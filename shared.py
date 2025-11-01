@@ -581,8 +581,13 @@ class SharedData:
 
 
             """Calculate the position of the Ragnar image on the screen to center it"""
-            self.x_center1 = (self.width - self.ragnar1.width) // 2
-            self.y_bottom1 = self.height - self.ragnar1.height
+            if self.ragnar1 is not None:
+                self.x_center1 = (self.width - self.ragnar1.width) // 2
+                self.y_bottom1 = self.height - self.ragnar1.height
+            else:
+                logger.warning("ragnar1.bmp image not found, using default positioning")
+                self.x_center1 = self.width // 2  # Center horizontally
+                self.y_bottom1 = self.height - 20  # Default bottom position
 
         except Exception as e:
             logger.error(f"Error loading images: {e}")

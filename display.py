@@ -436,8 +436,8 @@ class Display:
                     image.paste(img, img_pos)
                     draw.text(text_pos, text, font=self.shared_data.font_arial9, fill=0)
 
-                self.shared_data.update_bjornstatus()
-                image.paste(self.shared_data.bjornstatusimage, (int(3 * self.scale_factor_x), int(60 * self.scale_factor_y)))
+                self.shared_data.update_ragnarstatus()
+                image.paste(self.shared_data.ragnarstatusimage, (int(3 * self.scale_factor_x), int(60 * self.scale_factor_y)))
                 draw.text((int(35 * self.scale_factor_x), int(65 * self.scale_factor_y)), self.shared_data.ragnarstatustext, font=self.shared_data.font_arial9, fill=0)
                 draw.text((int(35 * self.scale_factor_x), int(75 * self.scale_factor_y)), self.shared_data.ragnarstatustext2, font=self.shared_data.font_arial9, fill=0)
 
