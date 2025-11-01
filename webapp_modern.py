@@ -58,6 +58,129 @@ web_utils = WebUtils(shared_data, logger)
 clients_connected = 0
 
 
+def sync_vulnerability_count():
+    """Synchronize vulnerability count across all data sources"""
+    try:
+        vuln_count = 0
+        
+        # Count vulnerabilities from files in vulnerabilities directory
+        vuln_results_dir = getattr(shared_data, 'vulnerabilities_dir', os.path.join('data', 'output', 'vulnerabilities'))
+        if os.path.exists(vuln_results_dir):
+            for filename in os.listdir(vuln_results_dir):
+                if filename.endswith('.txt'):
+                    filepath = os.path.join(vuln_results_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            if content.strip():
+                                # Count CVEs or files with vulnerability content
+                                cve_matches = re.findall(r'CVE-\d{4}-\d+', content)
+                                if cve_matches:
+                                    vuln_count += len(cve_matches)
+                                elif len(content.strip()) > 50:  # File has significant content
+                                    vuln_count += 1
+                    except Exception as e:
+                        continue
+        
+        # Update shared data with synchronized count
+        shared_data.vulnnbr = vuln_count
+        
+        # Also update livestatus file if it exists
+        if os.path.exists(shared_data.livestatusfile):
+            try:
+                import pandas as pd
+                df = pd.read_csv(shared_data.livestatusfile)
+                if not df.empty:
+                    df.loc[0, 'Vulnerabilities Count'] = vuln_count
+                    df.to_csv(shared_data.livestatusfile, index=False)
+            except Exception as e:
+                logger.warning(f"Could not update livestatus with sync vulnerability count: {e}")
+        
+        logger.debug(f"Synchronized vulnerability count: {vuln_count}")
+        return vuln_count
+        
+    except Exception as e:
+        logger.error(f"Error synchronizing vulnerability count: {e}")
+        return safe_int(shared_data.vulnnbr)
+
+
+def sync_all_counts():
+    """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources"""
+    try:
+        # Sync vulnerability count
+        sync_vulnerability_count()
+        
+        # Sync target and port counts from scan results
+        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
+        if os.path.exists(scan_results_dir):
+            unique_hosts = set()
+            port_count = 0
+            
+            for filename in os.listdir(scan_results_dir):
+                if filename.endswith('.txt'):
+                    filepath = os.path.join(scan_results_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            if content.strip():
+                                # Extract IP from filename
+                                ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
+                                if ip_match:
+                                    unique_hosts.add(ip_match.group())
+                                
+                                # Count ports
+                                for line in content.split('\n'):
+                                    if '/tcp' in line or '/udp' in line:
+                                        port_count += 1
+                    except Exception as e:
+                        continue
+            
+            # Only update if we found actual data
+            if len(unique_hosts) > 0:
+                shared_data.targetnbr = len(unique_hosts)
+            if port_count > 0:
+                shared_data.portnbr = port_count
+        
+        # Sync credential count from crackedpwd directory
+        cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
+        if os.path.exists(cred_results_dir):
+            cred_count = 0
+            for filename in os.listdir(cred_results_dir):
+                if filename.endswith('.txt') or filename.endswith('.csv'):
+                    filepath = os.path.join(cred_results_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            # Count lines with credential format (user:pass)
+                            for line in content.split('\n'):
+                                if ':' in line and line.strip():
+                                    cred_count += 1
+                    except Exception as e:
+                        continue
+            
+            # Only update if we found actual data
+            if cred_count > 0:
+                shared_data.crednbr = cred_count
+        
+        # Update livestatus file with all synchronized counts
+        if os.path.exists(shared_data.livestatusfile):
+            try:
+                import pandas as pd
+                df = pd.read_csv(shared_data.livestatusfile)
+                if not df.empty:
+                    df.loc[0, 'Alive Hosts Count'] = safe_int(shared_data.targetnbr)
+                    df.loc[0, 'Total Open Ports'] = safe_int(shared_data.portnbr)
+                    df.loc[0, 'Vulnerabilities Count'] = safe_int(shared_data.vulnnbr)
+                    df.to_csv(shared_data.livestatusfile, index=False)
+            except Exception as e:
+                logger.warning(f"Could not update livestatus with all sync counts: {e}")
+        
+        logger.debug(f"Synchronized all counts - Targets: {shared_data.targetnbr}, Ports: {shared_data.portnbr}, Vulns: {shared_data.vulnnbr}, Creds: {shared_data.crednbr}")
+        
+    except Exception as e:
+        logger.error(f"Error synchronizing all counts: {e}")
+
+
 def safe_int(value, default=0):
     """Safely convert value to int, handling numpy types"""
     try:
@@ -144,6 +267,9 @@ def serve_static(filename):
 def get_status():
     """Get current Ragnar status"""
     try:
+        # Synchronize all counts across all sources for consistency
+        sync_all_counts()
+        
         status_data = {
             'ragnar_status': safe_str(shared_data.ragnarstatustext),
             'ragnar_status2': safe_str(shared_data.ragnarstatustext2),
@@ -1387,9 +1513,15 @@ def broadcast_status_updates():
     """Broadcast status updates to all connected clients"""
     log_counter = 0
     activity_counter = 0
+    sync_counter = 0
     while not shared_data.webapp_should_exit:
         try:
             if clients_connected > 0:
+                # Synchronize all counts every 10 cycles (20 seconds)
+                sync_counter += 1
+                if sync_counter % 10 == 0:
+                    sync_all_counts()
+                
                 # Send status update
                 status_data = get_current_status()
                 socketio.emit('status_update', status_data)
@@ -2479,107 +2611,15 @@ def format_uptime(seconds):
 def get_dashboard_stats():
     """Get dashboard statistics including counts from various sources"""
     try:
+        # Synchronize all counts first to ensure consistency
+        sync_all_counts()
+        
         stats = {
-            'target_count': 0,
-            'port_count': 0,
-            'vulnerability_count': 0,
-            'credential_count': 0
+            'target_count': safe_int(shared_data.targetnbr),
+            'port_count': safe_int(shared_data.portnbr),
+            'vulnerability_count': safe_int(shared_data.vulnnbr),
+            'credential_count': safe_int(shared_data.crednbr)
         }
-        
-        # Get network scan results for target and port counts
-        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-        if os.path.exists(scan_results_dir):
-            unique_hosts = set()
-            port_count = 0
-            
-            for filename in os.listdir(scan_results_dir):
-                if filename.endswith('.txt'):
-                    filepath = os.path.join(scan_results_dir, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if content.strip():
-                                # Extract IP from filename
-                                ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
-                                if ip_match:
-                                    unique_hosts.add(ip_match.group())
-                                
-                                # Count ports
-                                for line in content.split('\n'):
-                                    if '/tcp' in line or '/udp' in line:
-                                        port_count += 1
-                    except Exception as e:
-                        continue
-            
-            stats['target_count'] = len(unique_hosts)
-            stats['port_count'] = port_count
-        
-        # Add example data if no real scan data exists
-        if stats['target_count'] == 0 and stats['port_count'] == 0:
-            stats['target_count'] = 2  # Match NetKB example hosts
-            stats['port_count'] = 2   # Match NetKB example ports
-        
-        # Get vulnerability count
-        vuln_results_dir = getattr(shared_data, 'vulnerabilities_dir', os.path.join('data', 'output', 'vulnerabilities'))
-        if os.path.exists(vuln_results_dir):
-            vuln_count = 0
-            for filename in os.listdir(vuln_results_dir):
-                if filename.endswith('.txt'):
-                    filepath = os.path.join(vuln_results_dir, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            if content.strip():
-                                # Count CVEs or files with vulnerability content
-                                cve_matches = re.findall(r'CVE-\d{4}-\d+', content)
-                                if cve_matches:
-                                    vuln_count += len(cve_matches)
-                                elif len(content.strip()) > 50:  # File has significant content
-                                    vuln_count += 1
-                    except Exception as e:
-                        continue
-            
-            # If no real vulnerabilities found, add example count for consistency with NetKB
-            if vuln_count == 0:
-                # Check if we have example NetKB data by seeing if there are any real scan files
-                real_data_exists = False
-                scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-                if os.path.exists(scan_results_dir):
-                    for filename in os.listdir(scan_results_dir):
-                        if filename.endswith('.txt'):
-                            filepath = os.path.join(scan_results_dir, filename)
-                            try:
-                                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                    if f.read().strip():
-                                        real_data_exists = True
-                                        break
-                            except:
-                                continue
-                
-                # If no real data exists, add example vulnerability count to match NetKB
-                if not real_data_exists:
-                    vuln_count = 1  # Match the example vulnerability in NetKB
-            
-            stats['vulnerability_count'] = vuln_count
-        
-        # Get credential count
-        cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
-        if os.path.exists(cred_results_dir):
-            cred_count = 0
-            for filename in os.listdir(cred_results_dir):
-                if filename.endswith('.txt'):
-                    filepath = os.path.join(cred_results_dir, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            # Count lines with credential format (user:pass)
-                            for line in content.split('\n'):
-                                if ':' in line and line.strip():
-                                    cred_count += 1
-                    except Exception as e:
-                        continue
-            
-            stats['credential_count'] = cred_count
         
         return jsonify(stats)
     except Exception as e:
@@ -2705,9 +2745,10 @@ def get_netkb_data():
                 }
             ]
         
-        # Calculate statistics
+        # Calculate statistics using synchronized vulnerability count
+        sync_all_counts()  # Ensure all counts are up to date
         total_entries = len(netkb_entries)
-        vulnerabilities = len([e for e in netkb_entries if e['type'] == 'vulnerability'])
+        vulnerabilities = safe_int(shared_data.vulnnbr)  # Use synchronized count from shared_data
         services = len([e for e in netkb_entries if e['type'] == 'service'])
         unique_hosts = len(set([e['host'] for e in netkb_entries]))
         
