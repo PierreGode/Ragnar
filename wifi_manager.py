@@ -659,10 +659,14 @@ class WiFiManager:
             # Strategy 2: Try iwlist scan (non-disruptive to AP mode)
             networks = []
             try:
-                self.ap_logger.debug("Attempting iwlist scan on AP interface...")
-                result = subprocess.run(['sudo', 'iwlist', self.ap_interface, 'scan'], 
-                                      capture_output=True, text=True, timeout=15)
-                
+                self.ap_logger.debug("Attempting iwlist scan on AP interface without sudo...")
+                result = subprocess.run(
+                    ['iwlist', self.ap_interface, 'scan'],
+                    capture_output=True,
+                    text=True,
+                    timeout=15
+                )
+
                 if result.returncode == 0:
                     self.ap_logger.debug("iwlist scan successful, parsing results...")
                     lines = result.stdout.split('\n')
@@ -721,9 +725,27 @@ class WiFiManager:
                         self.available_networks = unique_networks
                         return unique_networks
                     
+                    else:
+                        self.ap_logger.info("iwlist scan returned no networks, trying fallback strategies")
+                else:
+                    stderr = result.stderr.strip() if result.stderr else 'unknown error'
+                    self.ap_logger.warning(
+                        f"iwlist scan failed with exit code {result.returncode}: {stderr}"
+                    )
+                    if 'Permission denied' in stderr or 'Operation not permitted' in stderr:
+                        self.ap_logger.warning(
+                            "iwlist requires elevated privileges. Ensure the service has permission to scan wireless networks."
+                        )
+
+            except subprocess.TimeoutExpired:
+                self.ap_logger.warning("iwlist scan timed out, falling back to cached results")
+            except FileNotFoundError:
+                self.ap_logger.error(
+                    "iwlist command not found. Install wireless tools or adjust the scan strategy for this platform."
+                )
             except Exception as iwlist_error:
                 self.ap_logger.debug(f"iwlist scan failed: {iwlist_error}")
-            
+
             # Strategy 3: Use previously cached networks from before AP mode
             if hasattr(self, 'available_networks') and self.available_networks:
                 self.ap_logger.info("Using previously available networks from before AP mode")

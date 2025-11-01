@@ -7,6 +7,7 @@ import json
 import csv
 import zipfile
 import uuid
+from collections import deque
 try:
     import cgi
 except ImportError:
@@ -152,19 +153,36 @@ class WebUtils:
     def serve_logs(self, handler):
         try:
             log_file_path = self.shared_data.webconsolelog
-            if not os.path.exists(log_file_path):
-                subprocess.Popen(f"sudo tail -f /home/ragnar/Ragnar/data/logs/* > {log_file_path}", shell=True)
-
-            with open(log_file_path, 'r') as log_file:
-                log_lines = log_file.readlines()
-
+            logs_dir = self.shared_data.logsdir
             max_lines = 2000
-            if len(log_lines) > max_lines:
-                log_lines = log_lines[-max_lines:]
-                with open(log_file_path, 'w') as log_file:
-                    log_file.writelines(log_lines)
 
-            log_data = ''.join(log_lines)
+            os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
+
+            log_sources = []
+            if os.path.isdir(logs_dir):
+                for entry in sorted(os.listdir(logs_dir)):
+                    source_path = os.path.join(logs_dir, entry)
+                    if source_path == log_file_path:
+                        continue
+                    if os.path.isfile(source_path) and entry.endswith('.log'):
+                        log_sources.append(source_path)
+
+            log_buffer = deque(maxlen=max_lines)
+            for source_path in log_sources:
+                try:
+                    with open(source_path, 'r') as source_file:
+                        for line in source_file:
+                            log_buffer.append(f"[{os.path.basename(source_path)}] {line}")
+                except OSError as source_error:
+                    self.logger.debug(f"Skipping log source {source_path}: {source_error}")
+
+            if not log_buffer:
+                log_buffer.append("No log entries available. Logs will appear once the system generates them.\n")
+
+            with open(log_file_path, 'w') as log_file:
+                log_file.writelines(log_buffer)
+
+            log_data = ''.join(log_buffer)
 
             handler.send_response(200)
             handler.send_header("Content-type", "text/plain")

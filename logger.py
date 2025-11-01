@@ -40,8 +40,13 @@ class Logger:
 
     def __init__(self, name, level=logging.DEBUG, enable_file_logging=True):
         self.logger = logging.getLogger(name)
-        self.logger.setLevel(level)
         self.enable_file_logging = enable_file_logging
+
+        # Prevent messages from propagating to ancestor loggers and duplicating output
+        self.logger.propagate = False
+
+        # Ensure the logger always reflects the latest level requested by the caller
+        self.logger.setLevel(level)
 
         # Define custom log level styles
         custom_theme = Theme({
@@ -54,36 +59,62 @@ class Logger:
         })
 
         console = Console(theme=custom_theme)
-        
-        # Create console handler with rich and set level
-        console_handler = RichHandler(console=console, show_time=False, show_level=False, show_path=False, log_time_format="%Y-%m-%d %H:%M:%S")
-        console_handler.setLevel(level)
-        console_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-        console_handler.setFormatter(console_formatter)
 
-        # Add filter to console handler
+        # Create console handler with rich and set level if one isn't already configured
         vertical_filter = VerticalFilter()
-        console_handler.addFilter(vertical_filter)
+        console_handler = next(
+            (handler for handler in self.logger.handlers if getattr(handler, "_ragnar_console", False)),
+            None
+        )
+        if console_handler is None:
+            console_handler = RichHandler(
+                console=console,
+                show_time=False,
+                show_level=False,
+                show_path=False,
+                log_time_format="%Y-%m-%d %H:%M:%S"
+            )
+            console_handler._ragnar_console = True
+            self.logger.addHandler(console_handler)
 
-        # Add console handler to the logger
-        self.logger.addHandler(console_handler)
+        console_handler.setLevel(level)
+        console_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        console_handler.setFormatter(console_formatter)
+        # Ensure the filter is attached exactly once
+        if not any(isinstance(f, VerticalFilter) for f in console_handler.filters):
+            console_handler.addFilter(vertical_filter)
 
         if self.enable_file_logging:
             # Ensure the log folder exists
             os.makedirs(self.LOGS_DIR, exist_ok=True)
             log_file_path = os.path.join(self.LOGS_DIR, f"{name}.log")
 
-            # Create file handler and set level
-            file_handler = RotatingFileHandler(log_file_path, maxBytes=5*1024*1024, backupCount=2)
+            file_handler = next(
+                (handler for handler in self.logger.handlers if getattr(handler, "_ragnar_log_path", None) == log_file_path),
+                None
+            )
+            if file_handler is None:
+                file_handler = RotatingFileHandler(log_file_path, maxBytes=5 * 1024 * 1024, backupCount=2)
+                file_handler._ragnar_log_path = log_file_path
+                self.logger.addHandler(file_handler)
+
             file_handler.setLevel(level)
-            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+            file_formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
             file_handler.setFormatter(file_formatter)
-
-            # Add filter to file handler
-            file_handler.addFilter(vertical_filter)
-
-            # Add file handler to the logger
-            self.logger.addHandler(file_handler)
+            if not any(isinstance(f, VerticalFilter) for f in file_handler.filters):
+                file_handler.addFilter(vertical_filter)
+        else:
+            # Remove any managed file handlers when file logging is disabled
+            for handler in self.logger.handlers[:]:
+                if getattr(handler, "_ragnar_log_path", None):
+                    handler.close()
+                    self.logger.removeHandler(handler)
     
     def set_level(self, level):
         self.logger.setLevel(level)
