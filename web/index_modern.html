@@ -1,0 +1,1070 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragnar Cyberviking - Modern Dashboard</title>
+    <link rel="icon" href="/web/images/favicon.ico" type="image/x-icon">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Socket.IO Client -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        Ragnar: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <style>
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 5px rgba(14, 165, 233, 0.5); }
+            50% { box-shadow: 0 0 20px rgba(14, 165, 233, 0.8); }
+        }
+        .pulse-glow {
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
+        
+        .glass {
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: rgba(15, 23, 42, 0.5);
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: rgba(14, 165, 233, 0.5);
+            border-radius: 3px;
+        }
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+            background: rgba(14, 165, 233, 0.8);
+        }
+    </style>
+</head>
+
+<body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen">
+    
+    <!-- Navigation -->
+    <nav class="glass sticky top-0 z-50 border-b border-slate-700">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex items-center justify-between h-16">
+                <!-- Logo -->
+                <div class="flex items-center space-x-3">
+                    <img src="/web/images/favicon.ico" alt="Ragnar" class="h-10 w-10">
+                    <span class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent">
+                        Ragnar
+                    </span>
+                    <span id="connection-status" class="flex items-center space-x-2">
+                        <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
+                        <span class="text-xs text-gray-400">Connected</span>
+                    </span>
+                </div>
+                
+                <!-- Navigation Links -->
+                <div class="hidden md:flex space-x-1">
+                    <button onclick="showTab('dashboard')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="dashboard">
+                        Dashboard
+                    </button>
+                    <button onclick="showTab('network')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="network">
+                        Network
+                    </button>
+                    <button onclick="showTab('credentials')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="credentials">
+                        Credentials
+                    </button>
+                    <button onclick="showTab('loot')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="loot">
+                        Loot
+                    </button>
+                    <button onclick="showTab('files')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="files">
+                        Files
+                    </button>
+                    <button onclick="showTab('images')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="images">
+                        Images
+                    </button>
+                    <button onclick="showTab('system')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="system">
+                        System
+                    </button>
+                    <button onclick="showTab('netkb')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="netkb">
+                        NetKB
+                    </button>
+                    <button onclick="showTab('epaper')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="epaper">
+                        E-Paper
+                    </button>
+                    <button onclick="showTab('config')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="config">
+                        Config
+                    </button>
+                </div>
+                
+                <!-- Mobile Menu Button -->
+                <button id="mobile-menu-btn" class="md:hidden p-2 rounded-lg hover:bg-slate-700">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        
+        <!-- Mobile Menu -->
+        <div id="mobile-menu" class="hidden md:hidden border-t border-slate-700">
+            <div class="px-2 pt-2 pb-3 space-y-1">
+                <button onclick="showTab('dashboard')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Dashboard</button>
+                <button onclick="showTab('network')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Network</button>
+                <button onclick="showTab('credentials')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Credentials</button>
+                <button onclick="showTab('loot')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Loot</button>
+                <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
+                <button onclick="showTab('images')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Images</button>
+                <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
+                <button onclick="showTab('netkb')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">NetKB</button>
+                <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">E-Paper</button>
+                <button onclick="showTab('config')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Config</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        
+        <!-- Dashboard Tab -->
+        <div id="dashboard-tab" class="tab-content">
+            <!-- Stats Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+                <!-- Targets Card -->
+                <div class="glass rounded-xl p-6 hover:scale-105 transition-transform">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-400 text-sm">Targets</p>
+                            <p id="target-count" class="text-3xl font-bold text-Ragnar-400">0</p>
+                        </div>
+                        <div class="w-12 h-12 bg-Ragnar-500 bg-opacity-20 rounded-full flex items-center justify-center">
+                            <svg class="w-6 h-6 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Ports Card -->
+                <div class="glass rounded-xl p-6 hover:scale-105 transition-transform">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-400 text-sm">Open Ports</p>
+                            <p id="port-count" class="text-3xl font-bold text-green-400">0</p>
+                        </div>
+                        <div class="w-12 h-12 bg-green-500 bg-opacity-20 rounded-full flex items-center justify-center">
+                            <svg class="w-6 h-6 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Vulnerabilities Card -->
+                <div class="glass rounded-xl p-6 hover:scale-105 transition-transform">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-400 text-sm">Vulnerabilities</p>
+                            <p id="vuln-count" class="text-3xl font-bold text-red-400">0</p>
+                        </div>
+                        <div class="w-12 h-12 bg-red-500 bg-opacity-20 rounded-full flex items-center justify-center">
+                            <svg class="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Credentials Card -->
+                <div class="glass rounded-xl p-6 hover:scale-105 transition-transform">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-400 text-sm">Credentials</p>
+                            <p id="cred-count" class="text-3xl font-bold text-yellow-400">0</p>
+                        </div>
+                        <div class="w-12 h-12 bg-yellow-500 bg-opacity-20 rounded-full flex items-center justify-center">
+                            <svg class="w-6 h-6 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path>
+                            </svg>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Status Section -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                <!-- Current Status -->
+                <div class="glass rounded-xl p-6">
+                    <h2 class="text-xl font-bold mb-4 flex items-center">
+                        <svg class="w-6 h-6 mr-2 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                        </svg>
+                        Current Status
+                    </h2>
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <span class="text-gray-400">Status</span>
+                            <span id="Ragnar-status" class="text-Ragnar-400 font-semibold">IDLE</span>
+                        </div>
+                        <div class="flex items-center justify-between p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <span class="text-gray-400">Mode</span>
+                            <span id="Ragnar-mode" class="text-green-400 font-semibold">Auto</span>
+                        </div>
+                        <div class="p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <p class="text-gray-400 text-sm mb-2">Ragnar Says:</p>
+                            <p id="Ragnar-says" class="text-white font-mono text-sm">Hacking away...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Connection Status -->
+                <div class="glass rounded-xl p-6">
+                    <h2 class="text-xl font-bold mb-4 flex items-center">
+                        <svg class="w-6 h-6 mr-2 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path>
+                        </svg>
+                        Connectivity
+                    </h2>
+                    <div class="grid grid-cols-2 gap-3">
+                        <div class="p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <div class="flex items-center justify-between">
+                                <span class="text-gray-400 text-sm">WiFi</span>
+                                <span id="wifi-status" class="w-3 h-3 bg-gray-600 rounded-full"></span>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <div class="flex items-center justify-between">
+                                <span class="text-gray-400 text-sm">Bluetooth</span>
+                                <span id="bluetooth-status" class="w-3 h-3 bg-gray-600 rounded-full"></span>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <div class="flex items-center justify-between">
+                                <span class="text-gray-400 text-sm">USB</span>
+                                <span id="usb-status" class="w-3 h-3 bg-gray-600 rounded-full"></span>
+                            </div>
+                        </div>
+                        <div class="p-3 bg-slate-800 bg-opacity-50 rounded-lg">
+                            <div class="flex items-center justify-between">
+                                <span class="text-gray-400 text-sm">PAN</span>
+                                <span id="pan-status" class="w-3 h-3 bg-gray-600 rounded-full"></span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Manual Mode Controls (shown only when manual mode is active) -->
+            <div id="manual-controls" class="glass rounded-xl p-6 mb-8 hidden">
+                <h2 class="text-xl font-bold mb-4 flex items-center">
+                    <svg class="w-6 h-6 mr-2 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4"></path>
+                    </svg>
+                    Manual Controls
+                    <span class="ml-3 text-sm bg-orange-600 px-2 py-1 rounded">Manual Mode Active</span>
+                </h2>
+                
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    
+                    <!-- General Controls -->
+                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
+                        <h3 class="font-semibold mb-4 text-Ragnar-400">System Controls</h3>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button onclick="startOrchestrator()" 
+                                    class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h.01M19 10a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                Start Auto
+                            </button>
+                            <button onclick="stopOrchestrator()" 
+                                    class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10h6v4H9z"></path>
+                                </svg>
+                                Stop Auto
+                            </button>
+                            <button onclick="triggerNetworkScan()" 
+                                    class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                                </svg>
+                                Network Scan
+                            </button>
+                            <button onclick="triggerVulnScan()" 
+                                    class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+                                </svg>
+                                Vuln Scan
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Manual Attack Controls -->
+                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
+                        <h3 class="font-semibold mb-4 text-Ragnar-400">Manual Attack</h3>
+                        <div class="space-y-3">
+                            <div class="grid grid-cols-3 gap-2">
+                                <select id="manual-ip-dropdown" 
+                                        onchange="updateManualPorts()" 
+                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
+                                    <option value="">Select IP</option>
+                                </select>
+                                <select id="manual-port-dropdown" 
+                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
+                                    <option value="">Select Port</option>
+                                </select>
+                                <select id="manual-action-dropdown" 
+                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
+                                    <option value="">Select Action</option>
+                                </select>
+                            </div>
+                            <button onclick="executeManualAttack()" 
+                                    class="w-full bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                                Execute Attack
+                            </button>
+                        </div>
+                    </div>
+                    
+                </div>
+            </div>
+            
+            <!-- Console Log -->
+            <div class="glass rounded-xl p-6">
+                <h2 class="text-xl font-bold mb-4 flex items-center justify-between">
+                    <span class="flex items-center">
+                        <svg class="w-6 h-6 mr-2 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                        </svg>
+                        Console
+                    </span>
+                    <div class="flex space-x-2">
+                        <button onclick="loadConsoleLogs()" class="text-sm text-white bg-Ragnar-600 hover:bg-Ragnar-700 px-3 py-1 rounded transition-colors">
+                            Refresh
+                        </button>
+                        <button onclick="clearConsole()" class="text-sm text-gray-400 hover:text-white transition-colors">
+                            Clear
+                        </button>
+                    </div>
+                </h2>
+                <div id="console-output" class="bg-black bg-opacity-50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm scrollbar-thin">
+                    <div class="text-green-400">Ragnar console loading...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Network Tab -->
+        <div id="network-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Network Scan Results</h2>
+                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div id="network-table" class="overflow-x-auto">
+                    <p class="text-gray-400">Loading network data...</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Credentials Tab -->
+        <div id="credentials-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Discovered Credentials</h2>
+                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div id="credentials-table" class="overflow-x-auto">
+                    <p class="text-gray-400">Loading credentials...</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Loot Tab -->
+        <div id="loot-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Stolen Data</h2>
+                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                <div id="loot-table" class="overflow-x-auto">
+                    <p class="text-gray-400">Loading loot data...</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Files Tab -->
+        <div id="files-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">File Management</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="uploadFile()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                            Upload
+                        </button>
+                        <button onclick="clearFiles()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                            Clear Files
+                        </button>
+                        <button onclick="refreshFiles()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- File Browser -->
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                    <!-- Directory Tree -->
+                    <div class="lg:col-span-1">
+                        <h3 class="text-lg font-semibold mb-3">Directories</h3>
+                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                            <div id="directory-tree" class="p-4">
+                                <p class="text-gray-400">Loading directories...</p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- File List -->
+                    <div class="lg:col-span-2">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="text-lg font-semibold">Files</h3>
+                            <div class="text-sm text-gray-400">
+                                <span id="current-path">/</span>
+                            </div>
+                        </div>
+                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                            <div id="file-list" class="p-4">
+                                <p class="text-gray-400">Select a directory to view files</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- File Operations Modal -->
+                <div id="file-operations-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+                    <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
+                        <h3 id="modal-title" class="text-lg font-semibold mb-4">File Operation</h3>
+                        <div id="modal-content" class="mb-6">
+                            <!-- Dynamic content -->
+                        </div>
+                        <div class="flex space-x-3">
+                            <button id="modal-confirm" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                Confirm
+                            </button>
+                            <button onclick="closeFileModal()" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Images Tab -->
+        <div id="images-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Image Gallery</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="captureScreenshot()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            </svg>
+                            Capture Screenshot
+                        </button>
+                        <button onclick="refreshImages()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Image Filter Controls -->
+                <div class="mb-6">
+                    <div class="flex flex-wrap gap-2">
+                        <button onclick="filterImages('all')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-Ragnar-600 text-white" data-filter="all">
+                            All Images
+                        </button>
+                        <button onclick="filterImages('screenshots')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="screenshots">
+                            Screenshots
+                        </button>
+                        <button onclick="filterImages('captured_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="captured_images">
+                            Captured
+                        </button>
+                        <button onclick="filterImages('status_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="status_images">
+                            Status
+                        </button>
+                        <button onclick="filterImages('static_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="static_images">
+                            Static
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Image Grid -->
+                <div class="glass-card p-4">
+                    <div id="image-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
+                        <p class="text-gray-400 col-span-full text-center py-8">Loading images...</p>
+                    </div>
+                </div>
+                
+                <!-- Image Detail Modal -->
+                <div id="image-detail-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+                    <div class="glass rounded-xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 id="image-detail-title" class="text-lg font-semibold">Image Details</h3>
+                            <button onclick="closeImageModal()" class="text-gray-400 hover:text-white">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <!-- Image Display -->
+                            <div class="text-center">
+                                <img id="image-detail-img" src="" alt="" class="max-w-full max-h-96 mx-auto rounded-lg shadow-lg">
+                            </div>
+                            
+                            <!-- Image Information -->
+                            <div class="space-y-4">
+                                <div id="image-detail-info" class="space-y-2 text-sm">
+                                    <!-- Dynamic content -->
+                                </div>
+                                
+                                <div class="flex space-x-3">
+                                    <button id="download-image-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
+                                        </svg>
+                                        Download
+                                    </button>
+                                    <button id="delete-image-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                        </svg>
+                                        Delete
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- System Tab -->
+        <div id="system-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">System Monitoring</h2>
+                    <button onclick="refreshSystemStatus()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                
+                <!-- System Overview -->
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+                    <!-- CPU Card -->
+                    <div class="glass-card p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-sm">CPU Usage</h3>
+                            <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-2xl font-bold" id="cpu-usage">--</div>
+                        <div class="text-xs text-gray-400" id="cpu-details">-- cores</div>
+                        <div class="w-full bg-gray-700 rounded-full h-2 mt-2">
+                            <div id="cpu-progress" class="bg-blue-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Memory Card -->
+                    <div class="glass-card p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-sm">Memory</h3>
+                            <svg class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4"></path>
+                            </svg>
+                        </div>
+                        <div class="text-2xl font-bold" id="memory-usage">--</div>
+                        <div class="text-xs text-gray-400" id="memory-details">-- / --</div>
+                        <div class="w-full bg-gray-700 rounded-full h-2 mt-2">
+                            <div id="memory-progress" class="bg-green-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Disk Card -->
+                    <div class="glass-card p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-sm">Disk Usage</h3>
+                            <svg class="w-5 h-5 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-2xl font-bold" id="disk-usage">--</div>
+                        <div class="text-xs text-gray-400" id="disk-details">-- / --</div>
+                        <div class="w-full bg-gray-700 rounded-full h-2 mt-2">
+                            <div id="disk-progress" class="bg-yellow-500 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Uptime Card -->
+                    <div class="glass-card p-4">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-sm">Uptime</h3>
+                            <svg class="w-5 h-5 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-2xl font-bold" id="uptime-display">--</div>
+                        <div class="text-xs text-gray-400">System running</div>
+                    </div>
+                </div>
+                
+                <!-- Detailed Sections -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Process Monitor -->
+                    <div class="glass-card p-4">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="font-semibold">Top Processes</h3>
+                            <div class="flex space-x-2">
+                                <button onclick="sortProcesses('cpu')" class="process-sort-btn text-xs px-2 py-1 rounded bg-Ragnar-600 text-white" data-sort="cpu">CPU</button>
+                                <button onclick="sortProcesses('memory')" class="process-sort-btn text-xs px-2 py-1 rounded bg-gray-600 text-white" data-sort="memory">Memory</button>
+                            </div>
+                        </div>
+                        <div id="process-list" class="space-y-2 max-h-64 overflow-y-auto scrollbar-thin">
+                            <p class="text-gray-400 text-center py-4">Loading processes...</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Network Interfaces -->
+                    <div class="glass-card p-4">
+                        <h3 class="font-semibold mb-4">Network Interfaces</h3>
+                        <div id="network-interfaces" class="space-y-3 max-h-64 overflow-y-auto scrollbar-thin">
+                            <p class="text-gray-400 text-center py-4">Loading network interfaces...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Network Statistics -->
+                <div class="glass-card p-4 mt-6">
+                    <h3 class="font-semibold mb-4">Network Statistics</h3>
+                    <div id="network-stats" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        <p class="text-gray-400 col-span-full text-center py-4">Loading network statistics...</p>
+                    </div>
+                </div>
+                
+                <!-- Temperature Monitoring (if available) -->
+                <div id="temperature-section" class="glass-card p-4 mt-6 hidden">
+                    <h3 class="font-semibold mb-4">Temperature Sensors</h3>
+                    <div id="temperature-display" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                        <!-- Temperature data will be populated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- NetKB Tab -->
+        <div id="netkb-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Network Knowledge Base</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="exportNetkbData()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path>
+                            </svg>
+                            Export Data
+                        </button>
+                        <button onclick="refreshNetkbData()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- NetKB Filter Controls -->
+                <div class="mb-6">
+                    <div class="flex flex-wrap gap-2 mb-4">
+                        <button onclick="filterNetkbData('all')" class="netkb-filter-btn px-3 py-1 rounded-full text-sm bg-Ragnar-600 text-white" data-filter="all">
+                            All Entries
+                        </button>
+                        <button onclick="filterNetkbData('vulnerabilities')" class="netkb-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="vulnerabilities">
+                            Vulnerabilities
+                        </button>
+                        <button onclick="filterNetkbData('services')" class="netkb-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="services">
+                            Services
+                        </button>
+                        <button onclick="filterNetkbData('hosts')" class="netkb-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="hosts">
+                            Hosts
+                        </button>
+                        <button onclick="filterNetkbData('exploits')" class="netkb-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="exploits">
+                            Exploits
+                        </button>
+                    </div>
+                    
+                    <!-- Search Bar -->
+                    <div class="flex space-x-3">
+                        <input type="text" id="netkb-search" placeholder="Search NetKB entries..." 
+                               class="flex-1 bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none"
+                               onkeyup="searchNetkbData(this.value)">
+                        <button onclick="clearNetkbSearch()" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            Clear
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- NetKB Statistics -->
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                    <div class="glass-card p-4 text-center">
+                        <div class="text-2xl font-bold text-blue-400" id="netkb-total-entries">--</div>
+                        <div class="text-sm text-gray-400">Total Entries</div>
+                    </div>
+                    <div class="glass-card p-4 text-center">
+                        <div class="text-2xl font-bold text-red-400" id="netkb-vulnerabilities">--</div>
+                        <div class="text-sm text-gray-400">Vulnerabilities</div>
+                    </div>
+                    <div class="glass-card p-4 text-center">
+                        <div class="text-2xl font-bold text-green-400" id="netkb-services">--</div>
+                        <div class="text-sm text-gray-400">Services</div>
+                    </div>
+                    <div class="glass-card p-4 text-center">
+                        <div class="text-2xl font-bold text-yellow-400" id="netkb-hosts">--</div>
+                        <div class="text-sm text-gray-400">Unique Hosts</div>
+                    </div>
+                </div>
+                
+                <!-- NetKB Data Table -->
+                <div class="glass-card">
+                    <div class="p-4 border-b border-gray-700">
+                        <h3 class="text-lg font-semibold">Knowledge Base Entries</h3>
+                    </div>
+                    <div class="p-4">
+                        <div id="netkb-table" class="overflow-x-auto max-h-96 scrollbar-thin">
+                            <table class="w-full text-sm">
+                                <thead class="bg-slate-800 sticky top-0">
+                                    <tr>
+                                        <th class="text-left p-3 border-b border-gray-700">Type</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Host/Target</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Service/Port</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Description</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Severity</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Discovered</th>
+                                        <th class="text-left p-3 border-b border-gray-700">Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="netkb-table-body">
+                                    <tr>
+                                        <td colspan="7" class="text-center text-gray-400 py-8">Loading NetKB data...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- NetKB Detail Modal -->
+                <div id="netkb-detail-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+                    <div class="glass rounded-xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 id="netkb-detail-title" class="text-lg font-semibold">Entry Details</h3>
+                            <button onclick="closeNetkbModal()" class="text-gray-400 hover:text-white">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                                </svg>
+                            </button>
+                        </div>
+                        
+                        <div id="netkb-detail-content" class="space-y-4">
+                            <!-- Dynamic content -->
+                        </div>
+                        
+                        <div class="flex space-x-3 mt-6">
+                            <button id="netkb-exploit-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors hidden">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                                Exploit
+                            </button>
+                            <button id="netkb-research-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                                </svg>
+                                Research Online
+                            </button>
+                            <button onclick="exportNetkbEntry()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3M3 17V7a2 2 0 012-2h6l2 2h6a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2z"></path>
+                                </svg>
+                                Export Entry
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- E-Paper Display Tab -->
+        <div id="epaper-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">E-Paper Display</h2>
+                    <button onclick="refreshEpaperDisplay()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                
+                <!-- Live Status Display -->
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                    <div class="glass rounded-xl p-4">
+                        <h3 class="text-lg font-semibold mb-3 text-Ragnar-400">Current Status</h3>
+                        <div class="space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Primary Status:</span>
+                                <span id="epaper-status-1" class="text-white font-medium">Loading...</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Secondary Status:</span>
+                                <span id="epaper-status-2" class="text-white font-medium">Loading...</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Last Updated:</span>
+                                <span id="epaper-timestamp" class="text-gray-300 text-sm">Never</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="glass rounded-xl p-4">
+                        <h3 class="text-lg font-semibold mb-3 text-Ragnar-400">Display Info</h3>
+                        <div class="space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Resolution:</span>
+                                <span id="epaper-resolution" class="text-white font-medium">Unknown</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Auto-refresh:</span>
+                                <span class="text-green-400 font-medium">Active</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Connection:</span>
+                                <span id="epaper-connection" class="text-green-400 font-medium">Live</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- E-Paper Display Image -->
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-semibold text-Ragnar-400">Live E-Paper Display</h3>
+                        <div class="flex items-center space-x-2">
+                            <span class="text-sm text-gray-400">Size:</span>
+                            <button onclick="toggleEpaperSize()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1 rounded text-sm transition-colors">
+                                Resize
+                            </button>
+                        </div>
+                    </div>
+                    <div class="flex justify-center">
+                        <div id="epaper-display-container" class="relative inline-block bg-white rounded-lg p-4 shadow-2xl">
+                            <img id="epaper-display-image" 
+                                 src="" 
+                                 alt="E-Paper Display" 
+                                 class="max-w-full h-auto rounded border-2 border-gray-300"
+                                 style="max-height: 800px; min-height: 400px; image-rendering: crisp-edges; cursor: pointer;"
+                                 onclick="toggleEpaperSize()">
+                            <div id="epaper-loading" class="absolute inset-0 flex items-center justify-center bg-gray-100 rounded">
+                                <div class="text-center text-gray-600">
+                                    <svg class="animate-spin h-8 w-8 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    <p>Loading display...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <p class="text-center text-gray-400 text-sm mt-4">
+                        This shows the exact same content as your Ragnar device's physical e-paper display<br>
+                        <span class="text-Ragnar-400">💡 Click the display image or use the Resize button to cycle through different sizes</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Config Tab -->
+        <div id="config-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold">Configuration</h2>
+                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        Refresh
+                    </button>
+                </div>
+                
+                <!-- System Management Section -->
+                <div class="mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">System Management</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        
+                        <!-- Update Status Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">System Updates</h4>
+                                <span id="update-status" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                            </div>
+                            <div id="update-info" class="text-sm text-gray-400 mb-3">
+                                Checking for updates...
+                            </div>
+                            <button onclick="checkForUpdates()" 
+                                    class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                Check for Updates
+                            </button>
+                            <button onclick="performUpdate()" 
+                                    id="update-btn"
+                                    class="w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors disabled:bg-gray-600 disabled:cursor-not-allowed"
+                                    disabled>
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                <span id="update-btn-text">Update System</span>
+                            </button>
+                        </div>
+                        
+                        <!-- Service Control Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Service Control</h4>
+                                <span id="service-status" class="text-sm px-2 py-1 rounded bg-green-700 text-green-300">Running</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Manage the Ragnar system service
+                            </div>
+                            <button onclick="restartService()" 
+                                    class="w-full bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                Restart Service
+                            </button>
+                            <button onclick="rebootSystem()" 
+                                    class="w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                Reboot System
+                            </button>
+                        </div>
+
+                        <!-- Wi-Fi Management Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Wi-Fi Management</h4>
+                                <span id="wifi-status-indicator" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                            </div>
+                            <div id="wifi-info" class="text-sm text-gray-400 mb-3">
+                                Loading Wi-Fi status...
+                            </div>
+                            <button onclick="startAPMode()" 
+                                    class="w-full bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path>
+                                </svg>
+                                Start AP Mode
+                            </button>
+                            <button onclick="refreshWifiStatus()" 
+                                    class="w-full bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded transition-colors">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                                </svg>
+                                Refresh Status
+                            </button>
+                        </div>
+                        
+                    </div>
+                </div>
+                
+                <!-- Configuration Form -->
+                <div>
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Settings</h3>
+                    <div id="config-form">
+                        <p class="text-gray-400">Loading configuration...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+    </main>
+
+    <!-- JavaScript -->
+    <script src="/web/scripts/ragnar_modern.js"></script>
+    
+</body>
+</html>

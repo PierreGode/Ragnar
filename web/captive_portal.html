@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bjorn WiFi Setup</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+        }
+
+        .portal-container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 500px;
+            color: #333;
+        }
+
+        .logo {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .logo h1 {
+            font-size: 2.5rem;
+            font-weight: bold;
+            color: #1e3c72;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .logo p {
+            color: #666;
+            margin-top: 10px;
+            font-size: 1.1rem;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        select, input {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+            background: white;
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: #2a5298;
+            box-shadow: 0 0 10px rgba(42, 82, 152, 0.2);
+        }
+
+        .password-group {
+            position: relative;
+        }
+
+        .password-toggle {
+            position: absolute;
+            right: 15px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: none;
+            border: none;
+            color: #666;
+            cursor: pointer;
+            font-size: 14px;
+            padding: 5px;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(42, 82, 152, 0.3);
+        }
+
+        .btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 600;
+            display: none;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 2px solid #c3e6cb;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 2px solid #f5c6cb;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 2px solid #bee5eb;
+        }
+
+        .refresh-btn {
+            background: transparent;
+            border: 2px solid #2a5298;
+            color: #2a5298;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-left: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .refresh-btn:hover {
+            background: #2a5298;
+            color: white;
+        }
+
+        .network-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .network-controls select {
+            flex: 1;
+        }
+
+        @media (max-width: 600px) {
+            .portal-container {
+                margin: 20px;
+                padding: 30px 20px;
+            }
+            
+            .logo h1 {
+                font-size: 2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="portal-container">
+        <div class="logo">
+            <h1>⚡ BJORN</h1>
+            <p>WiFi Configuration Portal</p>
+        </div>
+
+        <form id="wifiForm">
+            <div class="form-group">
+                <label for="networkSelect">Select WiFi Network:</label>
+                <div class="network-controls">
+                    <select id="networkSelect" required>
+                        <option value="">Scanning for networks...</option>
+                    </select>
+                    <button type="button" class="refresh-btn" id="refreshBtn">🔄</button>
+                </div>
+                <div class="manual-entry" style="margin-top: 10px;">
+                    <label for="manualSSID" style="font-size: 14px; color: #666;">Or enter network name manually:</label>
+                    <input type="text" id="manualSSID" placeholder="Type WiFi network name (SSID)" style="margin-top: 5px; width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px;">
+                </div>
+            </div>
+
+            <div class="form-group">
+                <label for="password">WiFi Password:</label>
+                <div class="password-group">
+                    <input type="password" id="password" placeholder="Enter WiFi password">
+                    <button type="button" class="password-toggle" id="togglePassword">👁️</button>
+                </div>
+            </div>
+
+            <button type="submit" class="btn" id="connectBtn">Connect to WiFi</button>
+        </form>
+
+        <div id="status" class="status"></div>
+    </div>
+
+    <script>
+        const networkSelect = document.getElementById('networkSelect');
+        const manualSSID = document.getElementById('manualSSID');
+        const passwordInput = document.getElementById('password');
+        const connectBtn = document.getElementById('connectBtn');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const togglePassword = document.getElementById('togglePassword');
+        const status = document.getElementById('status');
+        const form = document.getElementById('wifiForm');
+
+        // Clear manual input when selecting from dropdown
+        networkSelect.addEventListener('change', () => {
+            if (networkSelect.value) {
+                manualSSID.value = '';
+            }
+        });
+
+        // Clear dropdown when typing manually
+        manualSSID.addEventListener('input', () => {
+            if (manualSSID.value) {
+                networkSelect.value = '';
+            }
+        });
+
+        // Toggle password visibility
+        togglePassword.addEventListener('click', () => {
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            togglePassword.textContent = type === 'password' ? '👁️' : '🙈';
+        });
+
+        // Show status message
+        function showStatus(message, type = 'info') {
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.style.display = 'block';
+        }
+
+        // Hide status message
+        function hideStatus() {
+            status.style.display = 'none';
+        }
+
+        // Load available networks
+        async function loadNetworks() {
+            try {
+                refreshBtn.disabled = true;
+                refreshBtn.textContent = '⏳';
+                
+                showStatus('Scanning for networks... This may take a moment.', 'info');
+                
+                // First trigger a scan
+                await fetch('/api/wifi/scan', { method: 'POST' });
+                
+                // Wait for scan to complete (shorter wait for non-disruptive scanning)
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                
+                // Get the networks
+                const response = await fetch('/api/wifi/networks');
+                const data = await response.json();
+                
+                networkSelect.innerHTML = '<option value="">Select from available networks...</option>';
+                
+                if (data.success && data.networks && data.networks.length > 0) {
+                    let hasRealNetworks = false;
+                    
+                    data.networks.forEach(network => {
+                        if (network.ssid && network.ssid.trim() !== '') {
+                            const option = document.createElement('option');
+                            option.value = network.ssid;
+                            
+                            // Handle instructional networks
+                            if (network.instruction) {
+                                option.disabled = true;
+                                option.style.fontStyle = 'italic';
+                                option.style.color = '#666';
+                                option.textContent = network.ssid;
+                            } else {
+                                hasRealNetworks = true;
+                                const security = network.security === 'Open' ? 'Open' : 'Secured';
+                                const signal = network.signal || 0;
+                                const knownText = network.known ? ' ⭐' : '';
+                                option.textContent = `${network.ssid} (${security}, ${signal}%)${knownText}`;
+                            }
+                            
+                            networkSelect.appendChild(option);
+                        }
+                    });
+                    
+                    if (hasRealNetworks) {
+                        showStatus(`Found ${data.networks.filter(n => !n.instruction).length} networks. Select one or enter manually below.`, 'success');
+                    } else {
+                        showStatus('No networks found via scan. Please enter the network name manually below.', 'info');
+                    }
+                } else {
+                    showStatus('No networks detected. Enter the WiFi network name manually below.', 'info');
+                }
+            } catch (error) {
+                console.error('Error loading networks:', error);
+                showStatus('Could not scan networks. Enter WiFi name manually below.', 'info');
+                networkSelect.innerHTML = '<option value="">Enter network name manually below</option>';
+            } finally {
+                refreshBtn.disabled = false;
+                refreshBtn.textContent = '🔄';
+            }
+        }
+
+        // Connect to WiFi
+        async function connectToWiFi(ssid, password) {
+            try {
+                connectBtn.disabled = true;
+                connectBtn.textContent = 'Connecting...';
+                showStatus('Connecting to WiFi...', 'info');
+
+                const response = await fetch('/api/wifi/connect', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ ssid, password })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showStatus('Successfully connected! Bjorn will now use this network.', 'success');
+                    setTimeout(() => {
+                        showStatus('You can now disconnect from this AP. Bjorn is connected to WiFi.', 'info');
+                    }, 3000);
+                } else {
+                    showStatus(data.message || 'Failed to connect. Check password and try again.', 'error');
+                }
+            } catch (error) {
+                console.error('Error connecting to WiFi:', error);
+                showStatus('Connection failed. Please try again.', 'error');
+            } finally {
+                connectBtn.disabled = false;
+                connectBtn.textContent = 'Connect to WiFi';
+            }
+        }
+
+        // Form submission
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            
+            // Get SSID from either dropdown or manual input
+            const ssid = networkSelect.value || manualSSID.value.trim();
+            const password = passwordInput.value;
+            
+            if (!ssid) {
+                showStatus('Please select a network or enter a network name manually.', 'error');
+                return;
+            }
+            
+            connectToWiFi(ssid, password);
+        });
+
+        // Refresh networks
+        refreshBtn.addEventListener('click', loadNetworks);
+
+        // Load networks on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(loadNetworks, 1000);
+        });
+
+        // Auto-refresh every 2 minutes (less frequent since scanning doesn't disrupt)
+        setInterval(loadNetworks, 120000);
+    </script>
+</body>
+</html>
