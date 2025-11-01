@@ -161,9 +161,9 @@ check_system_compatibility() {
         should_ask_confirmation=true
     fi
 
-    # Check if system is 32-bit ARM (armhf)
+    # Check if system is 32-bit ARM (armhf) or 64-bit
     architecture=$(dpkg --print-architecture)
-    if [ "$architecture" != "armhf" ]; then
+    if [ "$architecture" != "armhf" ]  ||  [ "$architecture" != "aarch64" ]  ; then
         log "WARNING" "Different architecture detected. Expected: armhf, Found: ${architecture}"
         echo -e "${YELLOW}This script was tested with armhf architecture${NC}"
         should_ask_confirmation=true
@@ -478,8 +478,8 @@ setup_ragnar() {
     fi
 
     # Set correct permissions and ownership
-    chown -R $ragnar_USER:$ragnar_USER /home/$ragnar_USER/ragnar
-    chmod -R 755 /home/$ragnar_USER/ragnar
+    chown -R $ragnar_USER:$ragnar_USER /home/$ragnar_USER/Ragnar
+    chmod -R 755 /home/$ragnar_USER/Ragnar
     
     # Make utility scripts executable with proper ownership
     chmod +x $ragnar_PATH/switch_webapp.sh 2>/dev/null || true
@@ -547,7 +547,7 @@ EOF
 import json
 import os
 
-actions_file = "/home/ragnar/ragnar/config/actions.json"
+actions_file = "/home/ragnar/Ragnar/config/actions.json"
 
 # Check if scanning module exists in actions.json
 try:
@@ -610,9 +610,9 @@ Before=basic.target
 After=local-fs.target
 
 [Service]
-ExecStartPre=/home/ragnar/ragnar/kill_port_8000.sh
-ExecStart=/usr/bin/python3 /home/ragnar/ragnar/Ragnar.py
-WorkingDirectory=/home/ragnar/ragnar
+ExecStartPre=/home/ragnar/Ragnar/kill_port_8000.sh
+ExecStart=/usr/bin/python3 /home/ragnar/Ragnar/Ragnar.py
+WorkingDirectory=/home/ragnar/Ragnar
 StandardOutput=inherit
 StandardError=inherit
 Restart=always
@@ -871,7 +871,7 @@ main() {
     echo "2. Web interface will be available at: http://[device-ip]:8000"
     echo "3. Make sure your e-Paper HAT (2.13-inch) is properly connected"
     echo -e "\n${BLUE}To update ragnar in the future:${NC}"
-    echo "   cd /home/ragnar/ragnar"
+    echo "   cd /home/ragnar/Ragnar"
     echo "   sudo git stash  # Save any local changes"
     echo "   sudo git pull   # Get latest updates"
     echo "   sudo systemctl restart ragnar"
