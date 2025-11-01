@@ -11,8 +11,8 @@ paramiko>=3.0.0
 smbprotocol>=1.10.0
 pysmb>=1.2.0
 pymysql>=1.0.0
+sqlalchemy>=1.4.0
 python-nmap>=0.7.0
 flask>=3.0.0
 flask-socketio>=5.3.0
 flask-cors>=4.0.0
-# sqlalchemy - Install via apt: sudo apt-get install python3-sqlalchemy

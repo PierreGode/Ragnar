@@ -424,6 +424,10 @@ setup_ragnar() {
     fi
     
     # Install remaining packages from requirements.txt with retry logic
+    # This includes all dependencies for full Ragnar functionality:
+    # - netifaces: Network interface detection for NetworkScanner
+    # - smbprotocol/pysmb: SMB protocol support for StealFilesSMB and SMBBruteforce
+    # - sqlalchemy: SQL database operations for StealDataSQL
     log "INFO" "Installing remaining Python packages..."
     
     # Array of packages to install with their import names
@@ -436,6 +440,7 @@ setup_ragnar() {
         ["smbprotocol>=1.10.0"]="smbprotocol"
         ["pysmb>=1.2.0"]="smb"
         ["pymysql>=1.0.0"]="pymysql"
+        ["sqlalchemy>=1.4.0"]="sqlalchemy"
         ["python-nmap>=0.7.0"]="nmap"
         ["flask>=3.0.0"]="flask"
         ["flask-socketio>=5.3.0"]="flask_socketio"
