@@ -929,7 +929,7 @@ def handle_connect():
     global clients_connected
     clients_connected += 1
     logger.info(f"Client connected. Total clients: {clients_connected}")
-    emit('connected', {'message': 'Connected to Bjorn'})
+    emit('connected', {'message': 'Connected to Ragnar'})
     
     # Send initial data to new client
     try:
@@ -1008,9 +1008,9 @@ def handle_loot_request():
 def get_current_status():
     """Get current status data"""
     return {
-        'bjorn_status': safe_str(shared_data.ragnarstatustext),
-        'bjorn_status2': safe_str(shared_data.ragnarstatustext2),
-        'bjorn_says': safe_str(shared_data.ragnarsays),
+        'ragnar_status': safe_str(shared_data.ragnarstatustext),
+        'ragnar_status2': safe_str(shared_data.ragnarstatustext2),
+        'ragnar_says': safe_str(shared_data.ragnarsays),
         'orchestrator_status': safe_str(shared_data.ragnarorch_status),
         'target_count': safe_int(shared_data.targetnbr),
         'port_count': safe_int(shared_data.portnbr),
@@ -2488,7 +2488,7 @@ def handle_exit(signum, frame):
 def run_server(host='0.0.0.0', port=8000):
     """Run the Flask server"""
     try:
-        logger.info(f"Starting Bjorn web server on {host}:{port}")
+        logger.info(f"Starting Ragnar web server on {host}:{port}")
         logger.info(f"Access the interface at http://{host}:{port}")
         
         # Start background status broadcaster
