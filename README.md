@@ -4,12 +4,11 @@
 ![Status](https://img.shields.io/badge/Status-Development-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-[![Reddit](https://img.shields.io/badge/Reddit-Ragnar__CyberViking-orange?style=for-the-badge&logo=reddit)](https://www.reddit.com/r/Ragnar_CyberViking)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Us-7289DA?style=for-the-badge&logo=discord)](https://discord.com/invite/B3ZH9taVfT)
 
 <p align="center">
   <img src="https://github.com/user-attachments/assets/c5eb4cc1-0c3d-497d-9422-1614651a84ab" alt="thumbnail_IMG_0546" width="150">
-  <img src="https://github.com/user-attachments/assets/1b490f07-f28e-4418-8d41-14f1492890c6" alt="Ragnar_epd-removebg-preview" width="150">
+  <img width="235" height="433" alt="image" src="https://github.com/user-attachments/assets/2bb9e9d9-bb6c-401d-aa65-043c5a0ca417" />
+
 </p>
 
 Ragnar is a « Tamagotchi like » sophisticated, autonomous network scanning, vulnerability assessment, and offensive security tool designed to run on a Raspberry Pi equipped with a 2.13-inch e-Paper HAT. This document provides a detailed explanation of the project.
