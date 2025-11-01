@@ -1614,34 +1614,36 @@ def get_stats():
 
 @app.route('/network_data')
 def legacy_network_data():
-    """Legacy endpoint for network data - returns HTML table with persistent state"""
+    """Network data endpoint with independent persistence - avoids netkb.csv conflicts"""
     try:
-        # Use netkb file as persistent network database
+        # Use a separate file for network display persistence to avoid orchestrator conflicts
+        network_cache_file = "/data/network_display_cache.json"
         network_data = []
         
-        # Read existing network knowledge base
+        # Load existing cached data if available
         try:
-            existing_data = shared_data.read_data()
-            # Convert to our format and ensure we have the right structure
-            for entry in existing_data:
-                if 'IPs' in entry and entry['IPs']:
-                    network_data.append({
-                        'IPs': entry.get('IPs', ''),
-                        'Hostnames': entry.get('Hostnames', ''),
-                        'Alive': int(entry.get('Alive', 1)) if str(entry.get('Alive', 1)).isdigit() else 1,
-                        'MAC Address': entry.get('MAC Address', ''),
-                        'Ports': entry.get('Ports', ''),
-                        'last_seen': entry.get('last_seen', datetime.now().isoformat())
-                    })
+            if os.path.exists(network_cache_file):
+                with open(network_cache_file, 'r') as f:
+                    cached_data = json.load(f)
+                    # Filter out old entries (older than 24 hours)
+                    cutoff_time = datetime.now() - timedelta(hours=24)
+                    for entry in cached_data:
+                        try:
+                            last_seen = datetime.fromisoformat(entry.get('last_seen', ''))
+                            if last_seen > cutoff_time:
+                                network_data.append(entry)
+                        except:
+                            # Skip entries with invalid timestamps
+                            continue
         except Exception as e:
-            logger.debug(f"Could not read existing netkb data: {e}")
+            logger.debug(f"Could not read network cache: {e}")
         
-        # Now merge with fresh scan results to update/add new findings
+        # Now update with fresh scan results
         scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
         current_time = datetime.now().isoformat()
         
         if os.path.exists(scan_results_dir):
-            # Process only the most recent result CSV files (last 5 minutes)
+            # Process recent result CSV files (last 10 minutes)
             recent_files = []
             current_timestamp = time.time()
             
@@ -1649,8 +1651,8 @@ def legacy_network_data():
                 if filename.startswith('result_') and filename.endswith('.csv'):
                     filepath = os.path.join(scan_results_dir, filename)
                     file_mtime = os.path.getmtime(filepath)
-                    # Only process files from the last 5 minutes
-                    if current_timestamp - file_mtime < 300:  # 5 minutes
+                    # Process files from the last 10 minutes
+                    if current_timestamp - file_mtime < 600:  # 10 minutes
                         recent_files.append((filepath, filename))
             
             # Process recent scan results
@@ -1712,15 +1714,15 @@ def legacy_network_data():
                     logger.debug(f"Could not read scan result file {filepath}: {e}")
                     continue
         
-        # Remove entries that haven't been seen for more than 24 hours (configurable)
-        cutoff_time = datetime.now() - timedelta(hours=24)
-        network_data = [entry for entry in network_data 
-                       if datetime.fromisoformat(entry.get('last_seen', current_time)) > cutoff_time]
-        
-        # Note: We don't write back to netkb here to avoid overwriting other data
-        # The network data persistence is handled by the scan processes themselves
+        # Save updated cache to independent file (not netkb.csv!)
+        try:
+            with open(network_cache_file, 'w') as f:
+                json.dump(network_data, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Could not save network cache: {e}")
         
         if not network_data:
+            return '<div class="error">No network scan results found. Please run a network scan first.</div>'
             return '<div class="error">No network scan results found. Please run a network scan first.</div>'
         
         # Generate HTML table
