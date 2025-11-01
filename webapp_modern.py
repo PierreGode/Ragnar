@@ -390,20 +390,12 @@ def perform_update():
             logger.info(f"Git pull completed: {output}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Git pull main failed: {e.stderr}")
-            # Try main branch as fallback
-            try:
-                result = subprocess.run(
-                    ['git', 'pull', 'origin', 'main'], 
-                    cwd=repo_path, 
-                    capture_output=True, 
-                    text=True, 
-                    check=True
-                )
-                output = result.stdout
-                logger.info(f"Git pull main completed: {output}")
-            except subprocess.CalledProcessError as e2:
-                logger.error(f"Git pull main also failed: {e2.stderr}")
-                return jsonify({'success': False, 'error': f'Git pull failed: {e2.stderr}'}), 500
+            # Return error immediately since this repo only has main branch
+            return jsonify({
+                'success': False, 
+                'error': f'Git pull failed: {e.stderr}',
+                'suggestion': 'Please check repository status and resolve any conflicts'
+            }), 500
         
         # Schedule service restart after a short delay
         def restart_service_delayed():
