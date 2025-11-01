@@ -170,6 +170,25 @@ class Display:
             try:
                 with open(self.shared_data.livestatusfile, 'r') as file:
                     livestatus_df = pd.read_csv(file)
+                    
+                    # Check if DataFrame is empty or has the expected columns
+                    if livestatus_df.empty:
+                        logger.warning("Livestatus file is empty, skipping data update")
+                        return
+                    
+                    # Check if required columns exist
+                    required_columns = ['Total Open Ports', 'Alive Hosts Count', 'All Known Hosts Count', 'Vulnerabilities Count']
+                    missing_columns = [col for col in required_columns if col not in livestatus_df.columns]
+                    if missing_columns:
+                        logger.error(f"Missing columns in livestatus file: {missing_columns}")
+                        logger.debug(f"Available columns: {list(livestatus_df.columns)}")
+                        return
+                    
+                    # Check if there's at least one row
+                    if len(livestatus_df) == 0:
+                        logger.warning("Livestatus file has no data rows, skipping data update")
+                        return
+                    
                     self.shared_data.portnbr = livestatus_df['Total Open Ports'].iloc[0]
                     self.shared_data.targetnbr = livestatus_df['Alive Hosts Count'].iloc[0]
                     self.shared_data.networkkbnbr = livestatus_df['All Known Hosts Count'].iloc[0]
@@ -179,8 +198,14 @@ class Display:
 
                 total_passwords = 0
                 for file in crackedpw_files:
-                    with open(file, 'r') as f:
-                        total_passwords += len(pd.read_csv(f, usecols=[0]))
+                    try:
+                        with open(file, 'r') as f:
+                            df = pd.read_csv(f, usecols=[0])
+                            if not df.empty:
+                                total_passwords += len(df)
+                    except Exception as e:
+                        logger.warning(f"Error reading password file {file}: {e}")
+                        continue
 
                 self.shared_data.crednbr = total_passwords
 
@@ -463,13 +488,13 @@ class Display:
                     y_text += (self.shared_data.font_arialbold.getbbox(line)[3] - self.shared_data.font_arialbold.getbbox(line)[1]) + 3
 
                 if self.screen_reversed:
-                    image = image.transpose(Image.ROTATE_180)
+                    image = image.transpose(Image.Transpose.ROTATE_180)
 
                 self.epd_helper.display_partial(image)
                 self.epd_helper.display_partial(image)
 
                 if self.web_screen_reversed:
-                    image = image.transpose(Image.ROTATE_180)
+                    image = image.transpose(Image.Transpose.ROTATE_180)
                 with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as img_file:
                     image.save(img_file)
                     img_file.flush()
@@ -485,9 +510,8 @@ def handle_exit_display(signum, frame, display_thread):
     shared_data.display_should_exit = True
     logger.info("Exit signal received. Waiting for the main loop to finish...")
     try:
-        if main_loop and main_loop.epd:
-            main_loop.epd.init(main_loop.epd.sleep)
-            main_loop.epd.Dev_exit()
+        if main_loop and hasattr(main_loop, 'epd_helper') and main_loop.epd_helper:
+            main_loop.epd_helper.sleep()
     except Exception as e:
         logger.error(f"Error while closing the display: {e}")
     display_thread.join()
