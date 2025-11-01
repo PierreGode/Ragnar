@@ -1717,25 +1717,8 @@ def legacy_network_data():
         network_data = [entry for entry in network_data 
                        if datetime.fromisoformat(entry.get('last_seen', current_time)) > cutoff_time]
         
-        # Update the netkb file with the merged data (persistence)
-        try:
-            # Prepare data for netkb format
-            netkb_data = []
-            for entry in network_data:
-                netkb_entry = {
-                    'IPs': entry['IPs'],
-                    'Hostnames': entry['Hostnames'],
-                    'Alive': entry['Alive'],
-                    'MAC Address': entry['MAC Address'],
-                    'Ports': entry['Ports']
-                }
-                netkb_data.append(netkb_entry)
-            
-            # Write back to netkb file to maintain persistence
-            if netkb_data:
-                shared_data.write_data(netkb_data)
-        except Exception as e:
-            logger.debug(f"Could not update netkb file: {e}")
+        # Note: We don't write back to netkb here to avoid overwriting other data
+        # The network data persistence is handled by the scan processes themselves
         
         if not network_data:
             return '<div class="error">No network scan results found. Please run a network scan first.</div>'
