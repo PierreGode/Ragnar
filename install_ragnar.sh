@@ -20,7 +20,7 @@ VERBOSE=false
 
 # Global variables
 ragnar_USER="ragnar"
-ragnar_PATH="/home/${ragnar_USER}/ragnar"
+ragnar_PATH="/home/${ragnar_USER}/Ragnar"
 CURRENT_STEP=0
 TOTAL_STEPS=9
 
@@ -356,7 +356,7 @@ setup_ragnar() {
 
     # Check for existing ragnar directory
     cd /home/$ragnar_USER
-    if [ -d "ragnar" ]; then
+    if [ -d "Ragnar" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"
     else
@@ -367,7 +367,7 @@ setup_ragnar() {
         check_success "Cloned ragnar repository"
     fi
 
-    cd ragnar
+    cd Ragnar
 
     # Update the shared_config.json file with the selected EPD version
     log "INFO" "Updating E-Paper display configuration..."
