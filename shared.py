@@ -41,7 +41,7 @@ class SharedData:
 
         # Update MAC blacklist without immediate save
         self.update_mac_blacklist()
-        self.setup_environment() # Setup the environment
+        self.setup_environment(clear_console=False) # Setup the environment without clearing console
         self.initialize_variables() # Initialize the variables used by the application
         
         # Initialize network intelligence (after paths and config are ready)
@@ -244,9 +244,10 @@ class SharedData:
 
 
 
-    def setup_environment(self):
+    def setup_environment(self, clear_console=False):
         """Setup the environment with the necessary directories and files."""
-        os.system('cls' if os.name == 'nt' else 'clear')
+        if clear_console:
+            os.system('cls' if os.name == 'nt' else 'clear')
         self.create_directories()  # Create all necessary directories first
         self.save_config()
         self.generate_actions_json()
