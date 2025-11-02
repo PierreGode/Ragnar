@@ -705,6 +705,7 @@ async function loadManualModeData() {
         const currentIp = document.getElementById('manual-ip-dropdown')?.value || '';
         const currentPort = document.getElementById('manual-port-dropdown')?.value || '';
         const currentAction = document.getElementById('manual-action-dropdown')?.value || '';
+        const currentVulnIp = document.getElementById('vuln-ip-dropdown')?.value || 'all';
         
         const data = await fetchAPI('/api/manual/targets');
         
@@ -728,12 +729,24 @@ async function loadManualModeData() {
         // Populate vulnerability scan IP dropdown
         const vulnIpDropdown = document.getElementById('vuln-ip-dropdown');
         if (vulnIpDropdown) {
-            vulnIpDropdown.innerHTML = '<option value="">Select IP</option>';
+            vulnIpDropdown.innerHTML = '';
+
+            const allOption = document.createElement('option');
+            allOption.value = 'all';
+            allOption.textContent = 'All Targets';
+            if (currentVulnIp === 'all' || !currentVulnIp) {
+                allOption.selected = true;
+            }
+            vulnIpDropdown.appendChild(allOption);
+
             if (data.targets && data.targets.length > 0) {
                 data.targets.forEach(target => {
                     const option = document.createElement('option');
                     option.value = target.ip;
                     option.textContent = `${target.ip} (${target.hostname})`;
+                    if (target.ip === currentVulnIp) {
+                        option.selected = true;
+                    }
                     vulnIpDropdown.appendChild(option);
                 });
             }
@@ -905,16 +918,13 @@ async function triggerNetworkScan() {
 async function triggerVulnScan() {
     try {
         const vulnIpDropdown = document.getElementById('vuln-ip-dropdown');
-        const selectedIp = vulnIpDropdown ? vulnIpDropdown.value : '';
-        
-        if (!selectedIp) {
-            addConsoleMessage('Please select an IP address for vulnerability scan', 'error');
-            return;
-        }
-        
-        addConsoleMessage(`Triggering vulnerability scan for ${selectedIp}...`, 'info');
-        
-        const data = await postAPI('/api/manual/scan/vulnerability', { ip: selectedIp });
+        const selectedIp = vulnIpDropdown ? vulnIpDropdown.value : 'all';
+        const isAllTargets = !selectedIp || selectedIp === 'all';
+        const scanLabel = isAllTargets ? 'all targets' : selectedIp;
+
+        addConsoleMessage(`Triggering vulnerability scan for ${scanLabel}...`, 'info');
+
+        const data = await postAPI('/api/manual/scan/vulnerability', { ip: isAllTargets ? 'all' : selectedIp });
         
         if (data.success) {
             addConsoleMessage('Vulnerability scan triggered successfully', 'success');

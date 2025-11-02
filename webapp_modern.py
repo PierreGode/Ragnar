@@ -2481,98 +2481,100 @@ def get_manual_mode_status():
         logger.error(f"Error getting manual mode status: {e}")
         return jsonify({'error': str(e)}), 500
 
+def _collect_manual_targets():
+    """Collect targets available for manual operations."""
+    targets = []
+    target_ips = set()  # Track unique IPs to avoid duplicates
+
+    # Read from the live status file first
+    if os.path.exists(shared_data.livestatusfile):
+        with open(shared_data.livestatusfile, 'r') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                if row.get('Alive') == '1':  # Only alive targets
+                    ip = row.get('IP', '')
+                    hostname = row.get('Hostname', ip)
+
+                    # Get open ports
+                    ports = []
+                    for key, value in row.items():
+                        if key.isdigit() and value:  # Port columns with values
+                            ports.append(key)
+
+                    if ip and ip not in target_ips:
+                        targets.append({
+                            'ip': ip,
+                            'hostname': hostname,
+                            'ports': ports,
+                            'source': 'Network Scan'
+                        })
+                        target_ips.add(ip)
+
+    # Also include hosts from NetKB data
+    try:
+        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
+        if os.path.exists(scan_results_dir):
+            for filename in os.listdir(scan_results_dir):
+                if filename.endswith('.txt'):
+                    filepath = os.path.join(scan_results_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            if content.strip():
+                                # Extract IP from filename or content
+                                ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
+                                host_ip = ip_match.group() if ip_match else 'Unknown'
+
+                                if host_ip and host_ip not in target_ips:
+                                    # Parse port/service info from content
+                                    ports = []
+                                    for line in content.split('\n'):
+                                        if '/tcp' in line or '/udp' in line:
+                                            parts = line.split()
+                                            if len(parts) >= 1:
+                                                port = parts[0].split('/')[0]  # Extract port number only
+                                                if port.isdigit() and port not in ports:
+                                                    ports.append(port)
+
+                                    targets.append({
+                                        'ip': host_ip,
+                                        'hostname': host_ip,  # Use IP as hostname if no other info
+                                        'ports': ports,
+                                        'source': 'NetKB'
+                                    })
+                                    target_ips.add(host_ip)
+                    except Exception:
+                        continue
+
+        # Add example targets if no real data exists
+        if not targets:
+            targets = [
+                {
+                    'ip': '192.168.1.1',
+                    'hostname': '192.168.1.1',
+                    'ports': ['22', '80', '443'],
+                    'source': 'Example'
+                },
+                {
+                    'ip': '192.168.1.100',
+                    'hostname': '192.168.1.100',
+                    'ports': ['80', '443'],
+                    'source': 'Example'
+                }
+            ]
+    except Exception as e:
+        logger.error(f"Error processing NetKB data for targets: {e}")
+
+    return targets
+
+
 @app.route('/api/manual/targets')
 def get_manual_targets():
     """Get available targets for manual attacks"""
     try:
-        targets = []
-        target_ips = set()  # Track unique IPs to avoid duplicates
-        
-        # Read from the live status file first
-        if os.path.exists(shared_data.livestatusfile):
-            with open(shared_data.livestatusfile, 'r') as file:
-                reader = csv.DictReader(file)
-                for row in reader:
-                    if row.get('Alive') == '1':  # Only alive targets
-                        ip = row.get('IP', '')
-                        hostname = row.get('Hostname', ip)
-                        
-                        # Get open ports
-                        ports = []
-                        for key, value in row.items():
-                            if key.isdigit() and value:  # Port columns with values
-                                ports.append(key)
-                        
-                        if ip and ip not in target_ips:
-                            targets.append({
-                                'ip': ip,
-                                'hostname': hostname,
-                                'ports': ports,
-                                'source': 'Network Scan'
-                            })
-                            target_ips.add(ip)
-        
-        # Also include hosts from NetKB data
-        try:
-            # Get NetKB data
-            netkb_entries = []
-            
-            # Process scan results for host/service information
-            scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-            if os.path.exists(scan_results_dir):
-                for filename in os.listdir(scan_results_dir):
-                    if filename.endswith('.txt'):
-                        filepath = os.path.join(scan_results_dir, filename)
-                        try:
-                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                content = f.read()
-                                if content.strip():
-                                    # Extract IP from filename or content
-                                    ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
-                                    host_ip = ip_match.group() if ip_match else 'Unknown'
-                                    
-                                    if host_ip and host_ip not in target_ips:
-                                        # Parse port/service info from content
-                                        ports = []
-                                        for line in content.split('\n'):
-                                            if '/tcp' in line or '/udp' in line:
-                                                parts = line.split()
-                                                if len(parts) >= 1:
-                                                    port = parts[0].split('/')[0]  # Extract port number only
-                                                    if port.isdigit() and port not in ports:
-                                                        ports.append(port)
-                                        
-                                        targets.append({
-                                            'ip': host_ip,
-                                            'hostname': host_ip,  # Use IP as hostname if no other info
-                                            'ports': ports,
-                                            'source': 'NetKB'
-                                        })
-                                        target_ips.add(host_ip)
-                        except Exception as e:
-                            continue
-            
-            # Add example targets if no real data exists
-            if not targets:
-                targets = [
-                    {
-                        'ip': '192.168.1.1',
-                        'hostname': '192.168.1.1',
-                        'ports': ['22', '80', '443'],
-                        'source': 'Example'
-                    },
-                    {
-                        'ip': '192.168.1.100',
-                        'hostname': '192.168.1.100',
-                        'ports': ['80', '443'],
-                        'source': 'Example'
-                    }
-                ]
-        except Exception as e:
-            logger.error(f"Error processing NetKB data for targets: {e}")
-        
+        targets = _collect_manual_targets()
         return jsonify({'targets': targets})
-        
+
     except Exception as e:
         logger.error(f"Error getting manual targets: {e}")
         return jsonify({'error': str(e)}), 500
@@ -2772,40 +2774,65 @@ def trigger_network_scan():
 def trigger_vulnerability_scan():
     """Trigger a manual vulnerability scan"""
     try:
-        data = request.get_json()
-        target_ip = data.get('ip')
-        
-        if not target_ip:
-            return jsonify({'success': False, 'error': 'Target IP required'}), 400
-        
+        data = request.get_json(silent=True) or {}
+        target_ip = (data.get('ip') or '').strip()
+
+        available_targets = _collect_manual_targets()
+        if not available_targets:
+            return jsonify({'success': False, 'error': 'No targets available for vulnerability scan'}), 400
+
+        is_all_targets = not target_ip or target_ip.lower() == 'all'
+
+        if is_all_targets:
+            targets_to_scan = available_targets
+            status_target = 'All Targets'
+        else:
+            targets_to_scan = [t for t in available_targets if t.get('ip') == target_ip]
+            status_target = target_ip
+            if not targets_to_scan:
+                return jsonify({'success': False, 'error': f'Target {target_ip} not found'}), 404
+
         # Update status to show vulnerability scanning is active
         shared_data.ragnarstatustext = "NmapVulnScanner"
-        shared_data.ragnarstatustext2 = f"Scanning: {target_ip}"
-        
+        shared_data.ragnarstatustext2 = f"Scanning: {status_target}"
+
         # Immediately broadcast the status change
         broadcast_status_update()
-        
+
         # Execute vulnerability scan in background
         def execute_vuln_scan():
             try:
                 # Import and create vulnerability scanner
                 from actions.nmap_vuln_scanner import NmapVulnScanner
                 vuln_scanner = NmapVulnScanner(shared_data)
-                
-                # Create a row for the scanner
-                row = {'ip': target_ip, 'hostname': target_ip, 'mac': '00:00:00:00:00:00'}
-                
-                # Execute vulnerability scan
-                vuln_scanner.execute(target_ip, row, "manual_vuln_scan")
-                
+
+                for target in targets_to_scan:
+                    ip = target.get('ip')
+                    hostname = target.get('hostname') or ip
+                    ports = [str(port) for port in target.get('ports', []) if str(port).strip()]
+
+                    if not ports:
+                        ports = ['1-65535']
+
+                    row = {
+                        'Ports': ';'.join(ports),
+                        'Hostnames': hostname,
+                        'MAC Address': target.get('mac', '00:00:00:00:00:00')
+                    }
+
+                    shared_data.ragnarstatustext2 = f"Scanning: {ip}"
+                    broadcast_status_update()
+
+                    vuln_scanner.execute(ip, row, "manual_vuln_scan")
+
                 # Update status when scan completes
                 shared_data.ragnarstatustext = "IDLE"
                 shared_data.ragnarstatustext2 = "Vulnerability scan completed"
-                
+
                 # Broadcast completion status
                 broadcast_status_update()
                 
-                logger.info(f"Manual vulnerability scan completed for: {target_ip}")
+                logger.info(f"Manual vulnerability scan completed for: {status_target}")
                 
             except Exception as e:
                 logger.error(f"Error executing vulnerability scan: {e}")
@@ -2819,11 +2846,11 @@ def trigger_vulnerability_scan():
         import threading
         threading.Thread(target=execute_vuln_scan, daemon=True).start()
         
-        logger.info(f"Manual vulnerability scan initiated for: {target_ip}")
-        
+        logger.info(f"Manual vulnerability scan initiated for: {status_target}")
+
         return jsonify({
             'success': True,
-            'message': f'Vulnerability scan initiated for {target_ip}'
+            'message': 'Vulnerability scan initiated for all targets' if is_all_targets else f'Vulnerability scan initiated for {target_ip}'
         })
         
     except Exception as e:
