@@ -17,13 +17,11 @@ import signal
 import logging
 import threading
 import time
+import subprocess
+import re
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response
 from flask_socketio import SocketIO, emit
-import re
-import time
-import os
-import json
 try:
     from flask_cors import CORS
     flask_cors_available = True
@@ -162,6 +160,9 @@ def sync_all_counts():
         
         # Sync vulnerability count
         sync_vulnerability_count()
+        
+        # Update WiFi-specific network data from scan results
+        update_wifi_network_data()
         
         # Sync target and port counts from scan results
         scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
@@ -313,6 +314,178 @@ def safe_bool(value, default=False):
         return default
 
 
+def get_current_wifi_ssid():
+    """Get the current WiFi SSID for file naming"""
+    try:
+        # Try to get SSID from wifi_manager if available
+        if hasattr(shared_data, 'wifi_manager') and shared_data.wifi_manager:
+            ssid = shared_data.wifi_manager.get_current_ssid()
+            if ssid:
+                # Sanitize SSID for filename
+                sanitized = re.sub(r'[^\w\-_]', '_', ssid)
+                return sanitized
+        
+        # Fallback to direct system command
+        result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,SSID', 'dev', 'wifi'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                if line.startswith('yes:'):
+                    ssid = line.split(':', 1)[1]
+                    if ssid:
+                        # Sanitize SSID for filename
+                        sanitized = re.sub(r'[^\w\-_]', '_', ssid)
+                        return sanitized
+        
+        return "unknown_network"
+    except Exception as e:
+        logger.debug(f"Error getting current WiFi SSID: {e}")
+        return "unknown_network"
+
+
+def get_wifi_specific_network_file():
+    """Get the WiFi-specific network data file path"""
+    current_ssid = get_current_wifi_ssid()
+    data_dir = os.path.join('data', 'network_data')
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, f'network_{current_ssid}.csv')
+
+
+def update_wifi_network_data():
+    """Update WiFi-specific network data from scan results"""
+    try:
+        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
+        wifi_network_file = get_wifi_specific_network_file()
+        
+        # Load existing data if file exists
+        existing_data = {}
+        if os.path.exists(wifi_network_file):
+            try:
+                with open(wifi_network_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    reader = csv.reader(f)
+                    headers = next(reader, None)
+                    if headers:
+                        for row in reader:
+                            if len(row) >= 1 and row[0].strip():
+                                ip = row[0].strip()
+                                existing_data[ip] = {
+                                    'hostname': row[1] if len(row) > 1 else '',
+                                    'alive': row[2] if len(row) > 2 else '1',
+                                    'mac': row[3] if len(row) > 3 else '',
+                                    'ports': set(row[4].split(';')) if len(row) > 4 and row[4] else set(),
+                                    'last_seen': row[5] if len(row) > 5 else datetime.now().isoformat()
+                                }
+            except Exception as e:
+                logger.debug(f"Could not read existing WiFi network file: {e}")
+        
+        # Process new scan results
+        if os.path.exists(scan_results_dir):
+            current_time = datetime.now().isoformat()
+            
+            for filename in os.listdir(scan_results_dir):
+                if filename.startswith('result_') and filename.endswith('.csv'):
+                    filepath = os.path.join(scan_results_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                            reader = csv.reader(f)
+                            for row in reader:
+                                if len(row) >= 1 and row[0].strip():
+                                    ip = row[0].strip()
+                                    if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+                                        hostname = row[1] if len(row) > 1 and row[1] else ''
+                                        alive = row[2] if len(row) > 2 and row[2] else '1'
+                                        mac = row[3] if len(row) > 3 and row[3] else ''
+                                        
+                                        # Collect ports from remaining columns
+                                        ports = set()
+                                        if len(row) > 4:
+                                            for port_col in row[4:]:
+                                                if port_col and port_col.strip():
+                                                    ports.add(port_col.strip())
+                                        
+                                        # Update or add entry
+                                        if ip in existing_data:
+                                            # Merge data
+                                            if hostname and hostname != 'Unknown':
+                                                existing_data[ip]['hostname'] = hostname
+                                            if mac and mac != 'Unknown':
+                                                existing_data[ip]['mac'] = mac
+                                            existing_data[ip]['alive'] = alive
+                                            existing_data[ip]['ports'].update(ports)
+                                            existing_data[ip]['last_seen'] = current_time
+                                        else:
+                                            # New entry
+                                            existing_data[ip] = {
+                                                'hostname': hostname,
+                                                'alive': alive,
+                                                'mac': mac,
+                                                'ports': ports,
+                                                'last_seen': current_time
+                                            }
+                    except Exception as e:
+                        logger.debug(f"Could not read scan result file {filepath}: {e}")
+                        continue
+        
+        # Write updated data to WiFi-specific file
+        try:
+            with open(wifi_network_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['IP', 'Hostname', 'Alive', 'MAC', 'Ports', 'LastSeen'])
+                
+                for ip, data in existing_data.items():
+                    ports_str = ';'.join(sorted(data['ports'], key=lambda x: int(x) if x.isdigit() else 0))
+                    writer.writerow([
+                        ip,
+                        data['hostname'],
+                        data['alive'],
+                        data['mac'],
+                        ports_str,
+                        data['last_seen']
+                    ])
+            
+            logger.info(f"Updated WiFi network data file: {wifi_network_file} with {len(existing_data)} entries")
+        except Exception as e:
+            logger.error(f"Error writing WiFi network data file: {e}")
+    
+    except Exception as e:
+        logger.error(f"Error updating WiFi network data: {e}")
+
+
+def read_wifi_network_data():
+    """Read network data from WiFi-specific file"""
+    try:
+        wifi_network_file = get_wifi_specific_network_file()
+        network_data = []
+        
+        if os.path.exists(wifi_network_file):
+            with open(wifi_network_file, 'r', encoding='utf-8', errors='ignore') as f:
+                reader = csv.reader(f)
+                headers = next(reader, None)  # Skip header
+                
+                for row in reader:
+                    if len(row) >= 6 and row[0].strip():
+                        ip = row[0].strip()
+                        if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+                            network_entry = {
+                                'IPs': ip,
+                                'Hostnames': row[1] if row[1] else '',
+                                'Alive': int(row[2]) if row[2].isdigit() else 1,
+                                'MAC Address': row[3] if row[3] else '',
+                                'Ports': row[4] if row[4] else '',
+                                'LastSeen': row[5] if len(row) > 5 else ''
+                            }
+                            network_data.append(network_entry)
+            
+            logger.debug(f"Read {len(network_data)} entries from WiFi network file: {wifi_network_file}")
+        else:
+            logger.debug(f"WiFi network file does not exist: {wifi_network_file}")
+        
+        return network_data
+    except Exception as e:
+        logger.error(f"Error reading WiFi network data: {e}")
+        return []
+
+
 def is_ap_client_request():
     """Check if the request is coming from an AP client (192.168.4.x)"""
     try:
@@ -436,74 +609,35 @@ def update_config():
         return jsonify({'error': str(e)}), 500
 
 
+def load_persistent_network_data():
+    """Load the WiFi-specific network data with fallbacks."""
+    update_wifi_network_data()
+
+    network_data = read_wifi_network_data()
+
+    if not network_data:
+        logger.warning("WiFi-specific network data is empty. Falling back to netkb data.")
+        try:
+            netkb_data = shared_data.read_data()
+            if netkb_data:
+                network_data = netkb_data
+                logger.debug("Used netkb data as fallback.")
+        except Exception as e:
+            logger.error(f"Could not read netkb data as fallback: {e}")
+            network_data = []
+
+    current_ssid = get_current_wifi_ssid()
+    logger.info(f"Returning {len(network_data)} network entries for WiFi: {current_ssid}")
+    return network_data
+
+
 @app.route('/api/network')
 def get_network():
-    """Get network scan data"""
+    """Get network scan data from the persistent WiFi-specific file."""
     try:
-        # Read scan results from CSV files instead of netkb
-        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-        
-        network_data = []
-        
-        if os.path.exists(scan_results_dir):
-            # Process result CSV files to build network data
-            for filename in os.listdir(scan_results_dir):
-                if filename.startswith('result_') and filename.endswith('.csv'):
-                    filepath = os.path.join(scan_results_dir, filename)
-                    try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            reader = csv.reader(f)
-                            for row in reader:
-                                if len(row) >= 1 and row[0].strip():
-                                    ip = row[0].strip()
-                                    if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
-                                        # Build network data entry
-                                        hostname = row[1] if len(row) > 1 and row[1] else ''
-                                        alive = row[2] if len(row) > 2 and row[2] else '1'
-                                        mac = row[3] if len(row) > 3 and row[3] else ''
-                                        
-                                        # Collect ports from remaining columns
-                                        ports = []
-                                        if len(row) > 4:
-                                            for port_col in row[4:]:
-                                                if port_col and port_col.strip() and port_col.strip() != '':
-                                                    ports.append(port_col.strip())
-                                        
-                                        network_entry = {
-                                            'IPs': ip,
-                                            'Hostnames': hostname,
-                                            'Alive': int(alive) if alive.isdigit() else 1,
-                                            'MAC Address': mac,
-                                            'Ports': ';'.join(ports) if ports else ''
-                                        }
-                                        
-                                        # Check if this IP already exists and merge
-                                        existing = next((item for item in network_data if item['IPs'] == ip), None)
-                                        if existing:
-                                            # Merge ports
-                                            existing_ports = set(existing['Ports'].split(';')) if existing['Ports'] else set()
-                                            new_ports = set(ports)
-                                            all_ports = existing_ports.union(new_ports)
-                                            existing['Ports'] = ';'.join(sorted(all_ports, key=lambda x: int(x) if x.isdigit() else 0))
-                                            # Update hostname if empty
-                                            if not existing['Hostnames'] and hostname:
-                                                existing['Hostnames'] = hostname
-                                        else:
-                                            network_data.append(network_entry)
-                    except Exception as e:
-                        logger.debug(f"Could not read scan result file {filepath}: {e}")
-                        continue
-        
-        # Fallback to netkb file if no scan results found
-        if not network_data:
-            try:
-                data = shared_data.read_data()
-                return jsonify(data)
-            except Exception as e:
-                logger.warning(f"Could not read netkb data: {e}")
-                return jsonify([])
-        
+        network_data = load_persistent_network_data()
         return jsonify(network_data)
+
     except Exception as e:
         logger.error(f"Error getting network data: {e}")
         return jsonify({'error': str(e)}), 500
@@ -606,7 +740,7 @@ def get_logs():
                             username = row.get('username', row.get('Username', 'Unknown'))
                             cred_log = f"🔓 {service} credentials found - {username}@{ip}"
                             all_logs.append(f"[CREDENTIALS] {cred_log}")
-                except Exception as e:
+                except Exception:
                     continue
         
         # 5. Get recent vulnerability findings
@@ -814,7 +948,7 @@ def check_updates():
         
         # Fetch latest changes from remote
         try:
-            fetch_result = subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True, capture_output=True, text=True)
+            fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
             logger.info(f"Git fetch completed: {fetch_result.stdout}")
         except subprocess.CalledProcessError as e:
             logger.error(f"Git fetch failed: {e.stderr}")
@@ -824,7 +958,7 @@ def check_updates():
                              cwd=repo_path, check=True, capture_output=True)
                 logger.info(f"Added {repo_path} to git safe directories")
                 # Retry fetch
-                fetch_result = subprocess.run(['git', 'fetch', 'origin'], cwd=repo_path, check=True, capture_output=True, text=True)
+                fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
                 logger.info(f"Git fetch completed after fixing safe directory: {fetch_result.stdout}")
             except subprocess.CalledProcessError as e2:
                 logger.error(f"Git fetch still failed after fixing safe directory: {e2.stderr}")
@@ -834,33 +968,30 @@ def check_updates():
                     'detailed_error': str(e2.stderr)
                 }), 500
         
+        # Get the current branch name
+        try:
+            branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=repo_path, check=True, capture_output=True, text=True)
+            current_branch = branch_result.stdout.strip()
+        except subprocess.CalledProcessError:
+            current_branch = 'main' # Fallback
+        
+        logger.info(f"Current git branch is: {current_branch}")
+        remote_branch = f'origin/{current_branch}'
+
         # Check if local branch is behind remote
         try:
             result = subprocess.run(
-                ['git', 'rev-list', '--count', 'HEAD..origin/main'], 
+                ['git', 'rev-list', '--count', f'HEAD..{remote_branch}'], 
                 cwd=repo_path, 
                 capture_output=True, 
                 text=True, 
                 check=True
             )
             commits_behind = int(result.stdout.strip())
-            logger.info(f"Commits behind: {commits_behind}")
+            logger.info(f"Commits behind '{remote_branch}': {commits_behind}")
         except (subprocess.CalledProcessError, ValueError) as e:
-            logger.error(f"Error checking commits behind main: {e}")
-            # Fallback: try main branch or assume up to date
-            try:
-                result = subprocess.run(
-                    ['git', 'rev-list', '--count', 'HEAD..origin/main'], 
-                    cwd=repo_path, 
-                    capture_output=True, 
-                    text=True, 
-                    check=True
-                )
-                commits_behind = int(result.stdout.strip())
-                logger.info(f"Commits behind (main): {commits_behind}")
-            except:
-                logger.error("Could not determine commits behind, assuming up to date")
-                commits_behind = 0
+            logger.error(f"Error checking commits behind '{remote_branch}': {e}")
+            commits_behind = 0
         
         # Get current HEAD commit
         try:
@@ -878,7 +1009,7 @@ def check_updates():
         # Get latest commit info
         try:
             result = subprocess.run(
-                ['git', 'log', 'origin/main', '--oneline', '-1'], 
+                ['git', 'log', remote_branch, '--oneline', '-1'], 
                 cwd=repo_path, 
                 capture_output=True, 
                 text=True, 
@@ -886,17 +1017,7 @@ def check_updates():
             )
             latest_commit = result.stdout.strip()
         except:
-            try:
-                result = subprocess.run(
-                    ['git', 'log', 'origin/main', '--oneline', '-1'], 
-                    cwd=repo_path, 
-                    capture_output=True, 
-                    text=True, 
-                    check=True
-                )
-                latest_commit = result.stdout.strip()
-            except:
-                latest_commit = "Unable to fetch latest commit"
+            latest_commit = "Unable to fetch latest commit"
         
         logger.info(f"Update check result - Behind: {commits_behind}, Current: {current_commit}, Latest: {latest_commit}")
         
@@ -922,10 +1043,25 @@ def perform_update():
         repo_path = os.getcwd()
         logger.info(f"Performing update in repository: {repo_path}")
         
+        # Fix permissions before git pull to prevent ownership issues
+        try:
+            logger.info("Correcting file permissions...")
+            perm_result = subprocess.run(
+                ['sudo', 'chown', '-R', 'ragnar:ragnar', '/home/ragnar/Ragnar'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            logger.info("Permissions corrected successfully")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Permission correction failed (continuing anyway): {e.stderr}")
+        except Exception as e:
+            logger.warning(f"Permission correction error (continuing anyway): {e}")
+        
         # Perform git pull
         try:
             result = subprocess.run(
-                ['git', 'pull', 'origin', 'main'], 
+                ['git', 'pull'], 
                 cwd=repo_path, 
                 capture_output=True, 
                 text=True, 
@@ -934,13 +1070,37 @@ def perform_update():
             output = result.stdout
             logger.info(f"Git pull completed: {output}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Git pull main failed: {e.stderr}")
-            # Return error immediately since this repo only has main branch
+            logger.error(f"Git pull failed: {e.stderr}")
             return jsonify({
                 'success': False, 
                 'error': f'Git pull failed: {e.stderr}',
                 'suggestion': 'Please check repository status and resolve any conflicts'
             }), 500
+        
+        # Make files executable after pull
+        try:
+            logger.info("Making files executable...")
+            # More comprehensive chmod - handle shell scripts and Python files specifically
+            chmod_commands = [
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/*.sh'],           # All shell scripts
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/*.py'],           # All Python files
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/Ragnar.py'],      # Main script
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/kill_port_8000.sh'], # Specific failing script
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/webapp_modern.py'], # This file
+                ['sudo', 'find', '/home/ragnar/Ragnar', '-name', '*.sh', '-exec', 'chmod', '+x', '{}', ';'] # Find all .sh files
+            ]
+            
+            for cmd in chmod_commands:
+                try:
+                    subprocess.run(cmd, capture_output=True, text=True, check=False)  # Don't fail on individual commands
+                except Exception as e:
+                    logger.debug(f"Chmod command failed (continuing): {cmd} - {e}")
+            
+            logger.info("Files made executable successfully")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Chmod failed (continuing anyway): {e.stderr}")
+        except Exception as e:
+            logger.warning(f"Chmod error (continuing anyway): {e}")
         
         # Schedule service restart after a short delay
         def restart_service_delayed():
@@ -1614,119 +1774,86 @@ def get_stats():
 
 @app.route('/network_data')
 def legacy_network_data():
-    """Network data endpoint with independent persistence - avoids netkb.csv conflicts"""
+    """Network data endpoint with WiFi-specific persistence"""
     try:
-        # Use a separate file for network display persistence to avoid orchestrator conflicts
-        network_cache_file = "/data/network_display_cache.json"
-        network_data = []
+        # Update WiFi-specific network data from latest scan results
+        update_wifi_network_data()
         
-        # Load existing cached data if available
-        try:
-            if os.path.exists(network_cache_file):
-                with open(network_cache_file, 'r') as f:
-                    cached_data = json.load(f)
-                    # Filter out old entries (older than 24 hours)
-                    cutoff_time = datetime.now() - timedelta(hours=24)
-                    for entry in cached_data:
+        # Read from WiFi-specific persistent file
+        network_data = read_wifi_network_data()
+        
+        # If no persistent data, build from current scan results
+        if not network_data:
+            logger.debug("No WiFi-specific network data found, building from scan results")
+            
+            scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
+            current_time = datetime.now().isoformat()
+            
+            if os.path.exists(scan_results_dir):
+                temp_data = {}
+                
+                for filename in os.listdir(scan_results_dir):
+                    if filename.startswith('result_') and filename.endswith('.csv'):
+                        filepath = os.path.join(scan_results_dir, filename)
                         try:
-                            last_seen = datetime.fromisoformat(entry.get('last_seen', ''))
-                            if last_seen > cutoff_time:
-                                network_data.append(entry)
-                        except:
-                            # Skip entries with invalid timestamps
+                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                                reader = csv.reader(f)
+                                for row in reader:
+                                    if len(row) >= 1 and row[0].strip():
+                                        ip = row[0].strip()
+                                        if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+                                            hostname = row[1] if len(row) > 1 and row[1] else ''
+                                            alive = row[2] if len(row) > 2 and row[2] else '1'
+                                            mac = row[3] if len(row) > 3 and row[3] else ''
+                                            
+                                            # Collect ports from remaining columns
+                                            ports = []
+                                            if len(row) > 4:
+                                                for port_col in row[4:]:
+                                                    if port_col and port_col.strip():
+                                                        ports.append(port_col.strip())
+                                            
+                                            # Update or add entry
+                                            if ip in temp_data:
+                                                # Merge data
+                                                if hostname and hostname != 'Unknown':
+                                                    temp_data[ip]['Hostnames'] = hostname
+                                                if mac and mac != 'Unknown':
+                                                    temp_data[ip]['MAC Address'] = mac
+                                                temp_data[ip]['Alive'] = int(alive) if alive.isdigit() else 1
+                                                existing_ports = set(temp_data[ip]['Ports'].split(';')) if temp_data[ip]['Ports'] else set()
+                                                existing_ports.update(ports)
+                                                temp_data[ip]['Ports'] = ';'.join(sorted(existing_ports, key=lambda x: int(x) if x.isdigit() else 0))
+                                                temp_data[ip]['LastSeen'] = current_time
+                                            else:
+                                                # New entry
+                                                temp_data[ip] = {
+                                                    'IPs': ip,
+                                                    'Hostnames': hostname,
+                                                    'Alive': int(alive) if alive.isdigit() else 1,
+                                                    'MAC Address': mac,
+                                                    'Ports': ';'.join(ports) if ports else '',
+                                                    'LastSeen': current_time
+                                                }
+                        except Exception as e:
+                            logger.debug(f"Could not read scan result file {filepath}: {e}")
                             continue
-        except Exception as e:
-            logger.debug(f"Could not read network cache: {e}")
-        
-        # Now update with fresh scan results
-        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-        current_time = datetime.now().isoformat()
-        
-        if os.path.exists(scan_results_dir):
-            # Process recent result CSV files (last 10 minutes)
-            recent_files = []
-            current_timestamp = time.time()
-            
-            for filename in os.listdir(scan_results_dir):
-                if filename.startswith('result_') and filename.endswith('.csv'):
-                    filepath = os.path.join(scan_results_dir, filename)
-                    file_mtime = os.path.getmtime(filepath)
-                    # Process files from the last 10 minutes
-                    if current_timestamp - file_mtime < 600:  # 10 minutes
-                        recent_files.append((filepath, filename))
-            
-            # Process recent scan results
-            for filepath, filename in recent_files:
-                try:
-                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                        reader = csv.reader(f)
-                        for row in reader:
-                            if len(row) >= 1 and row[0].strip():
-                                ip = row[0].strip()
-                                if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
-                                    # Build network data entry from fresh scan
-                                    hostname = row[1] if len(row) > 1 and row[1] else ''
-                                    alive = row[2] if len(row) > 2 and row[2] else '1'
-                                    mac = row[3] if len(row) > 3 and row[3] else ''
-                                    
-                                    # Collect ports from remaining columns
-                                    ports = []
-                                    if len(row) > 4:
-                                        for port_col in row[4:]:
-                                            if port_col and port_col.strip() and port_col.strip() != '':
-                                                ports.append(port_col.strip())
-                                    
-                                    # Find existing entry for this IP
-                                    existing = next((item for item in network_data if item['IPs'] == ip), None)
-                                    
-                                    if existing:
-                                        # Update existing entry with new information
-                                        existing['last_seen'] = current_time
-                                        existing['Alive'] = int(alive) if alive.isdigit() else 1
-                                        
-                                        # Update hostname if we got a better one
-                                        if hostname and hostname != 'Unknown':
-                                            existing['Hostnames'] = hostname
-                                        
-                                        # Update MAC if we got one
-                                        if mac and mac != 'Unknown':
-                                            existing['MAC Address'] = mac
-                                        
-                                        # Merge ports (add new ones, keep existing)
-                                        existing_ports = set(existing['Ports'].split(';')) if existing['Ports'] else set()
-                                        new_ports = set(ports)
-                                        all_ports = existing_ports.union(new_ports)
-                                        # Remove empty strings
-                                        all_ports.discard('')
-                                        existing['Ports'] = ';'.join(sorted(all_ports, key=lambda x: int(x) if x.isdigit() else 0))
-                                    else:
-                                        # Add new entry
-                                        new_entry = {
-                                            'IPs': ip,
-                                            'Hostnames': hostname,
-                                            'Alive': int(alive) if alive.isdigit() else 1,
-                                            'MAC Address': mac,
-                                            'Ports': ';'.join(ports) if ports else '',
-                                            'last_seen': current_time
-                                        }
-                                        network_data.append(new_entry)
-                except Exception as e:
-                    logger.debug(f"Could not read scan result file {filepath}: {e}")
-                    continue
-        
-        # Save updated cache to independent file (not netkb.csv!)
-        try:
-            with open(network_cache_file, 'w') as f:
-                json.dump(network_data, f, indent=2)
-        except Exception as e:
-            logger.debug(f"Could not save network cache: {e}")
+                
+                # Convert to list format
+                network_data = list(temp_data.values())
         
         if not network_data:
-            return '<div class="error">No network scan results found. Please run a network scan first.</div>'
-            return '<div class="error">No network scan results found. Please run a network scan first.</div>'
+            current_ssid = get_current_wifi_ssid()
+            return f'<div class="error">No network scan results found for WiFi network: {current_ssid}<br>Please run a network scan first.</div>'
+        
+        current_ssid = get_current_wifi_ssid()
         
         # Generate HTML table
-        html = '''
+        html = f'''
+        <div class="network-header">
+            <h3>Network Scan Results for WiFi: {current_ssid}</h3>
+            <p>Persistent data - automatically updated when new scans are performed</p>
+        </div>
         <table class="network-table">
             <thead>
                 <tr>
@@ -1747,7 +1874,7 @@ def legacy_network_data():
             alive = entry.get('Alive', 0)
             mac = entry.get('MAC Address', '')
             ports = entry.get('Ports', '')
-            last_seen = entry.get('last_seen', '')
+            last_seen = entry.get('LastSeen', '')
             
             # Format status
             status = 'Online' if alive == 1 else 'Offline'
@@ -1764,8 +1891,11 @@ def legacy_network_data():
             
             # Format last seen time
             try:
-                last_seen_dt = datetime.fromisoformat(last_seen)
-                last_seen_display = last_seen_dt.strftime('%m-%d %H:%M')
+                if last_seen:
+                    last_seen_dt = datetime.fromisoformat(last_seen)
+                    last_seen_display = last_seen_dt.strftime('%m-%d %H:%M')
+                else:
+                    last_seen_display = 'Unknown'
             except:
                 last_seen_display = 'Unknown'
             
@@ -1788,6 +1918,21 @@ def legacy_network_data():
         # Add some CSS for styling
         html = f'''
         <style>
+            .network-header {{
+                color: #00ff00;
+                font-family: 'Courier New', monospace;
+                text-align: center;
+                margin-bottom: 20px;
+            }}
+            .network-header h3 {{
+                margin: 0 0 10px 0;
+                font-size: 18px;
+            }}
+            .network-header p {{
+                margin: 0;
+                font-size: 12px;
+                color: #00cc00;
+            }}
             .network-table {{
                 width: 100%;
                 border-collapse: collapse;
@@ -1826,11 +1971,13 @@ def legacy_network_data():
         {html}
         '''
         
+        logger.info(f"Serving network data for WiFi: {current_ssid} with {len(network_data)} entries")
         return html
         
     except Exception as e:
-        logger.error(f"Error generating network HTML: {e}")
-        return f'<div class="error">Error loading network data: {str(e)}</div>'
+        logger.error(f"Error serving network data: {e}")
+        current_ssid = get_current_wifi_ssid()
+        return f'<div class="error">Error loading network data for WiFi: {current_ssid}<br>Error: {str(e)}</div>'
 
 @app.route('/list_credentials')
 def legacy_credentials():
@@ -1931,7 +2078,7 @@ def handle_log_request():
 def handle_network_request():
     """Handle request for network data"""
     try:
-        data = shared_data.read_data()
+        data = load_persistent_network_data()
         emit('network_update', data)
     except Exception as e:
         logger.error(f"Error sending network data: {e}")
@@ -1989,6 +2136,16 @@ def handle_activity_request():
                 pass
         
         # Add current status
+        if safe_str(shared_data.ragnarstatustext) and safe_str(shared_data.ragnarstatustext) != "Idle":
+            activity_logs.append({
+                'timestamp': current_time.strftime("%H:%M:%S"),
+                'type': 'status',
+                'icon': '🤖',
+                'message': f"Ragnar: {safe_str(shared_data.ragnarstatustext)}",
+                'details': safe_str(shared_data.ragnarstatustext2) if safe_str(shared_data.ragnarstatustext2) else '',
+                'severity': 'info'
+            })
+        
         if safe_str(shared_data.ragnarsays) and safe_str(shared_data.ragnarsays).strip():
             activity_logs.append({
                 'timestamp': current_time.strftime("%H:%M:%S"),
@@ -2223,7 +2380,7 @@ def get_manual_targets():
                                 if content.strip():
                                     # Extract IP from filename or content
                                     ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
-                                    host_ip = ip_match.group() if ip_match else None
+                                    host_ip = ip_match.group() if ip_match else 'Unknown'
                                     
                                     if host_ip and host_ip not in target_ips:
                                         # Parse port/service info from content
@@ -3043,9 +3200,9 @@ def get_image_info_api():
             'width': width,
             'height': height,
             'format': format_type
-        }
+        };
         
-        return jsonify(info)
+        return jsonify(info);
         
     except Exception as e:
         logger.error(f"Error getting image info: {e}")
@@ -3494,7 +3651,7 @@ def export_netkb_data():
         scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
         if os.path.exists(scan_results_dir):
             for filename in os.listdir(scan_results_dir):
-                if filename.endswith('.txt'):
+                if filename.endswith('.txt') and not filename.startswith('.'):
                     filepath = os.path.join(scan_results_dir, filename)
                     try:
                         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
@@ -3511,12 +3668,14 @@ def export_netkb_data():
                                             service = parts[2] if len(parts) > 2 else 'unknown'
                                             
                                             netkb_entries.append({
+                                                'id': f"scan_{host_ip}_{port}",
                                                 'type': 'service',
                                                 'host': host_ip,
                                                 'port': port,
                                                 'service': service,
                                                 'description': f"Service {service} running on {port}",
                                                 'severity': 'info',
+                                                'discovered': os.path.getmtime(filepath),
                                                 'source': 'Network Scan'
                                             })
                     except Exception as e:
