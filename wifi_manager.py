@@ -62,6 +62,7 @@ class WiFiManager:
         self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar-Setup')
         self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarpassword')
         self.ap_interface = "wlan0"
+        self.client_interface = None  # Optional dedicated interface for client/scan operations
         self.ap_ip = "192.168.4.1"
         self.ap_subnet = "192.168.4.0/24"
         
@@ -72,26 +73,62 @@ class WiFiManager:
         
         # Load configuration
         self.load_wifi_config()
+
+        # Determine which interfaces should be used for AP and scanning duties
+        self._initialize_interfaces()
         
     def load_wifi_config(self):
         """Load Wi-Fi configuration from shared data"""
         try:
             config = self.shared_data.config
-            
+
             # Load known networks
             self.known_networks = config.get('wifi_known_networks', [])
-            
+
             # Load AP settings
             self.ap_ssid = config.get('wifi_ap_ssid', 'Ragnar-Setup')
             self.ap_password = config.get('wifi_ap_password', 'ragnarpassword')
             self.connection_timeout = config.get('wifi_connection_timeout', 60)
             self.max_connection_attempts = config.get('wifi_max_attempts', 3)
-            
+
             self.logger.info(f"Wi-Fi config loaded: {len(self.known_networks)} known networks")
-            
+
         except Exception as e:
             self.logger.error(f"Error loading Wi-Fi config: {e}")
-    
+
+    def _initialize_interfaces(self):
+        """Determine AP/client interfaces from configuration or runtime detection."""
+        try:
+            config = self.shared_data.config
+
+            # Allow overriding of interfaces through configuration for advanced setups
+            self.ap_interface = config.get('wifi_ap_interface', self.ap_interface)
+            configured_client = config.get('wifi_client_interface') or None
+
+            # Auto-detect a client interface if one isn't configured
+            if configured_client:
+                self.client_interface = configured_client
+            else:
+                self.client_interface = self._detect_client_interface()
+
+            # If the configured client interface matches the AP interface, attempt detection again
+            if self.client_interface and self.client_interface == self.ap_interface:
+                detected = self._detect_client_interface(exclude_interfaces=[self.ap_interface])
+                self.client_interface = detected if detected else None
+
+            if self.client_interface and not self._interface_exists(self.client_interface):
+                self.logger.warning(f"Configured client interface {self.client_interface} not found - disabling dedicated scanning interface")
+                self.client_interface = None
+
+            if self.client_interface:
+                self.logger.info(f"Using {self.client_interface} for client/scanning operations during AP mode")
+            else:
+                self.logger.info("No dedicated client interface detected - AP scans will use fallback strategies only")
+
+        except Exception as e:
+            self.logger.warning(f"Failed to initialize Wi-Fi interfaces: {e}")
+            self.client_interface = None
+
     def save_wifi_config(self):
         """Save Wi-Fi configuration to shared data"""
         try:
@@ -100,10 +137,16 @@ class WiFiManager:
             self.shared_data.config['wifi_ap_password'] = self.ap_password
             self.shared_data.config['wifi_connection_timeout'] = self.connection_timeout
             self.shared_data.config['wifi_max_attempts'] = self.max_connection_attempts
-            
+            self.shared_data.config['wifi_ap_interface'] = self.ap_interface
+            if self.client_interface:
+                self.shared_data.config['wifi_client_interface'] = self.client_interface
+            elif 'wifi_client_interface' in self.shared_data.config:
+                # Avoid persisting stale values when detection fails
+                self.shared_data.config['wifi_client_interface'] = None
+
             self.shared_data.save_config()
             self.logger.info("Wi-Fi configuration saved")
-            
+
         except Exception as e:
             self.logger.error(f"Error saving Wi-Fi config: {e}")
     
@@ -659,11 +702,16 @@ class WiFiManager:
             # Strategy 2: Try iwlist scan (non-disruptive to AP mode)
             networks = []
             try:
-                self.ap_logger.debug("Attempting iwlist scan on AP interface...")
-                result = subprocess.run(['sudo', 'iwlist', self.ap_interface, 'scan'], 
-                                      capture_output=True, text=True, timeout=15)
-                
-                if result.returncode == 0:
+                scan_interface = self._get_scan_interface_for_ap_scan()
+                if scan_interface:
+                    self.ap_logger.debug(f"Attempting iwlist scan on interface {scan_interface} while AP active...")
+                    result = subprocess.run(['sudo', 'iwlist', scan_interface, 'scan'],
+                                          capture_output=True, text=True, timeout=15)
+                else:
+                    self.ap_logger.debug("No suitable interface available for AP scan without interruption")
+                    result = None
+
+                if result and result.returncode == 0:
                     self.ap_logger.debug("iwlist scan successful, parsing results...")
                     lines = result.stdout.split('\n')
                     current_network = {}
@@ -774,7 +822,74 @@ class WiFiManager:
             self.logger.error(f"Error in smart AP scanning: {e}")
             self.ap_logger.error(f"Error during smart AP scan: {e}")
             return []
-    
+
+    def _get_scan_interface_for_ap_scan(self):
+        """Return interface to use for scanning while AP mode is active."""
+        if not self.client_interface:
+            return None
+
+        if self.client_interface == self.ap_interface:
+            # Using the AP interface for scans will interrupt hostapd, skip to avoid disruption
+            return None
+
+        if self._interface_exists(self.client_interface):
+            return self.client_interface
+
+        return None
+
+    def _detect_client_interface(self, exclude_interfaces=None):
+        """Best-effort detection of an available Wi-Fi client interface."""
+        exclude_interfaces = exclude_interfaces or []
+
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE', 'device'],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+
+            if result.returncode != 0:
+                return None
+
+            for line in result.stdout.strip().split('\n'):
+                if not line:
+                    continue
+
+                parts = line.split(':')
+                if len(parts) < 3:
+                    continue
+
+                device, device_type, _ = parts[0], parts[1], parts[2]
+
+                if device_type != 'wifi':
+                    continue
+
+                if device in exclude_interfaces:
+                    continue
+
+                if not self._interface_exists(device):
+                    continue
+
+                return device
+
+        except Exception as e:
+            self.logger.debug(f"Client interface detection failed: {e}")
+
+        return None
+
+    def _interface_exists(self, interface_name):
+        """Check if a network interface exists on the system."""
+        try:
+            result = subprocess.run(
+                ['ip', 'link', 'show', interface_name],
+                capture_output=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def try_connect_known_networks(self):
         """Try to connect to known networks in priority order"""
         if not self.known_networks:
