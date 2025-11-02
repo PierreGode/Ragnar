@@ -1106,6 +1106,21 @@ def perform_update():
         repo_path = os.getcwd()
         logger.info(f"Performing update in repository: {repo_path}")
         
+        # Fix permissions before git pull to prevent ownership issues
+        try:
+            logger.info("Correcting file permissions...")
+            perm_result = subprocess.run(
+                ['sudo', 'chown', '-R', 'ragnar:ragnar', '/home/ragnar/Ragnar'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            logger.info("Permissions corrected successfully")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Permission correction failed (continuing anyway): {e.stderr}")
+        except Exception as e:
+            logger.warning(f"Permission correction error (continuing anyway): {e}")
+        
         # Perform git pull
         try:
             result = subprocess.run(
@@ -1125,6 +1140,21 @@ def perform_update():
                 'error': f'Git pull failed: {e.stderr}',
                 'suggestion': 'Please check repository status and resolve any conflicts'
             }), 500
+        
+        # Make files executable after pull
+        try:
+            logger.info("Making files executable...")
+            chmod_result = subprocess.run(
+                ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/*'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            logger.info("Files made executable successfully")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Chmod failed (continuing anyway): {e.stderr}")
+        except Exception as e:
+            logger.warning(f"Chmod error (continuing anyway): {e}")
         
         # Schedule service restart after a short delay
         def restart_service_delayed():
