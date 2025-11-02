@@ -312,16 +312,18 @@ strong {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border-radius: 50%;
     background-color: #e99f00;
     color: #000;
-    font-size: 12px;
+    font-size: 14px;
     font-weight: bold;
     cursor: pointer;
     position: relative;
     transition: background-color 0.2s ease;
+    flex-shrink: 0;
+    user-select: none;
 }
 
 .info-icon:hover,
@@ -333,40 +335,44 @@ strong {
 .info-icon::after {
     content: attr(data-tooltip);
     position: absolute;
-    bottom: calc(100% + 8px);
+    bottom: calc(100% + 10px);
     left: 50%;
     transform: translateX(-50%);
-    background-color: #1f1f1f;
+    background-color: #2a2a2a;
     color: #ffffff;
-    padding: 8px 10px;
+    padding: 10px 12px;
     border-radius: 6px;
-    min-width: 180px;
-    max-width: 260px;
-    font-size: 11px;
-    line-height: 1.4;
+    border: 1px solid #e99f00;
+    min-width: 200px;
+    max-width: 300px;
+    font-size: 12px;
+    line-height: 1.5;
+    font-weight: normal;
     opacity: 0;
     visibility: hidden;
-    transition: opacity 0.2s ease;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
     pointer-events: none;
-    z-index: 20;
+    z-index: 1000;
     text-align: left;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    white-space: normal;
+    word-wrap: break-word;
 }
 
 .info-icon::before {
     content: "";
     position: absolute;
-    bottom: calc(100% + 2px);
+    bottom: calc(100% + 3px);
     left: 50%;
     transform: translateX(-50%);
-    border-width: 6px;
+    border-width: 7px;
     border-style: solid;
-    border-color: #1f1f1f transparent transparent transparent;
+    border-color: #e99f00 transparent transparent transparent;
     opacity: 0;
     visibility: hidden;
-    transition: opacity 0.2s ease;
+    transition: opacity 0.3s ease, visibility 0.3s ease;
     pointer-events: none;
-    z-index: 20;
+    z-index: 1000;
 }
 
 .info-icon:hover::after,

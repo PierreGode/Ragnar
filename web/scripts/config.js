@@ -279,7 +279,7 @@ function escapeHtml(value) {
 
 function createInfoIconMarkup(key) {
     const description = escapeHtml(getConfigDescription(key));
-    return `<span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">i</span>`;
+    return `<span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">ⓘ</span>`;
 }
 
 function safeValue(value) {
