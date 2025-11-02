@@ -1124,7 +1124,7 @@ def perform_update():
         # Perform git pull
         try:
             result = subprocess.run(
-                ['git', 'pull', 'origin', 'main'], 
+                ['git', 'pull'], 
                 cwd=repo_path, 
                 capture_output=True, 
                 text=True, 
@@ -1133,8 +1133,8 @@ def perform_update():
             output = result.stdout
             logger.info(f"Git pull completed: {output}")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Git pull main failed: {e.stderr}")
-            # Return error immediately since this repo only has main branch
+            logger.error(f"Git pull failed: {e.stderr}")
+            # Return error immediately if git pull fails
             return jsonify({
                 'success': False, 
                 'error': f'Git pull failed: {e.stderr}',
