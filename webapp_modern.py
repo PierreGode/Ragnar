@@ -609,32 +609,35 @@ def update_config():
         return jsonify({'error': str(e)}), 500
 
 
+def load_persistent_network_data():
+    """Load the WiFi-specific network data with fallbacks."""
+    update_wifi_network_data()
+
+    network_data = read_wifi_network_data()
+
+    if not network_data:
+        logger.warning("WiFi-specific network data is empty. Falling back to netkb data.")
+        try:
+            netkb_data = shared_data.read_data()
+            if netkb_data:
+                network_data = netkb_data
+                logger.debug("Used netkb data as fallback.")
+        except Exception as e:
+            logger.error(f"Could not read netkb data as fallback: {e}")
+            network_data = []
+
+    current_ssid = get_current_wifi_ssid()
+    logger.info(f"Returning {len(network_data)} network entries for WiFi: {current_ssid}")
+    return network_data
+
+
 @app.route('/api/network')
 def get_network():
     """Get network scan data from the persistent WiFi-specific file."""
     try:
-        # First, ensure the persistent network file is up-to-date with the latest scans.
-        update_wifi_network_data()
-        
-        # Then, read the consolidated data from the persistent file.
-        network_data = read_wifi_network_data()
-        
-        # As a last resort, if the persistent file is empty, try to fall back to netkb.
-        if not network_data:
-            logger.warning("WiFi-specific network data is empty. Falling back to netkb data.")
-            try:
-                netkb_data = shared_data.read_data()
-                if netkb_data:
-                    network_data = netkb_data
-                    logger.debug("Used netkb data as fallback.")
-            except Exception as e:
-                logger.error(f"Could not read netkb data as fallback: {e}")
-                network_data = []
-
-        current_ssid = get_current_wifi_ssid()
-        logger.info(f"Returning {len(network_data)} network entries for WiFi: {current_ssid}")
+        network_data = load_persistent_network_data()
         return jsonify(network_data)
-        
+
     except Exception as e:
         logger.error(f"Error getting network data: {e}")
         return jsonify({'error': str(e)}), 500
@@ -2075,7 +2078,7 @@ def handle_log_request():
 def handle_network_request():
     """Handle request for network data"""
     try:
-        data = shared_data.read_data()
+        data = load_persistent_network_data()
         emit('network_update', data)
     except Exception as e:
         logger.error(f"Error sending network data: {e}")
