@@ -3,14 +3,6 @@ const configMetadata = {
         label: "Manual Mode",
         description: "Hold Ragnar in manual control. Disable this to let the orchestrator continuously discover devices, run actions, and launch vulnerability scans automatically."
     },
-    websrv: {
-        label: "Web Server",
-        description: "Keep the legacy configuration web service running so the interface remains reachable over HTTP."
-    },
-    web_increment: {
-        label: "Web Increment",
-        description: "Legacy incremental refresh support for the classic interface. Leave disabled unless you are troubleshooting the legacy UI."
-    },
     debug_mode: {
         label: "Debug Mode",
         description: "Enable verbose debug logging for deeper troubleshooting output."
