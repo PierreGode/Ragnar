@@ -737,7 +737,7 @@ def get_logs():
                             username = row.get('username', row.get('Username', 'Unknown'))
                             cred_log = f"🔓 {service} credentials found - {username}@{ip}"
                             all_logs.append(f"[CREDENTIALS] {cred_log}")
-                except Exception as e:
+                except Exception:
                     continue
         
         # 5. Get recent vulnerability findings
@@ -2133,6 +2133,16 @@ def handle_activity_request():
                 pass
         
         # Add current status
+        if safe_str(shared_data.ragnarstatustext) and safe_str(shared_data.ragnarstatustext) != "Idle":
+            activity_logs.append({
+                'timestamp': current_time.strftime("%H:%M:%S"),
+                'type': 'status',
+                'icon': '🤖',
+                'message': f"Ragnar: {safe_str(shared_data.ragnarstatustext)}",
+                'details': safe_str(shared_data.ragnarstatustext2) if safe_str(shared_data.ragnarstatustext2) else '',
+                'severity': 'info'
+            })
+        
         if safe_str(shared_data.ragnarsays) and safe_str(shared_data.ragnarsays).strip():
             activity_logs.append({
                 'timestamp': current_time.strftime("%H:%M:%S"),
@@ -2367,7 +2377,7 @@ def get_manual_targets():
                                 if content.strip():
                                     # Extract IP from filename or content
                                     ip_match = re.search(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b', filename)
-                                    host_ip = ip_match.group() if ip_match else None
+                                    host_ip = ip_match.group() if ip_match else 'Unknown'
                                     
                                     if host_ip and host_ip not in target_ips:
                                         # Parse port/service info from content
@@ -3187,9 +3197,9 @@ def get_image_info_api():
             'width': width,
             'height': height,
             'format': format_type
-        }
+        };
         
-        return jsonify(info)
+        return jsonify(info);
         
     except Exception as e:
         logger.error(f"Error getting image info: {e}")
@@ -3638,7 +3648,7 @@ def export_netkb_data():
         scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
         if os.path.exists(scan_results_dir):
             for filename in os.listdir(scan_results_dir):
-                if filename.endswith('.txt'):
+                if filename.endswith('.txt') and not filename.startswith('.'):
                     filepath = os.path.join(scan_results_dir, filename)
                     try:
                         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
@@ -3655,12 +3665,14 @@ def export_netkb_data():
                                             service = parts[2] if len(parts) > 2 else 'unknown'
                                             
                                             netkb_entries.append({
+                                                'id': f"scan_{host_ip}_{port}",
                                                 'type': 'service',
                                                 'host': host_ip,
                                                 'port': port,
                                                 'service': service,
                                                 'description': f"Service {service} running on {port}",
                                                 'severity': 'info',
+                                                'discovered': os.path.getmtime(filepath),
                                                 'source': 'Network Scan'
                                             })
                     except Exception as e:
