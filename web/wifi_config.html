@@ -57,6 +57,40 @@
             border-left-color: #ffc107;
         }
 
+        .ap-timer {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            text-align: center;
+        }
+
+        .timer-display {
+            font-size: 2em;
+            font-weight: bold;
+            color: #e17055;
+            margin: 10px 0;
+            font-family: 'Courier New', monospace;
+        }
+
+        .timer-display.urgent {
+            color: #d63031;
+            animation: pulse 1s infinite;
+        }
+
+        .timer-description {
+            color: #6c757d;
+            font-size: 0.9em;
+            margin-bottom: 10px;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
         .section {
             margin-bottom: 30px;
         }
@@ -292,6 +326,15 @@
                 <p><strong>Status:</strong> <span id="wifi-status">Checking...</span></p>
                 <p><strong>Network:</strong> <span id="current-network">N/A</span></p>
                 <p><strong>Mode:</strong> <span id="connection-mode">Client</span></p>
+                
+                <!-- AP Mode Timer -->
+                <div id="ap-timer" class="ap-timer" style="display: none;">
+                    <div class="timer-description" id="timer-description">Time remaining before switching to WiFi search:</div>
+                    <div class="timer-display" id="timer-display">3:00</div>
+                    <div style="font-size: 0.8em; color: #6c757d;">
+                        <span id="timer-status">Waiting for connection...</span>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -381,18 +424,7 @@
             loadNetworks();
         });
 
-        // Refresh Wi-Fi status
-        async function refreshStatus() {
-            try {
-                const response = await fetch('/api/wifi/status');
-                const status = await response.json();
-                currentWifiStatus = status;
-                updateStatusDisplay(status);
-            } catch (error) {
-                console.error('Error fetching status:', error);
-                showAlert('Error fetching Wi-Fi status', 'error');
-            }
-        }
+        // Refresh Wi-Fi status (enhanced version with timer support is below)
 
         // Update status display
         function updateStatusDisplay(status) {
@@ -401,6 +433,7 @@
             const wifiStatus = document.getElementById('wifi-status');
             const currentNetwork = document.getElementById('current-network');
             const connectionMode = document.getElementById('connection-mode');
+            const apTimer = document.getElementById('ap-timer');
 
             // Update status card class and content
             statusCard.className = 'status-card';
@@ -412,6 +445,7 @@
                 wifiStatus.textContent = 'Connected';
                 currentNetwork.textContent = status.current_ssid || 'Unknown';
                 connectionMode.textContent = 'Client Mode';
+                apTimer.style.display = 'none';
             } else if (status.ap_mode_active) {
                 statusCard.classList.add('ap-mode');
                 statusIcon.className = 'wifi-icon ap-mode';
@@ -419,6 +453,14 @@
                 wifiStatus.textContent = 'Access Point Mode';
                 currentNetwork.textContent = 'Ragnar-Setup';
                 connectionMode.textContent = 'Access Point';
+                
+                // Show and update AP timer
+                if (status.ap_time_remaining !== undefined) {
+                    apTimer.style.display = 'block';
+                    updateAPTimer(status);
+                } else {
+                    apTimer.style.display = 'none';
+                }
             } else {
                 statusCard.classList.add('disconnected');
                 statusIcon.className = 'wifi-icon disconnected';
@@ -426,6 +468,46 @@
                 wifiStatus.textContent = 'Disconnected';
                 currentNetwork.textContent = 'None';
                 connectionMode.textContent = status.startup_complete ? 'Searching...' : 'Starting up...';
+                apTimer.style.display = 'none';
+            }
+        }
+
+        // Update AP mode timer display
+        function updateAPTimer(status) {
+            const timerDisplay = document.getElementById('timer-display');
+            const timerDescription = document.getElementById('timer-description');
+            const timerStatus = document.getElementById('timer-status');
+            
+            if (!status.ap_time_remaining && status.ap_time_remaining !== 0) {
+                return;
+            }
+            
+            const timeRemaining = status.ap_time_remaining;
+            const minutes = Math.floor(timeRemaining / 60);
+            const seconds = timeRemaining % 60;
+            const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            
+            timerDisplay.textContent = timeString;
+            
+            // Update timer appearance based on time remaining
+            if (timeRemaining <= 30) {
+                timerDisplay.classList.add('urgent');
+            } else {
+                timerDisplay.classList.remove('urgent');
+            }
+            
+            // Update description and status based on timer type
+            if (status.ap_timer_type === 'user_connected') {
+                timerDescription.textContent = 'Time remaining in AP mode (user connected):';
+                timerStatus.textContent = `User connected for ${Math.floor(status.ap_user_connection_time / 60)}:${(status.ap_user_connection_time % 60).toString().padStart(2, '0')}`;
+            } else {
+                timerDescription.textContent = 'Time remaining before switching to WiFi search:';
+                timerStatus.textContent = status.user_connected_to_ap ? 'User connected to AP' : 'Waiting for connection...';
+            }
+            
+            // Show exit button hint when time is running low
+            if (timeRemaining <= 60 && !status.user_connected_to_ap) {
+                timerStatus.textContent += ' (Use "Leave AP Mode" button to exit early)';
             }
         }
 
@@ -903,6 +985,75 @@
                 showAlert('Connection error: ' + error.message, 'error');
             } finally {
                 loading.style.display = 'none';
+            }
+        }
+
+        // Timer update functionality
+        let timerUpdateInterval = null;
+        let lastTimerUpdate = 0;
+        
+        function startTimerUpdates() {
+            if (timerUpdateInterval) {
+                clearInterval(timerUpdateInterval);
+            }
+            
+            timerUpdateInterval = setInterval(() => {
+                if (currentWifiStatus.ap_mode_active && currentWifiStatus.ap_time_remaining !== undefined) {
+                    // Estimate current time remaining
+                    const now = Date.now();
+                    const timeSinceLastUpdate = Math.floor((now - lastTimerUpdate) / 1000);
+                    const estimatedTimeRemaining = Math.max(0, currentWifiStatus.ap_time_remaining - timeSinceLastUpdate);
+                    
+                    // Update display with estimated time
+                    const minutes = Math.floor(estimatedTimeRemaining / 60);
+                    const seconds = estimatedTimeRemaining % 60;
+                    const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                    
+                    const timerDisplay = document.getElementById('timer-display');
+                    if (timerDisplay) {
+                        timerDisplay.textContent = timeString;
+                        
+                        // Update urgency class
+                        if (estimatedTimeRemaining <= 30) {
+                            timerDisplay.classList.add('urgent');
+                        } else {
+                            timerDisplay.classList.remove('urgent');
+                        }
+                    }
+                    
+                    // Refresh status more frequently when timer is low
+                    if (estimatedTimeRemaining <= 10 && estimatedTimeRemaining > 0) {
+                        refreshStatus();
+                    }
+                } else {
+                    // Stop timer updates when not in AP mode
+                    if (timerUpdateInterval) {
+                        clearInterval(timerUpdateInterval);
+                        timerUpdateInterval = null;
+                    }
+                }
+            }, 1000); // Update every second
+        }
+        
+        // Enhanced refresh status function with timer tracking
+        async function refreshStatus() {
+            try {
+                const response = await fetch('/api/wifi/status');
+                const status = await response.json();
+                currentWifiStatus = status;
+                lastTimerUpdate = Date.now();
+                updateStatusDisplay(status);
+                
+                // Start timer updates if in AP mode
+                if (status.ap_mode_active && status.ap_time_remaining !== undefined) {
+                    startTimerUpdates();
+                } else if (timerUpdateInterval) {
+                    clearInterval(timerUpdateInterval);
+                    timerUpdateInterval = null;
+                }
+            } catch (error) {
+                console.error('Error fetching status:', error);
+                showAlert('Error fetching Wi-Fi status', 'error');
             }
         }
 

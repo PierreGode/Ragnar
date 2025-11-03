@@ -1685,7 +1685,7 @@ port=0
     
     def get_status(self):
         """Get current Wi-Fi manager status"""
-        return {
+        status = {
             'wifi_connected': self.wifi_connected,
             'ap_mode_active': self.ap_mode_active,
             'current_ssid': self.current_ssid,
@@ -1694,6 +1694,31 @@ port=0
             'startup_complete': self.startup_complete,
             'available_networks': len(self.available_networks)
         }
+        
+        # Add AP mode timing information
+        if self.ap_mode_active and self.ap_mode_start_time:
+            current_time = time.time()
+            ap_uptime = current_time - self.ap_mode_start_time
+            
+            # Calculate remaining time
+            if self.user_connected_to_ap and self.ap_user_connection_time:
+                # User is connected - show time since connection
+                user_connection_time = current_time - self.ap_user_connection_time
+                remaining_time = max(0, self.ap_mode_timeout - user_connection_time)
+                status['ap_timer_type'] = 'user_connected'
+                status['ap_user_connection_time'] = int(user_connection_time)
+            else:
+                # No user connected - show general AP timeout
+                remaining_time = max(0, self.ap_mode_timeout - ap_uptime)
+                status['ap_timer_type'] = 'waiting_for_connection'
+                
+            status['ap_time_remaining'] = int(remaining_time)
+            status['ap_total_timeout'] = self.ap_mode_timeout
+            status['ap_uptime'] = int(ap_uptime)
+            status['user_connected_to_ap'] = self.user_connected_to_ap
+            status['force_exit_requested'] = self.force_exit_ap_mode
+        
+        return status
     
     def get_known_networks(self):
         """Get list of known networks (without passwords)"""
