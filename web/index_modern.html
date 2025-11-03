@@ -186,9 +186,6 @@
                     <button onclick="showTab('files')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="files">
                         Files
                     </button>
-                    <button onclick="showTab('images')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="images">
-                        Images
-                    </button>
                     <button onclick="showTab('system')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="system">
                         System
                     </button>
@@ -221,7 +218,6 @@
                 <button onclick="showTab('loot')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Loot</button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
-                <button onclick="showTab('images')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Images</button>
                 <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
                 <button onclick="showTab('netkb')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">NetKB</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">E-Paper</button>
@@ -821,31 +817,14 @@
                     </div>
                 </div>
                 
-                <!-- File Operations Modal -->
-                <div id="file-operations-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
-                    <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
-                        <h3 id="modal-title" class="text-lg font-semibold mb-4">File Operation</h3>
-                        <div id="modal-content" class="mb-6">
-                            <!-- Dynamic content -->
-                        </div>
-                        <div class="flex space-x-3">
-                            <button id="modal-confirm" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                Confirm
-                            </button>
-                            <button onclick="closeFileModal()" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                Cancel
-                            </button>
-                        </div>
-                    </div>
-                </div>
             </div>
-        </div>
-        
-        <!-- Images Tab -->
-        <div id="images-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
+
+            <div class="glass rounded-xl p-6 mt-8">
                 <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">Image Gallery</h2>
+                    <div>
+                        <h2 class="text-2xl font-bold">Image Gallery</h2>
+                        <p class="text-sm text-gray-400 mt-1">Browse captured screenshots and other stored images.</p>
+                    </div>
                     <div class="flex space-x-3">
                         <button onclick="captureScreenshot()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
                             <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -862,7 +841,7 @@
                         </button>
                     </div>
                 </div>
-                
+
                 <!-- Image Filter Controls -->
                 <div class="mb-6">
                     <div class="flex flex-wrap gap-2">
@@ -883,52 +862,70 @@
                         </button>
                     </div>
                 </div>
-                
+
                 <!-- Image Grid -->
                 <div class="glass-card p-4">
                     <div id="image-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
                         <p class="text-gray-400 col-span-full text-center py-8">Loading images...</p>
                     </div>
                 </div>
-                
-                <!-- Image Detail Modal -->
-                <div id="image-detail-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
-                    <div class="glass rounded-xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-                        <div class="flex items-center justify-between mb-4">
-                            <h3 id="image-detail-title" class="text-lg font-semibold">Image Details</h3>
-                            <button onclick="closeImageModal()" class="text-gray-400 hover:text-white">
-                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                                </svg>
-                            </button>
+            </div>
+
+            <!-- File Operations Modal -->
+            <div id="file-operations-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+                <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
+                    <h3 id="modal-title" class="text-lg font-semibold mb-4">File Operation</h3>
+                    <div id="modal-content" class="mb-6">
+                        <!-- Dynamic content -->
+                    </div>
+                    <div class="flex space-x-3">
+                        <button id="modal-confirm" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            Confirm
+                        </button>
+                        <button onclick="closeFileModal()" class="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            Cancel
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Image Detail Modal -->
+            <div id="image-detail-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+                <div class="glass rounded-xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 id="image-detail-title" class="text-lg font-semibold">Image Details</h3>
+                        <button onclick="closeImageModal()" class="text-gray-400 hover:text-white">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                            </svg>
+                        </button>
+                    </div>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Image Display -->
+                        <div class="text-center">
+                            <img id="image-detail-img" src="" alt="" class="max-w-full max-h-96 mx-auto rounded-lg shadow-lg">
                         </div>
-                        
-                        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <!-- Image Display -->
-                            <div class="text-center">
-                                <img id="image-detail-img" src="" alt="" class="max-w-full max-h-96 mx-auto rounded-lg shadow-lg">
+
+                        <!-- Image Information -->
+                        <div class="space-y-4">
+                            <div id="image-detail-info" class="space-y-2 text-sm">
+                                <!-- Dynamic content -->
                             </div>
-                            
-                            <!-- Image Information -->
-                            <div class="space-y-4">
-                                <div id="image-detail-info" class="space-y-2 text-sm">
-                                    <!-- Dynamic content -->
-                                </div>
-                                
-                                <div class="flex space-x-3">
-                                    <button id="download-image-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
-                                        </svg>
-                                        Download
-                                    </button>
-                                    <button id="delete-image-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                        </svg>
-                                        Delete
-                                    </button>
-                                </div>
+
+                            <div class="flex space-x-3">
+                                <button id="download-image-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
+                                    </svg>
+                                    Download
+                                </button>
+                                <button id="delete-image-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
+                                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                    </svg>
+                                    Delete
+                                </button>
                             </div>
                         </div>
                     </div>
