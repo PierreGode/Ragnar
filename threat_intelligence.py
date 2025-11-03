@@ -114,6 +114,7 @@ class ThreatIntelligenceFusion:
         """Initialize the threat intelligence system"""
         try:
             os.makedirs(self.intelligence_dir, exist_ok=True)
+            self.ensure_json_files_exist()
             self.load_configuration()
             self.load_threat_cache()
             self.load_enriched_findings()
@@ -122,6 +123,31 @@ class ThreatIntelligenceFusion:
             self.logger.info("Threat intelligence system initialized successfully")
         except Exception as e:
             self.logger.error(f"Failed to initialize threat intelligence system: {e}")
+    
+    def ensure_json_files_exist(self):
+        """Ensure all required JSON files exist with proper empty content"""
+        json_files = [
+            self.threat_cache_file,
+            self.enriched_findings_file
+        ]
+        
+        for json_file in json_files:
+            try:
+                if not os.path.exists(json_file) or os.path.getsize(json_file) == 0:
+                    with open(json_file, 'w') as f:
+                        json.dump({}, f, indent=2)
+                    self.logger.debug(f"Initialized empty JSON file: {json_file}")
+            except Exception as e:
+                self.logger.error(f"Error initializing JSON file {json_file}: {e}")
+        
+        # Handle sources config file separately as it has a different structure
+        if not os.path.exists(self.sources_config_file):
+            try:
+                with open(self.sources_config_file, 'w') as f:
+                    json.dump({}, f, indent=2)
+                self.logger.debug(f"Initialized empty sources config file: {self.sources_config_file}")
+            except Exception as e:
+                self.logger.error(f"Error initializing sources config file: {e}")
     
     def initialize_default_sources(self):
         """Initialize default threat intelligence sources"""
@@ -166,13 +192,46 @@ class ThreatIntelligenceFusion:
         """Load threat intelligence sources configuration"""
         try:
             if os.path.exists(self.sources_config_file):
+                # Check if file is empty before trying to parse JSON
+                if os.path.getsize(self.sources_config_file) == 0:
+                    self.logger.debug("Sources config file is empty, will initialize with default sources")
+                    self.threat_sources = {}
+                    return
+                
                 with open(self.sources_config_file, 'r') as f:
-                    config_data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        self.logger.debug("Sources config file contains no content, will initialize with default sources")
+                        self.threat_sources = {}
+                        return
+                    
+                    config_data = json.loads(content)
+                    if not isinstance(config_data, dict):
+                        self.logger.warning("Sources config file contains invalid data format, will initialize with default sources")
+                        self.threat_sources = {}
+                        return
+                    
                     for name, source_data in config_data.items():
                         self.threat_sources[name] = ThreatIntelligenceSource(**source_data)
-                self.logger.info("Threat intelligence sources configuration loaded")
+                    
+                self.logger.info(f"Loaded {len(self.threat_sources)} threat intelligence sources")
+            else:
+                self.logger.debug("Sources config file does not exist, will initialize with default sources")
+                self.threat_sources = {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in sources config file: {e}")
+            self.logger.info("Backing up corrupted config file and initializing with default sources")
+            try:
+                # Backup corrupted file
+                backup_file = f"{self.sources_config_file}.backup.{int(time.time())}"
+                os.rename(self.sources_config_file, backup_file)
+                self.logger.info(f"Corrupted config file backed up to: {backup_file}")
+            except Exception as backup_error:
+                self.logger.error(f"Failed to backup corrupted config file: {backup_error}")
+            self.threat_sources = {}
         except Exception as e:
             self.logger.error(f"Error loading threat intelligence configuration: {e}")
+            self.threat_sources = {}
     
     def save_configuration(self):
         """Save threat intelligence sources configuration"""
@@ -188,11 +247,45 @@ class ThreatIntelligenceFusion:
         """Load cached threat intelligence data"""
         try:
             if os.path.exists(self.threat_cache_file):
+                # Check if file is empty before trying to parse JSON
+                if os.path.getsize(self.threat_cache_file) == 0:
+                    self.logger.debug("Threat cache file is empty, initializing with empty cache")
+                    self.threat_cache = {}
+                    return
+                
                 with open(self.threat_cache_file, 'r') as f:
-                    self.threat_cache = json.load(f)
-                self.logger.info("Threat intelligence cache loaded")
+                    content = f.read().strip()
+                    if not content:
+                        self.logger.debug("Threat cache file contains no content, initializing with empty cache")
+                        self.threat_cache = {}
+                        return
+                    
+                    cache_data = json.loads(content)
+                    if not isinstance(cache_data, dict):
+                        self.logger.warning("Threat cache file contains invalid data format, initializing with empty cache")
+                        self.threat_cache = {}
+                        return
+                    
+                    self.threat_cache = cache_data
+                    
+                self.logger.info(f"Loaded threat intelligence cache with {len(self.threat_cache)} entries")
+            else:
+                self.logger.debug("Threat cache file does not exist, initializing with empty cache")
+                self.threat_cache = {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in threat cache file: {e}")
+            self.logger.info("Backing up corrupted cache file and initializing with empty cache")
+            try:
+                # Backup corrupted file
+                backup_file = f"{self.threat_cache_file}.backup.{int(time.time())}"
+                os.rename(self.threat_cache_file, backup_file)
+                self.logger.info(f"Corrupted cache file backed up to: {backup_file}")
+            except Exception as backup_error:
+                self.logger.error(f"Failed to backup corrupted cache file: {backup_error}")
+            self.threat_cache = {}
         except Exception as e:
             self.logger.error(f"Error loading threat intelligence cache: {e}")
+            self.threat_cache = {}
     
     def save_threat_cache(self):
         """Save threat intelligence cache"""
@@ -207,14 +300,47 @@ class ThreatIntelligenceFusion:
         """Load enriched findings data"""
         try:
             if os.path.exists(self.enriched_findings_file):
+                # Check if file is empty before trying to parse JSON
+                if os.path.getsize(self.enriched_findings_file) == 0:
+                    self.logger.debug("Enriched findings file is empty, initializing with empty data")
+                    self.enriched_findings = {}
+                    return
+                
                 with open(self.enriched_findings_file, 'r') as f:
-                    findings_data = json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        self.logger.debug("Enriched findings file contains no content, initializing with empty data")
+                        self.enriched_findings = {}
+                        return
+                    
+                    findings_data = json.loads(content)
+                    if not isinstance(findings_data, dict):
+                        self.logger.warning("Enriched findings file contains invalid data format, initializing with empty data")
+                        self.enriched_findings = {}
+                        return
+                    
                     for finding_id, finding_data in findings_data.items():
                         # Reconstruct EnrichedFinding objects from JSON
                         self.enriched_findings[finding_id] = self.deserialize_enriched_finding(finding_data)
-                self.logger.info("Enriched findings loaded")
+                    
+                self.logger.info(f"Loaded {len(self.enriched_findings)} enriched findings")
+            else:
+                self.logger.debug("Enriched findings file does not exist, initializing with empty data")
+                self.enriched_findings = {}
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON in enriched findings file: {e}")
+            self.logger.info("Backing up corrupted file and initializing with empty data")
+            try:
+                # Backup corrupted file
+                backup_file = f"{self.enriched_findings_file}.backup.{int(time.time())}"
+                os.rename(self.enriched_findings_file, backup_file)
+                self.logger.info(f"Corrupted file backed up to: {backup_file}")
+            except Exception as backup_error:
+                self.logger.error(f"Failed to backup corrupted file: {backup_error}")
+            self.enriched_findings = {}
         except Exception as e:
             self.logger.error(f"Error loading enriched findings: {e}")
+            self.enriched_findings = {}
     
     def save_enriched_findings(self):
         """Save enriched findings data"""
