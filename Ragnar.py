@@ -11,7 +11,10 @@ import signal
 import threading
 import time
 import atexit
-import fcntl
+try:
+    import fcntl  # Unix only
+except ImportError:
+    fcntl = None
 import logging
 from collections import defaultdict
 

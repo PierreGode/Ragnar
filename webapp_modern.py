@@ -549,7 +549,10 @@ def update_wifi_network_data():
                         if value.isdigit():
                             return int(value)
                         try:
-                            return int(re.match(r"^(\d+)", value).group(1))
+                            match = re.match(r"^(\d+)", value)
+                            if match:
+                                return int(match.group(1))
+                            return value
                         except Exception:
                             return value
 
@@ -3532,11 +3535,10 @@ def capture_screenshot_api():
         filename = f"screenshot_{timestamp}.png"
         filepath = os.path.join(shared_data.webdir, filename)
         
-        # Capture screenshot using the display module
-        display_manager = display.DisplayManager(shared_data)
-        if hasattr(display_manager, 'capture_screenshot'):
-            success = display_manager.capture_screenshot(filepath)
-        else:
+        # Capture screenshot - create a placeholder for now
+        success = False
+            
+        if not success:
             # Fallback to creating a placeholder
             from PIL import Image, ImageDraw, ImageFont
             img = Image.new('RGB', (400, 300), color='black')
@@ -3668,11 +3670,14 @@ def get_system_status_api():
         
         # Temperature (if available)
         try:
-            temps = psutil.sensors_temperatures()
-            temperature_data = {}
-            for name, entries in temps.items():
-                for entry in entries:
-                    temperature_data[f"{name}_{entry.label}"] = entry.current
+            if hasattr(psutil, 'sensors_temperatures'):
+                temps = psutil.sensors_temperatures()
+                temperature_data = {}
+                for name, entries in temps.items():
+                    for entry in entries:
+                        temperature_data[f"{name}_{entry.label}"] = entry.current
+            else:
+                temperature_data = {}
         except:
             temperature_data = {}
         
