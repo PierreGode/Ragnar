@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ragnar Cyberviking - Discoveries</title>
+    <link rel="icon" href="web/images/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="web/css/styles.css">
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="images/apple-touch-icon.png">
+    <script src="web/scripts/discoveries.js" defer></script>
+</head>
+<body>
+    <div class="toolbar" id="mainToolbar">
+        <button type="button" onclick="window.location.href='/index.html'" title="Playground">
+            <img src="/web/images/console_icon.png" alt="Ragnar" style="height: 50px;">
+        </button>
+        <button type="button" onclick="window.location.href='/config.html'" title="Config">
+            <img src="/web/images/config_icon.png" alt="Icon_config" style="height: 50px;">
+        </button>
+        <button type="button" onclick="window.location.href='/network.html'" title="Network">
+            <img src="/web/images/network_icon.png" alt="Icon_network" style="height: 50px;">
+        </button>
+        <button type="button" onclick="window.location.href='/netkb.html'" title="NetKB">
+            <img src="/web/images/netkb_icon.png" alt="Icon_netkb" style="height: 50px;">
+        </button>
+        <button type="button" onclick="window.location.href='/discoveries.html'" title="Discoveries">
+            <img src="/web/images/loot_icon.png" alt="Icon_discoveries" style="height: 50px;">
+        </button>
+    </div>
+    <div class="console-toolbar discoveries-toolbar">
+        <div class="toolbar-group">
+            <span class="toolbar-label">Credentials</span>
+            <button type="button" class="toolbar-button" onclick="adjustCredentialsFontSize(-1)" title="-">
+                <img src="/web/images/less.png" alt="Icon_less" style="height: 40px;">
+            </button>
+            <button type="button" class="toolbar-button" onclick="adjustCredentialsFontSize(1)" title="+">
+                <img src="/web/images/plus.png" alt="Icon_plus" style="height: 40px;">
+            </button>
+        </div>
+        <button id="toggle-toolbar" type="button" class="toolbar-button" onclick="toggleDiscoveriesToolbar()" data-open="false">
+            <img id="toggle-icon" src="/web/images/hide.png" alt="Toggle Toolbar" style="height: 50px;">
+        </button>
+        <div class="toolbar-group">
+            <span class="toolbar-label">Loot</span>
+            <button type="button" class="toolbar-button" onclick="adjustLootFontSize(-1)" title="-">
+                <img src="/web/images/less.png" alt="Icon_less" style="height: 40px;">
+            </button>
+            <button type="button" class="toolbar-button" onclick="adjustLootFontSize(1)" title="+">
+                <img src="/web/images/plus.png" alt="Icon_plus" style="height: 40px;">
+            </button>
+        </div>
+    </div>
+    <div class="discoveries-container">
+        <section class="discoveries-section">
+            <h1 class="discoveries-title">Credentials</h1>
+            <div id="credentials-table"></div>
+        </section>
+        <section class="discoveries-section">
+            <h1 class="discoveries-title">Loot</h1>
+            <div id="file-list"></div>
+        </section>
+    </div>
+</body>
+</html>

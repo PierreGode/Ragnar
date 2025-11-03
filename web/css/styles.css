@@ -126,6 +126,57 @@ strong {
     margin-left: 5px;
     font-size: 14px;
 }
+
+.discoveries-toolbar {
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+.toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.toolbar-label {
+    color: #e0e0e0;
+    font-weight: bold;
+}
+
+.discoveries-container {
+    flex: 1;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    padding: 20px;
+    color: white;
+    background-color: #333;
+    overflow: auto;
+}
+
+.discoveries-section {
+    flex: 1 1 320px;
+    min-height: 0;
+    background-color: #2a2a2a;
+    padding: 20px;
+    border-radius: 12px;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+    overflow: auto;
+}
+
+.discoveries-title {
+    margin-top: 0;
+    color: #ee9025;
+}
+
+#file-list ul {
+    padding-left: 0;
+}
+
+#file-list li {
+    list-style: none;
+}
 #cred-title {
     color: white;
 }
