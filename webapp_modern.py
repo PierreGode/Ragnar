@@ -55,6 +55,11 @@ web_utils = WebUtils(shared_data, logger)
 # Global state
 clients_connected = 0
 
+# Synchronization helpers for keeping dashboard and e-paper data fresh
+sync_lock = threading.Lock()
+last_sync_time = 0.0
+SYNC_BACKGROUND_INTERVAL = 5  # seconds between automatic synchronizations
+
 
 def broadcast_status_update():
     """Immediately broadcast current status to all connected clients"""
@@ -155,166 +160,160 @@ def sync_vulnerability_count():
 
 def sync_all_counts():
     """Synchronize all counts (targets, ports, vulnerabilities, credentials) across data sources"""
-    try:
-        logger.debug("Starting sync_all_counts()")
-        
-        # Sync vulnerability count
-        sync_vulnerability_count()
-        
-        # Update WiFi-specific network data from scan results
-        aggregated_network_stats = update_wifi_network_data()
-        
-        # Sync target and port counts from scan results
-        scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
-        
-        logger.debug(f"Syncing targets/ports from directory: {scan_results_dir}")
-        
-        # Create directory if it doesn't exist
+    global last_sync_time
+
+    with sync_lock:
+        start_time = time.time()
         try:
-            os.makedirs(scan_results_dir, exist_ok=True)
-            logger.debug(f"Ensured directory exists: {scan_results_dir}")
-        except Exception as e:
-            logger.warning(f"Could not create scan_results directory: {e}")
-        
-        if os.path.exists(scan_results_dir):
+            logger.debug("Starting sync_all_counts()")
+
+            # Sync vulnerability count
+            sync_vulnerability_count()
+
+            # Update WiFi-specific network data from scan results
+            aggregated_network_stats = update_wifi_network_data()
+
+            # Sync target and port counts from scan results
+            scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
+
+            logger.debug(f"Syncing targets/ports from directory: {scan_results_dir}")
+
+            # Create directory if it doesn't exist
+            try:
+                os.makedirs(scan_results_dir, exist_ok=True)
+                logger.debug(f"Ensured directory exists: {scan_results_dir}")
+            except Exception as e:
+                logger.warning(f"Could not create scan_results directory: {e}")
+
             unique_hosts = set()
             port_count = 0
-            
-            try:
-                scan_files_found = []
-                for filename in os.listdir(scan_results_dir):
-                    # Look for result CSV files that contain actual scan data
-                    if filename.startswith('result_') and filename.endswith('.csv') and not filename.startswith('.'):
-                        scan_files_found.append(filename)
-                        filepath = os.path.join(scan_results_dir, filename)
-                        try:
-                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                reader = csv.reader(f)
-                                for row in reader:
-                                    if len(row) >= 1 and row[0].strip():
-                                        # First column should be IP address
-                                        ip = row[0].strip()
-                                        if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
-                                            unique_hosts.add(ip)
-                                            logger.debug(f"Found host {ip} in {filename}")
-                                            
-                                            # Count non-empty ports in columns 4-9 (typical port columns)
+            scan_files_found = []
+
+            if os.path.exists(scan_results_dir):
+                try:
+                    for filename in os.listdir(scan_results_dir):
+                        if filename.startswith('result_') and filename.endswith('.csv') and not filename.startswith('.'):
+                            scan_files_found.append(filename)
+                            filepath = os.path.join(scan_results_dir, filename)
+                            try:
+                                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                                    reader = csv.reader(f)
+                                    for row in reader:
+                                        if len(row) >= 1 and row[0].strip():
+                                            ip = row[0].strip()
+                                            if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+                                                unique_hosts.add(ip)
+
                                             if len(row) > 4:
                                                 for port_col in row[4:]:
-                                                    if port_col and port_col.strip() and port_col.strip() != '':
+                                                    if port_col and port_col.strip():
                                                         port_count += 1
-                        except Exception as e:
-                            logger.debug(f"Could not read scan result file {filepath}: {e}")
-                            continue
-                
-                logger.debug(f"Scan result files found: {scan_files_found}")
-                logger.debug(f"Unique hosts found: {list(unique_hosts)}")
-                logger.debug(f"Total port count: {port_count}")
-            except Exception as e:
-                logger.warning(f"Could not list scan_results directory: {e}")
-            
-            # Update shared data with the current counts
+                            except Exception as e:
+                                logger.debug(f"Could not read scan result file {filepath}: {e}")
+                                continue
+                except Exception as e:
+                    logger.warning(f"Could not process scan_results directory: {e}")
+            else:
+                logger.warning(f"Scan results directory does not exist: {scan_results_dir}")
+
+            logger.debug(f"Scan result files found: {scan_files_found}")
+            logger.debug(f"Unique hosts found: {list(unique_hosts)}")
+            logger.debug(f"Total port count: {port_count}")
+
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
             aggregated_targets = len(unique_hosts)
             aggregated_ports = port_count
 
             if aggregated_network_stats:
-                agg_host_count = aggregated_network_stats.get('host_count', aggregated_targets)
-                agg_port_count = aggregated_network_stats.get('port_count', aggregated_ports)
+                agg_host_count = aggregated_network_stats.get('host_count')
+                agg_port_count = aggregated_network_stats.get('port_count')
 
-                if agg_host_count or agg_port_count:
-                    aggregated_targets = max(agg_host_count, aggregated_targets)
-                    aggregated_ports = max(agg_port_count, aggregated_ports)
+                if agg_host_count is not None:
+                    aggregated_targets = max(aggregated_targets, safe_int(agg_host_count))
+                if agg_port_count is not None:
+                    aggregated_ports = max(aggregated_ports, safe_int(agg_port_count))
 
             shared_data.targetnbr = aggregated_targets
             shared_data.portnbr = aggregated_ports
             logger.debug(f"Updated targets: {old_targets} -> {aggregated_targets}")
             logger.debug(f"Updated ports: {old_ports} -> {aggregated_ports}")
-        else:
-            logger.warning(f"Scan results directory does not exist: {scan_results_dir}")
+        
+            # Sync credential count from crackedpwd directory
+            cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
 
-            if aggregated_network_stats:
-                old_targets = shared_data.targetnbr
-                old_ports = shared_data.portnbr
+            logger.debug(f"Syncing credentials from directory: {cred_results_dir}")
 
-                shared_data.targetnbr = aggregated_network_stats.get('host_count', safe_int(shared_data.targetnbr))
-                shared_data.portnbr = aggregated_network_stats.get('port_count', safe_int(shared_data.portnbr))
-
-                logger.debug(f"Updated targets from aggregated data: {old_targets} -> {shared_data.targetnbr}")
-                logger.debug(f"Updated ports from aggregated data: {old_ports} -> {shared_data.portnbr}")
-        
-        # Sync credential count from crackedpwd directory
-        cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
-        
-        logger.debug(f"Syncing credentials from directory: {cred_results_dir}")
-        
-        # Create directory if it doesn't exist
-        try:
-            os.makedirs(cred_results_dir, exist_ok=True)
-            logger.debug(f"Ensured directory exists: {cred_results_dir}")
-        except Exception as e:
-            logger.warning(f"Could not create crackedpwd directory: {e}")
-        
-        if os.path.exists(cred_results_dir):
-            cred_count = 0
+            # Create directory if it doesn't exist
             try:
-                cred_files_found = []
-                for filename in os.listdir(cred_results_dir):
-                    if (filename.endswith('.txt') or filename.endswith('.csv')) and not filename.startswith('.'):
-                        cred_files_found.append(filename)
-                        filepath = os.path.join(cred_results_dir, filename)
-                        try:
-                            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                                content = f.read()
-                                # Count lines with credential format (user:pass)
-                                file_creds = 0
-                                for line in content.split('\n'):
-                                    if ':' in line and line.strip():
-                                        cred_count += 1
-                                        file_creds += 1
-                                if file_creds > 0:
-                                    logger.debug(f"Found {file_creds} credentials in {filename}")
-                        except Exception as e:
-                            logger.debug(f"Could not read credential file {filepath}: {e}")
-                            continue
-                
-                logger.debug(f"Credential files found: {cred_files_found}")
-                logger.debug(f"Total credential count: {cred_count}")
+                os.makedirs(cred_results_dir, exist_ok=True)
+                logger.debug(f"Ensured directory exists: {cred_results_dir}")
             except Exception as e:
-                logger.warning(f"Could not list crackedpwd directory: {e}")
-            
-            # Update shared data with the current credential count
-            old_creds = shared_data.crednbr
-            shared_data.crednbr = cred_count
-            logger.debug(f"Updated credentials: {old_creds} -> {cred_count}")
-        else:
-            logger.warning(f"Crackedpwd directory does not exist: {cred_results_dir}")
-        
-        # Update livestatus file with all synchronized counts
-        if os.path.exists(shared_data.livestatusfile):
+                logger.warning(f"Could not create crackedpwd directory: {e}")
+
+            if os.path.exists(cred_results_dir):
+                cred_count = 0
+                try:
+                    cred_files_found = []
+                    for filename in os.listdir(cred_results_dir):
+                        if (filename.endswith('.txt') or filename.endswith('.csv')) and not filename.startswith('.'):
+                            cred_files_found.append(filename)
+                            filepath = os.path.join(cred_results_dir, filename)
+                            try:
+                                with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read()
+                                    # Count lines with credential format (user:pass)
+                                    file_creds = 0
+                                    for line in content.split('\n'):
+                                        if ':' in line and line.strip():
+                                            cred_count += 1
+                                            file_creds += 1
+                                    if file_creds > 0:
+                                        logger.debug(f"Found {file_creds} credentials in {filename}")
+                            except Exception as e:
+                                logger.debug(f"Could not read credential file {filepath}: {e}")
+                                continue
+
+                    logger.debug(f"Credential files found: {cred_files_found}")
+                    logger.debug(f"Total credential count: {cred_count}")
+                except Exception as e:
+                    logger.warning(f"Could not list crackedpwd directory: {e}")
+
+                # Update shared data with the current credential count
+                old_creds = shared_data.crednbr
+                shared_data.crednbr = cred_count
+                logger.debug(f"Updated credentials: {old_creds} -> {cred_count}")
+            else:
+                logger.warning(f"Crackedpwd directory does not exist: {cred_results_dir}")
+
+            # Update livestatus file with all synchronized counts
+            if os.path.exists(shared_data.livestatusfile):
+                try:
+                    import pandas as pd
+                    df = pd.read_csv(shared_data.livestatusfile)
+                    if not df.empty:
+                        df.loc[0, 'Alive Hosts Count'] = safe_int(shared_data.targetnbr)
+                        df.loc[0, 'Total Open Ports'] = safe_int(shared_data.portnbr)
+                        df.loc[0, 'Vulnerabilities Count'] = safe_int(shared_data.vulnnbr)
+                        df.to_csv(shared_data.livestatusfile, index=False)
+                        logger.debug("Updated livestatus file with synchronized counts")
+                except Exception as e:
+                    logger.warning(f"Could not update livestatus with all sync counts: {e}")
+
             try:
-                import pandas as pd
-                df = pd.read_csv(shared_data.livestatusfile)
-                if not df.empty:
-                    df.loc[0, 'Alive Hosts Count'] = safe_int(shared_data.targetnbr)
-                    df.loc[0, 'Total Open Ports'] = safe_int(shared_data.portnbr)
-                    df.loc[0, 'Vulnerabilities Count'] = safe_int(shared_data.vulnnbr)
-                    df.to_csv(shared_data.livestatusfile, index=False)
-                    logger.debug("Updated livestatus file with synchronized counts")
+                shared_data.update_stats()
+                logger.debug(f"Updated gamification stats - Level: {shared_data.levelnbr}, Points: {shared_data.coinnbr}")
             except Exception as e:
-                logger.warning(f"Could not update livestatus with all sync counts: {e}")
+                logger.warning(f"Could not update gamification stats: {e}")
 
-        try:
-            shared_data.update_stats()
-            logger.debug(f"Updated gamification stats - Level: {shared_data.levelnbr}, Points: {shared_data.coinnbr}")
+            logger.debug(f"Completed sync_all_counts() - Targets: {shared_data.targetnbr}, Ports: {shared_data.portnbr}, Vulns: {shared_data.vulnnbr}, Creds: {shared_data.crednbr}")
+
         except Exception as e:
-            logger.warning(f"Could not update gamification stats: {e}")
-
-        logger.debug(f"Completed sync_all_counts() - Targets: {shared_data.targetnbr}, Ports: {shared_data.portnbr}, Vulns: {shared_data.vulnnbr}, Creds: {shared_data.crednbr}")
-
-    except Exception as e:
-        logger.error(f"Error synchronizing all counts: {e}")
+            logger.error(f"Error synchronizing all counts: {e}")
+        finally:
+            last_sync_time = time.time()
+            duration = last_sync_time - start_time
+            logger.debug(f"sync_all_counts() finished in {duration:.2f}s")
 
 
 def safe_int(value, default=0):
@@ -339,6 +338,15 @@ def safe_bool(value, default=False):
         return bool(value) if value is not None else default
     except (ValueError, TypeError):
         return default
+
+
+def ensure_recent_sync(max_age=SYNC_BACKGROUND_INTERVAL):
+    """Ensure counts are synchronized if the last update is older than max_age seconds"""
+    global last_sync_time
+
+    if time.time() - last_sync_time > max_age:
+        logger.debug("Triggering on-demand sync_all_counts() due to stale data")
+        sync_all_counts()
 
 
 def get_current_wifi_ssid():
@@ -2226,12 +2234,13 @@ def handle_connect():
     clients_connected += 1
     logger.info(f"Client connected. Total clients: {clients_connected}")
     emit('connected', {'message': 'Connected to Ragnar'})
-    
+
     # Send initial data to new client
     try:
+        ensure_recent_sync()
         status_data = get_current_status()
         emit('status_update', status_data)
-        
+
         # Send recent logs
         logs = get_recent_logs()
         emit('log_update', logs)
@@ -2460,15 +2469,11 @@ def broadcast_status_updates():
     """Broadcast status updates to all connected clients"""
     log_counter = 0
     activity_counter = 0
-    sync_counter = 0
     while not shared_data.webapp_should_exit:
         try:
             if clients_connected > 0:
-                # Synchronize all counts every 10 cycles (20 seconds)
-                sync_counter += 1
-                if sync_counter % 10 == 0:
-                    sync_all_counts()
-                
+                ensure_recent_sync()
+
                 # Send status update
                 status_data = get_current_status()
                 socketio.emit('status_update', status_data)
@@ -2515,6 +2520,17 @@ def broadcast_status_updates():
         except Exception as e:
             logger.error(f"Error broadcasting status: {e}")
             socketio.sleep(5)
+
+
+def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
+    """Continuously synchronize counts so displays remain fresh even without web clients"""
+    while not shared_data.webapp_should_exit:
+        try:
+            sync_all_counts()
+        except Exception as e:
+            logger.error(f"Background sync error: {e}")
+
+        time.sleep(max(1, interval))
 
 
 # ============================================================================
@@ -3666,9 +3682,9 @@ def format_uptime(seconds):
 def get_dashboard_stats():
     """Get dashboard statistics including counts from various sources"""
     try:
-        # Synchronize all counts first to ensure consistency
-        sync_all_counts()
-        
+        # Ensure recent synchronization without blocking the request unnecessarily
+        ensure_recent_sync()
+
         stats = {
             'target_count': safe_int(shared_data.targetnbr),
             'port_count': safe_int(shared_data.portnbr),
@@ -3990,10 +4006,14 @@ def run_server(host='0.0.0.0', port=8000):
     try:
         logger.info(f"Starting Ragnar web server on {host}:{port}")
         logger.info(f"Access the interface at http://{host}:{port}")
-        
+
+        # Prime synchronized data before clients connect
+        sync_all_counts()
+
         # Start background status broadcaster
         socketio.start_background_task(broadcast_status_updates)
-        
+        socketio.start_background_task(background_sync_loop)
+
         # Run the server
         socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
     except Exception as e:
