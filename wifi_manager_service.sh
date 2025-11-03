@@ -1,8 +1,5 @@
 #!/bin/bash
 # wifi_manager_service.sh
-# Service management script for ragnar Wi-Fi functionality
-# This script provides convenient functions to manage the Wi-Fi services
-# Author: GitHub Copilot Assistant
 
 # Colors for output
 RED='\033[0;31m'
