@@ -1,8 +1,4 @@
 # wifi_manager.py
-# Robust Wi-Fi management system for Ragnar IoT device
-# Handles automatic connection, AP mode fallback, and web-based configuration
-# Author: GitHub Copilot Assistant
-# 
 # Features:
 # - Auto-connect to known Wi-Fi networks on boot
 # - Fall back to AP mode if connection fails 
