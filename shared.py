@@ -419,6 +419,14 @@ class SharedData:
         self.networkkbnbr = 0
         self.attacksnbr = 0
         self.show_first_image = True
+        self.network_hosts_snapshot = {}
+        self.total_targetnbr = 0
+        self.inactive_targetnbr = 0
+        self.new_targets = 0
+        self.lost_targets = 0
+        self.new_target_ips = []
+        self.lost_target_ips = []
+        self.last_sync_timestamp = 0.0
 
     def delete_webconsolelog(self):
             """Delete the web console log file."""

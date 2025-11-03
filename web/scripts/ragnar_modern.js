@@ -580,11 +580,135 @@ async function loadDashboardData() {
     }
 }
 
+function toNumber(value, fallback = 0) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function formatRelativeTime(seconds) {
+    if (!Number.isFinite(seconds)) {
+        return null;
+    }
+
+    let remaining = Math.max(0, Math.floor(seconds));
+    const units = [
+        { label: 'd', value: 86400 },
+        { label: 'h', value: 3600 },
+        { label: 'm', value: 60 },
+        { label: 's', value: 1 }
+    ];
+
+    const parts = [];
+    for (const unit of units) {
+        if (remaining >= unit.value || (unit.label === 's' && parts.length === 0)) {
+            const amount = Math.floor(remaining / unit.value);
+            if (amount > 0 || unit.label === 's') {
+                parts.push(`${amount}${unit.label}`);
+            }
+            remaining -= amount * unit.value;
+        }
+        if (parts.length >= 2) {
+            break;
+        }
+    }
+
+    return parts.length > 0 ? parts.join(' ') : '0s';
+}
+
+function buildLastSyncDisplay(stats) {
+    if (!stats) {
+        return 'Sync pending…';
+    }
+
+    const ageSeconds = toNumber(stats.last_sync_age_seconds, NaN);
+    const hasAge = Number.isFinite(ageSeconds);
+    const relative = hasAge ? `${formatRelativeTime(ageSeconds)} ago` : '';
+
+    let timestampSource = stats.last_sync_iso ?? stats.last_sync_time ?? stats.last_sync_timestamp;
+    let isoValue = null;
+
+    if (typeof timestampSource === 'number') {
+        isoValue = new Date(timestampSource * 1000).toISOString();
+    } else if (typeof timestampSource === 'string' && timestampSource) {
+        isoValue = timestampSource;
+    }
+
+    let absolute = '';
+    if (isoValue) {
+        const parsed = new Date(isoValue);
+        if (!Number.isNaN(parsed.getTime())) {
+            absolute = parsed.toLocaleString();
+        }
+    }
+
+    if (relative && absolute) {
+        return `${relative} (${absolute})`;
+    }
+
+    if (relative) {
+        return relative;
+    }
+
+    if (absolute) {
+        return absolute;
+    }
+
+    return 'Sync pending…';
+}
+
 function updateDashboardStats(stats) {
-    updateElement('target-count', stats.target_count || 0);
-    updateElement('port-count', stats.port_count || 0);
-    updateElement('vuln-count', stats.vulnerability_count || 0);
-    updateElement('cred-count', stats.credential_count || 0);
+    if (!stats || typeof stats !== 'object') {
+        return;
+    }
+
+    const activeTargets = toNumber(stats.active_target_count ?? stats.target_count, 0);
+    const inactiveTargets = toNumber(stats.inactive_target_count ?? stats.offline_target_count, 0);
+    const totalTargets = toNumber(stats.total_target_count ?? activeTargets + inactiveTargets, activeTargets + inactiveTargets);
+
+    const newTargetList = Array.isArray(stats.new_target_ips) ? stats.new_target_ips :
+        (Array.isArray(stats.new_targets) ? stats.new_targets : []);
+    const lostTargetList = Array.isArray(stats.lost_target_ips) ? stats.lost_target_ips :
+        (Array.isArray(stats.lost_targets) ? stats.lost_targets : []);
+
+    const newTargets = toNumber(stats.new_target_count ?? stats.new_targets ?? newTargetList.length, newTargetList.length);
+    const lostTargets = toNumber(stats.lost_target_count ?? stats.lost_targets ?? lostTargetList.length, lostTargetList.length);
+
+    const portCount = toNumber(stats.port_count ?? stats.open_port_count, 0);
+    const vulnCount = toNumber(stats.vulnerability_count ?? stats.vuln_count, 0);
+    const credCount = toNumber(stats.credential_count ?? stats.cred_count, 0);
+    const level = toNumber(stats.level ?? stats.levelnbr, 0);
+    const points = toNumber(stats.points ?? stats.coins, 0);
+
+    updateElement('target-count', activeTargets);
+    updateElement('target-total-count', totalTargets);
+    updateElement('target-inactive-count', inactiveTargets);
+    updateElement('target-new-count', newTargets);
+    updateElement('target-lost-count', lostTargets);
+
+    const newCountElement = document.getElementById('target-new-count');
+    if (newCountElement) {
+        newCountElement.title = newTargetList.length > 0 ? newTargetList.join(', ') : 'No recent additions';
+    }
+
+    const lostCountElement = document.getElementById('target-lost-count');
+    if (lostCountElement) {
+        lostCountElement.title = lostTargetList.length > 0 ? lostTargetList.join(', ') : 'No recent drops';
+    }
+
+    updateElement('port-count', portCount);
+    updateElement('vuln-count', vulnCount);
+    updateElement('cred-count', credCount);
+    updateElement('level-count', level);
+    updateElement('points-count', points);
+
+    const activeSummary = totalTargets > 0 ? `${activeTargets}/${totalTargets} active` : `${activeTargets} active`;
+    const newSummary = newTargets > 0 ? `${newTargets} new` : 'No new targets';
+    const lostSummary = lostTargets > 0 ? `${lostTargets} lost` : 'No targets lost';
+
+    updateElement('active-target-summary', activeSummary);
+    updateElement('new-target-summary', newSummary);
+    updateElement('lost-target-summary', lostSummary);
+    updateElement('last-sync-display', buildLastSyncDisplay(stats));
 }
 
 async function loadNetworkData() {
@@ -1256,41 +1380,23 @@ async function refreshDashboard() {
 
 function updateDashboardStatus(data) {
     // If the WebSocket data has zero counts, fetch from our dashboard API instead
-    if ((data.target_count || 0) === 0 && (data.port_count || 0) === 0 && 
+    if ((data.target_count || 0) === 0 && (data.port_count || 0) === 0 &&
         (data.vulnerability_count || 0) === 0 && (data.credential_count || 0) === 0) {
-        
+
         // Fetch proper dashboard stats
         fetchAPI('/api/dashboard/stats')
             .then(stats => {
-                updateElement('target-count', stats.target_count || 0);
-                updateElement('port-count', stats.port_count || 0);
-                updateElement('vuln-count', stats.vulnerability_count || 0);
-                updateElement('cred-count', stats.credential_count || 0);
-                updateElement('level-count', stats.level || stats.levelnbr || 0);
-                const dashboardPoints = stats.points ?? stats.coins ?? 0;
-                updateElement('points-count', dashboardPoints);
+                updateDashboardStats(stats);
             })
             .catch(() => {
                 // Fallback to WebSocket data if API fails
-                updateElement('target-count', data.target_count || 0);
-                updateElement('port-count', data.port_count || 0);
-                updateElement('vuln-count', data.vulnerability_count || 0);
-                updateElement('cred-count', data.credential_count || 0);
-                updateElement('level-count', data.level || data.levelnbr || 0);
-                const fallbackPoints = data.points ?? data.coins ?? 0;
-                updateElement('points-count', fallbackPoints);
+                updateDashboardStats(data);
             });
     } else {
         // Use WebSocket data if it has non-zero values
-        updateElement('target-count', data.target_count || 0);
-        updateElement('port-count', data.port_count || 0);
-        updateElement('vuln-count', data.vulnerability_count || 0);
-        updateElement('cred-count', data.credential_count || 0);
-        updateElement('level-count', data.level || data.levelnbr || 0);
-        const realtimePoints = data.points ?? data.coins ?? 0;
-        updateElement('points-count', realtimePoints);
+        updateDashboardStats(data);
     }
-    
+
     // Update status - use the actual e-paper display text
     updateElement('Ragnar-status', data.ragnar_status || 'IDLE');
     updateElement('Ragnar-says', (data.ragnar_says || 'Hacking away...'));

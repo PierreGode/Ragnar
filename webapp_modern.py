@@ -211,7 +211,7 @@ def sync_all_counts():
                 logger.warning(f"Could not create scan_results directory: {e}")
 
             unique_hosts = set()
-            port_count = 0
+            csv_host_ports = {}
             scan_files_found = []
 
             if os.path.exists(scan_results_dir):
@@ -228,11 +228,13 @@ def sync_all_counts():
                                             ip = row[0].strip()
                                             if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
                                                 unique_hosts.add(ip)
+                                                csv_host_ports.setdefault(ip, set())
 
                                             if len(row) > 4:
                                                 for port_col in row[4:]:
-                                                    if port_col and port_col.strip():
-                                                        port_count += 1
+                                                    normalized_port = _normalize_port_value(port_col)
+                                                    if normalized_port:
+                                                        csv_host_ports.setdefault(ip, set()).add(normalized_port)
                             except Exception as e:
                                 logger.debug(f"Could not read scan result file {filepath}: {e}")
                                 continue
@@ -243,27 +245,64 @@ def sync_all_counts():
 
             logger.debug(f"Scan result files found: {scan_files_found}")
             logger.debug(f"Unique hosts found: {list(unique_hosts)}")
-            logger.debug(f"Total port count: {port_count}")
+            aggregated_ports_from_csv = sum(len(ports) for ports in csv_host_ports.values())
+            logger.debug(f"Total port count from CSV: {aggregated_ports_from_csv}")
 
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
             aggregated_targets = len(unique_hosts)
-            aggregated_ports = port_count
+            aggregated_ports = aggregated_ports_from_csv
+            total_target_count = aggregated_targets
+            inactive_target_count = 0
+            current_snapshot = {ip: {'alive': True, 'ports': csv_host_ports.get(ip, set())} for ip in unique_hosts}
 
             if aggregated_network_stats:
                 agg_host_count = aggregated_network_stats.get('host_count')
+                agg_total_host_count = aggregated_network_stats.get('total_host_count')
+                agg_inactive_count = aggregated_network_stats.get('inactive_host_count')
                 agg_port_count = aggregated_network_stats.get('port_count')
+                hosts_snapshot = aggregated_network_stats.get('hosts')
+
+                if hosts_snapshot:
+                    current_snapshot = hosts_snapshot
 
                 if agg_host_count is not None:
-                    aggregated_targets = max(aggregated_targets, safe_int(agg_host_count))
+                    aggregated_targets = safe_int(agg_host_count)
+                if agg_total_host_count is not None:
+                    total_target_count = safe_int(agg_total_host_count)
+                else:
+                    total_target_count = aggregated_targets
+                if agg_inactive_count is not None:
+                    inactive_target_count = safe_int(agg_inactive_count)
+                else:
+                    inactive_target_count = max(total_target_count - aggregated_targets, 0)
                 if agg_port_count is not None:
-                    aggregated_ports = max(aggregated_ports, safe_int(agg_port_count))
+                    aggregated_ports = safe_int(agg_port_count)
+            else:
+                total_target_count = aggregated_targets
+                inactive_target_count = max(total_target_count - aggregated_targets, 0)
 
             shared_data.targetnbr = aggregated_targets
+            shared_data.total_targetnbr = total_target_count
+            shared_data.inactive_targetnbr = inactive_target_count
             shared_data.portnbr = aggregated_ports
             logger.debug(f"Updated targets: {old_targets} -> {aggregated_targets}")
             logger.debug(f"Updated ports: {old_ports} -> {aggregated_ports}")
-        
+
+            previous_snapshot = getattr(shared_data, 'network_hosts_snapshot', {}) or {}
+
+            previous_active_hosts = {ip for ip, meta in previous_snapshot.items() if meta.get('alive', True)}
+            current_active_hosts = {ip for ip, meta in current_snapshot.items() if meta.get('alive', True)}
+
+            new_active_hosts = current_active_hosts - previous_active_hosts
+            lost_active_hosts = previous_active_hosts - current_active_hosts
+
+            shared_data.network_hosts_snapshot = current_snapshot
+            shared_data.new_target_ips = sorted(new_active_hosts)
+            shared_data.lost_target_ips = sorted(lost_active_hosts)
+            shared_data.new_targets = len(shared_data.new_target_ips)
+            shared_data.lost_targets = len(shared_data.lost_target_ips)
+
             # Sync credential count from crackedpwd directory
             cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
 
@@ -339,6 +378,7 @@ def sync_all_counts():
             logger.error(f"Error synchronizing all counts: {e}")
         finally:
             last_sync_time = time.time()
+            shared_data.last_sync_timestamp = last_sync_time
             duration = last_sync_time - start_time
             logger.debug(f"sync_all_counts() finished in {duration:.2f}s")
 
@@ -433,6 +473,29 @@ def _normalize_port_value(port_entry):
         return None
 
 
+def _normalize_alive_value(value):
+    """Normalize alive column values to boolean"""
+    try:
+        if value is None:
+            return True
+
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, (int, float)):
+            return value != 0
+
+        text = str(value).strip().lower()
+        if text in ('', '1', 'true', 'yes', 'up', 'alive', 'online'):
+            return True
+        if text in ('0', 'false', 'no', 'down', 'dead', 'offline'):
+            return False
+
+        return True
+    except Exception:
+        return True
+
+
 def update_wifi_network_data():
     """Update WiFi-specific network data from scan results and provide aggregated counts"""
     try:
@@ -448,18 +511,18 @@ def update_wifi_network_data():
                     headers = next(reader, None)
                     if headers:
                         for row in reader:
-                            if len(row) >= 1 and row[0].strip():
-                                ip = row[0].strip()
-                                ports = set()
-                                if len(row) > 4 and row[4]:
-                                    for port_entry in row[4].split(';'):
-                                        normalized = _normalize_port_value(port_entry)
-                                        if normalized:
-                                            ports.add(normalized)
+                                if len(row) >= 1 and row[0].strip():
+                                    ip = row[0].strip()
+                                    ports = set()
+                                    if len(row) > 4 and row[4]:
+                                        for port_entry in row[4].split(';'):
+                                            normalized = _normalize_port_value(port_entry)
+                                            if normalized:
+                                                ports.add(normalized)
 
                                 existing_data[ip] = {
                                     'hostname': row[1] if len(row) > 1 else '',
-                                    'alive': row[2] if len(row) > 2 else '1',
+                                    'alive': _normalize_alive_value(row[2] if len(row) > 2 else '1'),
                                     'mac': row[3] if len(row) > 3 else '',
                                     'ports': ports,
                                     'last_seen': row[5] if len(row) > 5 else datetime.now().isoformat()
@@ -482,7 +545,7 @@ def update_wifi_network_data():
                                     ip = row[0].strip()
                                     if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
                                         hostname = row[1] if len(row) > 1 and row[1] else ''
-                                        alive = row[2] if len(row) > 2 and row[2] else '1'
+                                        alive = _normalize_alive_value(row[2] if len(row) > 2 and row[2] else '1')
                                         mac = row[3] if len(row) > 3 and row[3] else ''
 
                                         # Collect ports from remaining columns
@@ -541,11 +604,17 @@ def update_wifi_network_data():
 
         # Prepare aggregated counts from persisted data
         aggregated_host_count = 0
+        aggregated_active_count = 0
+        aggregated_inactive_count = 0
         aggregated_port_count = 0
 
         for ip, data in existing_data.items():
             aggregated_host_count += 1
-            aggregated_port_count += sum(1 for port in data['ports'] if port)
+            if data.get('alive', True):
+                aggregated_active_count += 1
+                aggregated_port_count += sum(1 for port in data['ports'] if port)
+            else:
+                aggregated_inactive_count += 1
 
         # Write updated data to WiFi-specific file
         try:
@@ -569,7 +638,7 @@ def update_wifi_network_data():
                     writer.writerow([
                         ip,
                         data['hostname'],
-                        data['alive'],
+                        '1' if data.get('alive', True) else '0',
                         data['mac'],
                         ports_str,
                         data['last_seen']
@@ -580,9 +649,12 @@ def update_wifi_network_data():
             logger.error(f"Error writing WiFi network data file: {e}")
 
         return {
-            'host_count': aggregated_host_count,
+            'host_count': aggregated_active_count,
+            'total_host_count': aggregated_host_count,
+            'inactive_host_count': aggregated_inactive_count,
             'port_count': aggregated_port_count,
-            'stale_hosts_removed': len(stale_hosts)
+            'stale_hosts_removed': len(stale_hosts),
+            'hosts': existing_data
         }
 
     except Exception as e:
@@ -4126,16 +4198,38 @@ def get_dashboard_stats():
         # Ensure recent synchronization without blocking the request unnecessarily
         ensure_recent_sync()
 
+        current_time = time.time()
+        last_sync_ts = getattr(shared_data, 'last_sync_timestamp', last_sync_time)
+        last_sync_iso = None
+        last_sync_age = None
+
+        if last_sync_ts:
+            try:
+                last_sync_iso = datetime.fromtimestamp(last_sync_ts).isoformat()
+                last_sync_age = max(current_time - last_sync_ts, 0.0)
+            except Exception:
+                last_sync_iso = None
+
         stats = {
             'target_count': safe_int(shared_data.targetnbr),
+            'active_target_count': safe_int(shared_data.targetnbr),
+            'inactive_target_count': safe_int(getattr(shared_data, 'inactive_targetnbr', 0)),
+            'total_target_count': safe_int(getattr(shared_data, 'total_targetnbr', shared_data.targetnbr)),
+            'new_target_count': safe_int(getattr(shared_data, 'new_targets', 0)),
+            'lost_target_count': safe_int(getattr(shared_data, 'lost_targets', 0)),
+            'new_target_ips': getattr(shared_data, 'new_target_ips', []),
+            'lost_target_ips': getattr(shared_data, 'lost_target_ips', []),
             'port_count': safe_int(shared_data.portnbr),
             'vulnerability_count': safe_int(shared_data.vulnnbr),
             'credential_count': safe_int(shared_data.crednbr),
             'level': safe_int(shared_data.levelnbr),
             'points': safe_int(shared_data.coinnbr),
-            'coins': safe_int(shared_data.coinnbr)
+            'coins': safe_int(shared_data.coinnbr),
+            'last_sync_timestamp': last_sync_ts,
+            'last_sync_iso': last_sync_iso,
+            'last_sync_age_seconds': last_sync_age
         }
-        
+
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
