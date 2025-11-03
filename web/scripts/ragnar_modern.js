@@ -3379,10 +3379,8 @@ async function downloadThreatReport(target) {
             showNotification(`Threat intelligence report downloaded for ${target}`, 'success');
         } else {
             const error = await response.json();
-            if (error.target_type === 'private_ip') {
-                showNotification(`Cannot analyze internal IP ${target} - threat intelligence is only meaningful for external/public targets`, 'warning');
-            } else if (error.target_type === 'no_findings') {
-                showNotification(`No security findings detected for ${target} - cannot generate threat intelligence report`, 'warning');
+            if (error.target_type === 'no_findings') {
+                showNotification(`No vulnerability findings detected for ${target} - run network scans first to discover vulnerabilities for threat intelligence enrichment`, 'warning');
             } else {
                 showNotification(`Failed to generate report: ${error.error}`, 'error');
             }

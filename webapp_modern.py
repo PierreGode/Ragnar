@@ -2449,48 +2449,69 @@ def enrich_target_endpoint():
         if not target:
             return jsonify({'error': 'Target is required'}), 400
         
-        # Validate if target is worth analyzing
-        if _is_ip_address(target):
-            import ipaddress
-            ip = ipaddress.ip_address(target)
-            if ip.is_private or ip.is_loopback or ip.is_link_local:
-                return jsonify({
-                    'error': f'Cannot analyze private/internal IP address: {target}',
-                    'message': 'Threat intelligence is only meaningful for public IPs, domains, and file hashes',
-                    'target_type': 'private_ip'
-                }), 400
-        
-        # Only analyze if we have real scan data for this target
-        has_real_findings = False
-        if hasattr(shared_data, 'network_intelligence'):
-            active_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
-            # Check if target has actual vulnerabilities or credentials
-            for vuln_data in active_findings.get('vulnerabilities', {}).values():
-                if vuln_data.get('host') == target:
-                    has_real_findings = True
-                    break
-            if not has_real_findings:
-                for cred_data in active_findings.get('credentials', {}).values():
+        # Look for actual vulnerability findings for this target
+        actual_findings = []
+        if hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence:
+            try:
+                # Check active findings
+                active_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+                
+                # Check for vulnerabilities on this target
+                for vuln_id, vuln_data in active_findings.get('vulnerabilities', {}).items():
+                    if vuln_data.get('host') == target:
+                        actual_findings.append(vuln_data)
+                
+                # Check for compromised credentials on this target  
+                for cred_id, cred_data in active_findings.get('credentials', {}).items():
                     if cred_data.get('host') == target:
-                        has_real_findings = True
-                        break
+                        actual_findings.append(cred_data)
+                        
+            except AttributeError as e:
+                logger.warning(f"Network intelligence method not available: {e}")
+                # Fallback: check if we have scan data directly from files
+                try:
+                    scan_results_dir = os.path.join(shared_data.datadir, 'output', 'scan_results')
+                    if os.path.exists(scan_results_dir):
+                        for filename in os.listdir(scan_results_dir):
+                            if filename.endswith('.csv') and target in filename:
+                                # Found scan results for this target
+                                actual_findings.append({
+                                    'host': target,
+                                    'vulnerability': 'Network scan findings available',
+                                    'source': 'scan_results',
+                                    'details': {'scan_file': filename}
+                                })
+                                break
+                except Exception as scan_e:
+                    logger.warning(f"Could not check scan results: {scan_e}")
+                    
+            except Exception as e:
+                logger.warning(f"Could not retrieve network intelligence findings: {e}")
         
-        if not has_real_findings:
+        # If no findings but target looks like it might have vulnerabilities, create a placeholder
+        if not actual_findings:
+            # For demonstration/testing purposes, allow manual vulnerability analysis
+            # This should ideally be replaced with real vulnerability scanner integration
             return jsonify({
-                'error': f'No security findings detected for target: {target}',
-                'message': 'Threat intelligence reports are only generated for targets with identified vulnerabilities or compromised credentials',
-                'target_type': 'no_findings'
+                'error': f'No vulnerability findings detected for target: {target}',
+                'message': 'Ragnar needs to discover vulnerabilities first through network scanning. Try running vulnerability scans on this target.',
+                'target_type': 'no_findings',
+                'suggestion': f'Run network scan on {target} first, then threat intelligence can enrich any discovered vulnerabilities'
             }), 404
 
-        # Create a finding object from the target
+        # Use the first real finding for enrichment (or combine multiple findings)
+        base_finding = actual_findings[0]
+        
+        # Create enriched finding object from actual scan data
         finding = {
-            'id': hashlib.md5(target.encode()).hexdigest()[:12],
-            'host': target if _is_ip_address(target) else None,
-            'domain': target if '.' in target and not _is_ip_address(target) else None,
-            'hash': target if len(target) >= 32 and all(c in '0123456789abcdefABCDEF' for c in target) else None,
-            'vulnerability': f'Threat intelligence analysis for {target}',
-            'severity': 'medium',
-            'details': {'analysis_type': 'targeted_lookup', 'target': target}
+            'id': base_finding.get('id', hashlib.md5(target.encode()).hexdigest()[:12]),
+            'host': target,
+            'vulnerability': base_finding.get('vulnerability', base_finding.get('service', 'Unknown')),
+            'severity': base_finding.get('severity', 'medium'),
+            'port': base_finding.get('port'),
+            'service': base_finding.get('service'),
+            'details': base_finding.get('details', {}),
+            'scan_timestamp': base_finding.get('timestamp', datetime.now().isoformat())
         }
         
         # Enrich the finding
