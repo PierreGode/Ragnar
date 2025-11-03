@@ -325,13 +325,13 @@ function initializeSocket() {
     });
 
     socket.on('credentials_update', function(data) {
-        if (currentTab === 'credentials') {
+        if (currentTab === 'discovered') {
             displayCredentialsTable(data);
         }
     });
 
     socket.on('loot_update', function(data) {
-        if (currentTab === 'loot') {
+        if (currentTab === 'discovered') {
             displayLootTable(data);
         }
     });
@@ -462,14 +462,9 @@ function setupAutoRefresh() {
         }
     }, 10000); // Every 10 seconds
 
-    autoRefreshIntervals.credentials = setInterval(() => {
-        if (currentTab === 'credentials' && socket && socket.connected) {
+    autoRefreshIntervals.discovered = setInterval(() => {
+        if (currentTab === 'discovered' && socket && socket.connected) {
             socket.emit('request_credentials');
-        }
-    }, 15000); // Every 15 seconds
-
-    autoRefreshIntervals.loot = setInterval(() => {
-        if (currentTab === 'loot' && socket && socket.connected) {
             socket.emit('request_loot');
         }
     }, 20000); // Every 20 seconds
@@ -540,10 +535,8 @@ async function loadTabData(tabName) {
         case 'network':
             await loadNetworkData();
             break;
-        case 'credentials':
+        case 'discovered':
             await loadCredentialsData();
-            break;
-        case 'loot':
             await loadLootData();
             break;
         case 'threat-intel':

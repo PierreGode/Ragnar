@@ -174,11 +174,8 @@
                     <button onclick="showTab('network')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="network">
                         Network
                     </button>
-                    <button onclick="showTab('credentials')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="credentials">
-                        Credentials
-                    </button>
-                    <button onclick="showTab('loot')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="loot">
-                        Loot
+                    <button onclick="showTab('discovered')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="discovered">
+                        Discovered
                     </button>
                     <button onclick="showTab('threat-intel')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="threat-intel">
                         Threat Intel
@@ -214,8 +211,7 @@
             <div class="px-2 pt-2 pb-3 space-y-1">
                 <button onclick="showTab('dashboard')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Dashboard</button>
                 <button onclick="showTab('network')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Network</button>
-                <button onclick="showTab('credentials')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Credentials</button>
-                <button onclick="showTab('loot')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Loot</button>
+                <button onclick="showTab('discovered')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Discovered</button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
                 <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
@@ -553,38 +549,36 @@
             </div>
         </div>
         
-        <!-- Credentials Tab -->
-        <div id="credentials-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">Discovered Credentials</h2>
-                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                        </svg>
-                        Refresh
-                    </button>
+        <!-- Discovered Tab -->
+        <div id="discovered-tab" class="tab-content hidden">
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                <div class="glass rounded-xl p-6 h-full flex flex-col">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-2xl font-bold">Discovered Credentials</h2>
+                        <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="credentials-table" class="overflow-x-auto">
+                        <p class="text-gray-400">Loading credentials...</p>
+                    </div>
                 </div>
-                <div id="credentials-table" class="overflow-x-auto">
-                    <p class="text-gray-400">Loading credentials...</p>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Loot Tab -->
-        <div id="loot-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">Stolen Data</h2>
-                    <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                        <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                        </svg>
-                        Refresh
-                    </button>
-                </div>
-                <div id="loot-table" class="overflow-x-auto">
-                    <p class="text-gray-400">Loading loot data...</p>
+                <div class="glass rounded-xl p-6 h-full flex flex-col">
+                    <div class="flex items-center justify-between mb-6">
+                        <h2 class="text-2xl font-bold">Stolen Data</h2>
+                        <button onclick="refreshCurrentTab()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                    <div id="loot-table" class="overflow-x-auto">
+                        <p class="text-gray-400">Loading loot data...</p>
+                    </div>
                 </div>
             </div>
         </div>
