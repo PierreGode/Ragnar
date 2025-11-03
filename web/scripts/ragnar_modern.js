@@ -3255,9 +3255,9 @@ function updateEnrichedFindingsTable(findings) {
             <td class="py-3 px-4 text-slate-300">${escapeHtml(finding.attribution || 'Unknown')}</td>
             <td class="py-3 px-4 text-slate-400">${formatTimestamp(finding.last_updated)}</td>
             <td class="py-3 px-4">
-                <button onclick="showFindingDetails('${finding.target}')" 
+                <button onclick="downloadThreatReport('${finding.target}')" 
                         class="text-blue-400 hover:text-blue-300 text-sm">
-                    Details
+                    Report
                 </button>
             </td>
         </tr>
@@ -3347,9 +3347,44 @@ async function enrichTarget() {
     }
 }
 
-// Show finding details (placeholder for future modal implementation)
-function showFindingDetails(target) {
-    showNotification(`Detailed analysis for ${target} coming soon...`, 'info');
+// Download threat intelligence report
+async function downloadThreatReport(target) {
+    try {
+        showNotification(`Generating threat intelligence report for ${target}...`, 'info');
+        
+        const response = await fetch('/api/threat-intelligence/download-report', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ target: target })
+        });
+
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            
+            // Generate filename with current date
+            const now = new Date();
+            const dateStr = now.toISOString().slice(0, 19).replace(/:/g, '-');
+            a.download = `Threat_Intelligence_Report_${target.replace(/[^a-zA-Z0-9.-]/g, '_')}_${dateStr}.txt`;
+            
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            showNotification(`Report downloaded successfully for ${target}`, 'success');
+        } else {
+            const error = await response.json();
+            showNotification(`Failed to generate report: ${error.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error downloading threat report:', error);
+        showNotification('Error downloading threat intelligence report', 'error');
+    }
 }
 
 // Format timestamp for display
