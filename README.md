@@ -5,9 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 
-<p align="center">
-  <img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />
 
+<p align="center">
 <img width="300" height="600" alt="image" src="https://github.com/user-attachments/assets/d79940c5-5076-430f-aa75-a4094a4d2910" />
 
 </p>
@@ -44,7 +43,10 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
 - **File Stealing**: Extracts data from vulnerable services.
 - **User Interface**: Real-time display on the e-Paper HAT and web interface for monitoring and interaction.
 - complete new web interface
-<img width="1167" height="654" alt="image" src="https://github.com/user-attachments/assets/b17ce98c-9ccd-452b-94f3-fe2303455bf7" />
+- <p align="center">
+  <img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />
+</p>
+<img width="1423" height="905" alt="image" src="https://github.com/user-attachments/assets/13d9248a-c3e2-455c-92ed-0b3192b5905a" />
 
 
 ## 🚀 Getting Started
