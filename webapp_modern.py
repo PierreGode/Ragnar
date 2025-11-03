@@ -23,6 +23,8 @@ import io
 import base64
 import shutil
 import importlib
+import hashlib
+import ipaddress
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response
 from flask_socketio import SocketIO, emit
@@ -451,6 +453,15 @@ def get_wifi_specific_network_file():
     data_dir = os.path.join('data', 'network_data')
     os.makedirs(data_dir, exist_ok=True)
     return os.path.join(data_dir, f'network_{current_ssid}.csv')
+
+
+def _is_ip_address(value):
+    """Check if a value is a valid IP address"""
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _normalize_port_value(port_entry):
@@ -2421,6 +2432,58 @@ def enrich_finding_endpoint():
         
     except Exception as e:
         logger.error(f"Error enriching finding: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/threat-intelligence/enrich-target', methods=['POST'])
+def enrich_target_endpoint():
+    """Enrich a target (IP, domain, or hash) with threat intelligence"""
+    try:
+        if not threat_intelligence:
+            return jsonify({'error': 'Threat intelligence system not available'}), 503
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        target = data.get('target', '').strip()
+        if not target:
+            return jsonify({'error': 'Target is required'}), 400
+        
+        # Create a finding object from the target
+        finding = {
+            'id': hashlib.md5(target.encode()).hexdigest()[:12],
+            'host': target if _is_ip_address(target) else None,
+            'domain': target if '.' in target and not _is_ip_address(target) else None,
+            'hash': target if len(target) >= 32 and all(c in '0123456789abcdefABCDEF' for c in target) else None,
+            'vulnerability': f'Manual threat intelligence lookup for {target}',
+            'severity': 'medium',
+            'details': {'manual_lookup': True, 'target': target}
+        }
+        
+        # Enrich the finding
+        import asyncio
+        enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
+        
+        # Convert risk score from 0-10 scale to 0-100 scale for frontend
+        risk_score_100 = min(int(enriched_finding.dynamic_risk_score * 10), 100)
+        
+        return jsonify({
+            'success': True,
+            'target': target,
+            'risk_score': risk_score_100,
+            'dynamic_risk_score': enriched_finding.dynamic_risk_score,
+            'executive_summary': enriched_finding.executive_summary,
+            'recommended_actions': enriched_finding.recommended_actions,
+            'threat_contexts_count': len(enriched_finding.threat_contexts),
+            'attribution': {
+                'actor_name': enriched_finding.attribution.actor_name if enriched_finding.attribution else None,
+                'confidence': enriched_finding.attribution.confidence if enriched_finding.attribution else 0.0
+            },
+            'enriched_finding_id': finding['id']
+        })
+        
+    except Exception as e:
+        logger.error(f"Error enriching target: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/threat-intelligence/dashboard')
