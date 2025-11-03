@@ -551,8 +551,6 @@ async function loadTabData(tabName) {
             break;
         case 'files':
             await loadFilesData();
-            break;
-        case 'images':
             await loadImagesData();
             break;
         case 'system':
