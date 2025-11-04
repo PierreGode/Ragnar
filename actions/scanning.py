@@ -486,7 +486,18 @@ class NetworkScanner:
                     self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
                     return
                 
-                self.df = pd.read_csv(self.source_csv_path)
+                # Try to read the CSV, catching specific pandas errors
+                try:
+                    self.df = pd.read_csv(self.source_csv_path)
+                except pd.errors.EmptyDataError:
+                    self.logger.warning(f"Source CSV file has no data to parse: {self.source_csv_path}")
+                    self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+                    return
+                except Exception as read_error:
+                    # Catch any other CSV reading errors (e.g., "No columns to parse from file")
+                    self.logger.warning(f"Could not parse CSV file: {read_error}")
+                    self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+                    return
                 
                 # Check if DataFrame is empty or missing required columns
                 if self.df.empty:
