@@ -1968,8 +1968,26 @@ def get_verbose_debug_logs():
             'arp_hosts_count': len(network_scan_cache.get('arp_hosts', {})),
             'arp_hosts_sample': dict(list(network_scan_cache.get('arp_hosts', {}).items())[:5]),
             'last_arp_scan_time': network_scan_cache.get('last_arp_scan', 'NEVER'),
-            'cache_size': len(str(network_scan_cache))
+            'cache_size': len(str(network_scan_cache)),
+            'network_scan_last_update': network_scan_last_update,
+            'arp_scan_interval': ARP_SCAN_INTERVAL,
+            'current_time': time.time(),
+            'time_since_last_cache_update': time.time() - network_scan_last_update if network_scan_last_update else 'NEVER'
         }
+        
+        # Test ARP scan directly
+        try:
+            debug_info['api_traces'].append("=== TESTING ARP SCAN DIRECTLY ===")
+            test_arp_result = run_arp_scan_localnet('wlan0')
+            debug_info['cache_state']['direct_arp_test'] = {
+                'success': bool(test_arp_result),
+                'host_count': len(test_arp_result) if test_arp_result else 0,
+                'sample_results': dict(list(test_arp_result.items())[:3]) if test_arp_result else {}
+            }
+            debug_info['api_traces'].append(f"Direct ARP test found {len(test_arp_result) if test_arp_result else 0} hosts")
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error testing ARP scan directly: {str(e)}")
+            debug_info['cache_state']['direct_arp_test'] = {'error': str(e)}
         
         # === SYNC INFORMATION ===
         debug_info['sync_information'] = {
@@ -2061,6 +2079,57 @@ def get_verbose_debug_logs():
         
     except Exception as e:
         logger.error(f"Error in verbose debug logs: {e}")
+        return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
+
+@app.route('/api/debug/force-arp-scan', methods=['POST'])
+def force_arp_scan():
+    """Force an ARP scan and update the cache manually for debugging"""
+    try:
+        global network_scan_cache, network_scan_last_update
+        
+        debug_info = {
+            'timestamp': datetime.now().isoformat(),
+            'operation': 'force_arp_scan',
+            'steps': []
+        }
+        
+        debug_info['steps'].append("Step 1: Running ARP scan...")
+        arp_hosts = run_arp_scan_localnet('wlan0')
+        debug_info['steps'].append(f"Step 2: Found {len(arp_hosts) if arp_hosts else 0} hosts")
+        
+        if arp_hosts:
+            debug_info['steps'].append("Step 3: Updating cache...")
+            current_time = time.time()
+            network_scan_cache['arp_hosts'] = arp_hosts
+            network_scan_cache['last_arp_scan'] = current_time
+            network_scan_last_update = current_time
+            debug_info['steps'].append("Step 4: Cache updated successfully")
+            
+            debug_info['steps'].append("Step 5: Updating NetKB entries...")
+            for ip, data in arp_hosts.items():
+                update_netkb_entry(ip, data.get('hostname', ''), data.get('mac', ''), True)
+            debug_info['steps'].append(f"Step 6: Updated {len(arp_hosts)} NetKB entries")
+            
+            debug_info['results'] = {
+                'cache_updated': True,
+                'hosts_found': arp_hosts,
+                'cache_state': {
+                    'arp_hosts_count': len(network_scan_cache.get('arp_hosts', {})),
+                    'last_arp_scan_time': network_scan_cache.get('last_arp_scan', 'NEVER')
+                }
+            }
+        else:
+            debug_info['steps'].append("Step 3: No hosts found, cache not updated")
+            debug_info['results'] = {
+                'cache_updated': False,
+                'hosts_found': {},
+                'error': 'No hosts discovered'
+            }
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        logger.error(f"Error in force ARP scan: {e}")
         return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
 
 # ============================================================================
