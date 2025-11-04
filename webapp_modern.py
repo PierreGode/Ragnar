@@ -1292,6 +1292,133 @@ def get_activity_logs():
         return jsonify({'error': str(e)}), 500
 
 # ============================================================================
+# REAL-TIME SCANNING ENDPOINTS
+# ============================================================================
+
+@app.route('/api/scan/start-realtime', methods=['POST'])
+def start_realtime_scan():
+    """Start real-time vulnerability scanning"""
+    try:
+        data = request.get_json() or {}
+        scan_type = data.get('type', 'all')  # 'all', 'single', 'network'
+        target = data.get('target', None)
+        
+        if scan_type == 'single' and target:
+            # Start single host scan
+            def scan_callback(event_type, event_data):
+                socketio.emit('scan_update', {
+                    'type': event_type,
+                    'data': event_data
+                })
+            
+            # Run scan in background thread
+            def run_single_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    result = scanner.scan_single_host_realtime(
+                        ip=target.get('ip', ''),
+                        hostname=target.get('hostname', ''),
+                        mac=target.get('mac', ''),
+                        ports=target.get('ports', ''),
+                        callback=scan_callback
+                    )
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_single_scan, daemon=True).start()
+            
+        elif scan_type == 'all':
+            # Start full network scan
+            def scan_callback(event_type, event_data):
+                socketio.emit('scan_update', {
+                    'type': event_type,
+                    'data': event_data
+                })
+            
+            # Run scan in background thread
+            def run_full_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.force_scan_all_hosts(real_time_callback=scan_callback)
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_full_scan, daemon=True).start()
+        
+        return jsonify({'status': 'success', 'message': 'Scan started'})
+        
+    except Exception as e:
+        logger.error(f"Error starting real-time scan: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/scan/status')
+def get_scan_status():
+    """Get current scanning status"""
+    try:
+        # Check if any scans are running by looking at orchestrator status
+        scan_status = {
+            'scanning': False,
+            'current_target': None,
+            'progress': 0,
+            'total_hosts': 0,
+            'completed_hosts': 0
+        }
+        
+        # You can enhance this by checking actual scan status
+        # For now, return basic status
+        
+        return jsonify({'status': 'success', 'data': scan_status})
+        
+    except Exception as e:
+        logger.error(f"Error getting scan status: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/scan/host', methods=['POST'])
+def scan_single_host():
+    """Scan a single host"""
+    try:
+        data = request.get_json()
+        if not data or 'ip' not in data:
+            return jsonify({'status': 'error', 'message': 'IP address is required'}), 400
+        
+        ip = data['ip']
+        
+        # Validate IP address format
+        import ipaddress
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid IP address format'}), 400
+        
+        # Start single host scan in background thread
+        def scan_host_background():
+            from actions.nmap_vuln_scanner import NmapVulnScanner
+            
+            scanner = NmapVulnScanner(shared_data)
+            
+            # Real-time callback for individual host scan
+            def single_host_callback(scan_data):
+                if scan_data.get('type') == 'host_update':
+                    socketio.emit('scan_host_update', scan_data)
+            
+            # Scan the host
+            scanner.scan_single_host_realtime(ip, callback=single_host_callback)
+        
+        # Start the scan in a background thread
+        import threading
+        scan_thread = threading.Thread(target=scan_host_background)
+        scan_thread.daemon = True
+        scan_thread.start()
+        
+        return jsonify({'status': 'success', 'message': f'Started scan of {ip}'})
+        
+    except Exception as e:
+        logger.error(f"Error scanning single host: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ============================================================================
 # SYSTEM MANAGEMENT ENDPOINTS
 # ============================================================================
 
@@ -3204,6 +3331,64 @@ def handle_loot_request():
         emit('loot_update', loot)
     except Exception as e:
         logger.error(f"Error sending loot data: {e}")
+
+
+@socketio.on('start_scan')
+def handle_start_scan(data):
+    """Handle scan start request via WebSocket"""
+    try:
+        scan_type = data.get('type', 'all')
+        target = data.get('target', None)
+        
+        def scan_callback(event_type, event_data):
+            socketio.emit('scan_update', {
+                'type': event_type,
+                'data': event_data
+            })
+        
+        if scan_type == 'single' and target:
+            def run_single_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.scan_single_host_realtime(
+                        ip=target.get('ip', ''),
+                        hostname=target.get('hostname', ''),
+                        mac=target.get('mac', ''),
+                        ports=target.get('ports', ''),
+                        callback=scan_callback
+                    )
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_single_scan, daemon=True).start()
+        
+        elif scan_type == 'all':
+            def run_full_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.force_scan_all_hosts(real_time_callback=scan_callback)
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_full_scan, daemon=True).start()
+        
+        emit('scan_started', {'status': 'success', 'type': scan_type})
+        
+    except Exception as e:
+        logger.error(f"Error handling scan start: {e}")
+        emit('scan_error', {'error': str(e)})
+
+@socketio.on('stop_scan')
+def handle_stop_scan():
+    """Handle scan stop request via WebSocket"""
+    try:
+        # You can implement scan stopping logic here
+        emit('scan_stopped', {'status': 'success'})
+    except Exception as e:
+        logger.error(f"Error stopping scan: {e}")
+        emit('scan_error', {'error': str(e)})
 
 
 @socketio.on('request_activity')

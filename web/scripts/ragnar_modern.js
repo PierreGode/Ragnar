@@ -343,6 +343,27 @@ function initializeSocket() {
         }
     });
 
+    // Real-time scanning WebSocket handlers
+    socket.on('scan_started', function(data) {
+        handleScanStarted(data);
+    });
+
+    socket.on('scan_progress', function(data) {
+        handleScanProgress(data);
+    });
+
+    socket.on('scan_host_update', function(data) {
+        handleScanHostUpdate(data);
+    });
+
+    socket.on('scan_completed', function(data) {
+        handleScanCompleted(data);
+    });
+
+    socket.on('scan_error', function(data) {
+        handleScanError(data);
+    });
+
     socket.on('connect_error', function(error) {
         reconnectAttempts++;
         console.error('Connection error:', error);
@@ -393,6 +414,17 @@ function setupEventListeners() {
     const clearBtn = document.getElementById('clear-console');
     if (clearBtn) {
         clearBtn.addEventListener('click', clearConsole);
+    }
+
+    // Real-time scanning buttons
+    const startScanBtn = document.getElementById('start-network-scan');
+    if (startScanBtn) {
+        startScanBtn.addEventListener('click', startRealtimeScan);
+    }
+
+    const stopScanBtn = document.getElementById('stop-network-scan');
+    if (stopScanBtn) {
+        stopScanBtn.addEventListener('click', stopRealtimeScan);
     }
 }
 
@@ -708,6 +740,235 @@ async function loadNetworkData() {
         displayNetworkTable(data);
     } catch (error) {
         console.error('Error loading network data:', error);
+    }
+}
+
+// Real-time scanning variables
+let currentScanState = {
+    isScanning: false,
+    totalHosts: 0,
+    scannedHosts: 0,
+    currentTarget: '',
+    startTime: null
+};
+
+// Real-time scanning control functions
+async function startRealtimeScan() {
+    const startBtn = document.getElementById('start-network-scan');
+    const stopBtn = document.getElementById('stop-network-scan');
+    
+    try {
+        startBtn.disabled = true;
+        startBtn.innerHTML = '⏳ Starting...';
+        
+        const response = await fetch('/api/scan/start-realtime', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        });
+        
+        if (response.ok) {
+            currentScanState.isScanning = true;
+            currentScanState.startTime = new Date();
+            stopBtn.disabled = false;
+            startBtn.innerHTML = '⏳ Scanning...';
+            
+            // Show progress section
+            document.getElementById('scan-progress').classList.remove('hidden');
+            
+            addConsoleMessage('Real-time network scan started', 'info');
+        } else {
+            throw new Error('Failed to start scan');
+        }
+    } catch (error) {
+        console.error('Error starting scan:', error);
+        addConsoleMessage('Failed to start network scan: ' + error.message, 'error');
+        resetScanButtons();
+    }
+}
+
+async function stopRealtimeScan() {
+    const stopBtn = document.getElementById('stop-network-scan');
+    
+    try {
+        stopBtn.disabled = true;
+        stopBtn.innerHTML = '⏳ Stopping...';
+        
+        // Emit stop scan event via WebSocket
+        socket.emit('stop_scan');
+        
+        addConsoleMessage('Stopping network scan...', 'info');
+    } catch (error) {
+        console.error('Error stopping scan:', error);
+        addConsoleMessage('Failed to stop network scan: ' + error.message, 'error');
+        stopBtn.disabled = false;
+        stopBtn.innerHTML = '⏹️ Stop Scan';
+    }
+}
+
+function resetScanButtons() {
+    const startBtn = document.getElementById('start-network-scan');
+    const stopBtn = document.getElementById('stop-network-scan');
+    
+    startBtn.disabled = false;
+    startBtn.innerHTML = '<span class="group-disabled:hidden">🔍</span> Start Full Scan';
+    stopBtn.disabled = true;
+    stopBtn.innerHTML = '⏹️ Stop Scan';
+    
+    currentScanState.isScanning = false;
+    document.getElementById('scan-progress').classList.add('hidden');
+}
+
+// WebSocket event handlers for real-time scanning
+function handleScanStarted(data) {
+    currentScanState.totalHosts = data.total_hosts || 0;
+    currentScanState.scannedHosts = 0;
+    
+    updateScanProgress();
+    addConsoleMessage(`Started scanning ${currentScanState.totalHosts} hosts`, 'info');
+}
+
+function handleScanProgress(data) {
+    currentScanState.scannedHosts = data.completed || 0;
+    currentScanState.currentTarget = data.current_target || '';
+    
+    updateScanProgress();
+}
+
+function handleScanHostUpdate(data) {
+    // Update the network table with new host data
+    if (currentTab === 'network') {
+        updateHostInTable(data);
+    }
+    
+    // Update threat intelligence and NetKB if vulnerabilities found
+    if (data.vulnerabilities && data.vulnerabilities.length > 0) {
+        // Trigger refresh of threat intelligence tab
+        if (currentTab === 'threat') {
+            loadThreatIntelData();
+        }
+        
+        // Update NetKB if applicable
+        if (currentTab === 'netkb') {
+            loadNetkbData();
+        }
+    }
+}
+
+function handleScanCompleted(data) {
+    addConsoleMessage(`Network scan completed. Found ${data.hosts_discovered || 0} hosts, ${data.vulnerabilities_found || 0} vulnerabilities`, 'success');
+    resetScanButtons();
+    
+    // Refresh all relevant tabs
+    if (currentTab === 'network') {
+        loadNetworkData();
+    }
+}
+
+function handleScanError(data) {
+    addConsoleMessage(`Scan error: ${data.error}`, 'error');
+    resetScanButtons();
+}
+
+function updateScanProgress() {
+    const progressText = document.getElementById('scan-progress-text');
+    const progressBar = document.getElementById('scan-progress-bar');
+    const currentTarget = document.getElementById('current-scan-target');
+    
+    const percentage = currentScanState.totalHosts > 0 ? 
+        (currentScanState.scannedHosts / currentScanState.totalHosts) * 100 : 0;
+    
+    if (progressText) {
+        progressText.textContent = `${currentScanState.scannedHosts}/${currentScanState.totalHosts} hosts`;
+    }
+    
+    if (progressBar) {
+        progressBar.style.width = `${percentage}%`;
+    }
+    
+    if (currentTarget) {
+        currentTarget.textContent = currentScanState.currentTarget ? 
+            `Currently scanning: ${currentScanState.currentTarget}` : '';
+    }
+}
+
+function updateHostInTable(hostData) {
+    const tableBody = document.getElementById('network-hosts-table');
+    if (!tableBody) return;
+    
+    // Remove "no data" row if it exists
+    const noDataRow = tableBody.querySelector('td[colspan="8"]');
+    if (noDataRow) {
+        noDataRow.parentElement.remove();
+    }
+    
+    // Find existing row or create new one
+    let row = tableBody.querySelector(`tr[data-ip="${hostData.ip}"]`);
+    if (!row) {
+        row = document.createElement('tr');
+        row.setAttribute('data-ip', hostData.ip);
+        row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors';
+        tableBody.appendChild(row);
+    }
+    
+    // Update row content
+    const status = hostData.status || 'Unknown';
+    const statusClass = status === 'Active' ? 'text-green-400' : 
+                       status === 'Inactive' ? 'text-red-400' : 'text-yellow-400';
+    
+    const ports = hostData.ports && hostData.ports.length > 0 ? 
+        hostData.ports.slice(0, 5).join(', ') + (hostData.ports.length > 5 ? '...' : '') : 'None';
+    
+    const vulnCount = hostData.vulnerabilities ? hostData.vulnerabilities.length : 0;
+    const vulnDisplay = vulnCount > 0 ? 
+        `<span class="text-red-400">${vulnCount} found</span>` : 
+        '<span class="text-gray-400">None</span>';
+    
+    row.innerHTML = `
+        <td class="py-3 px-4">
+            <span class="px-2 py-1 rounded text-xs ${statusClass}">${status}</span>
+        </td>
+        <td class="py-3 px-4 font-mono">${hostData.ip}</td>
+        <td class="py-3 px-4">${hostData.hostname || 'Unknown'}</td>
+        <td class="py-3 px-4 font-mono text-sm">${hostData.mac || 'Unknown'}</td>
+        <td class="py-3 px-4 text-sm">${ports}</td>
+        <td class="py-3 px-4">${vulnDisplay}</td>
+        <td class="py-3 px-4 text-sm">${new Date().toLocaleTimeString()}</td>
+        <td class="py-3 px-4">
+            <button onclick="scanSingleHost('${hostData.ip}')" 
+                    class="bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded text-xs">
+                Rescan
+            </button>
+        </td>
+    `;
+    
+    // Update host count
+    const hostCount = document.getElementById('host-count');
+    if (hostCount) {
+        const totalHosts = tableBody.querySelectorAll('tr[data-ip]').length;
+        hostCount.textContent = `${totalHosts} host${totalHosts !== 1 ? 's' : ''}`;
+    }
+}
+
+async function scanSingleHost(ip) {
+    try {
+        const response = await fetch('/api/scan/host', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ ip: ip })
+        });
+        
+        if (response.ok) {
+            addConsoleMessage(`Started scan of ${ip}`, 'info');
+        } else {
+            throw new Error('Failed to start host scan');
+        }
+    } catch (error) {
+        console.error('Error scanning host:', error);
+        addConsoleMessage(`Failed to scan ${ip}: ${error.message}`, 'error');
     }
 }
 

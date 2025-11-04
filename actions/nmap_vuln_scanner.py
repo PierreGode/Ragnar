@@ -389,16 +389,21 @@ class NmapVulnScanner:
         except Exception as e:
             logger.error(f"Error saving summary: {e}")
 
-    def force_scan_all_hosts(self):
+    def force_scan_all_hosts(self, real_time_callback=None):
         """
         Force scan all alive hosts in the NetKB regardless of previous scan status.
         This bypasses the retry delays and previous scan status checks.
+        
+        Args:
+            real_time_callback: Optional callback function for real-time updates
         """
         try:
             # Read current network data
             current_data = self.shared_data.read_data()
             if not current_data:
                 logger.warning("No network data available for vulnerability scanning")
+                if real_time_callback:
+                    real_time_callback("error", {"message": "No network data available"})
                 return 0
             
             scanned_count = 0
@@ -407,34 +412,159 @@ class NmapVulnScanner:
             logger.info(f"Force scanning {len(alive_hosts)} alive hosts for vulnerabilities...")
             nmap_logger.log_scan_operation(f"Force vulnerability scan", f"Scanning {len(alive_hosts)} hosts")
             
-            for row in alive_hosts:
+            # Send initial progress update
+            if real_time_callback:
+                real_time_callback("scan_started", {
+                    "total_hosts": len(alive_hosts),
+                    "scanned": 0,
+                    "current_ip": None
+                })
+            
+            for i, row in enumerate(alive_hosts):
                 ip = row.get("IPs", "")
                 if not ip:
                     continue
                     
                 try:
-                    logger.info(f"Force scanning {ip} for vulnerabilities...")
+                    # Send progress update
+                    if real_time_callback:
+                        real_time_callback("scan_progress", {
+                            "total_hosts": len(alive_hosts),
+                            "scanned": i,
+                            "current_ip": ip,
+                            "current_host": row.get("Hostnames", ""),
+                            "current_mac": row.get("MAC Address", ""),
+                            "progress_percent": int((i / len(alive_hosts)) * 100)
+                        })
+                    
+                    logger.info(f"Scanning {ip} ({i+1}/{len(alive_hosts)}) for vulnerabilities...")
                     result = self.execute(ip, row, "NmapVulnScanner")
+                    
                     if result == 'success':
                         scanned_count += 1
                         # Update the status to force a fresh timestamp
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         row["NmapVulnScanner"] = f'success_{timestamp}'
+                        
+                        # Send real-time update with scan results
+                        if real_time_callback:
+                            self._send_host_update(real_time_callback, ip, row, "success")
+                            
                     else:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         row["NmapVulnScanner"] = f'failed_{timestamp}'
                         
+                        # Send real-time update for failed scan
+                        if real_time_callback:
+                            self._send_host_update(real_time_callback, ip, row, "failed")
+                    
+                    # Save data after each scan to ensure progress is persisted
+                    self.shared_data.write_data(current_data)
+                        
                 except Exception as e:
                     logger.error(f"Error force scanning {ip}: {e}")
+                    if real_time_callback:
+                        real_time_callback("scan_error", {
+                            "ip": ip,
+                            "error": str(e)
+                        })
+            
+            # Send completion update
+            if real_time_callback:
+                real_time_callback("scan_completed", {
+                    "total_hosts": len(alive_hosts),
+                    "scanned": scanned_count,
+                    "success_count": scanned_count
+                })
                     
-            # Save updated data
-            self.shared_data.write_data(current_data)
             logger.info(f"Force scan completed. Successfully scanned {scanned_count} hosts.")
             return scanned_count
             
         except Exception as e:
             logger.error(f"Error in force_scan_all_hosts: {e}")
+            if real_time_callback:
+                real_time_callback("error", {"message": str(e)})
             return 0
+
+    def _send_host_update(self, callback, ip, row, status):
+        """Send real-time update for a scanned host"""
+        try:
+            # Get vulnerability data if available
+            vulnerabilities = []
+            if hasattr(self.shared_data, 'network_intelligence') and self.shared_data.network_intelligence:
+                # Get vulnerabilities from network intelligence
+                network_id = self.shared_data.network_intelligence.get_current_network_id()
+                if network_id in self.shared_data.network_intelligence.active_vulnerabilities:
+                    host_vulns = [v for v in self.shared_data.network_intelligence.active_vulnerabilities[network_id].values() 
+                                 if v.get('host') == ip]
+                    vulnerabilities = host_vulns
+            
+            host_data = {
+                "ip": ip,
+                "hostname": row.get("Hostnames", ""),
+                "mac": row.get("MAC Address", ""),
+                "ports": row.get("Ports", ""),
+                "alive": row.get("Alive", "0"),
+                "scan_status": status,
+                "vulnerabilities": vulnerabilities,
+                "last_scan": datetime.now().isoformat()
+            }
+            
+            callback("host_updated", host_data)
+            
+        except Exception as e:
+            logger.error(f"Error sending host update: {e}")
+
+    def scan_single_host_realtime(self, ip, hostname="", mac="", ports="", callback=None):
+        """
+        Scan a single host in real-time and send updates via callback
+        
+        Args:
+            ip: IP address to scan
+            hostname: Hostname of the target
+            mac: MAC address of the target
+            ports: Ports to scan (string or list)
+            callback: Function to call with real-time updates
+        """
+        try:
+            if callback:
+                callback("scan_started", {
+                    "ip": ip,
+                    "hostname": hostname,
+                    "mac": mac
+                })
+            
+            # Create a row object for compatibility
+            row = {
+                "IPs": ip,
+                "Hostnames": hostname,
+                "MAC Address": mac,
+                "Ports": ports,
+                "Alive": "1"
+            }
+            
+            # Execute the scan
+            result = self.execute(ip, row, "NmapVulnScanner")
+            
+            # Send completion update
+            if callback:
+                self._send_host_update(callback, ip, row, result)
+                callback("scan_completed", {
+                    "ip": ip,
+                    "status": result,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in single host scan for {ip}: {e}")
+            if callback:
+                callback("scan_error", {
+                    "ip": ip,
+                    "error": str(e)
+                })
+            return "failed"
 
 if __name__ == "__main__":
     shared_data = SharedData()
