@@ -389,6 +389,53 @@ class NmapVulnScanner:
         except Exception as e:
             logger.error(f"Error saving summary: {e}")
 
+    def force_scan_all_hosts(self):
+        """
+        Force scan all alive hosts in the NetKB regardless of previous scan status.
+        This bypasses the retry delays and previous scan status checks.
+        """
+        try:
+            # Read current network data
+            current_data = self.shared_data.read_data()
+            if not current_data:
+                logger.warning("No network data available for vulnerability scanning")
+                return 0
+            
+            scanned_count = 0
+            alive_hosts = [row for row in current_data if row.get("Alive") == '1']
+            
+            logger.info(f"Force scanning {len(alive_hosts)} alive hosts for vulnerabilities...")
+            nmap_logger.log_scan_operation(f"Force vulnerability scan", f"Scanning {len(alive_hosts)} hosts")
+            
+            for row in alive_hosts:
+                ip = row.get("IPs", "")
+                if not ip:
+                    continue
+                    
+                try:
+                    logger.info(f"Force scanning {ip} for vulnerabilities...")
+                    result = self.execute(ip, row, "NmapVulnScanner")
+                    if result == 'success':
+                        scanned_count += 1
+                        # Update the status to force a fresh timestamp
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        row["NmapVulnScanner"] = f'success_{timestamp}'
+                    else:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        row["NmapVulnScanner"] = f'failed_{timestamp}'
+                        
+                except Exception as e:
+                    logger.error(f"Error force scanning {ip}: {e}")
+                    
+            # Save updated data
+            self.shared_data.write_data(current_data)
+            logger.info(f"Force scan completed. Successfully scanned {scanned_count} hosts.")
+            return scanned_count
+            
+        except Exception as e:
+            logger.error(f"Error in force_scan_all_hosts: {e}")
+            return 0
+
 if __name__ == "__main__":
     shared_data = SharedData()
     try:
