@@ -280,6 +280,30 @@ class Display:
             logger.error(f"Error checking WiFi status: {e}")
             return False
 
+    def get_wifi_ip_last_octet(self):
+        """Get the last octet of the WiFi IP address (e.g., '.211' from '192.168.1.211')."""
+        try:
+            # Get IP address of wlan0 interface
+            result = subprocess.run(['ip', '-4', 'addr', 'show', 'wlan0'], 
+                                  capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                # Parse the output to find the IP address
+                for line in result.stdout.split('\n'):
+                    if 'inet ' in line:
+                        # Extract IP address (format: "inet 192.168.1.211/24 ...")
+                        parts = line.strip().split()
+                        if len(parts) >= 2:
+                            ip_with_mask = parts[1]
+                            ip_address = ip_with_mask.split('/')[0]
+                            # Get the last octet
+                            octets = ip_address.split('.')
+                            if len(octets) == 4:
+                                return f".{octets[3]}"
+            return None
+        except Exception as e:
+            logger.error(f"Error getting WiFi IP address: {e}")
+            return None
+
     def is_ap_mode_active(self):
         """Check if AP mode is currently active."""
         try:
@@ -439,7 +463,12 @@ class Display:
                         ap_text = f"AP:{self.shared_data.ap_client_count}"
                     draw.text((int(3 * self.scale_factor_x), int(3 * self.scale_factor_y)), ap_text, font=self.shared_data.font_arial9, fill=0)
                 elif self.shared_data.wifi_connected:
+                    # Show WiFi logo
                     image.paste(self.shared_data.wifi, (int(3 * self.scale_factor_x), int(3 * self.scale_factor_y)))
+                    # Show last octet of IP address below WiFi logo
+                    ip_last_octet = self.get_wifi_ip_last_octet()
+                    if ip_last_octet:
+                        draw.text((int(3 * self.scale_factor_x), int(13 * self.scale_factor_y)), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
                 # # # if self.shared_data.bluetooth_active:
                 # # #     image.paste(self.shared_data.bluetooth, (int(23 * self.scale_factor_x), int(4 * self.scale_factor_y)))
                 if self.shared_data.pan_connected:
