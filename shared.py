@@ -174,6 +174,7 @@ class SharedData:
             "nmap_scan_aggressivity": "-T4",
             "portstart": 1,
             "portend": 1000,
+            "default_vulnerability_ports": [22, 80, 443],
             
             "__title_timewaits__": "Time Wait Settings",
             "timewait_smb": 0,
