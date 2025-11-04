@@ -1898,6 +1898,171 @@ def get_activity_logs():
         logger.error(f"Error getting activity logs: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/debug/verbose-logs')
+def get_verbose_debug_logs():
+    """Get super verbose debugging logs for tracing data flow issues"""
+    try:
+        debug_info = {
+            'timestamp': datetime.now().isoformat(),
+            'system_state': {},
+            'data_sources': {},
+            'cache_state': {},
+            'sync_information': {},
+            'file_operations': {},
+            'api_traces': [],
+            'errors_and_warnings': []
+        }
+        
+        # === SYSTEM STATE DEBUGGING ===
+        debug_info['system_state'] = {
+            'shared_data_targetnbr': getattr(shared_data, 'targetnbr', 'NOT_SET'),
+            'shared_data_total_targetnbr': getattr(shared_data, 'total_targetnbr', 'NOT_SET'),
+            'shared_data_inactive_targetnbr': getattr(shared_data, 'inactive_targetnbr', 'NOT_SET'),
+            'shared_data_portnbr': getattr(shared_data, 'portnbr', 'NOT_SET'),
+            'shared_data_vulnnbr': getattr(shared_data, 'vulnnbr', 'NOT_SET'),
+            'shared_data_crednbr': getattr(shared_data, 'crednbr', 'NOT_SET'),
+            'shared_data_levelnbr': getattr(shared_data, 'levelnbr', 'NOT_SET'),
+            'shared_data_coinnbr': getattr(shared_data, 'coinnbr', 'NOT_SET'),
+        }
+        
+        # === DATA SOURCES DEBUGGING ===
+        try:
+            # WiFi network data
+            wifi_network_file = get_wifi_specific_network_file()
+            debug_info['data_sources']['wifi_network_file'] = {
+                'path': wifi_network_file,
+                'exists': os.path.exists(wifi_network_file),
+                'size_bytes': os.path.getsize(wifi_network_file) if os.path.exists(wifi_network_file) else 0,
+                'modified_time': datetime.fromtimestamp(os.path.getmtime(wifi_network_file)).isoformat() if os.path.exists(wifi_network_file) else 'N/A'
+            }
+            
+            # Read and analyze wifi network data
+            network_data = read_wifi_network_data()
+            debug_info['data_sources']['wifi_network_data'] = {
+                'total_entries': len(network_data),
+                'alive_entries': len([entry for entry in network_data if entry.get('Alive') in [True, 'True', '1', 1]]),
+                'sample_entries': network_data[:3] if network_data else [],
+                'all_alive_values': list(set([str(entry.get('Alive', 'MISSING')) for entry in network_data])),
+                'ip_list': [entry.get('IPs', 'NO_IP') for entry in network_data[:10]]
+            }
+            
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error reading WiFi network data: {str(e)}")
+        
+        try:
+            # NetKB data
+            netkb_data = shared_data.read_data()
+            debug_info['data_sources']['netkb_data'] = {
+                'total_entries': len(netkb_data),
+                'alive_entries': len([entry for entry in netkb_data if entry.get('Alive') in ['1', 1]]),
+                'sample_entries': netkb_data[:3] if netkb_data else [],
+                'all_alive_values': list(set([str(entry.get('Alive', 'MISSING')) for entry in netkb_data])),
+                'file_path': getattr(shared_data, 'network_file', 'NOT_SET')
+            }
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error reading NetKB data: {str(e)}")
+        
+        # === CACHE STATE DEBUGGING ===
+        debug_info['cache_state'] = {
+            'network_scan_cache_keys': list(network_scan_cache.keys()),
+            'arp_hosts_count': len(network_scan_cache.get('arp_hosts', {})),
+            'arp_hosts_sample': dict(list(network_scan_cache.get('arp_hosts', {}).items())[:5]),
+            'last_arp_scan_time': network_scan_cache.get('last_arp_scan', 'NEVER'),
+            'cache_size': len(str(network_scan_cache))
+        }
+        
+        # === SYNC INFORMATION ===
+        debug_info['sync_information'] = {
+            'last_sync_time': getattr(shared_data, 'last_sync_timestamp', 'NOT_SET'),
+            'sync_lock_acquired': sync_lock.locked() if sync_lock else 'NO_LOCK',
+            'sync_background_interval': SYNC_BACKGROUND_INTERVAL,
+            'current_time': time.time(),
+            'time_since_last_sync': time.time() - getattr(shared_data, 'last_sync_timestamp', 0) if hasattr(shared_data, 'last_sync_timestamp') else 'UNKNOWN'
+        }
+        
+        # === FILE OPERATIONS DEBUGGING ===
+        try:
+            # Check key files
+            important_files = [
+                shared_data.network_file if hasattr(shared_data, 'network_file') else 'NOT_SET',
+                shared_data.webconsolelog if hasattr(shared_data, 'webconsolelog') else 'NOT_SET',
+                get_wifi_specific_network_file()
+            ]
+            
+            debug_info['file_operations'] = {}
+            for file_path in important_files:
+                if file_path != 'NOT_SET' and file_path:
+                    try:
+                        debug_info['file_operations'][file_path] = {
+                            'exists': os.path.exists(file_path),
+                            'size': os.path.getsize(file_path) if os.path.exists(file_path) else 0,
+                            'readable': os.access(file_path, os.R_OK) if os.path.exists(file_path) else False,
+                            'writable': os.access(file_path, os.W_OK) if os.path.exists(file_path) else False,
+                            'modified': datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat() if os.path.exists(file_path) else 'N/A'
+                        }
+                    except Exception as e:
+                        debug_info['file_operations'][file_path] = {'error': str(e)}
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error checking file operations: {str(e)}")
+        
+        # === API TRACES ===
+        # Simulate the dashboard stats calculation to trace the issue
+        try:
+            debug_info['api_traces'].append("=== DASHBOARD STATS CALCULATION TRACE ===")
+            
+            # Step 1: Read network data
+            network_data = read_wifi_network_data()
+            debug_info['api_traces'].append(f"Step 1: Read {len(network_data)} entries from WiFi network file")
+            
+            # Step 2: Get ARP cache
+            recent_arp_data = network_scan_cache.get('arp_hosts', {})
+            debug_info['api_traces'].append(f"Step 2: Found {len(recent_arp_data)} entries in ARP cache")
+            
+            # Step 3: Process network data
+            processed_ips = set()
+            active_hosts_count = 0
+            
+            for i, entry in enumerate(network_data[:5]):  # Trace first 5 entries
+                ip = entry.get('IPs', '').strip()
+                alive_status = entry.get('Alive')
+                debug_info['api_traces'].append(f"Entry {i}: IP={ip}, Alive={alive_status} (type: {type(alive_status)})")
+                
+                if ip and ip not in processed_ips:
+                    processed_ips.add(ip)
+                    is_alive = alive_status in [True, 'True', '1', 1]
+                    debug_info['api_traces'].append(f"  -> IP {ip} processed, alive check: {is_alive}")
+                    if is_alive:
+                        active_hosts_count += 1
+                        debug_info['api_traces'].append(f"  -> Active count increased to {active_hosts_count}")
+            
+            # Step 4: Process ARP data
+            for ip in list(recent_arp_data.keys())[:5]:  # Trace first 5 ARP entries
+                if ip not in processed_ips:
+                    processed_ips.add(ip)
+                    active_hosts_count += 1
+                    debug_info['api_traces'].append(f"ARP: Added {ip} as active (count: {active_hosts_count})")
+            
+            debug_info['api_traces'].append(f"FINAL COUNTS: Active={active_hosts_count}, Total={len(processed_ips)}")
+            
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error in API trace: {str(e)}")
+        
+        # === RECENT LOG ENTRIES ===
+        try:
+            log_file = shared_data.webconsolelog if hasattr(shared_data, 'webconsolelog') else None
+            if log_file and os.path.exists(log_file):
+                with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    recent_lines = f.readlines()[-20:]  # Last 20 log lines
+                    debug_info['recent_logs'] = recent_lines
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error reading recent logs: {str(e)}")
+        
+        return jsonify(debug_info)
+        
+    except Exception as e:
+        logger.error(f"Error in verbose debug logs: {e}")
+        return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
+
 # ============================================================================
 # REAL-TIME SCANNING ENDPOINTS
 # ============================================================================
