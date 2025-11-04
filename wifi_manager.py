@@ -45,10 +45,11 @@ class WiFiManager:
         self.wifi_search_timeout = 120  # 2 minutes to search for WiFi
         self.ap_mode_timeout = 180  # 3 minutes in AP mode
         self.wifi_validation_interval = 180  # 3 minutes between WiFi validations
-        self.wifi_validation_retries = 3  # 3 validation attempts
+        self.wifi_validation_retries = 5  # 5 validation attempts (changed from 3)
         self.wifi_validation_retry_interval = 10  # 10 seconds between validation retries
         self.last_wifi_validation = None
         self.wifi_validation_failures = 0
+        self.consecutive_validation_cycles_failed = 0  # Track consecutive full validation cycle failures
         
         # Smart AP mode management
         self.ap_mode_start_time = None
@@ -327,8 +328,12 @@ class WiFiManager:
         """Search for and connect to known WiFi networks for 2 minutes"""
         self.logger.info("Endless Loop: Starting WiFi search phase (2 minutes)")
         search_start_time = time.time()
+        retry_count = 0
         
         while (time.time() - search_start_time) < self.wifi_search_timeout and not self.should_exit:
+            retry_count += 1
+            self.logger.info(f"Endless Loop: WiFi connection attempt #{retry_count}")
+            
             if self.try_connect_known_networks():
                 self.wifi_connected = True
                 self.shared_data.wifi_connected = True
@@ -336,6 +341,7 @@ class WiFiManager:
                 self.logger.info(f"Endless Loop: Successfully connected to {self.current_ssid}")
                 self._save_connection_state(self.current_ssid, True)
                 self.last_wifi_validation = time.time()
+                self.consecutive_validation_cycles_failed = 0  # Reset failure counter
                 return True
             
             # Try autoconnect networks too
@@ -346,13 +352,23 @@ class WiFiManager:
                 self.logger.info(f"Endless Loop: Successfully connected to autoconnect network {self.current_ssid}")
                 self._save_connection_state(self.current_ssid, True)
                 self.last_wifi_validation = time.time()
+                self.consecutive_validation_cycles_failed = 0  # Reset failure counter
                 return True
             
-            # Wait 10 seconds before next attempt
-            time.sleep(10)
+            # Calculate remaining time
+            elapsed = time.time() - search_start_time
+            remaining = self.wifi_search_timeout - elapsed
+            
+            if remaining > 10:
+                # Wait 10 seconds before next attempt
+                self.logger.info(f"Endless Loop: Retry in 10s (attempt {retry_count}, {remaining:.0f}s remaining)")
+                time.sleep(10)
+            elif remaining > 0:
+                # Less than 10 seconds remaining, wait the remainder
+                time.sleep(remaining)
         
         # No WiFi found after 2 minutes, switch to AP mode
-        self.logger.info("Endless Loop: No WiFi found after 2 minutes, switching to AP mode")
+        self.logger.info(f"Endless Loop: No WiFi found after {retry_count} attempts over 2 minutes, switching to AP mode")
         self._endless_loop_start_ap_mode()
         return False
 
@@ -439,8 +455,8 @@ class WiFiManager:
                 time.sleep(5)
 
     def _perform_wifi_validation(self):
-        """Perform 3 WiFi validation checks, 10 seconds apart"""
-        self.logger.info("Endless Loop: Starting WiFi validation (3 checks, 10s apart)")
+        """Perform 5 WiFi validation checks, 10 seconds apart. All 5 must fail to trigger AP mode."""
+        self.logger.info("Endless Loop: Starting WiFi validation (5 checks, 10s apart)")
         validation_failures = 0
         
         for i in range(self.wifi_validation_retries):
@@ -457,18 +473,21 @@ class WiFiManager:
         # Update validation time
         self.last_wifi_validation = time.time()
         
-        # If ALL validations failed, disconnect and start endless loop
+        # If ALL 5 validations failed, disconnect and start endless loop
         if validation_failures == self.wifi_validation_retries:
-            self.logger.warning("Endless Loop: All WiFi validations failed! Switching to AP mode")
+            self.consecutive_validation_cycles_failed += 1
+            self.logger.warning(f"Endless Loop: All {self.wifi_validation_retries} WiFi validations failed! Switching to AP mode")
             self.wifi_connected = False
             self.shared_data.wifi_connected = False
             self.disconnect_wifi()  # Disconnect from current network
             self._endless_loop_start_ap_mode()
         else:
+            # Reset consecutive failure counter if any check passed
+            self.consecutive_validation_cycles_failed = 0
             self.logger.info(f"Endless Loop: WiFi validation completed - {self.wifi_validation_retries - validation_failures}/{self.wifi_validation_retries} passed")
 
     def _handle_ap_mode_monitoring(self, current_time):
-        """Handle AP mode monitoring for endless loop"""
+        """Handle AP mode monitoring for endless loop with improved recovery"""
         if not self.ap_mode_active or not self.ap_mode_start_time:
             return
         
@@ -482,6 +501,23 @@ class WiFiManager:
             self.user_connected_to_ap = True
             self.ap_user_connection_time = current_time
             self.logger.info("Endless Loop: User connected to AP - monitoring user activity")
+        
+        # Periodically check for known WiFi networks while in AP mode (every 30 seconds)
+        # This allows recovery even when no user is connected
+        if ap_uptime > 0 and int(ap_uptime) % 30 == 0:
+            self.logger.info("Endless Loop: Checking for available known WiFi networks while in AP mode...")
+            if self._check_known_networks_available():
+                self.logger.info("Endless Loop: Known WiFi network detected! Attempting to connect...")
+                self.stop_ap_mode()
+                time.sleep(2)  # Brief pause for clean transition
+                if self._endless_loop_wifi_search():
+                    self.logger.info("Endless Loop: Successfully reconnected to known WiFi from AP mode")
+                    return
+                else:
+                    # If reconnection fails, restart AP mode
+                    self.logger.warning("Endless Loop: Failed to reconnect to WiFi, restarting AP mode")
+                    self._endless_loop_start_ap_mode()
+                    return
         
         # Handle user-connected AP mode
         if self.user_connected_to_ap and self.ap_user_connection_time:
@@ -511,6 +547,39 @@ class WiFiManager:
             self.logger.info("Endless Loop: AP mode timeout (3 minutes) - no users connected, switching to WiFi search")
             self.stop_ap_mode()
             self._endless_loop_wifi_search()
+
+    def _check_known_networks_available(self):
+        """Check if any known WiFi networks are currently available without disrupting AP mode"""
+        try:
+            if not self.known_networks:
+                return False
+            
+            # Try a quick scan using iwlist (less disruptive)
+            try:
+                result = subprocess.run(['sudo', 'iwlist', self.ap_interface, 'scan'], 
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    available_ssids = []
+                    for line in result.stdout.split('\n'):
+                        if 'ESSID:' in line:
+                            ssid = line.split('ESSID:')[1].strip('"')
+                            if ssid and ssid != '<hidden>':
+                                available_ssids.append(ssid)
+                    
+                    # Check if any known networks are available
+                    known_ssids = [net['ssid'] for net in self.known_networks]
+                    for known_ssid in known_ssids:
+                        if known_ssid in available_ssids:
+                            self.logger.info(f"Known network '{known_ssid}' detected while in AP mode")
+                            return True
+            except Exception as e:
+                self.logger.debug(f"iwlist scan failed: {e}")
+            
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error checking for known networks: {e}")
+            return False
 
     def exit_ap_mode_from_web(self):
         """Exit AP mode and start WiFi search (called from web interface)"""

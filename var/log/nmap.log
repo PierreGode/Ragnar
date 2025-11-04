@@ -1,0 +1,8 @@
+Starting Nmap 7.94SVN ( https://nmap.org ) at 2025-11-04 05:39 UTC
+Nmap scan report for localhost (127.0.0.1)
+Host is up (0.0000020s latency).
+Other addresses for localhost (not scanned): ::1
+All 1000 scanned ports on localhost (127.0.0.1) are in ignored states.
+Not shown: 1000 closed tcp ports (reset)
+
+Nmap done: 1 IP address (1 host up) scanned in 0.12 seconds

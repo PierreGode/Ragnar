@@ -56,10 +56,21 @@ class SMBConnector:
     """
     def __init__(self, shared_data):
         self.shared_data = shared_data
-        self.scan = pd.read_csv(shared_data.netkbfile)
+        
+        # Read CSV with error handling for empty files
+        try:
+            self.scan = pd.read_csv(shared_data.netkbfile)
+        except pd.errors.EmptyDataError:
+            logger.warning(f"NetKB file is empty or has no columns: {shared_data.netkbfile}")
+            self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+        except Exception as e:
+            logger.warning(f"Could not read NetKB file: {e}")
+            self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
 
         if "Ports" not in self.scan.columns:
             self.scan["Ports"] = None
+        # Ensure Ports column is string type before using .str accessor
+        self.scan["Ports"] = self.scan["Ports"].astype(str)
         self.scan = self.scan[self.scan["Ports"].str.contains("445", na=False)]
 
         self.users = open(shared_data.usersfile, "r").read().splitlines()

@@ -340,12 +340,22 @@ EOF
 configure_system_limits() {
     log "INFO" "Configuring system limits..."
 
-    # Configure /etc/security/limits.conf
+    # Configure /etc/security/limits.conf for file descriptors AND process limits
     cat >> /etc/security/limits.conf << EOF
+
+# Ragnar system limits - File descriptors
 * soft nofile 65535
 * hard nofile 65535
 root soft nofile 65535
 root hard nofile 65535
+
+# Ragnar system limits - Process limits (critical for threading and OpenBLAS)
+* soft nproc 4096
+* hard nproc 8192
+root soft nproc 4096
+root hard nproc 8192
+$ragnar_USER soft nproc 4096
+$ragnar_USER hard nproc 8192
 EOF
 
     # Configure systemd limits
@@ -353,17 +363,48 @@ EOF
     echo "DefaultLimitNOFILE=65535" >> /etc/systemd/system.conf
     sed -i '/^#DefaultLimitNOFILE=/d' /etc/systemd/user.conf
     echo "DefaultLimitNOFILE=65535" >> /etc/systemd/user.conf
+    
+    # Add process limit to systemd
+    sed -i '/^#DefaultLimitNPROC=/d' /etc/systemd/system.conf
+    echo "DefaultLimitNPROC=4096" >> /etc/systemd/system.conf
+    sed -i '/^#DefaultLimitNPROC=/d' /etc/systemd/user.conf
+    echo "DefaultLimitNPROC=4096" >> /etc/systemd/user.conf
 
-    # Create /etc/security/limits.d/90-nofile.conf
-    cat > /etc/security/limits.d/90-nofile.conf << EOF
+    # Create /etc/security/limits.d/90-ragnar-limits.conf with both file and process limits
+    cat > /etc/security/limits.d/90-ragnar-limits.conf << EOF
+# Ragnar System Limits Configuration
+# File descriptor limits
 root soft nofile 65535
 root hard nofile 65535
+$ragnar_USER soft nofile 65535
+$ragnar_USER hard nofile 65535
+
+# Process/thread limits (prevents OpenBLAS pthread_create errors)
+root soft nproc 4096
+root hard nproc 8192
+$ragnar_USER soft nproc 4096
+$ragnar_USER hard nproc 8192
 EOF
 
-    # Configure sysctl
-    echo "fs.file-max = 2097152" >> /etc/sysctl.conf
+    # Configure sysctl for file handles and process limits
+    cat >> /etc/sysctl.conf << EOF
+
+# Ragnar system tuning
+fs.file-max = 2097152
+kernel.pid_max = 32768
+kernel.threads-max = 65536
+EOF
     sysctl -p
 
+    # Ensure PAM limits are applied
+    if ! grep -q "session required pam_limits.so" /etc/pam.d/common-session; then
+        echo "session required pam_limits.so" >> /etc/pam.d/common-session
+    fi
+    if ! grep -q "session required pam_limits.so" /etc/pam.d/common-session-noninteractive; then
+        echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
+    fi
+
+    log "SUCCESS" "System limits configured: nofile=65535, nproc=4096/8192"
     check_success "System limits configuration completed"
 }
 
@@ -693,10 +734,6 @@ ExecStartPost=/bin/bash -c 'FILE_LIMIT=\$(ulimit -n); THRESHOLD=\$(( FILE_LIMIT 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    # Configure PAM
-    echo "session required pam_limits.so" >> /etc/pam.d/common-session
-    echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
 
     # Configure NetworkManager for WiFi management
     log "INFO" "Configuring NetworkManager for WiFi management..."

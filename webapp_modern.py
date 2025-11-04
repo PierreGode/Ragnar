@@ -846,6 +846,296 @@ def update_config():
         logger.error(f"Error updating config: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/config/hardware-profiles')
+def get_hardware_profiles():
+    """Get predefined hardware profiles for different Raspberry Pi models"""
+    try:
+        profiles = {
+            'pi_zero_2w': {
+                'name': 'Raspberry Pi Zero 2 W',
+                'ram': 512,
+                'description': '512MB RAM - Minimal resource usage',
+                'settings': {
+                    'scanner_max_threads': 3,
+                    'orchestrator_max_concurrent': 2,
+                    'nmap_scan_aggressivity': '-T2',
+                    'scan_interval': 300,
+                    'scan_vuln_interval': 600,
+                    'max_concurrent_scans': 1,
+                    'memory_warning_threshold': 70,
+                    'memory_critical_threshold': 85,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_4_1gb': {
+                'name': 'Raspberry Pi 4 (1GB)',
+                'ram': 1024,
+                'description': '1GB RAM - Light resource usage',
+                'settings': {
+                    'scanner_max_threads': 5,
+                    'orchestrator_max_concurrent': 3,
+                    'nmap_scan_aggressivity': '-T3',
+                    'scan_interval': 240,
+                    'scan_vuln_interval': 480,
+                    'max_concurrent_scans': 2,
+                    'memory_warning_threshold': 75,
+                    'memory_critical_threshold': 90,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_4_2gb': {
+                'name': 'Raspberry Pi 4 (2GB)',
+                'ram': 2048,
+                'description': '2GB RAM - Moderate resource usage',
+                'settings': {
+                    'scanner_max_threads': 10,
+                    'orchestrator_max_concurrent': 5,
+                    'nmap_scan_aggressivity': '-T3',
+                    'scan_interval': 180,
+                    'scan_vuln_interval': 360,
+                    'max_concurrent_scans': 3,
+                    'memory_warning_threshold': 75,
+                    'memory_critical_threshold': 90,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_4_4gb': {
+                'name': 'Raspberry Pi 4 (4GB)',
+                'ram': 4096,
+                'description': '4GB RAM - Standard resource usage',
+                'settings': {
+                    'scanner_max_threads': 20,
+                    'orchestrator_max_concurrent': 8,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 180,
+                    'scan_vuln_interval': 300,
+                    'max_concurrent_scans': 4,
+                    'memory_warning_threshold': 80,
+                    'memory_critical_threshold': 92,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_4_8gb': {
+                'name': 'Raspberry Pi 4 (8GB)',
+                'ram': 8192,
+                'description': '8GB RAM - High performance',
+                'settings': {
+                    'scanner_max_threads': 30,
+                    'orchestrator_max_concurrent': 10,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 120,
+                    'scan_vuln_interval': 240,
+                    'max_concurrent_scans': 6,
+                    'memory_warning_threshold': 80,
+                    'memory_critical_threshold': 92,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_5_2gb': {
+                'name': 'Raspberry Pi 5 (2GB)',
+                'ram': 2048,
+                'description': '2GB RAM - Fast CPU, moderate RAM',
+                'settings': {
+                    'scanner_max_threads': 15,
+                    'orchestrator_max_concurrent': 6,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 150,
+                    'scan_vuln_interval': 300,
+                    'max_concurrent_scans': 4,
+                    'memory_warning_threshold': 75,
+                    'memory_critical_threshold': 90,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_5_4gb': {
+                'name': 'Raspberry Pi 5 (4GB)',
+                'ram': 4096,
+                'description': '4GB RAM - High performance',
+                'settings': {
+                    'scanner_max_threads': 30,
+                    'orchestrator_max_concurrent': 12,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 120,
+                    'scan_vuln_interval': 240,
+                    'max_concurrent_scans': 6,
+                    'memory_warning_threshold': 80,
+                    'memory_critical_threshold': 92,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_5_8gb': {
+                'name': 'Raspberry Pi 5 (8GB)',
+                'ram': 8192,
+                'description': '8GB RAM - Maximum performance',
+                'settings': {
+                    'scanner_max_threads': 40,
+                    'orchestrator_max_concurrent': 15,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 90,
+                    'scan_vuln_interval': 180,
+                    'max_concurrent_scans': 8,
+                    'memory_warning_threshold': 82,
+                    'memory_critical_threshold': 93,
+                    'enable_resource_monitoring': True
+                }
+            },
+            'pi_5_16gb': {
+                'name': 'Raspberry Pi 5 (16GB)',
+                'ram': 16384,
+                'description': '16GB RAM - Extreme performance',
+                'settings': {
+                    'scanner_max_threads': 50,
+                    'orchestrator_max_concurrent': 20,
+                    'nmap_scan_aggressivity': '-T4',
+                    'scan_interval': 60,
+                    'scan_vuln_interval': 120,
+                    'max_concurrent_scans': 10,
+                    'memory_warning_threshold': 85,
+                    'memory_critical_threshold': 94,
+                    'enable_resource_monitoring': True
+                }
+            }
+        }
+        
+        return jsonify(profiles)
+    except Exception as e:
+        logger.error(f"Error getting hardware profiles: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/config/detect-hardware')
+def detect_hardware():
+    """Auto-detect current hardware and recommend profile"""
+    try:
+        import subprocess
+        import re
+        
+        # Detect Raspberry Pi model
+        model = 'unknown'
+        ram_mb = 0
+        recommended_profile = 'pi_zero_2w'  # Default to most conservative
+        
+        try:
+            # Read /proc/cpuinfo for model
+            with open('/proc/cpuinfo', 'r') as f:
+                cpuinfo = f.read()
+                
+            # Detect Pi model
+            if 'Raspberry Pi Zero 2' in cpuinfo:
+                model = 'Raspberry Pi Zero 2 W'
+                recommended_profile = 'pi_zero_2w'
+            elif 'Raspberry Pi 5' in cpuinfo:
+                model = 'Raspberry Pi 5'
+            elif 'Raspberry Pi 4' in cpuinfo:
+                model = 'Raspberry Pi 4'
+            elif 'Raspberry Pi 3' in cpuinfo:
+                model = 'Raspberry Pi 3'
+                
+        except Exception as e:
+            logger.warning(f"Could not read cpuinfo: {e}")
+        
+        # Detect RAM
+        if psutil_available:
+            try:
+                mem = psutil.virtual_memory()
+                ram_mb = int(mem.total / (1024 * 1024))
+                
+                # Match to closest profile
+                if model == 'Raspberry Pi Zero 2 W':
+                    recommended_profile = 'pi_zero_2w'
+                elif model == 'Raspberry Pi 5':
+                    if ram_mb >= 15000:
+                        recommended_profile = 'pi_5_16gb'
+                    elif ram_mb >= 7000:
+                        recommended_profile = 'pi_5_8gb'
+                    elif ram_mb >= 3500:
+                        recommended_profile = 'pi_5_4gb'
+                    else:
+                        recommended_profile = 'pi_5_2gb'
+                elif model == 'Raspberry Pi 4':
+                    if ram_mb >= 7000:
+                        recommended_profile = 'pi_4_8gb'
+                    elif ram_mb >= 3500:
+                        recommended_profile = 'pi_4_4gb'
+                    elif ram_mb >= 1800:
+                        recommended_profile = 'pi_4_2gb'
+                    else:
+                        recommended_profile = 'pi_4_1gb'
+                        
+            except Exception as e:
+                logger.warning(f"Could not detect RAM: {e}")
+        
+        # Get CPU count
+        cpu_count = psutil.cpu_count() if psutil_available else 1
+        
+        return jsonify({
+            'model': model,
+            'ram_mb': ram_mb,
+            'ram_gb': round(ram_mb / 1024, 1),
+            'cpu_count': cpu_count,
+            'recommended_profile': recommended_profile,
+            'detection_method': 'cpuinfo + psutil'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error detecting hardware: {e}")
+        return jsonify({
+            'model': 'unknown',
+            'ram_mb': 0,
+            'ram_gb': 0,
+            'cpu_count': 1,
+            'recommended_profile': 'pi_zero_2w',
+            'detection_method': 'fallback',
+            'error': str(e)
+        }), 200
+
+@app.route('/api/config/apply-profile', methods=['POST'])
+def apply_hardware_profile():
+    """Apply a hardware profile to the system configuration"""
+    try:
+        data = request.get_json()
+        profile_id = data.get('profile_id')
+        
+        if not profile_id:
+            return jsonify({'error': 'No profile_id provided'}), 400
+        
+        # Get the profile
+        profiles_response = get_hardware_profiles()
+        profiles = profiles_response.get_json()
+        
+        if profile_id not in profiles:
+            return jsonify({'error': f'Unknown profile: {profile_id}'}), 404
+        
+        profile = profiles[profile_id]
+        settings = profile['settings']
+        
+        # Update configuration with profile settings
+        for key, value in settings.items():
+            shared_data.config[key] = value
+        
+        # Also store the applied profile info
+        shared_data.config['hardware_profile'] = profile_id
+        shared_data.config['hardware_profile_name'] = profile['name']
+        shared_data.config['hardware_profile_applied'] = datetime.now().isoformat()
+        
+        # Save configuration
+        shared_data.save_config()
+        
+        logger.info(f"Applied hardware profile: {profile['name']} ({profile_id})")
+        
+        # Emit update to all connected clients
+        socketio.emit('config_updated', shared_data.config)
+        
+        return jsonify({
+            'success': True,
+            'message': f"Applied profile: {profile['name']}",
+            'profile': profile,
+            'restart_required': True
+        })
+        
+    except Exception as e:
+        logger.error(f"Error applying hardware profile: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 def load_persistent_network_data():
     """Load the WiFi-specific network data with fallbacks."""
@@ -1290,6 +1580,133 @@ def get_activity_logs():
     except Exception as e:
         logger.error(f"Error getting activity logs: {e}")
         return jsonify({'error': str(e)}), 500
+
+# ============================================================================
+# REAL-TIME SCANNING ENDPOINTS
+# ============================================================================
+
+@app.route('/api/scan/start-realtime', methods=['POST'])
+def start_realtime_scan():
+    """Start real-time vulnerability scanning"""
+    try:
+        data = request.get_json() or {}
+        scan_type = data.get('type', 'all')  # 'all', 'single', 'network'
+        target = data.get('target', None)
+        
+        if scan_type == 'single' and target:
+            # Start single host scan
+            def scan_callback(event_type, event_data):
+                socketio.emit('scan_update', {
+                    'type': event_type,
+                    'data': event_data
+                })
+            
+            # Run scan in background thread
+            def run_single_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    result = scanner.scan_single_host_realtime(
+                        ip=target.get('ip', ''),
+                        hostname=target.get('hostname', ''),
+                        mac=target.get('mac', ''),
+                        ports=target.get('ports', ''),
+                        callback=scan_callback
+                    )
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_single_scan, daemon=True).start()
+            
+        elif scan_type == 'all':
+            # Start full network scan
+            def scan_callback(event_type, event_data):
+                socketio.emit('scan_update', {
+                    'type': event_type,
+                    'data': event_data
+                })
+            
+            # Run scan in background thread
+            def run_full_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.force_scan_all_hosts(real_time_callback=scan_callback)
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_full_scan, daemon=True).start()
+        
+        return jsonify({'status': 'success', 'message': 'Scan started'})
+        
+    except Exception as e:
+        logger.error(f"Error starting real-time scan: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/scan/status')
+def get_scan_status():
+    """Get current scanning status"""
+    try:
+        # Check if any scans are running by looking at orchestrator status
+        scan_status = {
+            'scanning': False,
+            'current_target': None,
+            'progress': 0,
+            'total_hosts': 0,
+            'completed_hosts': 0
+        }
+        
+        # You can enhance this by checking actual scan status
+        # For now, return basic status
+        
+        return jsonify({'status': 'success', 'data': scan_status})
+        
+    except Exception as e:
+        logger.error(f"Error getting scan status: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/scan/host', methods=['POST'])
+def scan_single_host():
+    """Scan a single host"""
+    try:
+        data = request.get_json()
+        if not data or 'ip' not in data:
+            return jsonify({'status': 'error', 'message': 'IP address is required'}), 400
+        
+        ip = data['ip']
+        
+        # Validate IP address format
+        import ipaddress
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            return jsonify({'status': 'error', 'message': 'Invalid IP address format'}), 400
+        
+        # Start single host scan in background thread
+        def scan_host_background():
+            from actions.nmap_vuln_scanner import NmapVulnScanner
+            
+            scanner = NmapVulnScanner(shared_data)
+            
+            # Real-time callback for individual host scan
+            def single_host_callback(scan_data):
+                if scan_data.get('type') == 'host_update':
+                    socketio.emit('scan_host_update', scan_data)
+            
+            # Scan the host
+            scanner.scan_single_host_realtime(ip, callback=single_host_callback)
+        
+        # Start the scan in a background thread
+        import threading
+        scan_thread = threading.Thread(target=scan_host_background)
+        scan_thread.daemon = True
+        scan_thread.start()
+        
+        return jsonify({'status': 'success', 'message': f'Started scan of {ip}'})
+        
+    except Exception as e:
+        logger.error(f"Error scanning single host: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ============================================================================
 # SYSTEM MANAGEMENT ENDPOINTS
@@ -1938,6 +2355,47 @@ def exit_wifi_ap_mode():
         
     except Exception as e:
         logger.error(f"Error exiting Wi-Fi AP mode: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/wifi/force-recovery', methods=['POST'])
+def force_wifi_recovery():
+    """Force WiFi recovery - stop AP mode and aggressively search for known networks"""
+    try:
+        wifi_manager = getattr(shared_data, 'ragnar_instance', None)
+        if not wifi_manager or not hasattr(wifi_manager, 'wifi_manager'):
+            return jsonify({'error': 'Wi-Fi manager not available'}), 503
+        
+        wm = wifi_manager.wifi_manager
+        
+        # Stop AP mode if active
+        if wm.ap_mode_active:
+            logger.info("Force recovery: Stopping AP mode")
+            wm.stop_ap_mode()
+            time.sleep(2)  # Give time for AP to shut down properly
+        
+        # Force a WiFi search
+        logger.info("Force recovery: Starting aggressive WiFi search")
+        wm.wifi_validation_failures = 0
+        wm.consecutive_validation_cycles_failed = 0
+        
+        # Try to connect in a separate thread to avoid blocking
+        def attempt_reconnect():
+            success = wm._endless_loop_wifi_search()
+            if success:
+                logger.info("Force recovery: Successfully reconnected to WiFi")
+            else:
+                logger.warning("Force recovery: Failed to reconnect to WiFi")
+        
+        recovery_thread = threading.Thread(target=attempt_reconnect, daemon=True)
+        recovery_thread.start()
+        
+        return jsonify({
+            'success': True,
+            'message': 'WiFi recovery initiated - searching for known networks...'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error forcing WiFi recovery: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/epaper-display')
@@ -3204,6 +3662,64 @@ def handle_loot_request():
         emit('loot_update', loot)
     except Exception as e:
         logger.error(f"Error sending loot data: {e}")
+
+
+@socketio.on('start_scan')
+def handle_start_scan(data):
+    """Handle scan start request via WebSocket"""
+    try:
+        scan_type = data.get('type', 'all')
+        target = data.get('target', None)
+        
+        def scan_callback(event_type, event_data):
+            socketio.emit('scan_update', {
+                'type': event_type,
+                'data': event_data
+            })
+        
+        if scan_type == 'single' and target:
+            def run_single_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.scan_single_host_realtime(
+                        ip=target.get('ip', ''),
+                        hostname=target.get('hostname', ''),
+                        mac=target.get('mac', ''),
+                        ports=target.get('ports', ''),
+                        callback=scan_callback
+                    )
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_single_scan, daemon=True).start()
+        
+        elif scan_type == 'all':
+            def run_full_scan():
+                try:
+                    from actions.nmap_vuln_scanner import NmapVulnScanner
+                    scanner = NmapVulnScanner(shared_data)
+                    scanner.force_scan_all_hosts(real_time_callback=scan_callback)
+                except Exception as e:
+                    scan_callback('scan_error', {'error': str(e)})
+            
+            threading.Thread(target=run_full_scan, daemon=True).start()
+        
+        emit('scan_started', {'status': 'success', 'type': scan_type})
+        
+    except Exception as e:
+        logger.error(f"Error handling scan start: {e}")
+        emit('scan_error', {'error': str(e)})
+
+@socketio.on('stop_scan')
+def handle_stop_scan():
+    """Handle scan stop request via WebSocket"""
+    try:
+        # You can implement scan stopping logic here
+        emit('scan_stopped', {'status': 'success'})
+    except Exception as e:
+        logger.error(f"Error stopping scan: {e}")
+        emit('scan_error', {'error': str(e)})
 
 
 @socketio.on('request_activity')

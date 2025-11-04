@@ -42,6 +42,7 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
 - **System Attacks**: Conducts brute-force attacks on various services (FTP, SSH, SMB, RDP, Telnet, SQL).
 - **File Stealing**: Extracts data from vulnerable services.
 - **User Interface**: Real-time display on the e-Paper HAT and web interface for monitoring and interaction.
+- **Comprehensive Logging**: All nmap commands and their results are automatically logged to `/var/log/nmap.log` (or `var/log/nmap.log` in the project directory on Windows) for audit trails and troubleshooting.
 - complete new web interface
 - <p align="center">
   <img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />
