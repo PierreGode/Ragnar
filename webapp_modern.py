@@ -5808,6 +5808,31 @@ def get_dashboard_stats():
         # Ensure recent synchronization without blocking the request unnecessarily
         ensure_recent_sync()
 
+        # Get current live network data (same logic as stable endpoint)
+        network_data = read_wifi_network_data()
+        recent_arp_data = network_scan_cache.get('arp_hosts', {})
+        
+        # Count unique active hosts (same logic as stable network endpoint)
+        processed_ips = set()
+        active_hosts_count = 0
+        
+        # Count from network data (hosts with Alive status)
+        for entry in network_data:
+            ip = entry.get('IPs', '').strip()  # Note: field is 'IPs' not 'IP'
+            if ip and ip not in processed_ips:
+                processed_ips.add(ip)
+                # Check if host is alive (Alive field is 1 for active hosts)
+                if entry.get('Alive') in [True, 'True', '1', 1]:
+                    active_hosts_count += 1
+        
+        # Count from recent ARP discoveries (these are definitely active)
+        for ip in recent_arp_data.keys():
+            if ip not in processed_ips:
+                processed_ips.add(ip)
+                active_hosts_count += 1
+        
+        total_hosts_count = len(processed_ips)
+        
         current_time = time.time()
         last_sync_ts = getattr(shared_data, 'last_sync_timestamp', last_sync_time)
         last_sync_iso = None
@@ -5820,11 +5845,14 @@ def get_dashboard_stats():
             except Exception:
                 last_sync_iso = None
 
+        # Use calculated live network data for targets
+        inactive_targets = max(total_hosts_count - active_hosts_count, 0)
+
         stats = {
-            'target_count': safe_int(shared_data.targetnbr),
-            'active_target_count': safe_int(shared_data.targetnbr),
-            'inactive_target_count': safe_int(getattr(shared_data, 'inactive_targetnbr', 0)),
-            'total_target_count': safe_int(getattr(shared_data, 'total_targetnbr', shared_data.targetnbr)),
+            'target_count': active_hosts_count,
+            'active_target_count': active_hosts_count,
+            'inactive_target_count': inactive_targets,
+            'total_target_count': total_hosts_count,
             'new_target_count': safe_int(getattr(shared_data, 'new_targets', 0)),
             'lost_target_count': safe_int(getattr(shared_data, 'lost_targets', 0)),
             'new_target_ips': getattr(shared_data, 'new_target_ips', []),

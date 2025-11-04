@@ -468,7 +468,7 @@ class Display:
                     # Show last octet of IP address below WiFi logo
                     ip_last_octet = self.get_wifi_ip_last_octet()
                     if ip_last_octet:
-                        draw.text((int(8 * self.scale_factor_x), int(13 * self.scale_factor_y)), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
+                        draw.text((int(12 * self.scale_factor_x), int(10 * self.scale_factor_y)), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
                 # # # if self.shared_data.bluetooth_active:
                 # # #     image.paste(self.shared_data.bluetooth, (int(23 * self.scale_factor_x), int(4 * self.scale_factor_y)))
                 if self.shared_data.pan_connected:

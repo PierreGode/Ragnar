@@ -502,6 +502,13 @@ function setupAutoRefresh() {
         }
     }, 5000); // Every 5 seconds when on dashboard
     
+    // Set up dashboard stats auto-refresh
+    autoRefreshIntervals.dashboard = setInterval(() => {
+        if (currentTab === 'dashboard') {
+            loadDashboardData();
+        }
+    }, 15000); // Every 15 seconds when on dashboard
+    
     // Set up periodic update checking
     autoRefreshIntervals.updates = setInterval(() => {
         checkForUpdatesQuiet();
@@ -535,6 +542,9 @@ async function loadInitialData() {
         if (status) {
             updateDashboardStatus(status);
         }
+        
+        // Load dashboard statistics
+        await loadDashboardData();
         
         // Load initial console logs
         await loadConsoleLogs();
