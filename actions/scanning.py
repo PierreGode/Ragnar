@@ -463,60 +463,184 @@ class NetworkScanner:
             self.logger = logger
             self.source_csv_path = source_csv_path
             self.output_csv_path = output_csv_path
+            # Initialize default values in case of errors
+            self.df = pd.DataFrame()
+            self.total_open_ports = 0
+            self.alive_hosts_count = 0
+            self.all_known_hosts_count = 0
 
         def read_csv(self):
             """
             Reads the source CSV file into a DataFrame.
             """
             try:
+                if not os.path.exists(self.source_csv_path):
+                    self.logger.warning(f"Source CSV file does not exist: {self.source_csv_path}")
+                    # Create an empty DataFrame with expected columns
+                    self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+                    return
+                
+                # Check if file is empty
+                if os.path.getsize(self.source_csv_path) == 0:
+                    self.logger.warning(f"Source CSV file is empty: {self.source_csv_path}")
+                    self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+                    return
+                
                 self.df = pd.read_csv(self.source_csv_path)
+                
+                # Check if DataFrame is empty or missing required columns
+                if self.df.empty:
+                    self.logger.warning(f"Source CSV file has no data: {self.source_csv_path}")
+                    self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+                    return
+                
+                # Ensure required columns exist
+                required_columns = ['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive']
+                missing_columns = [col for col in required_columns if col not in self.df.columns]
+                if missing_columns:
+                    self.logger.warning(f"Missing columns in CSV: {missing_columns}")
+                    for col in missing_columns:
+                        self.df[col] = '' if col != 'Alive' else '0'
+                
+                self.logger.debug(f"Successfully read {len(self.df)} rows from {self.source_csv_path}")
+                
             except Exception as e:
                 self.logger.error(f"Error in read_csv: {e}")
+                # Create empty DataFrame on error
+                self.df = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
 
         def calculate_open_ports(self):
             """
             Calculates the total number of open ports for alive hosts.
             """
             try:
+                # Initialize default value
+                self.total_open_ports = 0
+                
+                # Check if DataFrame is valid and has required columns
+                if self.df.empty or 'Alive' not in self.df.columns or 'Ports' not in self.df.columns:
+                    self.logger.warning("DataFrame is empty or missing required columns for port calculation")
+                    return
+                
                 # The Alive column is persisted as strings ("1"/"0").
                 # Convert to string and compare against "1" to ensure
                 # compatibility with legacy data written by earlier
                 # components.
                 alive_mask = self.df['Alive'].astype(str).str.strip() == '1'
                 alive_df = self.df[alive_mask].copy()
+                
+                if alive_df.empty:
+                    self.logger.debug("No alive hosts found for port calculation")
+                    return
+                
                 alive_df.loc[:, 'Ports'] = alive_df['Ports'].fillna('')
                 alive_df.loc[:, 'Port Count'] = alive_df['Ports'].apply(lambda x: len(x.split(';')) if x else 0)
                 self.total_open_ports = alive_df['Port Count'].sum()
+                
+                self.logger.debug(f"Calculated total open ports: {self.total_open_ports}")
+                
             except Exception as e:
                 self.logger.error(f"Error in calculate_open_ports: {e}")
+                self.total_open_ports = 0
 
         def calculate_hosts_counts(self):
             """
             Calculates the total and alive host counts.
             """
             try:
-                # self.all_known_hosts_count = self.df.shape[0] 
+                # Initialize default values
+                self.all_known_hosts_count = 0
+                self.alive_hosts_count = 0
+                
+                # Check if DataFrame is valid and has required columns
+                if self.df.empty or 'MAC Address' not in self.df.columns or 'Alive' not in self.df.columns:
+                    self.logger.warning("DataFrame is empty or missing required columns for host count calculation")
+                    return
+                
+                # Count all hosts (excluding STANDALONE entries)
                 self.all_known_hosts_count = self.df[self.df['MAC Address'] != 'STANDALONE'].shape[0]
+                
+                # Count alive hosts
                 alive_mask = self.df['Alive'].astype(str).str.strip() == '1'
                 self.alive_hosts_count = self.df[alive_mask].shape[0]
+                
+                self.logger.debug(f"Host counts - Total: {self.all_known_hosts_count}, Alive: {self.alive_hosts_count}")
+                
             except Exception as e:
                 self.logger.error(f"Error in calculate_hosts_counts: {e}")
+                self.all_known_hosts_count = 0
+                self.alive_hosts_count = 0
 
         def save_results(self):
             """
             Saves the calculated results to the output CSV file.
             """
             try:
-                if os.path.exists(self.output_csv_path):
-                    results_df = pd.read_csv(self.output_csv_path)
-                    results_df.loc[0, 'Total Open Ports'] = self.total_open_ports
-                    results_df.loc[0, 'Alive Hosts Count'] = self.alive_hosts_count
-                    results_df.loc[0, 'All Known Hosts Count'] = self.all_known_hosts_count
+                # Ensure all required attributes exist with default values
+                if not hasattr(self, 'total_open_ports'):
+                    self.total_open_ports = 0
+                if not hasattr(self, 'alive_hosts_count'):
+                    self.alive_hosts_count = 0
+                if not hasattr(self, 'all_known_hosts_count'):
+                    self.all_known_hosts_count = 0
+                
+                if not os.path.exists(self.output_csv_path):
+                    self.logger.warning(f"Output CSV file does not exist: {self.output_csv_path}")
+                    # Create a basic results file if it doesn't exist
+                    results_df = pd.DataFrame({
+                        'Total Open Ports': [self.total_open_ports],
+                        'Alive Hosts Count': [self.alive_hosts_count],
+                        'All Known Hosts Count': [self.all_known_hosts_count]
+                    })
                     results_df.to_csv(self.output_csv_path, index=False)
+                    self.logger.info(f"Created new results file: {self.output_csv_path}")
+                    return
+                
+                # Check if output file is empty
+                if os.path.getsize(self.output_csv_path) == 0:
+                    self.logger.warning(f"Output CSV file is empty: {self.output_csv_path}")
+                    results_df = pd.DataFrame({
+                        'Total Open Ports': [self.total_open_ports],
+                        'Alive Hosts Count': [self.alive_hosts_count],
+                        'All Known Hosts Count': [self.all_known_hosts_count]
+                    })
+                    results_df.to_csv(self.output_csv_path, index=False)
+                    return
+                
+                results_df = pd.read_csv(self.output_csv_path)
+                
+                # Ensure at least one row exists
+                if results_df.empty:
+                    results_df = pd.DataFrame({
+                        'Total Open Ports': [self.total_open_ports],
+                        'Alive Hosts Count': [self.alive_hosts_count],
+                        'All Known Hosts Count': [self.all_known_hosts_count]
+                    })
                 else:
-                    self.logger.error(f"File {self.output_csv_path} does not exist.")
+                    # Update existing data
+                    if len(results_df) == 0:
+                        results_df.loc[0] = [self.total_open_ports, self.alive_hosts_count, self.all_known_hosts_count]
+                    else:
+                        results_df.loc[0, 'Total Open Ports'] = self.total_open_ports
+                        results_df.loc[0, 'Alive Hosts Count'] = self.alive_hosts_count
+                        results_df.loc[0, 'All Known Hosts Count'] = self.all_known_hosts_count
+                
+                results_df.to_csv(self.output_csv_path, index=False)
+                self.logger.debug(f"Successfully saved results to {self.output_csv_path}")
+                
             except Exception as e:
                 self.logger.error(f"Error in save_results: {e}")
+                # Try to create a minimal results file as fallback
+                try:
+                    fallback_df = pd.DataFrame({
+                        'Total Open Ports': [getattr(self, 'total_open_ports', 0)],
+                        'Alive Hosts Count': [getattr(self, 'alive_hosts_count', 0)],
+                        'All Known Hosts Count': [getattr(self, 'all_known_hosts_count', 0)]
+                    })
+                    fallback_df.to_csv(self.output_csv_path, index=False)
+                    self.logger.info(f"Created fallback results file: {self.output_csv_path}")
+                except Exception as fallback_error:
+                    self.logger.error(f"Failed to create fallback results file: {fallback_error}")
 
         def update_livestatus(self):
             """
