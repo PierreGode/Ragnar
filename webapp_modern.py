@@ -6055,8 +6055,11 @@ def get_dashboard_stats():
             ip = entry.get('IPs', '').strip()  # Note: field is 'IPs' not 'IP'
             if ip and ip not in processed_ips:
                 processed_ips.add(ip)
-                # Check if host is alive (Alive field is 1 for active hosts)
-                if entry.get('Alive') in [True, 'True', '1', 1]:
+                # Check if host is alive - prioritize ARP cache over file data
+                is_alive_in_file = entry.get('Alive') in [True, 'True', '1', 1]
+                is_alive_in_arp = ip in recent_arp_data
+                is_alive = is_alive_in_file or is_alive_in_arp  # ARP data overrides file data
+                if is_alive:
                     active_hosts_count += 1
         
         # Count from recent ARP discoveries (these are definitely active)
