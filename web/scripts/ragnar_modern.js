@@ -4214,6 +4214,39 @@ async function loadThreatIntelData() {
     }
 }
 
+// Trigger manual vulnerability scan
+async function triggerManualVulnScan() {
+    try {
+        addConsoleMessage('Starting vulnerability scan on all discovered hosts...', 'info');
+        const response = await fetchAPI('/api/manual/scan/vulnerability', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                target: 'all'
+            })
+        });
+        
+        if (response.success) {
+            addConsoleMessage('Vulnerability scan initiated successfully', 'success');
+            showNotification('Vulnerability scan started. Check back in a few minutes for results.', 'success');
+            
+            // Refresh threat intel data in 30 seconds to check for results
+            setTimeout(() => {
+                loadThreatIntelData();
+            }, 30000);
+        } else {
+            addConsoleMessage('Failed to start vulnerability scan', 'error');
+            showNotification('Failed to start vulnerability scan', 'error');
+        }
+    } catch (error) {
+        console.error('Error triggering vulnerability scan:', error);
+        addConsoleMessage('Error starting vulnerability scan: ' + error.message, 'error');
+        showNotification('Error starting vulnerability scan', 'error');
+    }
+}
+
 // Refresh threat intelligence data
 function refreshThreatIntel() {
     showNotification('Refreshing threat intelligence...', 'info');
@@ -4260,8 +4293,24 @@ function updateEnrichedFindingsTable(findings) {
     if (!findings || findings.length === 0) {
         tableBody.innerHTML = `
             <tr>
-                <td colspan="6" class="text-center py-8 text-slate-400">
-                    No threats detected. Run network scans to generate threat intelligence data.
+                <td colspan="6" class="text-center py-12 text-slate-400">
+                    <div class="space-y-4">
+                        <div class="text-xl">🛡️ No Threat Intelligence Findings</div>
+                        <div class="text-sm max-w-md mx-auto space-y-2">
+                            <p>Threat intelligence enrichment requires vulnerability discoveries first.</p>
+                            <p class="text-cyan-400">📋 Steps to generate threat intelligence:</p>
+                            <ol class="text-left text-xs space-y-1 mt-2">
+                                <li>1. Wait for network discovery to complete (${document.getElementById('target-count')?.textContent || '0'} hosts found)</li>
+                                <li>2. Run vulnerability scans on discovered hosts</li>
+                                <li>3. Threat intelligence will enrich discovered vulnerabilities</li>
+                            </ol>
+                            <div class="mt-4">
+                                <button onclick="triggerManualVulnScan()" class="bg-cyan-600 hover:bg-cyan-700 px-4 py-2 rounded text-sm transition-colors">
+                                    🚀 Start Vulnerability Scan
+                                </button>
+                            </div>
+                        </div>
+                    </div>
                 </td>
             </tr>
         `;
@@ -4306,8 +4355,11 @@ function updateTopThreatsList(threats, lastUpdated) {
 
     if (!threats || threats.length === 0) {
         listElement.innerHTML = `
-            <li class="text-slate-400">
-                No threats detected. You're all clear!
+            <li class="text-slate-400 text-center py-4">
+                <div class="space-y-2">
+                    <div>🛡️ No active threats detected</div>
+                    <div class="text-xs">Threat intelligence will appear here when vulnerabilities are discovered and enriched</div>
+                </div>
             </li>
         `;
         return;
