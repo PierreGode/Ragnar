@@ -179,29 +179,44 @@ class Display:
                 
                 with open(self.shared_data.livestatusfile, 'r') as file:
                     livestatus_df = pd.read_csv(file)
-                    
+
                     # Check if DataFrame is empty or has the expected columns
                     if livestatus_df.empty:
                         logger.warning("Livestatus file is empty, skipping data update")
                         return
-                    
-                    # Check if required columns exist
+
+                    # Ensure required columns exist; add them with default 0 if missing
                     required_columns = ['Total Open Ports', 'Alive Hosts Count', 'All Known Hosts Count', 'Vulnerabilities Count']
-                    missing_columns = [col for col in required_columns if col not in livestatus_df.columns]
-                    if missing_columns:
-                        logger.error(f"Missing columns in livestatus file: {missing_columns}")
-                        logger.debug(f"Available columns: {list(livestatus_df.columns)}")
-                        return
-                    
+                    for column in required_columns:
+                        if column not in livestatus_df.columns:
+                            logger.warning(f"Column '{column}' missing in livestatus file, initializing with 0")
+                            livestatus_df[column] = 0
+
                     # Check if there's at least one row
                     if len(livestatus_df) == 0:
                         logger.warning("Livestatus file has no data rows, skipping data update")
                         return
-                    
-                    self.shared_data.portnbr = livestatus_df['Total Open Ports'].iloc[0]
-                    self.shared_data.targetnbr = livestatus_df['Alive Hosts Count'].iloc[0]
-                    self.shared_data.networkkbnbr = livestatus_df['All Known Hosts Count'].iloc[0]
-                    self.shared_data.vulnnbr = livestatus_df['Vulnerabilities Count'].iloc[0]
+
+                    def _safe_int_from_df(df, column_name):
+                        try:
+                            value = pd.to_numeric(df[column_name].iloc[0], errors='coerce')
+                            if pd.isna(value):
+                                return 0
+                            return int(value)
+                        except Exception as e:
+                            logger.debug(f"Could not parse column '{column_name}' from livestatus file: {e}")
+                            return 0
+
+                    self.shared_data.portnbr = _safe_int_from_df(livestatus_df, 'Total Open Ports')
+                    self.shared_data.targetnbr = _safe_int_from_df(livestatus_df, 'Alive Hosts Count')
+                    self.shared_data.networkkbnbr = _safe_int_from_df(livestatus_df, 'All Known Hosts Count')
+                    self.shared_data.vulnnbr = _safe_int_from_df(livestatus_df, 'Vulnerabilities Count')
+
+                    # Persist any columns we added so other components stay in sync
+                    try:
+                        livestatus_df.to_csv(self.shared_data.livestatusfile, index=False)
+                    except Exception as e:
+                        logger.debug(f"Unable to persist normalized livestatus columns: {e}")
 
                 crackedpw_files = glob.glob(f"{self.shared_data.crackedpwddir}/*.csv")
 

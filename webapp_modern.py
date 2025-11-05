@@ -559,6 +559,7 @@ def sync_all_counts():
                     if not df.empty:
                         df.loc[0, 'Alive Hosts Count'] = safe_int(shared_data.targetnbr)
                         df.loc[0, 'Total Open Ports'] = safe_int(shared_data.portnbr)
+                        df.loc[0, 'All Known Hosts Count'] = safe_int(getattr(shared_data, 'total_targetnbr', shared_data.targetnbr))
                         df.loc[0, 'Vulnerabilities Count'] = safe_int(shared_data.vulnnbr)
                         df.to_csv(shared_data.livestatusfile, index=False)
                         logger.debug("Updated livestatus file with synchronized counts")
