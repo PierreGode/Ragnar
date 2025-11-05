@@ -449,12 +449,41 @@ class Display:
                 except:
                     return "AP: Active"
             
-            # Check if Wi-Fi is connected
-            result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                ssid = result.stdout.strip()
-                return f"WiFi: {ssid}"
+            # Check if Wi-Fi is connected using robust detection methods
+            # Method 1: Try iwgetid first (get SSID if available)
+            try:
+                result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=2)
+                if result.returncode == 0 and result.stdout.strip():
+                    ssid = result.stdout.strip()
+                    logger.debug(f"[STATUS] WiFi connected via iwgetid: SSID={ssid}")
+                    return f"WiFi: {ssid}"
+            except:
+                pass
             
+            # Method 2: Check if we have network connectivity (WiFi without SSID)
+            try:
+                result = subprocess.run(['ip', 'route', 'get', '8.8.8.8'], 
+                                      capture_output=True, text=True, timeout=2)
+                if result.returncode == 0 and 'via' in result.stdout:
+                    logger.debug(f"[STATUS] WiFi connected via ip route check")
+                    return "WiFi: Connected"
+            except:
+                pass
+            
+            # Method 3: Check for wlan interface with IP
+            try:
+                result = subprocess.run(['ip', 'addr', 'show'], 
+                                      capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    # Look for wlan interfaces with inet addresses
+                    for line in result.stdout.split('\n'):
+                        if ('wlan' in line and 'state UP' in line) or ('inet ' in line and 'scope global' in line and ('wlan' in result.stdout)):
+                            logger.debug(f"[STATUS] WiFi connected via interface check")
+                            return "WiFi: Connected"
+            except:
+                pass
+            
+            logger.debug(f"[STATUS] WiFi not detected by any method")
             return "WiFi: Disconnected"
             
         except Exception as e:
