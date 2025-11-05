@@ -992,7 +992,7 @@ def update_wifi_network_data():
         # Update alive status based on current ARP cache data with robust connectivity tracking
         current_time = datetime.now().isoformat()
         arp_hosts = network_scan_cache.get('arp_hosts', {})
-        MAX_FAILED_PINGS = shared_data.config.get('network_max_failed_pings', 5)  # Configurable value
+        MAX_FAILED_PINGS = shared_data.config.get('network_max_failed_pings', 15)  # Changed to 15 for more stability
         
         for ip, data in existing_data.items():
             # Initialize failure counter if not present
