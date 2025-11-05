@@ -1664,13 +1664,17 @@ def get_stable_network_data():
         # Sort by IP address for consistent display
         enriched_hosts.sort(key=lambda x: tuple(map(int, x['ip'].split('.'))))
         
-        return jsonify({
+        response = jsonify({
             'success': True,
             'hosts': enriched_hosts,
             'count': len(enriched_hosts),
             'timestamp': datetime.now().isoformat(),
             'source': 'stable_aggregated'
         })
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
         
     except Exception as e:
         logger.error(f"Error getting stable network data: {e}")
@@ -1686,7 +1690,11 @@ def get_network():
     """Get network scan data from the persistent WiFi-specific file."""
     try:
         network_data = load_persistent_network_data()
-        return jsonify(network_data)
+        response = jsonify(network_data)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
 
     except Exception as e:
         logger.error(f"Error getting network data: {e}")
@@ -2252,7 +2260,15 @@ def get_verbose_debug_logs():
         except Exception as e:
             debug_info['errors_and_warnings'].append(f"Error checking threat intelligence: {str(e)}")
         
-        return jsonify(debug_info)
+        # Force fresh timestamp and prevent caching
+        debug_info['timestamp'] = datetime.now().isoformat()
+        debug_info['generated_at'] = time.time()
+        
+        response = jsonify(debug_info)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
         
     except Exception as e:
         logger.error(f"Error in verbose debug logs: {e}")
@@ -6344,7 +6360,11 @@ def get_dashboard_stats():
             'last_sync_age_seconds': last_sync_age
         }
 
-        return jsonify(stats)
+        response = jsonify(stats)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
     except Exception as e:
         logger.error(f"Error getting dashboard stats: {e}")
         return jsonify({'error': str(e)}), 500
