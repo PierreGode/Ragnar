@@ -392,19 +392,14 @@ def sync_all_counts():
             # Update WiFi-specific network data from scan results
             aggregated_network_stats = update_wifi_network_data()
             
-            # IMPORTANT: Merge ARP scan results to get LIVE host count
+            # IMPORTANT: Use ARP scan results to supplement but not override robust failure tracking
             arp_hosts = network_scan_cache.get('arp_hosts', {})
             if arp_hosts:
-                logger.debug(f"Merging {len(arp_hosts)} hosts from ARP cache into sync")
-                # Override aggregated stats with ARP data if available
-                if aggregated_network_stats:
-                    # Keep the total count, but update active count from ARP
-                    aggregated_network_stats['host_count'] = len(arp_hosts)
-                    aggregated_network_stats['inactive_host_count'] = max(
-                        aggregated_network_stats.get('total_host_count', 0) - len(arp_hosts), 0
-                    )
-                else:
-                    # Create stats from ARP data
+                logger.debug(f"Found {len(arp_hosts)} hosts in ARP cache for supplementation")
+                # Don't override aggregated_network_stats if it exists (it has robust failure tracking)
+                # Instead, use ARP data to supplement the count only if aggregated_network_stats is missing
+                if not aggregated_network_stats:
+                    # Create minimal stats from ARP data only if no other data is available
                     aggregated_network_stats = {
                         'host_count': len(arp_hosts),
                         'total_host_count': len(arp_hosts),
@@ -412,6 +407,12 @@ def sync_all_counts():
                         'port_count': 0,
                         'hosts': {}
                     }
+                    logger.debug(f"Created stats from ARP data only (no network stats available): {len(arp_hosts)} hosts")
+                else:
+                    # Keep the robust failure tracking data intact, don't override with ARP count
+                    logger.debug(f"Keeping existing network stats with robust failure tracking instead of overriding with ARP count")
+            else:
+                logger.debug("No ARP hosts available for supplementation")
 
             # Sync target and port counts from scan results
             scan_results_dir = getattr(shared_data, 'scan_results_dir', os.path.join('data', 'output', 'scan_results'))
@@ -690,7 +691,13 @@ def sync_all_counts():
             except Exception as e:
                 logger.warning(f"Could not update gamification stats: {e}")
 
-            logger.debug(f"Completed sync_all_counts() - Targets: {shared_data.targetnbr}, Ports: {shared_data.portnbr}, Vulns: {shared_data.vulnnbr}, Creds: {shared_data.crednbr}, Level: {shared_data.levelnbr}, Coins: {shared_data.coinnbr}")
+            logger.debug(f"Completed sync_all_counts() - Active Targets: {shared_data.targetnbr}, Total Targets: {shared_data.total_targetnbr}, Inactive Targets: {shared_data.inactive_targetnbr}, Ports: {shared_data.portnbr}, Vulns: {shared_data.vulnnbr}, Creds: {shared_data.crednbr}, Level: {shared_data.levelnbr}, Coins: {shared_data.coinnbr}")
+            
+            # Consistency check to prevent flickering
+            if shared_data.targetnbr > shared_data.total_targetnbr:
+                logger.warning(f"CONSISTENCY WARNING: Active targets ({shared_data.targetnbr}) > Total targets ({shared_data.total_targetnbr}). Adjusting total.")
+                shared_data.total_targetnbr = shared_data.targetnbr
+                shared_data.inactive_targetnbr = 0
 
         except Exception as e:
             logger.error(f"Error synchronizing all counts: {e}")
@@ -6822,70 +6829,16 @@ def format_uptime(seconds):
 
 @app.route('/api/dashboard/stats')
 def get_dashboard_stats():
-    """Get dashboard statistics including counts from various sources"""
+    """Get dashboard statistics using synchronized data from shared_data to ensure consistency"""
     try:
         # Check for network switches and clear old data if needed
         check_and_handle_network_switch()
         
-        # LOG MESSAGE TO VERIFY NEW CODE IS RUNNING
-        logger.info("[ROBUST TRACKING TEST] Dashboard stats called with new robust tracking logic")
-        
         # Ensure recent synchronization without blocking the request unnecessarily
         ensure_recent_sync()
-
-        # Get current live network data with robust failure tracking
-        network_data = read_wifi_network_data()
-        recent_arp_data = network_scan_cache.get('arp_hosts', {})
-        max_failed_pings = shared_data.config.get('network_max_failed_pings', 5)
         
-        # Count unique hosts using robust failure tracking
-        processed_ips = set()
-        active_hosts_count = 0
-        total_hosts_count = 0
-        
-        # Count from network data using robust failure tracking (PROPER 5-ping rule)
-        for entry in network_data:
-            ip = entry.get('IPs', '').strip()
-            if ip and ip not in processed_ips:
-                processed_ips.add(ip)
-                total_hosts_count += 1
-                
-                # Get failure tracking data
-                failed_ping_count = entry.get('FailedPingCount', 0)
-                if isinstance(failed_ping_count, str) and failed_ping_count.isdigit():
-                    failed_ping_count = int(failed_ping_count)
-                elif not isinstance(failed_ping_count, int):
-                    failed_ping_count = 0
-                
-                # Get alive status
-                alive_status = entry.get('Alive', 0)
-                if isinstance(alive_status, str) and alive_status.isdigit():
-                    alive_status = int(alive_status)
-                elif not isinstance(alive_status, int):
-                    alive_status = 0
-                
-                # TARGET IS ACTIVE IF:
-                # 1. It has fewer than max_failed_pings consecutive failures (regardless of current ping result)
-                # 2. OR it's currently responding (Alive=1) even if it had some failures
-                is_currently_alive = alive_status == 1
-                has_not_exceeded_failure_limit = failed_ping_count < max_failed_pings
-                
-                if has_not_exceeded_failure_limit or is_currently_alive:
-                    active_hosts_count += 1
-                    logger.debug(f"[ROBUST COUNT] {ip}: ACTIVE (failures={failed_ping_count}, alive={is_currently_alive})")
-                else:
-                    logger.debug(f"[ROBUST COUNT] {ip}: INACTIVE (failures={failed_ping_count}, alive={is_currently_alive})")
-        
-        # Count from recent ARP discoveries that aren't in the file yet (these are always active)
-        for ip in recent_arp_data.keys():
-            if ip not in processed_ips:
-                processed_ips.add(ip)
-                total_hosts_count += 1
-                active_hosts_count += 1
-                logger.debug(f"[ROBUST COUNT] {ip}: NEW ARP DISCOVERY (always active)")
-
-        total_hosts_count = len(processed_ips)
-        
+        # Use the synchronized data from shared_data instead of re-calculating
+        # This prevents inconsistencies between different counting methods
         current_time = time.time()
         last_sync_ts = getattr(shared_data, 'last_sync_timestamp', last_sync_time)
         last_sync_iso = None
@@ -6898,14 +6851,26 @@ def get_dashboard_stats():
             except Exception:
                 last_sync_iso = None
 
-        # Use calculated live network data for targets
-        inactive_targets = max(total_hosts_count - active_hosts_count, 0)
+        # Use the already-synchronized counts from shared_data to ensure consistency
+        # across all endpoints (prevents the flickering between different counts)
+        active_target_count = safe_int(shared_data.targetnbr)
+        total_target_count = safe_int(shared_data.total_targetnbr)
+        inactive_target_count = safe_int(shared_data.inactive_targetnbr)
+        
+        # If we don't have proper total/inactive counts, calculate them from active count
+        if total_target_count == 0 and active_target_count > 0:
+            total_target_count = active_target_count
+            inactive_target_count = 0
+        elif inactive_target_count == 0 and total_target_count > active_target_count:
+            inactive_target_count = total_target_count - active_target_count
+
+        logger.debug(f"[DASHBOARD STATS] Using synchronized counts: active={active_target_count}, total={total_target_count}, inactive={inactive_target_count}")
 
         stats = {
-            'target_count': active_hosts_count,
-            'active_target_count': active_hosts_count,
-            'inactive_target_count': inactive_targets,
-            'total_target_count': total_hosts_count,
+            'target_count': active_target_count,
+            'active_target_count': active_target_count,
+            'inactive_target_count': inactive_target_count,
+            'total_target_count': total_target_count,
             'new_target_count': safe_int(getattr(shared_data, 'new_targets', 0)),
             'lost_target_count': safe_int(getattr(shared_data, 'lost_targets', 0)),
             'new_target_ips': getattr(shared_data, 'new_target_ips', []),
