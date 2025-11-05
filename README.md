@@ -16,6 +16,7 @@ Ragnar is a « Tamagotchi like » sophisticated, autonomous network scanning, vu
 ### 🌐 Web Interface & WiFi Management
 
 **Modern Dashboard** - Access Ragnar's sleek web interface at `http://<ragnar-ip>:8000`:
+[Images](WEB.md)
 - Real-time network discovery and vulnerability scanning
 - Multi-source threat intelligence dashboard
 - File management with image gallery
