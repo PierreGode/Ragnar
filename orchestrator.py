@@ -57,6 +57,7 @@ class Orchestrator:
             'success_retry_delay': 300,
             'failed_retry_delay': 180,
             'scan_vuln_running': True,
+            'enable_attacks': True,
             'scan_vuln_interval': 300,
             'scan_interval': 180
         }
@@ -144,12 +145,6 @@ class Orchestrator:
 
     def process_alive_ips(self, current_data):
         """Process all IPs with alive status set to 1"""
-        # Check if attacks are enabled in config
-        attacks_enabled = getattr(self.shared_data, 'attacks_enabled', True)
-        if not attacks_enabled:
-            logger.debug("Attacks disabled in config - skipping action execution")
-            return False
-        
         any_action_executed = False
         action_executed_status = None
 
@@ -194,6 +189,13 @@ class Orchestrator:
     def execute_action(self, action, ip, ports, row, action_key, current_data):
         """Execute an action on a target"""
         if hasattr(action, 'port') and str(action.port) not in ports:
+            return False
+
+        # Check if attacks are enabled (skip attack actions if disabled, but allow scanning)
+        enable_attacks = getattr(self.shared_data, 'enable_attacks', True)
+        attack_action_names = ['SSHConnector', 'FTPConnector', 'TelnetConnector', 'RDPConnector', 'SMBConnector', 'SQLConnector']
+        if not enable_attacks and action.action_name in attack_action_names:
+            logger.debug(f"Skipping attack action {action.action_name} for {ip}:{action.port} - attacks are disabled")
             return False
 
         # Check parent action status

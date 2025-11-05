@@ -7,18 +7,6 @@ const configMetadata = {
         label: "Debug Mode",
         description: "Enable verbose debug logging for deeper troubleshooting output."
     },
-    websrv: {
-        label: "Web Server",
-        description: "Enable the built-in web server to access the Ragnar dashboard and API endpoints."
-    },
-    web_increment: {
-        label: "Web Incremental Updates",
-        description: "Use incremental updates for web dashboard data instead of full refreshes to improve performance."
-    },
-    attacks_enabled: {
-        label: "Enable Attacks",
-        description: "Allow the orchestrator to execute attack actions against discovered targets. Disable this to only perform network scanning and vulnerability detection without active exploitation."
-    },
     scan_vuln_running: {
         label: "Automatic Vulnerability Scans",
         description: "Allow the orchestrator to launch vulnerability scans on discovered hosts based on the configured interval."

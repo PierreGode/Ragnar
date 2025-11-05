@@ -2625,6 +2625,7 @@ def get_orchestrator_diagnostic():
             # Configuration checks
             'config': {
                 'scan_vuln_running': shared_data.config.get('scan_vuln_running', True),
+                'enable_attacks': shared_data.config.get('enable_attacks', True),
                 'retry_success_actions': shared_data.config.get('retry_success_actions', True),
                 'retry_failed_actions': shared_data.config.get('retry_failed_actions', True),
                 'success_retry_delay': shared_data.config.get('success_retry_delay', 300),
@@ -2695,6 +2696,10 @@ def get_orchestrator_diagnostic():
         if not diagnostic['config']['scan_vuln_running']:
             diagnostic['diagnosis'].append('⚠️ Vulnerability scanning is disabled')
             diagnostic['recommendations'].append('Enable vulnerability scanning in Config tab')
+        
+        if not diagnostic['config']['enable_attacks']:
+            diagnostic['diagnosis'].append('⚠️ Attacks are disabled - Ragnar will only scan, not attack')
+            diagnostic['recommendations'].append('Enable attacks in Config tab to allow SSH/FTP/SMB/SQL attacks')
         
         # Check if actions are available
         try:
