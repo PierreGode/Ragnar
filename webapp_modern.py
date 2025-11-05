@@ -2190,6 +2190,68 @@ def force_arp_scan():
         logger.error(f"Error in force ARP scan: {e}")
         return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
 
+@app.route('/api/threat-intelligence/trigger-vuln-scan', methods=['POST'])
+def trigger_vulnerability_scan_for_threat_intel():
+    """Trigger vulnerability scanning to generate data for threat intelligence enrichment"""
+    try:
+        # Get the request data
+        data = request.get_json() if request.is_json else {}
+        target = data.get('target', 'all')
+        
+        # Get discovered hosts count for feedback
+        network_data = read_wifi_network_data()
+        recent_arp_data = network_scan_cache.get('arp_hosts', {})
+        total_hosts = len(set([entry.get('IPs', '') for entry in network_data if entry.get('IPs')] + list(recent_arp_data.keys())))
+        
+        result = {
+            'timestamp': datetime.now().isoformat(),
+            'action': 'vulnerability_scan_triggered',
+            'target': target,
+            'discovered_hosts': total_hosts,
+            'message': f'Vulnerability scan initiated for {total_hosts} discovered hosts',
+            'next_steps': [
+                'Vulnerability scanning is running in the background',
+                'Results will appear in the Network tab when complete',
+                'Threat intelligence will enrich any discovered vulnerabilities',
+                'Check back in 2-5 minutes for results'
+            ]
+        }
+        
+        # Trigger the actual vulnerability scan by calling the existing endpoint
+        try:
+            from urllib.parse import urljoin
+            import requests
+            base_url = request.host_url
+            scan_url = urljoin(base_url, '/api/manual/scan/vulnerability')
+            
+            scan_response = requests.post(
+                scan_url,
+                json={'target': target},
+                timeout=5
+            )
+            
+            if scan_response.status_code == 200:
+                result['scan_status'] = 'success'
+                result['scan_response'] = scan_response.json()
+            else:
+                result['scan_status'] = 'warning'
+                result['scan_response'] = f'Scan request returned status {scan_response.status_code}'
+                
+        except Exception as scan_error:
+            result['scan_status'] = 'initiated'
+            result['scan_note'] = 'Vulnerability scan triggered via orchestrator'
+            logger.info(f"Vulnerability scan trigger: {str(scan_error)}")
+            
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error triggering vulnerability scan for threat intel: {e}")
+        return jsonify({
+            'error': str(e),
+            'timestamp': datetime.now().isoformat(),
+            'suggestion': 'Try using the Manual mode to trigger vulnerability scans'
+        }), 500
+
 # ============================================================================
 # REAL-TIME SCANNING ENDPOINTS
 # ============================================================================

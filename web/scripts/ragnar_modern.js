@@ -4218,7 +4218,7 @@ async function loadThreatIntelData() {
 async function triggerManualVulnScan() {
     try {
         addConsoleMessage('Starting vulnerability scan on all discovered hosts...', 'info');
-        const response = await fetchAPI('/api/manual/scan/vulnerability', {
+        const response = await fetchAPI('/api/threat-intelligence/trigger-vuln-scan', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -4228,21 +4228,37 @@ async function triggerManualVulnScan() {
             })
         });
         
-        if (response.success) {
-            addConsoleMessage('Vulnerability scan initiated successfully', 'success');
-            showNotification('Vulnerability scan started. Check back in a few minutes for results.', 'success');
+        if (response.action === 'vulnerability_scan_triggered') {
+            addConsoleMessage(`✅ ${response.message}`, 'success');
+            addConsoleMessage(`📋 Scanning ${response.discovered_hosts} discovered hosts`, 'info');
+            
+            // Show detailed next steps
+            if (response.next_steps) {
+                response.next_steps.forEach(step => {
+                    addConsoleMessage(`   • ${step}`, 'info');
+                });
+            }
+            
+            showNotification(`Vulnerability scan started on ${response.discovered_hosts} hosts. Check back in a few minutes!`, 'success');
             
             // Refresh threat intel data in 30 seconds to check for results
             setTimeout(() => {
                 loadThreatIntelData();
+                addConsoleMessage('🔄 Checking for new threat intelligence findings...', 'info');
             }, 30000);
+            
+            // And again in 2 minutes
+            setTimeout(() => {
+                loadThreatIntelData();
+                addConsoleMessage('🔍 Final check for vulnerability scan results...', 'info');
+            }, 120000);
         } else {
-            addConsoleMessage('Failed to start vulnerability scan', 'error');
+            addConsoleMessage('❌ Failed to start vulnerability scan', 'error');
             showNotification('Failed to start vulnerability scan', 'error');
         }
     } catch (error) {
         console.error('Error triggering vulnerability scan:', error);
-        addConsoleMessage('Error starting vulnerability scan: ' + error.message, 'error');
+        addConsoleMessage('❌ Error starting vulnerability scan: ' + error.message, 'error');
         showNotification('Error starting vulnerability scan', 'error');
     }
 }
