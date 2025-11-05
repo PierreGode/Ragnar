@@ -1009,7 +1009,7 @@ function handleScanHostUpdate(data) {
 
         // Update threat intelligence and NetKB if vulnerabilities found
         if (data.vulnerabilities && data.vulnerabilities.length > 0) {
-            if (currentTab === 'threat') {
+            if (currentTab === 'threat-intel') {
                 loadThreatIntelData();
             }
             if (currentTab === 'netkb') {
@@ -5037,14 +5037,18 @@ async function triggerManualVulnScan() {
             
             // Refresh threat intel data in 30 seconds to check for results
             setTimeout(() => {
-                loadThreatIntelData();
-                addConsoleMessage('🔄 Checking for new threat intelligence findings...', 'info');
+                if (currentTab === 'threat-intel') {
+                    loadThreatIntelData();
+                    addConsoleMessage('🔄 Checking for new threat intelligence findings...', 'info');
+                }
             }, 30000);
             
             // And again in 2 minutes
             setTimeout(() => {
-                loadThreatIntelData();
-                addConsoleMessage('🔍 Final check for vulnerability scan results...', 'info');
+                if (currentTab === 'threat-intel') {
+                    loadThreatIntelData();
+                    addConsoleMessage('🔍 Final check for vulnerability scan results...', 'info');
+                }
             }, 120000);
         } else {
             addConsoleMessage('❌ Failed to start vulnerability scan', 'error');
@@ -5060,7 +5064,9 @@ async function triggerManualVulnScan() {
 // Refresh threat intelligence data
 function refreshThreatIntel() {
     showNotification('Refreshing threat intelligence...', 'info');
-    loadThreatIntelData();
+    if (currentTab === 'threat-intel') {
+        loadThreatIntelData();
+    }
 }
 
 // Update threat intelligence statistics
@@ -5225,7 +5231,9 @@ async function enrichTarget() {
             const result = await response.json();
             showNotification(`Target enriched successfully. Risk score: ${result.risk_score}/100`, 'success');
             targetInput.value = '';
-            loadThreatIntelData(); // Refresh the data
+            if (currentTab === 'threat-intel') {
+                loadThreatIntelData(); // Refresh the data
+            }
         } else {
             const error = await response.json();
             showNotification(`Enrichment failed: ${error.error}`, 'error');
