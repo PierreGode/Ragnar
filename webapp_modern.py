@@ -1029,9 +1029,9 @@ def update_wifi_network_data():
                     logger.debug(f"Device {ip} marked offline after {data['failed_ping_count']} consecutive failed pings")
                 else:
                     # IMPORTANT: Keep device as "alive" until it exceeds the failure limit
-                    # This implements the proper 5-ping rule you requested
-                    data['alive'] = True  # Don't change to False until 5 failures
-                    logger.debug(f"Device {ip} failed ping {data['failed_ping_count']}/{MAX_FAILED_PINGS} - keeping alive per 5-ping rule")
+                    # This implements the proper 15-ping rule you requested
+                    data['alive'] = True  # Don't change to False until 15 failures
+                    logger.debug(f"Device {ip} failed ping {data['failed_ping_count']}/{MAX_FAILED_PINGS} - keeping alive per 15-ping rule")
 
         # Add new devices discovered via ARP that aren't in our data yet
         for ip, arp_data in arp_hosts.items():
@@ -1075,10 +1075,10 @@ def update_wifi_network_data():
             if is_target_active:
                 aggregated_active_count += 1
                 aggregated_port_count += sum(1 for port in data['ports'] if port)
-                logger.debug(f"[5-PING RULE] {ip}: ACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
+                logger.debug(f"[15-PING RULE] {ip}: ACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
             else:
                 aggregated_inactive_count += 1
-                logger.debug(f"[5-PING RULE] {ip}: INACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
+                logger.debug(f"[15-PING RULE] {ip}: INACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
 
         # Write updated data to WiFi-specific file
         try:
@@ -1139,7 +1139,7 @@ def read_wifi_network_data():
         
         # Get configuration values for cleanup
         retention_hours = shared_data.config.get('network_device_retention_hours', 8)  # 8 hours by default
-        max_failed_pings = shared_data.config.get('network_max_failed_pings', 5)
+        max_failed_pings = shared_data.config.get('network_max_failed_pings', 15)  # Changed to 15 for more stability
         current_time = datetime.now()
         cutoff_time = current_time - timedelta(hours=retention_hours)
         
@@ -2572,7 +2572,7 @@ def test_robust_tracking():
         network_data = read_wifi_network_data()
         
         # Count devices by failure status
-        max_failed_pings = shared_data.config.get('network_max_failed_pings', 5)
+        max_failed_pings = shared_data.config.get('network_max_failed_pings', 15)  # Changed to 15 for more stability
         results = {
             'total_devices': len(network_data),
             'devices_with_failure_data': 0,
@@ -2622,7 +2622,7 @@ def get_connectivity_tracking():
             'summary': {
                 'total_devices': len(wifi_network_data),
                 'devices_in_arp': len(arp_hosts),
-                'max_failed_pings': shared_data.config.get('network_max_failed_pings', 5)
+                'max_failed_pings': shared_data.config.get('network_max_failed_pings', 15)  # Changed to 15 for more stability
             },
             'devices': []
         }
@@ -2642,7 +2642,7 @@ def get_connectivity_tracking():
                 'last_successful_ping': entry.get('last_successful_ping', ''),
                 'last_ping_attempt': entry.get('last_ping_attempt', ''),
                 'in_current_arp': ip in arp_hosts,
-                'connectivity_status': 'stable' if entry.get('failed_ping_count', 0) == 0 else f"failing ({entry.get('failed_ping_count', 0)}/{shared_data.config.get('network_max_failed_pings', 5)})"
+                'connectivity_status': 'stable' if entry.get('failed_ping_count', 0) == 0 else f"failing ({entry.get('failed_ping_count', 0)}/{shared_data.config.get('network_max_failed_pings', 15)})"  # Changed to 15
             }
             
             # Calculate time since last successful ping
