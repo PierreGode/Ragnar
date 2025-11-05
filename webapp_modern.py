@@ -2112,6 +2112,27 @@ def get_verbose_debug_logs():
         except Exception as e:
             debug_info['errors_and_warnings'].append(f"Error reading recent logs: {str(e)}")
         
+        # === THREAT INTELLIGENCE STATUS ===
+        try:
+            debug_info['threat_intelligence'] = {
+                'system_enabled': threat_intelligence is not None,
+                'vulnerability_count': safe_int(shared_data.vulnnbr),
+                'findings_need_vulnerabilities': 'Threat Intelligence needs discovered vulnerabilities to enrich',
+                'manual_scan_available': True,
+                'sample_enrichment_test': 'Try: POST /api/threat-intelligence/enrich-target with {"target": "192.168.1.1", "target_type": "ip"}'
+            }
+            
+            if threat_intelligence:
+                # Test threat intelligence status
+                ti_status = {
+                    'cache_entries': len(getattr(threat_intelligence, 'threat_cache', {})),
+                    'sources_count': len(getattr(threat_intelligence, 'sources', [])),
+                    'last_update': getattr(threat_intelligence, 'last_update', 'Never')
+                }
+                debug_info['threat_intelligence']['system_status'] = ti_status
+        except Exception as e:
+            debug_info['errors_and_warnings'].append(f"Error checking threat intelligence: {str(e)}")
+        
         return jsonify(debug_info)
         
     except Exception as e:
