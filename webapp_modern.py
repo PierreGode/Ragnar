@@ -3521,17 +3521,30 @@ def get_wifi_status():
         wifi_manager = getattr(shared_data, 'ragnar_instance', None)
         if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
             status = wifi_manager.wifi_manager.get_status()
+            logger.debug(f"Wi-Fi status from manager: {status}")
             return jsonify(status)
         else:
-            return jsonify({
-                'wifi_connected': shared_data.wifi_connected,
+            # Fallback: try to get Wi-Fi status from system
+            wifi_connected = getattr(shared_data, 'wifi_connected', False)
+            current_ssid = get_current_wifi_ssid() if wifi_connected else None
+            
+            fallback_status = {
+                'wifi_connected': wifi_connected,
                 'ap_mode_active': False,
-                'current_ssid': None,
-                'error': 'Wi-Fi manager not available'
-            })
+                'current_ssid': current_ssid,
+                'ap_ssid': None,
+                'error': 'Wi-Fi manager not available, using fallback'
+            }
+            logger.debug(f"Wi-Fi status fallback: {fallback_status}")
+            return jsonify(fallback_status)
     except Exception as e:
         logger.error(f"Error getting Wi-Fi status: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'error': str(e),
+            'wifi_connected': False,
+            'ap_mode_active': False,
+            'current_ssid': None
+        }), 500
 
 @app.route('/api/wifi/scan', methods=['POST'])
 def scan_wifi_networks():

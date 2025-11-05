@@ -593,6 +593,8 @@ async function loadTabData(tabName) {
             break;
         case 'config':
             await loadConfigData();
+            // Refresh Wi-Fi status when config tab is loaded
+            console.log('Loading config tab, refreshing Wi-Fi status...');
             await refreshWifiStatus();
             break;
     }
@@ -2064,33 +2066,58 @@ async function startAPMode() {
 async function refreshWifiStatus() {
     try {
         const data = await fetchAPI('/api/wifi/status');
+        console.log('Wi-Fi status data received:', data);
         
-        if (data.ap_mode_active) {
-            updateWifiStatus(
-                `AP Mode Active: "${data.ap_ssid || 'Ragnar'}" | Connect to configure Wi-Fi`,
-                'ap-mode'
-            );
-            updateElement('wifi-status-indicator', 'AP Mode');
-            document.getElementById('wifi-status-indicator').className = 'text-sm px-2 py-1 rounded bg-orange-700 text-orange-300';
-        } else if (data.wifi_connected) {
-            updateWifiStatus(`Connected to: ${data.current_ssid || 'Wi-Fi Network'}`, 'connected');
-            updateElement('wifi-status-indicator', 'Connected');
-            document.getElementById('wifi-status-indicator').className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
-        } else {
-            updateWifiStatus('Wi-Fi disconnected', 'disconnected');
-            updateElement('wifi-status-indicator', 'Disconnected');
-            document.getElementById('wifi-status-indicator').className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+        const statusIndicator = document.getElementById('wifi-status-indicator');
+        const wifiInfo = document.getElementById('wifi-info');
+        
+        if (!statusIndicator || !wifiInfo) {
+            console.error('Wi-Fi status elements not found in DOM');
+            console.log('Looking for elements: wifi-status-indicator and wifi-info');
+            return;
         }
         
-        updateElement('wifi-info', data.wifi_connected ? 
-            `Connected to: ${data.current_ssid || 'Unknown'}` : 
-            'No Wi-Fi connection');
+        console.log('Wi-Fi status elements found, updating...');
+        
+        if (data.ap_mode_active) {
+            const apMessage = `AP Mode Active: "${data.ap_ssid || 'Ragnar'}" | Connect to configure Wi-Fi`;
+            console.log('Setting AP mode status:', apMessage);
+            updateWifiStatus(apMessage, 'ap-mode');
+            statusIndicator.textContent = 'AP Mode';
+            statusIndicator.className = 'text-sm px-2 py-1 rounded bg-orange-700 text-orange-300';
+            wifiInfo.textContent = apMessage;
+        } else if (data.wifi_connected) {
+            const ssid = data.current_ssid || 'Unknown Network';
+            const connectedMessage = `Connected to: ${ssid}`;
+            console.log('Setting connected status:', connectedMessage);
+            updateWifiStatus(connectedMessage, 'connected');
+            statusIndicator.textContent = 'Connected';
+            statusIndicator.className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
+            wifiInfo.textContent = connectedMessage;
+        } else {
+            console.log('Setting disconnected status');
+            updateWifiStatus('Wi-Fi disconnected', 'disconnected');
+            statusIndicator.textContent = 'Disconnected';
+            statusIndicator.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+            wifiInfo.textContent = 'No Wi-Fi connection';
+        }
+        
+        console.log('Wi-Fi status updated successfully');
             
     } catch (error) {
         console.error('Error refreshing Wi-Fi status:', error);
         updateWifiStatus('Error checking Wi-Fi status', 'error');
-        updateElement('wifi-status-indicator', 'Error');
-        document.getElementById('wifi-status-indicator').className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+        
+        const statusIndicator = document.getElementById('wifi-status-indicator');
+        const wifiInfo = document.getElementById('wifi-info');
+        
+        if (statusIndicator) {
+            statusIndicator.textContent = 'Error';
+            statusIndicator.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+        }
+        if (wifiInfo) {
+            wifiInfo.textContent = 'Error checking Wi-Fi status';
+        }
     }
 }
 

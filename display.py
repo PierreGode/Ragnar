@@ -132,17 +132,38 @@ class Display:
                     logger.info("Vulnerability summary file created.")
                 else:
                     if os.path.exists(self.shared_data.netkbfile):
-                        with open(self.shared_data.netkbfile, 'r') as file:
-                            netkb_df = pd.read_csv(file)
-                            alive_mask = netkb_df["Alive"].astype(str).str.strip() == '1'
-                            alive_macs = set(
-                                netkb_df[(alive_mask) & (netkb_df["MAC Address"] != "STANDALONE")]["MAC Address"]
-                            )
+                        try:
+                            # Check if file is not empty and has content
+                            if os.path.getsize(self.shared_data.netkbfile) > 0:
+                                with open(self.shared_data.netkbfile, 'r') as file:
+                                    netkb_df = pd.read_csv(file)
+                                    if not netkb_df.empty and "Alive" in netkb_df.columns and "MAC Address" in netkb_df.columns:
+                                        alive_mask = netkb_df["Alive"].astype(str).str.strip() == '1'
+                                        alive_macs = set(
+                                            netkb_df[(alive_mask) & (netkb_df["MAC Address"] != "STANDALONE")]["MAC Address"]
+                                        )
+                                    else:
+                                        alive_macs = set()
+                            else:
+                                logger.debug("netkb file is empty, skipping")
+                                alive_macs = set()
+                        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+                            logger.warning(f"Could not parse netkb file: {e}")
+                            alive_macs = set()
                     else:
                         alive_macs = set()
 
-                    with open(self.shared_data.vuln_summary_file, 'r') as file:
-                        df = pd.read_csv(file)
+                    try:
+                        # Check if file is not empty and has content
+                        if os.path.getsize(self.shared_data.vuln_summary_file) > 0:
+                            with open(self.shared_data.vuln_summary_file, 'r') as file:
+                                df = pd.read_csv(file)
+                        else:
+                            logger.debug("vuln_summary file is empty, initializing with empty DataFrame")
+                            df = pd.DataFrame(columns=["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
+                    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+                        logger.warning(f"Could not parse vuln_summary file: {e}, creating new one")
+                        df = pd.DataFrame(columns=["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
                         all_vulnerabilities = set()
 
                         for index, row in df.iterrows():
@@ -159,11 +180,19 @@ class Display:
                         logger.debug(f"Updated vulnerabilities count: {self.shared_data.vulnnbr}")
 
                     if os.path.exists(self.shared_data.livestatusfile):
-                        with open(self.shared_data.livestatusfile, 'r+') as livestatus_file:
-                            livestatus_df = pd.read_csv(livestatus_file)
-                            livestatus_df.loc[0, 'Vulnerabilities Count'] = self.shared_data.vulnnbr
-                            livestatus_df.to_csv(self.shared_data.livestatusfile, index=False)
-                            logger.debug(f"Updated livestatusfile with vulnerability count: {self.shared_data.vulnnbr}")
+                        try:
+                            # Check if file is not empty and has content
+                            if os.path.getsize(self.shared_data.livestatusfile) > 0:
+                                with open(self.shared_data.livestatusfile, 'r+') as livestatus_file:
+                                    livestatus_df = pd.read_csv(livestatus_file)
+                                    if not livestatus_df.empty:
+                                        livestatus_df.loc[0, 'Vulnerabilities Count'] = self.shared_data.vulnnbr
+                                        livestatus_df.to_csv(self.shared_data.livestatusfile, index=False)
+                                        logger.debug(f"Updated livestatusfile with vulnerability count: {self.shared_data.vulnnbr}")
+                            else:
+                                logger.debug("livestatus file is empty, skipping update")
+                        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+                            logger.warning(f"Could not parse livestatus file: {e}")
                     else:
                         logger.error(f"Livestatusfile {self.shared_data.livestatusfile} does not exist.")
             except Exception as e:
@@ -178,8 +207,21 @@ class Display:
                     logger.info(f"Creating missing livestatus file: {self.shared_data.livestatusfile}")
                     self.shared_data.create_livestatusfile()
                 
-                with open(self.shared_data.livestatusfile, 'r') as file:
-                    livestatus_df = pd.read_csv(file)
+                try:
+                    # Check if file is not empty and has content
+                    if os.path.getsize(self.shared_data.livestatusfile) > 0:
+                        with open(self.shared_data.livestatusfile, 'r') as file:
+                            livestatus_df = pd.read_csv(file)
+                    else:
+                        logger.warning("Livestatus file is empty, recreating it")
+                        self.shared_data.create_livestatusfile()
+                        with open(self.shared_data.livestatusfile, 'r') as file:
+                            livestatus_df = pd.read_csv(file)
+                except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+                    logger.warning(f"Could not parse livestatus file: {e}, recreating it")
+                    self.shared_data.create_livestatusfile()
+                    with open(self.shared_data.livestatusfile, 'r') as file:
+                        livestatus_df = pd.read_csv(file)
 
                     # Check if DataFrame is empty or has the expected columns
                     if livestatus_df.empty:
@@ -224,10 +266,17 @@ class Display:
                 total_passwords = 0
                 for file in crackedpw_files:
                     try:
-                        with open(file, 'r') as f:
-                            df = pd.read_csv(f, usecols=[0])
-                            if not df.empty:
-                                total_passwords += len(df)
+                        # Check if file is not empty and has content
+                        if os.path.getsize(file) > 0:
+                            with open(file, 'r') as f:
+                                df = pd.read_csv(f, usecols=[0])
+                                if not df.empty:
+                                    total_passwords += len(df)
+                        else:
+                            logger.debug(f"Password file {file} is empty, skipping")
+                    except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
+                        logger.debug(f"Could not parse password file {file}: {e}")
+                        continue
                     except Exception as e:
                         logger.warning(f"Error reading password file {file}: {e}")
                         continue
