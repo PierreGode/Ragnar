@@ -423,6 +423,7 @@ class SharedData:
         self.levelnbr = 0
         self.networkkbnbr = 0
         self.attacksnbr = 0
+        self.vulnerable_host_count = 0
         self.show_first_image = True
         self.network_hosts_snapshot = {}
         self.total_targetnbr = 0

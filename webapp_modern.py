@@ -293,19 +293,49 @@ def sync_vulnerability_count():
     """Synchronize vulnerability count across all data sources and network intelligence"""
     try:
         vuln_count = 0
-        
+        vulnerable_hosts = set()
+
+        def record_host(candidate):
+            """Normalize and record a host value for vulnerable host counting"""
+            if candidate is None:
+                return
+
+            if isinstance(candidate, (list, tuple, set)):
+                for item in candidate:
+                    record_host(item)
+                return
+
+            host_value = str(candidate).strip()
+            if not host_value:
+                return
+
+            lowered = host_value.lower()
+            if lowered in {'unknown', 'none', 'n/a', 'na', 'null'}:
+                return
+
+            vulnerable_hosts.add(host_value)
+
         # Check if network intelligence is enabled
-        if (hasattr(shared_data, 'network_intelligence') and 
-            shared_data.network_intelligence and 
+        if (hasattr(shared_data, 'network_intelligence') and
+            shared_data.network_intelligence and
             shared_data.config.get('network_intelligence_enabled', True)):
-            
+
             # Update network context first
             shared_data.network_intelligence.update_network_context()
-            
+
             # Get active findings count for current network
             dashboard_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
             vuln_count = dashboard_findings['counts']['vulnerabilities']
-            
+
+            for vuln_info in dashboard_findings.get('vulnerabilities', {}).values():
+                if isinstance(vuln_info, dict):
+                    record_host(
+                        vuln_info.get('host') or
+                        vuln_info.get('ip') or
+                        vuln_info.get('target') or
+                        vuln_info.get('hostname')
+                    )
+
             logger.debug(f"Network intelligence vulnerability count: {vuln_count}")
         else:
             # Fallback to legacy file-based counting
@@ -342,19 +372,45 @@ def sync_vulnerability_count():
                             except Exception as e:
                                 logger.debug(f"Could not read vulnerability file {filepath}: {e}")
                                 continue
-                    
+
                     logger.debug(f"Vulnerability files found: {files_found}")
                     logger.debug(f"Total vulnerability count calculated: {vuln_count}")
                 except Exception as e:
                     logger.warning(f"Could not list vulnerabilities directory: {e}")
             else:
                 logger.warning(f"Vulnerabilities directory does not exist: {vuln_results_dir}")
-        
+
+            vuln_summary_file = getattr(shared_data, 'vuln_summary_file',
+                                        os.path.join('data', 'output', 'vulnerabilities', 'vulnerability_summary.csv'))
+
+            if os.path.exists(vuln_summary_file):
+                try:
+                    if pandas_available:
+                        df = pd.read_csv(vuln_summary_file)
+                        if not df.empty:
+                            for _, row in df.iterrows():
+                                vulnerabilities = safe_str(row.get('Vulnerabilities')).strip()
+                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
+                                    record_host(row.get('IP') or row.get('Hostname'))
+                    else:
+                        with open(vuln_summary_file, 'r', encoding='utf-8', errors='ignore') as summary_file:
+                            reader = csv.DictReader(summary_file)
+                            for row in reader:
+                                vulnerabilities = (row.get('Vulnerabilities') or '').strip()
+                                if vulnerabilities and vulnerabilities.lower() not in {'none', 'nan', 'na', '0'}:
+                                    record_host(row.get('IP') or row.get('Hostname'))
+                except Exception as e:
+                    logger.debug(f"Could not parse vulnerability summary for host count: {e}")
+
         # Update shared data with synchronized count
         old_count = shared_data.vulnnbr
         shared_data.vulnnbr = vuln_count
         logger.debug(f"Updated shared_data.vulnnbr: {old_count} -> {vuln_count}")
-        
+
+        old_host_count = getattr(shared_data, 'vulnerable_host_count', 0)
+        shared_data.vulnerable_host_count = len(vulnerable_hosts)
+        logger.debug(f"Updated vulnerable host count: {old_host_count} -> {shared_data.vulnerable_host_count}")
+
         # Also update livestatus file if it exists
         if os.path.exists(shared_data.livestatusfile):
             try:
@@ -5772,6 +5828,8 @@ def get_current_status():
         'target_count': safe_int(shared_data.targetnbr),
         'port_count': safe_int(shared_data.portnbr),
         'vulnerability_count': safe_int(shared_data.vulnnbr),
+        'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
+        'vulnerable_host_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
         'credential_count': safe_int(shared_data.crednbr),
         'data_count': safe_int(shared_data.datanbr),
         'level': safe_int(shared_data.levelnbr),
@@ -7269,6 +7327,8 @@ def get_dashboard_stats():
             'lost_target_ips': getattr(shared_data, 'lost_target_ips', []),
             'port_count': safe_int(shared_data.portnbr),
             'vulnerability_count': safe_int(shared_data.vulnnbr),
+            'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
+            'vulnerable_host_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
             'credential_count': safe_int(shared_data.crednbr),
             'level': safe_int(shared_data.levelnbr),
             'points': safe_int(shared_data.coinnbr),
