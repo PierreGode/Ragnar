@@ -2057,6 +2057,257 @@ def get_activity_logs():
         logger.error(f"Error getting activity logs: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wifi-log')
+def get_wifi_log():
+    """Get comprehensive WiFi logs including system status, Ragnar WiFi manager, and e-paper display updates"""
+    try:
+        wifi_log_data = {
+            'timestamp': datetime.now().isoformat(),
+            'system_wifi': {},
+            'ragnar_wifi_manager': {},
+            'epaper_display': {},
+            'network_interfaces': {},
+            'recent_events': []
+        }
+        
+        # === SYSTEM WIFI STATUS ===
+        try:
+            # Get current WiFi connection info
+            wifi_log_data['system_wifi']['connection_status'] = {}
+            
+            # Method 1: iwgetid for SSID
+            try:
+                result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=3)
+                if result.returncode == 0 and result.stdout.strip():
+                    wifi_log_data['system_wifi']['connection_status']['ssid'] = result.stdout.strip()
+                    wifi_log_data['system_wifi']['connection_status']['connected'] = True
+                else:
+                    wifi_log_data['system_wifi']['connection_status']['ssid'] = None
+                    wifi_log_data['system_wifi']['connection_status']['connected'] = False
+            except Exception as e:
+                wifi_log_data['system_wifi']['connection_status']['ssid_error'] = str(e)
+            
+            # Get WiFi interface details
+            try:
+                result = subprocess.run(['ip', 'addr', 'show', 'wlan0'], capture_output=True, text=True, timeout=3)
+                if result.returncode == 0:
+                    output = result.stdout
+                    # Extract IP address
+                    ip_match = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', output)
+                    wifi_log_data['system_wifi']['connection_status']['ip_address'] = ip_match.group(1) if ip_match else None
+                    
+                    # Extract MAC address
+                    mac_match = re.search(r'link/ether ([a-f0-9:]{17})', output)
+                    wifi_log_data['system_wifi']['connection_status']['mac_address'] = mac_match.group(1) if mac_match else None
+                    
+                    # Check interface state
+                    wifi_log_data['system_wifi']['connection_status']['interface_up'] = 'state UP' in output
+                else:
+                    wifi_log_data['system_wifi']['connection_status']['interface_error'] = f"Exit code: {result.returncode}"
+            except Exception as e:
+                wifi_log_data['system_wifi']['connection_status']['interface_error'] = str(e)
+            
+            # Get network route info
+            try:
+                result = subprocess.run(['ip', 'route'], capture_output=True, text=True, timeout=3)
+                if result.returncode == 0:
+                    routes = result.stdout.split('\n')
+                    default_routes = [route for route in routes if route.startswith('default')]
+                    wifi_log_data['system_wifi']['connection_status']['default_route'] = default_routes[0] if default_routes else None
+                    wifi_log_data['system_wifi']['connection_status']['has_internet_route'] = len(default_routes) > 0
+            except Exception as e:
+                wifi_log_data['system_wifi']['connection_status']['route_error'] = str(e)
+            
+        except Exception as e:
+            wifi_log_data['system_wifi']['error'] = f"System WiFi check failed: {e}"
+        
+        # === RAGNAR WIFI MANAGER STATUS ===
+        try:
+            if (hasattr(shared_data, 'ragnar_instance') and 
+                shared_data.ragnar_instance and 
+                hasattr(shared_data.ragnar_instance, 'wifi_manager')):
+                
+                wifi_mgr = shared_data.ragnar_instance.wifi_manager
+                
+                # Get WiFi manager state
+                wifi_log_data['ragnar_wifi_manager']['status'] = {
+                    'wifi_connected': getattr(wifi_mgr, 'wifi_connected', False),
+                    'ap_mode_active': getattr(wifi_mgr, 'ap_mode_active', False),
+                    'cycling_mode': getattr(wifi_mgr, 'cycling_mode', False),
+                    'current_ssid': getattr(wifi_mgr, 'current_ssid', None),
+                    'connection_attempts': getattr(wifi_mgr, 'connection_attempts', 0),
+                    'ap_clients_count': getattr(wifi_mgr, 'ap_clients_count', 0),
+                    'ap_clients_connected': getattr(wifi_mgr, 'ap_clients_connected', False),
+                    'user_connected_to_ap': getattr(wifi_mgr, 'user_connected_to_ap', False)
+                }
+                
+                # Get timing information
+                wifi_log_data['ragnar_wifi_manager']['timing'] = {
+                    'last_connection_attempt': getattr(wifi_mgr, 'last_connection_attempt', None),
+                    'ap_mode_start_time': getattr(wifi_mgr, 'ap_mode_start_time', None),
+                    'last_wifi_validation': getattr(wifi_mgr, 'last_wifi_validation', None),
+                    'endless_loop_start_time': getattr(wifi_mgr, 'endless_loop_start_time', None),
+                    'boot_completed_time': getattr(wifi_mgr, 'boot_completed_time', None)
+                }
+                
+                # Convert datetime objects to ISO strings
+                for key, value in wifi_log_data['ragnar_wifi_manager']['timing'].items():
+                    if isinstance(value, datetime):
+                        wifi_log_data['ragnar_wifi_manager']['timing'][key] = value.isoformat()
+                
+                # Get configuration
+                wifi_log_data['ragnar_wifi_manager']['config'] = {
+                    'ap_ssid': getattr(wifi_mgr, 'ap_ssid', 'Unknown'),
+                    'ap_interface': getattr(wifi_mgr, 'ap_interface', 'wlan0'),
+                    'ap_ip': getattr(wifi_mgr, 'ap_ip', '192.168.4.1'),
+                    'connection_timeout': getattr(wifi_mgr, 'connection_timeout', 0),
+                    'wifi_search_timeout': getattr(wifi_mgr, 'wifi_search_timeout', 0),
+                    'ap_mode_timeout': getattr(wifi_mgr, 'ap_mode_timeout', 0),
+                    'max_connection_attempts': getattr(wifi_mgr, 'max_connection_attempts', 0)
+                }
+                
+                # Get known networks
+                wifi_log_data['ragnar_wifi_manager']['known_networks'] = getattr(wifi_mgr, 'known_networks', [])
+                wifi_log_data['ragnar_wifi_manager']['available_networks'] = getattr(wifi_mgr, 'available_networks', [])
+                
+            else:
+                wifi_log_data['ragnar_wifi_manager']['error'] = "WiFi manager not available or not initialized"
+                
+        except Exception as e:
+            wifi_log_data['ragnar_wifi_manager']['error'] = f"WiFi manager check failed: {e}"
+        
+        # === E-PAPER DISPLAY WIFI STATUS ===
+        try:
+            if (hasattr(shared_data, 'ragnar_instance') and 
+                shared_data.ragnar_instance and 
+                hasattr(shared_data.ragnar_instance, 'display')):
+                
+                display = shared_data.ragnar_instance.display
+                
+                # Get current display WiFi status
+                try:
+                    wifi_status_text = display.get_wifi_status_text()
+                    wifi_connected = display.is_wifi_connected()
+                    
+                    wifi_log_data['epaper_display']['current_status'] = {
+                        'wifi_status_text': wifi_status_text,
+                        'is_wifi_connected': wifi_connected,
+                        'last_update': getattr(display, 'last_update_time', None)
+                    }
+                    
+                    # Convert datetime to ISO string
+                    if isinstance(wifi_log_data['epaper_display']['current_status']['last_update'], datetime):
+                        wifi_log_data['epaper_display']['current_status']['last_update'] = wifi_log_data['epaper_display']['current_status']['last_update'].isoformat()
+                        
+                except Exception as e:
+                    wifi_log_data['epaper_display']['current_status'] = {
+                        'error': f"Failed to get display WiFi status: {e}"
+                    }
+                
+                # Get display configuration
+                wifi_log_data['epaper_display']['config'] = {
+                    'update_interval': getattr(display, 'update_interval', 'Unknown'),
+                    'wifi_check_enabled': True,  # Always enabled
+                    'display_type': getattr(display, 'epd_type', 'Unknown')
+                }
+                
+            else:
+                wifi_log_data['epaper_display']['error'] = "Display not available or not initialized"
+                
+        except Exception as e:
+            wifi_log_data['epaper_display']['error'] = f"Display check failed: {e}"
+        
+        # === NETWORK INTERFACES ===
+        try:
+            # Get all network interfaces
+            result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True, timeout=3)
+            if result.returncode == 0:
+                interfaces = []
+                for line in result.stdout.split('\n'):
+                    if re.match(r'^\d+:', line):
+                        interface_match = re.search(r'^\d+: (\w+):', line)
+                        if interface_match:
+                            interface_name = interface_match.group(1)
+                            state = 'UP' if 'state UP' in line else 'DOWN'
+                            interfaces.append({
+                                'name': interface_name,
+                                'state': state,
+                                'is_wifi': 'wlan' in interface_name or 'wifi' in interface_name
+                            })
+                wifi_log_data['network_interfaces']['interfaces'] = interfaces
+            else:
+                wifi_log_data['network_interfaces']['error'] = f"Failed to get interfaces: exit code {result.returncode}"
+        except Exception as e:
+            wifi_log_data['network_interfaces']['error'] = f"Interface check failed: {e}"
+        
+        # === RECENT EVENTS (System Logs) ===
+        try:
+            recent_events = []
+            
+            # Get WiFi-related system logs from journalctl
+            try:
+                result = subprocess.run([
+                    'journalctl', '--since', '10 minutes ago', 
+                    '--grep', 'wifi|wlan|NetworkManager|wpa_supplicant|hostapd',
+                    '--no-pager', '-n', '20'
+                ], capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if line.strip():
+                            recent_events.append({
+                                'source': 'system_journal',
+                                'message': line.strip(),
+                                'timestamp': datetime.now().isoformat()  # journalctl includes its own timestamps
+                            })
+            except Exception as e:
+                recent_events.append({
+                    'source': 'system_journal',
+                    'message': f"Failed to get system logs: {e}",
+                    'timestamp': datetime.now().isoformat()
+                })
+            
+            # Get Ragnar-specific WiFi logs
+            try:
+                log_file = '/var/log/ragnar.log'  # Adjust path as needed
+                if os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        lines = f.readlines()
+                        wifi_lines = [line for line in lines[-50:] if any(keyword in line.lower() for keyword in ['wifi', 'ap mode', 'ssid', 'connection'])]
+                        for line in wifi_lines[-10:]:  # Last 10 WiFi-related lines
+                            recent_events.append({
+                                'source': 'ragnar_log',
+                                'message': line.strip(),
+                                'timestamp': datetime.now().isoformat()
+                            })
+            except Exception as e:
+                recent_events.append({
+                    'source': 'ragnar_log',
+                    'message': f"Failed to read Ragnar logs: {e}",
+                    'timestamp': datetime.now().isoformat()
+                })
+            
+            wifi_log_data['recent_events'] = recent_events[-20:]  # Keep last 20 events
+            
+        except Exception as e:
+            wifi_log_data['recent_events'] = [{
+                'source': 'error',
+                'message': f"Failed to get recent events: {e}",
+                'timestamp': datetime.now().isoformat()
+            }]
+        
+        # Add cache-control headers to prevent stale data
+        response = jsonify(wifi_log_data)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting WiFi logs: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/debug/verbose-logs')
 def get_verbose_debug_logs():
     """Get super verbose debugging logs for tracing data flow issues"""
