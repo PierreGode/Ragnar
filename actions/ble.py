@@ -320,18 +320,23 @@ class BluetoothManager:
         devices = {}
         
         try:
-            # Get basic device list
+            # Method 1: Get known devices from bluetoothctl devices
             result = subprocess.run(['bluetoothctl', 'devices'], 
                                   capture_output=True, text=True, timeout=10)
+            
+            self.logger.info(f"bluetoothctl devices returned: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
             
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
                     line = line.strip()
+                    self.logger.debug(f"Processing device line: '{line}'")
                     if line and line.startswith('Device '):
                         parts = line.split(None, 2)
                         if len(parts) >= 2:
                             address = parts[1]
                             name = parts[2] if len(parts) > 2 else 'Unknown Device'
+                            
+                            self.logger.info(f"Found device: {address} - {name}")
                             
                             device_info = {
                                 'address': address,
@@ -352,8 +357,19 @@ class BluetoothManager:
                                 device_info.update(detailed_info)
                             
                             devices[address] = device_info
+            else:
+                self.logger.warning(f"bluetoothctl devices failed with return code {result.returncode}")
+            
+            # Method 2: If scanning is active, try to get scan results
+            if self.scan_active or self._check_scan_status():
+                self.logger.info("Scanning is active, attempting to get scan results...")
+                scan_devices = self._get_scan_results()
+                if scan_devices:
+                    devices.update(scan_devices)
+                    self.logger.info(f"Found {len(scan_devices)} additional devices from scan")
                             
             self.discovered_devices = devices
+            self.logger.info(f"Total devices found: {len(devices)}")
             
         except subprocess.TimeoutExpired:
             self.logger.error("Device list command timed out")
@@ -361,6 +377,54 @@ class BluetoothManager:
             self.logger.error(f"Error getting device list: {e}")
         
         return devices
+    
+    def _get_scan_results(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Try to get devices discovered during active scanning
+        This is a workaround since bluetoothctl devices might not show newly discovered devices
+        """
+        scan_devices = {}
+        
+        try:
+            # Try running bluetoothctl in batch mode to get scan results
+            # This might show devices that are discovered but not yet in the devices list
+            result = subprocess.run(['timeout', '3', 'bluetoothctl'], 
+                                  input='scan on\ndevices\nexit\n',
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0 or result.returncode == 124:  # 124 is timeout exit code
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and line.startswith('Device '):
+                        parts = line.split(None, 2)
+                        if len(parts) >= 2:
+                            address = parts[1]
+                            name = parts[2] if len(parts) > 2 else 'Unknown Device'
+                            
+                            if address not in self.discovered_devices:  # Only add if not already known
+                                self.logger.info(f"Found new device from scan: {address} - {name}")
+                                
+                                device_info = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'Unknown',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
+                                    'last_seen': time.time(),
+                                    'from_scan': True  # Mark as from active scan
+                                }
+                                
+                                scan_devices[address] = device_info
+                                
+        except Exception as e:
+            self.logger.debug(f"Could not get scan results: {e}")
+            
+        return scan_devices
     
     def _get_device_details(self, address: str) -> Dict[str, Any]:
         """
