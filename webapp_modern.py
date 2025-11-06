@@ -4633,6 +4633,20 @@ def enumerate_bluetooth_services():
         logger.error(f"Error enumerating Bluetooth services: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/bluetooth/diagnose', methods=['GET'])
+def diagnose_bluetooth():
+    """Diagnose Bluetooth scanning issues"""
+    try:
+        if not BLUETOOTH_AVAILABLE or bluetooth_manager is None:
+            return jsonify({'error': 'Bluetooth manager not available'}), 503
+            
+        diagnosis = bluetooth_manager.diagnose_scanning()
+        return jsonify(diagnosis)
+        
+    except Exception as e:
+        logger.error(f"Error diagnosing Bluetooth: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/actions', methods=['GET'])
 def get_actions():

@@ -248,6 +248,9 @@ class BluetoothManager:
                 message = "Bluetooth device scan started"
                 if duration:
                     message += f" (will run for {duration} seconds)"
+                
+                # Add troubleshooting info
+                message += ". Make sure nearby devices are in discoverable mode."
                     
                 self.logger.info(message)
                 return True, message
@@ -425,6 +428,72 @@ class BluetoothManager:
             self.logger.debug(f"Could not get scan results: {e}")
             
         return scan_devices
+    
+    def diagnose_scanning(self) -> Dict[str, Any]:
+        """
+        Diagnose why Bluetooth scanning might not be finding devices
+        Returns diagnostic information
+        """
+        diagnosis = {
+            'bluetooth_available': False,
+            'bluetooth_enabled': False,
+            'scanning_active': False,
+            'controller_info': {},
+            'recommendations': []
+        }
+        
+        try:
+            # Check basic availability
+            available, msg = self.check_bluetooth_availability()
+            diagnosis['bluetooth_available'] = available
+            if not available:
+                diagnosis['recommendations'].append(f"Bluetooth not available: {msg}")
+                return diagnosis
+            
+            # Check status
+            status = self.get_status()
+            diagnosis['bluetooth_enabled'] = status.get('enabled', False)
+            diagnosis['scanning_active'] = status.get('scanning', False)
+            diagnosis['controller_info'] = status.get('controller_info', {})
+            
+            if not diagnosis['bluetooth_enabled']:
+                diagnosis['recommendations'].append("Bluetooth is not enabled. Try enabling it first.")
+            
+            if not diagnosis['scanning_active']:
+                diagnosis['recommendations'].append("Scanning is not active. Start a scan to discover devices.")
+            
+            # Check for paired devices as a baseline
+            paired = self.get_paired_devices()
+            diagnosis['paired_device_count'] = len(paired)
+            
+            if len(paired) == 0:
+                diagnosis['recommendations'].append("No paired devices found. This might indicate Bluetooth setup issues.")
+            
+            # Test basic bluetoothctl functionality
+            try:
+                result = subprocess.run(['bluetoothctl', 'list'], 
+                                      capture_output=True, text=True, timeout=5)
+                diagnosis['controllers_found'] = result.returncode == 0 and len(result.stdout.strip()) > 0
+                if not diagnosis['controllers_found']:
+                    diagnosis['recommendations'].append("No Bluetooth controllers found. Check hardware.")
+            except Exception:
+                diagnosis['controllers_found'] = False
+                diagnosis['recommendations'].append("Cannot communicate with bluetoothctl. Check installation.")
+            
+            # Add general recommendations
+            if len(diagnosis['recommendations']) == 0:
+                diagnosis['recommendations'].extend([
+                    "Bluetooth appears to be working correctly.",
+                    "Make sure nearby devices are in discoverable/pairable mode.",
+                    "Try putting a phone or other device in Bluetooth pairing mode.",
+                    "Some devices only show up when actively scanning from them."
+                ])
+            
+        except Exception as e:
+            diagnosis['error'] = str(e)
+            diagnosis['recommendations'].append(f"Error during diagnosis: {e}")
+        
+        return diagnosis
     
     def _get_device_details(self, address: str) -> Dict[str, Any]:
         """
