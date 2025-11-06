@@ -247,7 +247,7 @@ class NetworkScanner:
                 if not os.path.exists(netkbfile):
                     with open(netkbfile, 'w', newline='') as file:
                         writer = csv.writer(file)
-                        writer.writerow(['MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports'])
+                        writer.writerow(['MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports', 'Failed_Pings'])
             except Exception as e:
                 self.logger.error(f"Error in check_if_csv_scan_file_exists: {e}")
 

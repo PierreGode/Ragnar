@@ -480,7 +480,8 @@ def sync_all_counts():
                     # 1. Alive column is '1', OR
                     # 2. Failed_Pings < max_failed_pings
                     alive_status = row.get("Alive", "0")
-                    failed_pings = int(row.get("Failed_Pings", "0"))
+                    failed_pings_str = row.get("Failed_Pings", "0").strip()
+                    failed_pings = int(failed_pings_str) if failed_pings_str else 0
                     
                     is_active = (alive_status == '1' or failed_pings < max_failed_pings)
                     
