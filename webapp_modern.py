@@ -30,7 +30,7 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response
 from flask_socketio import SocketIO, emit
 try:
-    from flask_cors import CORS
+    from flask_cors import CORS  # type: ignore
     flask_cors_available = True
 except ImportError:
     flask_cors_available = False
@@ -150,10 +150,10 @@ def run_targeted_arp_scan(ip, interface=DEFAULT_ARP_SCAN_INTERFACE):
         entry = hosts.get(ip)
         return entry.get('mac', '') if entry else ''
     except FileNotFoundError:
-        logger.warning("arp-scan command not found when resolving MAC for %s", ip)
+        logger.warning(f"arp-scan command not found when resolving MAC for {ip}")
         return ''
     except subprocess.TimeoutExpired as e:
-        logger.warning("arp-scan timed out for %s: %s", ip, e)
+        logger.warning(f"arp-scan timed out for {ip}: {e}")
         hosts = _parse_arp_scan_output(e.stdout or '')
         entry = hosts.get(ip)
         return entry.get('mac', '') if entry else ''
@@ -219,13 +219,13 @@ def update_netkb_entry(ip, hostname, mac, is_alive):
         os.makedirs(os.path.dirname(netkb_path), exist_ok=True)
 
         rows = []
-        headers = []
+        headers: list[str] = []
         updated_row = None
 
         if os.path.exists(netkb_path) and os.path.getsize(netkb_path) > 0:
             with open(netkb_path, 'r', encoding='utf-8', errors='ignore') as f:
                 reader = csv.DictReader(f)
-                headers = reader.fieldnames or []
+                headers = list(reader.fieldnames) if reader.fieldnames else []
                 for row in reader:
                     rows.append(row)
         else:
@@ -498,7 +498,7 @@ def sync_all_counts():
                 logger.info(f"[NETKB SYNC] Found {len(netkb_hosts)} hosts in netkb.csv")
                 
             except Exception as e:
-                logger.error(f"[NETKB SYNC] ❌ Error reading from netkb.csv: {e}", exc_info=True)
+                logger.error(f"[NETKB SYNC] ❌ Error reading from netkb.csv: {e}")
             
             # STEP 2: Read from WiFi network file (primary source on this system)
             wifi_hosts = {}
@@ -783,8 +783,9 @@ def get_current_wifi_ssid():
     """Get the current WiFi SSID for file naming"""
     try:
         # Try to get SSID from wifi_manager if available
-        if hasattr(shared_data, 'wifi_manager') and shared_data.wifi_manager:
-            ssid = shared_data.wifi_manager.get_current_ssid()
+        if hasattr(shared_data, 'wifi_manager') and getattr(shared_data, 'wifi_manager', None):
+            wifi_manager = getattr(shared_data, 'wifi_manager')
+            ssid = wifi_manager.get_current_ssid()
             if ssid:
                 # Sanitize SSID for filename
                 sanitized = re.sub(r'[^\w\-_]', '_', ssid)
@@ -1714,6 +1715,8 @@ def apply_hardware_profile():
         
         # Get the profile
         profiles_response = get_hardware_profiles()
+        if isinstance(profiles_response, tuple):
+            return profiles_response
         profiles = profiles_response.get_json()
         
         if profile_id not in profiles:
@@ -2530,7 +2533,7 @@ def get_verbose_debug_logs():
         try:
             # Check key files
             important_files = [
-                shared_data.network_file if hasattr(shared_data, 'network_file') else 'NOT_SET',
+                getattr(shared_data, 'network_file', 'NOT_SET'),
                 shared_data.webconsolelog if hasattr(shared_data, 'webconsolelog') else 'NOT_SET',
                 get_wifi_specific_network_file()
             ]
@@ -3392,7 +3395,7 @@ def scan_single_host():
                 })
 
             except FileNotFoundError:
-                logger.warning("sep-scan command not found. Falling back to nmap for %s", ip)
+                logger.warning(f"sep-scan command not found. Falling back to nmap for {ip}")
                 socketio.emit('scan_host_update', {
                     'type': 'sep_scan_error',
                     'ip': ip,
@@ -6258,7 +6261,7 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
             background_thread_health['sync_last_run'] = time.time()
         except Exception as e:
             consecutive_errors += 1
-            logger.error(f"Background sync error (attempt {consecutive_errors}/{max_consecutive_errors}): {e}", exc_info=True)
+            logger.error(f"Background sync error (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
             
             if consecutive_errors >= max_consecutive_errors:
                 logger.critical(f"Background sync failed {max_consecutive_errors} times consecutively! Resetting error counter but continuing...")
@@ -6322,7 +6325,7 @@ def background_arp_scan_loop():
             
         except Exception as e:
             consecutive_errors += 1
-            logger.error(f"Error in background ARP scan loop (attempt {consecutive_errors}/{max_consecutive_errors}): {e}", exc_info=True)
+            logger.error(f"Error in background ARP scan loop (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
             
             if consecutive_errors >= max_consecutive_errors:
                 logger.critical(f"Background ARP scan failed {max_consecutive_errors} times consecutively! Resetting error counter but continuing...")
@@ -6370,7 +6373,7 @@ def background_health_monitor():
             time.sleep(15)  # Check every 15 seconds
             
         except Exception as e:
-            logger.error(f"Error in health monitor: {e}", exc_info=True)
+            logger.error(f"Error in health monitor: {e}")
             time.sleep(15)
 
 
@@ -7354,7 +7357,8 @@ def get_system_status_api():
         # Temperature (if available)
         try:
             if hasattr(psutil, 'sensors_temperatures'):
-                temps = psutil.sensors_temperatures()
+                temps_func = getattr(psutil, 'sensors_temperatures')
+                temps = temps_func()
                 temperature_data = {}
                 for name, entries in temps.items():
                     for entry in entries:
