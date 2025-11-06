@@ -688,63 +688,347 @@
                 </div>
             </div>
             
-            <!-- Wi-Fi Connection Modal -->
-            <div id="wifi-connect-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
-                <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
-                    <div class="flex items-center justify-between mb-4">
-                        <h3 class="text-xl font-bold">Connect to Wi-Fi</h3>
-                        <button onclick="closeWifiConnectModal()" class="text-gray-400 hover:text-white">
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                            </svg>
-                        </button>
-                    </div>
+            <!-- Bluetooth Management Section -->
+            <div class="mb-8">
+                <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Management</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     
-                    <div class="mb-4">
-                        <label class="block text-sm font-medium mb-2">Network Name (SSID)</label>
-                        <input type="text" id="wifi-connect-ssid" readonly
-                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
-                    </div>
-                    
-                    <div class="mb-4" id="wifi-password-section">
-                        <label class="block text-sm font-medium mb-2">Password</label>
-                        <div class="relative">
-                            <input type="password" id="wifi-connect-password"
-                                   class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white pr-10"
-                                   placeholder="Enter Wi-Fi password">
-                            <button onclick="togglePasswordVisibility()" 
-                                    class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-white">
-                                <svg id="password-eye-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                    <!-- Bluetooth Status Card -->
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Bluetooth Status</h4>
+                            <span id="bluetooth-status-indicator" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                        </div>
+                        <div id="bluetooth-info" class="text-sm text-gray-400 mb-3">
+                            Loading Bluetooth status...
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="enableBluetooth()" 
+                                    id="enable-bluetooth-btn"
+                                    class="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded transition-colors text-sm">
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
+                                Enable
+                            </button>
+                            <button onclick="disableBluetooth()" 
+                                    id="disable-bluetooth-btn"
+                                    class="flex-1 bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded transition-colors text-sm">
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                                </svg>
+                                Disable
                             </button>
                         </div>
                     </div>
                     
-                    <div class="mb-4">
-                        <label class="flex items-center space-x-2">
-                            <input type="checkbox" id="wifi-save-network" checked
-                                   class="form-checkbox h-4 w-4 text-Ragnar-600 bg-slate-700 border-slate-600 rounded">
-                            <span class="text-sm">Save network for auto-connect</span>
-                        </label>
+                    <!-- Bluetooth Discovery Card -->
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Device Discovery</h4>
+                            <span id="bluetooth-scan-status" class="text-sm px-2 py-1 rounded bg-blue-700 text-blue-300">Ready</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mb-3">
+                            Scan for nearby Bluetooth devices
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="startBluetoothScan()" 
+                                    id="start-bluetooth-scan-btn"
+                                    class="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded transition-colors text-sm">
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                                </svg>
+                                Scan
+                            </button>
+                            <button onclick="stopBluetoothScan()" 
+                                    id="stop-bluetooth-scan-btn"
+                                    class="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 px-3 rounded transition-colors text-sm"
+                                    disabled>
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                                </svg>
+                                Stop
+                            </button>
+                        </div>
                     </div>
                     
-                    <div id="wifi-connect-status" class="mb-4 hidden">
-                        <div class="bg-slate-700 rounded p-3 text-sm"></div>
+                </div>
+            </div>
+            
+            <!-- Bluetooth Devices Section -->
+            <div class="mb-8">
+                <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Discovered Bluetooth Devices</h3>
+                
+                <!-- Device Statistics -->
+                <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                    <div class="glass rounded-lg p-3">
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-blue-400" id="bluetooth-total-devices">0</div>
+                            <div class="text-xs text-gray-400">Total Devices</div>
+                        </div>
+                    </div>
+                    <div class="glass rounded-lg p-3">
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-green-400" id="bluetooth-paired-devices">0</div>
+                            <div class="text-xs text-gray-400">Paired</div>
+                        </div>
+                    </div>
+                    <div class="glass rounded-lg p-3">
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-yellow-400" id="bluetooth-connected-devices">0</div>
+                            <div class="text-xs text-gray-400">Connected</div>
+                        </div>
+                    </div>
+                    <div class="glass rounded-lg p-3">
+                        <div class="text-center">
+                            <div class="text-2xl font-bold text-purple-400" id="bluetooth-vulnerable-devices">0</div>
+                            <div class="text-xs text-gray-400">Vulnerable</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Discovered Devices List -->
+                <div class="glass rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-4">
+                        <h4 class="font-medium">Device List</h4>
+                        <div class="flex gap-2">
+                            <button onclick="exportBluetoothDevices()" 
+                                    class="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded transition-colors text-sm">
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                Export
+                            </button>
+                            <button onclick="clearBluetoothDevices()" 
+                                    class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-sm">
+                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                                </svg>
+                                Clear
+                            </button>
+                        </div>
                     </div>
                     
-                    <div class="flex space-x-3">
-                        <button onclick="closeWifiConnectModal()" 
-                                class="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
-                            Cancel
-                        </button>
-                        <button onclick="connectToWifiNetwork()" 
-                                id="wifi-connect-submit-btn"
-                                class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded transition-colors">
-                            Connect
+                    <!-- Devices Table -->
+                    <div id="bluetooth-devices-list" class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead>
+                                <tr class="border-b border-slate-600">
+                                    <th class="text-left py-2 px-3">Device Name</th>
+                                    <th class="text-left py-2 px-3">MAC Address</th>
+                                    <th class="text-left py-2 px-3">Device Type</th>
+                                    <th class="text-left py-2 px-3">RSSI</th>
+                                    <th class="text-left py-2 px-3">Status</th>
+                                    <th class="text-left py-2 px-3">Last Seen</th>
+                                    <th class="text-left py-2 px-3">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="bluetooth-devices-tbody">
+                                <tr>
+                                    <td colspan="7" class="text-center text-gray-400 py-8">
+                                        No Bluetooth devices discovered yet. Click "Scan" to start discovery.
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Bluetooth Attack Section -->
+            <div class="mb-8">
+                <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Security Testing</h3>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    
+                    <!-- Service Enumeration Card -->
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Service Discovery</h4>
+                            <span class="text-sm px-2 py-1 rounded bg-indigo-700 text-indigo-300">Enum</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mb-3">
+                            Enumerate Bluetooth services on discovered devices
+                        </div>
+                        <button onclick="startServiceEnumeration()" 
+                                class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                            </svg>
+                            Enumerate Services
                         </button>
                     </div>
+                    
+                    <!-- Bluejacking Card -->
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Bluejacking</h4>
+                            <span class="text-sm px-2 py-1 rounded bg-orange-700 text-orange-300">Attack</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mb-3">
+                            Send unsolicited messages to nearby devices
+                        </div>
+                        <button onclick="startBluejacking()" 
+                                class="w-full bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                            </svg>
+                            Send Messages
+                        </button>
+                    </div>
+                    
+                    <!-- DoS Attack Card -->
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">DoS Testing</h4>
+                            <span class="text-sm px-2 py-1 rounded bg-red-700 text-red-300">DoS</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mb-3">
+                            Test device resilience against connection flooding
+                        </div>
+                        <button onclick="startBluetoothDoS()" 
+                                class="w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                            </svg>
+                            Start DoS Test
+                        </button>
+                    </div>
+                    
+                </div>
+            </div>
+        </div>
+        
+        <!-- Bluetooth Device Detail Modal -->
+        <div id="bluetooth-device-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+            <div class="glass rounded-xl p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-xl font-bold">Bluetooth Device Details</h3>
+                    <button onclick="closeBluetoothDeviceModal()" class="text-gray-400 hover:text-white">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                
+                <div id="bluetooth-device-details" class="space-y-4">
+                    <!-- Device details will be populated here -->
+                </div>
+                
+                <div class="flex justify-end mt-6 space-x-3">
+                    <button onclick="pairBluetoothDevice()" 
+                            id="bluetooth-pair-btn"
+                            class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
+                        Pair Device
+                    </button>
+                    <button onclick="attackBluetoothDevice()" 
+                            id="bluetooth-attack-btn"
+                            class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors">
+                        Security Test
+                    </button>
+                    <button onclick="closeBluetoothDeviceModal()" 
+                            class="bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
+                        Close
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Bluejacking Modal -->
+        <div id="bluejacking-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+            <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-xl font-bold">Bluejacking Message</h3>
+                    <button onclick="closeBluejackingModal()" class="text-gray-400 hover:text-white">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2">Target Device</label>
+                    <select id="bluejacking-target-select" 
+                            class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                        <option value="">Select target device...</option>
+                    </select>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2">Message</label>
+                    <textarea id="bluejacking-message" 
+                              class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white h-24"
+                              placeholder="Enter message to send..."></textarea>
+                </div>
+                
+                <div class="flex space-x-3">
+                    <button onclick="closeBluejackingModal()" 
+                            class="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
+                        Cancel
+                    </button>
+                    <button onclick="sendBluejackingMessage()" 
+                            class="flex-1 bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded transition-colors">
+                        Send Message
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Wi-Fi Connection Modal -->
+        <div id="wifi-connect-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+            <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-xl font-bold">Connect to Wi-Fi</h3>
+                    <button onclick="closeWifiConnectModal()" class="text-gray-400 hover:text-white">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="block text-sm font-medium mb-2">Network Name (SSID)</label>
+                    <input type="text" id="wifi-connect-ssid" readonly
+                           class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                </div>
+                
+                <div class="mb-4" id="wifi-password-section">
+                    <label class="block text-sm font-medium mb-2">Password</label>
+                    <div class="relative">
+                        <input type="password" id="wifi-connect-password"
+                               class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white pr-10"
+                               placeholder="Enter Wi-Fi password">
+                        <button onclick="togglePasswordVisibility()" 
+                                class="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-white">
+                            <svg id="password-eye-icon" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="mb-4">
+                    <label class="flex items-center space-x-2">
+                        <input type="checkbox" id="wifi-save-network" checked
+                               class="form-checkbox h-4 w-4 text-Ragnar-600 bg-slate-700 border-slate-600 rounded">
+                        <span class="text-sm">Save network for auto-connect</span>
+                    </label>
+                </div>
+                
+                <div id="wifi-connect-status" class="mb-4 hidden">
+                    <div class="bg-slate-700 rounded p-3 text-sm"></div>
+                </div>
+                
+                <div class="flex space-x-3">
+                    <button onclick="closeWifiConnectModal()" 
+                            class="flex-1 bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
+                        Cancel
+                    </button>
+                    <button onclick="connectToWifiNetwork()" 
+                            id="wifi-connect-submit-btn"
+                            class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded transition-colors">
+                        Connect
+                    </button>
                 </div>
             </div>
         </div>
