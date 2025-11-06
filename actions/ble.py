@@ -238,39 +238,73 @@ class BluetoothManager:
                 if not power_success:
                     return False, f"Cannot start scan: {power_msg}"
             
-            result = subprocess.run(['bluetoothctl', 'scan', 'on'], 
-                                  capture_output=True, text=True, timeout=10)
+            # Try multiple methods to start scanning
+            methods_tried = []
+            scan_started = False
             
-            self.logger.info(f"bluetoothctl scan on result: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
+            # Method 1: Standard bluetoothctl scan on
+            try:
+                result = subprocess.run(['bluetoothctl', 'scan', 'on'], 
+                                      capture_output=True, text=True, timeout=10)
+                methods_tried.append(f"bluetoothctl scan on: rc={result.returncode}")
+                self.logger.info(f"Method 1 - bluetoothctl scan on: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
+                
+                if result.returncode == 0:
+                    # Wait and verify
+                    time.sleep(2)
+                    actual_scan_status = self._check_scan_status()
+                    if actual_scan_status is True:
+                        scan_started = True
+                        methods_tried.append("scan verified active")
+                    else:
+                        methods_tried.append("scan command ok but not active")
+            except Exception as e:
+                methods_tried.append(f"bluetoothctl scan on failed: {e}")
             
-            if result.returncode == 0:
+            # Method 2: If first method didn't work, try hcitool lescan (if available)
+            if not scan_started:
+                try:
+                    result = subprocess.run(['timeout', '1', 'hcitool', 'lescan'], 
+                                          capture_output=True, text=True, timeout=3)
+                    methods_tried.append(f"hcitool lescan: rc={result.returncode}")
+                    if result.returncode in [0, 124]:  # 124 is timeout exit code
+                        scan_started = True
+                        methods_tried.append("hcitool lescan working")
+                except Exception as e:
+                    methods_tried.append(f"hcitool lescan failed: {e}")
+            
+            # Method 3: Try using bluetoothctl interactively
+            if not scan_started:
+                try:
+                    # Use echo to pipe commands to bluetoothctl
+                    result = subprocess.run(['bash', '-c', 'echo "scan on" | bluetoothctl'], 
+                                          capture_output=True, text=True, timeout=5)
+                    methods_tried.append(f"interactive bluetoothctl: rc={result.returncode}")
+                    
+                    time.sleep(1)
+                    actual_scan_status = self._check_scan_status()
+                    if actual_scan_status is True:
+                        scan_started = True
+                        methods_tried.append("interactive method working")
+                except Exception as e:
+                    methods_tried.append(f"interactive method failed: {e}")
+            
+            # Update state and prepare response
+            if scan_started:
                 self.scan_active = True
                 self.scan_start_time = time.time()
-                
-                # Wait a moment and verify scanning actually started
-                time.sleep(2)
-                actual_scan_status = self._check_scan_status()
                 
                 message = "Bluetooth device scan started"
                 if duration:
                     message += f" (will run for {duration} seconds)"
+                message += ". Make sure nearby devices are in discoverable mode."
                 
-                if actual_scan_status is True:
-                    message += ". Scan is active and discovering devices."
-                elif actual_scan_status is False:
-                    message += ". Warning: Scan command succeeded but discovery is not active."
-                    self.logger.warning("Scan command succeeded but bluetoothctl shows discovery not active")
-                else:
-                    message += ". Warning: Cannot verify if scan is actually active."
-                
-                # Add troubleshooting info
-                message += " Make sure nearby devices are in discoverable mode."
-                    
-                self.logger.info(message)
+                self.logger.info(f"Scan started successfully. Methods tried: {', '.join(methods_tried)}")
                 return True, message
             else:
-                error_msg = result.stderr.strip() or 'Failed to start Bluetooth scan'
-                self.logger.error(f"Failed to start scan: {error_msg}")
+                self.scan_active = False
+                error_msg = f"Failed to start Bluetooth scan. Methods tried: {', '.join(methods_tried)}"
+                self.logger.error(error_msg)
                 return False, error_msg
                 
         except subprocess.TimeoutExpired:
@@ -397,14 +431,53 @@ class BluetoothManager:
     
     def _get_scan_results(self) -> Dict[str, Dict[str, Any]]:
         """
-        Try to get devices discovered during active scanning
+        Try to get devices discovered during active scanning using multiple methods
         This is a workaround since bluetoothctl devices might not show newly discovered devices
         """
         scan_devices = {}
         
+        # Method 1: Try hcitool lescan output
+        try:
+            result = subprocess.run(['timeout', '3', 'hcitool', 'lescan'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode in [0, 124]:  # 124 is timeout exit code
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line and ':' in line and len(line.split()) >= 2:
+                        parts = line.split(None, 1)
+                        if len(parts) >= 2:
+                            address = parts[0]
+                            name = parts[1] if len(parts) > 1 else 'Unknown Device'
+                            
+                            # Basic MAC address validation
+                            if len(address.split(':')) == 6:
+                                self.logger.info(f"Found device via hcitool: {address} - {name}")
+                                
+                                device_info = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'BLE Device',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
+                                    'last_seen': time.time(),
+                                    'from_scan': True,
+                                    'discovery_method': 'hcitool'
+                                }
+                                
+                                scan_devices[address] = device_info
+                                
+        except Exception as e:
+            self.logger.debug(f"hcitool lescan failed: {e}")
+        
+        # Method 2: Try bluetoothctl in batch mode (original method)
         try:
             # Try running bluetoothctl in batch mode to get scan results
-            # This might show devices that are discovered but not yet in the devices list
             result = subprocess.run(['timeout', '3', 'bluetoothctl'], 
                                   input='scan on\ndevices\nexit\n',
                                   capture_output=True, text=True, timeout=5)
@@ -419,8 +492,8 @@ class BluetoothManager:
                             address = parts[1]
                             name = parts[2] if len(parts) > 2 else 'Unknown Device'
                             
-                            if address not in self.discovered_devices:  # Only add if not already known
-                                self.logger.info(f"Found new device from scan: {address} - {name}")
+                            if address not in scan_devices:  # Don't overwrite hcitool results
+                                self.logger.info(f"Found device via bluetoothctl batch: {address} - {name}")
                                 
                                 device_info = {
                                     'address': address,
@@ -433,13 +506,14 @@ class BluetoothManager:
                                     'connected': False,
                                     'trusted': False,
                                     'last_seen': time.time(),
-                                    'from_scan': True  # Mark as from active scan
+                                    'from_scan': True,
+                                    'discovery_method': 'bluetoothctl'
                                 }
                                 
                                 scan_devices[address] = device_info
                                 
         except Exception as e:
-            self.logger.debug(f"Could not get scan results: {e}")
+            self.logger.debug(f"bluetoothctl batch mode failed: {e}")
             
         return scan_devices
     
