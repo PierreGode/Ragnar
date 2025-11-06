@@ -514,9 +514,10 @@ class WiFiManager:
             self.logger.info("Endless Loop: User connected to AP - monitoring user activity")
         
         # Periodically check for known WiFi networks while in AP mode (every 30 seconds)
-        # This allows recovery even when no user is connected
-        if ap_uptime > 0 and int(ap_uptime) % 30 == 0:
-            self.logger.info("Endless Loop: Checking for available known WiFi networks while in AP mode...")
+        # BUT only after the initial 3-minute grace period to give user time to connect
+        # This allows recovery even when no user is connected, but not too aggressively
+        if ap_uptime >= 180 and int(ap_uptime) % 30 == 0:  # Start checking after 3 minutes
+            self.logger.info("Endless Loop: Checking for available known WiFi networks while in AP mode (after 3-min grace period)...")
             if self._check_known_networks_available():
                 self.logger.info("Endless Loop: Known WiFi network detected! Attempting to connect...")
                 self.stop_ap_mode()
