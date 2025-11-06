@@ -71,8 +71,8 @@ class WiFiManager:
         self.current_ssid = None
         
         # AP mode settings
-        self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar-Setup')
-        self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarpassword')
+        self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar')
+        self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarconnect')
         self.ap_interface = "wlan0"
         self.ap_ip = "192.168.4.1"
         self.ap_subnet = "192.168.4.0/24"
@@ -94,8 +94,8 @@ class WiFiManager:
             self.known_networks = config.get('wifi_known_networks', [])
             
             # Load AP settings
-            self.ap_ssid = config.get('wifi_ap_ssid', 'Ragnar-Setup')
-            self.ap_password = config.get('wifi_ap_password', 'ragnarpassword')
+            self.ap_ssid = config.get('wifi_ap_ssid', 'Ragnar')
+            self.ap_password = config.get('wifi_ap_password', 'ragnarconnect')
             self.connection_timeout = config.get('wifi_connection_timeout', 60)
             self.max_connection_attempts = config.get('wifi_max_attempts', 3)
             
