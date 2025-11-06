@@ -450,7 +450,7 @@ def sync_all_counts():
             sync_vulnerability_count()
 
             # ==============================================================================
-            # PRIMARY DATA SOURCE: netkb.csv with 15-ping failure rule
+            # PRIMARY DATA SOURCE: Read from BOTH netkb.csv AND WiFi network file
             # ==============================================================================
             
             aggregated_targets = 0
@@ -459,6 +459,8 @@ def sync_all_counts():
             inactive_target_count = 0
             current_snapshot = {}
             
+            # STEP 1: Read from netkb.csv (if it has data)
+            netkb_hosts = {}
             try:
                 netkb_data = shared_data.read_data()
                 max_failed_pings = shared_data.config.get('network_max_failed_pings', 15)
@@ -482,48 +484,110 @@ def sync_all_counts():
                     
                     is_active = (alive_status == '1' or failed_pings < max_failed_pings)
                     
-                    # Count all hosts for total
-                    total_target_count += 1
-                    
-                    # Count active hosts
-                    if is_active:
-                        aggregated_targets += 1
-                        
-                        # Count ports for active hosts
-                        ports_str = row.get("Ports", "").strip()
-                        if ports_str and ports_str != '0':
-                            port_list = [p.strip() for p in ports_str.split(';') if p.strip() and p.strip() != '0']
-                            aggregated_ports += len(port_list)
-                        
-                        # Track in snapshot
-                        current_snapshot[ip] = {
-                            'alive': True,
-                            'ports': set(port_list) if ports_str else set(),
-                            'failed_pings': failed_pings
-                        }
-                        
-                        logger.debug(f"[NETKB SYNC] {ip}: ACTIVE (Alive={alive_status}, Failed_Pings={failed_pings}/{max_failed_pings})")
-                    else:
-                        inactive_target_count += 1
-                        current_snapshot[ip] = {
-                            'alive': False,
-                            'ports': set(),
-                            'failed_pings': failed_pings
-                        }
-                        logger.debug(f"[NETKB SYNC] {ip}: INACTIVE (Alive={alive_status}, Failed_Pings={failed_pings}/{max_failed_pings})")
+                    # Store in netkb_hosts dict
+                    netkb_hosts[ip] = {
+                        'alive': is_active,
+                        'alive_status': alive_status,
+                        'failed_pings': failed_pings,
+                        'ports': row.get("Ports", "").strip(),
+                        'mac': mac,
+                        'hostname': row.get("Hostnames", "").strip()
+                    }
                 
-                logger.info(f"[NETKB SYNC] ✅ Read {total_target_count} hosts from netkb.csv:")
-                logger.info(f"  - Active: {aggregated_targets}")
-                logger.info(f"  - Inactive: {inactive_target_count}")
-                logger.info(f"  - Ports: {aggregated_ports}")
+                logger.info(f"[NETKB SYNC] Found {len(netkb_hosts)} hosts in netkb.csv")
                 
             except Exception as e:
                 logger.error(f"[NETKB SYNC] ❌ Error reading from netkb.csv: {e}", exc_info=True)
-                # Fallback to zero if netkb read fails
-                aggregated_targets = 0
-                total_target_count = 0
-                inactive_target_count = 0
-                aggregated_ports = 0
+            
+            # STEP 2: Read from WiFi network file (primary source on this system)
+            wifi_hosts = {}
+            try:
+                wifi_network_data = read_wifi_network_data()
+                logger.info(f"[WIFI SYNC] Reading from WiFi network file")
+                
+                for row in wifi_network_data:
+                    ip = row.get("IPs", "").strip()
+                    
+                    if not ip:
+                        continue
+                    
+                    # WiFi network data uses 'Alive' field
+                    alive = row.get("Alive")
+                    is_active = alive in [True, 'True', '1', 1]
+                    
+                    wifi_hosts[ip] = {
+                        'alive': is_active,
+                        'ports': row.get("Ports", "").strip(),
+                        'mac': row.get("MAC Address", "").strip(),
+                        'hostname': row.get("Hostnames", "").strip(),
+                        'failed_ping_count': int(row.get("FailedPingCount", "0"))
+                    }
+                
+                logger.info(f"[WIFI SYNC] Found {len(wifi_hosts)} hosts in WiFi network file")
+                
+            except Exception as e:
+                logger.warning(f"[WIFI SYNC] Could not read WiFi network data: {e}")
+            
+            # STEP 3: Merge data from both sources (WiFi has priority if conflict)
+            all_ips = set(netkb_hosts.keys()) | set(wifi_hosts.keys())
+            
+            max_failed_pings = shared_data.config.get('network_max_failed_pings', 15)
+            
+            for ip in all_ips:
+                netkb_entry = netkb_hosts.get(ip, {})
+                wifi_entry = wifi_hosts.get(ip, {})
+                
+                # Determine if host is active (prefer WiFi data if available)
+                if wifi_entry:
+                    is_active = wifi_entry['alive']
+                    failed_pings = wifi_entry.get('failed_ping_count', 0)
+                    source = "wifi"
+                elif netkb_entry:
+                    is_active = netkb_entry['alive']
+                    failed_pings = netkb_entry.get('failed_pings', 0)
+                    source = "netkb"
+                else:
+                    continue
+                
+                # Count all hosts for total
+                total_target_count += 1
+                
+                # Count active hosts
+                if is_active:
+                    aggregated_targets += 1
+                    
+                    # Count ports (prefer WiFi data, fallback to netkb)
+                    ports_str = wifi_entry.get('ports') or netkb_entry.get('ports', '')
+                    if ports_str and ports_str != '0':
+                        port_list = [p.strip() for p in ports_str.split(';') if p.strip() and p.strip() != '0']
+                        aggregated_ports += len(port_list)
+                    else:
+                        port_list = []
+                    
+                    # Track in snapshot
+                    current_snapshot[ip] = {
+                        'alive': True,
+                        'ports': set(port_list),
+                        'failed_pings': failed_pings,
+                        'source': source
+                    }
+                    
+                    logger.debug(f"[SYNC] {ip}: ACTIVE from {source} (Failed_Pings={failed_pings}/{max_failed_pings})")
+                else:
+                    inactive_target_count += 1
+                    current_snapshot[ip] = {
+                        'alive': False,
+                        'ports': set(),
+                        'failed_pings': failed_pings,
+                        'source': source
+                    }
+                    logger.debug(f"[SYNC] {ip}: INACTIVE from {source} (Failed_Pings={failed_pings}/{max_failed_pings})")
+            
+            logger.info(f"[SYNC] ✅ Merged data from netkb.csv + WiFi network file:")
+            logger.info(f"  - Total unique IPs: {len(all_ips)}")
+            logger.info(f"  - Active: {aggregated_targets}")
+            logger.info(f"  - Inactive: {inactive_target_count}")
+            logger.info(f"  - Ports: {aggregated_ports}")
 
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
