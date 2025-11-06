@@ -1616,23 +1616,12 @@ async function loadConnectData() {
         await loadWifiInterfaces();
         
         // Refresh Wi-Fi status when connect tab is loaded
-        console.log('Loading connect tab, refreshing Wi-Fi and Bluetooth status...');
+        console.log('Loading connect tab, refreshing Wi-Fi status...');
         await refreshWifiStatus();
         
-        // Refresh Bluetooth status
+        // Load Bluetooth status and interfaces
+        console.log('Loading connect tab, refreshing Bluetooth status...');
         await refreshBluetoothStatus();
-        
-        // Load existing Bluetooth devices
-        try {
-            const devices = await fetchAPI('/api/bluetooth/devices');
-            if (devices && devices.devices) {
-                bluetoothDevices = devices.devices;
-                updateBluetoothDevicesList();
-                updateBluetoothStats();
-            }
-        } catch (error) {
-            console.log('No existing Bluetooth devices found or Bluetooth not available');
-        }
     } catch (error) {
         console.error('Error loading connect data:', error);
     }
@@ -2641,6 +2630,518 @@ async function connectToWifiNetwork() {
     }
 }
 
+// ============================================================================
+// BLUETOOTH MANAGEMENT FUNCTIONS
+// ============================================================================
+
+// Global Bluetooth state
+let currentBluetoothDevices = [];
+let isBluetoothScanning = false;
+let selectedBluetoothDevice = null;
+
+async function refreshBluetoothStatus() {
+    try {
+        const response = await fetchAPI('/api/bluetooth/status');
+        
+        const statusElement = document.getElementById('bluetooth-status-indicator');
+        const infoElement = document.getElementById('bluetooth-info');
+        const toggleBtn = document.getElementById('bluetooth-toggle-btn');
+        const toggleText = document.getElementById('bluetooth-toggle-text');
+        
+        if (statusElement && infoElement && toggleBtn && toggleText) {
+            if (response.active) {
+                statusElement.className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
+                statusElement.textContent = 'Active';
+                infoElement.textContent = `Bluetooth: ${response.adapter || 'Unknown'} - ${response.status || 'Ready'}`;
+                toggleBtn.className = 'w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors';
+                toggleText.textContent = 'Disable Bluetooth';
+                
+                // Load paired devices count
+                if (response.paired_count !== undefined) {
+                    updateBluetoothStats({ paired: response.paired_count });
+                }
+            } else {
+                statusElement.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+                statusElement.textContent = 'Inactive';
+                infoElement.textContent = 'Bluetooth service is not running';
+                toggleBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
+                toggleText.textContent = 'Enable Bluetooth';
+            }
+        }
+        
+        updateBluetoothStatus(`Bluetooth status updated: ${response.active ? 'Active' : 'Inactive'}`);
+        
+    } catch (error) {
+        console.error('Error refreshing Bluetooth status:', error);
+        updateBluetoothStatus('Error checking Bluetooth status', 'error');
+    }
+}
+
+async function toggleBluetoothService() {
+    try {
+        const statusResponse = await fetchAPI('/api/bluetooth/status');
+        const action = statusResponse.active ? 'disable' : 'enable';
+        
+        updateBluetoothStatus(`${action === 'enable' ? 'Enabling' : 'Disabling'} Bluetooth service...`);
+        
+        const response = await fetchAPI(`/api/bluetooth/${action}`, {
+            method: 'POST'
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus(`Bluetooth ${action}d successfully`);
+            setTimeout(refreshBluetoothStatus, 2000);
+        } else {
+            updateBluetoothStatus(`Failed to ${action} Bluetooth: ${response.error || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error toggling Bluetooth service:', error);
+        updateBluetoothStatus('Error toggling Bluetooth service', 'error');
+    }
+}
+
+async function startBluetoothScan() {
+    if (isBluetoothScanning) {
+        return stopBluetoothScan();
+    }
+    
+    try {
+        const scanBtn = document.getElementById('bluetooth-scan-btn');
+        const scanText = document.getElementById('bluetooth-scan-text');
+        
+        if (scanBtn && scanText) {
+            scanBtn.className = 'w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors mb-2';
+            scanText.textContent = 'Stop Scanning';
+        }
+        
+        isBluetoothScanning = true;
+        updateBluetoothStatus('Starting Bluetooth device scan...');
+        
+        const response = await fetchAPI('/api/bluetooth/scan/start', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                duration: 30, // 30 second scan
+                aggressive: false
+            })
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus('Bluetooth scan started successfully');
+            // Poll for scan results
+            pollBluetoothScanResults();
+        } else {
+            updateBluetoothStatus(`Failed to start scan: ${response.error || 'Unknown error'}`, 'error');
+            resetBluetoothScanButton();
+        }
+        
+    } catch (error) {
+        console.error('Error starting Bluetooth scan:', error);
+        updateBluetoothStatus('Error starting Bluetooth scan', 'error');
+        resetBluetoothScanButton();
+    }
+}
+
+async function stopBluetoothScan() {
+    try {
+        const response = await fetchAPI('/api/bluetooth/scan/stop', {
+            method: 'POST'
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus('Bluetooth scan stopped');
+        }
+        
+    } catch (error) {
+        console.error('Error stopping Bluetooth scan:', error);
+    } finally {
+        resetBluetoothScanButton();
+    }
+}
+
+function resetBluetoothScanButton() {
+    isBluetoothScanning = false;
+    const scanBtn = document.getElementById('bluetooth-scan-btn');
+    const scanText = document.getElementById('bluetooth-scan-text');
+    
+    if (scanBtn && scanText) {
+        scanBtn.className = 'w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2';
+        scanText.textContent = 'Start Device Scan';
+    }
+}
+
+async function pollBluetoothScanResults() {
+    if (!isBluetoothScanning) return;
+    
+    try {
+        const response = await fetchAPI('/api/bluetooth/scan/results');
+        if (response.devices) {
+            currentBluetoothDevices = response.devices;
+            displayBluetoothDevices(currentBluetoothDevices);
+            updateBluetoothStats({
+                total: currentBluetoothDevices.length,
+                connectable: currentBluetoothDevices.filter(d => d.connectable).length,
+                vulnerable: currentBluetoothDevices.filter(d => d.vulnerable).length
+            });
+        }
+        
+        if (response.scanning) {
+            setTimeout(pollBluetoothScanResults, 2000);
+        } else {
+            resetBluetoothScanButton();
+            updateBluetoothStatus(`Scan completed. Found ${currentBluetoothDevices.length} devices`);
+        }
+        
+    } catch (error) {
+        console.error('Error polling scan results:', error);
+        setTimeout(pollBluetoothScanResults, 2000);
+    }
+}
+
+function displayBluetoothDevices(devices) {
+    const devicesList = document.getElementById('bluetooth-devices-list');
+    if (!devicesList) return;
+    
+    if (!devices || devices.length === 0) {
+        devicesList.innerHTML = '<div class="text-center text-gray-400 py-8">No Bluetooth devices found</div>';
+        return;
+    }
+    
+    devicesList.innerHTML = devices.map(device => {
+        const deviceType = device.device_type || 'Unknown';
+        const signalStrength = device.rssi ? `${device.rssi} dBm` : 'Unknown';
+        const services = device.services ? device.services.length : 0;
+        
+        return `
+            <div class="glass rounded-lg p-3 hover:bg-slate-700 transition-colors cursor-pointer" 
+                 onclick="openBluetoothDeviceModal('${device.address}')">
+                <div class="flex items-center justify-between">
+                    <div class="flex-1">
+                        <div class="flex items-center space-x-2">
+                            <div class="w-3 h-3 rounded-full ${device.connectable ? 'bg-green-500' : 'bg-red-500'}"></div>
+                            <span class="font-medium">${device.name || 'Unknown Device'}</span>
+                            ${device.vulnerable ? '<span class="text-xs bg-red-600 text-red-100 px-2 py-1 rounded">VULN</span>' : ''}
+                        </div>
+                        <div class="text-sm text-gray-400 mt-1">
+                            ${device.address} • ${deviceType} • ${signalStrength}
+                        </div>
+                        <div class="text-xs text-gray-500 mt-1">
+                            ${services} services • Class: ${device.device_class || 'Unknown'}
+                        </div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-sm font-medium ${device.paired ? 'text-yellow-400' : 'text-gray-400'}">
+                            ${device.paired ? 'Paired' : 'Unpaired'}
+                        </div>
+                        <div class="text-xs text-gray-500">
+                            ${new Date(device.discovered_at).toLocaleTimeString()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function updateBluetoothStats(stats) {
+    const elements = {
+        total: document.getElementById('bluetooth-total-devices'),
+        connectable: document.getElementById('bluetooth-connectable-devices'),
+        paired: document.getElementById('bluetooth-paired-devices'),
+        vulnerable: document.getElementById('bluetooth-vulnerable-devices')
+    };
+    
+    Object.keys(stats).forEach(key => {
+        if (elements[key]) {
+            elements[key].textContent = stats[key] || 0;
+        }
+    });
+}
+
+async function makeDeviceDiscoverable() {
+    try {
+        updateBluetoothStatus('Making device discoverable...');
+        
+        const response = await fetchAPI('/api/bluetooth/discoverable', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                duration: 300 // 5 minutes
+            })
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus('Device is now discoverable for 5 minutes');
+        } else {
+            updateBluetoothStatus(`Failed to make discoverable: ${response.error || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error making device discoverable:', error);
+        updateBluetoothStatus('Error making device discoverable', 'error');
+    }
+}
+
+function openBluetoothDeviceModal(deviceAddress) {
+    const device = currentBluetoothDevices.find(d => d.address === deviceAddress);
+    if (!device) return;
+    
+    selectedBluetoothDevice = device;
+    
+    // Populate modal fields
+    document.getElementById('bt-device-name').value = device.name || 'Unknown Device';
+    document.getElementById('bt-device-mac').value = device.address;
+    document.getElementById('bt-device-type').value = device.device_type || 'Unknown';
+    document.getElementById('bt-device-rssi').value = device.rssi ? `${device.rssi} dBm` : 'Unknown';
+    
+    // Display services
+    const servicesElement = document.getElementById('bt-device-services');
+    if (device.services && device.services.length > 0) {
+        servicesElement.innerHTML = device.services.map(service => `
+            <div class="mb-2 p-2 bg-slate-800 rounded">
+                <div class="font-medium text-blue-400">${service.name || service.uuid}</div>
+                <div class="text-xs text-gray-400">${service.uuid}</div>
+                ${service.description ? `<div class="text-xs text-gray-500 mt-1">${service.description}</div>` : ''}
+            </div>
+        `).join('');
+    } else {
+        servicesElement.innerHTML = '<div class="text-gray-400 text-sm">No services discovered</div>';
+    }
+    
+    // Clear previous attack results
+    document.getElementById('bt-attack-results').innerHTML = '<div class="text-gray-400 text-sm">No attacks executed yet</div>';
+    
+    // Show modal
+    document.getElementById('bluetooth-device-modal').classList.remove('hidden');
+    document.getElementById('bluetooth-device-modal').classList.add('flex');
+}
+
+function closeBluetoothDeviceModal() {
+    document.getElementById('bluetooth-device-modal').classList.add('hidden');
+    document.getElementById('bluetooth-device-modal').classList.remove('flex');
+    selectedBluetoothDevice = null;
+}
+
+async function attemptBluetoothPair() {
+    if (!selectedBluetoothDevice) return;
+    
+    try {
+        updateAttackResults('Attempting to pair with device...');
+        
+        const response = await fetchAPI('/api/bluetooth/pair', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                address: selectedBluetoothDevice.address,
+                pin_attempts: ['0000', '1234', '1111', '0001']
+            })
+        });
+        
+        if (response.success) {
+            updateAttackResults(`Pairing successful! ${response.message || ''}`);
+        } else {
+            updateAttackResults(`Pairing failed: ${response.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error attempting Bluetooth pair:', error);
+        updateAttackResults('Error during pairing attempt');
+    }
+}
+
+async function attemptServiceEnumeration() {
+    if (!selectedBluetoothDevice) return;
+    
+    try {
+        updateAttackResults('Enumerating device services...');
+        
+        const response = await fetchAPI('/api/bluetooth/enumerate', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                address: selectedBluetoothDevice.address
+            })
+        });
+        
+        if (response.success) {
+            let resultText = `Service enumeration completed. Found ${response.services?.length || 0} services:\n\n`;
+            if (response.services) {
+                response.services.forEach(service => {
+                    resultText += `• ${service.name || service.uuid}\n`;
+                    if (service.description) resultText += `  ${service.description}\n`;
+                });
+            }
+            updateAttackResults(resultText);
+        } else {
+            updateAttackResults(`Service enumeration failed: ${response.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error enumerating services:', error);
+        updateAttackResults('Error during service enumeration');
+    }
+}
+
+async function attemptBluetoothExploit() {
+    if (!selectedBluetoothDevice) return;
+    
+    try {
+        updateAttackResults('Testing device for known vulnerabilities...');
+        
+        const response = await fetchAPI('/api/bluetooth/exploit', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                address: selectedBluetoothDevice.address,
+                tests: ['bluejack', 'bluesnarf', 'obex_push', 'pin_bruteforce']
+            })
+        });
+        
+        if (response.success) {
+            let resultText = 'Vulnerability testing completed:\n\n';
+            if (response.results) {
+                response.results.forEach(result => {
+                    resultText += `• ${result.test}: ${result.status}\n`;
+                    if (result.details) resultText += `  ${result.details}\n`;
+                });
+            }
+            updateAttackResults(resultText);
+        } else {
+            updateAttackResults(`Vulnerability testing failed: ${response.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error testing vulnerabilities:', error);
+        updateAttackResults('Error during vulnerability testing');
+    }
+}
+
+async function attemptDataExtraction() {
+    if (!selectedBluetoothDevice) return;
+    
+    try {
+        updateAttackResults('Attempting data extraction...');
+        
+        const response = await fetchAPI('/api/bluetooth/extract', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                address: selectedBluetoothDevice.address,
+                targets: ['contacts', 'sms', 'calendar', 'files']
+            })
+        });
+        
+        if (response.success) {
+            let resultText = 'Data extraction completed:\n\n';
+            if (response.extracted) {
+                response.extracted.forEach(item => {
+                    resultText += `• ${item.type}: ${item.count || 0} items extracted\n`;
+                    if (item.saved_to) resultText += `  Saved to: ${item.saved_to}\n`;
+                });
+            }
+            updateAttackResults(resultText);
+        } else {
+            updateAttackResults(`Data extraction failed: ${response.error || 'Unknown error'}`);
+        }
+    } catch (error) {
+        console.error('Error extracting data:', error);
+        updateAttackResults('Error during data extraction');
+    }
+}
+
+function updateAttackResults(message) {
+    const resultsElement = document.getElementById('bt-attack-results');
+    if (resultsElement) {
+        const timestamp = new Date().toLocaleTimeString();
+        const currentText = resultsElement.textContent;
+        if (currentText === 'No attacks executed yet') {
+            resultsElement.textContent = `[${timestamp}] ${message}`;
+        } else {
+            resultsElement.textContent = `${currentText}\n[${timestamp}] ${message}`;
+        }
+        resultsElement.scrollTop = resultsElement.scrollHeight;
+    }
+}
+
+async function saveBluetoothDevice() {
+    if (!selectedBluetoothDevice) return;
+    
+    try {
+        const response = await fetchAPI('/api/bluetooth/save-device', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                device: selectedBluetoothDevice,
+                attack_results: document.getElementById('bt-attack-results').textContent
+            })
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus('Device saved to intelligence database');
+            closeBluetoothDeviceModal();
+        } else {
+            updateBluetoothStatus(`Failed to save device: ${response.error || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error saving Bluetooth device:', error);
+        updateBluetoothStatus('Error saving device', 'error');
+    }
+}
+
+function clearBluetoothDevices() {
+    currentBluetoothDevices = [];
+    displayBluetoothDevices([]);
+    updateBluetoothStats({ total: 0, connectable: 0, paired: 0, vulnerable: 0 });
+    updateBluetoothStatus('Device list cleared');
+}
+
+async function exportBluetoothDevices() {
+    if (currentBluetoothDevices.length === 0) {
+        updateBluetoothStatus('No devices to export', 'error');
+        return;
+    }
+    
+    try {
+        const response = await fetchAPI('/api/bluetooth/export', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                devices: currentBluetoothDevices,
+                format: 'json'
+            })
+        });
+        
+        if (response.success) {
+            updateBluetoothStatus(`Exported ${currentBluetoothDevices.length} devices to ${response.filename}`);
+        } else {
+            updateBluetoothStatus(`Export failed: ${response.error || 'Unknown error'}`, 'error');
+        }
+    } catch (error) {
+        console.error('Error exporting Bluetooth devices:', error);
+        updateBluetoothStatus('Error exporting devices', 'error');
+    }
+}
+
+function updateBluetoothStatus(message, type = '') {
+    // Add to console if available
+    if (window.addConsoleMessage) {
+        addConsoleMessage(message, type);
+    }
+    console.log(`Bluetooth: ${message}`);
+}
+
 async function loadConsoleLogs() {
     try {
         const data = await fetchAPI('/api/logs');
@@ -2653,547 +3154,6 @@ async function loadConsoleLogs() {
         addConsoleMessage('Unable to load historical logs from server', 'warning');
         addConsoleMessage('Console will show new messages as they occur', 'info');
     }
-}
-
-// ============================================================================
-// BLUETOOTH MANAGEMENT FUNCTIONS
-// ============================================================================
-
-// Global Bluetooth state
-let bluetoothDevices = [];
-let bluetoothScanInterval = null;
-let isBluetoothScanning = false;
-
-async function refreshBluetoothStatus() {
-    try {
-        const data = await fetchAPI('/api/bluetooth/status');
-        updateBluetoothStatus(data);
-    } catch (error) {
-        console.error('Error refreshing Bluetooth status:', error);
-        updateBluetoothStatus({ 
-            enabled: false, 
-            status: 'Error', 
-            error: error.message 
-        });
-    }
-}
-
-function updateBluetoothStatus(data) {
-    const statusIndicator = document.getElementById('bluetooth-status-indicator');
-    const bluetoothInfo = document.getElementById('bluetooth-info');
-    const enableBtn = document.getElementById('enable-bluetooth-btn');
-    const disableBtn = document.getElementById('disable-bluetooth-btn');
-
-    if (!statusIndicator || !bluetoothInfo) return;
-
-    if (data.enabled) {
-        statusIndicator.textContent = 'Enabled';
-        statusIndicator.className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
-        bluetoothInfo.innerHTML = `
-            <div>Status: ${data.status || 'Active'}</div>
-            <div>Adapter: ${data.adapter || 'hci0'}</div>
-            <div>Address: ${data.address || 'N/A'}</div>
-        `;
-        if (enableBtn) enableBtn.disabled = true;
-        if (disableBtn) disableBtn.disabled = false;
-    } else {
-        statusIndicator.textContent = 'Disabled';
-        statusIndicator.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
-        bluetoothInfo.textContent = data.error || 'Bluetooth is disabled';
-        if (enableBtn) enableBtn.disabled = false;
-        if (disableBtn) disableBtn.disabled = true;
-    }
-}
-
-async function enableBluetooth() {
-    try {
-        showMessage('Enabling Bluetooth...', 'info');
-        const data = await fetchAPI('/api/bluetooth/enable', { method: 'POST' });
-        if (data.success) {
-            showMessage('Bluetooth enabled successfully', 'success');
-            setTimeout(refreshBluetoothStatus, 2000);
-        } else {
-            throw new Error(data.error || 'Failed to enable Bluetooth');
-        }
-    } catch (error) {
-        console.error('Error enabling Bluetooth:', error);
-        showMessage(`Error enabling Bluetooth: ${error.message}`, 'error');
-    }
-}
-
-async function disableBluetooth() {
-    try {
-        showMessage('Disabling Bluetooth...', 'info');
-        const data = await fetchAPI('/api/bluetooth/disable', { method: 'POST' });
-        if (data.success) {
-            showMessage('Bluetooth disabled successfully', 'success');
-            // Clear devices when Bluetooth is disabled
-            bluetoothDevices = [];
-            updateBluetoothDevicesList();
-            updateBluetoothStats();
-            setTimeout(refreshBluetoothStatus, 2000);
-        } else {
-            throw new Error(data.error || 'Failed to disable Bluetooth');
-        }
-    } catch (error) {
-        console.error('Error disabling Bluetooth:', error);
-        showMessage(`Error disabling Bluetooth: ${error.message}`, 'error');
-    }
-}
-
-async function startBluetoothScan() {
-    try {
-        const scanStatus = document.getElementById('bluetooth-scan-status');
-        const startBtn = document.getElementById('start-bluetooth-scan-btn');
-        const stopBtn = document.getElementById('stop-bluetooth-scan-btn');
-
-        if (scanStatus) {
-            scanStatus.textContent = 'Scanning...';
-            scanStatus.className = 'text-sm px-2 py-1 rounded bg-yellow-700 text-yellow-300';
-        }
-        
-        if (startBtn) startBtn.disabled = true;
-        if (stopBtn) stopBtn.disabled = false;
-
-        isBluetoothScanning = true;
-        showMessage('Starting Bluetooth device scan...', 'info');
-
-        const data = await fetchAPI('/api/bluetooth/scan/start', { method: 'POST' });
-        if (data.success) {
-            showMessage('Bluetooth scan started', 'success');
-            
-            // Start polling for scan results
-            bluetoothScanInterval = setInterval(async () => {
-                try {
-                    const devices = await fetchAPI('/api/bluetooth/devices');
-                    if (devices && devices.devices) {
-                        bluetoothDevices = devices.devices;
-                        updateBluetoothDevicesList();
-                        updateBluetoothStats();
-                    }
-                } catch (error) {
-                    console.error('Error fetching Bluetooth devices:', error);
-                }
-            }, 3000); // Poll every 3 seconds
-            
-        } else {
-            throw new Error(data.error || 'Failed to start Bluetooth scan');
-        }
-    } catch (error) {
-        console.error('Error starting Bluetooth scan:', error);
-        showMessage(`Error starting Bluetooth scan: ${error.message}`, 'error');
-        stopBluetoothScan();
-    }
-}
-
-async function stopBluetoothScan() {
-    try {
-        const scanStatus = document.getElementById('bluetooth-scan-status');
-        const startBtn = document.getElementById('start-bluetooth-scan-btn');
-        const stopBtn = document.getElementById('stop-bluetooth-scan-btn');
-
-        if (scanStatus) {
-            scanStatus.textContent = 'Ready';
-            scanStatus.className = 'text-sm px-2 py-1 rounded bg-blue-700 text-blue-300';
-        }
-        
-        if (startBtn) startBtn.disabled = false;
-        if (stopBtn) stopBtn.disabled = true;
-
-        isBluetoothScanning = false;
-
-        // Clear scan interval
-        if (bluetoothScanInterval) {
-            clearInterval(bluetoothScanInterval);
-            bluetoothScanInterval = null;
-        }
-
-        const data = await fetchAPI('/api/bluetooth/scan/stop', { method: 'POST' });
-        if (data.success) {
-            showMessage('Bluetooth scan stopped', 'info');
-        } else {
-            console.warn('Failed to stop scan on server:', data.error);
-        }
-    } catch (error) {
-        console.error('Error stopping Bluetooth scan:', error);
-        showMessage(`Error stopping Bluetooth scan: ${error.message}`, 'error');
-    }
-}
-
-function updateBluetoothDevicesList() {
-    const tbody = document.getElementById('bluetooth-devices-tbody');
-    if (!tbody) return;
-
-    if (bluetoothDevices.length === 0) {
-        tbody.innerHTML = `
-            <tr>
-                <td colspan="7" class="text-center text-gray-400 py-8">
-                    No Bluetooth devices discovered yet. Click "Scan" to start discovery.
-                </td>
-            </tr>
-        `;
-        return;
-    }
-
-    tbody.innerHTML = bluetoothDevices.map(device => {
-        const deviceName = device.name || 'Unknown Device';
-        const deviceType = device.device_type || device.class || 'Unknown';
-        const rssi = device.rssi ? `${device.rssi} dBm` : 'N/A';
-        const status = getDeviceStatus(device);
-        const lastSeen = device.last_seen ? formatTimeAgo(device.last_seen) : 'Just now';
-        
-        const statusClass = getStatusClass(status);
-
-        return `
-            <tr class="border-b border-slate-700 hover:bg-slate-800">
-                <td class="py-2 px-3">
-                    <div class="font-medium">${escapeHtml(deviceName)}</div>
-                    ${device.manufacturer ? `<div class="text-xs text-gray-400">${escapeHtml(device.manufacturer)}</div>` : ''}
-                </td>
-                <td class="py-2 px-3 font-mono text-sm">${device.address}</td>
-                <td class="py-2 px-3">${escapeHtml(deviceType)}</td>
-                <td class="py-2 px-3">${rssi}</td>
-                <td class="py-2 px-3">
-                    <span class="text-xs px-2 py-1 rounded ${statusClass}">${status}</span>
-                </td>
-                <td class="py-2 px-3 text-sm">${lastSeen}</td>
-                <td class="py-2 px-3">
-                    <div class="flex gap-1">
-                        <button onclick="showBluetoothDeviceDetails('${device.address}')" 
-                                class="bg-blue-600 hover:bg-blue-700 text-white px-2 py-1 rounded text-xs">
-                            Details
-                        </button>
-                        ${device.paired ? `
-                            <button onclick="disconnectBluetoothDevice('${device.address}')" 
-                                    class="bg-orange-600 hover:bg-orange-700 text-white px-2 py-1 rounded text-xs">
-                                Disconnect
-                            </button>
-                        ` : `
-                            <button onclick="pairBluetoothDevice('${device.address}')" 
-                                    class="bg-green-600 hover:bg-green-700 text-white px-2 py-1 rounded text-xs">
-                                Pair
-                            </button>
-                        `}
-                    </div>
-                </td>
-            </tr>
-        `;
-    }).join('');
-}
-
-function getDeviceStatus(device) {
-    if (device.connected) return 'Connected';
-    if (device.paired) return 'Paired';
-    if (device.vulnerable) return 'Vulnerable';
-    return 'Discovered';
-}
-
-function getStatusClass(status) {
-    switch (status) {
-        case 'Connected': return 'bg-green-700 text-green-300';
-        case 'Paired': return 'bg-blue-700 text-blue-300';
-        case 'Vulnerable': return 'bg-red-700 text-red-300';
-        default: return 'bg-gray-700 text-gray-300';
-    }
-}
-
-function updateBluetoothStats() {
-    const totalDevices = bluetoothDevices.length;
-    const pairedDevices = bluetoothDevices.filter(d => d.paired).length;
-    const connectedDevices = bluetoothDevices.filter(d => d.connected).length;
-    const vulnerableDevices = bluetoothDevices.filter(d => d.vulnerable).length;
-
-    const totalEl = document.getElementById('bluetooth-total-devices');
-    const pairedEl = document.getElementById('bluetooth-paired-devices');
-    const connectedEl = document.getElementById('bluetooth-connected-devices');
-    const vulnerableEl = document.getElementById('bluetooth-vulnerable-devices');
-
-    if (totalEl) totalEl.textContent = totalDevices;
-    if (pairedEl) pairedEl.textContent = pairedDevices;
-    if (connectedEl) connectedEl.textContent = connectedDevices;
-    if (vulnerableEl) vulnerableEl.textContent = vulnerableDevices;
-}
-
-function showBluetoothDeviceDetails(address) {
-    const device = bluetoothDevices.find(d => d.address === address);
-    if (!device) return;
-
-    const modal = document.getElementById('bluetooth-device-modal');
-    const detailsDiv = document.getElementById('bluetooth-device-details');
-    
-    if (!modal || !detailsDiv) return;
-
-    detailsDiv.innerHTML = `
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-                <h4 class="font-medium mb-2">Basic Information</h4>
-                <div class="space-y-2 text-sm">
-                    <div><strong>Name:</strong> ${escapeHtml(device.name || 'Unknown')}</div>
-                    <div><strong>Address:</strong> ${device.address}</div>
-                    <div><strong>Type:</strong> ${escapeHtml(device.device_type || device.class || 'Unknown')}</div>
-                    <div><strong>Manufacturer:</strong> ${escapeHtml(device.manufacturer || 'Unknown')}</div>
-                    <div><strong>RSSI:</strong> ${device.rssi ? device.rssi + ' dBm' : 'N/A'}</div>
-                </div>
-            </div>
-            <div>
-                <h4 class="font-medium mb-2">Status</h4>
-                <div class="space-y-2 text-sm">
-                    <div><strong>Connected:</strong> ${device.connected ? 'Yes' : 'No'}</div>
-                    <div><strong>Paired:</strong> ${device.paired ? 'Yes' : 'No'}</div>
-                    <div><strong>Trusted:</strong> ${device.trusted ? 'Yes' : 'No'}</div>
-                    <div><strong>Last Seen:</strong> ${device.last_seen ? formatTimeAgo(device.last_seen) : 'Just now'}</div>
-                </div>
-            </div>
-        </div>
-        ${device.services && device.services.length > 0 ? `
-            <div class="mt-4">
-                <h4 class="font-medium mb-2">Available Services</h4>
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                    ${device.services.map(service => `
-                        <div class="bg-slate-700 p-2 rounded">
-                            <div class="font-mono text-xs">${service.uuid}</div>
-                            <div class="text-gray-400">${service.name || 'Unknown Service'}</div>
-                        </div>
-                    `).join('')}
-                </div>
-            </div>
-        ` : ''}
-    `;
-
-    // Store selected device for modal actions
-    modal.dataset.deviceAddress = address;
-    modal.classList.remove('hidden');
-    modal.classList.add('flex');
-}
-
-function closeBluetoothDeviceModal() {
-    const modal = document.getElementById('bluetooth-device-modal');
-    if (modal) {
-        modal.classList.add('hidden');
-        modal.classList.remove('flex');
-    }
-}
-
-async function pairBluetoothDevice(address) {
-    const deviceAddress = address || document.getElementById('bluetooth-device-modal')?.dataset.deviceAddress;
-    if (!deviceAddress) return;
-
-    try {
-        showMessage(`Pairing with device ${deviceAddress}...`, 'info');
-        const data = await fetchAPI('/api/bluetooth/pair', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: deviceAddress })
-        });
-
-        if (data.success) {
-            showMessage(`Successfully paired with ${deviceAddress}`, 'success');
-            // Update device in local list
-            const device = bluetoothDevices.find(d => d.address === deviceAddress);
-            if (device) {
-                device.paired = true;
-                updateBluetoothDevicesList();
-                updateBluetoothStats();
-            }
-        } else {
-            throw new Error(data.error || 'Pairing failed');
-        }
-    } catch (error) {
-        console.error('Error pairing device:', error);
-        showMessage(`Error pairing device: ${error.message}`, 'error');
-    }
-}
-
-async function disconnectBluetoothDevice(address) {
-    try {
-        showMessage(`Disconnecting from device ${address}...`, 'info');
-        const data = await fetchAPI('/api/bluetooth/disconnect', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address })
-        });
-
-        if (data.success) {
-            showMessage(`Disconnected from ${address}`, 'success');
-            // Update device in local list
-            const device = bluetoothDevices.find(d => d.address === address);
-            if (device) {
-                device.connected = false;
-                updateBluetoothDevicesList();
-                updateBluetoothStats();
-            }
-        } else {
-            throw new Error(data.error || 'Disconnect failed');
-        }
-    } catch (error) {
-        console.error('Error disconnecting device:', error);
-        showMessage(`Error disconnecting device: ${error.message}`, 'error');
-    }
-}
-
-async function exportBluetoothDevices() {
-    try {
-        const data = await fetchAPI('/api/bluetooth/export');
-        if (data.success) {
-            const blob = new Blob([data.csv], { type: 'text/csv' });
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `bluetooth_devices_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.csv`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            window.URL.revokeObjectURL(url);
-            showMessage('Bluetooth devices exported successfully', 'success');
-        } else {
-            throw new Error(data.error || 'Export failed');
-        }
-    } catch (error) {
-        console.error('Error exporting devices:', error);
-        showMessage(`Error exporting devices: ${error.message}`, 'error');
-    }
-}
-
-async function clearBluetoothDevices() {
-    if (!confirm('Are you sure you want to clear all discovered Bluetooth devices?')) {
-        return;
-    }
-
-    try {
-        const data = await fetchAPI('/api/bluetooth/clear', { method: 'POST' });
-        if (data.success) {
-            bluetoothDevices = [];
-            updateBluetoothDevicesList();
-            updateBluetoothStats();
-            showMessage('Bluetooth devices cleared', 'success');
-        } else {
-            throw new Error(data.error || 'Clear failed');
-        }
-    } catch (error) {
-        console.error('Error clearing devices:', error);
-        showMessage(`Error clearing devices: ${error.message}`, 'error');
-    }
-}
-
-// Bluetooth Attack Functions
-async function startServiceEnumeration() {
-    try {
-        showMessage('Starting service enumeration on discovered devices...', 'info');
-        const data = await fetchAPI('/api/bluetooth/enumerate-services', { method: 'POST' });
-        if (data.success) {
-            showMessage(`Service enumeration started on ${data.devices_count} devices`, 'success');
-        } else {
-            throw new Error(data.error || 'Service enumeration failed');
-        }
-    } catch (error) {
-        console.error('Error starting service enumeration:', error);
-        showMessage(`Error starting service enumeration: ${error.message}`, 'error');
-    }
-}
-
-function startBluejacking() {
-    const modal = document.getElementById('bluejacking-modal');
-    const targetSelect = document.getElementById('bluejacking-target-select');
-    
-    if (!modal || !targetSelect) return;
-
-    // Populate target device list
-    targetSelect.innerHTML = '<option value="">Select target device...</option>';
-    bluetoothDevices.forEach(device => {
-        const option = document.createElement('option');
-        option.value = device.address;
-        option.textContent = `${device.name || 'Unknown'} (${device.address})`;
-        targetSelect.appendChild(option);
-    });
-
-    modal.classList.remove('hidden');
-    modal.classList.add('flex');
-}
-
-function closeBluejackingModal() {
-    const modal = document.getElementById('bluejacking-modal');
-    if (modal) {
-        modal.classList.add('hidden');
-        modal.classList.remove('flex');
-    }
-}
-
-async function sendBluejackingMessage() {
-    const targetSelect = document.getElementById('bluejacking-target-select');
-    const messageArea = document.getElementById('bluejacking-message');
-    
-    if (!targetSelect || !messageArea) return;
-
-    const targetAddress = targetSelect.value;
-    const message = messageArea.value.trim();
-
-    if (!targetAddress) {
-        showMessage('Please select a target device', 'error');
-        return;
-    }
-
-    if (!message) {
-        showMessage('Please enter a message', 'error');
-        return;
-    }
-
-    try {
-        showMessage('Sending bluejacking message...', 'info');
-        const data = await fetchAPI('/api/bluetooth/bluejack', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-                target: targetAddress, 
-                message: message 
-            })
-        });
-
-        if (data.success) {
-            showMessage(`Bluejacking message sent to ${targetAddress}`, 'success');
-            closeBluejackingModal();
-        } else {
-            throw new Error(data.error || 'Bluejacking failed');
-        }
-    } catch (error) {
-        console.error('Error sending bluejacking message:', error);
-        showMessage(`Error sending bluejacking message: ${error.message}`, 'error');
-    }
-}
-
-async function startBluetoothDoS() {
-    if (!confirm('This will test DoS resilience of discovered devices. Continue?')) {
-        return;
-    }
-
-    try {
-        showMessage('Starting Bluetooth DoS testing...', 'info');
-        const data = await fetchAPI('/api/bluetooth/dos-test', { method: 'POST' });
-        if (data.success) {
-            showMessage(`DoS testing started on ${data.devices_count} devices`, 'warning');
-        } else {
-            throw new Error(data.error || 'DoS test failed');
-        }
-    } catch (error) {
-        console.error('Error starting DoS test:', error);
-        showMessage(`Error starting DoS test: ${error.message}`, 'error');
-    }
-}
-
-function attackBluetoothDevice() {
-    const modal = document.getElementById('bluetooth-device-modal');
-    const deviceAddress = modal?.dataset.deviceAddress;
-    
-    if (!deviceAddress) return;
-
-    if (!confirm(`This will run security tests against device ${deviceAddress}. Continue?`)) {
-        return;
-    }
-
-    // Start multiple attack vectors
-    pairBluetoothDevice(deviceAddress);
-    
-    // You could add more specific attacks here
-    showMessage(`Security testing started for device ${deviceAddress}`, 'warning');
 }
 
 // ============================================================================
@@ -5239,22 +5199,19 @@ window.connectToWifiNetwork = connectToWifiNetwork;
 
 // Bluetooth Management Functions
 window.refreshBluetoothStatus = refreshBluetoothStatus;
-window.enableBluetooth = enableBluetooth;
-window.disableBluetooth = disableBluetooth;
+window.toggleBluetoothService = toggleBluetoothService;
 window.startBluetoothScan = startBluetoothScan;
 window.stopBluetoothScan = stopBluetoothScan;
-window.showBluetoothDeviceDetails = showBluetoothDeviceDetails;
+window.makeDeviceDiscoverable = makeDeviceDiscoverable;
+window.openBluetoothDeviceModal = openBluetoothDeviceModal;
 window.closeBluetoothDeviceModal = closeBluetoothDeviceModal;
-window.pairBluetoothDevice = pairBluetoothDevice;
-window.disconnectBluetoothDevice = disconnectBluetoothDevice;
-window.exportBluetoothDevices = exportBluetoothDevices;
+window.attemptBluetoothPair = attemptBluetoothPair;
+window.attemptServiceEnumeration = attemptServiceEnumeration;
+window.attemptBluetoothExploit = attemptBluetoothExploit;
+window.attemptDataExtraction = attemptDataExtraction;
+window.saveBluetoothDevice = saveBluetoothDevice;
 window.clearBluetoothDevices = clearBluetoothDevices;
-window.startServiceEnumeration = startServiceEnumeration;
-window.startBluejacking = startBluejacking;
-window.closeBluejackingModal = closeBluejackingModal;
-window.sendBluejackingMessage = sendBluejackingMessage;
-window.startBluetoothDoS = startBluetoothDoS;
-window.attackBluetoothDevice = attackBluetoothDevice;
+window.exportBluetoothDevices = exportBluetoothDevices;
 
 // File Management Functions
 window.loadFiles = loadFiles;

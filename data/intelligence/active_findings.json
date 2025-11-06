@@ -1,1 +1,9 @@
-{}
+{
+  "vulnerabilities": {
+    "default_network": {}
+  },
+  "credentials": {
+    "default_network": {}
+  },
+  "last_updated": "2025-11-06T11:51:12.893250"
+}

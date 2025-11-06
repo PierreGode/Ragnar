@@ -1,1 +1,1 @@
-IP,Hostname,Alive,MAC,Ports,LastSeen
+IP,Hostname,Alive,MAC,Ports,LastSeen,FailedPingCount,LastSuccessfulPing,LastPingAttempt

