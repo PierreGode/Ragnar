@@ -180,50 +180,94 @@ class NetworkScanner:
     def _ping_sweep_missing_hosts(self, arp_hosts):
         """
         Ping sweep to find hosts that don't respond to arp-scan but are alive.
-        Expands CIDR ranges like '192.168.1.0/24' into individual IPs.
+        Uses parallel execution and skips known-empty ranges for efficiency.
         """
         ping_discovered = {}
         known_ips = set(arp_hosts.keys())
         
-        # Define CIDRs to scan
+        # Define CIDRs to scan with optimized ranges
+        # Skip ranges that are typically empty to speed up scanning on Pi Zero W2
         target_cidrs = ['192.168.1.0/24']
+        
+        # Define ranges to skip (typically empty in home networks)
+        # Adjust these based on your network - skip middle ranges that are rarely used
+        skip_ranges = [
+            (50, 99),   # Skip .50-.99 if typically empty
+            (150, 199)  # Skip .150-.199 if typically empty
+        ]
 
+        def should_skip_ip(ip_str):
+            """Check if IP should be skipped based on configured ranges"""
+            try:
+                last_octet = int(ip_str.split('.')[-1])
+                for start, end in skip_ranges:
+                    if start <= last_octet <= end:
+                        return True
+                return False
+            except (ValueError, IndexError):
+                return False
+
+        def ping_host(ip_str):
+            """Ping a single host and return result"""
+            if ip_str in known_ips or should_skip_ip(ip_str):
+                return None
+                
+            try:
+                result = subprocess.run(
+                    ['ping', '-c', '1', '-W', '1', ip_str],  # Reduced wait from 2s to 1s
+                    capture_output=True, text=True, timeout=3  # Reduced timeout from 5s to 3s
+                )
+
+                if result.returncode == 0:
+                    mac = self.get_mac_address(ip_str, "")
+                    if not mac or mac == "00:00:00:00:00:00":
+                        ip_parts = ip_str.split('.')
+                        pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                        mac = pseudo_mac
+
+                    self.logger.info(f"Ping sweep found host: {ip_str} (MAC: {mac})")
+                    return (ip_str, {"mac": mac, "vendor": "Unknown (discovered by ping)"})
+                    
+            except subprocess.TimeoutExpired:
+                self.logger.debug(f"Ping sweep: {ip_str} timed out")
+            except Exception as e:
+                self.logger.debug(f"Ping sweep: {ip_str} failed ({e})")
+            
+            return None
+
+        # Build list of IPs to scan
+        ips_to_scan = []
         for cidr in target_cidrs:
             try:
                 network = ipaddress.ip_network(cidr, strict=False)
+                for ip in network.hosts():
+                    ip_str = str(ip)
+                    if ip_str not in known_ips and not should_skip_ip(ip_str):
+                        ips_to_scan.append(ip_str)
             except ValueError as e:
                 self.logger.error(f"Invalid network {cidr}: {e}")
                 continue
 
-            for ip in network.hosts():  # skips network/broadcast
-                ip_str = str(ip)
-                if ip_str in known_ips:
-                    continue
+        # Log optimization info
+        total_possible = sum(ipaddress.ip_network(cidr, strict=False).num_addresses - 2 for cidr in target_cidrs)
+        skipped = total_possible - len(ips_to_scan) - len(known_ips)
+        self.logger.info(f"Ping sweep: scanning {len(ips_to_scan)} IPs (skipped {skipped} in empty ranges, {len(known_ips)} already known)")
 
+        # Parallel ping sweep using ThreadPoolExecutor
+        # Use conservative worker count for Pi Zero W2 (2-4 workers)
+        max_ping_workers = max(2, min(4, self.host_scan_workers))
+        
+        with ThreadPoolExecutor(max_workers=max_ping_workers) as executor:
+            futures = {executor.submit(ping_host, ip): ip for ip in ips_to_scan}
+            
+            for future in futures:
                 try:
-                    result = subprocess.run(
-                        ['ping', '-c', '1', '-W', '2', ip_str],
-                        capture_output=True, text=True, timeout=5
-                    )
-
-                    if result.returncode == 0:
-                        mac = self.get_mac_address(ip_str, "")
-                        if not mac or mac == "00:00:00:00:00:00":
-                            ip_parts = ip_str.split('.')
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
-
-                        ping_discovered[ip_str] = {
-                            "mac": mac,
-                            "vendor": "Unknown (discovered by ping)"
-                        }
-                        self.logger.info(f"Ping sweep found host: {ip_str} (MAC: {mac})")
-
-                except subprocess.TimeoutExpired:
-                    self.logger.debug(f"Ping sweep: {ip_str} timed out")
+                    result = future.result(timeout=5)  # Overall future timeout
+                    if result:
+                        ip_str, host_data = result
+                        ping_discovered[ip_str] = host_data
                 except Exception as e:
-                    self.logger.debug(f"Ping sweep: {ip_str} failed ({e})")
-                    continue
+                    self.logger.debug(f"Ping sweep future failed: {e}")
 
         if ping_discovered:
             self.logger.info(f"Ping sweep discovered {len(ping_discovered)} additional hosts not found by arp-scan")
