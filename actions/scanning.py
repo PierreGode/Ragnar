@@ -1,6 +1,10 @@
 #scanning.py
 # This script performs a network scan to identify live hosts, their MAC addresses, and open ports.
 # The results are saved to CSV files and displayed using Rich for enhanced visualization.
+#
+# IMPORTANT: For optimal performance, nmap should have network privileges:
+# Run: sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
+# This allows nmap to use raw sockets and perform SYN scans without requiring sudo for each scan.
 
 import os
 import sys
@@ -99,15 +103,69 @@ class NetworkScanner:
             return False
 
     def resolve_hostname(self, ip):
-        """Resolve hostname for the given IP address."""
-        try:
-            if ip and self._is_valid_ip(ip):
-                hostname, _, _ = socket.gethostbyaddr(ip)
-                return hostname
-        except (socket.herror, socket.gaierror):
+        """Resolve hostname for the given IP address with multiple fallback methods."""
+        if not ip or not self._is_valid_ip(ip):
             return ""
-        except Exception as e:
-            self.logger.debug(f"Error resolving hostname for {ip}: {e}")
+        
+        # Try multiple hostname resolution methods
+        methods = [
+            self._resolve_via_socket,
+            self._resolve_via_nslookup,
+            self._resolve_via_netbios
+        ]
+        
+        for method in methods:
+            try:
+                hostname = method(ip)
+                if hostname and hostname.strip():
+                    self.logger.debug(f"Resolved {ip} to {hostname} using {method.__name__}")
+                    return hostname.strip()
+            except Exception as e:
+                self.logger.debug(f"Hostname resolution method {method.__name__} failed for {ip}: {e}")
+                continue
+        
+        # If all methods fail, return empty string
+        self.logger.debug(f"All hostname resolution methods failed for {ip}")
+        return ""
+    
+    def _resolve_via_socket(self, ip):
+        """Resolve hostname using socket.gethostbyaddr."""
+        hostname, _, _ = socket.gethostbyaddr(ip)
+        return hostname
+    
+    def _resolve_via_nslookup(self, ip):
+        """Resolve hostname using nslookup command."""
+        try:
+            result = subprocess.run(['nslookup', ip], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                # Parse nslookup output for hostname
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if 'name =' in line.lower():
+                        hostname = line.split('name =')[1].strip()
+                        if hostname.endswith('.'):
+                            hostname = hostname[:-1]  # Remove trailing dot
+                        return hostname
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            pass
+        return ""
+    
+    def _resolve_via_netbios(self, ip):
+        """Attempt NetBIOS name resolution (Windows networks)."""
+        try:
+            # Try nmblookup if available (Samba tools)
+            result = subprocess.run(['nmblookup', '-A', ip], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                for line in lines:
+                    if '<00>' in line and 'UNIQUE' in line:
+                        parts = line.strip().split()
+                        if parts:
+                            hostname = parts[0].strip()
+                            if hostname and not hostname.startswith('Looking'):
+                                return hostname
+        except (subprocess.TimeoutExpired, subprocess.CalledProcessError, FileNotFoundError):
+            pass
         return ""
 
     def _parse_arp_scan_output(self, output):
@@ -408,9 +466,14 @@ class NetworkScanner:
 
                 ip_to_mac = {}  # Dictionary to track IP to MAC associations
 
-                for data in netkb_data:
+                self.logger.info(f"Processing {len(netkb_data)} host records for netkb update")
+                
+                for i, data in enumerate(netkb_data):
                     mac, ip, hostname, ports = data
+                    self.logger.debug(f"Processing host {i+1}/{len(netkb_data)}: IP={ip}, MAC={mac}, hostname={hostname}, ports={ports}")
+                    
                     if not mac or mac == "STANDALONE" or ip == "STANDALONE" or hostname == "STANDALONE":
+                        self.logger.debug(f"Skipping STANDALONE entry: {data}")
                         continue
                     
                     # For hosts with unknown MAC (00:00:00:00:00:00), use IP as unique identifier
@@ -448,11 +511,14 @@ class NetworkScanner:
                     # Update or create entry for the new MAC
                     ip_to_mac[ip] = mac
                     if mac in netkb_entries:
+                        old_port_count = len(netkb_entries[mac]['Ports'])
                         netkb_entries[mac]['IPs'].add(ip)
                         netkb_entries[mac]['Hostnames'].add(hostname)
                         netkb_entries[mac]['Alive'] = '1'
                         netkb_entries[mac]['Ports'].update(map(str, ports))
                         netkb_entries[mac]['Failed_Pings'] = 0  # Reset failures since host is responsive
+                        new_port_count = len(netkb_entries[mac]['Ports'])
+                        self.logger.debug(f"Updated existing host {mac} ({ip}): ports {old_port_count} -> {new_port_count}")
                     else:
                         netkb_entries[mac] = {
                             'IPs': {ip},
@@ -463,6 +529,7 @@ class NetworkScanner:
                         }
                         for action in existing_action_columns:
                             netkb_entries[mac][action] = ""
+                        self.logger.info(f"Created new host entry {mac} ({ip}): {len(ports)} ports discovered")
 
                 # Update all existing entries - implement 15-failed-pings rule instead of immediate death
                 max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 15)
@@ -507,7 +574,7 @@ class NetworkScanner:
                             ';'.join(sorted(data['IPs'], key=self.ip_key)),
                             ';'.join(sorted(data['Hostnames'])),
                             data['Alive'],
-                            ';'.join(sorted(data['Ports'], key=int)),
+                            ';'.join(sorted(map(str, data['Ports']), key=lambda x: int(x) if x.isdigit() else 0)),
                             str(data.get('Failed_Pings', 0))  # Add Failed_Pings column
                         ]
                         row.extend(data.get(action, "") for action in existing_action_columns)
@@ -580,6 +647,12 @@ class NetworkScanner:
     class PortScanner:
         """
         Helper class to perform port scanning on a target IP using nmap.
+        
+        Note: For better performance and more accurate results, nmap should have network privileges.
+        Run this command to grant privileges:
+        sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
+        
+        This allows nmap to use SYN scans (-sS) instead of TCP connect scans (-sT).
         """
         def __init__(self, outer_instance, target, open_ports, portstart, portend, extra_ports):
             self.outer_instance = outer_instance
@@ -619,68 +692,96 @@ class NetworkScanner:
 
                 self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports using nmap (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
                 
-                # Use TCP connect scan (-sT) which works without root privileges
+                # Try SYN scan first (requires privileges), fall back to TCP connect scan
                 port_spec = ','.join(map(str, ordered_ports))
-                nmap_args = f"-Pn -sT -T4 --max-retries 1 -p {port_spec}"
+                
+                # First attempt: Try SYN scan (faster, more stealthy)
+                nmap_args = f"-Pn -sS -T4 --max-retries 1 -p {port_spec}"
                 
                 self.logger.info(f"Running nmap command: nmap {nmap_args} {self.target}")
                 nmap_logger.log_scan_operation(f"Port scan: {self.target}", f"Arguments: {nmap_args}")
                 
+                scan_successful = False
+                
                 try:
-                    # Run nmap scan
-                    self.outer_instance.nm.scan(hosts=self.target, arguments=nmap_args)
+                    # Try SYN scan first (requires privileges)
+                    scan_result = self.outer_instance.nm.scan(hosts=self.target, arguments=nmap_args)
+                    scan_successful = True
+                except Exception as syn_error:
+                    self.logger.warning(f"SYN scan failed for {self.target}, trying TCP connect scan: {syn_error}")
+                    # Fall back to TCP connect scan (no privileges required)
+                    nmap_args = f"-Pn -sT -T4 --max-retries 1 -p {port_spec}"
+                    self.logger.info(f"Fallback nmap command: nmap {nmap_args} {self.target}")
+                    nmap_logger.log_scan_operation(f"Port scan (fallback): {self.target}", f"Arguments: {nmap_args}")
                     
-                    # Debug: Show all discovered hosts
-                    all_hosts = self.outer_instance.nm.all_hosts()
-                    self.logger.debug(f"Nmap discovered hosts: {all_hosts}")
-                    
-                    if self.target in all_hosts:
-                        self.logger.debug(f"Target {self.target} found in nmap results")
-                        
-                        # Get scan info for debugging
-                        scan_info = self.outer_instance.nm[self.target]
-                        self.logger.debug(f"Scan info for {self.target}: state={scan_info.state()}")
-                        
-                        # Process each protocol (usually 'tcp')
-                        protocols = scan_info.all_protocols()
-                        self.logger.debug(f"Protocols found: {protocols}")
-                        
-                        for proto in protocols:
-                            ports = scan_info[proto].keys()
-                            self.logger.debug(f"Ports scanned on {proto}: {sorted(ports)}")
-                            
-                            for port in ports:
-                                port_info = scan_info[proto][port]
-                                port_state = port_info['state']
-                                self.logger.debug(f"Port {port}/{proto}: state={port_state}")
-                                
-                                if port_state == 'open':
-                                    self.open_ports[self.target].append(port)
-                                    self.logger.info(f"🔓 Port {port}/{proto} OPEN on {self.target}")
-                    else:
-                        self.logger.warning(f"Target {self.target} not found in nmap results. All hosts: {all_hosts}")
-                        # Check if host was down
-                        if self.target in self.outer_instance.nm._scan_result['scan']:
-                            scan_data = self.outer_instance.nm._scan_result['scan'][self.target]
-                            self.logger.debug(f"Scan data for {self.target}: {scan_data}")
-                    
-                    if self.open_ports[self.target]:
-                        self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
-                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"Found {len(self.open_ports[self.target])} open ports: {sorted(self.open_ports[self.target])}")
-                    else:
-                        self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
-                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"No open ports found (scanned {len(ordered_ports)} ports)")
-                        
-                except Exception as nmap_error:
-                    self.logger.error(f"Nmap port scan error for {self.target}: {nmap_error}")
-                    nmap_logger.log_scan_operation(f"Port scan FAILED: {self.target}", f"Error: {nmap_error}")
-                    # Try to get more error details
                     try:
-                        import subprocess
-                        test_result = subprocess.run(['nmap', '--version'], capture_output=True, text=True, timeout=5)
-                        self.logger.debug(f"Nmap version check: {test_result.stdout.strip()}")
-                    except Exception as version_error:
-                        self.logger.error(f"Nmap not accessible: {version_error}")
+                        scan_result = self.outer_instance.nm.scan(hosts=self.target, arguments=nmap_args)
+                        scan_successful = True
+                    except Exception as tcp_error:
+                        self.logger.error(f"Both SYN and TCP connect scans failed for {self.target}: {tcp_error}")
+                        scan_successful = False
+                        scan_result = None
+
+                if scan_successful and scan_result:
+                    
+                    # Parse scan results from the returned dictionary instead of relying on nm[target]
+                    if 'scan' in scan_result and self.target in scan_result['scan']:
+                        host_info = scan_result['scan'][self.target]
+                        self.logger.debug(f"Scan result for {self.target}: {host_info.get('status', {}).get('state', 'unknown')}")
+                        
+                        # Check if host is up
+                        if host_info.get('status', {}).get('state') == 'up':
+                            # Process TCP ports (most common)
+                            if 'tcp' in host_info:
+                                tcp_ports = host_info['tcp']
+                                self.logger.debug(f"TCP ports found for {self.target}: {list(tcp_ports.keys())}")
+                                
+                                for port_num, port_data in tcp_ports.items():
+                                    port_state = port_data.get('state', 'unknown')
+                                    self.logger.debug(f"Port {port_num}/tcp: state={port_state}")
+                                    
+                                    if port_state == 'open':
+                                        self.open_ports[self.target].append(int(port_num))
+                                        self.logger.info(f"🔓 Port {port_num}/tcp OPEN on {self.target}")
+                            
+                            # Process UDP ports if present
+                            if 'udp' in host_info:
+                                udp_ports = host_info['udp']
+                                self.logger.debug(f"UDP ports found for {self.target}: {list(udp_ports.keys())}")
+                                
+                                for port_num, port_data in udp_ports.items():
+                                    port_state = port_data.get('state', 'unknown')
+                                    self.logger.debug(f"Port {port_num}/udp: state={port_state}")
+                                    
+                                    if port_state == 'open':
+                                        self.open_ports[self.target].append(int(port_num))
+                                        self.logger.info(f"🔓 Port {port_num}/udp OPEN on {self.target}")
+                        else:
+                            self.logger.debug(f"Host {self.target} is not up (state: {host_info.get('status', {}).get('state', 'unknown')})")
+                    else:
+                        self.logger.warning(f"No scan results found for {self.target}")
+                        # Fallback: try to access via the old method if direct parsing failed
+                        try:
+                            all_hosts = self.outer_instance.nm.all_hosts()
+                            if self.target in all_hosts:
+                                scan_info = self.outer_instance.nm[self.target]
+                                protocols = scan_info.all_protocols()
+                                for proto in protocols:
+                                    ports = scan_info[proto].keys()
+                                    for port in ports:
+                                        port_info = scan_info[proto][port]
+                                        if port_info['state'] == 'open':
+                                            self.open_ports[self.target].append(int(port))
+                                            self.logger.info(f"🔓 Port {port}/{proto} OPEN on {self.target} (fallback method)")
+                        except Exception as fallback_error:
+                            self.logger.debug(f"Fallback parsing also failed for {self.target}: {fallback_error}")
+                    
+                if self.open_ports[self.target]:
+                    self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
+                    nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"Found {len(self.open_ports[self.target])} open ports: {sorted(self.open_ports[self.target])}")
+                else:
+                    self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
+                    nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"No open ports found (scanned {len(ordered_ports)} ports)")
                     
             except Exception as e:
                 import traceback
@@ -1097,9 +1198,18 @@ class NetworkScanner:
                 if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                     continue
                 alive = '1' if mac in alive_macs else '0'
-                row = [ip, hostname, alive, mac] + [Text(str(port), style="green bold") if port in ports else Text("", style="on red") for port in all_ports]
+                
+                # Ensure ports is a list of integers for consistent handling
+                if isinstance(ports, list):
+                    ports_list = [int(p) for p in ports if str(p).isdigit()]
+                else:
+                    ports_list = []
+                
+                self.logger.debug(f"Processing host {ip} ({mac}): {len(ports_list)} ports found: {ports_list}")
+                
+                row = [ip, hostname, alive, mac] + [Text(str(port), style="green bold") if port in ports_list else Text("", style="on red") for port in all_ports]
                 table.add_row(*row)
-                netkb_data.append([mac, ip, hostname, ports])
+                netkb_data.append([mac, ip, hostname, ports_list])
 
             with self.lock:
                 with open(csv_result_file, 'w', newline='') as file:
@@ -1109,7 +1219,14 @@ class NetworkScanner:
                         if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                             continue
                         alive = '1' if mac in alive_macs else '0'
-                        writer.writerow([ip, hostname, alive, mac] + [str(port) if port in ports else '' for port in all_ports])
+                        
+                        # Ensure ports is a list of integers for consistent handling
+                        if isinstance(ports, list):
+                            ports_list = [int(p) for p in ports if str(p).isdigit()]
+                        else:
+                            ports_list = []
+                        
+                        writer.writerow([ip, hostname, alive, mac] + [str(port) if port in ports_list else '' for port in all_ports])
 
             self.update_netkb(netkbfile, netkb_data, alive_macs)
 
