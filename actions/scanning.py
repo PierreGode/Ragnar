@@ -762,13 +762,18 @@ class NetworkScanner:
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
             self.total_ips = len(self.ip_data.ip_list)
             self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
+            
+            self.logger.info(f"Starting port scan for {self.total_ips} IPs")
+            
             with Progress() as progress:
                 task = progress.add_task("[cyan]Scanning IPs...", total=len(self.ip_data.ip_list))
                 for ip in self.ip_data.ip_list:
                     progress.update(task, advance=1)
+                    self.logger.debug(f"Creating PortScanner for {ip}")
                     port_scanner = self.outer_instance.PortScanner(self.outer_instance, ip, self.open_ports, self.portstart, self.portend, self.extra_ports)
                     port_scanner.start()
 
+            self.logger.info(f"Port scanning completed. Total ports found across all hosts: {sum(len(ports) for ports in self.open_ports.values())}")
             self.all_ports = sorted(list(set(port for ports in self.open_ports.values() for port in ports)))
             alive_ips = set(self.ip_data.ip_list)
             return self.ip_data, self.open_ports, self.all_ports, self.csv_result_file, self.netkbfile, alive_ips
