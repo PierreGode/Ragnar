@@ -373,12 +373,20 @@ class NetworkScanner:
             try:
                 netkb_entries = {}
                 existing_action_columns = []
+                existing_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"]
 
                 # Read existing CSV file
                 if os.path.exists(netkbfile):
                     with open(netkbfile, 'r') as file:
                         reader = csv.DictReader(file)
-                        existing_headers = reader.fieldnames
+                        file_headers = reader.fieldnames or []
+
+                        # Merge any existing headers with the defaults so we always
+                        # have the core columns even if the CSV was empty or malformed.
+                        for header in file_headers:
+                            if header and header not in existing_headers:
+                                existing_headers.append(header)
+
                         existing_action_columns = [header for header in existing_headers if header not in ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"]]
                         for row in reader:
                             mac = row["MAC Address"]
