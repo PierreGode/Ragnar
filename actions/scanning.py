@@ -760,6 +760,7 @@ class NetworkScanner:
             self.scan_network_and_write_to_csv()
             time.sleep(1)
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
+            self.ip_data.get_ip_from_csv()  # Actually populate the IP lists!
             self.total_ips = len(self.ip_data.ip_list)
             self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
             
