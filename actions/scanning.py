@@ -72,10 +72,11 @@ class NetworkScanner:
         # CRITICAL: Pi Zero W2 has limited resources - use conservative thread count
         # 512MB RAM, 4 cores @ 1GHz can only handle a few concurrent operations
         cpu_count = os.cpu_count() or 1
-        # Limit concurrent socket operations aggressively on the Pi Zero 2 W
-        self.port_scan_workers = max(2, min(6, cpu_count))
-        self.host_scan_workers = max(2, min(6, cpu_count))
-        self.semaphore = threading.Semaphore(min(4, max(1, cpu_count // 2 or 1)))
+        # ULTRA-CONSERVATIVE: Watchdog restarts if FDs > 200, so minimize concurrent operations
+        # Each network scan can open multiple FDs (socket, DNS, nmap subprocess, etc.)
+        self.port_scan_workers = 1  # Sequential port scanning to prevent FD exhaustion
+        self.host_scan_workers = 2  # Max 2 concurrent host scans (down from 6)
+        self.semaphore = threading.Semaphore(1)  # Only 1 concurrent scan operation
         self.nm = nmap.PortScanner()  # Initialize nmap.PortScanner()
         self.running = False
         self.arp_scan_interface = "wlan0"
@@ -254,8 +255,8 @@ class NetworkScanner:
         self.logger.info(f"Ping sweep: scanning {len(ips_to_scan)} IPs (skipped {skipped} in empty ranges, {len(known_ips)} already known)")
 
         # Parallel ping sweep using ThreadPoolExecutor
-        # Use conservative worker count for Pi Zero W2 (2-4 workers)
-        max_ping_workers = max(2, min(4, self.host_scan_workers))
+        # ULTRA-CONSERVATIVE: Fixed at 2 workers to minimize file descriptor usage
+        max_ping_workers = 2
         
         try:
             with ThreadPoolExecutor(max_workers=max_ping_workers) as executor:
