@@ -586,49 +586,92 @@ class NetworkScanner:
             Starts the port scanning process for the specified range and extra ports using nmap.
             """
             try:
-                ports_to_scan = list(range(self.portstart, self.portend))
+                # Ensure target is in open_ports dict
+                if self.target not in self.open_ports:
+                    self.open_ports[self.target] = []
+                
+                # Fix port range - make portend inclusive
+                ports_to_scan = list(range(self.portstart, self.portend + 1))
                 extra_ports = self.extra_ports or []
                 ports_to_scan.extend(extra_ports)
-                # Remove duplicates while preserving order
+                
+                # Remove duplicates and invalid ports
                 seen_ports = set()
                 ordered_ports = []
                 for port in ports_to_scan:
-                    if port in seen_ports:
+                    if port in seen_ports or port < 1 or port > 65535:
                         continue
                     seen_ports.add(port)
                     ordered_ports.append(port)
 
+                if not ordered_ports:
+                    self.logger.error(f"No valid ports to scan for {self.target}! portstart={self.portstart}, portend={self.portend}")
+                    return
+
                 self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports using nmap (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
                 
-                # Use nmap for fast, efficient port scanning
+                # Use TCP connect scan (-sT) which works without root privileges
                 port_spec = ','.join(map(str, ordered_ports))
-                nmap_args = f"-Pn -T4 --max-retries 1 -p {port_spec}"
+                nmap_args = f"-Pn -sT -T4 --max-retries 1 -p {port_spec}"
                 
-                self.logger.debug(f"Running nmap port scan on {self.target} with args: {nmap_args}")
+                self.logger.info(f"Running nmap command: nmap {nmap_args} {self.target}")
                 nmap_logger.log_scan_operation(f"Port scan: {self.target}", f"Arguments: {nmap_args}")
                 
                 try:
+                    # Run nmap scan
                     self.outer_instance.nm.scan(hosts=self.target, arguments=nmap_args)
                     
-                    if self.target in self.outer_instance.nm.all_hosts():
-                        for proto in self.outer_instance.nm[self.target].all_protocols():
-                            ports = self.outer_instance.nm[self.target][proto].keys()
+                    # Debug: Show all discovered hosts
+                    all_hosts = self.outer_instance.nm.all_hosts()
+                    self.logger.debug(f"Nmap discovered hosts: {all_hosts}")
+                    
+                    if self.target in all_hosts:
+                        self.logger.debug(f"Target {self.target} found in nmap results")
+                        
+                        # Get scan info for debugging
+                        scan_info = self.outer_instance.nm[self.target]
+                        self.logger.debug(f"Scan info for {self.target}: state={scan_info.state()}")
+                        
+                        # Process each protocol (usually 'tcp')
+                        protocols = scan_info.all_protocols()
+                        self.logger.debug(f"Protocols found: {protocols}")
+                        
+                        for proto in protocols:
+                            ports = scan_info[proto].keys()
+                            self.logger.debug(f"Ports scanned on {proto}: {sorted(ports)}")
+                            
                             for port in ports:
-                                port_state = self.outer_instance.nm[self.target][proto][port]['state']
+                                port_info = scan_info[proto][port]
+                                port_state = port_info['state']
+                                self.logger.debug(f"Port {port}/{proto}: state={port_state}")
+                                
                                 if port_state == 'open':
                                     self.open_ports[self.target].append(port)
-                                    self.logger.debug(f"Port {port}/{proto} OPEN on {self.target}")
+                                    self.logger.info(f"🔓 Port {port}/{proto} OPEN on {self.target}")
+                    else:
+                        self.logger.warning(f"Target {self.target} not found in nmap results. All hosts: {all_hosts}")
+                        # Check if host was down
+                        if self.target in self.outer_instance.nm._scan_result['scan']:
+                            scan_data = self.outer_instance.nm._scan_result['scan'][self.target]
+                            self.logger.debug(f"Scan data for {self.target}: {scan_data}")
                     
                     if self.open_ports[self.target]:
                         self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
                         nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"Found {len(self.open_ports[self.target])} open ports: {sorted(self.open_ports[self.target])}")
                     else:
                         self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
-                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"No open ports found")
+                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"No open ports found (scanned {len(ordered_ports)} ports)")
                         
                 except Exception as nmap_error:
                     self.logger.error(f"Nmap port scan error for {self.target}: {nmap_error}")
                     nmap_logger.log_scan_operation(f"Port scan FAILED: {self.target}", f"Error: {nmap_error}")
+                    # Try to get more error details
+                    try:
+                        import subprocess
+                        test_result = subprocess.run(['nmap', '--version'], capture_output=True, text=True, timeout=5)
+                        self.logger.debug(f"Nmap version check: {test_result.stdout.strip()}")
+                    except Exception as version_error:
+                        self.logger.error(f"Nmap not accessible: {version_error}")
                     
             except Exception as e:
                 import traceback
@@ -760,7 +803,6 @@ class NetworkScanner:
             self.scan_network_and_write_to_csv()
             time.sleep(1)
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
-            self.ip_data.get_ip_from_csv()  # Actually populate the IP lists!
             self.total_ips = len(self.ip_data.ip_list)
             self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
             
