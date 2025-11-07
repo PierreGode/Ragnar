@@ -107,8 +107,10 @@ class NmapVulnScanner:
 
             if result.returncode != 0:
                 logger.warning(
-                    f"nmap returned a non-zero exit code while scanning {ip}: {result.stderr.strip()}"
+                    f"nmap returned a non-zero exit code ({result.returncode}) while scanning {ip}: {result.stderr.strip()}"
                 )
+                # Don't fail the scan just because of non-zero exit code
+                # Nmap can return non-zero for various non-critical reasons
 
             vulnerability_summary, port_vulnerabilities, port_services = self.parse_vulnerabilities(result.stdout)
             
@@ -128,6 +130,9 @@ class NmapVulnScanner:
 
         except Exception as e:
             logger.error(f"Error scanning {ip}: {e}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             success = False  # Mark as failed if an error occurs
 
         return combined_result if success else None
@@ -145,8 +150,8 @@ class NmapVulnScanner:
             self.save_results(row["MAC Address"], ip, scan_result)
             return 'success'
         else:
-            return 'success' # considering failed as success as we just need to scan vulnerabilities once
-            # return 'failed'
+            logger.error(f"Vulnerability scan failed for {ip} - scan_result is None")
+            return 'failed'
 
     def prepare_port_list(self, ports) -> List[str]:
         """Normalize port values from the NetKB row"""
