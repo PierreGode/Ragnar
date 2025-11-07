@@ -105,7 +105,7 @@ class NetworkScanner:
     def resolve_hostname(self, ip):
         """Resolve hostname for the given IP address with multiple fallback methods."""
         if not ip or not self._is_valid_ip(ip):
-            return ""
+            return f"invalid-ip-{ip}"
         
         # Try multiple hostname resolution methods
         methods = [
@@ -124,9 +124,11 @@ class NetworkScanner:
                 self.logger.debug(f"Hostname resolution method {method.__name__} failed for {ip}: {e}")
                 continue
         
-        # If all methods fail, return empty string
-        self.logger.debug(f"All hostname resolution methods failed for {ip}")
-        return ""
+        # CRITICAL FIX: Always return a meaningful hostname instead of empty string
+        # This prevents blank hostname fields in netkb.csv
+        fallback_hostname = f"host-{ip.replace('.', '-')}"
+        self.logger.debug(f"All hostname resolution methods failed for {ip}, using fallback: {fallback_hostname}")
+        return fallback_hostname
     
     def _resolve_via_socket(self, ip):
         """Resolve hostname using socket.gethostbyaddr."""
@@ -910,26 +912,75 @@ class NetworkScanner:
             """
             Starts the network and port scanning process.
             """
+            # Phase 1: Host Discovery (ARP + Ping)
+            self.logger.info("🔍 Phase 1: Host Discovery (ARP + Ping)")
             self.scan_network_and_write_to_csv()
             time.sleep(1)
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
             self.total_ips = len(self.ip_data.ip_list)
             self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
             
-            self.logger.info(f"Starting port scan for {self.total_ips} IPs")
+            self.logger.info(f"🔍 Phase 2: Port Scanning {self.total_ips} discovered hosts")
             
-            with Progress() as progress:
-                task = progress.add_task("[cyan]Scanning IPs...", total=len(self.ip_data.ip_list))
-                for ip in self.ip_data.ip_list:
-                    progress.update(task, advance=1)
-                    self.logger.debug(f"Creating PortScanner for {ip}")
-                    port_scanner = self.outer_instance.PortScanner(self.outer_instance, ip, self.open_ports, self.portstart, self.portend, self.extra_ports)
-                    port_scanner.start()
+            # Phase 2: Port Scanning (with thread coordination)
+            # CRITICAL FIX: Use ThreadPoolExecutor to ensure all port scans complete
+            # before returning results. This prevents race conditions where
+            # update_netkb() is called before port scanning finishes.
+            with ThreadPoolExecutor(max_workers=self.outer_instance.port_scan_workers) as executor:
+                with Progress() as progress:
+                    task = progress.add_task("[cyan]Scanning ports...", total=len(self.ip_data.ip_list))
+                    
+                    # Submit all port scan jobs
+                    futures = []
+                    for ip in self.ip_data.ip_list:
+                        progress.update(task, advance=1)
+                        self.logger.debug(f"Submitting port scan job for {ip}")
+                        port_scanner = self.outer_instance.PortScanner(
+                            self.outer_instance, ip, self.open_ports, 
+                            self.portstart, self.portend, self.extra_ports
+                        )
+                        future = executor.submit(port_scanner.start)
+                        futures.append((ip, future))
+                    
+                    # Wait for ALL port scans to complete before proceeding
+                    completed_scans = 0
+                    for ip, future in futures:
+                        try:
+                            future.result(timeout=30)  # 30 second timeout per host
+                            completed_scans += 1
+                            self.logger.debug(f"Port scan completed for {ip} ({completed_scans}/{len(futures)})")
+                        except Exception as e:
+                            self.logger.warning(f"Port scan failed for {ip}: {e}")
+                            completed_scans += 1
 
-            self.logger.info(f"Port scanning completed. Total ports found across all hosts: {sum(len(ports) for ports in self.open_ports.values())}")
+            self.logger.info(f"✅ Port scanning completed. Total ports found across all hosts: {sum(len(ports) for ports in self.open_ports.values())}")
             self.all_ports = sorted(list(set(port for ports in self.open_ports.values() for port in ports)))
             alive_ips = set(self.ip_data.ip_list)
+            
+            # Phase 3: Hostname Resolution (ensure all hostnames are populated)
+            self.logger.info("🔍 Phase 3: Final hostname resolution")
+            self._ensure_all_hostnames_resolved()
+            
             return self.ip_data, self.open_ports, self.all_ports, self.csv_result_file, self.netkbfile, alive_ips
+        
+        def _ensure_all_hostnames_resolved(self):
+            """
+            Ensure all hosts have meaningful hostnames, generating fallbacks for empty ones.
+            This prevents blank hostname fields in the final CSV.
+            """
+            if not self.ip_data or not hasattr(self.ip_data, 'hostname_list') or not hasattr(self.ip_data, 'ip_list'):
+                self.logger.warning("No IP data available for hostname resolution")
+                return
+                
+            for i, hostname in enumerate(self.ip_data.hostname_list):
+                if not hostname or hostname.strip() == "":
+                    ip = self.ip_data.ip_list[i] if i < len(self.ip_data.ip_list) else "unknown"
+                    # Generate a meaningful hostname from IP
+                    fallback_hostname = f"host-{ip.replace('.', '-')}"
+                    self.ip_data.hostname_list[i] = fallback_hostname
+                    self.logger.debug(f"Generated fallback hostname '{fallback_hostname}' for IP {ip}")
+            
+            self.logger.info(f"Hostname resolution completed - {len([h for h in self.ip_data.hostname_list if h])} hosts have hostnames")
 
     class LiveStatusUpdater:
         """

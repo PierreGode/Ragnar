@@ -555,6 +555,9 @@ class Orchestrator:
             self.shared_data.ragnarorch_status = "NetworkScanner"
             self.shared_data.ragnarstatustext2 = "Initial scan..."
             self.network_scanner.scan()  # This does ARP ping scan + port scan
+            # CRITICAL FIX: Brief pause to ensure all scan data is fully written
+            # This prevents actions from starting before hostname/port data is available
+            time.sleep(2)  # Allow time for file I/O and data consistency  
             self.shared_data.ragnarstatustext2 = ""
             logger.info("✓ Phase 1 complete: Network hosts and ports discovered")
         else:
@@ -627,8 +630,11 @@ class Orchestrator:
                 if self.network_scanner:
                     self.shared_data.ragnarorch_status = "NetworkScanner"
                     self.network_scanner.scan()
+                    # CRITICAL FIX: Brief pause to ensure all scan data is fully written
+                    # This prevents race conditions where actions start before netkb.csv is complete
+                    time.sleep(2)  # Allow time for file I/O and data consistency
                     last_network_scan_time = current_time
-                    logger.info("✓ Network scan complete")
+                    logger.info("✓ Network scan complete - data synchronized")
                 else:
                     logger.warning("Network scanner not available")
             else:
@@ -691,6 +697,8 @@ class Orchestrator:
                     if self.network_scanner:
                         self.shared_data.ragnarorch_status = "NetworkScanner"
                         self.network_scanner.scan()
+                        # CRITICAL FIX: Brief pause to ensure all scan data is fully written
+                        time.sleep(2)  # Allow time for file I/O and data consistency
                         last_network_scan_time = time.time()
                         # Re-read the updated data after the scan
                         current_data = self.shared_data.read_data()
