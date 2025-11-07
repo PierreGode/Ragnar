@@ -504,21 +504,13 @@ class Orchestrator:
                 try:
                     logger.info(f"Vulnerability scanning {ip}...")
                     
-                    # Execute vulnerability scan with timeout protection
-                    scan_callable = lambda: self.nmap_vuln_scanner.execute(ip, row, action_key)
-                    result = self._execute_with_timeout(
-                        scan_callable,
-                        timeout=self.vuln_scan_timeout,
-                        action_name=f"NmapVulnScanner@{ip}"
-                    )
+                    # Execute vulnerability scan directly (already sequential, no need for executor)
+                    # Note: Removed timeout protection to avoid executor shutdown issues
+                    # Nmap has its own internal timeouts
+                    result = self.nmap_vuln_scanner.execute(ip, row, action_key)
                     
-                    # Update status using helper (timeout is treated as failed)
-                    if result == 'timeout':
-                        result_status = 'failed'
-                        logger.error(f"Vulnerability scan for {ip} timed out")
-                    else:
-                        result_status = 'success' if result == 'success' else 'failed'
-                    
+                    # Update status
+                    result_status = 'success' if result == 'success' else 'failed'
                     self._update_action_status(row, action_key, result_status)
                     
                     if result == 'success':
