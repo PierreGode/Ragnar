@@ -257,17 +257,23 @@ class NetworkScanner:
         # Use conservative worker count for Pi Zero W2 (2-4 workers)
         max_ping_workers = max(2, min(4, self.host_scan_workers))
         
-        with ThreadPoolExecutor(max_workers=max_ping_workers) as executor:
-            futures = {executor.submit(ping_host, ip): ip for ip in ips_to_scan}
-            
-            for future in futures:
-                try:
-                    result = future.result(timeout=5)  # Overall future timeout
-                    if result:
-                        ip_str, host_data = result
-                        ping_discovered[ip_str] = host_data
-                except Exception as e:
-                    self.logger.debug(f"Ping sweep future failed: {e}")
+        try:
+            with ThreadPoolExecutor(max_workers=max_ping_workers) as executor:
+                futures = {executor.submit(ping_host, ip): ip for ip in ips_to_scan}
+                
+                for future in futures:
+                    try:
+                        result = future.result(timeout=5)  # Overall future timeout
+                        if result:
+                            ip_str, host_data = result
+                            ping_discovered[ip_str] = host_data
+                    except Exception as e:
+                        self.logger.debug(f"Ping sweep future failed: {e}")
+        except RuntimeError as e:
+            if "cannot schedule new futures after interpreter shutdown" in str(e):
+                self.logger.warning(f"Ping sweep interrupted by interpreter shutdown (watchdog restart), discovered {len(ping_discovered)} hosts before interruption")
+            else:
+                raise
 
         if ping_discovered:
             self.logger.info(f"Ping sweep discovered {len(ping_discovered)} additional hosts not found by arp-scan")
@@ -614,10 +620,16 @@ class NetworkScanner:
                 self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
                 self.logger.debug(f"Port scan list for {self.target}: {sorted(ordered_ports)[:20]}... (showing first 20)")
 
-                with ThreadPoolExecutor(max_workers=self.outer_instance.port_scan_workers) as executor:
-                    futures = [executor.submit(self.scan_with_semaphore, port) for port in ordered_ports]
-                    for future in futures:
-                        future.result()
+                try:
+                    with ThreadPoolExecutor(max_workers=self.outer_instance.port_scan_workers) as executor:
+                        futures = [executor.submit(self.scan_with_semaphore, port) for port in ordered_ports]
+                        for future in futures:
+                            future.result()
+                except RuntimeError as e:
+                    if "cannot schedule new futures after interpreter shutdown" in str(e):
+                        self.logger.warning(f"Port scan of {self.target} interrupted by interpreter shutdown (watchdog restart), scanned {len(self.open_ports.get(self.target, set()))} ports before interruption")
+                    else:
+                        raise
                 
                 if self.open_ports[self.target]:
                     self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
@@ -687,13 +699,19 @@ class NetworkScanner:
                 nmap_logger.log_scan_operation("Host discovery completed (nmap)", f"Found {len(all_hosts)} hosts: {', '.join(all_hosts)}")
                 self.use_nmap_results = True
 
-            with ThreadPoolExecutor(max_workers=self.outer_instance.host_scan_workers) as executor:
-                futures = [
-                    executor.submit(self.scan_host, host, self.arp_hosts.get(host))
-                    for host in all_hosts
-                ]
-                for future in futures:
-                    future.result()
+            try:
+                with ThreadPoolExecutor(max_workers=self.outer_instance.host_scan_workers) as executor:
+                    futures = [
+                        executor.submit(self.scan_host, host, self.arp_hosts.get(host))
+                        for host in all_hosts
+                    ]
+                    for future in futures:
+                        future.result()
+            except RuntimeError as e:
+                if "cannot schedule new futures after interpreter shutdown" in str(e):
+                    self.logger.warning(f"Host scan interrupted by interpreter shutdown (watchdog restart), scanned {len(all_hosts)} hosts before interruption")
+                else:
+                    raise
 
             self.outer_instance.sort_and_write_csv(self.csv_scan_file)
 
@@ -1059,8 +1077,15 @@ class NetworkScanner:
             updater = self.LiveStatusUpdater(source_csv_path, output_csv_path)
             updater.update_livestatus()
             updater.clean_scan_results(self.shared_data.scan_results_dir)
+        except RuntimeError as e:
+            if "cannot schedule new futures after interpreter shutdown" in str(e):
+                self.logger.warning(f"Network scan interrupted by interpreter shutdown (watchdog restart): {e}")
+            else:
+                import traceback
+                self.logger.error(f"Runtime error in scan: {e}\n{traceback.format_exc()}")
         except Exception as e:
-            self.logger.error(f"Error in scan: {e}")
+            import traceback
+            self.logger.error(f"Error in scan: {e}\n{traceback.format_exc()}")
 
     def start(self):
         """
