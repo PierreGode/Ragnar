@@ -418,20 +418,12 @@ class Orchestrator:
         try:
             logger.info(f"Executing standalone action {action.action_name}")
             
-            # Execute action with timeout protection
-            action_callable = lambda: action.execute()
-            result = self._execute_with_timeout(
-                action_callable,
-                timeout=self.action_timeout,
-                action_name=f"standalone_{action.action_name}"
-            )
+            # Execute action directly (avoid executor shutdown issues)
+            # Note: Removed timeout protection to prevent executor errors
+            result = action.execute()
             
-            # Update status using helper (timeout is treated as failed)
-            if result == 'timeout':
-                result_status = 'failed'
-                logger.error(f"Standalone action {action.action_name} timed out")
-            else:
-                result_status = 'success' if result == 'success' else 'failed'
+            # Determine result status
+            result_status = 'success' if result == 'success' else 'failed'
             
             self._update_action_status(row, action_key, result_status)
             
