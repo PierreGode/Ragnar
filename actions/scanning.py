@@ -570,7 +570,7 @@ class NetworkScanner:
 
     class PortScanner:
         """
-        Helper class to perform port scanning on a target IP.
+        Helper class to perform port scanning on a target IP using nmap.
         """
         def __init__(self, outer_instance, target, open_ports, portstart, portend, extra_ports):
             self.outer_instance = outer_instance
@@ -581,29 +581,9 @@ class NetworkScanner:
             self.portend = portend
             self.extra_ports = extra_ports
 
-        def scan(self, port):
-            """
-            Scans a specific port on the target IP.
-            """
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(7)  # 7 seconds for better reliability
-            try:
-                s.connect((self.target, port))
-                self.open_ports[self.target].append(port)
-                self.logger.debug(f"Port {port} OPEN on {self.target}")
-            except socket.timeout:
-                self.logger.debug(f"Port {port} timeout on {self.target}")
-            except socket.error as e:
-                # Connection refused or other socket errors mean port is closed
-                self.logger.debug(f"Port {port} closed on {self.target}: {e}")
-            except Exception as e:
-                self.logger.warning(f"Unexpected error scanning port {port} on {self.target}: {e}")
-            finally:
-                s.close()  # Ensure the socket is closed
-
         def start(self):
             """
-            Starts the port scanning process for the specified range and extra ports.
+            Starts the port scanning process for the specified range and extra ports using nmap.
             """
             try:
                 ports_to_scan = list(range(self.portstart, self.portend))
@@ -618,34 +598,41 @@ class NetworkScanner:
                     seen_ports.add(port)
                     ordered_ports.append(port)
 
-                self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
-                self.logger.debug(f"Port scan list for {self.target}: {sorted(ordered_ports)[:20]}... (showing first 20)")
-
-                try:
-                    with ThreadPoolExecutor(max_workers=self.outer_instance.port_scan_workers) as executor:
-                        futures = [executor.submit(self.scan_with_semaphore, port) for port in ordered_ports]
-                        for future in futures:
-                            future.result()
-                except RuntimeError as e:
-                    if "cannot schedule new futures after interpreter shutdown" in str(e):
-                        self.logger.warning(f"Port scan of {self.target} interrupted by interpreter shutdown (watchdog restart), scanned {len(self.open_ports.get(self.target, set()))} ports before interruption")
-                    else:
-                        raise
+                self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports using nmap (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
                 
-                if self.open_ports[self.target]:
-                    self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
-                else:
-                    self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
+                # Use nmap for fast, efficient port scanning
+                port_spec = ','.join(map(str, ordered_ports))
+                nmap_args = f"-Pn -T4 --max-retries 1 -p {port_spec}"
+                
+                self.logger.debug(f"Running nmap port scan on {self.target} with args: {nmap_args}")
+                nmap_logger.log_scan_operation(f"Port scan: {self.target}", f"Arguments: {nmap_args}")
+                
+                try:
+                    self.outer_instance.nm.scan(hosts=self.target, arguments=nmap_args)
+                    
+                    if self.target in self.outer_instance.nm.all_hosts():
+                        for proto in self.outer_instance.nm[self.target].all_protocols():
+                            ports = self.outer_instance.nm[self.target][proto].keys()
+                            for port in ports:
+                                port_state = self.outer_instance.nm[self.target][proto][port]['state']
+                                if port_state == 'open':
+                                    self.open_ports[self.target].append(port)
+                                    self.logger.debug(f"Port {port}/{proto} OPEN on {self.target}")
+                    
+                    if self.open_ports[self.target]:
+                        self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
+                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"Found {len(self.open_ports[self.target])} open ports: {sorted(self.open_ports[self.target])}")
+                    else:
+                        self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
+                        nmap_logger.log_scan_operation(f"Port scan completed: {self.target}", f"No open ports found")
+                        
+                except Exception as nmap_error:
+                    self.logger.error(f"Nmap port scan error for {self.target}: {nmap_error}")
+                    nmap_logger.log_scan_operation(f"Port scan FAILED: {self.target}", f"Error: {nmap_error}")
                     
             except Exception as e:
-                self.logger.error(f"Error during port scan of {self.target}: {e}")
-
-        def scan_with_semaphore(self, port):
-            """
-            Scans a port using a semaphore to limit concurrent threads.
-            """
-            with self.outer_instance.semaphore:
-                self.scan(port)
+                import traceback
+                self.logger.error(f"Error during port scan of {self.target}: {e}\n{traceback.format_exc()}")
 
     class ScanPorts:
         """
