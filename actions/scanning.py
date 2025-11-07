@@ -3,6 +3,7 @@
 # The results are saved to CSV files and displayed using Rich for enhanced visualization.
 
 import os
+import sys
 import threading
 import csv
 from concurrent.futures import ThreadPoolExecutor
