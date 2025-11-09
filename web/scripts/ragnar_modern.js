@@ -818,13 +818,40 @@ function displayStableNetworkTable(data) {
             `<span class="font-mono text-xs">${host.mac}</span>`;
         
         // Format ports
-        let portsDisplay = host.ports === 'Unknown' || host.ports === 'Scanning...' ? 
-            '<span class="text-gray-500">Unknown</span>' : 
-            `<span class="text-xs">${host.ports}</span>`;
-        
+        const rawPortList = Array.isArray(host.port_list)
+            ? host.port_list
+            : (typeof host.ports === 'string'
+                ? host.ports.split(/[;,\s]+/).map(port => port.trim()).filter(Boolean)
+                : []);
+
+        let portsDisplay;
+        if (rawPortList.length > 0) {
+            const displayPorts = rawPortList.slice(0, 5).join(', ');
+            const remaining = rawPortList.length - 5;
+            const ellipsis = remaining > 0 ? ` <span class="text-gray-400">(+${remaining} more)</span>` : '';
+            portsDisplay = `<span class="text-xs" title="${escapeHtml(rawPortList.join(', '))}">${escapeHtml(displayPorts)}${ellipsis}</span>`;
+        } else if (typeof host.ports === 'string' && host.ports.trim() && host.ports !== 'Unknown') {
+            const cleaned = host.ports.trim();
+            const split = cleaned.split(/[;,\s]+/).map(port => port.trim()).filter(Boolean);
+            if (split.length > 0) {
+                const displayPorts = split.slice(0, 5).join(', ');
+                const remaining = split.length - 5;
+                const ellipsis = remaining > 0 ? ` <span class="text-gray-400">(+${remaining} more)</span>` : '';
+                portsDisplay = `<span class="text-xs" title="${escapeHtml(split.join(', '))}">${escapeHtml(displayPorts)}${ellipsis}</span>`;
+            } else if (cleaned.toLowerCase() === 'scanning...') {
+                portsDisplay = '<span class="text-gray-500">Scanning...</span>';
+            } else {
+                portsDisplay = `<span class="text-xs">${escapeHtml(cleaned)}</span>`;
+            }
+        } else if (typeof host.ports === 'string' && host.ports.trim().toLowerCase() === 'scanning...') {
+            portsDisplay = '<span class="text-gray-500">Scanning...</span>';
+        } else {
+            portsDisplay = '<span class="text-gray-500">Unknown</span>';
+        }
+
         // Format vulnerabilities
-        let vulnDisplay = host.vulnerabilities === '0' ? 
-            '<span class="text-gray-500">None</span>' : 
+        let vulnDisplay = host.vulnerabilities === '0' ?
+            '<span class="text-gray-500">None</span>' :
             `<span class="text-orange-400">${host.vulnerabilities}</span>`;
         
         // Format last scan

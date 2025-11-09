@@ -141,6 +141,83 @@ def build_pseudo_mac_from_ip(ip):
     return "00:00:00:00:00:00"
 
 
+def _normalize_port_list(port_value):
+    """Normalize various port representations into a clean list of unique strings."""
+    if isinstance(port_value, dict):
+        # If we received a mapping like {"80": {...}}, use the keys
+        candidates = list(port_value.keys())
+    elif isinstance(port_value, (list, set, tuple)):
+        candidates = list(port_value)
+    elif isinstance(port_value, str):
+        candidates = re.split(r"[;,\s]+", port_value)
+    elif port_value:
+        candidates = [port_value]
+    else:
+        candidates = []
+
+    normalized = []
+    seen = set()
+
+    for candidate in candidates:
+        if candidate is None:
+            continue
+
+        port_str = str(candidate).strip()
+        if not port_str:
+            continue
+
+        lower_port = port_str.lower()
+        if lower_port in {'unknown', 'scanning...', 'none', 'n/a', 'na', '0'}:
+            continue
+
+        if '/' in port_str:
+            prefix = port_str.split('/', 1)[0].strip()
+            if prefix.isdigit():
+                port_str = prefix
+
+        if port_str and port_str not in seen:
+            seen.add(port_str)
+            normalized.append(port_str)
+
+    return normalized
+
+
+def _set_port_metadata(entry, port_value):
+    """Populate Ports/port_list fields on an entry from the provided value."""
+    port_list = _normalize_port_list(port_value)
+    entry['port_list'] = port_list
+
+    if port_list:
+        joined_ports = ';'.join(port_list)
+        entry['Ports'] = joined_ports
+        entry['ports'] = joined_ports
+    else:
+        if isinstance(port_value, str) and port_value.strip():
+            entry['Ports'] = port_value.strip()
+            entry['ports'] = port_value.strip()
+        else:
+            entry['ports'] = entry.get('ports', 'Unknown')
+
+    return entry
+
+
+def _get_port_value(entry):
+    """Extract a raw port value from an entry, preserving original representation if possible."""
+    if not isinstance(entry, dict):
+        return ''
+
+    for key in ('Ports', 'ports', 'port_list', 'open_ports'):
+        value = entry.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped:
+                return stripped
+        elif value:
+            return value
+
+    return ''
+
+
 def run_targeted_arp_scan(ip, interface=DEFAULT_ARP_SCAN_INTERFACE):
     command = ['sudo', 'arp-scan', f'--interface={interface}', ip]
     logger.info(f"Running targeted arp-scan for {ip}: {' '.join(command)}")
@@ -1828,6 +1905,8 @@ def load_persistent_network_data():
                 entry.setdefault('nmap_vulnerabilities', '')
                 entry.setdefault('NmapVulnScanner', '')
                 entry.setdefault('nmap_vuln_scanner', '')
+
+            _set_port_metadata(entry, _get_port_value(entry))
     else:
         logger.warning("WiFi-specific network data is empty. Falling back to netkb data.")
         if netkb_data:
@@ -1865,6 +1944,9 @@ def load_persistent_network_data():
         else:
             network_data = []
 
+    for entry in network_data:
+        _set_port_metadata(entry, _get_port_value(entry))
+
     current_ssid = get_current_wifi_ssid()
     logger.info(f"Returning {len(network_data)} network entries for WiFi: {current_ssid}")
     return network_data
@@ -1897,13 +1979,15 @@ def get_stable_network_data():
         for entry in netkb_data:
             ip = entry.get('IPs', '').strip()
             if ip and ip not in ['STANDALONE']:
+                ports_value = _get_port_value(entry)
                 netkb_enrichment[ip] = {
                     'mac': entry.get('MAC Address', '').strip(),
                     'hostname': entry.get('Hostnames', '').strip(),
-                    'ports': entry.get('Ports', '').strip(),
+                    'ports': ports_value,
+                    'port_list': _normalize_port_list(ports_value),
                     'alive': entry.get('Alive', '0')
                 }
-        
+
         # Merge and enrich the data
         enriched_hosts = []
         processed_ips = set()
@@ -1921,7 +2005,6 @@ def get_stable_network_data():
                 'hostname': entry.get('Hostnames', '').strip() or 'Unknown',
                 'mac': entry.get('MAC Address', '').strip() or 'Unknown',
                 'status': 'up' if entry.get('Alive') in [True, 'True', '1', 1] else 'unknown',
-                'ports': entry.get('Ports', '').strip() or 'Unknown',
                 'vulnerabilities': str(entry.get('Vulnerabilities', '0')).strip() or '0',
                 'last_scan': entry.get('LastSeen', '').strip() or 'Never',
                 'first_seen': entry.get('First_Seen', '').strip() or 'Unknown',
@@ -1929,7 +2012,9 @@ def get_stable_network_data():
                 'services': entry.get('Services', '').strip() or 'Unknown',
                 'source': 'network_data'
             }
-            
+
+            _set_port_metadata(host_data, _get_port_value(entry))
+
             # Enhance with NetKB data if available
             if ip in netkb_enrichment:
                 netkb_entry = netkb_enrichment[ip]
@@ -1938,13 +2023,13 @@ def get_stable_network_data():
                     host_data['mac'] = netkb_entry['mac']
                 if netkb_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
                     host_data['hostname'] = netkb_entry['hostname']
-                if netkb_entry.get('ports') and host_data['ports'] in ['Unknown', '']:
-                    host_data['ports'] = netkb_entry['ports']
+                if netkb_entry.get('ports') and host_data.get('port_list') == []:
+                    _set_port_metadata(host_data, netkb_entry.get('port_list') or netkb_entry.get('ports'))
                 # Check if NetKB shows host as alive
                 if netkb_entry.get('alive') in ['1', 1]:
                     host_data['status'] = 'up'
                     host_data['source'] = 'network_data+netkb'
-            
+
             # Enhance with recent ARP data if available
             if ip in recent_arp_data:
                 arp_entry = recent_arp_data[ip]
@@ -1971,9 +2056,8 @@ def get_stable_network_data():
             host_data = {
                 'ip': ip,
                 'hostname': entry.get('Hostnames', '').strip() or 'Unknown',
-                'mac': entry.get('MAC Address', '').strip() or 'Unknown', 
+                'mac': entry.get('MAC Address', '').strip() or 'Unknown',
                 'status': 'up',
-                'ports': entry.get('Ports', '').strip() or 'Unknown',
                 'vulnerabilities': str(entry.get('Vulnerabilities', '0')).strip() or '0',
                 'last_scan': entry.get('LastSeen', '').strip() or 'Unknown',
                 'first_seen': entry.get('First_Seen', '').strip() or 'Unknown',
@@ -1981,7 +2065,9 @@ def get_stable_network_data():
                 'services': entry.get('Services', '').strip() or 'Unknown',
                 'source': 'netkb'
             }
-            
+
+            _set_port_metadata(host_data, _get_port_value(entry))
+
             # Enhance with recent ARP data if available
             if ip in recent_arp_data:
                 arp_entry = recent_arp_data[ip]
@@ -2001,7 +2087,6 @@ def get_stable_network_data():
                     'hostname': arp_entry.get('hostname', 'Unknown'),
                     'mac': arp_entry.get('mac', 'Unknown'),
                     'status': 'up',
-                    'ports': 'Scanning...',
                     'vulnerabilities': '0',
                     'last_scan': 'Recently discovered',
                     'first_seen': 'Recent',
@@ -2009,8 +2094,14 @@ def get_stable_network_data():
                     'services': 'Unknown',
                     'source': 'arp_discovery'
                 }
+                _set_port_metadata(host_data, arp_entry.get('ports') or [])
+                if not host_data.get('port_list'):
+                    host_data['ports'] = 'Scanning...'
+                    host_data['Ports'] = 'Scanning...'
+                    host_data['port_list'] = []
+                processed_ips.add(ip)
                 enriched_hosts.append(host_data)
-        
+
         # Sort by IP address for consistent display
         enriched_hosts.sort(key=lambda x: tuple(map(int, x['ip'].split('.'))))
         
