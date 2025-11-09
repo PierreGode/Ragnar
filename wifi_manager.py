@@ -744,45 +744,16 @@ class WiFiManager:
     def scan_networks(self):
         """Scan for available Wi-Fi networks"""
         try:
-            # If we're in AP mode, use special AP scanning method
             if self.ap_mode_active:
                 return self.scan_networks_while_ap()
-            
+
             self.logger.info("Scanning for Wi-Fi networks...")
-            
-            # Trigger a new scan
-            subprocess.run(['nmcli', 'dev', 'wifi', 'rescan'], 
-                         capture_output=True, timeout=15)
-            
-            # Get scan results
-            result = subprocess.run(['nmcli', '-t', '-f', 'SSID,SIGNAL,SECURITY', 'dev', 'wifi'], 
-                                  capture_output=True, text=True, timeout=15)
-            
-            networks = []
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if line and ':' in line:
-                        parts = line.split(':')
-                        if len(parts) >= 3 and parts[0]:  # SSID not empty
-                            networks.append({
-                                'ssid': parts[0],
-                                'signal': int(parts[1]) if parts[1].isdigit() else 0,
-                                'security': parts[2] if parts[2] else 'Open',
-                                'known': parts[0] in [net['ssid'] for net in self.known_networks]
-                            })
-            
-            # Remove duplicates and sort by signal strength
-            seen_ssids = set()
-            unique_networks = []
-            for network in sorted(networks, key=lambda x: x['signal'], reverse=True):
-                if network['ssid'] not in seen_ssids:
-                    seen_ssids.add(network['ssid'])
-                    unique_networks.append(network)
-            
-            self.available_networks = unique_networks
-            self.logger.info(f"Found {len(unique_networks)} unique networks")
-            return unique_networks
-            
+            networks = self._perform_nmcli_scan()
+
+            self.available_networks = networks
+            self.logger.info(f"Found {len(networks)} unique networks")
+            return networks
+
         except Exception as e:
             self.logger.error(f"Error scanning networks: {e}")
             return []
@@ -793,137 +764,187 @@ class WiFiManager:
             self.logger.info("Scanning networks while in AP mode using smart strategies")
             self.ap_logger.info("Starting network scan while in AP mode (non-disruptive)")
             
-            # Strategy 1: Return cached networks if we have recent data (within 5 minutes for fresher data)
-            if hasattr(self, 'cached_networks') and hasattr(self, 'last_scan_time'):
-                cache_age = time.time() - self.last_scan_time
-                if cache_age < 300:  # 5 minutes cache for fresher data
-                    self.ap_logger.info(f"Returning cached networks (age: {cache_age:.1f}s, count: {len(self.cached_networks)})")
-                    return self.cached_networks
-            
-            # Strategy 2: Use networks scanned before AP mode started
-            if hasattr(self, 'available_networks') and self.available_networks:
-                real_networks = [n for n in self.available_networks if not n.get('instruction')]
-                if real_networks:
-                    self.ap_logger.info(f"Using pre-AP scan results ({len(real_networks)} networks)")
-                    # Update cache
-                    self.cached_networks = real_networks
-                    self.last_scan_time = time.time()
-                    return real_networks
-            
-            # Strategy 3: Try iwlist scan (non-disruptive to AP mode)
-            networks = []
-            try:
-                self.ap_logger.debug("Attempting iwlist scan on AP interface...")
-                result = subprocess.run(['sudo', 'iwlist', self.ap_interface, 'scan'], 
-                                      capture_output=True, text=True, timeout=15)
-                
-                if result.returncode == 0:
-                    self.ap_logger.debug("iwlist scan successful, parsing results...")
-                    lines = result.stdout.split('\n')
-                    current_network = {}
-                    
-                    for line in lines:
-                        line = line.strip()
-                        if 'Cell ' in line and 'Address:' in line:
-                            # Start of new network, save previous if complete
-                            if 'ssid' in current_network and current_network['ssid'] != self.ap_ssid:
-                                networks.append(current_network.copy())
-                            current_network = {}
-                        elif 'ESSID:' in line:
-                            # Extract SSID
-                            essid_part = line.split('ESSID:')[1].strip('"')
-                            if essid_part and essid_part != self.ap_ssid:
-                                current_network['ssid'] = essid_part
-                        elif 'Signal level=' in line:
-                            # Extract signal strength
-                            try:
-                                signal_part = line.split('Signal level=')[1].split()[0]
-                                if 'dBm' in signal_part:
-                                    dbm = int(signal_part.replace('dBm', ''))
-                                    # Convert dBm to percentage (rough approximation)
-                                    signal = max(0, min(100, (dbm + 100) * 2))
-                                else:
-                                    signal = 50  # Default
-                                current_network['signal'] = signal
-                            except:
-                                current_network['signal'] = 50
-                        elif 'Encryption key:on' in line:
-                            current_network['security'] = 'WPA2'
-                        elif 'Encryption key:off' in line:
-                            current_network['security'] = 'Open'
-                    
-                    # Add last network if complete
-                    if 'ssid' in current_network and current_network['ssid'] != self.ap_ssid:
-                        networks.append(current_network.copy())
-                    
-                    if networks:
-                        self.ap_logger.info(f"iwlist scan found {len(networks)} networks")
-                        
-                        # Remove duplicates and sort
-                        seen_ssids = set()
-                        unique_networks = []
-                        for network in sorted(networks, key=lambda x: x.get('signal', 0), reverse=True):
-                            if network['ssid'] not in seen_ssids:
-                                seen_ssids.add(network['ssid'])
-                                # Add known network flag
-                                network['known'] = network['ssid'] in [net['ssid'] for net in self.known_networks]
-                                unique_networks.append(network)
-                        
-                        # Cache the results
-                        self.cached_networks = unique_networks
-                        self.last_scan_time = time.time()
-                        self.available_networks = unique_networks
-                        
-                        return unique_networks
-                    
-            except Exception as iwlist_error:
-                self.ap_logger.debug(f"iwlist scan failed: {iwlist_error}")
-            
-            # Strategy 4: Return known networks as available options
-            if self.known_networks:
-                self.ap_logger.info("Returning known networks as scan alternatives")
-                known_as_available = []
-                for i, net in enumerate(self.known_networks):
-                    known_as_available.append({
-                        'ssid': net['ssid'],
-                        'signal': 80 - (i * 5),  # Decreasing signal strength
-                        'security': 'WPA2' if net.get('password') else 'Open',
-                        'known': True
-                    })
-                return known_as_available
-            
-            # Strategy 5: Return helpful message for manual entry
-            help_networks = [
-                {
-                    'ssid': '📡 Cached networks may be available',
-                    'signal': 100,
-                    'security': '',
-                    'instruction': True,
-                    'known': False
-                },
-                {
-                    'ssid': '✏️ Or type network name manually below',
-                    'signal': 90,
-                    'security': '',
-                    'instruction': True,
-                    'known': False
-                },
-                {
-                    'ssid': '� Click refresh to try scanning again',
-                    'signal': 80,
-                    'security': '',
-                    'instruction': True,
-                    'known': False
-                }
-            ]
-            
-            self.ap_logger.info("Returning instructional networks for manual entry")
-            return help_networks
-            
+            cached_networks = self._get_cached_ap_networks()
+            if cached_networks is not None:
+                return cached_networks
+
+            pre_ap_networks = self._get_pre_ap_networks()
+            if pre_ap_networks is not None:
+                return pre_ap_networks
+
+            iwlist_networks = self._scan_with_iwlist()
+            if iwlist_networks is not None:
+                return iwlist_networks
+
+            known_networks = self._known_networks_as_scan_results()
+            if known_networks is not None:
+                return known_networks
+
+            return self._instructional_networks()
+
         except Exception as e:
             self.logger.error(f"Error in smart AP scanning: {e}")
             self.ap_logger.error(f"Error during smart AP scan: {e}")
             return []
+
+    def _perform_nmcli_scan(self):
+        """Trigger an nmcli Wi-Fi scan and return deduplicated results."""
+        try:
+            subprocess.run(
+                ['nmcli', 'dev', 'wifi', 'rescan'],
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'SSID,SIGNAL,SECURITY', 'dev', 'wifi'],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                self.logger.warning(
+                    "nmcli Wi-Fi scan returned non-zero exit status: %s", result.returncode
+                )
+
+            networks = self._parse_nmcli_output(result.stdout)
+            return self._deduplicate_networks(networks)
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("nmcli Wi-Fi scan timed out")
+            return []
+
+    def _get_cached_ap_networks(self):
+        """Return cached AP scan results when they are still fresh."""
+        cache_age = None
+        if hasattr(self, 'cached_networks') and hasattr(self, 'last_scan_time'):
+            cache_age = time.time() - self.last_scan_time
+
+        if cache_age is not None and cache_age < 300:
+            self.ap_logger.info(
+                "Returning cached networks (age: %.1fs, count: %s)",
+                cache_age,
+                len(self.cached_networks),
+            )
+            return self.cached_networks
+
+        return None
+
+    def _get_pre_ap_networks(self):
+        """Use networks discovered before AP mode was enabled if available."""
+        if hasattr(self, 'available_networks') and self.available_networks:
+            real_networks = [n for n in self.available_networks if not n.get('instruction')]
+            if real_networks:
+                self.ap_logger.info(
+                    "Using pre-AP scan results (%s networks)", len(real_networks)
+                )
+                self.cached_networks = real_networks
+                self.last_scan_time = time.time()
+                return real_networks
+        return None
+
+    def _scan_with_iwlist(self):
+        """Attempt to scan using iwlist without disrupting AP mode."""
+        try:
+            self.ap_logger.debug("Attempting iwlist scan on AP interface...")
+            result = subprocess.run(
+                ['sudo', 'iwlist', self.ap_interface, 'scan'],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+            if result.returncode != 0:
+                self.ap_logger.debug(
+                    "iwlist scan returned non-zero exit status: %s", result.returncode
+                )
+                return None
+
+            networks = self._parse_iwlist_output(result.stdout)
+            if not networks:
+                return None
+
+            unique_networks = self._deduplicate_networks(networks)
+            self.ap_logger.info(
+                "iwlist scan found %s networks", len(unique_networks)
+            )
+
+            self.cached_networks = unique_networks
+            self.last_scan_time = time.time()
+            self.available_networks = unique_networks
+            return unique_networks
+
+        except subprocess.TimeoutExpired:
+            self.ap_logger.debug("iwlist scan timed out")
+        except Exception as iwlist_error:
+            self.ap_logger.debug(f"iwlist scan failed: {iwlist_error}")
+
+        return None
+
+    def _known_networks_as_scan_results(self):
+        """Represent known networks as synthetic scan results."""
+        if not self.known_networks:
+            return None
+
+        self.ap_logger.info("Returning known networks as scan alternatives")
+        known_as_available = []
+        for i, net in enumerate(self.known_networks):
+            known_as_available.append({
+                'ssid': net['ssid'],
+                'signal': max(0, 80 - (i * 5)),
+                'security': 'WPA2' if net.get('password') else 'Open',
+                'known': True,
+            })
+        return known_as_available
+
+    def _instructional_networks(self):
+        """Provide helpful guidance when no scan results are available."""
+        self.ap_logger.info("Returning instructional networks for manual entry")
+        return [
+            {
+                'ssid': '📡 Cached networks may be available',
+                'signal': 100,
+                'security': '',
+                'instruction': True,
+                'known': False,
+            },
+            {
+                'ssid': '✏️ Or type network name manually below',
+                'signal': 90,
+                'security': '',
+                'instruction': True,
+                'known': False,
+            },
+            {
+                'ssid': '🔄 Click refresh to try scanning again',
+                'signal': 80,
+                'security': '',
+                'instruction': True,
+                'known': False,
+            },
+        ]
+
+    def _deduplicate_networks(self, networks):
+        """Remove duplicate SSIDs and sort by signal strength."""
+        seen_ssids = set()
+        unique_networks = []
+        known_ssids = {net['ssid'] for net in self.known_networks}
+
+        for network in sorted(networks, key=lambda x: x.get('signal', 0), reverse=True):
+            ssid = network.get('ssid')
+            if not ssid or ssid in seen_ssids:
+                continue
+
+            normalized = dict(network)
+            normalized['known'] = bool(network.get('known') or ssid in known_ssids)
+            unique_networks.append(normalized)
+            seen_ssids.add(ssid)
+
+        return unique_networks
 
     def _parse_iwlist_output(self, output):
         """Parse iwlist scan output into network list for Pi Zero W2 compatibility"""
