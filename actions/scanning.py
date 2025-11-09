@@ -612,15 +612,43 @@ class NetworkScanner:
                             hostnames_sorted = [fallback_hostname]
                             data['Hostnames'] = {fallback_hostname}
 
+                        ports_joined = ';'.join(
+                            sorted(map(str, data['Ports']), key=lambda x: int(x) if x.isdigit() else 0)
+                        )
+
+                        # Populate compatibility columns for legacy dashboards if they exist
+                        compatibility_timestamp = datetime.utcnow().isoformat()
+                        primary_ip = ip_list_sorted[0] if ip_list_sorted else ""
+                        primary_hostname = hostnames_sorted[0] if hostnames_sorted else ""
+
+                        compatibility_values = {}
+                        if 'IP' in existing_action_columns:
+                            compatibility_values['IP'] = primary_ip
+                        if 'Hostname' in existing_action_columns:
+                            compatibility_values['Hostname'] = primary_hostname
+                        if 'MAC' in existing_action_columns:
+                            compatibility_values['MAC'] = mac
+                        if 'Ports' in existing_action_columns:
+                            compatibility_values['Ports'] = ports_joined
+                        if 'LastSeen' in existing_action_columns:
+                            # Always update LastSeen to the current attempt time
+                            compatibility_values['LastSeen'] = compatibility_timestamp
+                        if 'FailedPingCount' in existing_action_columns:
+                            compatibility_values['FailedPingCount'] = str(data.get('Failed_Pings', 0))
+                        if 'LastSuccessfulPing' in existing_action_columns and data.get('Alive') == '1':
+                            compatibility_values['LastSuccessfulPing'] = compatibility_timestamp
+                        if 'LastPingAttempt' in existing_action_columns:
+                            compatibility_values['LastPingAttempt'] = compatibility_timestamp
+
                         row = [
                             mac,
                             ';'.join(ip_list_sorted),
                             ';'.join(hostnames_sorted),
                             data['Alive'],
-                            ';'.join(sorted(map(str, data['Ports']), key=lambda x: int(x) if x.isdigit() else 0)),
+                            ports_joined,
                             str(data.get('Failed_Pings', 0))  # Add Failed_Pings column
                         ]
-                        row.extend(data.get(action, "") for action in existing_action_columns)
+                        row.extend(str(compatibility_values.get(action, data.get(action, ""))) for action in existing_action_columns)
                         writer.writerow(row)
             except Exception as e:
                 self.logger.error(f"Error in update_netkb: {e}")
