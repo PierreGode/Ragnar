@@ -472,6 +472,10 @@ class NetworkScanner:
                 
                 for i, data in enumerate(netkb_data):
                     mac, ip, hostname, ports = data
+                    hostname = hostname.strip() if hostname else ""
+                    if not hostname and ip:
+                        hostname = f"host-{ip.replace('.', '-')}"
+
                     self.logger.debug(f"Processing host {i+1}/{len(netkb_data)}: IP={ip}, MAC={mac}, hostname={hostname}, ports={ports}")
                     
                     if not mac or mac == "STANDALONE" or ip == "STANDALONE" or hostname == "STANDALONE":
@@ -515,16 +519,21 @@ class NetworkScanner:
                     if mac in netkb_entries:
                         old_port_count = len(netkb_entries[mac]['Ports'])
                         netkb_entries[mac]['IPs'].add(ip)
-                        netkb_entries[mac]['Hostnames'].add(hostname)
+                        if hostname:
+                            netkb_entries[mac]['Hostnames'].add(hostname)
                         netkb_entries[mac]['Alive'] = '1'
                         netkb_entries[mac]['Ports'].update(map(str, ports))
                         netkb_entries[mac]['Failed_Pings'] = 0  # Reset failures since host is responsive
                         new_port_count = len(netkb_entries[mac]['Ports'])
                         self.logger.debug(f"Updated existing host {mac} ({ip}): ports {old_port_count} -> {new_port_count}")
                     else:
+                        hostnames_set = {hostname} if hostname else set()
+                        if not hostnames_set and ip:
+                            hostnames_set.add(f"host-{ip.replace('.', '-')}")
+
                         netkb_entries[mac] = {
                             'IPs': {ip},
-                            'Hostnames': {hostname},
+                            'Hostnames': hostnames_set,
                             'Alive': '1',
                             'Ports': set(map(str, ports)),
                             'Failed_Pings': 0  # New hosts start with 0 failed pings
@@ -571,6 +580,10 @@ class NetworkScanner:
                     
                     writer.writerow(existing_headers)  # Write updated headers
                     for mac, data in sorted_netkb_entries:
+                        if not data['Hostnames'] and data['IPs']:
+                            fallback_hostname = f"host-{next(iter(data['IPs'])).replace('.', '-')}"
+                            data['Hostnames'].add(fallback_hostname)
+
                         row = [
                             mac,
                             ';'.join(sorted(data['IPs'], key=self.ip_key)),
@@ -630,6 +643,13 @@ class NetworkScanner:
     def get_mac_address(self, ip, hostname):
         """
         Retrieves the MAC address for the given IP address and hostname.
+
+        The upstream getmac helper can occasionally return placeholder values or
+        addresses that are not in canonical colon separated format.  Downstream
+        consumers expect a normalised MAC address so they can reliably map hosts
+        across scans.  We therefore normalise the value and, when a valid address
+        cannot be retrieved, explicitly return ``00:00:00:00:00:00`` so the
+        caller can promote it to a deterministic pseudo-MAC based on the IP.
         """
         try:
             mac = None
@@ -637,14 +657,24 @@ class NetworkScanner:
             while not mac and retries > 0:
                 mac = gma(ip=ip)
                 if not mac:
-                    time.sleep(2)  # Attendre 2 secondes avant de réessayer
+                    time.sleep(2)
                     retries -= 1
+
             if not mac:
-                mac = f"{ip}_{hostname}" if hostname else f"{ip}_NoHostname"
+                return "00:00:00:00:00:00"
+
+            mac = mac.strip().lower()
+            if not self._is_valid_mac(mac):
+                cleaned = re.sub(r"[^0-9a-f]", "", mac)
+                if len(cleaned) == 12:
+                    mac = ":".join(cleaned[i:i+2] for i in range(0, 12, 2))
+                else:
+                    mac = "00:00:00:00:00:00"
+
             return mac
         except Exception as e:
             self.logger.error(f"Error in get_mac_address: {e}")
-            return None
+            return "00:00:00:00:00:00"
 
     class PortScanner:
         """
@@ -885,7 +915,7 @@ class NetworkScanner:
                 if not mac:
                     mac = self.outer_instance.get_mac_address(ip, hostname)
 
-                if not mac:
+                if not mac or not self.outer_instance._is_valid_mac(mac):
                     mac = "00:00:00:00:00:00"
                 else:
                     mac = mac.lower()
@@ -1245,19 +1275,26 @@ class NetworkScanner:
                 table.add_column(f"{port}", style="green")
 
             netkb_data = []
-            for ip, ports, hostname, mac in zip(ip_data.ip_list, open_ports.values(), ip_data.hostname_list, ip_data.mac_list):
+            for index, ip in enumerate(ip_data.ip_list):
+                ports = open_ports.get(ip, [])
+                hostname = ip_data.hostname_list[index] if index < len(ip_data.hostname_list) else ""
+                mac = ip_data.mac_list[index] if index < len(ip_data.mac_list) else "00:00:00:00:00:00"
+
                 if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                     continue
                 alive = '1' if mac in alive_macs else '0'
-                
-                # Ensure ports is a list of integers for consistent handling
+
                 if isinstance(ports, list):
-                    ports_list = [int(p) for p in ports if str(p).isdigit()]
+                    ports_list = sorted({int(p) for p in ports if str(p).isdigit()})
                 else:
                     ports_list = []
-                
+
+                hostname = hostname.strip() if hostname else ""
+                if not hostname:
+                    hostname = f"host-{ip.replace('.', '-')}"
+
                 self.logger.debug(f"Processing host {ip} ({mac}): {len(ports_list)} ports found: {ports_list}")
-                
+
                 row = [ip, hostname, alive, mac] + [Text(str(port), style="green bold") if port in ports_list else Text("", style="on red") for port in all_ports]
                 table.add_row(*row)
                 netkb_data.append([mac, ip, hostname, ports_list])
@@ -1266,17 +1303,24 @@ class NetworkScanner:
                 with open(csv_result_file, 'w', newline='') as file:
                     writer = csv.writer(file)
                     writer.writerow(["IP", "Hostname", "Alive", "MAC Address"] + [str(port) for port in all_ports])
-                    for ip, ports, hostname, mac in zip(ip_data.ip_list, open_ports.values(), ip_data.hostname_list, ip_data.mac_list):
+                    for index, ip in enumerate(ip_data.ip_list):
+                        ports = open_ports.get(ip, [])
+                        hostname = ip_data.hostname_list[index] if index < len(ip_data.hostname_list) else ""
+                        mac = ip_data.mac_list[index] if index < len(ip_data.mac_list) else "00:00:00:00:00:00"
+
                         if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                             continue
                         alive = '1' if mac in alive_macs else '0'
-                        
-                        # Ensure ports is a list of integers for consistent handling
+
                         if isinstance(ports, list):
-                            ports_list = [int(p) for p in ports if str(p).isdigit()]
+                            ports_list = sorted({int(p) for p in ports if str(p).isdigit()})
                         else:
                             ports_list = []
-                        
+
+                        hostname = hostname.strip() if hostname else ""
+                        if not hostname:
+                            hostname = f"host-{ip.replace('.', '-')}"
+
                         writer.writerow([ip, hostname, alive, mac] + [str(port) if port in ports_list else '' for port in all_ports])
 
             self.update_netkb(netkbfile, netkb_data, alive_macs)
