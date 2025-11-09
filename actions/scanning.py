@@ -432,6 +432,9 @@ class NetworkScanner:
         """
         with self.lock:
             try:
+                def sanitize_hostnames(hostnames_set):
+                    return {h.strip() for h in hostnames_set if h and h.strip()}
+
                 netkb_entries = {}
                 existing_action_columns = []
                 existing_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"]
@@ -452,13 +455,13 @@ class NetworkScanner:
                         for row in reader:
                             mac = row["MAC Address"]
                             ips = row["IPs"].split(';')
-                            hostnames = row["Hostnames"].split(';')
+                            hostnames = [h.strip() for h in row["Hostnames"].split(';') if h and h.strip()]
                             alive = row["Alive"]
                             ports = row["Ports"].split(';')
                             failed_pings = int(row.get("Failed_Pings", "0"))  # Default to 0 if missing
                             netkb_entries[mac] = {
                                 'IPs': set(ips) if ips[0] else set(),
-                                'Hostnames': set(hostnames) if hostnames[0] else set(),
+                                'Hostnames': set(hostnames),
                                 'Alive': alive,
                                 'Ports': set(ports) if ports[0] else set(),
                                 'Failed_Pings': failed_pings
@@ -521,13 +524,14 @@ class NetworkScanner:
                         netkb_entries[mac]['IPs'].add(ip)
                         if hostname:
                             netkb_entries[mac]['Hostnames'].add(hostname)
+                        netkb_entries[mac]['Hostnames'] = sanitize_hostnames(netkb_entries[mac]['Hostnames'])
                         netkb_entries[mac]['Alive'] = '1'
                         netkb_entries[mac]['Ports'].update(map(str, ports))
                         netkb_entries[mac]['Failed_Pings'] = 0  # Reset failures since host is responsive
                         new_port_count = len(netkb_entries[mac]['Ports'])
                         self.logger.debug(f"Updated existing host {mac} ({ip}): ports {old_port_count} -> {new_port_count}")
                     else:
-                        hostnames_set = {hostname} if hostname else set()
+                        hostnames_set = sanitize_hostnames({hostname} if hostname else set())
                         if not hostnames_set and ip:
                             hostnames_set.add(f"host-{ip.replace('.', '-')}")
 
@@ -580,6 +584,7 @@ class NetworkScanner:
                     
                     writer.writerow(existing_headers)  # Write updated headers
                     for mac, data in sorted_netkb_entries:
+                        data['Hostnames'] = sanitize_hostnames(data.get('Hostnames', set()))
                         if not data['Hostnames'] and data['IPs']:
                             fallback_hostname = f"host-{next(iter(data['IPs'])).replace('.', '-')}"
                             data['Hostnames'].add(fallback_hostname)
