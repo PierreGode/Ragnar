@@ -601,10 +601,21 @@ class NetworkScanner:
                     for mac, data in sorted_netkb_entries:
                         ensure_hostnames(data)
 
+                        ip_list_sorted = sorted(data['IPs'], key=self.ip_key)
+                        hostnames_sorted = sorted(
+                            [h for h in data.get('Hostnames', set()) if h and h.strip()]
+                        )
+
+                        if not hostnames_sorted:
+                            fallback_ip = ip_list_sorted[0] if ip_list_sorted else "unknown"
+                            fallback_hostname = f"host-{fallback_ip.replace('.', '-')}"
+                            hostnames_sorted = [fallback_hostname]
+                            data['Hostnames'] = {fallback_hostname}
+
                         row = [
                             mac,
-                            ';'.join(sorted(data['IPs'], key=self.ip_key)),
-                            ';'.join(sorted(data['Hostnames'])),
+                            ';'.join(ip_list_sorted),
+                            ';'.join(hostnames_sorted),
                             data['Alive'],
                             ';'.join(sorted(map(str, data['Ports']), key=lambda x: int(x) if x.isdigit() else 0)),
                             str(data.get('Failed_Pings', 0))  # Add Failed_Pings column
