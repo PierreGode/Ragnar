@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-“””
-Network Scanner using ARP and Nmap
-Requires: nmap, arp-scan
-Install: sudo apt install nmap arp-scan (Debian/Ubuntu)
-sudo yum install nmap arp-scan (RHEL/CentOS)
-Run as: sudo python3 script.py
-“””
-
 import subprocess
 import re
 import sys
