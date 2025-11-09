@@ -435,6 +435,19 @@ class NetworkScanner:
                 def sanitize_hostnames(hostnames_set):
                     return {h.strip() for h in hostnames_set if h and h.strip()}
 
+                def ensure_hostnames(entry):
+                    sanitized = sanitize_hostnames(entry.get('Hostnames', set()))
+                    if sanitized:
+                        entry['Hostnames'] = sanitized
+                        return
+
+                    ips = entry.get('IPs', set())
+                    if ips:
+                        fallback = f"host-{next(iter(ips)).replace('.', '-')}"
+                        entry['Hostnames'] = {fallback}
+                    else:
+                        entry['Hostnames'] = set()
+
                 netkb_entries = {}
                 existing_action_columns = []
                 existing_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"]
@@ -466,6 +479,7 @@ class NetworkScanner:
                                 'Ports': set(ports) if ports[0] else set(),
                                 'Failed_Pings': failed_pings
                             }
+                            ensure_hostnames(netkb_entries[mac])
                             for action in existing_action_columns:
                                 netkb_entries[mac][action] = row.get(action, "")
 
@@ -524,7 +538,7 @@ class NetworkScanner:
                         netkb_entries[mac]['IPs'].add(ip)
                         if hostname:
                             netkb_entries[mac]['Hostnames'].add(hostname)
-                        netkb_entries[mac]['Hostnames'] = sanitize_hostnames(netkb_entries[mac]['Hostnames'])
+                        ensure_hostnames(netkb_entries[mac])
                         netkb_entries[mac]['Alive'] = '1'
                         netkb_entries[mac]['Ports'].update(map(str, ports))
                         netkb_entries[mac]['Failed_Pings'] = 0  # Reset failures since host is responsive
@@ -542,6 +556,7 @@ class NetworkScanner:
                             'Ports': set(map(str, ports)),
                             'Failed_Pings': 0  # New hosts start with 0 failed pings
                         }
+                        ensure_hostnames(netkb_entries[mac])
                         for action in existing_action_columns:
                             netkb_entries[mac][action] = ""
                         self.logger.info(f"Created new host entry {mac} ({ip}): {len(ports)} ports discovered")
@@ -584,10 +599,7 @@ class NetworkScanner:
                     
                     writer.writerow(existing_headers)  # Write updated headers
                     for mac, data in sorted_netkb_entries:
-                        data['Hostnames'] = sanitize_hostnames(data.get('Hostnames', set()))
-                        if not data['Hostnames'] and data['IPs']:
-                            fallback_hostname = f"host-{next(iter(data['IPs'])).replace('.', '-')}"
-                            data['Hostnames'].add(fallback_hostname)
+                        ensure_hostnames(data)
 
                         row = [
                             mac,
