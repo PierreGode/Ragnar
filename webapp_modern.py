@@ -3723,11 +3723,19 @@ def reboot_system():
 
 @app.route('/api/data/reset-vulnerabilities', methods=['POST'])
 def reset_vulnerabilities():
-    """Reset all vulnerability data - removes all discovered vulnerabilities"""
+    """
+    Reset all vulnerability data - removes all discovered vulnerabilities
+    
+    IMPORTANT: Network Intelligence is the SINGLE SOURCE OF TRUTH for vulnerabilities.
+    - Vulnerabilities are cleared from Network Intelligence (in-memory + JSON files)
+    - Legacy CSV files are also cleared for backward compatibility
+    - If the same vulnerabilities are found in future scans, they will be 
+      automatically re-added to Network Intelligence (auto-repopulation)
+    """
     try:
         deleted_count = 0
         
-        # Clear network intelligence vulnerabilities
+        # SINGLE SOURCE OF TRUTH: Clear Network Intelligence vulnerabilities
         if hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence:
             try:
                 # Count all vulnerabilities across all networks
@@ -3740,22 +3748,23 @@ def reset_vulnerabilities():
                         shared_data.network_intelligence.resolved_vulnerabilities.clear()
                     
                     shared_data.network_intelligence.save_intelligence_data()
-                    logger.info(f"Cleared {deleted_count} vulnerabilities from network intelligence")
+                    logger.info(f"Cleared {deleted_count} vulnerabilities from Network Intelligence (single source of truth)")
             except Exception as e:
                 logger.error(f"Error clearing network intelligence vulnerabilities: {e}")
         
-        # Clear vulnerability summary file
+        # Legacy CSV cleanup (DEPRECATED - kept for backward compatibility only)
+        # TODO: Remove once all systems read from Network Intelligence
         vuln_summary = os.path.join('data', 'output', 'vulnerabilities', 'vulnerability_summary.csv')
         if os.path.exists(vuln_summary):
             try:
                 import pandas as pd
                 df = pd.DataFrame(columns=["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
                 df.to_csv(vuln_summary, index=False)
-                logger.info("Reset vulnerability summary file")
+                logger.debug("Reset legacy vulnerability summary CSV file")
             except Exception as e:
                 logger.error(f"Error resetting vulnerability summary: {e}")
         
-        # Clear individual vulnerability scan files
+        # Clear individual vulnerability scan files (raw nmap output - kept for audit/forensics)
         vuln_dir = os.path.join('data', 'output', 'vulnerabilities')
         if os.path.exists(vuln_dir):
             try:
@@ -3763,7 +3772,7 @@ def reset_vulnerabilities():
                     if filename.startswith('scan_') and filename.endswith('.txt'):
                         file_path = os.path.join(vuln_dir, filename)
                         os.remove(file_path)
-                logger.info("Cleared individual vulnerability scan files")
+                logger.debug("Cleared individual vulnerability scan files")
             except Exception as e:
                 logger.error(f"Error clearing vulnerability scan files: {e}")
         
@@ -3773,11 +3782,12 @@ def reset_vulnerabilities():
         # Trigger sync
         sync_vulnerability_count()
         
-        logger.info(f"Vulnerability reset complete: {deleted_count} entries removed")
+        logger.info(f"Vulnerability reset complete: {deleted_count} entries removed from Network Intelligence")
         
         return jsonify({
             'success': True,
-            'message': 'Vulnerabilities reset successfully',
+            'message': f'Vulnerabilities reset successfully. {deleted_count} entries removed.',
+            'note': 'If the same vulnerabilities are detected in future scans, they will be automatically re-added.',
             'deleted_count': deleted_count
         })
         

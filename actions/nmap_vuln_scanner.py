@@ -1,6 +1,30 @@
 # nmap_vuln_scanner.py
-# This script performs vulnerability scanning using Nmap on specified IP addresses.
-# It scans for vulnerabilities on various ports and saves the results and progress.
+# Vulnerability Scanner for Ragnar - Uses Nmap with vulners.nse script
+#
+# DATA ARCHITECTURE - SINGLE SOURCE OF TRUTH:
+# ============================================
+# This scanner feeds vulnerability data to Network Intelligence, which is the 
+# AUTHORITATIVE SOURCE for all vulnerability information in Ragnar.
+#
+# Data Flow:
+# 1. Nmap scans hosts → parses vulnerability output
+# 2. Vulnerabilities fed to Network Intelligence (network_intelligence.py)
+# 3. Network Intelligence stores in:
+#    - In-memory: active_vulnerabilities dict (by network_id)
+#    - Persistent: data/intelligence/active_findings.json
+# 4. Web UI reads ONLY from Network Intelligence
+#
+# Auto-Repopulation:
+# - If vulnerabilities are deleted via web UI and still present in scans,
+#   they will be automatically re-added on next scan cycle
+# - This ensures the system reflects current reality (not stale data)
+#
+# Legacy Files (DEPRECATED):
+# - vulnerability_summary.csv - Kept for backward compatibility only
+# - netkb.csv "Nmap Vulnerabilities" column - Will be removed
+# - final_vulnerability_summary.csv - Will be removed
+#
+# TODO: Remove all CSV-based vulnerability storage once fully migrated
 
 import os
 import sys
@@ -140,17 +164,20 @@ class NmapVulnScanner:
             if not port_vulnerabilities or all(len(v) == 0 for v in port_vulnerabilities.values()):
                 logger.warning(f"No vulnerabilities detected in scan output for {ip}")
             
-            # Determine port string for summary
+            # SINGLE SOURCE OF TRUTH: Feed vulnerabilities ONLY to Network Intelligence
+            # Network Intelligence is the authoritative source - no CSV files needed
+            # If vulnerabilities are deleted via web UI and scan finds them again,
+            # they will be automatically re-added here
+            self.feed_to_network_intelligence(ip, port_vulnerabilities, port_services)
+            
+            # Legacy CSV updates - DEPRECATED (kept for backward compatibility only)
+            # TODO: Remove these once all systems read from Network Intelligence
             if ports_to_scan:
                 scanned_ports_str = ",".join(ports_to_scan)
             else:
                 scanned_ports_str = "top-50"
-            
             self.update_summary_file(ip, hostname, mac, scanned_ports_str, vulnerability_summary)
             self.update_netkb_vulnerabilities(mac, ip, port_vulnerabilities, port_services)
-
-            # Feed vulnerabilities into network intelligence system
-            self.feed_to_network_intelligence(ip, port_vulnerabilities, port_services)
 
         except Exception as e:
             logger.error(f"Error scanning {ip}: {e}")
