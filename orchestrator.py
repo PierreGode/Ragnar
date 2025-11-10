@@ -4,6 +4,7 @@
 # It manages the loading and execution of actions, handles retries for failed and successful actions, 
 # and updates the status of the orchestrator.
 #
+#
 # Key functionalities include:
 # - Initializing and loading actions from a configuration file, including network and vulnerability scanners.
 # - Managing the execution of actions on network targets, checking for open ports and handling retries based on success or failure.
