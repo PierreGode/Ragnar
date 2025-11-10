@@ -569,12 +569,14 @@ class NetworkScanner:
                     
                     writer.writerow(existing_headers)  # Write updated headers
                     for mac, data in sorted_netkb_entries:
+                        # Filter out empty strings from ports before sorting
+                        valid_ports = [p for p in data['Ports'] if p]
                         row = [
                             mac,
                             ';'.join(sorted(data['IPs'], key=self.ip_key)),
                             ';'.join(sorted(data['Hostnames'])),
                             data['Alive'],
-                            ';'.join(sorted(data['Ports'], key=int)),
+                            ';'.join(sorted(valid_ports, key=int)) if valid_ports else '',
                             str(data.get('Failed_Pings', 0))  # Add Failed_Pings column
                         ]
                         row.extend(data.get(action, "") for action in existing_action_columns)
@@ -1069,7 +1071,10 @@ class NetworkScanner:
                     return
                 
                 alive_df.loc[:, 'Ports'] = alive_df['Ports'].fillna('')
-                alive_df.loc[:, 'Port Count'] = alive_df['Ports'].apply(lambda x: len(x.split(';')) if x else 0)
+                # Count non-empty port entries (split by ';' and filter out empty strings)
+                alive_df.loc[:, 'Port Count'] = alive_df['Ports'].apply(
+                    lambda x: len([p for p in str(x).split(';') if p.strip()]) if x else 0
+                )
                 self.total_open_ports = alive_df['Port Count'].sum()
                 
                 self.logger.debug(f"Calculated total open ports: {self.total_open_ports}")
