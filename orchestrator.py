@@ -59,7 +59,9 @@ class Orchestrator:
         # IMPORTANT: executor is never shutdown during normal operation to prevent
         # "cannot schedule new futures after shutdown" errors
         self.executor = None
-        self.executor_lock = threading.Lock()
+        # Use a reentrant lock because executor recovery paths may call
+        # _ensure_executor() while already holding the lock.
+        self.executor_lock = threading.RLock()
         self._ensure_executor()
         
         # Default timeout for action execution (in seconds)
@@ -220,10 +222,12 @@ class Orchestrator:
                     if self.executor:
                         try:
                             self.executor.shutdown(wait=False, cancel_futures=True)
-                        except:
+                        except Exception:
                             pass
                         self.executor = None
-                    self._ensure_executor()
+                # Recreate the executor after releasing the lock to avoid
+                # deadlocks from re-entrant acquisition within _ensure_executor
+                self._ensure_executor()
                 # Retry the action once with new executor
                 try:
                     executor = self._ensure_executor()
