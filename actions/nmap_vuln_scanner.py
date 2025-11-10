@@ -4,8 +4,11 @@
 
 import os
 import sys
-# Add parent directory to path BEFORE importing local modules
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# CRITICAL: Add parent directory to path FIRST to ensure local imports work
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)  # Insert at beginning to prioritize local modules
 
 import re
 import pandas as pd
@@ -16,6 +19,8 @@ from typing import Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn
+
+# Import local modules AFTER path is set
 from shared import SharedData
 from logger import Logger
 from nmap_logger import nmap_logger
