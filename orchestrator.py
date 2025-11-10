@@ -15,8 +15,8 @@
 # - Logging events and errors to ensure maintainability and ease of debugging.
 # - Handling graceful degradation by managing retries and idle states when no new targets are found.
 
-# VERSION: 11:10:18:07 - Force vuln scans at startup/schedule (bypass retry delays)
-ORCHESTRATOR_VERSION = "11:10:18:07"
+# VERSION: 11:10:18:21 - Fix ThreadPoolExecutor shutdown bug (auto-recreate if shutdown)
+ORCHESTRATOR_VERSION = "11:10:18:21"
 
 import json
 import importlib
@@ -56,14 +56,26 @@ class Orchestrator:
         self.semaphore = threading.Semaphore(2)  # Max 2 concurrent actions for Pi Zero W2
         
         # Thread pool executor for timeout-protected action execution
-        self.executor = ThreadPoolExecutor(
-            max_workers=2,  # Match semaphore limit for Pi Zero W2
-            thread_name_prefix="RagnarAction"
-        )
+        # IMPORTANT: executor is never shutdown during normal operation to prevent
+        # "cannot schedule new futures after shutdown" errors
+        self.executor = None
+        self.executor_lock = threading.Lock()
+        self._ensure_executor()
         
         # Default timeout for action execution (in seconds)
         self.action_timeout = getattr(self.shared_data, 'action_timeout', 300)  # 5 minutes default
         self.vuln_scan_timeout = getattr(self.shared_data, 'vuln_scan_timeout', 600)  # 10 minutes for vuln scans
+    
+    def _ensure_executor(self):
+        """Ensure the thread pool executor is created and available"""
+        with self.executor_lock:
+            if self.executor is None or self.executor._shutdown:
+                logger.info("Creating new ThreadPoolExecutor")
+                self.executor = ThreadPoolExecutor(
+                    max_workers=2,  # Match semaphore limit for Pi Zero W2
+                    thread_name_prefix="RagnarAction"
+                )
+            return self.executor
     
     def _verify_config_attributes(self):
         """Verify that all required configuration attributes exist on shared_data."""
@@ -174,7 +186,9 @@ class Orchestrator:
             str: 'success', 'failed', or 'timeout'
         """
         try:
-            future = self.executor.submit(action_callable)
+            # Ensure executor is available before using it
+            executor = self._ensure_executor()
+            future = executor.submit(action_callable)
             result = future.result(timeout=timeout)
             return result
         except FutureTimeoutError:
@@ -818,8 +832,12 @@ class Orchestrator:
         logger.info("Shutting down orchestrator...")
         try:
             # Shutdown the executor and wait for running tasks to complete (max 30 seconds)
-            self.executor.shutdown(wait=True, cancel_futures=False)
-            logger.info("Thread pool executor shutdown complete")
+            with self.executor_lock:
+                if self.executor is not None and not self.executor._shutdown:
+                    self.executor.shutdown(wait=True, cancel_futures=False)
+                    logger.info("Thread pool executor shutdown complete")
+                else:
+                    logger.info("Thread pool executor already shutdown or not created")
         except Exception as e:
             logger.error(f"Error during executor shutdown: {e}")
 
