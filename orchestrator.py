@@ -782,6 +782,8 @@ class Orchestrator:
                     if new_ip_trigger:
                         logger.info(f"→ Cycle Phase 2: Vulnerability Scan (NEW IP trigger - {len(new_ips)} new hosts)")
                     
+                    # Set orchestrator status to show vulnerability scanning in web UI
+                    self.shared_data.ragnarorch_status = "NmapVulnScanner"
                     self.run_vulnerability_scans(force=True)  # Force scan on schedule/new IPs
                     last_vuln_scan_check = time.time()
                     vuln_scan_triggered = True
