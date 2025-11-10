@@ -5,75 +5,161 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ragnar WiFi Setup</title>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --secondary-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --success-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            --dark: #1a1a2e;
+            --light: #ffffff;
+            --glass-bg: rgba(255, 255, 255, 0.1);
+            --glass-border: rgba(255, 255, 255, 0.2);
+        }
+
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
+            background-size: 400% 400%;
+            animation: gradientShift 15s ease infinite;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            color: white;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        @keyframes gradientShift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        /* Floating particles background */
+        body::before {
+            content: '';
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            background-image: 
+                radial-gradient(circle at 20% 50%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 40% 20%, rgba(255, 255, 255, 0.05) 0%, transparent 50%);
+            animation: float 20s ease-in-out infinite;
+            pointer-events: none;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
         }
 
         .portal-container {
             background: rgba(255, 255, 255, 0.95);
-            border-radius: 20px;
-            padding: 40px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(20px);
+            border-radius: 30px;
+            padding: 50px 40px;
+            box-shadow: 
+                0 30px 60px rgba(0, 0, 0, 0.3),
+                0 0 0 1px rgba(255, 255, 255, 0.3) inset;
             width: 100%;
-            max-width: 500px;
+            max-width: 540px;
             color: #333;
+            position: relative;
+            animation: slideUp 0.6s ease-out;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(30px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .logo {
             text-align: center;
-            margin-bottom: 30px;
+            margin-bottom: 40px;
+            position: relative;
+        }
+
+        .logo-icon {
+            font-size: 4rem;
+            margin-bottom: 10px;
+            display: inline-block;
+            animation: pulse 2s ease-in-out infinite;
+            filter: drop-shadow(0 5px 15px rgba(102, 126, 234, 0.4));
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
         }
 
         .logo h1 {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: #1e3c72;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
+            font-size: 2.8rem;
+            font-weight: 800;
+            background: var(--primary-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: -1px;
+            margin-bottom: 8px;
         }
 
         .logo p {
             color: #666;
-            margin-top: 10px;
-            font-size: 1.1rem;
+            margin-top: 5px;
+            font-size: 1rem;
+            font-weight: 500;
+            letter-spacing: 0.5px;
         }
 
         .form-group {
-            margin-bottom: 25px;
+            margin-bottom: 28px;
         }
 
         label {
             display: block;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
             font-weight: 600;
-            color: #333;
+            color: #2d3748;
+            font-size: 0.95rem;
+            letter-spacing: 0.3px;
         }
 
         select, input {
             width: 100%;
-            padding: 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 16px;
-            transition: border-color 0.3s ease;
+            padding: 16px 18px;
+            border: 2px solid #e2e8f0;
+            border-radius: 14px;
+            font-size: 15px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             background: white;
+            font-family: inherit;
+            font-weight: 500;
         }
 
         select:focus, input:focus {
             outline: none;
-            border-color: #2a5298;
-            box-shadow: 0 0 10px rgba(42, 82, 152, 0.2);
+            border-color: #667eea;
+            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
+            transform: translateY(-1px);
+        }
+
+        select:hover, input:hover {
+            border-color: #cbd5e0;
         }
 
         .password-group {
@@ -82,139 +168,276 @@
 
         .password-toggle {
             position: absolute;
-            right: 15px;
+            right: 18px;
             top: 50%;
             transform: translateY(-50%);
             background: none;
             border: none;
             color: #666;
             cursor: pointer;
-            font-size: 14px;
-            padding: 5px;
+            font-size: 18px;
+            padding: 8px;
+            transition: all 0.2s ease;
+            border-radius: 8px;
+        }
+
+        .password-toggle:hover {
+            background: rgba(102, 126, 234, 0.1);
+            color: #667eea;
         }
 
         .btn {
             width: 100%;
-            padding: 15px;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            padding: 18px;
+            background: var(--primary-gradient);
             color: white;
             border: none;
-            border-radius: 10px;
-            font-size: 18px;
-            font-weight: 600;
+            border-radius: 14px;
+            font-size: 17px;
+            font-weight: 700;
             cursor: pointer;
-            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            font-family: inherit;
         }
 
         .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(42, 82, 152, 0.3);
+            transform: translateY(-3px);
+            box-shadow: 0 15px 35px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(-1px);
         }
 
         .btn:disabled {
-            background: #ccc;
+            background: linear-gradient(135deg, #cbd5e0 0%, #a0aec0 100%);
             cursor: not-allowed;
             transform: none;
             box-shadow: none;
         }
 
+        .btn-secondary {
+            background: var(--secondary-gradient);
+            box-shadow: 0 10px 25px rgba(245, 87, 108, 0.3);
+            margin-top: 12px;
+        }
+
+        .btn-secondary:hover {
+            box-shadow: 0 15px 35px rgba(245, 87, 108, 0.4);
+        }
+
         .status {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 10px;
+            margin-top: 25px;
+            padding: 18px 20px;
+            border-radius: 14px;
             text-align: center;
             font-weight: 600;
+            font-size: 0.95rem;
             display: none;
+            animation: slideIn 0.4s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .status.success {
-            background: #d4edda;
+            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
             color: #155724;
-            border: 2px solid #c3e6cb;
+            border: 2px solid #b1dfbb;
         }
 
         .status.error {
-            background: #f8d7da;
+            background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
             color: #721c24;
-            border: 2px solid #f5c6cb;
+            border: 2px solid #f1b0b7;
         }
 
         .status.info {
-            background: #d1ecf1;
+            background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
             color: #0c5460;
-            border: 2px solid #bee5eb;
+            border: 2px solid #abdde5;
         }
 
         .refresh-btn {
-            background: transparent;
-            border: 2px solid #2a5298;
-            color: #2a5298;
-            padding: 10px 20px;
-            border-radius: 8px;
+            background: white;
+            border: 2px solid #e2e8f0;
+            color: #667eea;
+            padding: 12px 18px;
+            border-radius: 12px;
             cursor: pointer;
-            font-size: 14px;
-            margin-left: 10px;
-            transition: all 0.3s ease;
+            font-size: 16px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            font-weight: 600;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
         }
 
         .refresh-btn:hover {
-            background: #2a5298;
+            background: #667eea;
             color: white;
+            border-color: #667eea;
+            transform: rotate(180deg);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+        }
+
+        .refresh-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
         }
 
         .network-controls {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
         }
 
         .network-controls select {
             flex: 1;
         }
 
+        .manual-entry {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e2e8f0;
+        }
+
+        .manual-entry label {
+            font-size: 13px;
+            color: #718096;
+            font-weight: 500;
+        }
+
+        .manual-entry input {
+            margin-top: 8px;
+            background: #f7fafc;
+        }
+
+        .network-list-item {
+            padding: 2px 0;
+        }
+
+        option {
+            padding: 12px;
+        }
+
+        option:hover {
+            background: #f7fafc;
+        }
+
+        .divider {
+            text-align: center;
+            margin: 25px 0;
+            position: relative;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, #e2e8f0, transparent);
+        }
+
+        .divider span {
+            background: white;
+            padding: 0 15px;
+            color: #a0aec0;
+            font-size: 13px;
+            font-weight: 600;
+            position: relative;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
         @media (max-width: 600px) {
             .portal-container {
-                margin: 20px;
-                padding: 30px 20px;
+                margin: 10px;
+                padding: 40px 30px;
+                border-radius: 24px;
             }
             
             .logo h1 {
-                font-size: 2rem;
+                font-size: 2.2rem;
             }
+
+            .logo-icon {
+                font-size: 3rem;
+            }
+        }
+
+        /* Loading spinner */
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            margin-left: 8px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
         }
     </style>
 </head>
 <body>
     <div class="portal-container">
         <div class="logo">
-            <h1>⚡ RAGNAR</h1>
+            <div class="logo-icon">⚡</div>
+            <h1>RAGNAR</h1>
             <p>WiFi Configuration Portal</p>
         </div>
 
         <form id="wifiForm">
             <div class="form-group">
-                <label for="networkSelect">Select WiFi Network:</label>
+                <label for="networkSelect">📡 Available Networks</label>
                 <div class="network-controls">
-                    <select id="networkSelect" required>
+                    <select id="networkSelect">
                         <option value="">Scanning for networks...</option>
                     </select>
-                    <button type="button" class="refresh-btn" id="refreshBtn">🔄</button>
+                    <button type="button" class="refresh-btn" id="refreshBtn" title="Refresh network list">🔄</button>
                 </div>
-                <div class="manual-entry" style="margin-top: 10px;">
-                    <label for="manualSSID" style="font-size: 14px; color: #666;">Or enter network name manually:</label>
-                    <input type="text" id="manualSSID" placeholder="Type WiFi network name (SSID)" style="margin-top: 5px; width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px;">
+                
+                <div class="divider">
+                    <span>or</span>
+                </div>
+                
+                <div class="manual-entry">
+                    <label for="manualSSID">✏️ Enter Network Manually</label>
+                    <input type="text" id="manualSSID" placeholder="Network name (SSID)">
                 </div>
             </div>
 
             <div class="form-group">
-                <label for="password">WiFi Password:</label>
+                <label for="password">🔒 WiFi Password</label>
                 <div class="password-group">
-                    <input type="password" id="password" placeholder="Enter WiFi password">
+                    <input type="password" id="password" placeholder="Enter password (leave empty if none)">
                     <button type="button" class="password-toggle" id="togglePassword">👁️</button>
                 </div>
             </div>
 
-            <button type="submit" class="btn" id="connectBtn">Connect to WiFi</button>
+            <button type="submit" class="btn" id="connectBtn">
+                <span id="connectBtnText">Connect to WiFi</span>
+            </button>
+            
+            <button type="button" class="btn btn-secondary" id="exitApBtn">
+                <span id="exitApBtnText">Exit AP Mode & Reconnect</span>
+            </button>
         </form>
 
         <div id="status" class="status"></div>
@@ -225,6 +448,9 @@
         const manualSSID = document.getElementById('manualSSID');
         const passwordInput = document.getElementById('password');
         const connectBtn = document.getElementById('connectBtn');
+        const connectBtnText = document.getElementById('connectBtnText');
+        const exitApBtn = document.getElementById('exitApBtn');
+        const exitApBtnText = document.getElementById('exitApBtnText');
         const refreshBtn = document.getElementById('refreshBtn');
         const togglePassword = document.getElementById('togglePassword');
         const status = document.getElementById('status');
@@ -267,24 +493,25 @@
         async function loadNetworks() {
             try {
                 refreshBtn.disabled = true;
+                const originalText = refreshBtn.textContent;
                 refreshBtn.textContent = '⏳';
                 
-                showStatus('Scanning for networks... This may take a moment.', 'info');
+                showStatus('🔍 Scanning for networks... Please wait.', 'info');
                 
                 // First trigger a scan
                 await fetch('/api/wifi/scan', { method: 'POST' });
                 
-                // Wait for scan to complete (shorter wait for non-disruptive scanning)
+                // Wait for scan to complete
                 await new Promise(resolve => setTimeout(resolve, 3000));
                 
                 // Get the networks
                 const response = await fetch('/api/wifi/networks');
                 const data = await response.json();
                 
-                networkSelect.innerHTML = '<option value="">Select from available networks...</option>';
+                networkSelect.innerHTML = '<option value="">Choose a network...</option>';
                 
                 if (data.success && data.networks && data.networks.length > 0) {
-                    let hasRealNetworks = false;
+                    let realNetworkCount = 0;
                     
                     data.networks.forEach(network => {
                         if (network.ssid && network.ssid.trim() !== '') {
@@ -295,31 +522,36 @@
                             if (network.instruction) {
                                 option.disabled = true;
                                 option.style.fontStyle = 'italic';
-                                option.style.color = '#666';
+                                option.style.color = '#a0aec0';
                                 option.textContent = network.ssid;
                             } else {
-                                hasRealNetworks = true;
-                                const security = network.security === 'Open' ? 'Open' : 'Secured';
+                                realNetworkCount++;
+                                const security = network.security === 'Open' ? '🔓 Open' : '🔒 Secured';
                                 const signal = network.signal || 0;
+                                let signalIcon = '📶';
+                                if (signal < 30) signalIcon = '📶';
+                                else if (signal < 60) signalIcon = '📶';
+                                else signalIcon = '📶';
+                                
                                 const knownText = network.known ? ' ⭐' : '';
-                                option.textContent = `${network.ssid} (${security}, ${signal}%)${knownText}`;
+                                option.textContent = `${signalIcon} ${network.ssid} ${knownText} (${security}, ${signal}%)`;
                             }
                             
                             networkSelect.appendChild(option);
                         }
                     });
                     
-                    if (hasRealNetworks) {
-                        showStatus(`Found ${data.networks.filter(n => !n.instruction).length} networks. Select one or enter manually below.`, 'success');
+                    if (realNetworkCount > 0) {
+                        showStatus(`✅ Found ${realNetworkCount} network${realNetworkCount > 1 ? 's' : ''}! Select one or enter manually.`, 'success');
                     } else {
-                        showStatus('No networks found via scan. Please enter the network name manually below.', 'info');
+                        showStatus('⚠️ No networks found. Please enter network name manually below.', 'info');
                     }
                 } else {
-                    showStatus('No networks detected. Enter the WiFi network name manually below.', 'info');
+                    showStatus('⚠️ No networks detected. Enter WiFi name manually below.', 'info');
                 }
             } catch (error) {
                 console.error('Error loading networks:', error);
-                showStatus('Could not scan networks. Enter WiFi name manually below.', 'info');
+                showStatus('⚠️ Could not scan networks. Enter WiFi name manually.', 'info');
                 networkSelect.innerHTML = '<option value="">Enter network name manually below</option>';
             } finally {
                 refreshBtn.disabled = false;
@@ -331,8 +563,8 @@
         async function connectToWiFi(ssid, password) {
             try {
                 connectBtn.disabled = true;
-                connectBtn.textContent = 'Connecting...';
-                showStatus('Connecting to WiFi...', 'info');
+                connectBtnText.innerHTML = 'Connecting<span class="spinner"></span>';
+                showStatus('🔌 Connecting to WiFi... Please wait.', 'info');
 
                 const response = await fetch('/api/wifi/connect', {
                     method: 'POST',
@@ -345,19 +577,53 @@
                 const data = await response.json();
 
                 if (data.success) {
-                    showStatus('Successfully connected! Ragnar will now use this network.', 'success');
+                    showStatus('✅ Successfully connected! Ragnar is now online.', 'success');
                     setTimeout(() => {
-                        showStatus('You can now disconnect from this AP. Ragnar is connected to WiFi.', 'info');
+                        showStatus('ℹ️ You can now disconnect from this AP. Ragnar is connected to WiFi.', 'info');
                     }, 3000);
                 } else {
-                    showStatus(data.message || 'Failed to connect. Check password and try again.', 'error');
+                    showStatus('❌ ' + (data.message || 'Failed to connect. Check password and try again.'), 'error');
                 }
             } catch (error) {
                 console.error('Error connecting to WiFi:', error);
-                showStatus('Connection failed. Please try again.', 'error');
+                showStatus('❌ Connection failed. Please try again.', 'error');
             } finally {
                 connectBtn.disabled = false;
-                connectBtn.textContent = 'Connect to WiFi';
+                connectBtnText.textContent = 'Connect to WiFi';
+            }
+        }
+
+        // Exit AP Mode
+        async function exitAPMode() {
+            try {
+                exitApBtn.disabled = true;
+                exitApBtnText.innerHTML = 'Exiting AP Mode<span class="spinner"></span>';
+                showStatus('🔄 Exiting AP mode and reconnecting to WiFi...', 'info');
+
+                const response = await fetch('/api/wifi/exit-ap', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showStatus('✅ AP mode exited! Ragnar is reconnecting to WiFi.', 'success');
+                    setTimeout(() => {
+                        showStatus('ℹ️ This portal will close shortly. Ragnar is now searching for WiFi.', 'info');
+                    }, 2000);
+                } else {
+                    showStatus('❌ ' + (data.message || 'Failed to exit AP mode. Please try again.'), 'error');
+                    exitApBtn.disabled = false;
+                    exitApBtnText.textContent = 'Exit AP Mode & Reconnect';
+                }
+            } catch (error) {
+                console.error('Error exiting AP mode:', error);
+                showStatus('❌ Failed to exit AP mode. Please try again.', 'error');
+                exitApBtn.disabled = false;
+                exitApBtnText.textContent = 'Exit AP Mode & Reconnect';
             }
         }
 
@@ -370,12 +636,15 @@
             const password = passwordInput.value;
             
             if (!ssid) {
-                showStatus('Please select a network or enter a network name manually.', 'error');
+                showStatus('⚠️ Please select a network or enter a network name manually.', 'error');
                 return;
             }
             
             connectToWiFi(ssid, password);
         });
+
+        // Exit AP Mode button
+        exitApBtn.addEventListener('click', exitAPMode);
 
         // Refresh networks
         refreshBtn.addEventListener('click', loadNetworks);
@@ -385,7 +654,7 @@
             setTimeout(loadNetworks, 1000);
         });
 
-        // Auto-refresh every 2 minutes (less frequent since scanning doesn't disrupt)
+        // Auto-refresh every 2 minutes
         setInterval(loadNetworks, 120000);
     </script>
 </body>

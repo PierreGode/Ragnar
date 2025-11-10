@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-ragnar_PATH="/home/ragnar/ragnar"
+ragnar_PATH="/home/ragnar/Ragnar"
 
 echo -e "${BLUE}ragnar Update Script${NC}"
 echo -e "${YELLOW}This will update ragnar while preserving your data and configurations.${NC}"

@@ -5,6 +5,7 @@
 import os
 import threading
 import csv
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import socket
@@ -38,12 +39,12 @@ except ImportError:
         # Final fallback
         def gma(*args, **kwargs):
             return "00:00:00:00:00:00"
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from shared import SharedData
 from logger import Logger
 import ipaddress
 import nmap
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from nmap_logger import nmap_logger
 
 logger = Logger(name="scanning.py", level=logging.DEBUG)
@@ -136,8 +137,8 @@ class NetworkScanner:
         return hosts
 
     def run_arp_scan(self):
-        """Execute arp-scan to quickly discover hosts on the local network."""
-        # Try both --localnet and explicit subnet scanning for comprehensive discovery
+        """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
+        # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
         commands = [
             ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '--localnet'],
             ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '192.168.1.0/24']
@@ -146,11 +147,11 @@ class NetworkScanner:
         all_hosts = {}
         
         for command in commands:
-            self.logger.info(f"Running arp-scan for host discovery: {' '.join(command)}")
+            self.logger.info(f"Running arp-scan for MAC/vendor discovery: {' '.join(command)}")
             try:
                 result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=120)
                 hosts = self._parse_arp_scan_output(result.stdout)
-                self.logger.info(f"arp-scan command '{' '.join(command)}' discovered {len(hosts)} hosts")
+                self.logger.info(f"arp-scan command '{' '.join(command)}' discovered {len(hosts)} MACs")
                 all_hosts.update(hosts)  # Merge results from both scans
             except FileNotFoundError:
                 self.logger.error("arp-scan command not found. Install arp-scan or adjust configuration.")
@@ -167,15 +168,98 @@ class NetworkScanner:
                 self.logger.error(f"Unexpected error running arp-scan: {e}")
                 continue
         
-        self.logger.info(f"Total unique hosts discovered by all arp-scan methods: {len(all_hosts)}")
-        
-        # Supplementary ping sweep for hosts that don't respond to ARP
-        # This catches devices like 192.168.1.192 that may filter ARP but respond to ping
-        ping_discovered = self._ping_sweep_missing_hosts(all_hosts)
-        all_hosts.update(ping_discovered)
-        
-        self.logger.info(f"Final host count after arp-scan + ping sweep: {len(all_hosts)}")
+        self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
         return all_hosts
+
+    def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
+        """
+        Use nmap to scan entire network for host discovery AND port scanning in one efficient sweep.
+        This is much faster and more reliable than ping sweeps.
+        Returns: dict of {ip: {'hostname': str, 'open_ports': [int]}}
+        """
+        self.logger.info(f"🚀 Starting nmap network-wide scan: {network_cidr}")
+        
+        # Most common ports - top 50 commonly used ports
+        common_ports = [
+            21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 
+            143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080,
+            # Add extra_ports for custom services
+            *( extra_ports or [] )
+        ]
+        
+        # Remove duplicates while preserving order
+        seen_ports = set()
+        ordered_ports = []
+        for port in common_ports:
+            if port not in seen_ports:
+                seen_ports.add(port)
+                ordered_ports.append(port)
+        
+        port_list = ','.join(map(str, ordered_ports))
+        
+        # Nmap arguments for network-wide scan:
+        # -Pn: Skip host discovery (treat all as online)
+        # -sS: SYN scan (requires root, 10x faster than -sT)
+        # --open: Only show open ports
+        # --min-rate 5000: Send at least 5000 probes per second
+        # --max-retries 1: No slow resends
+        # --host-timeout 10s: Limit per-host time strictly
+        # -v: Verbose output
+        nmap_args = f"-Pn -sS -p{port_list} --open --min-rate 5000 --max-retries 1 --host-timeout 10s -v"
+        
+        nmap_command = f"nmap {nmap_args} {network_cidr}"
+        self.logger.info(f"🔍 Executing: {nmap_command}")
+        self.logger.info(f"   Scanning {len(ordered_ports)} ports across entire {network_cidr} network")
+        
+        nmap_results = {}
+        
+        try:
+            scan_start = time.time()
+            self.nm.scan(hosts=network_cidr, arguments=nmap_args)
+            scan_duration = time.time() - scan_start
+            
+            all_hosts = self.nm.all_hosts()
+            self.logger.info(f"✅ Network scan complete in {scan_duration:.2f}s - found {len(all_hosts)} hosts with open ports")
+            
+            for host in all_hosts:
+                try:
+                    hostname = self.nm[host].hostname() or ''
+                    open_ports = []
+                    
+                    # Extract open TCP ports
+                    if 'tcp' in self.nm[host]:
+                        tcp_ports = self.nm[host]['tcp']
+                        for port in tcp_ports:
+                            if tcp_ports[port]['state'] == 'open':
+                                open_ports.append(port)
+                                self.logger.debug(f"   ✅ {host}: port {port}/tcp open ({tcp_ports[port].get('name', 'unknown')})")
+                    
+                    # Extract open UDP ports if scanned
+                    if 'udp' in self.nm[host]:
+                        udp_ports = self.nm[host]['udp']
+                        for port in udp_ports:
+                            if udp_ports[port]['state'] == 'open':
+                                open_ports.append(port)
+                                self.logger.debug(f"   ✅ {host}: port {port}/udp open")
+                    
+                    if open_ports:
+                        nmap_results[host] = {
+                            'hostname': hostname,
+                            'open_ports': sorted(open_ports)
+                        }
+                        self.logger.info(f"📍 {host} ({hostname or 'no hostname'}): {len(open_ports)} open ports - {sorted(open_ports)}")
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error processing nmap results for {host}: {e}")
+                    continue
+            
+            self.logger.info(f"🎉 NMAP NETWORK SCAN COMPLETE: {len(nmap_results)} hosts with open ports discovered")
+            
+        except Exception as e:
+            self.logger.error(f"💥 Nmap network scan failed: {type(e).__name__}: {e}")
+            self.logger.debug(f"Full traceback: {traceback.format_exc()}")
+        
+        return nmap_results
 
     def _ping_sweep_missing_hosts(self, arp_hosts):
         """
@@ -187,6 +271,11 @@ class NetworkScanner:
         
         # Define CIDRs to scan
         target_cidrs = ['192.168.1.0/24']
+        
+        # CRITICAL TARGET: Always ensure 192.168.1.192 is checked explicitly
+        priority_targets = ['192.168.1.192']
+
+        self.logger.info(f"🔍 Starting ping sweep - ARP found {len(arp_hosts)} hosts, checking {254} additional IPs")
 
         for cidr in target_cidrs:
             try:
@@ -195,9 +284,43 @@ class NetworkScanner:
                 self.logger.error(f"Invalid network {cidr}: {e}")
                 continue
 
+            # First, ping priority targets explicitly
+            for priority_ip in priority_targets:
+                if priority_ip in known_ips:
+                    self.logger.info(f"✅ Priority target {priority_ip} already found by ARP scan")
+                    continue
+                
+                self.logger.info(f"🎯 PRIORITY PING: Testing critical target {priority_ip}")
+                try:
+                    result = subprocess.run(
+                        ['ping', '-c', '3', '-W', '3', priority_ip],  # 3 pings, 3 sec timeout
+                        capture_output=True, text=True, timeout=10
+                    )
+
+                    if result.returncode == 0:
+                        mac = self.get_mac_address(priority_ip, "")
+                        if not mac or mac == "00:00:00:00:00:00":
+                            ip_parts = priority_ip.split('.')
+                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                            mac = pseudo_mac
+
+                        ping_discovered[priority_ip] = {
+                            "mac": mac,
+                            "vendor": "Priority target (discovered by ping)"
+                        }
+                        self.logger.info(f"🎉 PRIORITY TARGET FOUND: {priority_ip} (MAC: {mac})")
+                    else:
+                        self.logger.warning(f"❌ Priority target {priority_ip} not responding to ping")
+
+                except subprocess.TimeoutExpired:
+                    self.logger.warning(f"⏰ Priority target {priority_ip} ping timed out")
+                except Exception as e:
+                    self.logger.error(f"💥 Priority target {priority_ip} ping failed: {e}")
+
+            # Then scan the rest of the network
             for ip in network.hosts():  # skips network/broadcast
                 ip_str = str(ip)
-                if ip_str in known_ips:
+                if ip_str in known_ips or ip_str in priority_targets:
                     continue
 
                 try:
@@ -217,7 +340,7 @@ class NetworkScanner:
                             "mac": mac,
                             "vendor": "Unknown (discovered by ping)"
                         }
-                        self.logger.info(f"Ping sweep found host: {ip_str} (MAC: {mac})")
+                        self.logger.info(f"📡 Ping sweep found host: {ip_str} (MAC: {mac})")
 
                 except subprocess.TimeoutExpired:
                     self.logger.debug(f"Ping sweep: {ip_str} timed out")
@@ -226,7 +349,11 @@ class NetworkScanner:
                     continue
 
         if ping_discovered:
-            self.logger.info(f"Ping sweep discovered {len(ping_discovered)} additional hosts not found by arp-scan")
+            self.logger.info(f"🎊 PING SWEEP COMPLETE: Discovered {len(ping_discovered)} additional hosts not found by arp-scan")
+            for ip, data in ping_discovered.items():
+                self.logger.info(f"   📍 {ip} - MAC: {data['mac']} - {data['vendor']}")
+        else:
+            self.logger.warning(f"❌ Ping sweep found no additional hosts beyond ARP scan results")
 
         return ping_discovered
 
@@ -442,12 +569,14 @@ class NetworkScanner:
                     
                     writer.writerow(existing_headers)  # Write updated headers
                     for mac, data in sorted_netkb_entries:
+                        # Filter out empty strings from ports before sorting
+                        valid_ports = [p for p in data['Ports'] if p]
                         row = [
                             mac,
                             ';'.join(sorted(data['IPs'], key=self.ip_key)),
                             ';'.join(sorted(data['Hostnames'])),
                             data['Alive'],
-                            ';'.join(sorted(data['Ports'], key=int)),
+                            ';'.join(sorted(valid_ports, key=int)) if valid_ports else '',
                             str(data.get('Failed_Pings', 0))  # Add Failed_Pings column
                         ]
                         row.extend(data.get(action, "") for action in existing_action_columns)
@@ -519,7 +648,7 @@ class NetworkScanner:
 
     class PortScanner:
         """
-        Helper class to perform port scanning on a target IP.
+        Helper class to perform port scanning on a target IP using nmap.
         """
         def __init__(self, outer_instance, target, open_ports, portstart, portend, extra_ports):
             self.outer_instance = outer_instance
@@ -530,34 +659,17 @@ class NetworkScanner:
             self.portend = portend
             self.extra_ports = extra_ports
 
-        def scan(self, port):
-            """
-            Scans a specific port on the target IP.
-            """
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(7)  # 7 seconds for better reliability
-            try:
-                s.connect((self.target, port))
-                self.open_ports[self.target].append(port)
-                self.logger.debug(f"Port {port} OPEN on {self.target}")
-            except socket.timeout:
-                self.logger.debug(f"Port {port} timeout on {self.target}")
-            except socket.error as e:
-                # Connection refused or other socket errors mean port is closed
-                self.logger.debug(f"Port {port} closed on {self.target}: {e}")
-            except Exception as e:
-                self.logger.warning(f"Unexpected error scanning port {port} on {self.target}: {e}")
-            finally:
-                s.close()  # Ensure the socket is closed
-
         def start(self):
             """
-            Starts the port scanning process for the specified range and extra ports.
+            Starts the port scanning process using nmap for reliable scanning.
             """
+            scan_start_time = time.time()
             try:
+                # Build port list to scan
                 ports_to_scan = list(range(self.portstart, self.portend))
                 extra_ports = self.extra_ports or []
                 ports_to_scan.extend(extra_ports)
+                
                 # Remove duplicates while preserving order
                 seen_ports = set()
                 ordered_ports = []
@@ -567,28 +679,146 @@ class NetworkScanner:
                     seen_ports.add(port)
                     ordered_ports.append(port)
 
-                self.logger.info(f"Scanning {self.target}: {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
-                self.logger.debug(f"Port scan list for {self.target}: {sorted(ordered_ports)[:20]}... (showing first 20)")
-
-                with ThreadPoolExecutor(max_workers=self.outer_instance.port_scan_workers) as executor:
-                    futures = [executor.submit(self.scan_with_semaphore, port) for port in ordered_ports]
-                    for future in futures:
-                        future.result()
+                self.logger.info(f"🎯 PORT SCAN STARTING: {self.target} - {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
+                self.logger.debug(f"Port list preview for {self.target}: {sorted(ordered_ports)[:10]}{'...' if len(ordered_ports) > 10 else ''}")
                 
-                if self.open_ports[self.target]:
-                    self.logger.info(f"✅ Found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
-                else:
-                    self.logger.warning(f"❌ No open ports found on {self.target} (scanned {len(ordered_ports)} ports)")
+                # Use nmap for more reliable port scanning
+                port_list = ','.join(map(str, ordered_ports))
+                
+                # Nmap arguments: -Pn (skip ping), -sT (TCP connect), --host-timeout (per-host timeout)
+                # Removed --open flag to see all port states (open, closed, filtered)
+                nmap_args = f"-Pn -sT -p{port_list} --host-timeout 30s"
+                
+                self.logger.debug(f"🔍 Executing nmap command for {self.target}: nmap {nmap_args} {self.target}")
+                
+                try:
+                    nmap_start_time = time.time()
+                    # Use the nmap scanner from the outer instance
+                    self.outer_instance.nm.scan(self.target, arguments=nmap_args)
+                    nmap_duration = time.time() - nmap_start_time
+                    
+                    self.logger.debug(f"⏱️ Nmap scan completed for {self.target} in {nmap_duration:.2f}s")
+                    
+                    # Log detailed nmap results
+                    all_hosts = self.outer_instance.nm.all_hosts()
+                    self.logger.debug(f"📊 Nmap results for {self.target}: all_hosts={all_hosts}")
+                    
+                    if self.target in all_hosts:
+                        host_data = self.outer_instance.nm[self.target]
+                        self.logger.debug(f"📋 Host data keys for {self.target}: {list(host_data.keys())}")
+                        
+                        # Log scan info if available
+                        if 'status' in host_data:
+                            self.logger.debug(f"🔄 Host status for {self.target}: {host_data['status']}")
+                        
+                        # Check TCP ports
+                        if 'tcp' in host_data:
+                            tcp_ports = host_data['tcp']
+                            self.logger.info(f"🔌 TCP scan results for {self.target}: {len(tcp_ports)} ports scanned")
+                            open_count = 0
+                            closed_count = 0
+                            filtered_count = 0
+                            for port in tcp_ports:
+                                port_state = tcp_ports[port]['state']
+                                port_service = tcp_ports[port].get('name', 'unknown')
+                                
+                                if port_state == 'open':
+                                    self.open_ports[self.target].append(port)
+                                    self.logger.info(f"✅ OPEN PORT: {port}/tcp on {self.target} ({port_service})")
+                                    open_count += 1
+                                elif port_state == 'closed':
+                                    self.logger.debug(f"🚪 CLOSED PORT: {port}/tcp on {self.target} ({port_service})")
+                                    closed_count += 1
+                                elif port_state == 'filtered':
+                                    self.logger.debug(f"🛡️ FILTERED PORT: {port}/tcp on {self.target} ({port_service})")
+                                    filtered_count += 1
+                                else:
+                                    self.logger.debug(f"❓ UNKNOWN STATE: Port {port}/tcp = {port_state} on {self.target} ({port_service})")
+                            
+                            self.logger.info(f"📊 Port summary for {self.target}: {open_count} open, {closed_count} closed, {filtered_count} filtered")
+                        else:
+                            self.logger.warning(f"⚠️ No TCP results in nmap data for {self.target}")
+                        
+                        # Check UDP ports if scanned
+                        if 'udp' in host_data:
+                            udp_ports = host_data['udp']
+                            self.logger.debug(f"🔌 UDP scan results for {self.target}: {len(udp_ports)} ports scanned")
+                            for port in udp_ports:
+                                port_state = udp_ports[port]['state']
+                                if port_state == 'open':
+                                    self.open_ports[self.target].append(port)
+                                    self.logger.info(f"✅ OPEN UDP PORT: {port}/udp on {self.target}")
+                    else:
+                        self.logger.warning(f"❌ Target {self.target} not found in nmap results. Available hosts: {all_hosts}")
+                    
+                    # Summary logging
+                    scan_duration = time.time() - scan_start_time
+                    if self.open_ports[self.target]:
+                        self.logger.info(f"🎉 SCAN SUCCESS: Found {len(self.open_ports[self.target])} open ports on {self.target} in {scan_duration:.2f}s: {sorted(self.open_ports[self.target])}")
+                    else:
+                        self.logger.warning(f"❌ SCAN COMPLETE: No open ports found on {self.target} in {scan_duration:.2f}s (scanned {len(ordered_ports)} ports)")
+                        # Log sample of scanned ports for debugging
+                        sample_ports = sorted(ordered_ports)[:5] if len(ordered_ports) <= 10 else sorted(ordered_ports)[:5] + ['...'] + sorted(ordered_ports)[-5:]
+                        self.logger.debug(f"   Scanned ports: {sample_ports}")
+                        
+                except Exception as nmap_error:
+                    scan_duration = time.time() - scan_start_time
+                    self.logger.error(f"💥 NMAP SCAN FAILED for {self.target} after {scan_duration:.2f}s: {type(nmap_error).__name__}: {nmap_error}")
+                    # Fallback to socket scanning with shorter timeout
+                    self.logger.info(f"🔄 FALLBACK: Switching to socket scanning for {self.target}")
+                    self._socket_scan_fallback(ordered_ports)
                     
             except Exception as e:
-                self.logger.error(f"Error during port scan of {self.target}: {e}")
+                scan_duration = time.time() - scan_start_time
+                self.logger.error(f"💥 PORT SCAN ERROR for {self.target} after {scan_duration:.2f}s: {type(e).__name__}: {e}")
+                import traceback
+                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
 
-        def scan_with_semaphore(self, port):
-            """
-            Scans a port using a semaphore to limit concurrent threads.
-            """
-            with self.outer_instance.semaphore:
-                self.scan(port)
+        def _socket_scan_fallback(self, ports_to_scan):
+            """Fallback socket scanning with shorter timeout for when nmap fails"""
+            fallback_start_time = time.time()
+            self.logger.info(f"🔌 SOCKET FALLBACK: Scanning {self.target} with {len(ports_to_scan)} ports")
+            
+            initial_open_count = len(self.open_ports[self.target])
+            
+            with ThreadPoolExecutor(max_workers=min(4, self.outer_instance.port_scan_workers)) as executor:
+                futures = [executor.submit(self._scan_port_socket, port) for port in ports_to_scan]
+                completed_scans = 0
+                failed_scans = 0
+                
+                for future in futures:
+                    try:
+                        future.result(timeout=5)  # 5 second timeout per port
+                        completed_scans += 1
+                    except Exception as e:
+                        failed_scans += 1
+                        self.logger.debug(f"Socket scan future failed: {e}")
+            
+            fallback_duration = time.time() - fallback_start_time
+            final_open_count = len(self.open_ports[self.target])
+            new_ports_found = final_open_count - initial_open_count
+            
+            if new_ports_found > 0:
+                self.logger.info(f"🎉 SOCKET FALLBACK SUCCESS: Found {new_ports_found} additional open ports on {self.target} in {fallback_duration:.2f}s")
+            else:
+                self.logger.warning(f"❌ SOCKET FALLBACK COMPLETE: No additional ports found on {self.target} in {fallback_duration:.2f}s (completed: {completed_scans}, failed: {failed_scans})")
+        
+        def _scan_port_socket(self, port):
+            """Fallback socket scanning method with aggressive timeout"""
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3)  # Very short timeout for fallback
+            try:
+                s.connect((self.target, port))
+                self.open_ports[self.target].append(port)
+                self.logger.info(f"✅ SOCKET SUCCESS: Port {port} OPEN on {self.target} (socket fallback)")
+            except socket.timeout:
+                self.logger.debug(f"Socket timeout on {self.target}:{port}")
+            except socket.error as e:
+                self.logger.debug(f"Socket connection refused on {self.target}:{port}: {e}")
+            except Exception as e:
+                self.logger.warning(f"Unexpected socket scan error on {self.target}:{port}: {e}")
+            finally:
+                s.close()
 
     class ScanPorts:
         """
@@ -618,7 +848,8 @@ class NetworkScanner:
 
         def scan_network_and_write_to_csv(self):
             """
-            Scans the network and writes the results to a CSV file.
+            Scans the network using nmap for host/port discovery and arp-scan for MAC addresses.
+            Merges results to get complete host information (IP, MAC, hostname, ports).
             """
             self.outer_instance.check_if_csv_scan_file_exists(self.csv_scan_file, self.csv_result_file, self.netkbfile)
             with self.outer_instance.lock:
@@ -629,72 +860,65 @@ class NetworkScanner:
                 except Exception as e:
                     self.outer_instance.logger.error(f"Error in scan_network_and_write_to_csv (initial write): {e}")
 
-            # Prefer arp-scan for host discovery
+            self.logger.info("🎯 Phase 1: Getting MAC addresses via arp-scan")
+            # Get MAC addresses and vendor info from arp-scan
             self.arp_hosts = self.outer_instance.run_arp_scan()
-
-            if self.arp_hosts:
-                all_hosts = sorted(self.arp_hosts.keys(), key=self.outer_instance.ip_key)
-                self.logger.info(f"Using arp-scan results for {len(all_hosts)} hosts")
-            else:
-                # Fallback to nmap host discovery if arp-scan failed
-                nmap_logger.log_scan_operation("Host discovery scan (fallback)", f"Network: {self.network}, Arguments: -sn")
-                self.outer_instance.nm.scan(hosts=str(self.network), arguments='-sn')
-                all_hosts = self.outer_instance.nm.all_hosts()
-                nmap_logger.log_scan_operation("Host discovery completed (nmap)", f"Found {len(all_hosts)} hosts: {', '.join(all_hosts)}")
-                self.use_nmap_results = True
-
-            with ThreadPoolExecutor(max_workers=self.outer_instance.host_scan_workers) as executor:
-                futures = [
-                    executor.submit(self.scan_host, host, self.arp_hosts.get(host))
-                    for host in all_hosts
-                ]
-                for future in futures:
-                    future.result()
-
-            self.outer_instance.sort_and_write_csv(self.csv_scan_file)
-
-        def scan_host(self, ip, arp_entry=None):
-            """
-            Scans a specific host to check if it is alive and retrieves its hostname and MAC address.
-            """
-            if self.outer_instance.blacklistcheck and ip in self.outer_instance.ip_scan_blacklist:
-                return
-            try:
-                hostname = ""
-                mac = None
-
-                if arp_entry:
-                    mac = arp_entry.get("mac")
-
-                if self.use_nmap_results:
-                    try:
-                        hostname = self.outer_instance.nm[ip].hostname() or ''
-                        if not mac:
-                            mac = self.outer_instance.nm[ip]['addresses'].get('mac')
-                    except Exception as e:
-                        self.outer_instance.logger.debug(f"No nmap data for {ip}: {e}")
-
+            
+            self.logger.info("🎯 Phase 2: Network-wide nmap scan for hosts and ports")
+            # Run nmap network-wide scan for host discovery AND port scanning
+            network_cidr = str(self.network)
+            self.nmap_results = self.outer_instance.run_nmap_network_scan(
+                network_cidr, 
+                self.portstart, 
+                self.portend, 
+                self.extra_ports
+            )
+            
+            # Merge results: nmap gives us IPs, hostnames, and ports; arp-scan gives us MACs
+            self.logger.info(f"🔗 Merging results: {len(self.nmap_results)} nmap hosts + {len(self.arp_hosts)} arp MACs")
+            
+            all_ips = set(self.nmap_results.keys()) | set(self.arp_hosts.keys())
+            self.logger.info(f"📋 Total unique hosts to process: {len(all_ips)}")
+            
+            # Store nmap port results for later use
+            self.nmap_port_data = {ip: data['open_ports'] for ip, data in self.nmap_results.items()}
+            
+            # Process all discovered hosts
+            for ip in sorted(all_ips, key=self.outer_instance.ip_key):
+                # Get hostname from nmap results if available
+                hostname = self.nmap_results.get(ip, {}).get('hostname', '')
                 if not hostname:
                     hostname = self.outer_instance.resolve_hostname(ip)
-
+                
+                # Get MAC from arp-scan results if available
+                mac = None
+                if ip in self.arp_hosts:
+                    mac = self.arp_hosts[ip].get('mac')
+                
                 if not mac:
+                    # Try to get MAC address
                     mac = self.outer_instance.get_mac_address(ip, hostname)
-
-                if not mac:
-                    mac = "00:00:00:00:00:00"
-                else:
-                    mac = mac.lower()
-
-                if not self.outer_instance.blacklistcheck or mac not in self.outer_instance.mac_scan_blacklist:
+                
+                if not mac or mac == "00:00:00:00:00:00":
+                    # Create pseudo-MAC for hosts without discoverable MAC
+                    ip_parts = ip.split('.')
+                    if len(ip_parts) == 4:
+                        mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                        self.logger.debug(f"Created pseudo-MAC {mac} for {ip}")
+                
+                mac = mac.lower() if mac else "00:00:00:00:00:00"
+                
+                # Write to CSV
+                if not self.outer_instance.blacklistcheck or (mac not in self.outer_instance.mac_scan_blacklist and ip not in self.outer_instance.ip_scan_blacklist):
                     with self.outer_instance.lock:
                         with open(self.csv_scan_file, 'a', newline='') as file:
                             writer = csv.writer(file)
                             writer.writerow([ip, hostname, mac])
                             self.ip_hostname_list.append((ip, hostname, mac))
-            except Exception as e:
-                self.outer_instance.logger.error(f"Error getting MAC address or writing to file for IP {ip}: {e}")
-            self.progress += 1
-            time.sleep(0.1)  # Adding a small delay to avoid overwhelming the network
+                    self.logger.debug(f"✅ Added to CSV: {ip} ({hostname}) - MAC: {mac}")
+
+            self.outer_instance.sort_and_write_csv(self.csv_scan_file)
+            self.logger.info(f"✅ Network scan complete: {len(self.ip_hostname_list)} hosts processed")
 
         def get_progress(self):
             """
@@ -705,21 +929,55 @@ class NetworkScanner:
 
         def start(self):
             """
-            Starts the network and port scanning process.
+            Starts the network and port scanning process using nmap for efficiency.
             """
+            overall_start_time = time.time()
+            
+            self.logger.info("🚀 STARTING EFFICIENT NETWORK SCAN (nmap network-wide + arp-scan for MACs)")
+            
+            # Combined discovery and port scan phase
+            self.logger.info("📡 Running combined host discovery and port scanning")
+            scan_start = time.time()
             self.scan_network_and_write_to_csv()
+            scan_duration = time.time() - scan_start
+            
             time.sleep(1)
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
             self.total_ips = len(self.ip_data.ip_list)
-            self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
-            with Progress() as progress:
-                task = progress.add_task("[cyan]Scanning IPs...", total=len(self.ip_data.ip_list))
-                for ip in self.ip_data.ip_list:
-                    progress.update(task, advance=1)
-                    port_scanner = self.outer_instance.PortScanner(self.outer_instance, ip, self.open_ports, self.portstart, self.portend, self.extra_ports)
-                    port_scanner.start()
-
+            self.logger.info(f"✅ Network scan complete: Found {self.total_ips} hosts in {scan_duration:.2f}s")
+            
+            if self.total_ips == 0:
+                self.logger.warning("❌ No hosts found!")
+                return self.ip_data, {}, [], self.csv_result_file, self.netkbfile, set()
+            
+            # Use nmap port results that were already collected during network scan
+            self.logger.info(f"📊 Processing port data from nmap results")
+            self.open_ports = {}
+            
+            for ip in self.ip_data.ip_list:
+                # Get ports from nmap results collected during network scan
+                if hasattr(self, 'nmap_port_data') and ip in self.nmap_port_data:
+                    self.open_ports[ip] = self.nmap_port_data[ip]
+                    if self.open_ports[ip]:
+                        self.logger.info(f"✅ {ip}: {len(self.open_ports[ip])} open ports - {sorted(self.open_ports[ip])}")
+                else:
+                    self.open_ports[ip] = []
+                    self.logger.debug(f"ℹ️ {ip}: No open ports detected")
+            
+            # Results summary
             self.all_ports = sorted(list(set(port for ports in self.open_ports.values() for port in ports)))
+            total_open_ports = sum(len(ports) for ports in self.open_ports.values())
+            hosts_with_ports = len([ip for ip, ports in self.open_ports.items() if ports])
+            
+            overall_duration = time.time() - overall_start_time
+            
+            self.logger.info(f"🎉 SCAN COMPLETE!")
+            self.logger.info(f"   📈 Total duration: {overall_duration:.2f}s")
+            self.logger.info(f"   🎯 Hosts discovered: {self.total_ips}")
+            self.logger.info(f"   🔌 Total open ports found: {total_open_ports}")
+            self.logger.info(f"   🏠 Hosts with open ports: {hosts_with_ports}")
+            self.logger.info(f"   📋 Unique ports discovered: {len(self.all_ports)} - {self.all_ports}")
+            
             alive_ips = set(self.ip_data.ip_list)
             return self.ip_data, self.open_ports, self.all_ports, self.csv_result_file, self.netkbfile, alive_ips
 
@@ -812,9 +1070,14 @@ class NetworkScanner:
                     self.logger.debug("No alive hosts found for port calculation")
                     return
                 
-                alive_df.loc[:, 'Ports'] = alive_df['Ports'].fillna('')
-                alive_df.loc[:, 'Port Count'] = alive_df['Ports'].apply(lambda x: len(x.split(';')) if x else 0)
-                self.total_open_ports = alive_df['Port Count'].sum()
+                # Convert Ports column to string type to avoid pandas dtype warning
+                alive_df = alive_df.copy()
+                alive_df['Ports'] = alive_df['Ports'].fillna('').astype(str)
+                # Count non-empty port entries (split by ';' and filter out empty strings)
+                alive_df['Port Count'] = alive_df['Ports'].apply(
+                    lambda x: len([p for p in x.split(';') if p.strip()]) if x else 0
+                )
+                self.total_open_ports = int(alive_df['Port Count'].sum())
                 
                 self.logger.debug(f"Calculated total open ports: {self.total_open_ports}")
                 

@@ -4112,6 +4112,26 @@ def disconnect_wifi():
         logger.error(f"Error disconnecting Wi-Fi: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wifi/exit-ap', methods=['POST'])
+def exit_ap_mode():
+    """Exit AP mode and reconnect to WiFi"""
+    try:
+        wifi_manager = getattr(shared_data, 'ragnar_instance', None)
+        if not wifi_manager or not hasattr(wifi_manager, 'wifi_manager'):
+            return jsonify({'success': False, 'error': 'Wi-Fi manager not available'}), 503
+        
+        # Use the existing method to exit AP mode from web interface
+        result = wifi_manager.wifi_manager.exit_ap_mode_from_web()
+        
+        return jsonify({
+            'success': result,
+            'message': 'Exiting AP mode and reconnecting to WiFi' if result else 'Failed to exit AP mode'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error exiting AP mode: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/wifi/forget', methods=['POST'])
 def forget_wifi_network():
     """Remove a network from known networks"""

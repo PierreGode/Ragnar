@@ -1,11 +1,11 @@
 {
   "default_network": {
     "first_seen": "2025-11-06T13:26:45.988538",
-    "connection_count": 6,
+    "connection_count": 7,
     "total_vulnerabilities": 0,
     "total_credentials": 0,
     "active_vulnerabilities": 0,
     "active_credentials": 0,
-    "last_seen": "2025-11-06T17:45:08.490132"
+    "last_seen": "2025-11-10T14:00:51.519861"
   }
 }

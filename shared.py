@@ -173,7 +173,7 @@ class SharedData:
             "__title_network__": "Network",
             "nmap_scan_aggressivity": "-T4",
             "portstart": 1,
-            "portend": 1000,
+            "portend": 5500,
             "default_vulnerability_ports": [22, 80, 443],
             "network_max_failed_pings": 15,
             "network_device_retention_days": 14,

@@ -6,7 +6,7 @@
     "api_key": null,
     "enabled": true,
     "confidence_weight": 0.9,
-    "last_updated": "2025-11-06T12:53:19.608768"
+    "last_updated": "2025-11-10T14:00:51.493890"
   },
   "NVD_CVE": {
     "name": "NVD_CVE",
@@ -15,7 +15,7 @@
     "api_key": null,
     "enabled": true,
     "confidence_weight": 0.8,
-    "last_updated": "2025-11-06T12:53:19.610317"
+    "last_updated": "2025-11-10T14:00:51.495185"
   },
   "AlienVault_OTX": {
     "name": "AlienVault_OTX",
@@ -24,7 +24,7 @@
     "api_key": null,
     "enabled": true,
     "confidence_weight": 0.7,
-    "last_updated": "2025-11-06T12:53:19.611473"
+    "last_updated": "2025-11-10T14:00:51.496565"
   },
   "MITRE_ATT&CK": {
     "name": "MITRE_ATT&CK",
@@ -33,6 +33,6 @@
     "api_key": null,
     "enabled": true,
     "confidence_weight": 0.9,
-    "last_updated": "2025-11-06T12:53:19.612214"
+    "last_updated": "2025-11-10T14:00:51.507397"
   }
 }

@@ -543,36 +543,83 @@ class Orchestrator:
             logger.error(f"Error during vulnerability scanning cycle: {e}")
 
     def run(self):
-        """Run the orchestrator cycle to execute actions"""
+        """
+        Run the orchestrator cycle with proper scan order:
+        1. ARP Ping Scan (fast host discovery)
+        2. Nmap Port Scan (discover open ports)
+        3. Nmap Vulnerability Scan (scan for vulnerabilities)
+        4. Attacks (if enabled)
+        5. Loop
+        
+        Scans ALWAYS run regardless of enable_attacks setting.
+        Only attack actions respect the enable_attacks flag.
+        """
         # Use getattr for safe config access
         scan_vuln_running = getattr(self.shared_data, 'scan_vuln_running', True)
         scan_vuln_interval = getattr(self.shared_data, 'scan_vuln_interval', 300)
         scan_interval = getattr(self.shared_data, 'scan_interval', 180)
-        retry_success = getattr(self.shared_data, 'retry_success_actions', True)
-        retry_failed = getattr(self.shared_data, 'retry_failed_actions', True)
-        success_delay = getattr(self.shared_data, 'success_retry_delay', 300)
-        failed_delay = getattr(self.shared_data, 'failed_retry_delay', 180)
+        enable_attacks = getattr(self.shared_data, 'enable_attacks', True)
         
-        #Run the scanner a first time to get the initial data
+        # ====================================================================
+        # PHASE 1: Initial ARP + Port Scan
+        # ====================================================================
+        logger.info("=" * 70)
+        logger.info("ORCHESTRATOR STARTUP - PHASE 1: ARP + Port Scan")
+        logger.info("=" * 70)
+        
         if self.network_scanner:
             self.shared_data.ragnarorch_status = "NetworkScanner"
-            self.shared_data.ragnarstatustext2 = "First scan..."
-            self.network_scanner.scan()
+            self.shared_data.ragnarstatustext2 = "Initial scan..."
+            self.network_scanner.scan()  # This does ARP ping scan + port scan
             self.shared_data.ragnarstatustext2 = ""
-            
-            # Run initial vulnerability scan on startup if enabled
-            if scan_vuln_running and self.nmap_vuln_scanner:
-                logger.info("Running initial vulnerability scan...")
-                self.run_vulnerability_scans()
+            logger.info("✓ Phase 1 complete: Network hosts and ports discovered")
         else:
             logger.error("Network scanner not initialized. Cannot start orchestrator.")
+            return
+        
+        # ====================================================================
+        # PHASE 2: Initial Vulnerability Scan
+        # ====================================================================
+        logger.info("=" * 70)
+        logger.info("ORCHESTRATOR STARTUP - PHASE 2: Vulnerability Scan")
+        logger.info("=" * 70)
+        
+        if scan_vuln_running and self.nmap_vuln_scanner:
+            logger.info("Running initial vulnerability scan on all discovered hosts...")
+            self.run_vulnerability_scans()
+            logger.info("✓ Phase 2 complete: Vulnerability scan finished")
+        else:
+            logger.info("⊘ Phase 2 skipped: Vulnerability scanning disabled")
+        
+        # ====================================================================
+        # PHASE 3: Attack Phase (if enabled)
+        # ====================================================================
+        logger.info("=" * 70)
+        logger.info(f"ORCHESTRATOR STARTUP - PHASE 3: Attack Phase (enabled={enable_attacks})")
+        logger.info("=" * 70)
+        
+        if enable_attacks:
+            logger.info("Attack phase enabled - will execute attack actions in main loop")
+        else:
+            logger.info("⊘ Attack phase disabled - will skip attack actions")
         
         # Log initial system status
         resource_monitor.log_system_status()
         last_resource_log_time = time.time()
         last_vuln_scan_check = time.time()
+        last_network_scan_time = time.time()
+        cycle_count = 0
+        
+        logger.info("=" * 70)
+        logger.info("ENTERING MAIN ORCHESTRATOR LOOP")
+        logger.info("=" * 70)
         
         while not self.shared_data.orchestrator_should_exit:
+            cycle_count += 1
+            logger.info(f"\n{'=' * 70}")
+            logger.info(f"ORCHESTRATOR CYCLE #{cycle_count}")
+            logger.info(f"{'=' * 70}")
+            
             # Periodically log resource status (every 5 minutes)
             if time.time() - last_resource_log_time > 300:
                 resource_monitor.log_system_status()
@@ -583,12 +630,49 @@ class Orchestrator:
                     logger.info("High memory usage detected - forcing garbage collection")
                     resource_monitor.force_garbage_collection()
             
-            # Periodic vulnerability scanning (independent of idle state)
-            scan_vuln_interval = getattr(self.shared_data, 'scan_vuln_interval', 300)
-            if time.time() - last_vuln_scan_check > scan_vuln_interval:
-                logger.info("Periodic vulnerability scan check triggered")
+            # ================================================================
+            # CYCLE PHASE 1: Periodic Network Scan (ARP + Port Scan)
+            # ================================================================
+            current_time = time.time()
+            scan_interval = getattr(self.shared_data, 'scan_interval', scan_interval)
+            if current_time - last_network_scan_time >= scan_interval:
+                logger.info(f"→ Cycle Phase 1: ARP + Port Scan (interval: {scan_interval}s)")
+                if self.network_scanner:
+                    self.shared_data.ragnarorch_status = "NetworkScanner"
+                    self.network_scanner.scan()
+                    last_network_scan_time = current_time
+                    logger.info("✓ Network scan complete")
+                else:
+                    logger.warning("Network scanner not available")
+            else:
+                remaining = int(scan_interval - (current_time - last_network_scan_time))
+                logger.debug(f"⊘ Network scan skipped (next in {remaining}s)")
+            
+            # ================================================================
+            # CYCLE PHASE 2: Periodic Vulnerability Scan
+            # ================================================================
+            scan_vuln_running = getattr(self.shared_data, 'scan_vuln_running', scan_vuln_running)
+            scan_vuln_interval = getattr(self.shared_data, 'scan_vuln_interval', scan_vuln_interval)
+            if scan_vuln_running and (time.time() - last_vuln_scan_check >= scan_vuln_interval):
+                logger.info(f"→ Cycle Phase 2: Vulnerability Scan (interval: {scan_vuln_interval}s)")
                 self.run_vulnerability_scans()
                 last_vuln_scan_check = time.time()
+                logger.info("✓ Vulnerability scan complete")
+            else:
+                if scan_vuln_running:
+                    remaining = int(scan_vuln_interval - (time.time() - last_vuln_scan_check))
+                    logger.debug(f"⊘ Vulnerability scan skipped (next in {remaining}s)")
+                else:
+                    logger.debug("⊘ Vulnerability scanning disabled")
+            
+            # ================================================================
+            # CYCLE PHASE 3: Attack Phase (only if enabled)
+            # ================================================================
+            enable_attacks = getattr(self.shared_data, 'enable_attacks', enable_attacks)
+            if enable_attacks:
+                logger.info("→ Cycle Phase 3: Attack Phase (executing attack actions)")
+            else:
+                logger.debug("⊘ Cycle Phase 3: Attack Phase (disabled - skipping all attacks)")
             
             # CRITICAL: Check system health before processing actions
             if not resource_monitor.is_system_healthy():
@@ -600,22 +684,35 @@ class Orchestrator:
             current_data = self.shared_data.read_data()
             any_action_executed = False
             action_retry_pending = False
+            
+            # Execute actions (only attack actions will be filtered by enable_attacks)
             any_action_executed = self.process_alive_ips(current_data)
 
             self.shared_data.write_data(current_data)
 
             if not any_action_executed:
+                if enable_attacks:
+                    logger.info("✓ No attack actions to execute at this time")
+                else:
+                    logger.debug("⊘ Attack actions skipped (disabled)")
+                    
                 self.shared_data.ragnarorch_status = "IDLE"
                 self.shared_data.ragnarstatustext2 = ""
-                logger.info("No available targets. Running network scan...")
-                if self.network_scanner:
-                    self.shared_data.ragnarorch_status = "NetworkScanner"
-                    self.network_scanner.scan()
-                    # Re-read the updated data after the scan
-                    current_data = self.shared_data.read_data()
-                    any_action_executed = self.process_alive_ips(current_data)
-                else:
-                    logger.warning("No network scanner available.")
+                
+                # Check if we should run a network scan
+                if current_time - last_network_scan_time >= scan_interval:
+                    logger.info("No targets available - running network scan...")
+                    if self.network_scanner:
+                        self.shared_data.ragnarorch_status = "NetworkScanner"
+                        self.network_scanner.scan()
+                        last_network_scan_time = time.time()
+                        # Re-read the updated data after the scan
+                        current_data = self.shared_data.read_data()
+                        if enable_attacks:
+                            any_action_executed = self.process_alive_ips(current_data)
+                    else:
+                        logger.warning("No network scanner available.")
+                
                 self.failed_scans_count += 1
                 if self.failed_scans_count >= 1:
                     for action in self.standalone_actions:
@@ -623,6 +720,8 @@ class Orchestrator:
                             if self.execute_standalone_action(action, current_data):
                                 self.failed_scans_count = 0
                                 break
+                    
+                    # Idle period before next cycle
                     idle_start_time = datetime.now()
                     idle_end_time = idle_start_time + timedelta(seconds=scan_interval)
                     while datetime.now() < idle_end_time:
@@ -632,16 +731,22 @@ class Orchestrator:
                         self.shared_data.ragnarorch_status = "IDLE"
                         self.shared_data.ragnarstatustext2 = ""
                         sys.stdout.write('\x1b[1A\x1b[2K')
-                        logger.warning(f"Scanner did not find any new targets. Next scan in: {remaining_time} seconds")
+                        logger.warning(f"Idle - Next cycle in: {remaining_time} seconds")
                         time.sleep(1)
                     self.failed_scans_count = 0
                     continue
             else:
+                if enable_attacks:
+                    logger.info("✓ Attack actions executed successfully")
                 self.failed_scans_count = 0
                 action_retry_pending = True
 
             if action_retry_pending:
                 self.failed_scans_count = 0
+            
+            logger.info(f"{'=' * 70}")
+            logger.info(f"END OF CYCLE #{cycle_count}")
+            logger.info(f"{'=' * 70}\n")
     
     def shutdown(self):
         """Gracefully shutdown the orchestrator and cleanup resources"""
