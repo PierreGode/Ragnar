@@ -76,25 +76,38 @@ class NmapVulnScanner:
             self.shared_data.bjornstatustext2 = ip
 
             ports_to_scan = self.prepare_port_list(ports)
-            if not ports_to_scan:
-                logger.warning(f"No valid ports supplied for {ip}. Falling back to default vulnerability ports.")
-                ports_to_scan = self.get_default_vulnerability_ports()
-
-            logger.info(
-                f"Scanning {ip} on ports {','.join(ports_to_scan)} for vulnerabilities with aggressivity {self.shared_data.nmap_scan_aggressivity}"
-            )
             
-            # Prepare nmap command
-            nmap_command = [
-                "nmap",
-                self.shared_data.nmap_scan_aggressivity,
-                "-sV",
-                "--script",
-                "vulners.nse",
-                "-p",
-                ",".join(ports_to_scan),
-                ip,
-            ]
+            # Determine scan strategy based on detected ports
+            if not ports_to_scan:
+                # No ports detected - scan top 50 ports for vulnerabilities
+                logger.info(f"No ports detected for {ip}. Scanning top 50 ports for vulnerabilities.")
+                nmap_command = [
+                    "nmap",
+                    "-Pn",
+                    "-sT",  # TCP connect scan (works on Wi-Fi)
+                    "-sV",  # Service version detection
+                    "--script",
+                    "vulners.nse",
+                    "--top-ports",
+                    "50",
+                    ip,
+                ]
+            else:
+                # Ports detected - scan those specific ports
+                logger.info(
+                    f"Scanning {ip} on {len(ports_to_scan)} detected ports for vulnerabilities: {','.join(ports_to_scan[:10])}{'...' if len(ports_to_scan) > 10 else ''}"
+                )
+                nmap_command = [
+                    "nmap",
+                    "-Pn",  # Treat host as up (skip ping)
+                    "-sT",  # TCP connect scan (works on Wi-Fi)
+                    "-sV",  # Service version detection
+                    "--script",
+                    "vulners.nse",
+                    "-p",
+                    ",".join(ports_to_scan),
+                    ip,
+                ]
             
             # Execute nmap command with logging
             result = nmap_logger.run_nmap_command(
@@ -120,7 +133,13 @@ class NmapVulnScanner:
             if not port_vulnerabilities or all(len(v) == 0 for v in port_vulnerabilities.values()):
                 logger.warning(f"No vulnerabilities detected in scan output for {ip}")
             
-            self.update_summary_file(ip, hostname, mac, ",".join(ports_to_scan), vulnerability_summary)
+            # Determine port string for summary
+            if ports_to_scan:
+                scanned_ports_str = ",".join(ports_to_scan)
+            else:
+                scanned_ports_str = "top-50"
+            
+            self.update_summary_file(ip, hostname, mac, scanned_ports_str, vulnerability_summary)
             self.update_netkb_vulnerabilities(mac, ip, port_vulnerabilities, port_services)
 
             # Feed vulnerabilities into network intelligence system
