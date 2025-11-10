@@ -534,6 +534,7 @@ class NetworkScanner:
             """
             Starts the port scanning process using nmap for reliable scanning.
             """
+            scan_start_time = time.time()
             try:
                 # Build port list to scan
                 ports_to_scan = list(range(self.portstart, self.portend))
@@ -549,7 +550,8 @@ class NetworkScanner:
                     seen_ports.add(port)
                     ordered_ports.append(port)
 
-                self.logger.info(f"Nmap scanning {self.target}: {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
+                self.logger.info(f"🎯 PORT SCAN STARTING: {self.target} - {len(ordered_ports)} ports (range: {self.portstart}-{self.portend}, extra: {len(extra_ports)} ports)")
+                self.logger.debug(f"Port list preview for {self.target}: {sorted(ordered_ports)[:10]}{'...' if len(ordered_ports) > 10 else ''}")
                 
                 # Use nmap for more reliable port scanning
                 port_list = ','.join(map(str, ordered_ports))
@@ -557,54 +559,105 @@ class NetworkScanner:
                 # Nmap arguments: -Pn (skip ping), -sT (TCP connect), --host-timeout (per-host timeout)
                 nmap_args = f"-Pn -sT -p{port_list} --host-timeout 30s --open"
                 
+                self.logger.debug(f"🔍 Executing nmap command for {self.target}: nmap {nmap_args} {self.target}")
+                
                 try:
+                    nmap_start_time = time.time()
                     # Use the nmap scanner from the outer instance
                     self.outer_instance.nm.scan(self.target, arguments=nmap_args)
+                    nmap_duration = time.time() - nmap_start_time
                     
-                    if self.target in self.outer_instance.nm.all_hosts():
+                    self.logger.debug(f"⏱️ Nmap scan completed for {self.target} in {nmap_duration:.2f}s")
+                    
+                    # Log detailed nmap results
+                    all_hosts = self.outer_instance.nm.all_hosts()
+                    self.logger.debug(f"📊 Nmap results for {self.target}: all_hosts={all_hosts}")
+                    
+                    if self.target in all_hosts:
                         host_data = self.outer_instance.nm[self.target]
+                        self.logger.debug(f"📋 Host data keys for {self.target}: {list(host_data.keys())}")
+                        
+                        # Log scan info if available
+                        if 'status' in host_data:
+                            self.logger.debug(f"🔄 Host status for {self.target}: {host_data['status']}")
                         
                         # Check TCP ports
                         if 'tcp' in host_data:
-                            for port in host_data['tcp']:
-                                port_state = host_data['tcp'][port]['state']
+                            tcp_ports = host_data['tcp']
+                            self.logger.debug(f"🔌 TCP scan results for {self.target}: {len(tcp_ports)} ports scanned")
+                            for port in tcp_ports:
+                                port_state = tcp_ports[port]['state']
+                                port_service = tcp_ports[port].get('name', 'unknown')
+                                self.logger.debug(f"  - Port {port}: {port_state} ({port_service})")
                                 if port_state == 'open':
                                     self.open_ports[self.target].append(port)
-                                    self.logger.debug(f"Port {port} OPEN on {self.target} (nmap)")
+                                    self.logger.info(f"✅ OPEN PORT FOUND: {port}/tcp on {self.target} ({port_service})")
+                        else:
+                            self.logger.warning(f"⚠️ No TCP results in nmap data for {self.target}")
                         
                         # Check UDP ports if scanned
                         if 'udp' in host_data:
-                            for port in host_data['udp']:
-                                port_state = host_data['udp'][port]['state']
+                            udp_ports = host_data['udp']
+                            self.logger.debug(f"🔌 UDP scan results for {self.target}: {len(udp_ports)} ports scanned")
+                            for port in udp_ports:
+                                port_state = udp_ports[port]['state']
                                 if port_state == 'open':
                                     self.open_ports[self.target].append(port)
-                                    self.logger.debug(f"UDP Port {port} OPEN on {self.target} (nmap)")
-                    
-                    if self.open_ports[self.target]:
-                        self.logger.info(f"✅ Nmap found {len(self.open_ports[self.target])} open ports on {self.target}: {sorted(self.open_ports[self.target])}")
+                                    self.logger.info(f"✅ OPEN UDP PORT: {port}/udp on {self.target}")
                     else:
-                        self.logger.warning(f"❌ Nmap found no open ports on {self.target} (scanned {len(ordered_ports)} ports)")
+                        self.logger.warning(f"❌ Target {self.target} not found in nmap results. Available hosts: {all_hosts}")
+                    
+                    # Summary logging
+                    scan_duration = time.time() - scan_start_time
+                    if self.open_ports[self.target]:
+                        self.logger.info(f"🎉 SCAN SUCCESS: Found {len(self.open_ports[self.target])} open ports on {self.target} in {scan_duration:.2f}s: {sorted(self.open_ports[self.target])}")
+                    else:
+                        self.logger.warning(f"❌ SCAN COMPLETE: No open ports found on {self.target} in {scan_duration:.2f}s (scanned {len(ordered_ports)} ports)")
+                        # Log sample of scanned ports for debugging
+                        sample_ports = sorted(ordered_ports)[:5] if len(ordered_ports) <= 10 else sorted(ordered_ports)[:5] + ['...'] + sorted(ordered_ports)[-5:]
+                        self.logger.debug(f"   Scanned ports: {sample_ports}")
                         
                 except Exception as nmap_error:
-                    self.logger.error(f"Nmap scan failed for {self.target}: {nmap_error}")
+                    scan_duration = time.time() - scan_start_time
+                    self.logger.error(f"💥 NMAP SCAN FAILED for {self.target} after {scan_duration:.2f}s: {type(nmap_error).__name__}: {nmap_error}")
                     # Fallback to socket scanning with shorter timeout
-                    self.logger.info(f"Falling back to socket scanning for {self.target}")
+                    self.logger.info(f"🔄 FALLBACK: Switching to socket scanning for {self.target}")
                     self._socket_scan_fallback(ordered_ports)
                     
             except Exception as e:
-                self.logger.error(f"Error during port scan of {self.target}: {e}")
+                scan_duration = time.time() - scan_start_time
+                self.logger.error(f"💥 PORT SCAN ERROR for {self.target} after {scan_duration:.2f}s: {type(e).__name__}: {e}")
+                import traceback
+                self.logger.debug(f"Full traceback: {traceback.format_exc()}")
 
         def _socket_scan_fallback(self, ports_to_scan):
             """Fallback socket scanning with shorter timeout for when nmap fails"""
-            self.logger.info(f"Socket fallback scanning {self.target}: {len(ports_to_scan)} ports")
+            fallback_start_time = time.time()
+            self.logger.info(f"🔌 SOCKET FALLBACK: Scanning {self.target} with {len(ports_to_scan)} ports")
+            
+            initial_open_count = len(self.open_ports[self.target])
             
             with ThreadPoolExecutor(max_workers=min(4, self.outer_instance.port_scan_workers)) as executor:
                 futures = [executor.submit(self._scan_port_socket, port) for port in ports_to_scan]
+                completed_scans = 0
+                failed_scans = 0
+                
                 for future in futures:
                     try:
                         future.result(timeout=5)  # 5 second timeout per port
+                        completed_scans += 1
                     except Exception as e:
+                        failed_scans += 1
                         self.logger.debug(f"Socket scan future failed: {e}")
+            
+            fallback_duration = time.time() - fallback_start_time
+            final_open_count = len(self.open_ports[self.target])
+            new_ports_found = final_open_count - initial_open_count
+            
+            if new_ports_found > 0:
+                self.logger.info(f"🎉 SOCKET FALLBACK SUCCESS: Found {new_ports_found} additional open ports on {self.target} in {fallback_duration:.2f}s")
+            else:
+                self.logger.warning(f"❌ SOCKET FALLBACK COMPLETE: No additional ports found on {self.target} in {fallback_duration:.2f}s (completed: {completed_scans}, failed: {failed_scans})")
         
         def _scan_port_socket(self, port):
             """Fallback socket scanning method with aggressive timeout"""
@@ -613,11 +666,13 @@ class NetworkScanner:
             try:
                 s.connect((self.target, port))
                 self.open_ports[self.target].append(port)
-                self.logger.debug(f"Port {port} OPEN on {self.target} (socket fallback)")
-            except (socket.timeout, socket.error):
-                pass  # Port closed or filtered
+                self.logger.info(f"✅ SOCKET SUCCESS: Port {port} OPEN on {self.target} (socket fallback)")
+            except socket.timeout:
+                self.logger.debug(f"Socket timeout on {self.target}:{port}")
+            except socket.error as e:
+                self.logger.debug(f"Socket connection refused on {self.target}:{port}: {e}")
             except Exception as e:
-                self.logger.debug(f"Socket scan error on {self.target}:{port}: {e}")
+                self.logger.warning(f"Unexpected socket scan error on {self.target}:{port}: {e}")
             finally:
                 s.close()
 
@@ -738,19 +793,62 @@ class NetworkScanner:
             """
             Starts the network and port scanning process.
             """
+            overall_start_time = time.time()
+            
+            self.logger.info("🚀 STARTING NETWORK AND PORT SCAN PROCESS")
+            
+            # Host discovery phase
+            self.logger.info("📡 Phase 1: Host Discovery")
+            host_discovery_start = time.time()
             self.scan_network_and_write_to_csv()
+            host_discovery_duration = time.time() - host_discovery_start
+            
             time.sleep(1)
             self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
             self.total_ips = len(self.ip_data.ip_list)
+            self.logger.info(f"✅ Host discovery complete: Found {self.total_ips} alive hosts in {host_discovery_duration:.2f}s")
+            
+            if self.total_ips == 0:
+                self.logger.warning("❌ No hosts found for port scanning!")
+                return self.ip_data, {}, [], self.csv_result_file, self.netkbfile, set()
+            
+            # Port scanning phase
+            self.logger.info(f"🔍 Phase 2: Port Scanning ({self.total_ips} hosts)")
+            self.logger.info(f"Port range: {self.portstart}-{self.portend}, Extra ports: {len(self.extra_ports or [])} ports")
+            
+            port_scan_start = time.time()
             self.open_ports = {ip: [] for ip in self.ip_data.ip_list}
+            
             with Progress() as progress:
                 task = progress.add_task("[cyan]Scanning IPs...", total=len(self.ip_data.ip_list))
-                for ip in self.ip_data.ip_list:
+                for i, ip in enumerate(self.ip_data.ip_list, 1):
                     progress.update(task, advance=1)
+                    self.logger.debug(f"Starting port scan {i}/{self.total_ips} for {ip}")
+                    
                     port_scanner = self.outer_instance.PortScanner(self.outer_instance, ip, self.open_ports, self.portstart, self.portend, self.extra_ports)
                     port_scanner.start()
+                    
+                    # Log progress every 5 hosts
+                    if i % 5 == 0 or i == self.total_ips:
+                        current_total_ports = sum(len(ports) for ports in self.open_ports.values())
+                        self.logger.info(f"📊 Progress: {i}/{self.total_ips} hosts scanned, {current_total_ports} total ports found so far")
 
+            port_scan_duration = time.time() - port_scan_start
+            
+            # Results summary
             self.all_ports = sorted(list(set(port for ports in self.open_ports.values() for port in ports)))
+            total_open_ports = sum(len(ports) for ports in self.open_ports.values())
+            hosts_with_ports = len([ip for ip, ports in self.open_ports.items() if ports])
+            
+            overall_duration = time.time() - overall_start_time
+            
+            self.logger.info(f"🎉 SCAN COMPLETE!")
+            self.logger.info(f"   📈 Total duration: {overall_duration:.2f}s (host discovery: {host_discovery_duration:.2f}s, port scan: {port_scan_duration:.2f}s)")
+            self.logger.info(f"   🎯 Hosts scanned: {self.total_ips}")
+            self.logger.info(f"   🔌 Total open ports found: {total_open_ports}")
+            self.logger.info(f"   🏠 Hosts with open ports: {hosts_with_ports}")
+            self.logger.info(f"   📋 Unique ports discovered: {len(self.all_ports)} - {self.all_ports}")
+            
             alive_ips = set(self.ip_data.ip_list)
             return self.ip_data, self.open_ports, self.all_ports, self.csv_result_file, self.netkbfile, alive_ips
 
