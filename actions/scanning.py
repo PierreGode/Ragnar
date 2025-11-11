@@ -1309,40 +1309,44 @@ class NetworkScanner:
             self.logger.error(f"Error in scan: {e}")
 
     def deep_scan_host(self, ip, portstart=1, portend=65535, progress_callback=None, use_top_ports=True):
-        """
-    Perform a deep scan on a single host using -sT (TCP connect scan).
-    By default scans TOP 100 most common ports (nmap --top-ports 100) for speed on constrained hardware.
-    If use_top_ports is False, falls back to full range portstart-portend.
-    Results are merged with existing data without overwriting.
-        
+        """Perform a deep scan on a single host using nmap -sT (TCP connect scan).
+
+        By default (use_top_ports=True) scans the TOP 100 most common ports via
+        ``nmap --top-ports 100`` for speed on constrained hardware like Pi Zero.
+        When use_top_ports=False, scans the full port range ``portstart-portend``.
+
+        Results are merged with existing data without overwriting existing ports.
+
         Args:
-            ip: Target IP address
-            portstart: Starting port (default 1)
-            portend: Ending port (default 65535)
-            progress_callback: Optional callback function to report progress
-            use_top_ports: If True, use nmap --top-ports 100 instead of full range
-            
+            ip (str): Target IPv4 address.
+            portstart (int): Starting port if doing full-range scan.
+            portend (int): Ending port if doing full-range scan.
+            progress_callback (callable|None): Optional callback to emit progress events.
+            use_top_ports (bool): Whether to use nmap --top-ports 100 fast mode.
+
         Returns:
-            dict: {'success': bool, 'open_ports': list, 'hostname': str, 'message': str}
+            dict: Scan outcome including success flag, open_ports list, hostname, timing and message.
         """
-        # EXPLICIT DEBUG LOGGING - Check what we actually received
-    self.logger.info(f"🔍 DEEP SCAN METHOD CALLED")
-    self.logger.info(f"   ip='{ip}' portstart={portstart} portend={portend} use_top_ports={use_top_ports}")
-    self.logger.debug(f"   progress_callback={progress_callback}")
-        
+        # Debug input parameters (single consolidated line for easier grepping)
+        self.logger.info("🔍 DEEP SCAN METHOD CALLED")
+        self.logger.info(
+            f"🎯 DEEP SCAN PARAMETERS ip={ip} portstart={portstart} portend={portend} use_top_ports={use_top_ports}"
+        )
+        self.logger.debug(f"   progress_callback={progress_callback}")
+
         if not ip:
-            self.logger.error(f"❌ CRITICAL ERROR: IP parameter is empty/None!")
+            self.logger.error("❌ CRITICAL ERROR: IP parameter is empty/None!")
             return {
                 'success': False,
                 'open_ports': [],
                 'hostname': '',
                 'message': 'IP address is required but was empty'
             }
-        
-    scan_mode = 'top100' if use_top_ports else 'full-range'
-    self.logger.info(f"🔍 DEEP SCAN INIT ip={ip} mode={scan_mode} range={portstart}-{portend}")
-        
-        # Quick connectivity test first
+
+        scan_mode = 'top100' if use_top_ports else 'full-range'
+        self.logger.info(f"🔍 DEEP SCAN INIT ip={ip} mode={scan_mode} range={portstart}-{portend}")
+
+        # Quick connectivity test (best-effort)
         self.logger.info(f"📡 Testing connectivity to {ip}...")
         try:
             ping_result = subprocess.run(['ping', '-c', '1', '-W', '2', ip], 
@@ -1357,7 +1361,7 @@ class NetworkScanner:
         try:
             # Build nmap args depending on mode
             if use_top_ports:
-                # Fast scan of most common ports
+                # Fast scan of most common ports (top 100)
                 nmap_args = "-Pn -sT --top-ports 100 --open -T4 --min-rate 500 --max-retries 1 -v"
                 self.logger.info(f"🚀 EXECUTING DEEP SCAN (TOP 100): nmap {nmap_args} {ip}")
                 self.logger.info("   Mode: top100 common ports (fast)")
@@ -1369,7 +1373,6 @@ class NetworkScanner:
                 self.logger.info(f"   Port range size: {total_ports} ports (expected longer duration)")
             self.logger.info(f"   nmap.PortScanner object: {self.nm}")
             self.logger.info(f"   Full command (copy/paste): nmap {nmap_args} {ip}")
-            self.logger.info(f"   nmap.PortScanner object: {self.nm}")
             
             # Notify scan started
             if progress_callback:
@@ -1465,6 +1468,9 @@ class NetworkScanner:
         Merge deep scan results into BOTH NetKB and WiFi-specific network file.
         Adds new ports while preserving all existing information.
         """
+        # Local import to satisfy static analysis complaining about 'os' being unbound.
+        # (Global import exists at module top; this is a defensive redundancy.)
+        import os  # noqa: F401
         netkbfile = self.shared_data.netkbfile
         
         try:

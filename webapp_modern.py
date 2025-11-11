@@ -3425,7 +3425,13 @@ def deep_scan_host():
             logger.error(f"❌ Deep scan request missing IP after all parsing attempts. Raw snippet: {snippet!r}")
             return jsonify({'status': 'error', 'message': 'IP address is required', 'raw_snippet': snippet}), 400
 
-        logger.info(f"🎯 DEEP SCAN PARAMETERS - IP=[{ip}] Ports={portstart}-{portend}")
+        # Decide scan mode early so API response reflects reality
+        mode_flag = (data.get('mode') or data.get('scan_mode') or '').lower()
+        full_flag = str(data.get('full', '')).lower() in ['1','true','yes']
+        use_top_ports = not (mode_flag in ['full','all','65535'] or full_flag)
+        logger.info(
+            f"🎯 DEEP SCAN PARAMETERS - IP=[{ip}] Ports={portstart}-{portend} mode={'top100' if use_top_ports else 'full-range'}"
+        )
 
         # Validate IP address format
         import ipaddress
@@ -3461,11 +3467,6 @@ def deep_scan_host():
                         'service': data.get('service')
                     })
                 
-                # Decide scan mode (top100 by default; allow full if client sets mode=full or full=true)
-                mode_flag = (data.get('mode') or data.get('scan_mode') or '').lower()
-                full_flag = str(data.get('full', '')).lower() in ['1','true','yes']
-                use_top_ports = not (mode_flag in ['full','all','65535'] or full_flag)
-
                 socketio.emit('deep_scan_update', {
                     'type': 'deep_scan_progress',
                     'ip': ip,
@@ -3512,11 +3513,11 @@ def deep_scan_host():
         
         return jsonify({
             'status': 'success',
-            'message': f"Started deep scan of {ip} (mode={'top100' if portend==65535 else 'custom'})",
+            'message': f"Started deep scan of {ip} (mode={'top100' if use_top_ports else 'full-range'})",
             'ip': ip,
             'portstart': portstart,
             'portend': portend,
-            'mode': 'top100'
+            'mode': 'top100' if use_top_ports else 'full-range'
         })
         
     except Exception as e:
