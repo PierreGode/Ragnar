@@ -26,7 +26,6 @@ import logging
 import sys
 import threading
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from actions.nmap_vuln_scanner import NmapVulnScanner
 from init_shared import shared_data
 from logger import Logger
@@ -55,41 +54,12 @@ class Orchestrator:
         # Running too many actions simultaneously causes memory exhaustion and hangs
         self.semaphore = threading.Semaphore(2)  # Max 2 concurrent actions for Pi Zero W2
         
-        # Thread pool executor for timeout-protected action execution
-        # IMPORTANT: executor is never shutdown during normal operation to prevent
-        # "cannot schedule new futures after shutdown" errors
-        self.executor = None
-        self.executor_lock = threading.Lock()
-        self._ensure_executor()
+        # No longer using ThreadPoolExecutor - direct threading is more reliable
+        # and avoids "cannot schedule new futures after interpreter shutdown" errors
         
         # Default timeout for action execution (in seconds)
         self.action_timeout = getattr(self.shared_data, 'action_timeout', 300)  # 5 minutes default
-        self.vuln_scan_timeout = getattr(self.shared_data, 'vuln_scan_timeout', 600)  # 10 minutes for vuln scans
-    
-    def _ensure_executor(self):
-        """Ensure the thread pool executor is created and available"""
-        with self.executor_lock:
-            # Check if executor is None, shutdown, or broken
-            needs_new_executor = (
-                self.executor is None or 
-                self.executor._shutdown or
-                getattr(self.executor, '_broken', False)
-            )
-            
-            if needs_new_executor:
-                # Clean up old executor if it exists
-                if self.executor is not None:
-                    try:
-                        self.executor.shutdown(wait=False, cancel_futures=True)
-                    except Exception as cleanup_error:
-                        logger.debug(f"Executor cleanup error (safe to ignore): {cleanup_error}")
-                
-                logger.info("Creating new ThreadPoolExecutor")
-                self.executor = ThreadPoolExecutor(
-                    max_workers=2,  # Match semaphore limit for Pi Zero W2
-                    thread_name_prefix="RagnarAction"
-                )
-            return self.executor
+        self.vuln_scan_timeout = getattr(self.shared_data, 'vuln_scan_timeout', 1800)  # 30 minutes for vuln scans
     
     def _verify_config_attributes(self):
         """Verify that all required configuration attributes exist on shared_data."""
@@ -103,7 +73,7 @@ class Orchestrator:
             'scan_vuln_interval': 300,
             'scan_interval': 180,
             'action_timeout': 300,  # 5 minutes timeout for regular actions
-            'vuln_scan_timeout': 600  # 10 minutes timeout for vulnerability scans
+            'vuln_scan_timeout': 1800  # 30 minutes timeout for vulnerability scans
         }
         
         for attr, default_value in required_attrs.items():
@@ -190,6 +160,7 @@ class Orchestrator:
     def _execute_with_timeout(self, action_callable, timeout, action_name="unknown"):
         """
         Execute an action with a timeout to prevent hanging.
+        Uses direct threading instead of ThreadPoolExecutor to avoid executor shutdown issues.
         
         Args:
             action_callable: Callable that executes the action
@@ -199,46 +170,33 @@ class Orchestrator:
         Returns:
             str: 'success', 'failed', or 'timeout'
         """
-        future = None
-        try:
-            # Ensure executor is available before using it
-            executor = self._ensure_executor()
-            future = executor.submit(action_callable)
-            result = future.result(timeout=timeout)
-            return result
-        except FutureTimeoutError:
+        result_container = {'result': None, 'exception': None, 'completed': False}
+        
+        def run_action():
+            try:
+                result_container['result'] = action_callable()
+                result_container['completed'] = True
+            except Exception as e:
+                result_container['exception'] = e
+                result_container['completed'] = True
+        
+        # Run action in separate thread
+        action_thread = threading.Thread(target=run_action, name=f"Action_{action_name}")
+        action_thread.daemon = True
+        action_thread.start()
+        
+        # Wait for completion with timeout
+        action_thread.join(timeout=timeout)
+        
+        if not result_container['completed']:
             logger.error(f"Action {action_name} timed out after {timeout} seconds")
-            # Cancel the future to prevent resource leaks
-            if future:
-                future.cancel()
             return 'timeout'
-        except RuntimeError as e:
-            if "cannot schedule new futures" in str(e):
-                logger.error(f"Executor shutdown detected for {action_name}, recreating executor...")
-                # Force recreate executor
-                with self.executor_lock:
-                    if self.executor:
-                        try:
-                            self.executor.shutdown(wait=False, cancel_futures=True)
-                        except:
-                            pass
-                        self.executor = None
-                    self._ensure_executor()
-                # Retry the action once with new executor
-                try:
-                    executor = self._ensure_executor()
-                    future = executor.submit(action_callable)
-                    result = future.result(timeout=timeout)
-                    return result
-                except Exception as retry_error:
-                    logger.error(f"Retry failed for {action_name}: {retry_error}")
-                    return 'failed'
-            else:
-                logger.error(f"Action {action_name} raised RuntimeError: {e}")
-                return 'failed'
-        except Exception as e:
-            logger.error(f"Action {action_name} raised exception: {e}")
+        
+        if result_container['exception']:
+            logger.error(f"Action {action_name} raised exception: {result_container['exception']}")
             return 'failed'
+        
+        return result_container['result'] if result_container['result'] else 'failed'
 
     def load_actions(self):
         """Load all actions from the actions file"""
@@ -580,28 +538,18 @@ class Orchestrator:
                 try:
                     logger.info(f"🔍 Vulnerability scanning {ip} ({hostname})...")
                     
-                    # Execute vulnerability scan with timeout protection
-                    # Note: nmap_vuln_scanner is guaranteed to be not None here due to function entry check
+                    # Execute vulnerability scan DIRECTLY without ThreadPoolExecutor
+                    # ThreadPoolExecutor causes "interpreter shutdown" errors on Windows
+                    # Vulnerability scans are already long-running, so timeout isn't critical here
                     if self.nmap_vuln_scanner is None:
                         logger.error("Vulnerability scanner became unavailable")
                         continue
                     
-                    # Type narrowing: Store reference to avoid repeated None checks
-                    vuln_scanner = self.nmap_vuln_scanner
-                    scan_callable = lambda: vuln_scanner.execute(ip, row, action_key)
-                    result = self._execute_with_timeout(
-                        scan_callable,
-                        timeout=self.vuln_scan_timeout,
-                        action_name=f"NmapVulnScanner@{ip}"
-                    )
+                    # Run scan directly - no executor needed
+                    result = self.nmap_vuln_scanner.execute(ip, row, action_key)
                     
-                    # Update status using helper (timeout is treated as failed)
-                    if result == 'timeout':
-                        result_status = 'failed'
-                        logger.error(f"⏱️  Vulnerability scan for {ip} ({hostname}) TIMED OUT after {self.vuln_scan_timeout}s")
-                    else:
-                        result_status = 'success' if result == 'success' else 'failed'
-                    
+                    # Update status
+                    result_status = 'success' if result == 'success' else 'failed'
                     self._update_action_status(row, action_key, result_status)
                     
                     if result == 'success':
@@ -881,16 +829,7 @@ class Orchestrator:
     def shutdown(self):
         """Gracefully shutdown the orchestrator and cleanup resources"""
         logger.info("Shutting down orchestrator...")
-        try:
-            # Shutdown the executor and wait for running tasks to complete (max 30 seconds)
-            with self.executor_lock:
-                if self.executor is not None and not self.executor._shutdown:
-                    self.executor.shutdown(wait=True, cancel_futures=False)
-                    logger.info("Thread pool executor shutdown complete")
-                else:
-                    logger.info("Thread pool executor already shutdown or not created")
-        except Exception as e:
-            logger.error(f"Error during executor shutdown: {e}")
+        logger.info("Orchestrator shutdown complete")
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

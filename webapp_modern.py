@@ -2075,28 +2075,51 @@ def get_loot():
 
 @app.route('/api/logs')
 def get_logs():
-    """Get recent logs"""
+    """Get recent logs - prioritizing orchestrator.py output"""
     try:
         # Enhanced logging - aggregate from multiple sources
         all_logs = []
         
-        # Get terminal log level filter from config - default to 'security' for focused logging
-        terminal_log_level = shared_data.config.get('terminal_log_level', 'security')
+        # Get terminal log level filter from config - default to 'all' to show orchestrator output
+        terminal_log_level = shared_data.config.get('terminal_log_level', 'all')
         
-        # 1. Get web console logs (existing functionality)
-        log_file = shared_data.webconsolelog
-        if os.path.exists(log_file):
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+        # 1. PRIORITY: Get orchestrator.py logs (main scanning activity)
+        orchestrator_log = os.path.join(shared_data.logsdir, 'orchestrator.py.log')
+        if os.path.exists(orchestrator_log):
+            with open(orchestrator_log, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
-                web_logs = [line.strip() for line in lines[-50:] if line.strip()]
-                all_logs.extend([f"[WEB] {log}" for log in web_logs])
+                # Get last 100 lines of orchestrator logs
+                orch_logs = [line.strip() for line in lines[-100:] if line.strip()]
+                all_logs.extend(orch_logs)
+        
+        # 2. Get scanning.py logs (network scanning details)
+        scanning_log = os.path.join(shared_data.logsdir, 'scanning.py.log')
+        if os.path.exists(scanning_log):
+            with open(scanning_log, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+                # Get last 50 lines of scanning logs
+                scan_logs = [line.strip() for line in lines[-50:] if line.strip()]
+                all_logs.extend(scan_logs)
+        
+        # 3. Get nmap_vuln_scanner.py logs (vulnerability scanning)
+        vuln_scanner_log = os.path.join(shared_data.logsdir, 'nmap_vuln_scanner.py.log')
+        if os.path.exists(vuln_scanner_log):
+            with open(vuln_scanner_log, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+                # Get last 50 lines of vuln scanner logs
+                vuln_logs = [line.strip() for line in lines[-50:] if line.strip()]
+                all_logs.extend(vuln_logs)
         
         # 2. Get Ragnar main activity logs from data/logs directory
         logs_dir = shared_data.logsdir
         if os.path.exists(logs_dir):
-            # Look for recent log files
+            # Look for recent log files from attack actions
             for log_filename in os.listdir(logs_dir):
                 if log_filename.endswith('.log') or log_filename.endswith('.txt'):
+                    # Skip files we've already processed
+                    if log_filename in ['orchestrator.py.log', 'scanning.py.log', 'nmap_vuln_scanner.py.log']:
+                        continue
+                    
                     log_path = os.path.join(logs_dir, log_filename)
                     try:
                         # Get file modification time to show recent files first
@@ -2105,148 +2128,34 @@ def get_logs():
                         if time.time() - mod_time < 86400:  # 24 hours
                             with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
                                 lines = f.readlines()
-                                recent_lines = [line.strip() for line in lines[-20:] if line.strip()]
-                                source_tag = f"[{log_filename.upper().replace('.LOG', '').replace('.TXT', '')}]"
-                                all_logs.extend([f"{source_tag} {log}" for log in recent_lines])
+                                recent_lines = [line.strip() for line in lines[-10:] if line.strip()]
+                                all_logs.extend(recent_lines)
                     except Exception as e:
                         # Skip files that can't be read
                         continue
         
-        # 3. Get recent discoveries from livestatus file
-        if os.path.exists(shared_data.livestatusfile):
+        # Sort logs chronologically if they have timestamps
+        # Logs are in format: YYYY-MM-DD HH:MM:SS - filename - LEVEL - message
+        def extract_timestamp(log_line):
             try:
-                import pandas as pd
-                df = pd.read_csv(shared_data.livestatusfile)
-                alive_hosts = df[df['Alive'] == 1] if 'Alive' in df.columns else df
-                if not alive_hosts.empty:
-                    recent_discoveries = []
-                    for _, row in alive_hosts.tail(10).iterrows():
-                        ip = row.get('IP', 'Unknown')
-                        hostname = row.get('Hostname', ip)
-                        ports = row.get('Ports', '')
-                        if ports:
-                            port_list = ports.split(';')[:5]  # Show first 5 ports
-                            port_str = ', '.join(port_list)
-                            if len(ports.split(';')) > 5:
-                                port_str += f" (+{len(ports.split(';')) - 5} more)"
-                            discovery_log = f"🎯 Discovered {hostname} ({ip}) - Ports: {port_str}"
-                        else:
-                            discovery_log = f"🎯 Discovered {hostname} ({ip}) - Host alive"
-                        all_logs.append(f"[DISCOVERY] {discovery_log}")
-            except Exception as e:
-                all_logs.append(f"[DISCOVERY] Error reading discoveries: {str(e)}")
+                # Extract timestamp from log line (first 19 characters: YYYY-MM-DD HH:MM:SS)
+                if len(log_line) >= 19 and log_line[4] == '-' and log_line[7] == '-':
+                    timestamp_str = log_line[:19]
+                    from datetime import datetime
+                    return datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+            except:
+                pass
+            return datetime.min
         
-        # 4. Get recent credential findings
-        for cred_file, service in [(shared_data.sshfile, 'SSH'), (shared_data.smbfile, 'SMB'), 
-                                  (shared_data.ftpfile, 'FTP'), (shared_data.telnetfile, 'Telnet'),
-                                  (shared_data.sqlfile, 'SQL'), (shared_data.rdpfile, 'RDP')]:
-            if os.path.exists(cred_file):
-                try:
-                    import pandas as pd
-                    df = pd.read_csv(cred_file)
-                    if not df.empty:
-                        recent_creds = df.tail(5)  # Last 5 credentials
-                        for _, row in recent_creds.iterrows():
-                            ip = row.get('ip', row.get('IP', 'Unknown'))
-                            username = row.get('username', row.get('Username', 'Unknown'))
-                            cred_log = f"🔓 {service} credentials found - {username}@{ip}"
-                            all_logs.append(f"[CREDENTIALS] {cred_log}")
-                except Exception:
-                    continue
+        # Sort by timestamp
+        try:
+            from datetime import datetime
+            all_logs.sort(key=extract_timestamp)
+        except:
+            pass  # If sorting fails, keep original order
         
-        # 5. Get recent vulnerability findings
-        vuln_dir = getattr(shared_data, 'vulnerabilities_dir', os.path.join('data', 'output', 'vulnerabilities'))
-        if os.path.exists(vuln_dir):
-            vuln_files = [f for f in os.listdir(vuln_dir) if f.endswith('.txt')]
-            # Sort by modification time, get 3 most recent
-            vuln_files.sort(key=lambda x: os.path.getmtime(os.path.join(vuln_dir, x)), reverse=True)
-            for vuln_file in vuln_files[:3]:
-                try:
-                    vuln_path = os.path.join(vuln_dir, vuln_file)
-                    with open(vuln_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                        # Look for vulnerability indicators
-                        if 'VULNERABLE' in content.upper() or 'CVE-' in content:
-                            ip = vuln_file.replace('.txt', '').replace('vuln_', '')
-                            vuln_log = f"⚠️ Vulnerabilities found on {ip}"
-                            all_logs.append(f"[VULNERABILITIES] {vuln_log}")
-                except Exception:
-                    continue
-        
-        # 6. Add current status summary
-        status_log = f"📊 Status: {safe_int(shared_data.targetnbr)} targets, {safe_int(shared_data.portnbr)} ports, {safe_int(shared_data.vulnnbr)} vulns, {safe_int(shared_data.crednbr)} creds"
-        all_logs.append(f"[STATUS] {status_log}")
-        
-        # Filter logs based on terminal_log_level setting
-        def should_include_log(log_line):
-            """Filter logs to focus on security scanning activities"""
-            if not log_line:
-                return False
-            
-            log_lower = log_line.lower()
-            log_upper = log_line.upper()
-            
-            # Exclude comment.py and other non-essential logs
-            exclude_sources = [
-                'comment.py', 'comments.py', 'comment_', 'comments_',
-                'display.py', 'epd_helper.py', 'webapp_', 'flask',
-                'socketio', 'werkzeug', 'http.server', 'static'
-            ]
-            
-            if any(source in log_lower for source in exclude_sources):
-                return False
-            
-            # Always include security scanning and vulnerability logs
-            high_priority_keywords = [
-                'nmap', 'scan', 'scanning', 'port scan', 'host discovery',
-                'vulnerability', 'vuln', 'exploit', 'cve-', 'exploit-db',
-                'credential', 'cred', 'password', 'login', 'auth',
-                'ssh', 'ftp', 'smb', 'telnet', 'rdp', 'sql', 'mysql', 'postgres',
-                'attack', 'brute', 'crack', 'penetration', 'pentest',
-                'target', 'host found', 'port open', 'service', 'banner',
-                'network intelligence', 'threat intelligence', 'orchestrator'
-            ]
-            
-            if any(keyword in log_lower for keyword in high_priority_keywords):
-                return True
-            
-            # Check for error indicators (always important)
-            is_error = any(keyword in log_upper for keyword in [
-                'ERROR', 'CRITICAL', 'EXCEPTION', 'FAILED', 'FAILURE'
-            ])
-            
-            if is_error:
-                return True
-            
-            # Check for important discovery indicators
-            is_discovery = any(keyword in log_upper for keyword in [
-                'DISCOVERED', 'FOUND', 'CREDENTIALS', 'VULNERABILITIES', 
-                'DISCOVERY', 'SUCCESS'
-            ])
-            
-            if is_discovery:
-                return True
-            
-            # Filter based on terminal_log_level setting for other logs
-            if terminal_log_level == 'error':
-                return is_error
-            elif terminal_log_level == 'info':
-                return is_error or is_discovery
-            elif terminal_log_level == 'security':
-                # Security mode: show only security-related logs (default)
-                return True  # Already filtered by high_priority_keywords above
-            elif terminal_log_level == 'all':
-                return True
-            
-            # Default to security mode: be more selective to reduce noise
-            return True  # Already filtered by high_priority_keywords above
-        
-        # Apply filtering
-        filtered_logs = [log for log in all_logs if should_include_log(log)]
-        
-        # Sort logs by timestamp if possible, otherwise keep recent additions at the end
-        # Limit to last 150 entries for security-focused logging
-        recent_logs = filtered_logs[-150:] if filtered_logs else []
+        # Limit to last 200 entries to avoid overwhelming the UI
+        recent_logs = all_logs[-200:] if all_logs else []
         
         return jsonify({'logs': recent_logs})
     except Exception as e:
