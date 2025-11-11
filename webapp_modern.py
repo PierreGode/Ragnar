@@ -3373,6 +3373,39 @@ def deep_scan_host():
 
         ip = (data.get('ip') or '').strip()
         portstart_raw = data.get('portstart', 1)
+        # ===== SECONDARY RAW BODY PARSING FALLBACK =====
+        # If IP is still empty after initial structured parsing, attempt to extract it manually
+        if not ip:
+            try:
+                raw_text = raw_body.decode('utf-8', errors='ignore').strip()
+                logger.debug(f"   Fallback raw body text: {raw_text}")
+                # Case 1: Proper JSON that get_json() failed to parse (malformed headers / PowerShell curl issues)
+                if raw_text.startswith('{') and raw_text.endswith('}'):
+                    import json as _json
+                    try:
+                        manual_json = _json.loads(raw_text)
+                        ip = (manual_json.get('ip') or '').strip()
+                        logger.debug(f"   Extracted IP from manual JSON fallback: [{ip}]")
+                    except Exception as mj_err:
+                        logger.debug(f"   Manual JSON decode failed: {mj_err}")
+                # Case 2: application/x-www-form-urlencoded style: ip=192.168.1.192
+                if not ip and ('=' in raw_text or '&' in raw_text):
+                    import urllib.parse as _up
+                    parsed_qs = _up.parse_qs(raw_text)
+                    if 'ip' in parsed_qs and parsed_qs['ip']:
+                        ip = (parsed_qs['ip'][0] or '').strip()
+                        logger.debug(f"   Extracted IP from querystring style body: [{ip}]")
+                # Case 3: Loose key:value or key=value pattern inside text
+                if not ip:
+                    import re as _re
+                    m = _re.search(r'"?ip"?\s*[:=]\s*"?(\d{1,3}(?:\.\d{1,3}){3})"?', raw_text)
+                    if m:
+                        ip = m.group(1).strip()
+                        logger.debug(f"   Extracted IP via regex heuristic: [{ip}]")
+            except Exception as fb_err:
+                logger.debug(f"   Raw body manual parse error: {fb_err}")
+        # Log final IP extraction state before validation
+        logger.debug(f"   Final extracted IP after fallbacks: [{ip}]")
         portend_raw = data.get('portend', 65535)
         try:
             portstart = int(portstart_raw)
@@ -3384,8 +3417,13 @@ def deep_scan_host():
             portend = 65535
 
         if not ip:
-            logger.error("❌ Deep scan request missing IP (empty after parsing)")
-            return jsonify({'status': 'error', 'message': 'IP address is required'}), 400
+            # Include a small, safe snippet of raw body to aid debugging (truncated to 120 chars)
+            try:
+                snippet = raw_body.decode('utf-8','ignore')[:120]
+            except Exception:
+                snippet = '<un-decodable>'
+            logger.error(f"❌ Deep scan request missing IP after all parsing attempts. Raw snippet: {snippet!r}")
+            return jsonify({'status': 'error', 'message': 'IP address is required', 'raw_snippet': snippet}), 400
 
         logger.info(f"🎯 DEEP SCAN PARAMETERS - IP=[{ip}] Ports={portstart}-{portend}")
 
