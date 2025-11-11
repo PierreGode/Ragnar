@@ -1,5 +1,12 @@
 [
     {
+        "b_module": "ble",
+        "b_class": "BLE",
+        "b_port": null,
+        "b_status": "bluetooth_scan",
+        "b_parent": null
+    },
+    {
         "b_module": "ftp_connector",
         "b_class": "FTPBruteforce",
         "b_port": 21,
