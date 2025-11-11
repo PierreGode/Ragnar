@@ -22,6 +22,7 @@ import csv
 import logging
 import subprocess
 import threading
+from datetime import datetime
 from PIL import Image, ImageFont 
 from logger import Logger
 from epd_helper import EPDHelper
@@ -45,7 +46,8 @@ class SharedData:
         self.update_mac_blacklist()
         self.setup_environment(clear_console=False) # Setup the environment without clearing console
         self.initialize_variables() # Initialize the variables used by the application
-        
+        self.load_gamification_data()  # Load persistent gamification progress
+
         # Initialize network intelligence (after paths and config are ready)
         self.network_intelligence = None
         self.initialize_network_intelligence()
@@ -108,6 +110,7 @@ class SharedData:
         # Files directly under datadir
         self.netkbfile = os.path.join(self.datadir, "netkb.csv")
         self.livestatusfile = os.path.join(self.datadir, 'livestatus.csv')
+        self.gamification_file = os.path.join(self.datadir, 'gamification.json')
         # Files directly under vulnerabilities_dir
         self.vuln_summary_file = os.path.join(self.vulnerabilities_dir, 'vulnerability_summary.csv')
         self.vuln_scan_progress_file = os.path.join(self.vulnerabilities_dir, 'scan_progress.json')
@@ -397,7 +400,7 @@ class SharedData:
         """Initialize the variables."""
         self.should_exit = False
         self.display_should_exit = False
-        self.orchestrator_should_exit = False 
+        self.orchestrator_should_exit = False
         self.webapp_should_exit = False 
         self.ragnar_instance = None
         self.wifichanged = False
@@ -427,6 +430,13 @@ class SharedData:
         self.networkkbnbr = 0
         self.attacksnbr = 0
         self.vulnerable_host_count = 0
+        self.gamification_data = {}
+        self.points_per_level = 200
+        self.points_per_mac = 15
+        self.points_per_credential = 25
+        self.points_per_data_file = 10
+        self.points_per_zombie = 40
+        self.points_per_vulnerability = 20
         self.show_first_image = True
         self.network_hosts_snapshot = {}
         self.total_targetnbr = 0
@@ -441,6 +451,123 @@ class SharedData:
         self.y_bottom = 0  # Initialize y_bottom for image positioning
         self.x_center1 = 0  # Alternative positioning
         self.y_bottom1 = 0  # Alternative positioning
+
+    def load_gamification_data(self):
+        """Load persistent gamification progress from disk."""
+        os.makedirs(self.datadir, exist_ok=True)
+
+        default_data = {
+            "version": 1,
+            "total_points": 0,
+            "level": 1,
+            "mac_points": {},
+            "lifetime_counts": {}
+        }
+
+        loaded_data = {}
+        if os.path.exists(self.gamification_file):
+            try:
+                with open(self.gamification_file, 'r', encoding='utf-8') as fp:
+                    raw_data = json.load(fp)
+                    if isinstance(raw_data, dict):
+                        loaded_data = raw_data
+            except json.JSONDecodeError:
+                logger.warning("Gamification file is corrupted; starting with defaults")
+            except Exception as exc:
+                logger.warning(f"Unable to load gamification file: {exc}")
+
+        self.gamification_data = {**default_data, **loaded_data}
+        if not isinstance(self.gamification_data.get("mac_points"), dict):
+            self.gamification_data["mac_points"] = {}
+        if not isinstance(self.gamification_data.get("lifetime_counts"), dict):
+            self.gamification_data["lifetime_counts"] = {}
+
+        self._update_gamification_state()
+
+    def save_gamification_data(self):
+        """Persist gamification progress to disk."""
+        try:
+            os.makedirs(os.path.dirname(self.gamification_file), exist_ok=True)
+            data_to_save = dict(self.gamification_data)
+            data_to_save["total_points"] = int(self.gamification_data.get("total_points", 0) or 0)
+            data_to_save["level"] = int(self.gamification_data.get("level", 1) or 1)
+            with open(self.gamification_file, 'w', encoding='utf-8') as fp:
+                json.dump(data_to_save, fp, indent=4)
+        except Exception as exc:
+            logger.error(f"Failed to save gamification data: {exc}")
+
+    def calculate_level(self, total_points: int) -> int:
+        """Calculate the level from total points using a slower progression curve."""
+        if total_points < 0:
+            total_points = 0
+        return max(1, 1 + total_points // max(self.points_per_level, 1))
+
+    def _update_gamification_state(self):
+        """Synchronize in-memory level/points from gamification data."""
+        total_points = int(self.gamification_data.get("total_points", 0) or 0)
+        self.coinnbr = total_points
+        self.levelnbr = self.calculate_level(total_points)
+        self.gamification_data["level"] = self.levelnbr
+
+    def normalize_mac(self, mac_address: str) -> str:
+        """Return a normalized MAC address suitable for persistence."""
+        if not mac_address:
+            return ""
+
+        mac = mac_address.strip().upper()
+        if mac in {"UNKNOWN", "N/A", "NONE"}:
+            return ""
+
+        mac = mac.replace('-', ':')
+        if '.' in mac:
+            mac = mac.replace('.', '')
+        mac = mac.replace(' ', '')
+
+        if ':' not in mac and len(mac) == 12:
+            mac = ':'.join(mac[i:i + 2] for i in range(0, 12, 2))
+
+        if mac.count(':') == 5:
+            if mac in {"00:00:00:00:00:00", "FF:FF:FF:FF:FF:FF"}:
+                return ""
+            return mac
+
+        return ""
+
+    def process_discovered_macs(self, mac_addresses):
+        """Track newly discovered MAC addresses and award points once per device."""
+        normalized = {self.normalize_mac(mac) for mac in mac_addresses}
+        normalized.discard("")
+
+        if not normalized:
+            return 0, 0
+
+        with self._stats_lock:
+            mac_points = self.gamification_data.setdefault("mac_points", {})
+            new_mac_count = 0
+            points_awarded = 0
+
+            for mac in normalized:
+                if mac in mac_points:
+                    continue
+                mac_points[mac] = {
+                    "points": self.points_per_mac,
+                    "first_seen": datetime.utcnow().isoformat() + "Z"
+                }
+                new_mac_count += 1
+                points_awarded += self.points_per_mac
+
+            if points_awarded:
+                previous_points = self.gamification_data.get("total_points", 0)
+                self.gamification_data["total_points"] = int(previous_points) + points_awarded
+                prev_level = self.levelnbr
+                self._update_gamification_state()
+                self.save_gamification_data()
+                logger.info(
+                    f"Awarded {points_awarded} points for {new_mac_count} new MAC address(es). "
+                    f"Level {prev_level} -> {self.levelnbr}"
+                )
+
+            return new_mac_count, points_awarded
 
     def delete_webconsolelog(self):
             """Delete the web console log file."""
@@ -819,11 +946,46 @@ class SharedData:
             for row in mac_to_existing_row.values():
                 writer.writerow(row)
 
-    def update_stats(self):
-        """Update the stats based on formulas."""
+    def update_stats(self, persist=True):
+        """Update gamification stats using lifetime achievements rather than volatile counts."""
         with self._stats_lock:
-            self.coinnbr = int((self.networkkbnbr * 5 + self.crednbr * 5 + self.datanbr * 5 + self.zombiesnbr * 10+self.attacksnbr * 5+ self.vulnnbr * 2 ))
-            self.levelnbr = int((self.networkkbnbr * 0.1 + self.crednbr * 0.2 + self.datanbr * 0.1 + self.zombiesnbr * 0.5+ self.attacksnbr+ self.vulnnbr * 0.01 ))
+            lifetime_counts = self.gamification_data.setdefault("lifetime_counts", {})
+            total_added = 0
+            awarded_breakdown = {}
+
+            metrics = {
+                "crednbr": (int(self.crednbr or 0), self.points_per_credential),
+                "datanbr": (int(self.datanbr or 0), self.points_per_data_file),
+                "zombiesnbr": (int(self.zombiesnbr or 0), self.points_per_zombie),
+                "vulnnbr": (int(self.vulnnbr or 0), self.points_per_vulnerability),
+            }
+
+            for key, (current_value, points_value) in metrics.items():
+                recorded_value = int(lifetime_counts.get(key, 0) or 0)
+                if current_value > recorded_value:
+                    delta = current_value - recorded_value
+                    lifetime_counts[key] = current_value
+                    points_gained = delta * points_value
+                    total_added += points_gained
+                    awarded_breakdown[key] = {
+                        "delta": delta,
+                        "points": points_gained
+                    }
+                else:
+                    lifetime_counts[key] = max(recorded_value, current_value)
+
+            if total_added:
+                self.gamification_data["total_points"] = int(self.gamification_data.get("total_points", 0)) + total_added
+                logger.info(f"Awarded {total_added} points from new achievements: {awarded_breakdown}")
+
+            previous_points = self.coinnbr
+            previous_level = self.levelnbr
+            self._update_gamification_state()
+
+            if persist and (total_added or self.coinnbr != previous_points or self.levelnbr != previous_level):
+                self.save_gamification_data()
+
+            return total_added
 
 
     def print(self, message):

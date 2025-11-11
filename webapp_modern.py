@@ -458,6 +458,7 @@ def sync_all_counts():
             total_target_count = 0
             inactive_target_count = 0
             current_snapshot = {}
+            discovered_macs = set()
             
             # STEP 1: Read from netkb.csv (if it has data)
             netkb_hosts = {}
@@ -549,7 +550,13 @@ def sync_all_counts():
                     source = "netkb"
                 else:
                     continue
-                
+
+                mac_address = wifi_entry.get('mac') if wifi_entry else None
+                if not mac_address:
+                    mac_address = netkb_entry.get('mac')
+                if mac_address:
+                    discovered_macs.add(mac_address)
+
                 # Count all hosts for total
                 total_target_count += 1
                 
@@ -570,7 +577,8 @@ def sync_all_counts():
                         'alive': True,
                         'ports': set(port_list),
                         'failed_pings': failed_pings,
-                        'source': source
+                        'source': source,
+                        'mac': mac_address
                     }
                     
                     logger.debug(f"[SYNC] {ip}: ACTIVE from {source} (Failed_Pings={failed_pings}/{max_failed_pings})")
@@ -580,7 +588,8 @@ def sync_all_counts():
                         'alive': False,
                         'ports': set(),
                         'failed_pings': failed_pings,
-                        'source': source
+                        'source': source,
+                        'mac': mac_address
                     }
                     logger.debug(f"[SYNC] {ip}: INACTIVE from {source} (Failed_Pings={failed_pings}/{max_failed_pings})")
             
@@ -619,6 +628,13 @@ def sync_all_counts():
             shared_data.lost_target_ips = sorted(lost_active_hosts)
             shared_data.new_targets = len(shared_data.new_target_ips)
             shared_data.lost_targets = len(shared_data.lost_target_ips)
+
+            if discovered_macs:
+                new_mac_count, points_awarded = shared_data.process_discovered_macs(discovered_macs)
+                if new_mac_count:
+                    logger.info(
+                        f"[GAMIFICATION] Registered {new_mac_count} new MAC(s), awarded {points_awarded} points"
+                    )
 
             # Sync credential count from crackedpwd directory
             cred_results_dir = getattr(shared_data, 'crackedpwd_dir', os.path.join('data', 'output', 'crackedpwd'))
