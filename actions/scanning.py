@@ -1308,7 +1308,7 @@ class NetworkScanner:
         except Exception as e:
             self.logger.error(f"Error in scan: {e}")
 
-    def deep_scan_host(self, ip, portstart=1, portend=65535):
+    def deep_scan_host(self, ip, portstart=1, portend=65535, progress_callback=None):
         """
         Perform a thorough deep scan on a single host using -sT (TCP connect scan).
         This scans ALL ports (1-65535) to find every possible open port.
@@ -1318,6 +1318,7 @@ class NetworkScanner:
             ip: Target IP address
             portstart: Starting port (default 1)
             portend: Ending port (default 65535)
+            progress_callback: Optional callback function to report progress
             
         Returns:
             dict: {'success': bool, 'open_ports': list, 'hostname': str, 'message': str}
@@ -1331,6 +1332,10 @@ class NetworkScanner:
             
             self.logger.info(f"   Executing: nmap {nmap_args} {ip}")
             scan_start = time.time()
+            
+            # Notify scan started
+            if progress_callback:
+                progress_callback('scanning', {'message': 'Scan started'})
             
             self.nm.scan(hosts=ip, arguments=nmap_args)
             
@@ -1347,6 +1352,11 @@ class NetworkScanner:
             
             # Extract results
             hostname = self.nm[ip].hostname() or ''
+            
+            # Notify hostname found
+            if progress_callback and hostname:
+                progress_callback('hostname', {'message': f'Name: {hostname[:20]}'})
+            
             open_ports = []
             port_details = {}
             
@@ -1363,6 +1373,10 @@ class NetworkScanner:
                             'state': 'open'
                         }
                         self.logger.info(f"   ✅ Port {port}/tcp open - {service} {version}")
+                        
+                        # Notify each port discovery (but limit to every 5 ports to avoid spam)
+                        if progress_callback and len(open_ports) % 5 == 1:
+                            progress_callback('port_found', {'message': f'Port {port} found', 'port': port, 'service': service})
             
             # Now update the NetKB with deep scan results WITHOUT overwriting existing data
             self._merge_deep_scan_results(ip, hostname, open_ports, port_details)

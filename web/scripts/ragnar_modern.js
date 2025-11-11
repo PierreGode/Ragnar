@@ -850,7 +850,8 @@ function displayStableNetworkTable(data) {
             <td class="py-3 px-4">${lastScanDisplay}</td>
             <td class="py-3 px-4">
                 <button onclick="triggerDeepScan('${host.ip}')" 
-                        class="bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-colors"
+                        id="deep-scan-btn-${host.ip.replace(/\./g, '-')}"
+                        class="deep-scan-button bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
                         title="Scan all 65535 ports with TCP connect (-sT)">
                     Deep Scan
                 </button>
@@ -1091,9 +1092,36 @@ async function triggerDeepScan(ip) {
 function handleDeepScanUpdate(data) {
     const { type, ip, message } = data;
     
+    // Get the button for this IP
+    const buttonId = `deep-scan-btn-${ip.replace(/\./g, '-')}`;
+    const button = document.getElementById(buttonId);
+    
     switch (type) {
         case 'deep_scan_started':
             addConsoleMessage(`🔍 ${message}`, 'info');
+            if (button) {
+                button.classList.remove('bg-purple-600', 'hover:bg-purple-700');
+                button.classList.add('bg-blue-600', 'cursor-wait');
+                button.disabled = true;
+                button.textContent = 'Scan started';
+            }
+            break;
+        
+        case 'deep_scan_progress':
+            // Update button with short progress messages
+            if (button) {
+                const event = data.event;
+                if (event === 'scanning') {
+                    button.textContent = 'Scanning...';
+                } else if (event === 'hostname') {
+                    // Extract short hostname (max 20 chars already in message)
+                    button.textContent = message;
+                } else if (event === 'port_found') {
+                    const port = data.port;
+                    const service = data.service;
+                    button.textContent = `Port ${port} found`;
+                }
+            }
             break;
             
         case 'deep_scan_completed':
@@ -1108,6 +1136,22 @@ function handleDeepScanUpdate(data) {
                 addConsoleMessage(`   Open ports: ${portList}${moreText}`, 'info');
             }
             
+            // Update button to show completion
+            if (button) {
+                button.classList.remove('bg-blue-600', 'cursor-wait');
+                button.classList.add('bg-green-600');
+                button.textContent = `✅ ${portCount} ports`;
+                button.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    button.classList.remove('bg-green-600');
+                    button.classList.add('bg-purple-600', 'hover:bg-purple-700');
+                    button.textContent = 'Deep Scan';
+                    button.disabled = false;
+                }, 3000);
+            }
+            
             // Refresh network table to show updated port information
             if (currentTab === 'network') {
                 loadNetworkData();
@@ -1116,6 +1160,22 @@ function handleDeepScanUpdate(data) {
             
         case 'deep_scan_error':
             addConsoleMessage(`❌ Deep scan error for ${ip}: ${message}`, 'error');
+            
+            // Update button to show error
+            if (button) {
+                button.classList.remove('bg-blue-600', 'cursor-wait');
+                button.classList.add('bg-red-600');
+                button.textContent = '❌ Error';
+                button.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    button.classList.remove('bg-red-600');
+                    button.classList.add('bg-purple-600', 'hover:bg-purple-700');
+                    button.textContent = 'Deep Scan';
+                    button.disabled = false;
+                }, 3000);
+            }
             break;
             
         default:

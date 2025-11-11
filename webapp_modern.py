@@ -3374,10 +3374,21 @@ def deep_scan_host():
                     'message': f'Starting deep scan on {ip} (ports {portstart}-{portend})...'
                 })
                 
-                # Perform the deep scan
-                result = scanner.deep_scan_host(ip, portstart, portend)
+                # Define progress callback to emit real-time updates
+                def progress_callback(event_type, data):
+                    socketio.emit('deep_scan_update', {
+                        'type': 'deep_scan_progress',
+                        'event': event_type,
+                        'ip': ip,
+                        'message': data.get('message', ''),
+                        'port': data.get('port'),
+                        'service': data.get('service')
+                    })
                 
-                # Emit progress updates
+                # Perform the deep scan with progress callback
+                result = scanner.deep_scan_host(ip, portstart, portend, progress_callback=progress_callback)
+                
+                # Emit final result
                 if result['success']:
                     socketio.emit('deep_scan_update', {
                         'type': 'deep_scan_completed',
