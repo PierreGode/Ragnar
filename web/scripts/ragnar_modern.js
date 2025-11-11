@@ -1066,7 +1066,22 @@ function handleScanError(data) {
 
 async function triggerDeepScan(ip) {
     try {
+        // EXPLICIT DEBUG: Log what we received
+        console.log('🔍 triggerDeepScan CALLED');
+        console.log('   Received IP parameter:', ip);
+        console.log('   IP type:', typeof ip);
+        console.log('   IP length:', ip ? ip.length : 'null/undefined');
+        
+        if (!ip) {
+            console.error('❌ IP parameter is empty in triggerDeepScan!');
+            addConsoleMessage('Error: No IP address provided for deep scan', 'error');
+            return;
+        }
+        
         addConsoleMessage(`Starting deep scan on ${ip}...`, 'info');
+        
+        console.log('📤 Sending POST request to /api/scan/deep');
+        console.log('   Request body:', JSON.stringify({ ip: ip }));
         
         const response = await fetch('/api/scan/deep', {
             method: 'POST',
@@ -1076,7 +1091,10 @@ async function triggerDeepScan(ip) {
             body: JSON.stringify({ ip: ip })
         });
         
+        console.log('📥 Response received, status:', response.status);
+        
         const data = await response.json();
+        console.log('📋 Response data:', data);
         
         if (data.status === 'success') {
             addConsoleMessage(`Deep scan initiated for ${ip} - scanning all 65535 ports`, 'success');

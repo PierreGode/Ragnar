@@ -1341,6 +1341,18 @@ class NetworkScanner:
         
         self.logger.info(f"🔍 DEEP SCAN initiated for IP=[{ip}] ports [{portstart}-{portend}]")
         
+        # Quick connectivity test first
+        self.logger.info(f"📡 Testing connectivity to {ip}...")
+        try:
+            ping_result = subprocess.run(['ping', '-c', '1', '-W', '2', ip], 
+                                       capture_output=True, text=True, timeout=5)
+            if ping_result.returncode == 0:
+                self.logger.info(f"✅ Ping successful to {ip} - host is reachable")
+            else:
+                self.logger.warning(f"⚠️  Ping failed to {ip} - host may be down or firewalled")
+        except Exception as ping_error:
+            self.logger.warning(f"⚠️  Ping test failed: {ping_error}")
+        
         try:
             # Use -sT for TCP connect scan (doesn't require root, works everywhere)
             # Scan ALL ports for comprehensive discovery
@@ -1350,25 +1362,40 @@ class NetworkScanner:
             # -T4: Aggressive timing template
             nmap_args = f"-Pn -sT -p{portstart}-{portend} --open -T4 --min-rate 1000 --max-retries 1 -v"
             
-            self.logger.info(f"   Executing: nmap {nmap_args} {ip}")
-            self.logger.info(f"   This may take 1-3 minutes to scan all {portend - portstart + 1} ports...")
-            scan_start = time.time()
+            self.logger.info(f"🚀 EXECUTING DEEP SCAN: nmap {nmap_args} {ip}")
+            self.logger.info(f"   Port range: {portend - portstart + 1} ports to scan")
+            self.logger.info(f"   Expected scan time: 1-3 minutes on Raspberry Pi")
+            self.logger.info(f"   nmap.PortScanner object: {self.nm}")
             
             # Notify scan started
             if progress_callback:
                 progress_callback('scanning', {'message': 'Scan started'})
             
+            scan_start = time.time()
+            
+            # CRITICAL: Log the actual nmap execution attempt
+            self.logger.info(f"⏰ SCAN START: {datetime.now().strftime('%H:%M:%S')} - Starting nmap scan...")
+            
+            # Execute the scan
             self.nm.scan(hosts=ip, arguments=nmap_args)
             
             scan_duration = time.time() - scan_start
+            self.logger.info(f"⏰ SCAN END: {datetime.now().strftime('%H:%M:%S')} - Scan took {scan_duration:.2f}s")
             
-            self.logger.info(f"   Scan completed in {scan_duration:.2f}s")
-            self.logger.debug(f"   All hosts found by nmap: {self.nm.all_hosts()}")
+            # Check what hosts nmap found
+            all_hosts = self.nm.all_hosts()
+            self.logger.info(f"🔎 NMAP RESULTS: Found {len(all_hosts)} hosts: {all_hosts}")
+            self.logger.info(f"   Looking for target IP: {ip} in results...")
             
-            if ip not in self.nm.all_hosts():
-                self.logger.warning(f"❌ Deep scan found no results for {ip} after {scan_duration:.2f}s")
-                self.logger.warning(f"   This could mean: 1) Host is down/firewalled, 2) No ports open, 3) Scan timeout")
-                self.logger.debug(f"   Nmap command was: nmap {nmap_args} {ip}")
+            if ip not in all_hosts:
+                self.logger.warning(f"❌ DEEP SCAN NO RESULTS: {ip} not found in nmap results after {scan_duration:.2f}s")
+                self.logger.warning(f"   This could mean:")
+                self.logger.warning(f"   1) Host is down or unreachable")
+                self.logger.warning(f"   2) Host has no open ports")
+                self.logger.warning(f"   3) Firewall blocking scans")
+                self.logger.warning(f"   4) Network connectivity issue")
+                self.logger.info(f"   Full nmap command: nmap {nmap_args} {ip}")
+                self.logger.info(f"   Consider testing with: ping {ip}")
                 return {
                     'success': False,
                     'open_ports': [],
@@ -1485,18 +1512,39 @@ class NetworkScanner:
                     netkb_entries[target_mac]['Deep_Scan_Ports'] = str(len(open_ports))
                     
                     # Write back to file
-                    with open(netkbfile, 'w', newline='') as file:
-                        writer = csv.DictWriter(file, fieldnames=headers)
-                        writer.writeheader()
-                        for mac in sorted(netkb_entries.keys()):
-                            writer.writerow(netkb_entries[mac])
+                    if headers:  # Ensure headers exist
+                        with open(netkbfile, 'w', newline='') as file:
+                            writer = csv.DictWriter(file, fieldnames=headers)
+                            writer.writeheader()
+                            for mac in sorted(netkb_entries.keys()):
+                                writer.writerow(netkb_entries[mac])
+                    else:
+                        self.logger.warning(f"No headers found for NetKB file - skipping write")
                     
                     self.logger.info(f"📝 Merged deep scan results into NetKB: {ip} (MAC: {target_mac}) now has {len(merged_ports)} total ports ({len(new_ports)} from deep scan)")
             
             # ===== PART 2: Update WiFi-specific network file (IP-indexed, comma-separated) =====
             # This is the file the web UI actually displays!
-            from webapp_modern import get_wifi_specific_network_file
-            wifi_network_file = get_wifi_specific_network_file()
+            try:
+                # Import function to get wifi network file path
+                import sys
+                import os
+                sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # Add parent directory to path
+                from webapp_modern import get_wifi_specific_network_file
+                wifi_network_file = get_wifi_specific_network_file()
+            except Exception as import_error:
+                self.logger.warning(f"Failed to import get_wifi_specific_network_file: {import_error}")
+                # Fallback: construct the path manually
+                try:
+                    import subprocess
+                    result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=5)
+                    current_ssid = result.stdout.strip() if result.returncode == 0 else "unknown_network"
+                except:
+                    current_ssid = "unknown_network"
+                
+                data_dir = os.path.join(self.currentdir, 'data', 'network_data')
+                os.makedirs(data_dir, exist_ok=True)
+                wifi_network_file = os.path.join(data_dir, f'network_{current_ssid}.csv')
             
             if not os.path.exists(wifi_network_file):
                 self.logger.warning(f"WiFi-specific network file not found: {wifi_network_file}")
@@ -1543,10 +1591,13 @@ class NetworkScanner:
                     target_entry['LastSeen'] = datetime.now().isoformat()
                     
                     # Write back to file
-                    with open(wifi_network_file, 'w', newline='', encoding='utf-8') as file:
-                        writer = csv.DictWriter(file, fieldnames=wifi_headers)
-                        writer.writeheader()
-                        writer.writerows(wifi_entries)
+                    if wifi_headers:  # Ensure headers exist
+                        with open(wifi_network_file, 'w', newline='', encoding='utf-8') as file:
+                            writer = csv.DictWriter(file, fieldnames=wifi_headers)
+                            writer.writeheader()
+                            writer.writerows(wifi_entries)
+                    else:
+                        self.logger.warning(f"No headers found for WiFi network file - skipping write")
                     
                     self.logger.info(f"📝 Merged deep scan results into WiFi network file: {ip} now has {len(merged_ports)} total ports ({len(new_ports)} from deep scan)")
             
