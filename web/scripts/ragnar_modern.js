@@ -2,7 +2,8 @@
 
 let socket;
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_WARNING_THRESHOLD = 5;
+const RECONNECT_DELAY_MAX = 15000;
 let currentTab = 'dashboard';
 let autoRefreshIntervals = {};
 
@@ -297,8 +298,7 @@ function initializeSocket() {
     socket = io({
         reconnection: true,
         reconnectionDelay: 1000,
-        reconnectionDelayMax: 5000,
-        reconnectionAttempts: MAX_RECONNECT_ATTEMPTS
+        reconnectionDelayMax: RECONNECT_DELAY_MAX
     });
 
     socket.on('connect', function() {
@@ -316,6 +316,13 @@ function initializeSocket() {
         console.log('Disconnected from Ragnar server');
         updateConnectionStatus(false);
         addConsoleMessage('Disconnected from server', 'error');
+        // Ensure the client continues to retry if Socket.IO gives up internally
+        setTimeout(() => {
+            if (socket && socket.disconnected) {
+                console.log('Attempting manual socket reconnection');
+                socket.connect();
+            }
+        }, 2000);
     });
 
     socket.on('status_update', function(data) {
@@ -381,8 +388,10 @@ function initializeSocket() {
     socket.on('connect_error', function(error) {
         reconnectAttempts++;
         console.error('Connection error:', error);
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            addConsoleMessage('Failed to connect to server after multiple attempts', 'error');
+        if (reconnectAttempts === RECONNECT_WARNING_THRESHOLD) {
+            addConsoleMessage('Reconnecting to server… still attempting to reach backend', 'warning');
+        } else if (reconnectAttempts > RECONNECT_WARNING_THRESHOLD && reconnectAttempts % RECONNECT_WARNING_THRESHOLD === 0) {
+            addConsoleMessage(`Still reconnecting (attempt ${reconnectAttempts}). Will keep trying until successful.`, 'warning');
         }
     });
 }
