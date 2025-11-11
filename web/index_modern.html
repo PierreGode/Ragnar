@@ -170,6 +170,32 @@
         .deep-scan-button.bg-blue-600 {
             animation: scan-pulse 2s ease-in-out infinite;
         }
+
+        #connection-status {
+            min-width: 0;
+        }
+
+        #connection-status .status-text {
+            white-space: nowrap;
+        }
+
+        @media (max-width: 640px) {
+            #connection-status {
+                width: 100%;
+                margin-top: 0.5rem;
+                justify-content: flex-start;
+                gap: 0.5rem;
+            }
+
+            #connection-status .status-text {
+                font-size: 0.7rem;
+            }
+
+            #connection-status .status-dot {
+                width: 0.5rem;
+                height: 0.5rem;
+            }
+        }
     </style>
 </head>
 
@@ -180,14 +206,14 @@
         <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between h-16">
                 <!-- Logo -->
-                <div class="flex items-center space-x-3">
+                <div class="flex items-center space-x-3 flex-wrap">
                     <img src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9">
                     <span class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent">
                         Ragnar
                     </span>
                     <span id="connection-status" class="flex items-center space-x-2">
-                        <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
-                        <span class="text-xs text-gray-400">Connected&nbsp;&nbsp;&nbsp;</span>
+                        <span class="status-dot w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
+                        <span class="status-text text-xs text-gray-400">Connected</span>
                     </span>
                 </div>
                 
