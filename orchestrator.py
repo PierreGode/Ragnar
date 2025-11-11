@@ -34,6 +34,17 @@ from resource_monitor import resource_monitor
 
 logger = Logger(name="orchestrator.py", level=logging.DEBUG)
 
+class ProtectedThreadPoolExecutor(ThreadPoolExecutor):
+    """
+    Custom ThreadPoolExecutor that protects against premature shutdown from
+    other modules calling exit() or sys.exit()
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Prevent atexit from registering shutdown handler
+        # This stops the executor from being shutdown when unrelated code calls exit()
+        self._shutdown_on_exit = False  # Disable automatic shutdown on interpreter exit
+
 class Orchestrator:
     def __init__(self):
         """Initialise the orchestrator"""
@@ -59,6 +70,7 @@ class Orchestrator:
         # IMPORTANT: executor is never shutdown during normal operation to prevent
         # "cannot schedule new futures after shutdown" errors
         self.executor = None
+        self.executor_is_shutdown = False  # Track shutdown state ourselves
         # Use a reentrant lock because executor recovery paths may call
         # _ensure_executor() while already holding the lock.
         self.executor_lock = threading.RLock()
@@ -71,26 +83,8 @@ class Orchestrator:
     def _ensure_executor(self):
         """Ensure the thread pool executor is created and available"""
         with self.executor_lock:
-            # Check if executor needs to be created or recreated
-            needs_new_executor = False
-            
-            if self.executor is None:
-                needs_new_executor = True
-            else:
-                # Try to submit a test task to check if executor is alive
-                try:
-                    # Submit a no-op task to verify executor is functional
-                    test_future = self.executor.submit(lambda: None)
-                    test_future.result(timeout=0.1)
-                except RuntimeError as e:
-                    # Executor is shutdown or broken
-                    if "cannot schedule new futures" in str(e) or "shutdown" in str(e):
-                        needs_new_executor = True
-                except Exception:
-                    # Any other error means executor might be broken
-                    needs_new_executor = True
-            
-            if needs_new_executor:
+            # Check if we need to create a new executor
+            if self.executor is None or self.executor_is_shutdown:
                 # Clean up old executor if it exists
                 if self.executor is not None:
                     try:
@@ -100,10 +94,11 @@ class Orchestrator:
                         logger.debug(f"Executor cleanup error (safe to ignore): {cleanup_error}")
                 
                 logger.info("Creating new ThreadPoolExecutor")
-                self.executor = ThreadPoolExecutor(
+                self.executor = ProtectedThreadPoolExecutor(
                     max_workers=2,  # Match semaphore limit for Pi Zero W2
                     thread_name_prefix="RagnarAction"
                 )
+                self.executor_is_shutdown = False
             return self.executor
     
     def _verify_config_attributes(self):
@@ -230,6 +225,8 @@ class Orchestrator:
         except RuntimeError as e:
             if "cannot schedule new futures" in str(e):
                 logger.error(f"Executor shutdown detected for {action_name}, recreating executor...")
+                # Mark executor as shutdown
+                self.executor_is_shutdown = True
                 # Force recreate executor
                 with self.executor_lock:
                     if self.executor:
@@ -238,8 +235,7 @@ class Orchestrator:
                         except Exception:
                             pass
                         self.executor = None
-                # Recreate the executor after releasing the lock to avoid
-                # deadlocks from re-entrant acquisition within _ensure_executor
+                # Recreate the executor
                 self._ensure_executor()
                 # Retry the action once with new executor
                 try:
@@ -901,12 +897,13 @@ class Orchestrator:
         try:
             # Shutdown the executor and wait for running tasks to complete (max 30 seconds)
             with self.executor_lock:
-                if self.executor is not None:
+                if self.executor is not None and not self.executor_is_shutdown:
                     try:
+                        self.executor_is_shutdown = True  # Mark as shutdown first
                         self.executor.shutdown(wait=True, cancel_futures=False)
                         logger.info("Thread pool executor shutdown complete")
                     except Exception as e:
-                        logger.warning(f"Executor already shutdown or error during shutdown: {e}")
+                        logger.warning(f"Executor shutdown error: {e}")
                 else:
                     logger.info("Thread pool executor not created or already shutdown")
         except Exception as e:
