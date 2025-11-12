@@ -35,6 +35,7 @@ if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)  # Insert at beginning to prioritize local modules
 
 import re
+import json
 import pandas as pd
 import subprocess
 import logging
@@ -59,14 +60,29 @@ b_parent = None
 
 class NmapVulnScanner:
     """
-    This class handles the Nmap vulnerability scanning process.
+    This class handles the Nmap vulnerability scanning process with incremental port scanning.
+    
+    INCREMENTAL SCANNING LOGIC:
+    - Tracks which ports have been scanned for each MAC address
+    - Only scans NEW ports discovered since last scan
+    - Dramatically reduces resource usage on Pi Zero W2
+    - Example: If MAC 4c:ed:fb:d5:fa:c9 has ports 135,139,445 already scanned,
+               and port 22 is newly discovered, only port 22 gets scanned
     """
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self.scan_results = []
         self.summary_file = self.shared_data.vuln_summary_file
+        
+        # Incremental scan tracking file
+        self.scanned_ports_file = os.path.join(
+            self.shared_data.vulnerabilities_dir, 
+            'scanned_ports_history.json'
+        )
+        
         self.create_summary_file()
-        logger.debug("NmapVulnScanner initialized.")
+        self.load_scanned_ports_history()
+        logger.debug("NmapVulnScanner initialized with incremental scanning support.")
 
     def create_summary_file(self):
         """
@@ -76,6 +92,132 @@ class NmapVulnScanner:
             os.makedirs(self.shared_data.vulnerabilities_dir, exist_ok=True)
             df = pd.DataFrame(columns=["IP", "Hostname", "MAC Address", "Port", "Vulnerabilities"])
             df.to_csv(self.summary_file, index=False)
+    
+    def load_scanned_ports_history(self):
+        """
+        Load the history of which ports have been scanned for each MAC address.
+        Format: {
+            "4c:ed:fb:d5:fa:c9": ["135", "139", "445"],
+            "aa:bb:cc:dd:ee:ff": ["22", "80", "443"]
+        }
+        """
+        try:
+            if os.path.exists(self.scanned_ports_file):
+                with open(self.scanned_ports_file, 'r') as f:
+                    self.scanned_ports_history = json.load(f)
+                logger.info(f"📋 Loaded scanned ports history for {len(self.scanned_ports_history)} MAC addresses")
+            else:
+                self.scanned_ports_history = {}
+                logger.info("🆕 No scanned ports history found - starting fresh")
+        except Exception as e:
+            logger.error(f"Error loading scanned ports history: {e}")
+            self.scanned_ports_history = {}
+    
+    def save_scanned_ports_history(self):
+        """
+        Save the history of scanned ports to disk.
+        """
+        try:
+            os.makedirs(self.shared_data.vulnerabilities_dir, exist_ok=True)
+            with open(self.scanned_ports_file, 'w') as f:
+                json.dump(self.scanned_ports_history, f, indent=2)
+            logger.debug(f"💾 Saved scanned ports history ({len(self.scanned_ports_history)} MACs tracked)")
+        except Exception as e:
+            logger.error(f"Error saving scanned ports history: {e}")
+    
+    def update_scanned_ports_for_mac(self, mac, scanned_ports):
+        """
+        Update the list of scanned ports for a given MAC address.
+        
+        Args:
+            mac: MAC address (e.g., "4c:ed:fb:d5:fa:c9")
+            scanned_ports: List of port numbers that were just scanned
+        """
+        if mac not in self.scanned_ports_history:
+            self.scanned_ports_history[mac] = []
+        
+        # Add new ports to the history (avoiding duplicates)
+        for port in scanned_ports:
+            port_str = str(port).strip()
+            if port_str and port_str not in self.scanned_ports_history[mac]:
+                self.scanned_ports_history[mac].append(port_str)
+        
+        # Sort for cleaner output
+        self.scanned_ports_history[mac].sort(key=lambda x: int(x) if x.isdigit() else 0)
+        
+        # Save to disk
+        self.save_scanned_ports_history()
+    
+    def get_new_ports_to_scan(self, mac, current_ports):
+        """
+        Determine which ports are NEW and need scanning.
+        
+        Args:
+            mac: MAC address to check
+            current_ports: List of currently open ports on this host
+            
+        Returns:
+            List of NEW ports that haven't been scanned before
+        """
+        if mac not in self.scanned_ports_history:
+            # First time seeing this MAC - scan all ports
+            logger.info(f"🆕 NEW MAC {mac} - will scan all {len(current_ports)} ports")
+            return current_ports
+        
+        previously_scanned = set(self.scanned_ports_history[mac])
+        current_ports_set = set(str(p).strip() for p in current_ports if p)
+        
+        new_ports = current_ports_set - previously_scanned
+        
+        if new_ports:
+            logger.info(f"🔍 MAC {mac}: {len(new_ports)} NEW ports to scan (out of {len(current_ports_set)} total)")
+            logger.info(f"   Previously scanned: {sorted(previously_scanned, key=lambda x: int(x) if x.isdigit() else 0)}")
+            logger.info(f"   New ports: {sorted(new_ports, key=lambda x: int(x) if x.isdigit() else 0)}")
+        else:
+            logger.info(f"✅ MAC {mac}: All {len(current_ports_set)} ports already scanned - SKIPPING")
+        
+        return sorted(new_ports, key=lambda x: int(x) if x.isdigit() else 0)
+    
+    def reset_scan_history(self, mac=None):
+        """
+        Reset scan history for specific MAC or all MACs.
+        
+        Args:
+            mac: Specific MAC address to reset, or None to reset all
+        """
+        if mac:
+            if mac in self.scanned_ports_history:
+                del self.scanned_ports_history[mac]
+                self.save_scanned_ports_history()
+                logger.info(f"🔄 Reset scan history for MAC {mac}")
+                return True
+            else:
+                logger.warning(f"MAC {mac} not found in scan history")
+                return False
+        else:
+            self.scanned_ports_history = {}
+            self.save_scanned_ports_history()
+            logger.info("🔄 Reset ALL scan history - next scan will be full rescan")
+            return True
+    
+    def get_scan_history_stats(self):
+        """
+        Get statistics about the scan history.
+        
+        Returns:
+            dict: Statistics including MAC count, total ports tracked, etc.
+        """
+        total_ports = sum(len(ports) for ports in self.scanned_ports_history.values())
+        
+        return {
+            'total_macs_tracked': len(self.scanned_ports_history),
+            'total_ports_scanned': total_ports,
+            'average_ports_per_mac': total_ports / len(self.scanned_ports_history) if self.scanned_ports_history else 0,
+            'mac_details': {
+                mac: len(ports) 
+                for mac, ports in self.scanned_ports_history.items()
+            }
+        }
 
     def update_summary_file(self, ip, hostname, mac, port, vulnerabilities):
         """
@@ -107,6 +249,19 @@ class NmapVulnScanner:
             self.shared_data.bjornstatustext2 = ip
 
             ports_to_scan = self.prepare_port_list(ports)
+            
+            # INCREMENTAL SCANNING: Only scan NEW ports for this MAC address
+            if mac and mac not in ['Unknown', '00:00:00:00:00:00', '']:
+                original_port_count = len(ports_to_scan)
+                ports_to_scan = self.get_new_ports_to_scan(mac, ports_to_scan)
+                
+                if not ports_to_scan and original_port_count > 0:
+                    logger.info(f"⏭️ SKIPPING {ip} (MAC {mac}) - All {original_port_count} ports already scanned")
+                    return None  # All ports already scanned - skip this host
+                elif ports_to_scan and original_port_count > 0:
+                    logger.info(f"📍 INCREMENTAL SCAN {ip} (MAC {mac}): {len(ports_to_scan)}/{original_port_count} NEW ports")
+            else:
+                logger.warning(f"⚠️ No valid MAC for {ip} - cannot use incremental scanning")
             
             # Determine scan strategy based on detected ports
             if not ports_to_scan:
@@ -176,6 +331,12 @@ class NmapVulnScanner:
             # If vulnerabilities are deleted via web UI and scan finds them again,
             # they will be automatically re-added here
             self.feed_to_network_intelligence(ip, port_vulnerabilities, port_services)
+            
+            # CRITICAL: Update scanned ports history for incremental scanning
+            # This ensures we don't re-scan the same ports on subsequent runs
+            if mac and mac not in ['Unknown', '00:00:00:00:00:00', ''] and ports_to_scan:
+                self.update_scanned_ports_for_mac(mac, ports_to_scan)
+                logger.info(f"✅ Updated scan history for MAC {mac}: Added {len(ports_to_scan)} ports")
             
             # Legacy CSV updates - DEPRECATED (kept for backward compatibility only)
             # TODO: Remove these once all systems read from Network Intelligence

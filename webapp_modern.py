@@ -86,6 +86,9 @@ sync_lock = threading.Lock()
 last_sync_time = 0.0
 SYNC_BACKGROUND_INTERVAL = 5  # seconds between automatic synchronizations
 
+# Scan results caching to avoid reprocessing files every sync
+scan_results_cache = {}
+processed_scan_files = {}  # Track which files we've already processed: {filename: mtime}
 
 DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'
 SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
@@ -947,6 +950,7 @@ def update_wifi_network_data():
                                     ip = row[0].strip()
                                     ports = set()
                                     if len(row) > 4 and row[4]:
+                                        # Parse ports from semicolon-separated list
                                         for port_entry in row[4].split(';'):
                                             normalized = _normalize_port_value(port_entry)
                                             if normalized:
@@ -963,63 +967,104 @@ def update_wifi_network_data():
                                     'last_successful_ping': row[7] if len(row) > 7 else '',
                                     'last_ping_attempt': row[8] if len(row) > 8 else ''
                                 }
+                        
+                        # Log loaded data for debugging
+                        total_ports_loaded = sum(len(data['ports']) for data in existing_data.values())
+                        logger.debug(f"[WIFI DATA LOAD] Loaded {len(existing_data)} hosts with {total_ports_loaded} total ports from {wifi_network_file}")
+                        
+                        # Log hosts with many ports (likely from deep scans)
+                        for ip, data in existing_data.items():
+                            if len(data['ports']) > 10:
+                                logger.debug(f"[WIFI DATA LOAD] {ip} has {len(data['ports'])} ports (likely from deep scan)")
+                                
             except Exception as e:
                 logger.debug(f"Could not read existing WiFi network file: {e}")
 
-        # Process new scan results
+        # Process new scan results (with caching to avoid reprocessing unchanged files)
         if os.path.exists(scan_results_dir):
             current_time = datetime.now().isoformat()
-
+            global processed_scan_files
+            
+            files_to_process = []
             for filename in os.listdir(scan_results_dir):
                 if filename.startswith('result_') and filename.endswith('.csv'):
                     filepath = os.path.join(scan_results_dir, filename)
                     try:
-                        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                            reader = csv.reader(f)
-                            for row in reader:
-                                if len(row) >= 1 and row[0].strip():
-                                    ip = row[0].strip()
-                                    if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
-                                        hostname = row[1] if len(row) > 1 and row[1] else ''
-                                        alive = _normalize_alive_value(row[2] if len(row) > 2 and row[2] else '1')
-                                        mac = row[3] if len(row) > 3 and row[3] else ''
-
-                                        # Collect ports from remaining columns
-                                        ports = set()
-                                        if len(row) > 4:
-                                            for port_col in row[4:]:
-                                                normalized = _normalize_port_value(port_col)
-                                                if normalized:
-                                                    ports.add(normalized)
-
-                                        # Update or add entry
-                                        if ip in existing_data:
-                                            # Merge data
-                                            if hostname and hostname != 'Unknown':
-                                                existing_data[ip]['hostname'] = hostname
-                                            if mac and mac != 'Unknown':
-                                                existing_data[ip]['mac'] = mac
-                                            existing_data[ip]['alive'] = alive
-                                            existing_data[ip]['ports'].update(ports)
-                                            existing_data[ip]['last_seen'] = current_time
-                                            # Reset failure counter on successful scan
-                                            existing_data[ip]['failed_ping_count'] = 0
-                                            existing_data[ip]['last_successful_ping'] = current_time
-                                        else:
-                                            # New entry
-                                            existing_data[ip] = {
-                                                'hostname': hostname,
-                                                'alive': alive,
-                                                'mac': mac,
-                                                'ports': ports,
-                                                'last_seen': current_time,
-                                                'failed_ping_count': 0,
-                                                'last_successful_ping': current_time,
-                                                'last_ping_attempt': current_time
-                                            }
+                        # Check if file has been modified since we last processed it
+                        file_mtime = os.path.getmtime(filepath)
+                        if filename not in processed_scan_files or processed_scan_files[filename] < file_mtime:
+                            files_to_process.append((filename, filepath, file_mtime))
                     except Exception as e:
-                        logger.debug(f"Could not read scan result file {filepath}: {e}")
-                        continue
+                        logger.debug(f"Could not check mtime for {filepath}: {e}")
+                        
+            # Log caching efficiency
+            if len(files_to_process) == 0:
+                logger.debug(f"[SCAN CACHE] All {len(processed_scan_files)} scan files already processed, skipping")
+            elif len(files_to_process) < len(os.listdir(scan_results_dir)):
+                logger.debug(f"[SCAN CACHE] Processing {len(files_to_process)} new/modified files, skipping {len(processed_scan_files) - len(files_to_process)} cached files")
+
+            for filename, filepath, file_mtime in files_to_process:
+                try:
+                    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                        reader = csv.reader(f)
+                        for row in reader:
+                            if len(row) >= 1 and row[0].strip():
+                                ip = row[0].strip()
+                                if re.match(r'^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$', ip):
+                                    hostname = row[1] if len(row) > 1 and row[1] else ''
+                                    alive = _normalize_alive_value(row[2] if len(row) > 2 and row[2] else '1')
+                                    mac = row[3] if len(row) > 3 and row[3] else ''
+
+                                    # Collect ports from remaining columns
+                                    ports = set()
+                                    if len(row) > 4:
+                                        for port_col in row[4:]:
+                                            normalized = _normalize_port_value(port_col)
+                                            if normalized:
+                                                ports.add(normalized)
+
+                                    # Update or add entry
+                                    if ip in existing_data:
+                                        # Merge data - PRESERVE ALL EXISTING PORTS (including deep scan results)
+                                        existing_ports_before = len(existing_data[ip]['ports'])
+                                        
+                                        if hostname and hostname != 'Unknown':
+                                            existing_data[ip]['hostname'] = hostname
+                                        if mac and mac != 'Unknown':
+                                            existing_data[ip]['mac'] = mac
+                                        existing_data[ip]['alive'] = alive
+                                        
+                                        # CRITICAL: Add new ports to existing set, don't replace
+                                        existing_data[ip]['ports'].update(ports)
+                                        
+                                        existing_ports_after = len(existing_data[ip]['ports'])
+                                        # Only log significant port changes to reduce noise
+                                        if existing_ports_after > existing_ports_before and (existing_ports_after - existing_ports_before) >= 3:
+                                            logger.info(f"[PORT PRESERVATION] {ip}: Added {existing_ports_after - existing_ports_before} new ports (total: {existing_ports_after})")
+                                        
+                                        existing_data[ip]['last_seen'] = current_time
+                                        # Reset failure counter on successful scan
+                                        existing_data[ip]['failed_ping_count'] = 0
+                                        existing_data[ip]['last_successful_ping'] = current_time
+                                    else:
+                                        # New entry
+                                        existing_data[ip] = {
+                                            'hostname': hostname,
+                                            'alive': alive,
+                                            'mac': mac,
+                                            'ports': ports,
+                                            'last_seen': current_time,
+                                            'failed_ping_count': 0,
+                                            'last_successful_ping': current_time,
+                                            'last_ping_attempt': current_time
+                                        }
+                    
+                    # Mark file as processed
+                    processed_scan_files[filename] = file_mtime
+                    
+                except Exception as e:
+                    logger.debug(f"Could not read scan result file {filepath}: {e}")
+                    continue
         
         # Remove entries that haven't been seen recently
         retention_days = shared_data.config.get('network_device_retention_days', 14)
@@ -1045,8 +1090,12 @@ def update_wifi_network_data():
             existing_data.pop(ip, None)
 
         # Update alive status based on current ARP cache data with robust connectivity tracking
+        # IMPORTANT: Only update ping counters when we have fresh ARP data (within last ARP_SCAN_INTERVAL)
         current_time = datetime.now().isoformat()
+        current_timestamp = time.time()
         arp_hosts = network_scan_cache.get('arp_hosts', {})
+        last_arp_scan_time = network_scan_cache.get('last_arp_scan', 0)
+        arp_data_is_fresh = (current_timestamp - last_arp_scan_time) < ARP_SCAN_INTERVAL + 2  # +2 for timing tolerance
         MAX_FAILED_PINGS = shared_data.config.get('network_max_failed_pings', 15)  # Changed to 15 for more stability
         
         for ip, data in existing_data.items():
@@ -1074,19 +1123,22 @@ def update_wifi_network_data():
                     except Exception as e:
                         logger.debug(f"Could not update NetKB with real MAC for {ip}: {e}")
             else:
-                # Device didn't respond - increment failure counter
-                data['failed_ping_count'] = data.get('failed_ping_count', 0) + 1
-                data['last_ping_attempt'] = current_time
+                # Device didn't respond - only increment counter if we have fresh ARP data
+                if arp_data_is_fresh:
+                    data['failed_ping_count'] = data.get('failed_ping_count', 0) + 1
+                    data['last_ping_attempt'] = current_time
                 
                 # Only mark as offline after MAX_FAILED_PINGS consecutive failures
                 if data['failed_ping_count'] >= MAX_FAILED_PINGS:
                     data['alive'] = False
-                    logger.debug(f"Device {ip} marked offline after {data['failed_ping_count']} consecutive failed pings")
+                    logger.info(f"Device {ip} marked offline after {data['failed_ping_count']} consecutive failed pings")
                 else:
                     # IMPORTANT: Keep device as "alive" until it exceeds the failure limit
                     # This implements the proper 15-ping rule you requested
                     data['alive'] = True  # Don't change to False until 15 failures
-                    logger.debug(f"Device {ip} failed ping {data['failed_ping_count']}/{MAX_FAILED_PINGS} - keeping alive per 15-ping rule")
+                    # Only log devices approaching the failure threshold to reduce noise
+                    if data['failed_ping_count'] >= MAX_FAILED_PINGS - 3:
+                        logger.debug(f"Device {ip} failed ping {data['failed_ping_count']}/{MAX_FAILED_PINGS} - keeping alive per 15-ping rule")
 
         # Add new devices discovered via ARP that aren't in our data yet
         for ip, arp_data in arp_hosts.items():
@@ -1130,13 +1182,21 @@ def update_wifi_network_data():
             if is_target_active:
                 aggregated_active_count += 1
                 aggregated_port_count += sum(1 for port in data['ports'] if port)
-                logger.debug(f"[15-PING RULE] {ip}: ACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
+                # Only log every 10th device or devices approaching failure threshold
+                if aggregated_active_count % 10 == 1 or failed_ping_count >= MAX_FAILED_PINGS - 2:
+                    logger.debug(f"[15-PING RULE] {ip}: ACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
             else:
                 aggregated_inactive_count += 1
-                logger.debug(f"[15-PING RULE] {ip}: INACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
+                logger.info(f"[15-PING RULE] {ip}: INACTIVE (failures={failed_ping_count}/{MAX_FAILED_PINGS}, alive={is_explicitly_alive})")
 
         # Write updated data to WiFi-specific file
         try:
+            # Count ports before writing for debugging
+            total_ports_to_write = sum(len(data['ports']) for data in existing_data.values())
+            hosts_with_many_ports = sum(1 for data in existing_data.values() if len(data['ports']) > 10)
+            
+            logger.debug(f"[WIFI DATA WRITE] Writing {len(existing_data)} hosts with {total_ports_to_write} total ports ({hosts_with_many_ports} hosts with >10 ports)")
+            
             with open(wifi_network_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['IP', 'Hostname', 'Alive', 'MAC', 'Ports', 'LastSeen', 'FailedPingCount', 'LastSuccessfulPing', 'LastPingAttempt'])
@@ -1154,6 +1214,11 @@ def update_wifi_network_data():
                             return value
 
                     ports_str = ';'.join(sorted((port for port in data['ports'] if port), key=port_sort_key))
+                    
+                    # Log hosts with many ports being written
+                    if len(data['ports']) > 10:
+                        logger.debug(f"[WIFI DATA WRITE] {ip}: Writing {len(data['ports'])} ports to file")
+                    
                     writer.writerow([
                         ip,
                         data['hostname'],
@@ -1166,7 +1231,7 @@ def update_wifi_network_data():
                         data.get('last_ping_attempt', '')
                     ])
 
-            logger.info(f"Updated WiFi network data file: {wifi_network_file} with {len(existing_data)} entries (removed {len(stale_hosts)} stale hosts)")
+            logger.info(f"✅ Updated WiFi network data file: {wifi_network_file} with {len(existing_data)} entries (removed {len(stale_hosts)} stale hosts, preserved {total_ports_to_write} ports)")
         except Exception as e:
             logger.error(f"Error writing WiFi network data file: {e}")
 
@@ -2915,6 +2980,69 @@ def trigger_vulnerability_scan_for_threat_intel():
             'timestamp': datetime.now().isoformat(),
             'suggestion': 'Try using the Manual mode to trigger vulnerability scans'
         }), 500
+
+@app.route('/api/vulnerability-scan/history', methods=['GET'])
+def get_vulnerability_scan_history():
+    """Get incremental scan history statistics"""
+    try:
+        # Access the nmap_vuln_scanner from shared_data
+        vuln_scanner = getattr(shared_data, 'nmap_vuln_scanner', None)
+        
+        if not vuln_scanner:
+            return jsonify({
+                'error': 'Vulnerability scanner not initialized',
+                'stats': {
+                    'total_macs_tracked': 0,
+                    'total_ports_scanned': 0,
+                    'average_ports_per_mac': 0,
+                    'mac_details': {}
+                }
+            }), 200
+        
+        stats = vuln_scanner.get_scan_history_stats()
+        
+        return jsonify({
+            'success': True,
+            'stats': stats,
+            'message': f"Tracking {stats['total_macs_tracked']} MAC addresses with {stats['total_ports_scanned']} scanned ports"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting scan history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vulnerability-scan/history/reset', methods=['POST'])
+def reset_vulnerability_scan_history():
+    """Reset incremental scan history for specific MAC or all"""
+    try:
+        data = request.get_json() if request.is_json else {}
+        mac = data.get('mac', None)
+        
+        # Access the nmap_vuln_scanner from shared_data
+        vuln_scanner = getattr(shared_data, 'nmap_vuln_scanner', None)
+        
+        if not vuln_scanner:
+            return jsonify({
+                'error': 'Vulnerability scanner not initialized'
+            }), 500
+        
+        success = vuln_scanner.reset_scan_history(mac)
+        
+        if mac:
+            message = f"Reset scan history for MAC {mac}" if success else f"MAC {mac} not found in history"
+        else:
+            message = "Reset ALL scan history - next scan will be a full rescan"
+        
+        return jsonify({
+            'success': success,
+            'message': message,
+            'mac': mac,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error resetting scan history: {e}")
+        return jsonify({'error': str(e)}), 500
 
 # ============================================================================
 # REAL-TIME SCANNING ENDPOINTS
@@ -6429,10 +6557,10 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
             import threading
             sync_thread = threading.Thread(target=sync_all_counts, daemon=True)
             sync_thread.start()
-            sync_thread.join(timeout=30)  # 30 second timeout
+            sync_thread.join(timeout=120)  # 120 second timeout (increased from 30s to handle large networks)
             
             if sync_thread.is_alive():
-                logger.error("Background sync thread timed out after 30 seconds! Skipping this cycle.")
+                logger.error("Background sync thread timed out after 120 seconds! Skipping this cycle.")
                 consecutive_errors += 1
             else:
                 consecutive_errors = 0  # Reset on success
@@ -6545,10 +6673,10 @@ def background_health_monitor():
         try:
             current_time = time.time()
             
-            # Check sync thread - should run every 5 seconds
+            # Check sync thread - should run every 5 seconds but may take up to 60s for large networks
             if background_thread_health['sync_last_run'] > 0:
                 time_since_sync = current_time - background_thread_health['sync_last_run']
-                if time_since_sync > 30:  # No sync for 30 seconds
+                if time_since_sync > 150:  # Increased from 30s to 150s to accommodate 120s timeout + buffer
                     logger.warning(f"⚠️ Background sync thread appears stuck! Last run was {time_since_sync:.0f}s ago")
                     background_thread_health['sync_alive'] = False
                 else:

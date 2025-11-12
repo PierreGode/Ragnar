@@ -1325,10 +1325,10 @@ class NetworkScanner:
         try:
             # Build nmap args depending on mode
             if use_top_ports:
-                # Fast scan of most common ports (top 30000) for broader coverage while still faster than full range
-                nmap_args = "-Pn -sT --top-ports 30000 --open -T4 --min-rate 500 --max-retries 1 -v"
-                self.logger.info(f"🚀 EXECUTING DEEP SCAN (TOP 30000): nmap {nmap_args} {ip}")
-                self.logger.info("   Mode: top30000 common ports (fast/extended)")
+                # Fast scan of most common ports (top 10000) for broader coverage while still faster than full range
+                nmap_args = "-Pn -sT --top-ports 10000 --open -T4 --min-rate 500 --max-retries 1 -v"
+                self.logger.info(f"🚀 EXECUTING DEEP SCAN (TOP 10000): nmap {nmap_args} {ip}")
+                self.logger.info("   Mode: top10000 common ports (fast/extended)")
             else:
                 # Full range scan (can be slow)
                 nmap_args = f"-Pn -sT -p{portstart}-{portend} --open -T4 --min-rate 1000 --max-retries 1 -v"
