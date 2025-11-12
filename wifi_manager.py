@@ -584,10 +584,36 @@ class WiFiManager:
             self.stop_ap_mode()
             self._endless_loop_wifi_search()
 
-    def _check_known_networks_available(self):
-        """Check if any known WiFi networks are currently available without disrupting AP mode"""
+    def get_system_wifi_profiles(self):
+        """Get all WiFi connection profiles from NetworkManager (system-wide)"""
         try:
-            if not self.known_networks:
+            result = subprocess.run(['nmcli', '-t', '-f', 'NAME,TYPE', 'con', 'show'], 
+                                  capture_output=True, text=True, timeout=10)
+            
+            wifi_profiles = []
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line and ':' in line:
+                        parts = line.split(':')
+                        if len(parts) >= 2 and parts[1] == '802-11-wireless':
+                            wifi_profiles.append(parts[0])
+            
+            self.logger.debug(f"Found {len(wifi_profiles)} system WiFi profiles: {wifi_profiles}")
+            return wifi_profiles
+            
+        except Exception as e:
+            self.logger.error(f"Error getting system WiFi profiles: {e}")
+            return []
+
+    def _check_known_networks_available(self):
+        """Check if any known WiFi networks (Ragnar or system) are currently available without disrupting AP mode"""
+        try:
+            # Get both Ragnar's known networks AND system profiles
+            ragnar_known = [net['ssid'] for net in self.known_networks]
+            system_profiles = self.get_system_wifi_profiles()
+            all_known = list(set(ragnar_known + system_profiles))  # Combine and deduplicate
+            
+            if not all_known:
                 return False
             
             # Try a quick scan using iwlist (less disruptive)
@@ -602,9 +628,8 @@ class WiFiManager:
                             if ssid and ssid != '<hidden>':
                                 available_ssids.append(ssid)
                     
-                    # Check if any known networks are available
-                    known_ssids = [net['ssid'] for net in self.known_networks]
-                    for known_ssid in known_ssids:
+                    # Check if any known networks (Ragnar or system) are available
+                    for known_ssid in all_known:
                         if known_ssid in available_ssids:
                             self.logger.info(f"Known network '{known_ssid}' detected while in AP mode")
                             return True
@@ -766,13 +791,17 @@ class WiFiManager:
             return None
     
     def scan_networks(self):
-        """Scan for available Wi-Fi networks"""
+        """Scan for available Wi-Fi networks and mark those with system profiles"""
         try:
             # If we're in AP mode, use special AP scanning method
             if self.ap_mode_active:
                 return self.scan_networks_while_ap()
             
             self.logger.info("Scanning for Wi-Fi networks...")
+            
+            # Get system WiFi profiles to mark known networks
+            system_profiles = self.get_system_wifi_profiles()
+            ragnar_known = [net['ssid'] for net in self.known_networks]
             
             # Trigger a new scan
             subprocess.run(['nmcli', 'dev', 'wifi', 'rescan'], 
@@ -788,11 +817,14 @@ class WiFiManager:
                     if line and ':' in line:
                         parts = line.split(':')
                         if len(parts) >= 3 and parts[0]:  # SSID not empty
+                            ssid = parts[0]
+                            # Mark as known if EITHER in Ragnar's list OR has system profile
+                            is_known = ssid in ragnar_known or ssid in system_profiles
                             networks.append({
-                                'ssid': parts[0],
+                                'ssid': ssid,
                                 'signal': int(parts[1]) if parts[1].isdigit() else 0,
                                 'security': parts[2] if parts[2] else 'Open',
-                                'known': parts[0] in [net['ssid'] for net in self.known_networks]
+                                'known': is_known
                             })
             
             # Remove duplicates and sort by signal strength
@@ -816,6 +848,10 @@ class WiFiManager:
         try:
             self.logger.info("Scanning networks while in AP mode using smart strategies")
             self.ap_logger.info("Starting network scan while in AP mode (non-disruptive)")
+            
+            # Get system WiFi profiles to mark known networks
+            system_profiles = self.get_system_wifi_profiles()
+            ragnar_known = [net['ssid'] for net in self.known_networks]
             
             # Strategy 1: Return cached networks if we have recent data (within 5 minutes for fresher data)
             if hasattr(self, 'cached_networks') and hasattr(self, 'last_scan_time'):
@@ -889,8 +925,9 @@ class WiFiManager:
                         for network in sorted(networks, key=lambda x: x.get('signal', 0), reverse=True):
                             if network['ssid'] not in seen_ssids:
                                 seen_ssids.add(network['ssid'])
-                                # Add known network flag
-                                network['known'] = network['ssid'] in [net['ssid'] for net in self.known_networks]
+                                # Add known network flag - check BOTH Ragnar and system profiles
+                                ssid = network['ssid']
+                                network['known'] = ssid in ragnar_known or ssid in system_profiles
                                 unique_networks.append(network)
                         
                         # Cache the results
