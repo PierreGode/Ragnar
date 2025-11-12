@@ -196,16 +196,8 @@ class NetworkScanner:
                 ordered_ports.append(port)
         
         port_list = ','.join(map(str, ordered_ports))
-        
-        # Nmap arguments for network-wide scan:
-        # -Pn: Skip host discovery (treat all as online)
-        # -sS: SYN scan (requires root, 10x faster than -sT)
-        # --open: Only show open ports
-        # --min-rate 5000: Send at least 5000 probes per second
-        # --max-retries 1: No slow resends
-        # --host-timeout 10s: Limit per-host time strictly
-        # -v: Verbose output
-        nmap_args = f"-Pn -sS -p{port_list} --open --min-rate 5000 --max-retries 1 --host-timeout 10s -v"
+
+        nmap_args = f"-Pn -sT --top-ports 3000 --open -T4 --min-rate 500 --max-retries 1 -v"
         
         nmap_command = f"nmap {nmap_args} {network_cidr}"
         self.logger.info(f"🔍 Executing: {nmap_command}")
@@ -1362,7 +1354,7 @@ class NetworkScanner:
             # Build nmap args depending on mode
             if use_top_ports:
                 # Fast scan of most common ports (top 3000) for broader coverage while still faster than full range
-                nmap_args = "-Pn -sT --top-ports 3000 --open -T4 --min-rate 500 --max-retries 1 -v"
+                nmap_args = "nmap -Pn -sT -p- --open -T4 --min-rate 500 --max-retries 1 -v"
                 self.logger.info(f"🚀 EXECUTING DEEP SCAN (TOP 3000): nmap {nmap_args} {ip}")
                 self.logger.info("   Mode: top3000 common ports (fast/extended)")
             else:
