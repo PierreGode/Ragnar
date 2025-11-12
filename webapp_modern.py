@@ -26,8 +26,9 @@ import importlib
 import hashlib
 import ipaddress
 import socket
-from datetime import datetime, timedelta
-from flask import Flask, render_template, jsonify, request, send_from_directory, Response
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
+from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response
 from flask_socketio import SocketIO, emit
 try:
     from flask_cors import CORS  # type: ignore
@@ -105,6 +106,37 @@ def _is_valid_ipv4(value):
 
 def _normalize_mac(mac):
     return mac.lower() if mac else ''
+
+
+def _parse_attack_timestamp(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (ValueError, OSError):
+            return None
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+
+        if cleaned.endswith('Z') and '+' not in cleaned:
+            cleaned = cleaned[:-1] + '+00:00'
+
+        parsers = (
+            lambda v: datetime.fromisoformat(v),
+            lambda v: datetime.strptime(v, '%Y-%m-%d %H:%M:%S'),
+            lambda v: datetime.strptime(v, '%Y-%m-%dT%H:%M:%S'),
+        )
+
+        for parser in parsers:
+            try:
+                return parser(cleaned)
+            except ValueError:
+                continue
+
+    return None
 
 
 def _parse_arp_scan_output(output):
@@ -2482,18 +2514,19 @@ def attack_logs():
             days_back = int(request.args.get('days', 7))
             
             attack_log_dir = os.path.join(shared_data.logsdir, 'attacks')
-            
+
             if not os.path.exists(attack_log_dir):
                 return jsonify({
                     'attack_logs': [],
                     'total_count': 0,
                     'message': 'No attack logs found'
                 })
-            
+
             # Collect logs from recent days
             all_logs = []
+            latest_log_time_all = None
             cutoff_date = datetime.now() - timedelta(days=days_back)
-            
+
             for log_file in os.listdir(attack_log_dir):
                 if not log_file.startswith('attacks_') or not log_file.endswith('.json'):
                     continue
@@ -2513,13 +2546,18 @@ def attack_logs():
                     with open(log_path, 'r', encoding='utf-8') as f:
                         logs = json.load(f)
                         all_logs.extend(logs)
+
+                        for entry in logs:
+                            parsed_time = _parse_attack_timestamp(entry.get('timestamp'))
+                            if parsed_time and (latest_log_time_all is None or parsed_time > latest_log_time_all):
+                                latest_log_time_all = parsed_time
                 except Exception as e:
                     logger.error(f"Error reading attack log file {log_file}: {e}")
                     continue
-            
+
             # Apply filters
             filtered_logs = all_logs
-            
+
             if ip_filter:
                 filtered_logs = [log for log in filtered_logs if log.get('target_ip') == ip_filter]
             
@@ -2531,17 +2569,23 @@ def attack_logs():
             
             # Sort by timestamp (most recent first)
             filtered_logs.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
-            
+
             # Apply limit
             filtered_logs = filtered_logs[:limit]
-            
+
             # Generate summary statistics
             total_count = len(all_logs)
             filtered_count = len(filtered_logs)
             success_count = len([log for log in filtered_logs if log.get('status') == 'success'])
             failed_count = len([log for log in filtered_logs if log.get('status') == 'failed'])
-            
-            return jsonify({
+
+            filtered_latest = None
+            for entry in filtered_logs:
+                parsed_time = _parse_attack_timestamp(entry.get('timestamp'))
+                if parsed_time and (filtered_latest is None or parsed_time > filtered_latest):
+                    filtered_latest = parsed_time
+
+            response_payload = {
                 'attack_logs': filtered_logs,
                 'total_count': total_count,
                 'filtered_count': filtered_count,
@@ -2554,8 +2598,41 @@ def attack_logs():
                     'days': days_back,
                     'limit': limit
                 }
-            })
-            
+            }
+
+            etag_source = json.dumps({
+                'attack_logs': filtered_logs,
+                'total_count': total_count,
+                'filtered_count': filtered_count,
+                'success_count': success_count,
+                'failed_count': failed_count
+            }, sort_keys=True).encode('utf-8')
+
+            etag_value = f'W/"attack-{hashlib.md5(etag_source).hexdigest()}"'
+
+            last_modified_dt = filtered_latest or latest_log_time_all
+            if last_modified_dt and last_modified_dt.tzinfo is None:
+                last_modified_dt = last_modified_dt.replace(tzinfo=timezone.utc)
+
+            if_none_match = request.headers.get('If-None-Match', '')
+            if if_none_match:
+                etag_matches = [tag.strip() for tag in if_none_match.split(',') if tag.strip()]
+                if etag_value in etag_matches:
+                    response = make_response('', 304)
+                    response.headers['ETag'] = etag_value
+                    response.headers['Cache-Control'] = 'no-cache'
+                    if last_modified_dt:
+                        response.headers['Last-Modified'] = format_datetime(last_modified_dt.astimezone(timezone.utc), usegmt=True)
+                    return response
+
+            response = jsonify(response_payload)
+            response.headers['ETag'] = etag_value
+            response.headers['Cache-Control'] = 'no-cache'
+            if last_modified_dt:
+                response.headers['Last-Modified'] = format_datetime(last_modified_dt.astimezone(timezone.utc), usegmt=True)
+
+            return response
+
         except Exception as e:
             logger.error(f"Error retrieving attack logs: {e}")
             return jsonify({

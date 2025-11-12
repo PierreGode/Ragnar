@@ -594,8 +594,10 @@ async function loadInitialData() {
 async function loadTabData(tabName) {
     switch(tabName) {
         case 'dashboard':
-            await loadDashboardData();
-            await loadConsoleLogs();
+            await Promise.all([
+                loadDashboardData(),
+                loadConsoleLogs()
+            ]);
             break;
         case 'network':
             await loadNetworkData();
@@ -604,16 +606,20 @@ async function loadTabData(tabName) {
             await loadConnectData();
             break;
         case 'discovered':
-            await loadCredentialsData();
-            await loadLootData();
-            await loadAttackLogs();
+            await Promise.all([
+                loadCredentialsData(),
+                loadLootData(),
+                loadAttackLogs()
+            ]);
             break;
         case 'threat-intel':
             await loadThreatIntelData();
             break;
         case 'files':
-            await loadFilesData();
-            await loadImagesData();
+            await Promise.all([
+                loadFilesData(),
+                loadImagesData()
+            ]);
             break;
         case 'system':
             loadSystemData();
@@ -1920,24 +1926,72 @@ async function loadLootData() {
 // Attack Logs Functions
 let currentAttackFilter = 'all';
 let attackLogsCache = null;
+let attackLogsETag = null;
+let attackLogsInFlight = null;
 
-async function loadAttackLogs() {
-    try {
-        const data = await fetchAPI('/api/attack?limit=200&days=7');
-        attackLogsCache = data;
-        displayAttackLogs(data);
-    } catch (error) {
-        console.error('Error loading attack logs:', error);
+async function loadAttackLogs(options = {}) {
+    const { force = false } = options;
+
+    if (attackLogsInFlight) {
+        return attackLogsInFlight;
+    }
+
+    const headers = {};
+    if (!force && attackLogsETag) {
+        headers['If-None-Match'] = attackLogsETag;
+    }
+
+    if (!attackLogsCache) {
         document.getElementById('attack-logs-container').innerHTML = `
-            <div class="text-center text-red-400 py-8">
-                <svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+            <div class="text-center text-gray-400 py-8">
+                <svg class="w-8 h-8 inline animate-spin mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                 </svg>
-                <p>Error loading attack logs</p>
-                <p class="text-sm text-gray-500 mt-2">${error.message}</p>
+                <p>Loading attack logs...</p>
             </div>
         `;
     }
+
+    attackLogsInFlight = (async () => {
+        try {
+            const response = await fetch('/api/attack?limit=200&days=7', { headers });
+
+            if (response.status === 304) {
+                console.debug('Attack logs unchanged; skipping DOM update');
+                return attackLogsCache;
+            }
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            attackLogsCache = data;
+            attackLogsETag = response.headers.get('ETag') || attackLogsETag;
+            displayAttackLogs(data);
+            return data;
+        } catch (error) {
+            console.error('Error loading attack logs:', error);
+
+            if (!attackLogsCache) {
+                document.getElementById('attack-logs-container').innerHTML = `
+                    <div class="text-center text-red-400 py-8">
+                        <svg class="w-12 h-12 mx-auto mb-3 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                        </svg>
+                        <p>Error loading attack logs</p>
+                        <p class="text-sm text-gray-500 mt-2">${error.message}</p>
+                    </div>
+                `;
+            }
+
+            return attackLogsCache;
+        } finally {
+            attackLogsInFlight = null;
+        }
+    })();
+
+    return attackLogsInFlight;
 }
 
 function filterAttackLogs(status) {
@@ -1959,7 +2013,7 @@ function filterAttackLogs(status) {
 }
 
 async function refreshAttackLogs() {
-    await loadAttackLogs();
+    await loadAttackLogs({ force: true });
 }
 
 function displayAttackLogs(data) {
@@ -2155,16 +2209,15 @@ async function loadConfigData() {
 
 async function loadConnectData() {
     try {
-        // Load Wi-Fi interfaces
+        // Load Wi-Fi interfaces first so dropdowns are populated before status updates
         await loadWifiInterfaces();
-        
-        // Refresh Wi-Fi status when connect tab is loaded
-        console.log('Loading connect tab, refreshing Wi-Fi status...');
-        await refreshWifiStatus();
-        
-        // Refresh Bluetooth status when connect tab is loaded
-        console.log('Loading connect tab, refreshing Bluetooth status...');
-        await refreshBluetoothStatus();
+
+        // Refresh Wi-Fi and Bluetooth status in parallel to shorten the loading time
+        console.log('Loading connect tab, refreshing connectivity status...');
+        await Promise.all([
+            refreshWifiStatus(),
+            refreshBluetoothStatus()
+        ]);
     } catch (error) {
         console.error('Error loading connect data:', error);
     }
