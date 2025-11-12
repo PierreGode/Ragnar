@@ -196,7 +196,7 @@ class NetworkScanner:
 
         nmap_args = f"-Pn -sS -p{port_list} --open --min-rate 5000 --max-retries 1 --host-timeout 10s -v"
         
-        nmap_command = f"nmap {nmap_args} {network_cidr}"
+        nmap_command = f"sudo nmap {nmap_args} {network_cidr}"
         self.logger.info(f"🔍 Executing: {nmap_command}")
         self.logger.info(f"   Scanning {len(ordered_ports)} ports across entire {network_cidr} network")
         
@@ -204,7 +204,8 @@ class NetworkScanner:
         
         try:
             scan_start = time.time()
-            self.nm.scan(hosts=network_cidr, arguments=nmap_args)
+            # Use sudo for nmap to allow SYN scanning (-sS flag requires root)
+            self.nm.scan(hosts=network_cidr, arguments=nmap_args, sudo=True)
             scan_duration = time.time() - scan_start
             
             all_hosts = self.nm.all_hosts()

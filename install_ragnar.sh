@@ -719,6 +719,14 @@ ragnar ALL=(ALL) NOPASSWD: /usr/bin/nmcli, /sbin/iwlist, /sbin/ip, /bin/systemct
 EOF
     chmod 440 /etc/sudoers.d/ragnar-wifi
     
+    # Configure sudo for nmap port scanning without password
+    log "INFO" "Configuring sudo permissions for nmap..."
+    cat > /etc/sudoers.d/ragnar-nmap << EOF
+# Allow ragnar user to run nmap without password for port scanning
+ragnar ALL=(ALL) NOPASSWD: /usr/bin/nmap
+EOF
+    chmod 440 /etc/sudoers.d/ragnar-nmap
+    
     check_success "Added ragnar user to required groups and configured sudo permissions"
 }
 
