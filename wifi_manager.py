@@ -1063,13 +1063,13 @@ class WiFiManager:
         return False
     
     def connect_to_network(self, ssid, password=None):
-        """Connect to a specific Wi-Fi network"""
+        """Connect to a specific Wi-Fi network - NEVER deletes existing system profiles"""
         try:
             self.logger.info(f"Connecting to network: {ssid}")
             if password:
                 self.logger.info(f"Password provided: {'*' * len(password)} (length: {len(password)})")
             else:
-                self.logger.info("No password provided (open network or saved credentials)")
+                self.logger.info("No password provided (open network or will use saved credentials)")
             
             # CRITICAL: If in AP mode, stop it first before connecting to WiFi
             if self.ap_mode_active:
@@ -1077,19 +1077,32 @@ class WiFiManager:
                 self.stop_ap_mode()
                 time.sleep(2)  # Give system time to clean up AP mode
             
-            # First, try to delete any existing connection to ensure fresh connection
-            # This prevents using old/incorrect passwords
-            delete_result = subprocess.run(['nmcli', 'con', 'delete', ssid], 
+            # IMPORTANT: NEVER delete existing NetworkManager profiles!
+            # Check if a connection profile already exists
+            check_result = subprocess.run(['nmcli', 'con', 'show', ssid], 
                                          capture_output=True, text=True)
-            if delete_result.returncode == 0:
-                self.logger.info(f"Deleted existing connection for {ssid}")
+            profile_exists = check_result.returncode == 0
             
-            # Always create a new connection with the provided credentials
-            cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid]
-            if password:
-                cmd.extend(['password', password])
+            if profile_exists:
+                self.logger.info(f"Found existing connection profile for {ssid}")
+                
+                # If password is provided and profile exists, try to update the password
+                if password:
+                    self.logger.info(f"Updating password for existing profile {ssid}")
+                    update_cmd = ['nmcli', 'con', 'modify', ssid, 'wifi-sec.psk', password]
+                    subprocess.run(update_cmd, capture_output=True, text=True)
+                
+                # Try to activate the existing connection
+                self.logger.info(f"Activating existing connection profile for {ssid}")
+                cmd = ['nmcli', 'con', 'up', ssid]
+            else:
+                # No existing profile - create a new one
+                self.logger.info(f"No existing profile found for {ssid}, creating new connection")
+                cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid]
+                if password:
+                    cmd.extend(['password', password])
             
-            self.logger.info(f"Executing: nmcli dev wifi connect {ssid} password {'***' if password else '(none)'}")
+            self.logger.info(f"Executing: {' '.join(cmd[:3])} {ssid} {'password ***' if password else ''}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
@@ -1176,25 +1189,18 @@ class WiFiManager:
             return False
     
     def remove_known_network(self, ssid):
-        """Remove a network from the known networks list"""
+        """Remove a network from Ragnar's known networks list - does NOT delete system NetworkManager profiles"""
         try:
             original_count = len(self.known_networks)
             self.known_networks = [net for net in self.known_networks if net['ssid'] != ssid]
             
             if len(self.known_networks) < original_count:
                 self.save_wifi_config()
-                self.logger.info(f"Removed known network: {ssid}")
-                
-                # Also remove from NetworkManager
-                try:
-                    subprocess.run(['nmcli', 'con', 'delete', ssid], 
-                                 capture_output=True, timeout=10)
-                except:
-                    pass  # Ignore errors, connection might not exist
-                
+                self.logger.info(f"Removed {ssid} from Ragnar's known networks list")
+                self.logger.info(f"NOTE: System NetworkManager profile for {ssid} was NOT deleted - it remains available")
                 return True
             else:
-                self.logger.warning(f"Network {ssid} not found in known networks")
+                self.logger.warning(f"Network {ssid} not found in Ragnar's known networks")
                 return False
                 
         except Exception as e:
