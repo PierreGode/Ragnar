@@ -1,0 +1,56 @@
+﻿# ============================================================
+# RAGNAR PORT SCANNING FIX - DEPLOYMENT INSTRUCTIONS
+# ============================================================
+
+## Problem Identified:
+- Network scanner discovers 32 hosts 
+- Port scanning FAILS (Ports column empty) 
+- Nmap requires sudo for SYN scans (-sS flag)
+- Without port data, attack actions never execute 
+
+## Solution Implemented:
+1. Added sudo=True to nmap scan calls in scanning.py
+2. Created sudoers configuration for passwordless nmap
+3. Updated install script to include nmap sudoers setup
+
+## DEPLOYMENT STEPS:
+
+### On Raspberry Pi (192.168.1.211):
+
+# 1. Pull the latest changes
+ssh ragnar@192.168.1.211
+cd /home/ragnar/Ragnar
+git pull
+
+# 2. Run the sudo fix script
+chmod +x fix_nmap_sudo.sh
+./fix_nmap_sudo.sh
+
+# 3. Restart Ragnar service
+sudo systemctl restart ragnar
+
+# 4. Verify the fix (wait 3-5 minutes for scan cycle)
+tail -f /var/log/syslog | grep -i nmap
+# OR
+watch -n 5 'head -10 /home/ragnar/Ragnar/data/netkb.csv'
+
+## Expected Results After Fix:
+- Ports column should show port numbers (e.g., 22, 80, 443, 445)
+- Attack actions will start executing on hosts with open ports
+- SSH bruteforce will target hosts with port 22 open
+- SMB attacks will target hosts with port 445 open
+- etc.
+
+## Manual Test:
+# Test if nmap works with sudo now:
+sudo nmap -Pn -sS -p22,80,443 192.168.1.11 --open
+
+# Should complete without asking for password!
+
+## Changes Made:
+- actions/scanning.py: Line 208 - Added sudo=True parameter
+- install_ragnar.sh: Lines 721-726 - Added nmap sudoers config
+- fix_nmap_sudo.sh: New script for manual fix
+
+Committed: 8a42266
+Branch: wifiap
