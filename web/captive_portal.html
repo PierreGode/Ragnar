@@ -427,12 +427,13 @@
                 </div>
             </div>
 
-            <div class="form-group">
+            <div class="form-group" id="passwordGroup" style="display: none;">
                 <label for="password">🔒 WiFi Password</label>
                 <div class="password-group">
                     <input type="password" id="password" placeholder="Enter password (leave empty if none)">
                     <button type="button" class="password-toggle" id="togglePassword">👁️</button>
                 </div>
+                <p id="passwordHint" class="text-xs text-gray-400 mt-2" style="display: none;"></p>
             </div>
 
             <button type="submit" class="btn" id="connectBtn">
@@ -451,6 +452,8 @@
         const networkSelect = document.getElementById('networkSelect');
         const manualSSID = document.getElementById('manualSSID');
         const passwordInput = document.getElementById('password');
+        const passwordGroup = document.getElementById('passwordGroup');
+        const passwordHint = document.getElementById('passwordHint');
         const connectBtn = document.getElementById('connectBtn');
         const connectBtnText = document.getElementById('connectBtnText');
         const exitApBtn = document.getElementById('exitApBtn');
@@ -460,10 +463,16 @@
         const status = document.getElementById('status');
         const form = document.getElementById('wifiForm');
 
+        let selectedNetworkKnown = false;
+        let connectionAttempted = false;
+
         // Clear manual input when selecting from dropdown
         networkSelect.addEventListener('change', () => {
             if (networkSelect.value) {
                 manualSSID.value = '';
+                checkNetworkStatus(networkSelect.value);
+            } else {
+                hidePasswordField();
             }
         });
 
@@ -471,8 +480,75 @@
         manualSSID.addEventListener('input', () => {
             if (manualSSID.value) {
                 networkSelect.value = '';
+                hidePasswordField();
+            } else {
+                hidePasswordField();
             }
         });
+
+        // Check if network has stored credentials
+        async function checkNetworkStatus(ssid) {
+            if (!ssid) {
+                hidePasswordField();
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/wifi/networks');
+                const data = await response.json();
+                
+                if (data.success && data.networks) {
+                    const network = data.networks.find(n => n.ssid === ssid);
+                    if (network && network.known) {
+                        selectedNetworkKnown = true;
+                        hidePasswordField();
+                        showPasswordHint('✓ Saved network - will use stored credentials');
+                    } else {
+                        selectedNetworkKnown = false;
+                        showPasswordField();
+                        showPasswordHint('');
+                    }
+                } else {
+                    selectedNetworkKnown = false;
+                    showPasswordField();
+                    showPasswordHint('');
+                }
+            } catch (error) {
+                console.error('Error checking network status:', error);
+                selectedNetworkKnown = false;
+                showPasswordField();
+                showPasswordHint('');
+            }
+        }
+
+        // Show password field
+        function showPasswordField() {
+            passwordGroup.style.display = 'block';
+        }
+
+        // Hide password field
+        function hidePasswordField() {
+            passwordGroup.style.display = 'none';
+            passwordInput.value = '';
+        }
+
+        // Show password hint
+        function showPasswordHint(message) {
+            if (message) {
+                passwordHint.textContent = message;
+                passwordHint.style.display = 'block';
+                passwordHint.className = 'text-xs text-green-400 mt-2';
+            } else {
+                passwordHint.style.display = 'none';
+            }
+        }
+
+        // Show error hint
+        function showPasswordError(message) {
+            passwordHint.textContent = message;
+            passwordHint.style.display = 'block';
+            passwordHint.className = 'text-xs text-red-400 mt-2';
+        }
 
         // Toggle password visibility
         togglePassword.addEventListener('click', () => {
@@ -582,15 +658,34 @@
 
                 if (data.success) {
                     showStatus('✅ Successfully connected! Ragnar is now online.', 'success');
+                    connectionAttempted = false;
+                    selectedNetworkKnown = false;
                     setTimeout(() => {
                         showStatus('ℹ️ You can now disconnect from this AP. Ragnar is connected to WiFi.', 'info');
                     }, 3000);
                 } else {
-                    showStatus('❌ ' + (data.message || 'Failed to connect. Check password and try again.'), 'error');
+                    // Connection failed
+                    const errorMessage = data.message || 'Failed to connect. Check password and try again.';
+                    showStatus('❌ ' + errorMessage, 'error');
+                    
+                    // If this was a known network or first attempt without password, show password field
+                    if (selectedNetworkKnown || !password) {
+                        selectedNetworkKnown = false;
+                        showPasswordField();
+                        showPasswordError('⚠️ Authentication failed. Please enter the correct password.');
+                        connectionAttempted = true;
+                    }
                 }
             } catch (error) {
                 console.error('Error connecting to WiFi:', error);
                 showStatus('❌ Connection failed. Please try again.', 'error');
+                
+                // Show password field on connection error
+                if (selectedNetworkKnown) {
+                    selectedNetworkKnown = false;
+                    showPasswordField();
+                    showPasswordError('⚠️ Connection error. Please enter the password.');
+                }
             } finally {
                 connectBtn.disabled = false;
                 connectBtnText.textContent = 'Connect to WiFi';

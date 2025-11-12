@@ -2996,6 +2996,19 @@ async function connectToWifiNetwork() {
             }
             
             addConsoleMessage(`Failed to connect to Wi-Fi: ${ssid}`, 'error');
+            
+            // If this was a known network, show password field for retry
+            if (isKnown && passwordSection) {
+                passwordSection.style.display = 'block';
+                if (passwordInput) {
+                    passwordInput.value = '';
+                    passwordInput.placeholder = 'Stored password failed - enter correct password';
+                }
+                // Update the network state so next attempt uses the password
+                if (selectedWifiNetwork) {
+                    selectedWifiNetwork.isKnown = false;
+                }
+            }
         }
         
     } catch (error) {
@@ -3011,6 +3024,19 @@ async function connectToWifiNetwork() {
         }
         
         addConsoleMessage(`Error connecting to Wi-Fi: ${error.message}`, 'error');
+        
+        // Show password field on connection error for known networks
+        if (isKnown && passwordSection) {
+            passwordSection.style.display = 'block';
+            if (passwordInput) {
+                passwordInput.value = '';
+                passwordInput.placeholder = 'Connection error - please enter password';
+            }
+            // Update the network state
+            if (selectedWifiNetwork) {
+                selectedWifiNetwork.isKnown = false;
+            }
+        }
         
     } finally {
         // Re-enable submit button
