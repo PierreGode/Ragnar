@@ -1,78 +1,66 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ragnar WiFi Setup</title>
+    <link rel="icon" href="/web/images/ragnar.ico" type="image/x-icon">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Custom Tailwind Config -->
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        Ragnar: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            200: '#bae6fd',
+                            300: '#7dd3fc',
+                            400: '#38bdf8',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                            800: '#075985',
+                            900: '#0c4a6e',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 5px rgba(14, 165, 233, 0.5); }
+            50% { box-shadow: 0 0 20px rgba(14, 165, 233, 0.8); }
+        }
+        .pulse-glow {
+            animation: pulse-glow 2s ease-in-out infinite;
+        }
         
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        .glass {
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
-
-        :root {
-            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            --secondary-gradient: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            --success-gradient: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-            --dark: #1a1a2e;
-            --light: #ffffff;
-            --glass-bg: rgba(255, 255, 255, 0.1);
-            --glass-border: rgba(255, 255, 255, 0.2);
-        }
-
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%);
-            background-size: 400% 400%;
-            animation: gradientShift 15s ease infinite;
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-            position: relative;
-            overflow-x: hidden;
-        }
-
-        @keyframes gradientShift {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
-        }
-
-        /* Floating particles background */
-        body::before {
-            content: '';
-            position: fixed;
-            width: 100%;
-            height: 100%;
-            background-image: 
-                radial-gradient(circle at 20% 50%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 80% 80%, rgba(255, 255, 255, 0.1) 0%, transparent 50%),
-                radial-gradient(circle at 40% 20%, rgba(255, 255, 255, 0.05) 0%, transparent 50%);
-            animation: float 20s ease-in-out infinite;
-            pointer-events: none;
-        }
-
-        @keyframes float {
-            0%, 100% { transform: translateY(0px); }
-            50% { transform: translateY(-20px); }
-        }
-
+        
         .portal-container {
-            background: rgba(255, 255, 255, 0.95);
+            background: rgba(15, 23, 42, 0.8);
             backdrop-filter: blur(20px);
-            border-radius: 30px;
-            padding: 50px 40px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 48px 40px;
             box-shadow: 
-                0 30px 60px rgba(0, 0, 0, 0.3),
-                0 0 0 1px rgba(255, 255, 255, 0.3) inset;
+                0 25px 50px rgba(0, 0, 0, 0.4),
+                0 0 0 1px rgba(255, 255, 255, 0.1) inset;
             width: 100%;
             max-width: 540px;
-            color: #333;
+            color: white;
             position: relative;
             animation: slideUp 0.6s ease-out;
         }
@@ -95,11 +83,12 @@
         }
 
         .logo-icon {
-            font-size: 4rem;
-            margin-bottom: 10px;
+            width: 48px;
+            height: 48px;
+            margin-bottom: 16px;
             display: inline-block;
             animation: pulse 2s ease-in-out infinite;
-            filter: drop-shadow(0 5px 15px rgba(102, 126, 234, 0.4));
+            filter: drop-shadow(0 5px 15px rgba(14, 165, 233, 0.4));
         }
 
         @keyframes pulse {
@@ -110,7 +99,7 @@
         .logo h1 {
             font-size: 2.8rem;
             font-weight: 800;
-            background: var(--primary-gradient);
+            background: linear-gradient(to right, #38bdf8, #0284c7);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             background-clip: text;
@@ -119,7 +108,7 @@
         }
 
         .logo p {
-            color: #666;
+            color: #94a3b8;
             margin-top: 5px;
             font-size: 1rem;
             font-weight: 500;
@@ -132,9 +121,9 @@
 
         label {
             display: block;
-            margin-bottom: 10px;
+            margin-bottom: 12px;
             font-weight: 600;
-            color: #2d3748;
+            color: #f8fafc;
             font-size: 0.95rem;
             letter-spacing: 0.3px;
         }
@@ -142,24 +131,31 @@
         select, input {
             width: 100%;
             padding: 16px 18px;
-            border: 2px solid #e2e8f0;
-            border-radius: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
             font-size: 15px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            background: white;
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(10px);
+            color: white;
             font-family: inherit;
             font-weight: 500;
         }
 
         select:focus, input:focus {
             outline: none;
-            border-color: #667eea;
-            box-shadow: 0 0 0 4px rgba(102, 126, 234, 0.1);
-            transform: translateY(-1px);
+            border-color: #38bdf8;
+            box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2);
+            background: rgba(15, 23, 42, 0.8);
         }
 
         select:hover, input:hover {
-            border-color: #cbd5e0;
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        select option {
+            background: #1e293b;
+            color: white;
         }
 
         .password-group {
@@ -173,7 +169,7 @@
             transform: translateY(-50%);
             background: none;
             border: none;
-            color: #666;
+            color: #94a3b8;
             cursor: pointer;
             font-size: 18px;
             padding: 8px;
@@ -182,30 +178,30 @@
         }
 
         .password-toggle:hover {
-            background: rgba(102, 126, 234, 0.1);
-            color: #667eea;
+            background: rgba(56, 189, 248, 0.1);
+            color: #38bdf8;
         }
 
         .btn {
             width: 100%;
             padding: 18px;
-            background: var(--primary-gradient);
+            background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
             color: white;
             border: none;
-            border-radius: 14px;
-            font-size: 17px;
-            font-weight: 700;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-            box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
-            letter-spacing: 0.5px;
-            text-transform: uppercase;
+            box-shadow: 0 8px 20px rgba(2, 132, 199, 0.3);
+            letter-spacing: 0.3px;
             font-family: inherit;
         }
 
         .btn:hover {
-            transform: translateY(-3px);
-            box-shadow: 0 15px 35px rgba(102, 126, 234, 0.4);
+            transform: translateY(-2px);
+            box-shadow: 0 12px 25px rgba(2, 132, 199, 0.4);
+            background: linear-gradient(135deg, #0369a1 0%, #075985 100%);
         }
 
         .btn:active {
@@ -213,31 +209,35 @@
         }
 
         .btn:disabled {
-            background: linear-gradient(135deg, #cbd5e0 0%, #a0aec0 100%);
+            background: linear-gradient(135deg, #475569 0%, #334155 100%);
             cursor: not-allowed;
             transform: none;
             box-shadow: none;
+            opacity: 0.7;
         }
 
         .btn-secondary {
-            background: var(--secondary-gradient);
-            box-shadow: 0 10px 25px rgba(245, 87, 108, 0.3);
+            background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+            box-shadow: 0 8px 20px rgba(124, 58, 237, 0.3);
             margin-top: 12px;
         }
 
         .btn-secondary:hover {
-            box-shadow: 0 15px 35px rgba(245, 87, 108, 0.4);
+            background: linear-gradient(135deg, #6d28d9 0%, #5b21b6 100%);
+            box-shadow: 0 12px 25px rgba(124, 58, 237, 0.4);
         }
 
         .status {
             margin-top: 25px;
             padding: 18px 20px;
-            border-radius: 14px;
+            border-radius: 12px;
             text-align: center;
             font-weight: 600;
             font-size: 0.95rem;
             display: none;
             animation: slideIn 0.4s ease-out;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         @keyframes slideIn {
@@ -252,42 +252,43 @@
         }
 
         .status.success {
-            background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
-            color: #155724;
-            border: 2px solid #b1dfbb;
+            background: rgba(34, 197, 94, 0.2);
+            color: #86efac;
+            border-color: rgba(34, 197, 94, 0.3);
         }
 
         .status.error {
-            background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
-            color: #721c24;
-            border: 2px solid #f1b0b7;
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border-color: rgba(239, 68, 68, 0.3);
         }
 
         .status.info {
-            background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
-            color: #0c5460;
-            border: 2px solid #abdde5;
+            background: rgba(56, 189, 248, 0.2);
+            color: #7dd3fc;
+            border-color: rgba(56, 189, 248, 0.3);
         }
 
         .refresh-btn {
-            background: white;
-            border: 2px solid #e2e8f0;
-            color: #667eea;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #38bdf8;
             padding: 12px 18px;
             border-radius: 12px;
             cursor: pointer;
             font-size: 16px;
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             font-weight: 600;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
         }
 
         .refresh-btn:hover {
-            background: #667eea;
+            background: rgba(56, 189, 248, 0.1);
             color: white;
-            border-color: #667eea;
+            border-color: #38bdf8;
             transform: rotate(180deg);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+            box-shadow: 0 4px 12px rgba(56, 189, 248, 0.3);
         }
 
         .refresh-btn:disabled {
@@ -309,18 +310,18 @@
         .manual-entry {
             margin-top: 15px;
             padding-top: 15px;
-            border-top: 1px solid #e2e8f0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
         }
 
         .manual-entry label {
             font-size: 13px;
-            color: #718096;
+            color: #94a3b8;
             font-weight: 500;
         }
 
         .manual-entry input {
             margin-top: 8px;
-            background: #f7fafc;
+            background: rgba(15, 23, 42, 0.4);
         }
 
         .network-list-item {
@@ -348,13 +349,13 @@
             left: 0;
             right: 0;
             height: 1px;
-            background: linear-gradient(90deg, transparent, #e2e8f0, transparent);
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
         }
 
         .divider span {
-            background: white;
+            background: rgba(15, 23, 42, 0.8);
             padding: 0 15px;
-            color: #a0aec0;
+            color: #64748b;
             font-size: 13px;
             font-weight: 600;
             position: relative;
@@ -362,21 +363,7 @@
             letter-spacing: 1px;
         }
 
-        @media (max-width: 600px) {
-            .portal-container {
-                margin: 10px;
-                padding: 40px 30px;
-                border-radius: 24px;
-            }
-            
-            .logo h1 {
-                font-size: 2.2rem;
-            }
 
-            .logo-icon {
-                font-size: 3rem;
-            }
-        }
 
         /* Loading spinner */
         .spinner {
@@ -393,12 +380,29 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+
+        @media (max-width: 600px) {
+            .portal-container {
+                margin: 10px;
+                padding: 40px 30px;
+                border-radius: 20px;
+            }
+            
+            .logo h1 {
+                font-size: 2.2rem;
+            }
+
+            .logo-icon {
+                width: 40px;
+                height: 40px;
+            }
+        }
     </style>
 </head>
-<body>
+<body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen flex items-center justify-center p-5">
     <div class="portal-container">
         <div class="logo">
-            <div class="logo-icon">⚡</div>
+            <img src="/web/images/ragnar.ico" alt="Ragnar" class="logo-icon mx-auto">
             <h1>RAGNAR</h1>
             <p>WiFi Configuration Portal</p>
         </div>
