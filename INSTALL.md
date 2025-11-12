@@ -1,7 +1,7 @@
 ## 🔧 Installation and Configuration
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/c5eb4cc1-0c3d-497d-9422-1614651a84ab" alt="thumbnail_IMG_0546" width="98">
+   <img src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" alt="thumbnail_IMG_0546" width="130"> 
 </p>
 
 ## 📚 Table of Contents
@@ -14,17 +14,6 @@
 Use Raspberry Pi Imager to install your OS
 https://www.raspberrypi.com/software/
 
-### 📌 Prerequisites for RPI zero W (32bits)
-![image](https://github.com/user-attachments/assets/3980ec5f-a8fc-4848-ab25-4356e0529639)
-
-- Raspberry Pi OS installed. 
-    - Stable:
-      - System: 32-bit
-      - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-armhf-lite'
-- Username and hostname set to `ragnar`.
-- 2.13-inch e-Paper HAT connected to GPIO pins.
-
 ### 📌 Prerequisites for RPI zero W2 (64bits)
 
 ![image](https://github.com/user-attachments/assets/e8d276be-4cb2-474d-a74d-b5b6704d22f5)
@@ -35,7 +24,7 @@ I did not develop ragnar for the raspberry pi zero w2 64bits, but several feedba
     - Stable:
       - System: 64-bit
       - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-arm64-lite'
+      - Debian version: Debian GNU/Linux 13 (trixie)'
 - Username and hostname set to `ragnar`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
@@ -125,7 +114,7 @@ Choose your e-Paper HAT version by modifying the configuration file:
 
 1. Open the configuration file:
 ```bash
-sudo vi /home/ragnar/ragnar/config/shared_config.json
+sudo vi /home/ragnar/Ragnar/config/shared_config.json
 ```
 Press i to enter insert mode
 Locate the line containing "epd_type":
