@@ -903,6 +903,68 @@ def get_bluetooth_info(logger=None) -> Dict[str, Any]:
         }
     }
 
+
+class BLE:
+    """
+    Ragnar action wrapper for Bluetooth scanning
+    This is a standalone action (port=0) that scans for Bluetooth devices
+    """
+    
+    def __init__(self, shared_data):
+        self.shared_data = shared_data
+        self.action_name = "BLE"
+        self.port = 0  # Standalone action
+        self.b_parent_action = None
+        self.logger = logging.getLogger(__name__)
+        self.bt_manager = BluetoothManager(self.logger)
+    
+    def execute(self):
+        """
+        Execute Bluetooth scan as a standalone action
+        Returns 'success' or 'failed'
+        """
+        try:
+            self.logger.info("🔵 Starting Bluetooth scan...")
+            
+            # Check if Bluetooth is available
+            available, msg = self.bt_manager.check_bluetooth_availability()
+            if not available:
+                self.logger.warning(f"Bluetooth not available: {msg}")
+                return 'failed'
+            
+            # Enable Bluetooth if needed
+            status = self.bt_manager.get_status()
+            if not status['enabled']:
+                success, msg = self.bt_manager.power_on()
+                if not success:
+                    self.logger.error(f"Failed to enable Bluetooth: {msg}")
+                    return 'failed'
+            
+            # Scan for 30 seconds
+            devices = self.bt_manager.scan_for_time(30)
+            
+            if devices:
+                self.logger.info(f"✓ Bluetooth scan found {len(devices)} devices")
+                
+                # Save results to file
+                output_dir = os.path.join('data', 'output', 'bluetooth_devices')
+                os.makedirs(output_dir, exist_ok=True)
+                
+                output_file = os.path.join(output_dir, f'bt_scan_{int(time.time())}.json')
+                with open(output_file, 'w') as f:
+                    json.dump(devices, f, indent=2)
+                
+                self.logger.info(f"Saved Bluetooth scan results to {output_file}")
+                return 'success'
+            else:
+                self.logger.info("No Bluetooth devices found")
+                return 'failed'
+                
+        except Exception as e:
+            self.logger.error(f"Bluetooth scan failed: {e}")
+            return 'failed'
+
+
 if __name__ == "__main__":
     # Example usage and testing
     import logging
