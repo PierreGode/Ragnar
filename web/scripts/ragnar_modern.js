@@ -2086,12 +2086,41 @@ function displayAttackLogs(data) {
                             ${log.message ? `<p class="text-sm text-gray-300 mb-2">${escapeHtml(log.message)}</p>` : ''}
                             ${Object.keys(log.details || {}).length > 0 ? `
                                 <div class="text-xs space-y-1 mt-2">
-                                    ${Object.entries(log.details).map(([key, value]) => `
-                                        <div class="flex items-center space-x-2">
-                                            <span class="text-gray-500">${key}:</span>
-                                            <span class="text-gray-300 font-mono">${escapeHtml(String(value))}</span>
-                                        </div>
-                                    `).join('')}
+                                    ${Object.entries(log.details).map(([key, value], index) => {
+                                        const isPasswordField = key.toLowerCase().includes('password') || key.toLowerCase().includes('pwd');
+                                        const uniqueId = `pwd-${ip.replace(/\./g, '-')}-${index}`;
+                                        
+                                        if (isPasswordField) {
+                                            return `
+                                                <div class="flex items-center space-x-2">
+                                                    <span class="text-gray-500">${key}:</span>
+                                                    <span id="${uniqueId}" class="text-gray-300 font-mono">••••••••</span>
+                                                    <button onclick="togglePassword('${uniqueId}', '${escapeHtml(String(value)).replace(/'/g, "\\'")}')" 
+                                                            class="text-gray-400 hover:text-white transition-colors focus:outline-none"
+                                                            title="Show/Hide Password">
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                                                        </svg>
+                                                    </button>
+                                                    <button onclick="copyToClipboard('${escapeHtml(String(value)).replace(/'/g, "\\'")}', '${key}')" 
+                                                            class="text-gray-400 hover:text-white transition-colors focus:outline-none"
+                                                            title="Copy Password">
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"></path>
+                                                        </svg>
+                                                    </button>
+                                                </div>
+                                            `;
+                                        } else {
+                                            return `
+                                                <div class="flex items-center space-x-2">
+                                                    <span class="text-gray-500">${key}:</span>
+                                                    <span class="text-gray-300 font-mono">${escapeHtml(String(value))}</span>
+                                                </div>
+                                            `;
+                                        }
+                                    }).join('')}
                                 </div>
                             ` : ''}
                         </div>
@@ -2124,6 +2153,42 @@ function toggleAttackHost(ip) {
         container.classList.add('hidden');
         chevron.classList.remove('rotate-180');
     }
+}
+
+function togglePassword(elementId, actualPassword) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+    
+    // Check if password is currently hidden (showing dots)
+    if (element.textContent === '••••••••') {
+        // Show actual password
+        element.textContent = actualPassword;
+        element.classList.add('text-yellow-300'); // Highlight when shown
+    } else {
+        // Hide password (show dots)
+        element.textContent = '••••••••';
+        element.classList.remove('text-yellow-300');
+    }
+}
+
+function copyToClipboard(text, label) {
+    // Create a temporary textarea to copy from
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    
+    try {
+        document.execCommand('copy');
+        addConsoleMessage(`${label || 'Password'} copied to clipboard`, 'success');
+    } catch (err) {
+        console.error('Failed to copy:', err);
+        addConsoleMessage(`Failed to copy ${label || 'password'}`, 'error');
+    }
+    
+    document.body.removeChild(textarea);
 }
 
 function escapeHtml(text) {
