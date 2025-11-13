@@ -5510,8 +5510,17 @@ def get_stats():
         # Add scan results count
         if os.path.exists(shared_data.netkbfile):
             import pandas as pd
-            df = pd.read_csv(shared_data.netkbfile)
-            stats['scan_results_count'] = safe_int(len(df[df['Alive'] == 1]) if 'Alive' in df.columns else len(df))
+            try:
+                # Robust CSV parsing - skip malformed rows
+                try:
+                    df = pd.read_csv(shared_data.netkbfile, on_bad_lines='warn')
+                except TypeError:
+                    # Fallback for older pandas
+                    df = pd.read_csv(shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
+                stats['scan_results_count'] = safe_int(len(df[df['Alive'] == 1]) if 'Alive' in df.columns else len(df))
+            except Exception as e:
+                logger.warning(f"Could not read netkb for stats: {e}")
+                stats['scan_results_count'] = 0
         
         # Add threat intelligence stats
         if threat_intelligence:
@@ -6364,7 +6373,12 @@ def legacy_netkb_json():
             return jsonify({'ips': [], 'ports': {}, 'actions': []})
             
         import pandas as pd
-        df = pd.read_csv(netkb_file)
+        # Robust CSV parsing - skip malformed rows
+        try:
+            df = pd.read_csv(netkb_file, on_bad_lines='warn')
+        except TypeError:
+            # Fallback for older pandas
+            df = pd.read_csv(netkb_file, error_bad_lines=False, warn_bad_lines=True)
         data = df[df['Alive'] == 1] if 'Alive' in df.columns else df
         
         # Get available actions from actions file
