@@ -96,6 +96,21 @@ SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
 
 
+def _normalize_value(value, default='Unknown'):
+    """Normalize a value, handling nan, None, empty strings, etc."""
+    if value is None:
+        return default
+    
+    # Convert to string
+    str_value = str(value).strip()
+    
+    # Check for pandas nan or various empty representations
+    if not str_value or str_value.lower() in ['nan', 'none', 'null', '']:
+        return default
+    
+    return str_value
+
+
 def _is_valid_ipv4(value):
     try:
         ipaddress.ip_address(value)
@@ -2038,15 +2053,15 @@ def get_stable_network_data():
             
             host_data = {
                 'ip': ip,
-                'hostname': entry.get('Hostnames', '').strip() or 'Unknown',
-                'mac': entry.get('MAC Address', '').strip() or 'Unknown',
+                'hostname': _normalize_value(entry.get('Hostnames'), 'Unknown'),
+                'mac': _normalize_value(entry.get('MAC Address'), 'Unknown'),
                 'status': 'up' if entry.get('Alive') in [True, 'True', '1', 1] else 'unknown',
-                'ports': entry.get('Ports', '').strip() or 'Unknown',
-                'vulnerabilities': str(entry.get('Vulnerabilities', '0')).strip() or '0',
-                'last_scan': entry.get('LastSeen', '').strip() or 'Never',
-                'first_seen': entry.get('First_Seen', '').strip() or 'Unknown',
-                'os': entry.get('OS', '').strip() or 'Unknown',
-                'services': entry.get('Services', '').strip() or 'Unknown',
+                'ports': _normalize_value(entry.get('Ports'), 'Unknown'),
+                'vulnerabilities': _normalize_value(entry.get('Vulnerabilities'), '0'),
+                'last_scan': _normalize_value(entry.get('LastSeen'), 'Never'),
+                'first_seen': _normalize_value(entry.get('First_Seen'), 'Unknown'),
+                'os': _normalize_value(entry.get('OS'), 'Unknown'),
+                'services': _normalize_value(entry.get('Services'), 'Unknown'),
                 'source': 'network_data'
             }
             
@@ -2090,15 +2105,15 @@ def get_stable_network_data():
             
             host_data = {
                 'ip': ip,
-                'hostname': entry.get('Hostnames', '').strip() or 'Unknown',
-                'mac': entry.get('MAC Address', '').strip() or 'Unknown', 
+                'hostname': _normalize_value(entry.get('Hostnames'), 'Unknown'),
+                'mac': _normalize_value(entry.get('MAC Address'), 'Unknown'), 
                 'status': 'up',
-                'ports': entry.get('Ports', '').strip() or 'Unknown',
-                'vulnerabilities': str(entry.get('Vulnerabilities', '0')).strip() or '0',
-                'last_scan': entry.get('LastSeen', '').strip() or 'Unknown',
-                'first_seen': entry.get('First_Seen', '').strip() or 'Unknown',
-                'os': entry.get('OS', '').strip() or 'Unknown',
-                'services': entry.get('Services', '').strip() or 'Unknown',
+                'ports': _normalize_value(entry.get('Ports'), 'Unknown'),
+                'vulnerabilities': _normalize_value(entry.get('Vulnerabilities'), '0'),
+                'last_scan': _normalize_value(entry.get('LastSeen'), 'Unknown'),
+                'first_seen': _normalize_value(entry.get('First_Seen'), 'Unknown'),
+                'os': _normalize_value(entry.get('OS'), 'Unknown'),
+                'services': _normalize_value(entry.get('Services'), 'Unknown'),
                 'source': 'netkb'
             }
             
