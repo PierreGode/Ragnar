@@ -66,9 +66,13 @@ class SQLConnector:
         """
         Load the scan file and filter it for SQL ports.
         """
-        # Read CSV with error handling for empty files
+        # Read CSV with error handling for empty files and malformed rows
         try:
-            self.scan = pd.read_csv(self.shared_data.netkbfile)
+            try:
+                # Try pandas with robust error handling for malformed rows
+                self.scan = pd.read_csv(self.shared_data.netkbfile, on_bad_lines='warn')
+            except TypeError:  # pandas < 1.3
+                self.scan = pd.read_csv(self.shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
         except pd.errors.EmptyDataError:
             logger.warning(f"NetKB file is empty or has no columns: {self.shared_data.netkbfile}")
             self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
