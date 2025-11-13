@@ -302,7 +302,8 @@ class Orchestrator:
                     if row["Alive"] != '1':
                         continue
                     
-                    ip, ports = row["IPs"], row["Ports"].split(';')
+                    ip = row["IPs"]
+                    ports = self._extract_ports(row)
                     
                     with self.semaphore:
                         if self.execute_action(action, ip, ports, row, action_key, current_data):
@@ -329,7 +330,8 @@ class Orchestrator:
                     if row["Alive"] != '1':
                         continue
                     
-                    ip, ports = row["IPs"], row["Ports"].split(';')
+                    ip = row["IPs"]
+                    ports = self._extract_ports(row)
                     
                     with self.semaphore:
                         if self.execute_action(child_action, ip, ports, row, action_key, current_data):
@@ -349,9 +351,13 @@ class Orchestrator:
     def execute_action(self, action, ip, ports, row, action_key, current_data):
         """Execute an action on a target with timeout protection"""
         # Check if action requires a specific port
-        if hasattr(action, 'port') and str(action.port) not in ports:
-            logger.debug(f"Skipping {action.action_name} for {ip} - required port {action.port} not in {ports}")
-            return False
+        required_port = getattr(action, 'port', None)
+        if required_port not in (None, '', 0, '0'):
+            if str(required_port) not in ports:
+                logger.debug(
+                    f"Skipping {action.action_name} for {ip} - required port {required_port} not in {ports}"
+                )
+                return False
 
         # Check if attacks are enabled (skip attack actions if disabled, but allow scanning)
         enable_attacks = getattr(self.shared_data, 'enable_attacks', True)
@@ -432,6 +438,12 @@ class Orchestrator:
             self._update_action_status(row, action_key, 'failed')
             self.shared_data.write_data(current_data)
             return False
+
+    @staticmethod
+    def _extract_ports(row):
+        """Return a sanitized list of ports extracted from a data row."""
+        ports_field = row.get("Ports", "") or ""
+        return [port.strip() for port in ports_field.split(';') if port and port.strip()]
 
     def execute_standalone_action(self, action, current_data):
         """Execute a standalone action with timeout protection"""
