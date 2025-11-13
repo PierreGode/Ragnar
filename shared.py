@@ -970,14 +970,47 @@ class SharedData:
                 # Add new row
                 mac_to_existing_row[mac_address] = new_row
 
-        # Write updated data back to CSV
-        with open(self.netkbfile, 'w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=headers)
-            writer.writeheader()
-
-            # Write all data
-            for row in mac_to_existing_row.values():
-                writer.writerow(row)
+        # Write updated data back to CSV with backup protection
+        import tempfile
+        import shutil
+        
+        # Only write if we have data to write
+        if not mac_to_existing_row:
+            self.print("Warning: No data to write to netkb.csv - skipping write")
+            return
+        
+        # Create backup of existing file if it exists and has content
+        if os.path.exists(self.netkbfile) and os.path.getsize(self.netkbfile) > 100:
+            backup_file = f"{self.netkbfile}.backup"
+            try:
+                shutil.copy2(self.netkbfile, backup_file)
+                self.print(f"Created backup: {backup_file}")
+            except Exception as backup_error:
+                logger.warning(f"Could not create backup: {backup_error}")
+        
+        # Write to temporary file first (atomic operation)
+        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.netkbfile), suffix='.tmp')
+        try:
+            with os.fdopen(temp_fd, 'w', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=headers)
+                writer.writeheader()
+                
+                # Write all data
+                for row in mac_to_existing_row.values():
+                    writer.writerow(row)
+            
+            # Verify temp file has content before replacing original
+            if os.path.getsize(temp_path) > 50:  # At least headers
+                shutil.move(temp_path, self.netkbfile)
+                self.print(f"Successfully wrote {len(mac_to_existing_row)} entries to netkb.csv")
+            else:
+                logger.error("Temp file is too small - aborting write to prevent data loss")
+                os.unlink(temp_path)
+        except Exception as write_error:
+            logger.error(f"Error writing netkb.csv: {write_error}")
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+            raise
 
     def update_stats(self, persist=True):
         """Update gamification stats using lifetime achievements rather than volatile counts."""
