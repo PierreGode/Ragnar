@@ -1613,14 +1613,31 @@ class NetworkScanner:
             if not os.path.exists(wifi_network_file):
                 self.logger.warning(f"WiFi-specific network file not found: {wifi_network_file}")
             else:
-                # Read WiFi network file
+                # Read WiFi network file with robust error handling
                 wifi_entries = []
-                with open(wifi_network_file, 'r', encoding='utf-8', errors='ignore') as file:
-                    reader = csv.DictReader(file)
-                    wifi_headers = reader.fieldnames
+                try:
+                    # Try pandas first (handles malformed rows)
+                    import pandas as pd
+                    try:
+                        df = pd.read_csv(wifi_network_file, on_bad_lines='warn', encoding='utf-8', encoding_errors='ignore')
+                    except TypeError:  # pandas < 1.3
+                        df = pd.read_csv(wifi_network_file, error_bad_lines=False, warn_bad_lines=True, encoding='utf-8', encoding_errors='ignore')
                     
-                    for row in reader:
-                        wifi_entries.append(row)
+                    wifi_headers = list(df.columns)
+                    wifi_entries = df.to_dict('records')
+                except Exception as pandas_error:
+                    self.logger.warning(f"Pandas CSV read failed, falling back to csv module: {pandas_error}")
+                    # Fallback to csv module with line-by-line error handling
+                    with open(wifi_network_file, 'r', encoding='utf-8', errors='ignore') as file:
+                        reader = csv.DictReader(file)
+                        wifi_headers = reader.fieldnames
+                        
+                        for line_num, row in enumerate(reader, start=2):  # Start at 2 (after header)
+                            try:
+                                wifi_entries.append(row)
+                            except Exception as row_error:
+                                self.logger.warning(f"Skipping malformed row {line_num} in WiFi file: {row_error}")
+                                continue
                 
                 # Find the entry for this IP
                 target_entry = None
@@ -1654,12 +1671,27 @@ class NetworkScanner:
                     # Update LastSeen timestamp
                     target_entry['LastSeen'] = datetime.now().isoformat()
                     
-                    # Write back to file
+                    # Write back to file using atomic write pattern
                     if wifi_headers:  # Ensure headers exist
-                        with open(wifi_network_file, 'w', newline='', encoding='utf-8') as file:
-                            writer = csv.DictWriter(file, fieldnames=wifi_headers)
-                            writer.writeheader()
-                            writer.writerows(wifi_entries)
+                        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(wifi_network_file), suffix='.tmp')
+                        try:
+                            with os.fdopen(temp_fd, 'w', newline='', encoding='utf-8') as file:
+                                writer = csv.DictWriter(file, fieldnames=wifi_headers)
+                                writer.writeheader()
+                                writer.writerows(wifi_entries)
+                            
+                            # Verify temp file has reasonable size before replacing original
+                            if os.path.getsize(temp_path) > 50:
+                                shutil.move(temp_path, wifi_network_file)
+                                self.logger.debug(f"✅ Atomically updated WiFi network file for {ip}")
+                            else:
+                                self.logger.error(f"Temp WiFi file too small ({os.path.getsize(temp_path)} bytes) - not replacing original")
+                                os.unlink(temp_path)
+                        except Exception as write_error:
+                            self.logger.error(f"Failed to write WiFi network file: {write_error}")
+                            if os.path.exists(temp_path):
+                                os.unlink(temp_path)
+                            raise
                     else:
                         self.logger.warning(f"No headers found for WiFi network file - skipping write")
                     
