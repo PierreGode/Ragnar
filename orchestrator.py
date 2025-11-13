@@ -771,7 +771,15 @@ class Orchestrator:
                 time.sleep(30)
                 continue
             
-            current_data = self.shared_data.read_data()
+            # Prefer fresh in-memory scan results over CSV file reads
+            # This eliminates race conditions and provides instant access to live hosts
+            current_data = self.shared_data.get_latest_scan_results()
+            if current_data is not None:
+                logger.debug("✅ Using fresh scan results from memory (no CSV read needed)")
+            else:
+                logger.debug("📄 No in-memory results available - falling back to netkb.csv file read")
+                current_data = self.shared_data.read_data()
+            
             any_action_executed = False
             action_retry_pending = False
             
@@ -796,8 +804,11 @@ class Orchestrator:
                         self.shared_data.ragnarorch_status = "NetworkScanner"
                         self.network_scanner.scan()
                         last_network_scan_time = time.time()
-                        # Re-read the updated data after the scan
-                        current_data = self.shared_data.read_data()
+                        # Get fresh results from memory (scanner hands them off immediately)
+                        current_data = self.shared_data.get_latest_scan_results()
+                        if current_data is None:
+                            logger.debug("No in-memory results after scan - reading from CSV")
+                            current_data = self.shared_data.read_data()
                         if enable_attacks:
                             any_action_executed = self.process_alive_ips(current_data)
                     else:

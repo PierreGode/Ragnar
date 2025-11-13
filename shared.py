@@ -455,6 +455,12 @@ class SharedData:
         self.y_bottom = 0  # Initialize y_bottom for image positioning
         self.x_center1 = 0  # Alternative positioning
         self.y_bottom1 = 0  # Alternative positioning
+        
+        # In-memory scan results for immediate orchestrator access
+        # Stores latest live hosts from scanner without waiting for CSV writes
+        self.latest_scan_results = None  # List of host dicts with 'MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports', etc.
+        self.latest_scan_timestamp = 0.0  # Time when last scan completed
+        self._scan_results_lock = threading.Lock()  # Thread-safe access to scan results
 
     def load_gamification_data(self):
         """Load persistent gamification progress from disk."""
@@ -893,6 +899,29 @@ class SharedData:
             raise
 
 
+    def set_latest_scan_results(self, scan_data):
+        """Store fresh scan results in memory for immediate orchestrator access.
+        
+        Args:
+            scan_data: List of dictionaries with keys: 'MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports', etc.
+        """
+        with self._scan_results_lock:
+            self.latest_scan_results = scan_data
+            self.latest_scan_timestamp = time.time()
+            logger.info(f"📋 Stored {len(scan_data)} live hosts in memory for immediate orchestrator access")
+    
+    def get_latest_scan_results(self):
+        """Retrieve fresh scan results from memory if available.
+        
+        Returns:
+            List of host dictionaries if available, None otherwise
+        """
+        with self._scan_results_lock:
+            if self.latest_scan_results is not None:
+                age_seconds = time.time() - self.latest_scan_timestamp
+                logger.info(f"📋 Retrieved {len(self.latest_scan_results)} hosts from memory (age: {age_seconds:.1f}s)")
+            return self.latest_scan_results
+    
     def read_data(self):
         """Read data from the CSV file."""
         self.initialize_csv()  # Ensure CSV is initialized with correct headers
@@ -913,7 +942,7 @@ class SharedData:
         if os.path.exists(self.netkbfile):
             with open(self.netkbfile, 'r') as file:
                 reader = csv.DictReader(file)
-                existing_headers = reader.fieldnames
+                existing_headers = list(reader.fieldnames) if reader.fieldnames else []
                 existing_data = list(reader)
         else:
             existing_headers = []

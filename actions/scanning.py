@@ -493,7 +493,7 @@ class NetworkScanner:
                         # Mark the old MAC as having a failed ping instead of immediately dead
                         old_mac = ip_to_mac[ip]
                         if old_mac in netkb_entries:
-                            max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 15)
+                            max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 30)
                             current_failures = netkb_entries[old_mac].get('Failed_Pings', 0) + 1
                             netkb_entries[old_mac]['Failed_Pings'] = current_failures
                             
@@ -502,7 +502,7 @@ class NetworkScanner:
                                 netkb_entries[old_mac]['Alive'] = '0'
                                 self.logger.info(f"Old MAC {old_mac} marked offline after {current_failures} consecutive failed pings (IP reassigned to {mac})")
                             else:
-                                netkb_entries[old_mac]['Alive'] = '1'  # Keep alive per 15-ping rule
+                                netkb_entries[old_mac]['Alive'] = '1'  # Keep alive per 30-ping rule
                                 self.logger.debug(f"Old MAC {old_mac} failed ping {current_failures}/{max_failed_pings} due to IP reassignment - keeping alive")
 
                     # Update or create entry for the new MAC
@@ -532,8 +532,8 @@ class NetworkScanner:
                         for action in existing_action_columns:
                             netkb_entries[mac][action] = ""
 
-                # Update all existing entries - implement 15-failed-pings rule instead of immediate death
-                max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 15)
+                # Update all existing entries - implement 30-failed-pings rule instead of immediate death
+                max_failed_pings = self.shared_data.config.get('network_max_failed_pings', 30)
                 for mac in netkb_entries:
                     if mac not in alive_macs:
                         # Host not found in current scan - increment failure count
@@ -546,7 +546,7 @@ class NetworkScanner:
                             self.logger.info(f"Host {mac} marked offline after {netkb_entries[mac]['Failed_Pings']} consecutive failed pings")
                         else:
                             # Keep alive until threshold reached
-                            netkb_entries[mac]['Alive'] = '1'  # Keep alive per 15-ping rule
+                            netkb_entries[mac]['Alive'] = '1'  # Keep alive per 30-ping rule
                             self.logger.debug(f"Host {mac} failed ping {netkb_entries[mac]['Failed_Pings']}/{max_failed_pings} - keeping alive per {max_failed_pings}-ping rule")
 
                 # Remove entries with multiple IP addresses for a single MAC address
@@ -1223,6 +1223,7 @@ class NetworkScanner:
     def scan(self):
         """
         Initiates the network scan, updates the netkb file, and displays the results.
+        Now also stores results in memory for immediate orchestrator access.
         """
         try:
             self.shared_data.ragnarorch_status = "NetworkScanner"
@@ -1277,6 +1278,15 @@ class NetworkScanner:
                         writer.writerow([ip, hostname, alive, mac] + [str(port) if port in ports else '' for port in all_ports])
 
             self.update_netkb(netkbfile, netkb_data, alive_macs)
+            
+            # Store fresh scan results in memory for immediate orchestrator access
+            # This eliminates race conditions with CSV file writes
+            try:
+                live_hosts = self.shared_data.read_data()  # Read the just-updated netkb
+                self.shared_data.set_latest_scan_results(live_hosts)
+                self.logger.info(f"✅ Scan results handed off to memory - orchestrator can proceed immediately")
+            except Exception as e:
+                self.logger.error(f"Failed to store scan results in memory: {e}")
 
             if self.displaying_csv:
                 self.display_csv(csv_result_file)
