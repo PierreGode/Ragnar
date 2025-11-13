@@ -461,7 +461,14 @@ class NetworkScanner:
                                     hostnames = row.get("Hostnames", "").split(';')
                                     alive = row.get("Alive", "0")
                                     ports = row.get("Ports", "").split(';')
-                                    failed_pings = int(row.get("Failed_Pings", "0"))  # Default to 0 if missing
+                                    
+                                    # Safely parse Failed_Pings with fallback for empty strings
+                                    failed_pings_str = row.get("Failed_Pings", "0")
+                                    try:
+                                        failed_pings = int(failed_pings_str) if failed_pings_str and failed_pings_str.strip() else 0
+                                    except ValueError:
+                                        self.logger.warning(f"Error parsing Failed_Pings in row {line_num}: invalid value '{failed_pings_str}', defaulting to 0")
+                                        failed_pings = 0
                                     
                                     netkb_entries[mac] = {
                                         'IPs': set(ips) if ips[0] else set(),
