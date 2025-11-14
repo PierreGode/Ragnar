@@ -26,6 +26,7 @@ from datetime import datetime
 from PIL import Image, ImageFont 
 from logger import Logger
 from epd_helper import EPDHelper
+from db_manager import get_db
 
 
 logger = Logger(name="shared.py", level=logging.DEBUG) # Create a logger object 
@@ -42,6 +43,9 @@ class SharedData:
         # Load existing configuration first
         self.load_config()
 
+        # Initialize SQLite database manager
+        self.db = get_db(currentdir=self.currentdir)
+        
         # Update MAC blacklist without immediate save
         self.update_mac_blacklist()
         self.setup_environment(clear_console=False) # Setup the environment without clearing console
@@ -56,6 +60,9 @@ class SharedData:
         self.load_fonts() # Load the fonts used by the application
         self.load_images() # Load the images used by the application
         # self.create_initial_image() # Create the initial image displayed on the screen
+        
+        # Start background cleanup task for old hosts
+        self._start_cleanup_task()
         
     def initialize_network_intelligence(self):
         """Initialize the network intelligence system"""
@@ -923,7 +930,63 @@ class SharedData:
             return self.latest_scan_results
     
     def read_data(self):
-        """Read data from the CSV file with robust error handling."""
+        """
+        Read data from SQLite database (primary) with CSV fallback.
+        Returns data in the same format as CSV for backward compatibility.
+        """
+        data = []
+        
+        try:
+            # Read from SQLite database (PRIMARY DATA SOURCE)
+            hosts = self.db.get_all_hosts()
+            
+            if not hosts:
+                logger.warning("No hosts found in database - falling back to CSV")
+                return self._read_data_from_csv()
+            
+            # Convert database format to CSV-compatible format
+            for host in hosts:
+                # Convert to format expected by orchestrator
+                row = {
+                    'MAC Address': host.get('mac', ''),
+                    'IPs': host.get('ip', ''),
+                    'Hostnames': host.get('hostname', ''),
+                    'Alive': '1' if host.get('status') == 'alive' else '0',
+                    'Ports': host.get('ports', ''),
+                    'Failed_Pings': str(host.get('failed_ping_count', 0)),
+                    'Services': host.get('services', ''),
+                    'Nmap Vulnerabilities': host.get('vulnerabilities', ''),
+                    'Alive Count': str(host.get('alive_count', 0)),
+                    'Network Profile': host.get('network_profile', ''),
+                    'Scanner': host.get('scanner_status', ''),
+                    'ssh_connector': host.get('ssh_connector', ''),
+                    'rdp_connector': host.get('rdp_connector', ''),
+                    'ftp_connector': host.get('ftp_connector', ''),
+                    'smb_connector': host.get('smb_connector', ''),
+                    'telnet_connector': host.get('telnet_connector', ''),
+                    'sql_connector': host.get('sql_connector', ''),
+                    'steal_files_ssh': host.get('steal_files_ssh', ''),
+                    'steal_files_rdp': host.get('steal_files_rdp', ''),
+                    'steal_files_ftp': host.get('steal_files_ftp', ''),
+                    'steal_files_smb': host.get('steal_files_smb', ''),
+                    'steal_files_telnet': host.get('steal_files_telnet', ''),
+                    'steal_data_sql': host.get('steal_data_sql', ''),
+                    'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
+                    'Notes': host.get('notes', ''),
+                    'Deep_Scanned': '',  # TODO: Add to database schema
+                    'Deep_Scan_Ports': '',  # TODO: Add to database schema
+                }
+                data.append(row)
+            
+            logger.debug(f"✅ Read {len(data)} hosts from SQLite database")
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error reading from database, falling back to CSV: {e}")
+            return self._read_data_from_csv()
+    
+    def _read_data_from_csv(self):
+        """Legacy CSV read - fallback only."""
         self.initialize_csv()  # Ensure CSV is initialized with correct headers
         data = []
         try:
@@ -954,11 +1017,29 @@ class SharedData:
                 try:
                     import shutil
                     shutil.copy2(backup_file, self.netkbfile)
-                    return self.read_data()  # Retry reading
+                    return self._read_data_from_csv()  # Retry reading
                 except Exception as restore_error:
                     logger.error(f"Could not restore from backup: {restore_error}")
         
         return data
+    
+    def _start_cleanup_task(self):
+        """Start background task to cleanup old hosts (not seen in 24 hours)."""
+        def cleanup_worker():
+            import time
+            while True:
+                try:
+                    # Run cleanup every hour
+                    time.sleep(3600)
+                    removed = self.db.cleanup_old_hosts(hours=24)
+                    if removed > 0:
+                        logger.info(f"🧹 Cleanup: Removed {removed} hosts not seen in 24 hours")
+                except Exception as e:
+                    logger.error(f"Error in cleanup task: {e}")
+        
+        cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True, name="HostCleanup")
+        cleanup_thread.start()
+        logger.info("Started background host cleanup task (runs hourly)")
 
     def write_data(self, data):
         """Write data to the CSV file."""
@@ -1069,8 +1150,21 @@ class SharedData:
             raise
 
     def update_stats(self, persist=True):
-        """Update gamification stats using lifetime achievements rather than volatile counts."""
+        """Update gamification stats using lifetime achievements and SQLite database statistics."""
         with self._stats_lock:
+            # Get current statistics from SQLite database
+            try:
+                db_stats = self.db.get_stats()
+                # Update vulnerability count from database
+                if 'hosts_with_vulns' in db_stats:
+                    self.vulnnbr = db_stats['hosts_with_vulns']
+                # Update zombie count from database (could be hosts with successful attacks)
+                if 'total_hosts' in db_stats:
+                    # This is a placeholder - adjust based on actual zombie logic
+                    pass
+            except Exception as e:
+                logger.error(f"Failed to get stats from database: {e}")
+            
             lifetime_counts = self.gamification_data.setdefault("lifetime_counts", {})
             total_added = 0
             awarded_breakdown = {}

@@ -49,6 +49,7 @@ from rich.progress import Progress, BarColumn, TextColumn
 from shared import SharedData
 from logger import Logger
 from nmap_logger import nmap_logger
+from db_manager import get_db
 
 logger = Logger(name="nmap_vuln_scanner.py", level=logging.INFO)
 
@@ -79,6 +80,9 @@ class NmapVulnScanner:
             self.shared_data.vulnerabilities_dir, 
             'scanned_ports_history.json'
         )
+        
+        # Initialize SQLite database manager
+        self.db = get_db(currentdir=shared_data.currentdir)
         
         self.create_summary_file()
         self.load_scanned_ports_history()
@@ -222,6 +226,7 @@ class NmapVulnScanner:
     def update_summary_file(self, ip, hostname, mac, port, vulnerabilities):
         """
         Updates the summary file with the scan results.
+        NOW ALSO WRITES TO SQLITE DATABASE.
         """
         try:
             # Read existing data
@@ -238,6 +243,21 @@ class NmapVulnScanner:
             
             # Save the updated data back to the summary file
             df.to_csv(self.summary_file, index=False)
+            
+            # WRITE TO SQLITE DATABASE
+            try:
+                # Update host record with vulnerability information
+                if mac and mac.lower() != 'unknown':
+                    self.db.upsert_host(
+                        mac=mac.lower().strip(),
+                        ip=ip,
+                        hostname=hostname,
+                        vulnerabilities=vulnerabilities
+                    )
+                    logger.debug(f"✅ Updated database with vulnerability data for {mac}")
+            except Exception as db_error:
+                logger.error(f"Failed to write vulnerability data to database: {db_error}")
+            
         except Exception as e:
             logger.error(f"Error updating summary file: {e}")
 
@@ -346,6 +366,21 @@ class NmapVulnScanner:
                 scanned_ports_str = "top-50"
             self.update_summary_file(ip, hostname, mac, scanned_ports_str, vulnerability_summary)
             self.update_netkb_vulnerabilities(mac, ip, port_vulnerabilities, port_services)
+            
+            # Add vulnerability scan to scan history in database
+            try:
+                if mac and mac.lower() not in ['unknown', '00:00:00:00:00:00', '']:
+                    vuln_count = sum(len(vulns) for vulns in port_vulnerabilities.values())
+                    self.db.add_scan_history(
+                        mac=mac.lower().strip(),
+                        ip=ip,
+                        scan_type='vuln_scan',
+                        ports_found=scanned_ports_str,
+                        vulnerabilities_found=vuln_count
+                    )
+                    logger.debug(f"✅ Added vulnerability scan history for {mac}: {vuln_count} vulnerabilities")
+            except Exception as db_error:
+                logger.error(f"Failed to add scan history to database: {db_error}")
 
         except Exception as e:
             logger.error(f"Error scanning {ip}: {e}")

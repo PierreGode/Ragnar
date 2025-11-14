@@ -46,6 +46,7 @@ from logger import Logger
 import ipaddress
 import nmap
 from nmap_logger import nmap_logger
+from db_manager import get_db
 
 logger = Logger(name="scanning.py", level=logging.DEBUG)
 
@@ -80,6 +81,8 @@ class NetworkScanner:
         self.nm = nmap.PortScanner()  # Initialize nmap.PortScanner()
         self.running = False
         self.arp_scan_interface = "wlan0"
+        # Initialize SQLite database manager
+        self.db = get_db(currentdir=self.currentdir)
 
     @staticmethod
     def _is_valid_mac(value):
@@ -169,6 +172,26 @@ class NetworkScanner:
                 continue
         
         self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
+        
+        # Write ARP scan results to SQLite database
+        try:
+            for ip, metadata in all_hosts.items():
+                mac = metadata.get('mac', '').lower().strip()
+                vendor = metadata.get('vendor', '')
+                
+                if mac and mac != '00:00:00:00:00:00':
+                    self.db.upsert_host(
+                        mac=mac,
+                        ip=ip,
+                        vendor=vendor
+                    )
+                    self.db.update_ping_status(mac, success=True)
+                    self.db.add_scan_history(mac, ip, 'arp_scan')
+            
+            self.logger.debug(f"✅ ARP scan results written to database")
+        except Exception as e:
+            self.logger.error(f"Failed to write ARP scan results to database: {e}")
+        
         return all_hosts
 
     def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
@@ -243,6 +266,33 @@ class NetworkScanner:
                     continue
             
             self.logger.info(f"🎉 NMAP NETWORK SCAN COMPLETE: {len(nmap_results)} hosts with open ports discovered")
+            
+            # Write nmap scan results to SQLite database
+            try:
+                for host, data in nmap_results.items():
+                    mac = data.get('mac', '')
+                    if not mac or mac == '00:00:00:00:00:00':
+                        # Create pseudo-MAC for hosts without MAC address
+                        ip_parts = host.split('.')
+                        if len(ip_parts) == 4:
+                            mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                    
+                    if mac:
+                        mac = mac.lower().strip()
+                        ports_str = ','.join(map(str, sorted(data.get('open_ports', []))))
+                        
+                        self.db.upsert_host(
+                            mac=mac,
+                            ip=host,
+                            hostname=data.get('hostname', ''),
+                            ports=ports_str
+                        )
+                        self.db.update_ping_status(mac, success=True)
+                        self.db.add_scan_history(mac, host, 'nmap_scan', ports_found=ports_str)
+                
+                self.logger.debug(f"✅ Nmap scan results written to database")
+            except Exception as e:
+                self.logger.error(f"Failed to write nmap scan results to database: {e}")
             
         except Exception as e:
             self.logger.error(f"💥 Nmap network scan failed: {type(e).__name__}: {e}")
@@ -341,6 +391,24 @@ class NetworkScanner:
             self.logger.info(f"🎊 PING SWEEP COMPLETE: Discovered {len(ping_discovered)} additional hosts not found by arp-scan")
             for ip, data in ping_discovered.items():
                 self.logger.info(f"   📍 {ip} - MAC: {data['mac']} - {data['vendor']}")
+            
+            # Write ping sweep results to SQLite database
+            try:
+                for ip, data in ping_discovered.items():
+                    mac = data['mac'].lower().strip()
+                    vendor = data.get('vendor', '')
+                    
+                    self.db.upsert_host(
+                        mac=mac,
+                        ip=ip,
+                        vendor=vendor
+                    )
+                    self.db.update_ping_status(mac, success=True)
+                    self.db.add_scan_history(mac, ip, 'ping_sweep')
+                
+                self.logger.debug(f"✅ Ping sweep results written to database")
+            except Exception as e:
+                self.logger.error(f"Failed to write ping sweep results to database: {e}")
         else:
             self.logger.warning(f"❌ Ping sweep found no additional hosts beyond ARP scan results")
 
@@ -433,6 +501,8 @@ class NetworkScanner:
     def update_netkb(self, netkbfile, netkb_data, alive_macs):
         """
         Updates the net knowledge base (netkb) file with the scan results.
+        NOW ALSO WRITES TO SQLITE DATABASE AS PRIMARY DATA STORE.
+        CSV is kept for backward compatibility.
         """
         with self.lock:
             try:
@@ -660,6 +730,65 @@ class NetworkScanner:
                     if os.path.exists(temp_path):
                         os.unlink(temp_path)
                     raise
+                
+                # WRITE TO SQLITE DATABASE (PRIMARY DATA STORE)
+                # This ensures all scan data is persisted in the database
+                try:
+                    self.logger.debug(f"Writing {len(sorted_netkb_entries)} hosts to SQLite database...")
+                    
+                    for mac, data in sorted_netkb_entries:
+                        # Get primary IP (first one if multiple)
+                        primary_ip = sorted(data['IPs'], key=self.ip_key)[0] if data['IPs'] else ''
+                        hostname = '; '.join(sorted(data['Hostnames'])) if data['Hostnames'] else ''
+                        
+                        # Prepare ports string
+                        valid_ports = [p for p in data['Ports'] if p]
+                        ports_str = ','.join(sorted(valid_ports, key=int)) if valid_ports else ''
+                        
+                        # Upsert host to database
+                        self.db.upsert_host(
+                            mac=mac,
+                            ip=primary_ip,
+                            hostname=hostname,
+                            ports=ports_str,
+                            alive_count=data.get('Alive', '0'),
+                            scanner_status=data.get('Scanner', ''),
+                            network_profile=data.get('Network Profile', ''),
+                            ssh_connector=data.get('ssh_connector', ''),
+                            rdp_connector=data.get('rdp_connector', ''),
+                            ftp_connector=data.get('ftp_connector', ''),
+                            smb_connector=data.get('smb_connector', ''),
+                            telnet_connector=data.get('telnet_connector', ''),
+                            sql_connector=data.get('sql_connector', ''),
+                            steal_files_ssh=data.get('steal_files_ssh', ''),
+                            steal_files_rdp=data.get('steal_files_rdp', ''),
+                            steal_files_ftp=data.get('steal_files_ftp', ''),
+                            steal_files_smb=data.get('steal_files_smb', ''),
+                            steal_files_telnet=data.get('steal_files_telnet', ''),
+                            steal_data_sql=data.get('steal_data_sql', ''),
+                            nmap_vuln_scanner=data.get('nmap_vuln_scanner', ''),
+                            notes=data.get('Notes', ''),
+                            failed_ping_count=data.get('Failed_Pings', 0),
+                            status='alive' if data.get('Alive') == '1' else 'degraded'
+                        )
+                        
+                        # Update ping status based on alive state
+                        if data.get('Alive') == '1':
+                            self.db.update_ping_status(mac, success=True)
+                        elif data.get('Failed_Pings', 0) > 0:
+                            # Don't call update_ping_status for failed pings here
+                            # because we already have the correct failed_ping_count
+                            # Just log the degraded state
+                            if data.get('Failed_Pings', 0) >= 30:
+                                self.logger.debug(f"Host {mac} in degraded state ({data.get('Failed_Pings', 0)} failed pings)")
+                    
+                    self.logger.info(f"✅ Updated SQLite database with {len(sorted_netkb_entries)} hosts")
+                    
+                except Exception as db_error:
+                    self.logger.error(f"Failed to write to SQLite database: {db_error}")
+                    self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                    # Don't raise - CSV write succeeded, so continue
+                
             except Exception as e:
                 self.logger.error(f"Error in update_netkb: {e}")
 
