@@ -195,7 +195,7 @@ install_python_packages() {
         ["rich>=13.0.0"]="rich"
         ["netifaces==0.11.0"]="netifaces"
         ["ping3>=4.0.0"]="ping3"
-        ["get-mac>=0.9.0"]="get_mac"
+        ["get-mac>=0.9.0"]="getmac"
         ["paramiko>=3.0.0"]="paramiko"
         ["smbprotocol>=1.10.0"]="smbprotocol"
         ["pysmb>=1.2.0"]="smb"
@@ -266,7 +266,7 @@ verify_installation() {
     local failed=0
     
     # Check critical Python modules
-    local required_modules=("RPi.GPIO" "spidev" "PIL" "numpy" "pandas" "rich" "netifaces" "ping3" "get_mac" "paramiko" "smbprotocol" "smb" "pymysql" "sqlalchemy" "nmap" "flask" "flask_socketio" "flask_cors" "psutil")
+    local required_modules=("RPi.GPIO" "spidev" "PIL" "numpy" "pandas" "rich" "netifaces" "ping3" "getmac" "paramiko" "smbprotocol" "smb" "pymysql" "sqlalchemy" "nmap" "flask" "flask_socketio" "flask_cors" "psutil")
     
     for module in "${required_modules[@]}"; do
         if check_python_package "$module"; then
