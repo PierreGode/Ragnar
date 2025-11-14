@@ -10,6 +10,27 @@
 
 Ragnar is a « Tamagotchi like » sophisticated, autonomous network scanning, vulnerability assessment, and offensive security tool designed to run on a Raspberry Pi equipped with a 2.13-inch e-Paper HAT. This document provides a detailed explanation of the project.
 
+### ⚠️ IMPORTANT: Educational Kill Switch
+
+**For educational use only!** Ragnar includes a built-in kill switch endpoint (`/api/kill`) that completely wipes all databases, logs, and deletes the entire repository. This ensures no sensitive data remains after demonstrations or training sessions.
+
+**🔴 Critical Security Feature:**
+- Requires confirmation token `ERASE_ALL_DATA` to prevent accidental triggers
+- Wipes all network scan data, credentials, and logs
+- Deletes the entire Ragnar installation
+- Optional system shutdown after cleanup
+
+**📖 Full Documentation:** See [KILL_SWITCH.md](KILL_SWITCH.md) for complete usage instructions and safety guidelines.
+
+**Usage Example:**
+```bash
+curl -X POST http://localhost:8000/api/kill \
+  -H "Content-Type: application/json" \
+  -d '{"confirmation": "ERASE_ALL_DATA"}'
+```
+
+⚠️ **This operation is IRREVERSIBLE. Use responsibly and only for authorized educational purposes.**
+
 ### 🌐 Web Interface & WiFi Management
 
 **Modern Dashboard** - Access Ragnar's sleek web interface at `http://<ragnar-ip>:8000`:
