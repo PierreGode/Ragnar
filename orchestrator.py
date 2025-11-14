@@ -431,12 +431,14 @@ class Orchestrator:
                 except Exception as stats_error:
                     logger.warning(f"Could not update stats: {stats_error}")
             
-            self.shared_data.write_data(current_data)
+            # SQLite writes happen automatically in action modules - no CSV write needed
+            # self.shared_data.write_data(current_data)
             return result == 'success'
         except Exception as e:
             logger.error(f"Action {action.action_name} failed: {e}")
             self._update_action_status(row, action_key, 'failed')
-            self.shared_data.write_data(current_data)
+            # SQLite writes happen automatically in action modules - no CSV write needed
+            # self.shared_data.write_data(current_data)
             return False
 
     @staticmethod
@@ -505,12 +507,14 @@ class Orchestrator:
             else:
                 logger.error(f"Standalone action {action.action_name} failed")
             
-            self.shared_data.write_data(current_data)
+            # SQLite writes happen automatically in action modules - no CSV write needed
+            # self.shared_data.write_data(current_data)
             return result == 'success'
         except Exception as e:
             logger.error(f"Standalone action {action.action_name} failed: {e}")
             self._update_action_status(row, action_key, 'failed')
-            self.shared_data.write_data(current_data)
+            # SQLite writes happen automatically in action modules - no CSV write needed
+            # self.shared_data.write_data(current_data)
             return False
 
     def run_vulnerability_scans(self, force=False):
@@ -600,12 +604,14 @@ class Orchestrator:
                     else:
                         logger.warning(f"❌ Vulnerability scan failed for {ip} ({hostname})")
                     
-                    self.shared_data.write_data(current_data)
+                    # SQLite writes happen automatically in vuln scanner - no CSV write needed
+                    # self.shared_data.write_data(current_data)
                     scans_performed += 1
                 except Exception as e:
                     logger.error(f"Error scanning {ip} ({hostname}): {e}")
                     self._update_action_status(row, action_key, 'failed')
-                    self.shared_data.write_data(current_data)
+                    # SQLite writes happen automatically in vuln scanner - no CSV write needed
+                    # self.shared_data.write_data(current_data)
             
             self.last_vuln_scan_time = datetime.now()
             if scans_performed > 0 or scans_skipped > 0:
@@ -817,7 +823,8 @@ class Orchestrator:
             # Execute actions (only attack actions will be filtered by enable_attacks)
             any_action_executed = self.process_alive_ips(current_data)
 
-            self.shared_data.write_data(current_data)
+            # SQLite writes happen automatically in action modules - no CSV write needed
+            # self.shared_data.write_data(current_data)
 
             if not any_action_executed:
                 if enable_attacks:
