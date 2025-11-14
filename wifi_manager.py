@@ -296,14 +296,14 @@ class WiFiManager:
         """Handle initial Wi-Fi connection with endless loop behavior"""
         self.logger.info("Starting Endless Loop Wi-Fi management...")
         
-        # Wait 2 minutes after boot before starting the endless loop
+        # Wait 30 seconds after boot before starting the endless loop (reduced from 2 minutes)
         if self.boot_completed_time:
-            boot_wait_time = 120  # 2 minutes
+            boot_wait_time = 30  # 30 seconds for faster startup
             elapsed_since_boot = time.time() - self.boot_completed_time
             remaining_wait = boot_wait_time - elapsed_since_boot
             
             if remaining_wait > 0:
-                self.logger.info(f"Waiting {remaining_wait:.1f}s more before starting endless loop (2 minutes after boot)")
+                self.logger.info(f"Waiting {remaining_wait:.1f}s more before starting endless loop (30 seconds after boot)")
                 time.sleep(remaining_wait)
         
         # Check if we're already connected before starting the loop
@@ -751,7 +751,7 @@ class WiFiManager:
         try:
             # Method 1: Check using nmcli for active wireless connections
             result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,TYPE', 'con', 'show'], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
                     if line and 'yes:802-11-wireless' in line:
@@ -797,7 +797,7 @@ class WiFiManager:
         """Get the current connected SSID"""
         try:
             result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,SSID', 'dev', 'wifi'], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 for line in result.stdout.strip().split('\n'):
                     if line.startswith('yes:'):
