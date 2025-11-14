@@ -276,6 +276,7 @@ install_dependencies() {
         "iproute2"
         "iputils-ping"
         "rfkill"
+        "sqlite3"
     )
     
     # Optional packages that may not be available in all distributions
