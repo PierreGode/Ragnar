@@ -16,7 +16,7 @@ Ragnar is a « Tamagotchi like » sophisticated, autonomous network scanning, vu
 
 > Ragnar includes a built-in kill switch endpoint (`/api/kill`) that completely wipes all databases, logs, This ensures no sensitive data remains after demonstrations or training sessions.
 > If Ragnar is to be found witout permission in a network anyone kan completely wipe all databases + delete the entire repository rendering Ragnar dead.
-> **📖 Full Documentation:** See [KILL_SWITCH.md](KILL_SWITCH.md) for complete usage instructions and safety guidelines.
+> **📖 Full Documentation:** See [kill switch doc](KILL_SWITCH.md) for complete usage instructions and safety guidelines.
 
 
 ### 🌐 Web Interface & WiFi Management
