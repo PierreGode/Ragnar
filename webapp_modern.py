@@ -26,6 +26,7 @@ import importlib
 import hashlib
 import ipaddress
 import socket
+import traceback
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response
@@ -2182,9 +2183,45 @@ def get_stable_network_data():
 
 @app.route('/api/network')
 def get_network():
-    """Get network scan data from the persistent WiFi-specific file."""
+    """Get network scan data from SQLite database (real-time)."""
     try:
-        network_data = load_persistent_network_data()
+        # Get all hosts from SQLite database
+        hosts = shared_data.db.get_all_hosts()
+        
+        # Convert to format expected by frontend
+        network_data = []
+        for host in hosts:
+            # Parse ports from comma-separated string to list
+            ports_str = host.get('ports', '')
+            ports = [p.strip() for p in ports_str.split(',') if p.strip()] if ports_str else []
+            
+            network_data.append({
+                'mac': host.get('mac_address', ''),
+                'ip': host.get('ip_address', ''),
+                'hostname': host.get('hostname', ''),
+                'status': host.get('status', 'unknown'),
+                'ports': ports,
+                'failed_pings': host.get('failed_ping_count', 0),
+                'last_seen': host.get('last_seen', ''),
+                # Action statuses
+                'scanner': host.get('scanner_status', ''),
+                'network_profile': host.get('network_profile', ''),
+                'ssh_connector': host.get('ssh_connector', ''),
+                'rdp_connector': host.get('rdp_connector', ''),
+                'ftp_connector': host.get('ftp_connector', ''),
+                'smb_connector': host.get('smb_connector', ''),
+                'telnet_connector': host.get('telnet_connector', ''),
+                'sql_connector': host.get('sql_connector', ''),
+                'steal_files_ssh': host.get('steal_files_ssh', ''),
+                'steal_files_rdp': host.get('steal_files_rdp', ''),
+                'steal_files_ftp': host.get('steal_files_ftp', ''),
+                'steal_files_smb': host.get('steal_files_smb', ''),
+                'steal_files_telnet': host.get('steal_files_telnet', ''),
+                'steal_data_sql': host.get('steal_data_sql', ''),
+                'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
+                'notes': host.get('notes', '')
+            })
+        
         response = jsonify(network_data)
         response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         response.headers['Pragma'] = 'no-cache'
@@ -2192,7 +2229,8 @@ def get_network():
         return response
 
     except Exception as e:
-        logger.error(f"Error getting network data: {e}")
+        logger.error(f"Error getting network data from SQLite: {e}")
+        logger.debug(f"Traceback: {traceback.format_exc()}")
         return jsonify({'error': str(e)}), 500
 
 
