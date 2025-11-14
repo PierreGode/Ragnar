@@ -36,6 +36,7 @@ import sys
 import sqlite3
 import json
 import csv
+import logging
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
