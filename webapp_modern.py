@@ -526,8 +526,8 @@ def sync_all_counts():
                 logger.info(f"[SQLITE SYNC] Reading from SQLite database")
                 
                 for host in hosts:
-                    ip = host.get("ip_address", "").strip()
-                    mac = host.get("mac_address", "").strip()
+                    ip = host.get("ip", "").strip()
+                    mac = host.get("mac", "").strip()
                     
                     # Skip standalone entries or entries without IP
                     if mac == "STANDALONE" or not ip:
@@ -1960,7 +1960,7 @@ def get_stable_network_data():
         
         # Process SQLite hosts
         for host in hosts:
-            ip = host.get('ip_address', '').strip()
+            ip = host.get('ip', '').strip()
             # Skip if empty, already processed, or is STANDALONE
             if not ip or ip in processed_ips or ip == 'STANDALONE':
                 continue
@@ -1986,7 +1986,7 @@ def get_stable_network_data():
             host_data = {
                 'ip': ip,
                 'hostname': _normalize_value(host.get('hostname'), 'Unknown'),
-                'mac': _normalize_value(host.get('mac_address'), 'Unknown'),
+                'mac': _normalize_value(host.get('mac'), 'Unknown'),
                 'status': host_status,
                 'ports': ';'.join(ports) if ports else 'Unknown',
                 'vulnerabilities': _normalize_value(host.get('nmap_vuln_scanner'), '0'),
@@ -2081,8 +2081,8 @@ def get_network():
             ports = [p.strip() for p in ports_str.split(',') if p.strip()] if ports_str else []
             
             network_data.append({
-                'mac': host.get('mac_address', ''),
-                'ip': host.get('ip_address', ''),
+                'mac': host.get('mac', ''),
+                'ip': host.get('ip', ''),
                 'hostname': host.get('hostname', ''),
                 'status': host.get('status', 'unknown'),
                 'ports': ports,
@@ -6384,13 +6384,13 @@ def legacy_netkb_json():
         # Build ports dict (ip -> list of ports)
         ports_dict = {}
         for host in alive_hosts:
-            ip = host.get('ip_address', '')
+            ip = host.get('ip', '')
             if ip:
                 port_str = host.get('ports', '')
                 ports_dict[ip] = port_str.split(',') if port_str else []
         
         response_data = {
-            'ips': [h.get('ip_address', '') for h in alive_hosts if h.get('ip_address')],
+            'ips': [h.get('ip', '') for h in alive_hosts if h.get('ip')],
             'ports': ports_dict,
             'actions': actions
         }
