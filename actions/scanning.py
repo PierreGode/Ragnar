@@ -272,10 +272,20 @@ class NetworkScanner:
                 for host, data in nmap_results.items():
                     mac = data.get('mac', '')
                     if not mac or mac == '00:00:00:00:00:00':
-                        # Create pseudo-MAC for hosts without MAC address
-                        ip_parts = host.split('.')
-                        if len(ip_parts) == 4:
-                            mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                        # Check if this IP already exists in database with a real MAC
+                        existing_mac = next((h['mac'] for h in self.db.get_all_hosts() 
+                                           if h.get('ip') == host and not h['mac'].startswith('00:00:c0:a8')), None)
+                        
+                        if existing_mac:
+                            # Use existing real MAC instead of creating pseudo-MAC
+                            mac = existing_mac
+                            self.logger.info(f"✅ Nmap results: Found existing MAC {mac} for IP {host}, skipping pseudo-MAC creation")
+                        else:
+                            # Only create pseudo-MAC if no real MAC exists
+                            ip_parts = host.split('.')
+                            if len(ip_parts) == 4:
+                                mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                self.logger.warning(f"⚠️ Nmap results: Creating pseudo-MAC {mac} for IP {host}")
                     
                     if mac:
                         mac = mac.lower().strip()
@@ -339,9 +349,18 @@ class NetworkScanner:
                     if result.returncode == 0:
                         mac = self.get_mac_address(priority_ip, "")
                         if not mac or mac == "00:00:00:00:00:00":
-                            ip_parts = priority_ip.split('.')
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
+                            # Check if this IP already exists in database with a real MAC
+                            existing_hosts = self.db.get_all_hosts()
+                            existing_mac = next((h['mac'] for h in existing_hosts if h.get('ip') == priority_ip and not h['mac'].startswith('00:00:c0:a8')), None)
+                            
+                            if existing_mac:
+                                mac = existing_mac
+                                self.logger.info(f"✅ Priority target {priority_ip}: Found existing MAC {mac}, skipping pseudo-MAC")
+                            else:
+                                ip_parts = priority_ip.split('.')
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.warning(f"⚠️ Priority target {priority_ip}: Creating pseudo-MAC {mac}")
 
                         ping_discovered[priority_ip] = {
                             "mac": mac,
@@ -371,9 +390,18 @@ class NetworkScanner:
                     if result.returncode == 0:
                         mac = self.get_mac_address(ip_str, "")
                         if not mac or mac == "00:00:00:00:00:00":
-                            ip_parts = ip_str.split('.')
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
+                            # Check if this IP already exists in database with a real MAC
+                            existing_hosts = self.db.get_all_hosts()
+                            existing_mac = next((h['mac'] for h in existing_hosts if h.get('ip') == ip_str and not h['mac'].startswith('00:00:c0:a8')), None)
+                            
+                            if existing_mac:
+                                mac = existing_mac
+                                self.logger.debug(f"✅ Ping sweep {ip_str}: Found existing MAC {mac}, skipping pseudo-MAC")
+                            else:
+                                ip_parts = ip_str.split('.')
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.debug(f"⚠️ Ping sweep {ip_str}: Creating pseudo-MAC {mac}")
 
                         ping_discovered[ip_str] = {
                             "mac": mac,
@@ -573,14 +601,22 @@ class NetworkScanner:
                     # For hosts with unknown MAC (00:00:00:00:00:00), use IP as unique identifier
                     # This allows tracking hosts across routers or when MAC can't be determined
                     if mac == "00:00:00:00:00:00":
-                        # Create a pseudo-MAC from the IP for tracking purposes
-                        # This ensures each IP is tracked separately even without MAC
-                        ip_parts = ip.split('.')
-                        if len(ip_parts) == 4:
-                            # Convert IP to a unique MAC-like identifier: 00:00:ip1:ip2:ip3:ip4
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
-                            self.logger.debug(f"Created pseudo-MAC {mac} for IP {ip} (MAC address unavailable)")
+                        # Check if this IP already exists in database with a real MAC
+                        existing_mac = next((h['mac'] for h in self.db.get_all_hosts() 
+                                           if h.get('ip') == ip and not h['mac'].startswith('00:00:c0:a8')), None)
+                        
+                        if existing_mac:
+                            # Use existing real MAC instead of creating pseudo-MAC
+                            mac = existing_mac
+                            self.logger.info(f"✅ NetKB merge: Found existing MAC {mac} for IP {ip}, skipping pseudo-MAC creation")
+                        else:
+                            # Only create pseudo-MAC if no real MAC exists
+                            ip_parts = ip.split('.')
+                            if len(ip_parts) == 4:
+                                # Convert IP to a unique MAC-like identifier: 00:00:ip1:ip2:ip3:ip4
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.warning(f"⚠️ Created pseudo-MAC {mac} for IP {ip} (MAC address unavailable)")
 
                     if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                         continue
