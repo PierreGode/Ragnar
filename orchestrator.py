@@ -445,7 +445,11 @@ class Orchestrator:
     def _extract_ports(row):
         """Return a sanitized list of ports extracted from a data row."""
         ports_field = row.get("Ports", "") or ""
-        return [port.strip() for port in ports_field.split(';') if port and port.strip()]
+        # Support both comma and semicolon delimiters (SQLite uses comma, CSV uses semicolon)
+        if ',' in ports_field:
+            return [port.strip() for port in ports_field.split(',') if port and port.strip()]
+        else:
+            return [port.strip() for port in ports_field.split(';') if port and port.strip()]
 
     def execute_standalone_action(self, action, current_data):
         """Execute a standalone action with timeout protection"""
