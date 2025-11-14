@@ -5548,20 +5548,13 @@ def get_stats():
             'services_discovered': {}
         }
         
-        # Add scan results count
-        if os.path.exists(shared_data.netkbfile):
-            import pandas as pd
-            try:
-                # Robust CSV parsing - skip malformed rows
-                try:
-                    df = pd.read_csv(shared_data.netkbfile, on_bad_lines='warn')
-                except TypeError:
-                    # Fallback for older pandas
-                    df = pd.read_csv(shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
-                stats['scan_results_count'] = safe_int(len(df[df['Alive'] == 1]) if 'Alive' in df.columns else len(df))
-            except Exception as e:
-                logger.warning(f"Could not read netkb for stats: {e}")
-                stats['scan_results_count'] = 0
+        # Add scan results count from SQLite database
+        try:
+            db_stats = shared_data.db.get_stats()
+            stats['scan_results_count'] = safe_int(db_stats.get('alive_count', 0))
+        except Exception as e:
+            logger.warning(f"Could not get database stats: {e}")
+            stats['scan_results_count'] = 0
         
         # Add threat intelligence stats
         if threat_intelligence:
@@ -6407,20 +6400,11 @@ def legacy_logs():
 
 @app.route('/netkb_data_json')
 def legacy_netkb_json():
-    """Legacy endpoint for network knowledge base JSON"""
+    """Legacy endpoint for network knowledge base JSON - now uses SQLite database"""
     try:
-        netkb_file = shared_data.netkbfile
-        if not os.path.exists(netkb_file):
-            return jsonify({'ips': [], 'ports': {}, 'actions': []})
-            
-        import pandas as pd
-        # Robust CSV parsing - skip malformed rows
-        try:
-            df = pd.read_csv(netkb_file, on_bad_lines='warn')
-        except TypeError:
-            # Fallback for older pandas
-            df = pd.read_csv(netkb_file, error_bad_lines=False, warn_bad_lines=True)
-        data = df[df['Alive'] == 1] if 'Alive' in df.columns else df
+        # Get alive hosts from database
+        hosts = shared_data.db.get_all_hosts()
+        alive_hosts = [h for h in hosts if h.get('status') == 'alive']
         
         # Get available actions from actions file
         actions = []
@@ -6431,9 +6415,17 @@ def legacy_netkb_json():
         except Exception:
             pass
         
+        # Build ports dict (ip -> list of ports)
+        ports_dict = {}
+        for host in alive_hosts:
+            ip = host.get('ip_address', '')
+            if ip:
+                port_str = host.get('ports', '')
+                ports_dict[ip] = port_str.split(',') if port_str else []
+        
         response_data = {
-            'ips': data['IPs'].tolist() if 'IPs' in data.columns else [],
-            'ports': {row['IPs']: row['Ports'].split(';') for _, row in data.iterrows() if 'Ports' in row},
+            'ips': [h.get('ip_address', '') for h in alive_hosts if h.get('ip_address')],
+            'ports': ports_dict,
             'actions': actions
         }
         

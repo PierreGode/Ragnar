@@ -131,27 +131,19 @@ class Display:
                     self.shared_data.vulnnbr = 0
                     logger.info("Vulnerability summary file created.")
                 else:
-                    if os.path.exists(self.shared_data.netkbfile):
-                        try:
-                            # Check if file is not empty and has content
-                            if os.path.getsize(self.shared_data.netkbfile) > 0:
-                                with open(self.shared_data.netkbfile, 'r') as file:
-                                    netkb_df = pd.read_csv(file)
-                                    if not netkb_df.empty and "Alive" in netkb_df.columns and "MAC Address" in netkb_df.columns:
-                                        alive_mask = netkb_df["Alive"].astype(str).str.strip() == '1'
-                                        alive_macs = set(
-                                            netkb_df[(alive_mask) & (netkb_df["MAC Address"] != "STANDALONE")]["MAC Address"]
-                                        )
-                                    else:
-                                        alive_macs = set()
-                            else:
-                                logger.debug("netkb file is empty, skipping")
-                                alive_macs = set()
-                        except (pd.errors.EmptyDataError, pd.errors.ParserError) as e:
-                            logger.warning(f"Could not parse netkb file: {e}")
-                            alive_macs = set()
-                    else:
+                    # Get alive hosts from SQLite database instead of CSV
+                    try:
+                        db_stats = self.shared_data.db.get_stats()
+                        alive_hosts = self.shared_data.db.get_all_hosts()
+                        alive_macs = {
+                            h['mac_address'] for h in alive_hosts 
+                            if h.get('status') == 'alive' and h.get('mac_address') != 'STANDALONE'
+                        }
+                        logger.debug(f"Loaded {len(alive_macs)} alive MACs from database")
+                    except Exception as e:
+                        logger.warning(f"Could not get alive MACs from database: {e}")
                         alive_macs = set()
+
 
                     try:
                         # Check if file is not empty and has content

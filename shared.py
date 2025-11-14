@@ -22,6 +22,7 @@ import csv
 import logging
 import subprocess
 import threading
+import traceback
 from datetime import datetime
 from PIL import Image, ImageFont 
 from logger import Logger
@@ -931,18 +932,18 @@ class SharedData:
     
     def read_data(self):
         """
-        Read data from SQLite database (primary) with CSV fallback.
+        Read data from SQLite database.
         Returns data in the same format as CSV for backward compatibility.
         """
         data = []
         
         try:
-            # Read from SQLite database (PRIMARY DATA SOURCE)
+            # Read from SQLite database (PRIMARY AND ONLY DATA SOURCE)
             hosts = self.db.get_all_hosts()
             
             if not hosts:
-                logger.warning("No hosts found in database - falling back to CSV")
-                return self._read_data_from_csv()
+                logger.debug("No hosts found in database")
+                return []
             
             # Convert database format to CSV-compatible format
             for host in hosts:
@@ -982,47 +983,11 @@ class SharedData:
             return data
             
         except Exception as e:
-            logger.error(f"Error reading from database, falling back to CSV: {e}")
-            return self._read_data_from_csv()
+            logger.error(f"Error reading from database: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return []  # Return empty list on database error
     
-    def _read_data_from_csv(self):
-        """Legacy CSV read - fallback only."""
-        self.initialize_csv()  # Ensure CSV is initialized with correct headers
-        data = []
-        try:
-            with open(self.netkbfile, 'r', newline='', encoding='utf-8') as file:
-                reader = csv.DictReader(file)
-                expected_fieldnames = reader.fieldnames
-                
-                for line_num, row in enumerate(reader, start=2):  # Start at 2 (after header)
-                    try:
-                        # Check if row has extra fields (malformed)
-                        if len(row) > len(expected_fieldnames) if expected_fieldnames else False:
-                            logger.warning(f"Skipping malformed row {line_num} in netkb.csv: too many fields")
-                            continue
-                        
-                        # Only add rows with valid MAC address
-                        if row.get("MAC Address") and row["MAC Address"].strip():
-                            data.append(row)
-                    except Exception as row_error:
-                        logger.warning(f"Error reading row {line_num} in netkb.csv: {row_error}")
-                        continue
-                        
-        except Exception as e:
-            logger.error(f"Error reading netkb.csv: {e}")
-            # If file is corrupted, try to restore from backup
-            backup_file = f"{self.netkbfile}.backup"
-            if os.path.exists(backup_file):
-                logger.info(f"Attempting to restore from backup: {backup_file}")
-                try:
-                    import shutil
-                    shutil.copy2(backup_file, self.netkbfile)
-                    return self._read_data_from_csv()  # Retry reading
-                except Exception as restore_error:
-                    logger.error(f"Could not restore from backup: {restore_error}")
-        
-        return data
-    
+
     def _start_cleanup_task(self):
         """Start background task to cleanup old hosts (not seen in 24 hours)."""
         def cleanup_worker():
@@ -1042,112 +1007,15 @@ class SharedData:
         logger.info("Started background host cleanup task (runs hourly)")
 
     def write_data(self, data):
-        """Write data to the CSV file."""
-        with open(self.actions_file, 'r') as file:
-            actions = json.load(file)
-        action_names = [action["b_class"] for action in actions if "b_class" in action]
-
-        # Read existing CSV file if it exists with error handling
-        existing_headers = []
-        existing_data = []
-        
-        if os.path.exists(self.netkbfile):
-            try:
-                with open(self.netkbfile, 'r', newline='', encoding='utf-8') as file:
-                    reader = csv.DictReader(file)
-                    existing_headers = list(reader.fieldnames) if reader.fieldnames else []
-                    
-                    for line_num, row in enumerate(reader, start=2):
-                        try:
-                            # Skip malformed rows
-                            if len(row) > len(existing_headers) if existing_headers else False:
-                                logger.warning(f"Skipping malformed row {line_num} during write_data")
-                                continue
-                            existing_data.append(row)
-                        except Exception as row_error:
-                            logger.warning(f"Error reading row {line_num}: {row_error}")
-                            continue
-                            
-            except Exception as read_error:
-                logger.error(f"Error reading netkbfile for write_data: {read_error}")
-                # Try backup if available
-                backup_file = f"{self.netkbfile}.backup"
-                if os.path.exists(backup_file):
-                    logger.info("Attempting to restore from backup before write")
-                    try:
-                        import shutil
-                        shutil.copy2(backup_file, self.netkbfile)
-                        # Retry read
-                        with open(self.netkbfile, 'r', newline='', encoding='utf-8') as file:
-                            reader = csv.DictReader(file)
-                            existing_headers = list(reader.fieldnames) if reader.fieldnames else []
-                            existing_data = list(reader)
-                    except Exception as restore_error:
-                        logger.error(f"Could not restore from backup: {restore_error}")
-
-        # Check for missing action columns and add them
-        new_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"] + action_names
-        missing_headers = [header for header in new_headers if header not in existing_headers]
-
-        # Update headers
-        headers = existing_headers + missing_headers
-
-        # Merge new data with existing data
-        mac_to_existing_row = {row["MAC Address"]: row for row in existing_data}
-
-        for new_row in data:
-            mac_address = new_row["MAC Address"]
-            if mac_address in mac_to_existing_row:
-                # Update the existing row with new data
-                existing_row = mac_to_existing_row[mac_address]
-                for key, value in new_row.items():
-                    if value:
-                        existing_row[key] = value
-            else:
-                # Add new row
-                mac_to_existing_row[mac_address] = new_row
-
-        # Write updated data back to CSV with backup protection
-        import tempfile
-        import shutil
-        
-        # Only write if we have data to write
-        if not mac_to_existing_row:
-            self.print("Warning: No data to write to netkb.csv - skipping write")
-            return
-        
-        # Create backup of existing file if it exists and has content
-        if os.path.exists(self.netkbfile) and os.path.getsize(self.netkbfile) > 100:
-            backup_file = f"{self.netkbfile}.backup"
-            try:
-                shutil.copy2(self.netkbfile, backup_file)
-                self.print(f"Created backup: {backup_file}")
-            except Exception as backup_error:
-                logger.warning(f"Could not create backup: {backup_error}")
-        
-        # Write to temporary file first (atomic operation)
-        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(self.netkbfile), suffix='.tmp')
-        try:
-            with os.fdopen(temp_fd, 'w', newline='') as file:
-                writer = csv.DictWriter(file, fieldnames=headers)
-                writer.writeheader()
-                
-                # Write all data
-                for row in mac_to_existing_row.values():
-                    writer.writerow(row)
-            
-            # Verify temp file has content before replacing original
-            if os.path.getsize(temp_path) > 50:  # At least headers
-                shutil.move(temp_path, self.netkbfile)
-                self.print(f"Successfully wrote {len(mac_to_existing_row)} entries to netkb.csv")
-            else:
-                logger.error("Temp file is too small - aborting write to prevent data loss")
-                os.unlink(temp_path)
-        except Exception as write_error:
-            logger.error(f"Error writing netkb.csv: {write_error}")
-            if os.path.exists(temp_path):
-                os.unlink(temp_path)
-            raise
+        """
+        DEPRECATED: CSV write operations no longer supported.
+        All data is now stored in SQLite database.
+        Use db.upsert_host() to write host data.
+        This method is kept for backward compatibility but does nothing.
+        """
+        logger.warning("write_data() is deprecated - all data is now stored in SQLite database")
+        logger.debug(f"Ignoring write_data call with {len(data) if data else 0} entries")
+        pass
 
     def update_stats(self, persist=True):
         """Update gamification stats using lifetime achievements and SQLite database statistics."""

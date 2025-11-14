@@ -500,76 +500,68 @@ class NetworkScanner:
 
     def update_netkb(self, netkbfile, netkb_data, alive_macs):
         """
-        Updates the net knowledge base (netkb) file with the scan results.
-        NOW ALSO WRITES TO SQLITE DATABASE AS PRIMARY DATA STORE.
-        CSV is kept for backward compatibility.
+        Updates the network knowledge base with scan results.
+        WRITES TO SQLITE DATABASE AS PRIMARY AND ONLY DATA STORE.
+        netkbfile parameter kept for backward compatibility but CSV is no longer used.
         """
         with self.lock:
             try:
                 netkb_entries = {}
                 existing_action_columns = []
-                existing_headers = None
 
-                # Read existing CSV file with robust error handling
-                if os.path.exists(netkbfile):
-                    try:
-                        with open(netkbfile, 'r', newline='', encoding='utf-8') as file:
-                            reader = csv.DictReader(file)
-                            existing_headers = list(reader.fieldnames) if reader.fieldnames else []
-                            # Preserve deep scan metadata columns alongside action columns
-                            existing_action_columns = [header for header in existing_headers if header not in ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings", "Deep_Scanned", "Deep_Scan_Ports"]]
-                            
-                            for line_num, row in enumerate(reader, start=2):
-                                try:
-                                    # Skip malformed rows
-                                    if not row.get("MAC Address") or not row["MAC Address"].strip():
-                                        self.logger.warning(f"Skipping row {line_num} with empty MAC address")
-                                        continue
-                                    
-                                    mac = row["MAC Address"]
-                                    ips = row.get("IPs", "").split(';')
-                                    hostnames = row.get("Hostnames", "").split(';')
-                                    alive = row.get("Alive", "0")
-                                    ports = row.get("Ports", "").split(';')
-                                    
-                                    # Safely parse Failed_Pings with fallback for empty strings
-                                    failed_pings_str = row.get("Failed_Pings", "0")
-                                    try:
-                                        failed_pings = int(failed_pings_str) if failed_pings_str and failed_pings_str.strip() else 0
-                                    except ValueError:
-                                        self.logger.warning(f"Error parsing Failed_Pings in row {line_num}: invalid value '{failed_pings_str}', defaulting to 0")
-                                        failed_pings = 0
-                                    
-                                    netkb_entries[mac] = {
-                                        'IPs': set(ips) if ips[0] else set(),
-                                        'Hostnames': set(hostnames) if hostnames[0] else set(),
-                                        'Alive': alive,
-                                        'Ports': set(ports) if ports[0] else set(),
-                                        'Failed_Pings': failed_pings,
-                                        # Preserve deep scan metadata
-                                        'Deep_Scanned': row.get("Deep_Scanned", ""),
-                                        'Deep_Scan_Ports': row.get("Deep_Scan_Ports", "")
-                                    }
-                                    for action in existing_action_columns:
-                                        netkb_entries[mac][action] = row.get(action, "")
-                                        
-                                except Exception as row_error:
-                                    self.logger.warning(f"Error parsing row {line_num} in netkb: {row_error}")
-                                    continue
-                                    
-                    except Exception as read_error:
-                        self.logger.error(f"Error reading netkb file: {read_error}")
-                        # Try to restore from backup
-                        backup_file = f"{netkbfile}.backup"
-                        if os.path.exists(backup_file):
-                            self.logger.info("Attempting to restore netkb from backup")
-                            try:
-                                import shutil
-                                shutil.copy2(backup_file, netkbfile)
-                                # Retry reading with recursive call
-                                return self.update_netkb(netkbfile, netkb_data, alive_macs)
-                            except Exception as restore_error:
-                                self.logger.error(f"Could not restore from backup: {restore_error}")
+                # Read existing data from SQLite database
+                try:
+                    existing_hosts = self.db.get_all_hosts()
+                    self.logger.debug(f"Loaded {len(existing_hosts)} existing hosts from SQLite")
+                    
+                    for host in existing_hosts:
+                        mac = host['mac_address']
+                        # Parse IPs (stored as comma-separated in DB, we use ; for compatibility)
+                        ips = host['ip_address'].split(',') if host['ip_address'] else []
+                        hostnames = [host['hostname']] if host['hostname'] else []
+                        alive = '1' if host['status'] == 'alive' else '0'
+                        ports = host['ports'].split(',') if host['ports'] else []
+                        failed_pings = host['failed_ping_count']
+                        
+                        netkb_entries[mac] = {
+                            'IPs': set(ips) if ips else set(),
+                            'Hostnames': set(hostnames) if hostnames else set(),
+                            'Alive': alive,
+                            'Ports': set(ports) if ports else set(),
+                            'Failed_Pings': failed_pings,
+                            'Deep_Scanned': "",  # TODO: Add to database schema
+                            'Deep_Scan_Ports': "",  # TODO: Add to database schema
+                            # Preserve action module statuses
+                            'Scanner': host.get('scanner_status', ''),
+                            'Network Profile': host.get('network_profile', ''),
+                            'ssh_connector': host.get('ssh_connector', ''),
+                            'rdp_connector': host.get('rdp_connector', ''),
+                            'ftp_connector': host.get('ftp_connector', ''),
+                            'smb_connector': host.get('smb_connector', ''),
+                            'telnet_connector': host.get('telnet_connector', ''),
+                            'sql_connector': host.get('sql_connector', ''),
+                            'steal_files_ssh': host.get('steal_files_ssh', ''),
+                            'steal_files_rdp': host.get('steal_files_rdp', ''),
+                            'steal_files_ftp': host.get('steal_files_ftp', ''),
+                            'steal_files_smb': host.get('steal_files_smb', ''),
+                            'steal_files_telnet': host.get('steal_files_telnet', ''),
+                            'steal_data_sql': host.get('steal_data_sql', ''),
+                            'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
+                            'Notes': host.get('notes', '')
+                        }
+                    
+                    # Track which action columns exist (for new hosts)
+                    if netkb_entries:
+                        sample_entry = next(iter(netkb_entries.values()))
+                        existing_action_columns = [k for k in sample_entry.keys() 
+                                                  if k not in ["IPs", "Hostnames", "Alive", "Ports", 
+                                                              "Failed_Pings", "Deep_Scanned", "Deep_Scan_Ports"]]
+                        
+                except Exception as db_error:
+                    self.logger.error(f"Error reading from SQLite: {db_error}")
+                    self.logger.debug(f"Traceback: {traceback.format_exc()}")
+                    # Continue with empty netkb_entries - will create new database entries
+
 
                 ip_to_mac = {}  # Dictionary to track IP to MAC associations
 
@@ -661,77 +653,10 @@ class NetworkScanner:
 
                 # Only write if we have data
                 if not sorted_netkb_entries:
-                    self.logger.warning("No entries to write to netkb - skipping write")
+                    self.logger.warning("No entries to write to database - skipping write")
                     return
                 
-                # Initialize headers if not read from file
-                if existing_headers is None:
-                    existing_headers = ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings"]
-                
-                # Use atomic write with temp file
-                import tempfile
-                import shutil
-                temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(netkbfile), suffix='.tmp')
-                
-                try:
-                    with os.fdopen(temp_fd, 'w', newline='') as file:
-                        writer = csv.writer(file)
-                        # Ensure Failed_Pings and Deep Scan columns are included in headers
-                        if "Failed_Pings" not in existing_headers:
-                            # Insert Failed_Pings after Ports column
-                            headers_list = list(existing_headers)
-                            if "Ports" in headers_list:
-                                ports_index = headers_list.index("Ports")
-                                headers_list.insert(ports_index + 1, "Failed_Pings")
-                            else:
-                                headers_list.append("Failed_Pings")
-                            existing_headers = headers_list
-                        
-                        # Add Deep Scan columns if not present
-                        if "Deep_Scanned" not in existing_headers:
-                            headers_list = list(existing_headers)
-                            headers_list.append("Deep_Scanned")
-                            existing_headers = headers_list
-                        
-                        if "Deep_Scan_Ports" not in existing_headers:
-                            headers_list = list(existing_headers)
-                            headers_list.append("Deep_Scan_Ports")
-                            existing_headers = headers_list
-                        
-                        # Update action columns list to exclude all metadata columns
-                        existing_action_columns = [header for header in existing_headers if header not in ["MAC Address", "IPs", "Hostnames", "Alive", "Ports", "Failed_Pings", "Deep_Scanned", "Deep_Scan_Ports"]]
-                        
-                        writer.writerow(existing_headers)  # Write updated headers
-                        for mac, data in sorted_netkb_entries:
-                            # Filter out empty strings from ports before sorting
-                            valid_ports = [p for p in data['Ports'] if p]
-                            row = [
-                                mac,
-                                ';'.join(sorted(data['IPs'], key=self.ip_key)),
-                                ';'.join(sorted(data['Hostnames'])),
-                                data['Alive'],
-                                ';'.join(sorted(valid_ports, key=int)) if valid_ports else '',
-                                str(data.get('Failed_Pings', 0)),
-                                data.get('Deep_Scanned', ''),
-                                data.get('Deep_Scan_Ports', '')
-                            ]
-                            row.extend(data.get(action, "") for action in existing_action_columns)
-                            writer.writerow(row)
-                    
-                    # Verify temp file before replacing original
-                    if os.path.getsize(temp_path) > 50:
-                        shutil.move(temp_path, netkbfile)
-                        self.logger.info(f"✅ Updated netkb.csv with {len(sorted_netkb_entries)} entries")
-                    else:
-                        self.logger.error("Temp file too small - aborting write")
-                        os.unlink(temp_path)
-                except Exception as write_error:
-                    self.logger.error(f"Error writing netkb: {write_error}")
-                    if os.path.exists(temp_path):
-                        os.unlink(temp_path)
-                    raise
-                
-                # WRITE TO SQLITE DATABASE (PRIMARY DATA STORE)
+                # WRITE TO SQLITE DATABASE (PRIMARY AND ONLY DATA STORE)
                 # This ensures all scan data is persisted in the database
                 try:
                     self.logger.debug(f"Writing {len(sorted_netkb_entries)} hosts to SQLite database...")
@@ -1316,7 +1241,9 @@ class NetworkScanner:
 
         def save_results(self):
             """
-            Saves the calculated results to the output CSV file.
+            Logs the calculated scan statistics.
+            Statistics are now available from the SQLite database via db.get_stats()
+            CSV results file is no longer needed - this method kept for compatibility.
             """
             try:
                 # Ensure all required attributes exist with default values
@@ -1327,63 +1254,14 @@ class NetworkScanner:
                 if not hasattr(self, 'all_known_hosts_count'):
                     self.all_known_hosts_count = 0
                 
-                if not os.path.exists(self.output_csv_path):
-                    self.logger.warning(f"Output CSV file does not exist: {self.output_csv_path}")
-                    # Create a basic results file if it doesn't exist
-                    results_df = pd.DataFrame({
-                        'Total Open Ports': [self.total_open_ports],
-                        'Alive Hosts Count': [self.alive_hosts_count],
-                        'All Known Hosts Count': [self.all_known_hosts_count]
-                    })
-                    results_df.to_csv(self.output_csv_path, index=False)
-                    self.logger.info(f"Created new results file: {self.output_csv_path}")
-                    return
-                
-                # Check if output file is empty
-                if os.path.getsize(self.output_csv_path) == 0:
-                    self.logger.warning(f"Output CSV file is empty: {self.output_csv_path}")
-                    results_df = pd.DataFrame({
-                        'Total Open Ports': [self.total_open_ports],
-                        'Alive Hosts Count': [self.alive_hosts_count],
-                        'All Known Hosts Count': [self.all_known_hosts_count]
-                    })
-                    results_df.to_csv(self.output_csv_path, index=False)
-                    return
-                
-                results_df = pd.read_csv(self.output_csv_path)
-                
-                # Ensure at least one row exists
-                if results_df.empty:
-                    results_df = pd.DataFrame({
-                        'Total Open Ports': [self.total_open_ports],
-                        'Alive Hosts Count': [self.alive_hosts_count],
-                        'All Known Hosts Count': [self.all_known_hosts_count]
-                    })
-                else:
-                    # Update existing data
-                    if len(results_df) == 0:
-                        results_df.loc[0] = [self.total_open_ports, self.alive_hosts_count, self.all_known_hosts_count]
-                    else:
-                        results_df.loc[0, 'Total Open Ports'] = self.total_open_ports
-                        results_df.loc[0, 'Alive Hosts Count'] = self.alive_hosts_count
-                        results_df.loc[0, 'All Known Hosts Count'] = self.all_known_hosts_count
-                
-                results_df.to_csv(self.output_csv_path, index=False)
-                self.logger.debug(f"Successfully saved results to {self.output_csv_path}")
+                # Simply log the statistics - they're already in SQLite
+                self.logger.info(f"📊 Scan Results - Total Open Ports: {self.total_open_ports}, "
+                               f"Alive Hosts: {self.alive_hosts_count}, "
+                               f"All Known Hosts: {self.all_known_hosts_count}")
                 
             except Exception as e:
                 self.logger.error(f"Error in save_results: {e}")
-                # Try to create a minimal results file as fallback
-                try:
-                    fallback_df = pd.DataFrame({
-                        'Total Open Ports': [getattr(self, 'total_open_ports', 0)],
-                        'Alive Hosts Count': [getattr(self, 'alive_hosts_count', 0)],
-                        'All Known Hosts Count': [getattr(self, 'all_known_hosts_count', 0)]
-                    })
-                    fallback_df.to_csv(self.output_csv_path, index=False)
-                    self.logger.info(f"Created fallback results file: {self.output_csv_path}")
-                except Exception as fallback_error:
-                    self.logger.error(f"Failed to create fallback results file: {fallback_error}")
+
 
         def update_livestatus(self):
             """

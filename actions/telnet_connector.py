@@ -60,27 +60,18 @@ class TelnetConnector:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         
-        # Read CSV with error handling for empty files and malformed rows
+        # Read from SQLite via shared_data (no more CSV)
         try:
-            # Use error_bad_lines=False (pandas <1.3) or on_bad_lines='skip' (pandas >=1.3) to skip malformed rows
-            try:
-                # Try pandas >= 1.3 syntax first
-                self.scan = pd.read_csv(shared_data.netkbfile, on_bad_lines='warn')
-            except TypeError:
-                # Fall back to older pandas syntax
-                self.scan = pd.read_csv(shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
-        except pd.errors.EmptyDataError:
-            logger.warning(f"NetKB file is empty or has no columns: {shared_data.netkbfile}")
-            self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+            data = shared_data.read_data()
+            self.scan = pd.DataFrame(data)
+            if "Ports" not in self.scan.columns:
+                self.scan["Ports"] = None
+            # Ensure Ports column is string type before using .str accessor
+            self.scan["Ports"] = self.scan["Ports"].astype(str)
+            self.scan = self.scan[self.scan["Ports"].str.contains("23", na=False)]
         except Exception as e:
-            logger.warning(f"Could not read NetKB file: {e}")
+            logger.warning(f"Could not read data from database: {e}")
             self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
-
-        if "Ports" not in self.scan.columns:
-            self.scan["Ports"] = None
-        # Ensure Ports column is string type before using .str accessor
-        self.scan["Ports"] = self.scan["Ports"].astype(str)
-        self.scan = self.scan[self.scan["Ports"].str.contains("23", na=False)]
 
         self.users = open(shared_data.usersfile, "r").read().splitlines()
         self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
@@ -98,26 +89,20 @@ class TelnetConnector:
 
     def load_scan_file(self):
         """
-        Load the netkb file and filter it for Telnet ports.
+        Load from SQLite database and filter for Telnet ports.
         """
         try:
-            # Use error_bad_lines=False (pandas <1.3) or on_bad_lines='skip' (pandas >=1.3) to skip malformed rows
-            try:
-                # Try pandas >= 1.3 syntax first
-                self.scan = pd.read_csv(self.shared_data.netkbfile, on_bad_lines='warn')
-            except TypeError:
-                # Fall back to older pandas syntax
-                self.scan = pd.read_csv(self.shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
+            data = self.shared_data.read_data()
+            self.scan = pd.DataFrame(data)
+            if "Ports" not in self.scan.columns:
+                self.scan["Ports"] = None
+            # Ensure Ports column is string type before using .str accessor
+            self.scan["Ports"] = self.scan["Ports"].astype(str)
+            self.scan = self.scan[self.scan["Ports"].str.contains("23", na=False)]
         except Exception as e:
-            logger.warning(f"Could not reload NetKB file: {e}")
+            logger.warning(f"Could not reload data from database: {e}")
             # Keep existing scan data if reload fails
             return
-
-        if "Ports" not in self.scan.columns:
-            self.scan["Ports"] = None
-        # Ensure Ports column is string type before using .str accessor
-        self.scan["Ports"] = self.scan["Ports"].astype(str)
-        self.scan = self.scan[self.scan["Ports"].str.contains("23", na=False)]
 
     def telnet_connect(self, adresse_ip, user, password):
         """

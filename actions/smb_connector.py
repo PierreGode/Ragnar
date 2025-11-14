@@ -57,22 +57,15 @@ class SMBConnector:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         
-        # Read CSV with error handling for empty files and malformed rows
+        # Read from SQLite via shared_data (no more CSV)
         try:
-            try:
-                # Try pandas with robust error handling for malformed rows
-                self.scan = pd.read_csv(shared_data.netkbfile, on_bad_lines='warn')
-            except TypeError:  # pandas < 1.3
-                self.scan = pd.read_csv(shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
-        except pd.errors.EmptyDataError:
-            logger.warning(f"NetKB file is empty or has no columns: {shared_data.netkbfile}")
-            self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
+            data = shared_data.read_data()
+            self.scan = pd.DataFrame(data)
+            if "Ports" not in self.scan.columns:
+                self.scan["Ports"] = None
         except Exception as e:
-            logger.warning(f"Could not read NetKB file: {e}")
+            logger.warning(f"Could not read data from database: {e}")
             self.scan = pd.DataFrame(columns=['MAC Address', 'IPs', 'Hostnames', 'Ports', 'Alive'])
-
-        if "Ports" not in self.scan.columns:
-            self.scan["Ports"] = None
         # Ensure Ports column is string type before using .str accessor
         self.scan["Ports"] = self.scan["Ports"].astype(str)
         self.scan = self.scan[self.scan["Ports"].str.contains("445", na=False)]
@@ -93,13 +86,10 @@ class SMBConnector:
 
     def load_scan_file(self):
         """
-        Load the netkb file and filter it for SMB ports.
+        Load from SQLite database and filter for SMB ports.
         """
-        try:
-            self.scan = pd.read_csv(self.shared_data.netkbfile, on_bad_lines='warn')
-        except TypeError:  # pandas < 1.3
-            self.scan = pd.read_csv(self.shared_data.netkbfile, error_bad_lines=False, warn_bad_lines=True)
-
+        data = self.shared_data.read_data()
+        self.scan = pd.DataFrame(data)
         if "Ports" not in self.scan.columns:
             self.scan["Ports"] = None
         self.scan = self.scan[self.scan["Ports"].str.contains("445", na=False)]
