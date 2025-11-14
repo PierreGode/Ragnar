@@ -1941,129 +1941,77 @@ def load_persistent_network_data():
 
 @app.route('/api/network/stable')
 def get_stable_network_data():
-    """Get stable, aggregated network data for the Network tab"""
+    """Get stable, aggregated network data for the Network tab from SQLite database"""
     try:
-        # Check for network switches and clear old data if needed
-        check_and_handle_network_switch()
+        from db_manager import DatabaseManager
+        db = DatabaseManager()
         
-        # Read from the WiFi-specific network file for most stable data
-        network_data = read_wifi_network_data()
+        # Get all hosts from SQLite database
+        hosts = db.get_all_hosts()
         
-        # Also get any recent ARP scan cache data
+        # Also get any recent ARP scan cache data for real-time enrichment
         recent_arp_data = network_scan_cache.get('arp_hosts', {})
         
-        # Read NetKB data for additional enrichment (ports, MACs, etc.)
-        # CRITICAL FIX: Include ALL netkb data as primary source, not just enrichment
-        netkb_data = []
-        try:
-            netkb_data = shared_data.read_data()
-            logger.info(f"Loaded {len(netkb_data)} entries from NetKB for stable API")
-        except Exception as e:
-            logger.warning(f"Could not read NetKB data for enrichment: {e}")
-        
-        # Create enrichment map from NetKB data
-        netkb_enrichment = {}
-        for entry in netkb_data:
-            ip = entry.get('IPs', '').strip()
-            if ip and ip not in ['STANDALONE']:
-                netkb_enrichment[ip] = {
-                    'mac': entry.get('MAC Address', '').strip(),
-                    'hostname': entry.get('Hostnames', '').strip(),
-                    'ports': entry.get('Ports', '').strip(),
-                    'alive': entry.get('Alive', '0')
-                }
+        logger.info(f"Loaded {len(hosts)} entries from SQLite database for stable API")
         
         # Merge and enrich the data
         enriched_hosts = []
         processed_ips = set()
         
-        # Process network data first (most stable)
-        for entry in network_data:
-            ip = entry.get('IPs', '').strip()  # Fixed: Use 'IPs' not 'IP'
+        # Process SQLite hosts
+        for host in hosts:
+            ip = host.get('ip_address', '').strip()
             # Skip if empty, already processed, or is STANDALONE
             if not ip or ip in processed_ips or ip == 'STANDALONE':
                 continue
                 
             processed_ips.add(ip)
             
+            # Parse ports from semicolon-separated string to list
+            ports_str = host.get('ports', '')
+            if ports_str:
+                ports = [p.strip() for p in ports_str.split(';') if p.strip()]
+            else:
+                ports = []
+            
+            # Determine status based on SQLite status field
+            status = host.get('status', 'unknown')
+            if status == 'alive':
+                host_status = 'up'
+            elif status == 'degraded':
+                host_status = 'degraded'
+            else:
+                host_status = 'unknown'
+            
             host_data = {
                 'ip': ip,
-                'hostname': _normalize_value(entry.get('Hostnames'), 'Unknown'),
-                'mac': _normalize_value(entry.get('MAC Address'), 'Unknown'),
-                'status': 'up' if entry.get('Alive') in [True, 'True', '1', 1] else 'unknown',
-                'ports': _normalize_value(entry.get('Ports'), 'Unknown'),
-                'vulnerabilities': _normalize_value(entry.get('Vulnerabilities'), '0'),
-                'last_scan': _normalize_value(entry.get('LastSeen'), 'Never'),
-                'first_seen': _normalize_value(entry.get('First_Seen'), 'Unknown'),
-                'os': _normalize_value(entry.get('OS'), 'Unknown'),
-                'services': _normalize_value(entry.get('Services'), 'Unknown'),
-                'source': 'network_data'
+                'hostname': _normalize_value(host.get('hostname'), 'Unknown'),
+                'mac': _normalize_value(host.get('mac_address'), 'Unknown'),
+                'status': host_status,
+                'ports': ';'.join(ports) if ports else 'Unknown',
+                'vulnerabilities': _normalize_value(host.get('nmap_vuln_scanner'), '0'),
+                'last_scan': _normalize_value(host.get('last_seen'), 'Never'),
+                'first_seen': _normalize_value(host.get('first_seen'), 'Unknown'),
+                'os': 'Unknown',  # TODO: Add OS detection to database
+                'services': 'Unknown',  # TODO: Add services to database
+                'failed_pings': host.get('failed_ping_count', 0),
+                'source': 'sqlite'
             }
             
-            # Enhance with NetKB data if available
-            if ip in netkb_enrichment:
-                netkb_entry = netkb_enrichment[ip]
-                # Use NetKB data to fill in missing information
-                if netkb_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
-                    host_data['mac'] = netkb_entry['mac']
-                if netkb_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
-                    host_data['hostname'] = netkb_entry['hostname']
-                if netkb_entry.get('ports') and host_data['ports'] in ['Unknown', '']:
-                    host_data['ports'] = netkb_entry['ports']
-                # Check if NetKB shows host as alive
-                if netkb_entry.get('alive') in ['1', 1]:
+            # Enhance with recent ARP data if available
+            if ip in recent_arp_data:
+                arp_entry = recent_arp_data[ip]
+                if arp_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
+                    host_data['mac'] = arp_entry['mac']
+                if arp_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
+                    host_data['hostname'] = arp_entry['hostname']
+                if host_status != 'up':  # ARP means it's definitely up
                     host_data['status'] = 'up'
-                    host_data['source'] = 'network_data+netkb'
-            
-            # Enhance with recent ARP data if available
-            if ip in recent_arp_data:
-                arp_entry = recent_arp_data[ip]
-                if arp_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
-                    host_data['mac'] = arp_entry['mac']
-                if arp_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
-                    host_data['hostname'] = arp_entry['hostname']
-                host_data['status'] = 'up'  # ARP means it's definitely up
-                host_data['source'] = 'network_data+arp+netkb' if 'netkb' in host_data['source'] else 'network_data+arp'
+                host_data['source'] = 'sqlite+arp'
             
             enriched_hosts.append(host_data)
         
-        # CRITICAL FIX: Add ALL alive hosts from NetKB that weren't in network_data
-        for entry in netkb_data:
-            ip = entry.get('IPs', '').strip()
-            alive = entry.get('Alive', '0')
-            
-            # Skip if already processed, not alive, or is STANDALONE
-            if not ip or ip in processed_ips or ip == 'STANDALONE' or alive not in ['1', 1]:
-                continue
-                
-            processed_ips.add(ip)
-            
-            host_data = {
-                'ip': ip,
-                'hostname': _normalize_value(entry.get('Hostnames'), 'Unknown'),
-                'mac': _normalize_value(entry.get('MAC Address'), 'Unknown'), 
-                'status': 'up',
-                'ports': _normalize_value(entry.get('Ports'), 'Unknown'),
-                'vulnerabilities': _normalize_value(entry.get('Vulnerabilities'), '0'),
-                'last_scan': _normalize_value(entry.get('LastSeen'), 'Unknown'),
-                'first_seen': _normalize_value(entry.get('First_Seen'), 'Unknown'),
-                'os': _normalize_value(entry.get('OS'), 'Unknown'),
-                'services': _normalize_value(entry.get('Services'), 'Unknown'),
-                'source': 'netkb'
-            }
-            
-            # Enhance with recent ARP data if available
-            if ip in recent_arp_data:
-                arp_entry = recent_arp_data[ip]
-                if arp_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
-                    host_data['mac'] = arp_entry['mac']
-                if arp_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
-                    host_data['hostname'] = arp_entry['hostname']
-                host_data['source'] = 'netkb+arp'
-            
-            enriched_hosts.append(host_data)
-        
-        # Add any new ARP discoveries not in network data or NetKB
+        # Add any new ARP discoveries not in database
         for ip, arp_entry in recent_arp_data.items():
             if ip not in processed_ips:
                 host_data = {
@@ -2077,19 +2025,21 @@ def get_stable_network_data():
                     'first_seen': 'Recent',
                     'os': 'Unknown',
                     'services': 'Unknown',
+                    'failed_pings': 0,
                     'source': 'arp_discovery'
                 }
                 enriched_hosts.append(host_data)
         
+        logger.info(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
+        
         # Sort by IP address for consistent display
-        # Handle non-IP values like "STANDALONE" gracefully
         def safe_ip_sort_key(host):
             ip = host.get('ip', '')
             try:
                 # Try to parse as IP address
                 return (0, tuple(map(int, ip.split('.'))))
             except (ValueError, AttributeError):
-                # Non-IP values (like "STANDALONE") sort to the end
+                # Non-IP values sort to the end
                 return (1, ip)
         
         enriched_hosts.sort(key=safe_ip_sort_key)
@@ -2099,7 +2049,7 @@ def get_stable_network_data():
             'hosts': enriched_hosts,
             'count': len(enriched_hosts),
             'timestamp': datetime.now().isoformat(),
-            'source': 'stable_aggregated'
+            'source': 'sqlite_database'
         })
         response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
         response.headers['Pragma'] = 'no-cache'
@@ -2107,7 +2057,8 @@ def get_stable_network_data():
         return response
         
     except Exception as e:
-        logger.error(f"Error getting stable network data: {e}")
+        logger.error(f"Error getting stable network data from SQLite: {e}")
+        traceback.print_exc()
         return jsonify({
             'success': False,
             'error': str(e),
@@ -5510,23 +5461,65 @@ def add_credential():
 def get_stats():
     """Get aggregated statistics"""
     try:
-        stats = {
-            'total_targets': safe_int(shared_data.targetnbr),
-            'total_ports': safe_int(shared_data.portnbr),
-            'total_vulnerabilities': safe_int(shared_data.vulnnbr),
-            'total_credentials': safe_int(shared_data.crednbr),
-            'total_data_stolen': safe_int(shared_data.datanbr),
-            'scan_results_count': 0,
-            'services_discovered': {}
-        }
-        
-        # Add scan results count from SQLite database
+        # Get database stats
+        db_stats = {}
         try:
             db_stats = shared_data.db.get_stats()
-            stats['scan_results_count'] = safe_int(db_stats.get('alive_count', 0))
         except Exception as e:
             logger.warning(f"Could not get database stats: {e}")
-            stats['scan_results_count'] = 0
+        
+        # Build comprehensive stats object with multiple naming conventions for frontend compatibility
+        stats = {
+            # Target counts (multiple naming conventions for compatibility)
+            'active_target_count': safe_int(shared_data.targetnbr),
+            'target_count': safe_int(shared_data.targetnbr),
+            'total_targets': safe_int(shared_data.targetnbr),
+            
+            'inactive_target_count': safe_int(shared_data.inactive_targetnbr),
+            'offline_target_count': safe_int(shared_data.inactive_targetnbr),
+            
+            'total_target_count': safe_int(shared_data.total_targetnbr),
+            'all_targets': safe_int(shared_data.total_targetnbr),
+            
+            'new_target_count': safe_int(shared_data.new_targets),
+            'new_targets': safe_int(shared_data.new_targets),
+            'new_target_ips': shared_data.new_target_ips if hasattr(shared_data, 'new_target_ips') else [],
+            
+            'lost_target_count': safe_int(shared_data.lost_targets),
+            'lost_targets': safe_int(shared_data.lost_targets),
+            'lost_target_ips': shared_data.lost_target_ips if hasattr(shared_data, 'lost_target_ips') else [],
+            
+            # Port counts
+            'port_count': safe_int(shared_data.portnbr),
+            'open_port_count': safe_int(shared_data.portnbr),
+            'total_ports': safe_int(shared_data.portnbr),
+            
+            # Vulnerability counts
+            'vulnerability_count': safe_int(shared_data.vulnnbr),
+            'vuln_count': safe_int(shared_data.vulnnbr),
+            'total_vulnerabilities': safe_int(shared_data.vulnnbr),
+            'vulnerable_hosts_count': safe_int(db_stats.get('vulnerable_hosts', 0)),
+            'vulnerable_host_count': safe_int(db_stats.get('vulnerable_hosts', 0)),
+            
+            # Credential counts
+            'credential_count': safe_int(shared_data.crednbr),
+            'cred_count': safe_int(shared_data.crednbr),
+            'total_credentials': safe_int(shared_data.crednbr),
+            
+            # Gamification
+            'level': safe_int(shared_data.levelnbr),
+            'levelnbr': safe_int(shared_data.levelnbr),
+            'points': safe_int(shared_data.coinnbr),
+            'coins': safe_int(shared_data.coinnbr),
+            
+            # Other counts
+            'total_data_stolen': safe_int(shared_data.datanbr),
+            'scan_results_count': safe_int(db_stats.get('alive_count', 0)),
+            'services_discovered': {},
+            
+            # Last sync timestamp
+            'last_sync': shared_data.last_sync_timestamp if hasattr(shared_data, 'last_sync_timestamp') else None
+        }
         
         # Add threat intelligence stats
         if threat_intelligence:
@@ -5536,6 +5529,7 @@ def get_stats():
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 
