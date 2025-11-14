@@ -178,6 +178,8 @@ curl -X POST http://192.168.1.100:8000/api/kill \
 
 After triggering, you can verify deletion:
 
+<img width="680" height="223" alt="image" src="https://github.com/user-attachments/assets/d724aee1-050d-4c2d-982b-40a67b64b2e2" />
+
 ```bash
 # Check if Ragnar directory exists
 ls -la /path/to/Ragnar  # Should not exist after ~10 seconds
