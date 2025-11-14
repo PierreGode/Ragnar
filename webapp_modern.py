@@ -289,8 +289,8 @@ def update_netkb_entry(ip, hostname, mac, is_alive):
         if mac_to_store:
             # Update or insert host in database
             db.upsert_host(
-                mac_address=mac_to_store,
-                ip_address=ip,
+                mac=mac_to_store,
+                ip=ip,
                 hostname=hostname or '',
                 status='alive' if alive_value == '1' else 'offline'
             )
