@@ -521,6 +521,23 @@ class WiFiManager:
             self.consecutive_validation_cycles_failed = 0
             self.logger.info(f"Endless Loop: WiFi validation completed - {self.wifi_validation_retries - validation_failures}/{self.wifi_validation_retries} passed")
 
+    def _strong_wifi_presence_check(self):
+        """Perform a strong connectivity check (ping external host) to verify real internet access"""
+        try:
+            self.logger.debug("Performing strong WiFi presence check (ping 8.8.8.8)")
+            result = subprocess.run(['ping', '-c', '2', '-W', '3', '8.8.8.8'], 
+                                  capture_output=True, timeout=8)
+            if result.returncode == 0:
+                self.logger.info("Strong check: Successfully pinged 8.8.8.8 - WiFi connected")
+                return True
+            else:
+                self.logger.warning("Strong check: Failed to ping 8.8.8.8")
+                return False
+        except Exception as e:
+            self.logger.error(f"Strong check error: {e}")
+            return False
+
+
     def _handle_ap_mode_monitoring(self, current_time):
         """Handle AP mode monitoring for endless loop with improved recovery"""
         if not self.ap_mode_active or not self.ap_mode_start_time:
