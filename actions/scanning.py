@@ -1509,7 +1509,7 @@ class NetworkScanner:
     
     def _merge_deep_scan_results(self, ip, hostname, open_ports, port_details):
         """
-        Merge deep scan results into BOTH NetKB and WiFi-specific network file.
+        Merge deep scan results into SQLite database (primary) and legacy CSV files.
         Adds new ports while preserving all existing information.
         """
         # Local import to satisfy static analysis complaining about 'os' being unbound.
@@ -1518,6 +1518,60 @@ class NetworkScanner:
         netkbfile = self.shared_data.netkbfile
         
         try:
+            # ===== PART 0: Update SQLite Database (PRIMARY DATA STORE) =====
+            try:
+                # Get existing host data from database
+                host = self.db.get_host_by_ip(ip)
+                
+                if host:
+                    # Get existing ports
+                    existing_ports_str = host.get('ports', '')
+                    existing_ports = set()
+                    
+                    if existing_ports_str:
+                        # Database uses comma-separated ports
+                        existing_ports = {p.strip() for p in existing_ports_str.split(',') if p.strip()}
+                    
+                    # Merge with new ports from deep scan
+                    new_ports = {str(p) for p in open_ports}
+                    merged_ports = existing_ports.union(new_ports)
+                    
+                    # Sort ports numerically
+                    sorted_ports = sorted(merged_ports, key=lambda x: int(x) if x.isdigit() else 0)
+                    ports_str = ','.join(sorted_ports)
+                    
+                    # Update the database
+                    self.db.upsert_host(
+                        mac=host['mac'],
+                        ip=ip,
+                        hostname=hostname if hostname else host.get('hostname'),
+                        ports=ports_str,
+                        # Mark that this was a deep scan
+                        notes=f"Deep scan: {len(open_ports)} ports found on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    
+                    self.logger.info(f"✅ Updated SQLite database for {ip}: {len(merged_ports)} total ports ({len(new_ports)} from deep scan)")
+                else:
+                    self.logger.warning(f"IP {ip} not found in database - creating new entry")
+                    # Create new entry with pseudo-MAC if no existing record
+                    pseudo_mac = f"00:00:{':'.join(f'{int(octet):02x}' for octet in ip.split('.'))}"
+                    sorted_ports = sorted([str(p) for p in open_ports], key=lambda x: int(x) if x.isdigit() else 0)
+                    
+                    self.db.upsert_host(
+                        mac=pseudo_mac,
+                        ip=ip,
+                        hostname=hostname if hostname else '',
+                        ports=','.join(sorted_ports),
+                        notes=f"Deep scan: {len(open_ports)} ports found on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    
+                    self.logger.info(f"✅ Created new SQLite database entry for {ip}: {len(open_ports)} ports from deep scan")
+                    
+            except Exception as db_error:
+                self.logger.error(f"Failed to update SQLite database for {ip}: {db_error}")
+                self.logger.debug(f"Database error traceback: {traceback.format_exc()}")
+            
+            
             # ===== PART 1: Update NetKB (MAC-indexed, semicolon-separated) =====
             if not os.path.exists(netkbfile):
                 self.logger.warning(f"NetKB file not found: {netkbfile}")
