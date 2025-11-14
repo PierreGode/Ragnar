@@ -1023,9 +1023,9 @@ class SharedData:
             # Get current statistics from SQLite database
             try:
                 db_stats = self.db.get_stats()
-                # Update vulnerability count from database
-                if 'hosts_with_vulns' in db_stats:
-                    self.vulnnbr = db_stats['hosts_with_vulns']
+                # NOTE: Do NOT update vulnnbr here - it's managed by sync_vulnerability_count()
+                # which uses network intelligence (114 vulns) instead of just database hosts_with_vulns (3)
+                
                 # Update zombie count from database (could be hosts with successful attacks)
                 if 'total_hosts' in db_stats:
                     # This is a placeholder - adjust based on actual zombie logic
