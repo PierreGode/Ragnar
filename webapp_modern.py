@@ -86,7 +86,7 @@ clients_connected = 0
 # Synchronization helpers for keeping dashboard and e-paper data fresh
 sync_lock = threading.Lock()
 last_sync_time = 0.0
-SYNC_BACKGROUND_INTERVAL = 5  # seconds between automatic synchronizations
+SYNC_BACKGROUND_INTERVAL = 15  # seconds between automatic synchronizations (increased from 5s to reduce CPU load)
 
 # Scan results caching to avoid reprocessing files every sync
 scan_results_cache = {}
@@ -254,8 +254,6 @@ def update_vulnerability_output(ip, hostname, mac, is_alive):
             else:
                 f.write(f"Host {ip} is not responding\n")
                 f.write(f"Status: INACTIVE\n")
-        
-        logger.debug(f"Updated vulnerability output for {ip}")
         
     except Exception as e:
         logger.error(f"Error updating vulnerability output for {ip}: {e}")
@@ -551,10 +549,14 @@ def sync_all_counts():
                     if is_active:
                         aggregated_targets += 1
                         
-                        # Count ports
+                        # Count ports - support both comma (SQLite) and semicolon (CSV) delimiters
                         ports_str = host.get('ports', '')
                         if ports_str and ports_str != '0':
-                            port_list = [p.strip() for p in ports_str.split(';') if p.strip() and p.strip() != '0']
+                            # Check for comma first (SQLite format), else semicolon (CSV format)
+                            if ',' in ports_str:
+                                port_list = [p.strip() for p in ports_str.split(',') if p.strip() and p.strip() != '0']
+                            else:
+                                port_list = [p.strip() for p in ports_str.split(';') if p.strip() and p.strip() != '0']
                             aggregated_ports += len(port_list)
                         else:
                             port_list = []
@@ -567,8 +569,6 @@ def sync_all_counts():
                             'source': 'sqlite',
                             'mac': mac
                         }
-                        
-                        logger.debug(f"[SYNC] {ip}: ACTIVE from sqlite (status={status}, Failed_Pings={failed_pings})")
                     else:
                         inactive_target_count += 1
                         current_snapshot[ip] = {
@@ -578,7 +578,6 @@ def sync_all_counts():
                             'source': 'sqlite',
                             'mac': mac
                         }
-                        logger.debug(f"[SYNC] {ip}: INACTIVE from sqlite (status={status}, Failed_Pings={failed_pings})")
                 
                 logger.info(f"[SYNC] ✅ Read data from SQLite database:")
                 logger.info(f"  - Total unique IPs: {total_target_count}")
@@ -651,19 +650,15 @@ def sync_all_counts():
                                 with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
                                     content = f.read()
                                     # Count lines with credential format (user:pass)
-                                    file_creds = 0
                                     for line in content.split('\n'):
                                         if ':' in line and line.strip():
                                             cred_count += 1
-                                            file_creds += 1
-                                    if file_creds > 0:
-                                        logger.debug(f"Found {file_creds} credentials in {filename}")
                             except Exception as e:
                                 logger.debug(f"Could not read credential file {filepath}: {e}")
                                 continue
 
-                    logger.debug(f"Credential files found: {cred_files_found}")
-                    logger.debug(f"Total credential count: {cred_count}")
+                    if cred_count > 0:
+                        logger.debug(f"Total credential count: {cred_count} from {len(cred_files_found)} files")
                 except Exception as e:
                     logger.warning(f"Could not list crackedpwd directory: {e}")
 
@@ -786,8 +781,19 @@ def ensure_recent_sync(max_age=SYNC_BACKGROUND_INTERVAL):
         sync_all_counts()
 
 
+# WiFi SSID cache to avoid frequent nmcli calls
+_wifi_ssid_cache = {'ssid': None, 'timestamp': 0}
+_WIFI_SSID_CACHE_TTL = 60  # Cache for 60 seconds
+
 def get_current_wifi_ssid():
     """Get the current WiFi SSID for file naming"""
+    global _wifi_ssid_cache
+    
+    # Return cached value if still valid
+    current_timestamp = time.time()
+    if _wifi_ssid_cache['ssid'] and (current_timestamp - _wifi_ssid_cache['timestamp']) < _WIFI_SSID_CACHE_TTL:
+        return _wifi_ssid_cache['ssid']
+    
     try:
         # Try to get SSID from wifi_manager if available
         if hasattr(shared_data, 'wifi_manager') and getattr(shared_data, 'wifi_manager', None):
@@ -796,6 +802,8 @@ def get_current_wifi_ssid():
             if ssid:
                 # Sanitize SSID for filename
                 sanitized = re.sub(r'[^\w\-_]', '_', ssid)
+                _wifi_ssid_cache['ssid'] = sanitized
+                _wifi_ssid_cache['timestamp'] = current_timestamp
                 return sanitized
         
         # Fallback to direct system command
@@ -808,11 +816,19 @@ def get_current_wifi_ssid():
                     if ssid:
                         # Sanitize SSID for filename
                         sanitized = re.sub(r'[^\w\-_]', '_', ssid)
+                        _wifi_ssid_cache['ssid'] = sanitized
+                        _wifi_ssid_cache['timestamp'] = current_timestamp
                         return sanitized
         
+        # Cache the default value too
+        _wifi_ssid_cache['ssid'] = "unknown_network"
+        _wifi_ssid_cache['timestamp'] = current_timestamp
         return "unknown_network"
     except Exception as e:
         logger.debug(f"Error getting current WiFi SSID: {e}")
+        # Cache the error result
+        _wifi_ssid_cache['ssid'] = "unknown_network"
+        _wifi_ssid_cache['timestamp'] = current_timestamp
         return "unknown_network"
 
 
@@ -6972,10 +6988,10 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
             import threading
             sync_thread = threading.Thread(target=sync_all_counts, daemon=True)
             sync_thread.start()
-            sync_thread.join(timeout=120)  # 120 second timeout (increased from 30s to handle large networks)
+            sync_thread.join(timeout=60)  # 60 second timeout (reduced from 120s)
             
             if sync_thread.is_alive():
-                logger.error("Background sync thread timed out after 120 seconds! Skipping this cycle.")
+                logger.error("Background sync thread timed out after 60 seconds! Skipping this cycle.")
                 consecutive_errors += 1
             else:
                 consecutive_errors = 0  # Reset on success
@@ -7088,10 +7104,10 @@ def background_health_monitor():
         try:
             current_time = time.time()
             
-            # Check sync thread - should run every 5 seconds but may take up to 60s for large networks
+            # Check sync thread - should run every 15 seconds but may take up to 60s for large networks
             if background_thread_health['sync_last_run'] > 0:
                 time_since_sync = current_time - background_thread_health['sync_last_run']
-                if time_since_sync > 150:  # Increased from 30s to 150s to accommodate 120s timeout + buffer
+                if time_since_sync > 90:  # 60s timeout + 30s buffer
                     logger.warning(f"⚠️ Background sync thread appears stuck! Last run was {time_since_sync:.0f}s ago")
                     background_thread_health['sync_alive'] = False
                 else:
@@ -7136,7 +7152,8 @@ def _collect_manual_targets():
 
     # Read from SQLite database (primary source)
     try:
-        db = get_db(currentdir=shared_data.currentdir)
+        from db_manager import DatabaseManager
+        db = DatabaseManager()
         all_hosts = db.get_all_hosts()
         
         for host in all_hosts:
