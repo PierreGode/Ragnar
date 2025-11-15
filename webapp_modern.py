@@ -501,6 +501,7 @@ def sync_all_counts():
             inactive_target_count = 0
             current_snapshot = {}
             discovered_macs = set()
+            port_debug_info = []  # Track which hosts contribute to port count
             
             # Read from SQLite database
             try:
@@ -549,6 +550,11 @@ def sync_all_counts():
                             valid_ports = [p for p in port_list if p.isdigit()]
                             aggregated_ports += len(valid_ports)
                             port_list = valid_ports  # Use only valid ports for snapshot
+                            
+                            # Track for debugging
+                            if len(valid_ports) > 0:
+                                hostname = host.get('hostname', '')
+                                port_debug_info.append(f"{ip} ({hostname}): {len(valid_ports)} ports [{','.join(valid_ports)}]")
                         else:
                             port_list = []
                         
@@ -575,6 +581,12 @@ def sync_all_counts():
                 logger.info(f"  - Active (alive): {aggregated_targets}")
                 logger.info(f"  - Inactive (degraded): {inactive_target_count}")
                 logger.info(f"  - Total open ports: {aggregated_ports}")
+                
+                # Log detailed port breakdown for debugging
+                if port_debug_info:
+                    logger.info(f"[PORT COUNT BREAKDOWN] Counting ports from {len(port_debug_info)} alive hosts with open ports:")
+                    for info in port_debug_info:
+                        logger.info(f"    {info}")
                 
             except Exception as e:
                 logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
@@ -2056,23 +2068,34 @@ def get_stable_network_data():
 
 @app.route('/api/network')
 def get_network():
-    """Get network scan data from SQLite database (real-time)."""
+    """Get network scan data from SQLite database - returns ALL hosts (alive and degraded)."""
     try:
         # Get all hosts from SQLite database
         hosts = shared_data.db.get_all_hosts()
         
+        logger.debug(f"[API /api/network] Retrieved {len(hosts)} total hosts from database")
+        
         # Convert to format expected by frontend
         network_data = []
+        alive_count = 0
+        degraded_count = 0
+        
         for host in hosts:
             # Parse ports from comma-separated string to list
             ports_str = host.get('ports', '')
             ports = [p.strip() for p in ports_str.split(',') if p.strip()] if ports_str else []
             
+            status = host.get('status', 'unknown')
+            if status == 'alive':
+                alive_count += 1
+            elif status == 'degraded':
+                degraded_count += 1
+            
             network_data.append({
                 'mac': host.get('mac', ''),
                 'ip': host.get('ip', ''),
                 'hostname': host.get('hostname', ''),
-                'status': host.get('status', 'unknown'),
+                'status': status,
                 'ports': ports,
                 'failed_pings': host.get('failed_ping_count', 0),
                 'last_seen': host.get('last_seen', ''),
@@ -2094,6 +2117,8 @@ def get_network():
                 'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
                 'notes': host.get('notes', '')
             })
+        
+        logger.info(f"[API /api/network] Returning {len(network_data)} hosts (alive: {alive_count}, degraded: {degraded_count})")
         
         response = jsonify(network_data)
         response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
