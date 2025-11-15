@@ -573,6 +573,20 @@ class NetworkScanner:
                     # For hosts with unknown MAC (00:00:00:00:00:00), use IP as unique identifier
                     # This allows tracking hosts across routers or when MAC can't be determined
                     if mac == "00:00:00:00:00:00":
+                        # CRITICAL: Check if this IP already has a real MAC in database
+                        # If so, use that real MAC instead of creating a pseudo-MAC
+                        real_mac_found = None
+                        for existing_mac, existing_data in netkb_entries.items():
+                            if ip in existing_data['IPs'] and not existing_mac.startswith("00:00:"):
+                                # Found real MAC for this IP - use it instead
+                                real_mac_found = existing_mac
+                                self.logger.info(f"🔗 IP {ip} already tracked with real MAC {existing_mac}, skipping pseudo-MAC creation")
+                                break
+                        
+                        if real_mac_found:
+                            # Skip this scan result - the real MAC entry will be updated instead
+                            continue
+                        
                         # Create a pseudo-MAC from the IP for tracking purposes
                         # This ensures each IP is tracked separately even without MAC
                         ip_parts = ip.split('.')
