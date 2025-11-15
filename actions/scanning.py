@@ -1,11 +1,15 @@
 #scanning.py
 # This script performs a network scan to identify live hosts, their MAC addresses, and open ports.
-# The results are saved to CSV files and displayed using Rich for enhanced visualization.
+# MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+# All host and scan state is stored and read exclusively via SQLite db_manager API (self.db).
+# CSV files are kept for optional result display only, NOT as input or source of truth.
 
 import os
 import threading
-import csv
+import csv  # Only used for optional display functionality
 import traceback
+import tempfile
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 import socket
@@ -143,26 +147,12 @@ class NetworkScanner:
         """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
         # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
         commands = [
-            [
-                'sudo', 'arp-scan',
-                f'--interface={self.arp_scan_interface}',
-                '--localnet',
-                '--retry=4',
-                '--timeout=300',
-                '--repeat=3'
-            ],
-            [
-                'sudo', 'arp-scan',
-                f'--interface={self.arp_scan_interface}',
-                '192.168.1.0/24',
-                '--retry=4',
-                '--timeout=300',
-                '--repeat=3'
-            ]
+            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '--localnet'],
+            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '192.168.1.0/24']
         ]
-
+        
         all_hosts = {}
-
+        
         for command in commands:
             self.logger.info(f"Running arp-scan for MAC/vendor discovery: {' '.join(command)}")
             try:
@@ -184,15 +174,15 @@ class NetworkScanner:
             except Exception as e:
                 self.logger.error(f"Unexpected error running arp-scan: {e}")
                 continue
-
+        
         self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
-
+        
         # Write ARP scan results to SQLite database
         try:
             for ip, metadata in all_hosts.items():
                 mac = metadata.get('mac', '').lower().strip()
                 vendor = metadata.get('vendor', '')
-
+                
                 if mac and mac != '00:00:00:00:00:00':
                     self.db.upsert_host(
                         mac=mac,
@@ -201,11 +191,11 @@ class NetworkScanner:
                     )
                     self.db.update_ping_status(mac, success=True)
                     self.db.add_scan_history(mac, ip, 'arp_scan')
-
+            
             self.logger.debug(f"✅ ARP scan results written to database")
         except Exception as e:
             self.logger.error(f"Failed to write ARP scan results to database: {e}")
-
+        
         return all_hosts
 
     def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
@@ -282,30 +272,27 @@ class NetworkScanner:
             self.logger.info(f"🎉 NMAP NETWORK SCAN COMPLETE: {len(nmap_results)} hosts with open ports discovered")
             
             # Write nmap scan results to SQLite database
+            # MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+            # Pseudo-MAC generation: Only here and in update_netkb() via DB operations
             try:
                 for host, data in nmap_results.items():
                     mac = data.get('mac', '')
                     if not mac or mac == '00:00:00:00:00:00':
-                        # CRITICAL: Check if this IP already has a real MAC in database
-                        existing_host = self.db.get_host_by_ip(host)
-                        if existing_host and existing_host.get('mac_address'):
-                            existing_mac = existing_host['mac_address'].lower().strip()
-                            if not existing_mac.startswith("00:00:"):
-                                # Real MAC exists in database - use it instead of creating pseudo-MAC
-                                mac = existing_mac
-                                self.logger.info(f"🔗 Nmap result for {host}: Using existing real MAC {mac} from database")
-                            else:
-                                # Only pseudo-MAC exists - create new one (will be same anyway)
-                                ip_parts = host.split('.')
-                                if len(ip_parts) == 4:
-                                    mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                                    self.logger.debug(f"Reusing pseudo-MAC {mac} for {host}")
+                        # Check if this IP already exists in database with a real MAC
+                        existing_mac = next((h['mac'] for h in self.db.get_all_hosts() 
+                                           if h.get('ip') == host and not h['mac'].startswith('00:00:c0:a8')), None)
+                        
+                        if existing_mac:
+                            # Use existing real MAC instead of creating pseudo-MAC
+                            mac = existing_mac
+                            self.logger.info(f"✅ Nmap results: Found existing MAC {mac} for IP {host}, skipping pseudo-MAC creation")
                         else:
-                            # No existing entry - create pseudo-MAC
+                            # Pseudo-MAC generation: ONLY via update_netkb() - defer to that method
+                            # This temporary pseudo-MAC will be reconciled in update_netkb()
                             ip_parts = host.split('.')
                             if len(ip_parts) == 4:
                                 mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                                self.logger.debug(f"Created pseudo-MAC {mac} for new host {host}")
+                                self.logger.warning(f"⚠️ Nmap results: Creating temporary pseudo-MAC {mac} for IP {host} (will be reconciled in update_netkb)")
                     
                     if mac:
                         mac = mac.lower().strip()
@@ -369,9 +356,20 @@ class NetworkScanner:
                     if result.returncode == 0:
                         mac = self.get_mac_address(priority_ip, "")
                         if not mac or mac == "00:00:00:00:00:00":
-                            ip_parts = priority_ip.split('.')
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
+                            # MAC/host resolution: SQLITE DB ONLY
+                            # Check if this IP already exists in database with a real MAC
+                            existing_hosts = self.db.get_all_hosts()
+                            existing_mac = next((h['mac'] for h in existing_hosts if h.get('ip') == priority_ip and not h['mac'].startswith('00:00:c0:a8')), None)
+                            
+                            if existing_mac:
+                                mac = existing_mac
+                                self.logger.info(f"✅ Priority target {priority_ip}: Found existing MAC {mac} from DB, skipping pseudo-MAC")
+                            else:
+                                # Pseudo-MAC generation: temporary, will be reconciled in update_netkb()
+                                ip_parts = priority_ip.split('.')
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.warning(f"⚠️ Priority target {priority_ip}: Creating temporary pseudo-MAC {mac} (will be reconciled in update_netkb)")
 
                         ping_discovered[priority_ip] = {
                             "mac": mac,
@@ -399,26 +397,22 @@ class NetworkScanner:
                     )
 
                     if result.returncode == 0:
-                        # CRITICAL: Check database first for existing real MAC
-                        existing_host = self.db.get_host_by_ip(ip_str)
-                        mac = None
-                        
-                        if existing_host and existing_host.get('mac_address'):
-                            existing_mac = existing_host['mac_address'].lower().strip()
-                            if not existing_mac.startswith("00:00:"):
-                                # Real MAC exists in database - use it
+                        mac = self.get_mac_address(ip_str, "")
+                        if not mac or mac == "00:00:00:00:00:00":
+                            # MAC/host resolution: SQLITE DB ONLY
+                            # Check if this IP already exists in database with a real MAC
+                            existing_hosts = self.db.get_all_hosts()
+                            existing_mac = next((h['mac'] for h in existing_hosts if h.get('ip') == ip_str and not h['mac'].startswith('00:00:c0:a8')), None)
+                            
+                            if existing_mac:
                                 mac = existing_mac
-                                self.logger.info(f"🔗 Ping sweep for {ip_str}: Using existing real MAC {mac} from database")
-                        
-                        # If no real MAC in database, try to get it via ARP
-                        if not mac:
-                            mac = self.get_mac_address(ip_str, "")
-                            if not mac or mac == "00:00:00:00:00:00":
-                                # Only create pseudo-MAC if we truly can't find a real one
+                                self.logger.debug(f"✅ Ping sweep {ip_str}: Found existing MAC {mac} from DB, skipping pseudo-MAC")
+                            else:
+                                # Pseudo-MAC generation: temporary, will be reconciled in update_netkb()
                                 ip_parts = ip_str.split('.')
                                 pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
                                 mac = pseudo_mac
-                                self.logger.debug(f"Created pseudo-MAC {mac} for ping-discovered host {ip_str}")
+                                self.logger.debug(f"⚠️ Ping sweep {ip_str}: Creating temporary pseudo-MAC {mac} (will be reconciled in update_netkb)")
 
                         ping_discovered[ip_str] = {
                             "mac": mac,
@@ -459,27 +453,6 @@ class NetworkScanner:
 
         return ping_discovered
 
-    def check_if_csv_scan_file_exists(self, csv_scan_file, csv_result_file, netkbfile):
-        """
-        Checks and prepares the necessary CSV files for the scan.
-        """
-        with self.lock:
-            try:
-                if not os.path.exists(os.path.dirname(csv_scan_file)):
-                    os.makedirs(os.path.dirname(csv_scan_file))
-                if not os.path.exists(os.path.dirname(netkbfile)):
-                    os.makedirs(os.path.dirname(netkbfile))
-                if os.path.exists(csv_scan_file):
-                    os.remove(csv_scan_file)
-                if os.path.exists(csv_result_file):
-                    os.remove(csv_result_file)
-                if not os.path.exists(netkbfile):
-                    with open(netkbfile, 'w', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow(['MAC Address', 'IPs', 'Hostnames', 'Alive', 'Ports', 'Failed_Pings'])
-            except Exception as e:
-                self.logger.error(f"Error in check_if_csv_scan_file_exists: {e}")
-
     def get_current_timestamp(self):
         """
         Returns the current timestamp in a specific format.
@@ -498,55 +471,16 @@ class NetworkScanner:
             self.logger.error(f"Error in ip_key: {e}")
             return (0, 0, 0, 0)
 
-    def sort_and_write_csv(self, csv_scan_file):
-        """
-        Sorts the CSV file based on IP addresses and writes the sorted content back to the file.
-        """
-        with self.lock:
-            try:
-                with open(csv_scan_file, 'r') as file:
-                    lines = file.readlines()
-                sorted_lines = [lines[0]] + sorted(lines[1:], key=lambda x: self.ip_key(x.split(',')[0]))
-                with open(csv_scan_file, 'w') as file:
-                    file.writelines(sorted_lines)
-            except Exception as e:
-                self.logger.error(f"Error in sort_and_write_csv: {e}")
-
-    class GetIpFromCsv:
-        """
-        Helper class to retrieve IP addresses, hostnames, and MAC addresses from a CSV file.
-        """
-        def __init__(self, outer_instance, csv_scan_file):
-            self.outer_instance = outer_instance
-            self.csv_scan_file = csv_scan_file
-            self.ip_list = []
-            self.hostname_list = []
-            self.mac_list = []
-            self.get_ip_from_csv()
-
-        def get_ip_from_csv(self):
-            """
-            Reads IP addresses, hostnames, and MAC addresses from the CSV file.
-            """
-            with self.outer_instance.lock:
-                try:
-                    with open(self.csv_scan_file, 'r') as csv_scan_file:
-                        csv_reader = csv.reader(csv_scan_file)
-                        next(csv_reader)
-                        for row in csv_reader:
-                            if row[0] == "STANDALONE" or row[1] == "STANDALONE" or row[2] == "STANDALONE":
-                                continue
-                            if not self.outer_instance.blacklistcheck or (row[2] not in self.outer_instance.mac_scan_blacklist and row[0] not in self.outer_instance.ip_scan_blacklist):
-                                self.ip_list.append(row[0])
-                                self.hostname_list.append(row[1])
-                                self.mac_list.append(row[2])
-                except Exception as e:
-                    self.outer_instance.logger.error(f"Error in get_ip_from_csv: {e}")
-
     def update_netkb(self, netkbfile, netkb_data, alive_macs):
         """
         Updates the network knowledge base with scan results.
-        WRITES TO SQLITE DATABASE AS PRIMARY AND ONLY DATA STORE.
+        
+        # MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+        # All host and scan state is stored and read exclusively via SQLite db_manager API (self.db).
+        # This method integrates all scan results via SQLite alone.
+        # No CSV fallback for host data - DB is the single source of truth.
+        # Only update_netkb() creates pseudo-MACs, and only via DB operations.
+        
         netkbfile parameter kept for backward compatibility but CSV is no longer used.
         """
         with self.lock:
@@ -560,9 +494,9 @@ class NetworkScanner:
                     self.logger.debug(f"Loaded {len(existing_hosts)} existing hosts from SQLite")
                     
                     for host in existing_hosts:
-                        mac = host['mac_address']
+                        mac = host['mac']
                         # Parse IPs (stored as comma-separated in DB, we use ; for compatibility)
-                        ips = host['ip_address'].split(',') if host['ip_address'] else []
+                        ips = host['ip'].split(',') if host['ip'] else []
                         hostnames = [host['hostname']] if host['hostname'] else []
                         alive = '1' if host['status'] == 'alive' else '0'
                         ports = host['ports'].split(',') if host['ports'] else []
@@ -615,31 +549,28 @@ class NetworkScanner:
                     if not mac or mac == "STANDALONE" or ip == "STANDALONE" or hostname == "STANDALONE":
                         continue
                     
+                    # MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+                    # Pseudo-MAC generation: ONLY in update_netkb() via DB operations
                     # For hosts with unknown MAC (00:00:00:00:00:00), use IP as unique identifier
                     # This allows tracking hosts across routers or when MAC can't be determined
                     if mac == "00:00:00:00:00:00":
-                        # CRITICAL: Check if this IP already has a real MAC in database
-                        # If so, use that real MAC instead of creating a pseudo-MAC
-                        real_mac_found = None
-                        for existing_mac, existing_data in netkb_entries.items():
-                            if ip in existing_data['IPs'] and not existing_mac.startswith("00:00:"):
-                                # Found real MAC for this IP - use it instead
-                                real_mac_found = existing_mac
-                                self.logger.info(f"🔗 IP {ip} already tracked with real MAC {existing_mac}, skipping pseudo-MAC creation")
-                                break
+                        # Check if this IP already exists in database with a real MAC
+                        existing_mac = next((h['mac'] for h in self.db.get_all_hosts() 
+                                           if h.get('ip') == ip and not h['mac'].startswith('00:00:c0:a8')), None)
                         
-                        if real_mac_found:
-                            # Skip this scan result - the real MAC entry will be updated instead
-                            continue
-                        
-                        # Create a pseudo-MAC from the IP for tracking purposes
-                        # This ensures each IP is tracked separately even without MAC
-                        ip_parts = ip.split('.')
-                        if len(ip_parts) == 4:
-                            # Convert IP to a unique MAC-like identifier: 00:00:ip1:ip2:ip3:ip4
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
-                            self.logger.debug(f"Created pseudo-MAC {mac} for IP {ip} (MAC address unavailable)")
+                        if existing_mac:
+                            # Use existing real MAC instead of creating pseudo-MAC
+                            mac = existing_mac
+                            self.logger.info(f"✅ NetKB merge: Found existing MAC {mac} for IP {ip} from DB, skipping pseudo-MAC creation")
+                        else:
+                            # Pseudo-MAC generation: ONLY here in update_netkb() - this is the authoritative source
+                            # Only create pseudo-MAC if no real MAC exists in database
+                            ip_parts = ip.split('.')
+                            if len(ip_parts) == 4:
+                                # Convert IP to a unique MAC-like identifier: 00:00:ip1:ip2:ip3:ip4
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.warning(f"⚠️ update_netkb: Created authoritative pseudo-MAC {mac} for IP {ip} (MAC address unavailable)")
 
                     if self.blacklistcheck and (mac in self.mac_scan_blacklist or ip in self.ip_scan_blacklist):
                         continue
@@ -707,75 +638,6 @@ class NetworkScanner:
 
                 # Remove entries with multiple IP addresses for a single MAC address
                 netkb_entries = {mac: data for mac, data in netkb_entries.items() if len(data['IPs']) == 1}
-                
-                # CRITICAL: Deduplicate entries that share the same IP address
-                # This prevents duplicate vulnerability scans when a host appears with different MACs/hostnames
-                # Also handles merging pseudo-MACs with real MACs from database
-                ip_to_primary_mac = {}  # Track which MAC "owns" each IP
-                duplicate_macs_to_remove = set()  # MACs to remove due to IP conflicts
-                
-                # First pass: identify the best MAC for each IP
-                for mac, data in netkb_entries.items():
-                    if not data['IPs']:
-                        continue
-                    ip = sorted(data['IPs'], key=self.ip_key)[0]  # Get primary IP
-                    
-                    if ip in ip_to_primary_mac:
-                        # IP conflict detected - keep the entry with better data
-                        existing_mac = ip_to_primary_mac[ip]
-                        existing_data = netkb_entries[existing_mac]
-                        
-                        # Prioritize: real MAC > pseudo-MAC, more hostnames > fewer, more ports > fewer
-                        is_pseudo_mac = mac.startswith("00:00:")
-                        existing_is_pseudo = existing_mac.startswith("00:00:")
-                        
-                        keep_new = False
-                        if not is_pseudo_mac and existing_is_pseudo:
-                            # Real MAC wins over pseudo-MAC
-                            keep_new = True
-                            self.logger.info(f"🔄 IP {ip}: Real MAC {mac} replacing pseudo-MAC {existing_mac}")
-                        elif is_pseudo_mac and not existing_is_pseudo:
-                            # Existing real MAC wins over new pseudo-MAC
-                            keep_new = False
-                            self.logger.info(f"🔄 IP {ip}: Keeping real MAC {existing_mac}, discarding pseudo-MAC {mac}")
-                        elif is_pseudo_mac == existing_is_pseudo:
-                            # Same MAC type - compare by data quality
-                            new_hostnames = len([h for h in data['Hostnames'] if h])
-                            existing_hostnames = len([h for h in existing_data['Hostnames'] if h])
-                            new_ports = len(data['Ports'])
-                            existing_ports = len(existing_data['Ports'])
-                            
-                            if new_hostnames > existing_hostnames or (new_hostnames == existing_hostnames and new_ports > existing_ports):
-                                keep_new = True
-                        
-                        if keep_new:
-                            # Merge data from existing into new before removing
-                            data['Hostnames'].update(existing_data['Hostnames'])
-                            data['Ports'].update(existing_data['Ports'])
-                            # Mark old MAC for removal
-                            duplicate_macs_to_remove.add(existing_mac)
-                            ip_to_primary_mac[ip] = mac
-                        else:
-                            # Merge data from new into existing before removing
-                            existing_data['Hostnames'].update(data['Hostnames'])
-                            existing_data['Ports'].update(data['Ports'])
-                            # Mark new MAC for removal
-                            duplicate_macs_to_remove.add(mac)
-                    else:
-                        ip_to_primary_mac[ip] = mac
-                
-                # Remove duplicate MACs and delete from database
-                for mac in duplicate_macs_to_remove:
-                    if mac in netkb_entries:
-                        del netkb_entries[mac]
-                        self.logger.info(f"✂️ Removed duplicate entry for MAC {mac} from scan data")
-                        
-                        # Also delete from database to clean up old duplicates
-                        try:
-                            self.db.delete_host(mac)
-                            self.logger.info(f"🗑️ Deleted duplicate MAC {mac} from database")
-                        except Exception as e:
-                            self.logger.warning(f"Could not delete duplicate MAC {mac} from database: {e}")
 
                 sorted_netkb_entries = sorted(netkb_entries.items(), key=lambda x: self.ip_key(sorted(x[1]['IPs'])[0]))
 
@@ -1107,23 +969,18 @@ class NetworkScanner:
             self.arp_hosts = {}
             self.use_nmap_results = False
 
-        def scan_network_and_write_to_csv(self):
-
-            self.outer_instance.check_if_csv_scan_file_exists(self.csv_scan_file, self.csv_result_file, self.netkbfile)
-            with self.outer_instance.lock:
-                try:
-                    with open(self.csv_scan_file, 'a', newline='') as file:
-                        writer = csv.writer(file)
-                        writer.writerow(['IP', 'Hostname', 'MAC Address'])
-                except Exception as e:
-                    self.outer_instance.logger.error(f"Error in scan_network_and_write_to_csv (initial write): {e}")
-
+        def scan_network_and_collect_hosts(self):
+            """
+            # MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+            # Scans network and stores results directly to SQLite database.
+            # No intermediate CSV files for host state tracking.
+            """
             self.logger.info("🎯 Phase 1: Getting MAC addresses via arp-scan")
-            # Get MAC addresses and vendor info from arp-scan
+            # Get MAC addresses and vendor info from arp-scan (writes to DB internally)
             self.arp_hosts = self.outer_instance.run_arp_scan()
             
             self.logger.info("🎯 Phase 2: Network-wide nmap scan for hosts and ports")
-            # Run nmap network-wide scan for host discovery AND port scanning
+            # Run nmap network-wide scan for host discovery AND port scanning (writes to DB internally)
             network_cidr = str(self.network)
             self.nmap_results = self.outer_instance.run_nmap_network_scan(
                 network_cidr, 
@@ -1141,7 +998,9 @@ class NetworkScanner:
             # Store nmap port results for later use
             self.nmap_port_data = {ip: data['open_ports'] for ip, data in self.nmap_results.items()}
             
-            # Process all discovered hosts
+            # Collect host data for return (reading from what we just wrote to DB)
+            # MAC/host resolution: SQLITE DB ONLY - we build the list from scan results
+            # that were already written to the database by run_arp_scan() and run_nmap_network_scan()
             for ip in sorted(all_ips, key=self.outer_instance.ip_key):
                 # Get hostname from nmap results if available
                 hostname = self.nmap_results.get(ip, {}).get('hostname', '')
@@ -1158,24 +1017,26 @@ class NetworkScanner:
                     mac = self.outer_instance.get_mac_address(ip, hostname)
                 
                 if not mac or mac == "00:00:00:00:00:00":
-                    # Create pseudo-MAC for hosts without discoverable MAC
-                    ip_parts = ip.split('.')
-                    if len(ip_parts) == 4:
-                        mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                        self.logger.debug(f"Created pseudo-MAC {mac} for {ip}")
+                    # Check DB for existing MAC before creating pseudo-MAC
+                    # MAC/host resolution: SQLITE DB ONLY
+                    existing_host = self.outer_instance.db.get_host_by_ip(ip)
+                    if existing_host and existing_host['mac'] and not existing_host['mac'].startswith('00:00:c0:a8'):
+                        mac = existing_host['mac']
+                        self.logger.debug(f"Using existing MAC from DB: {mac} for {ip}")
+                    else:
+                        # Only create pseudo-MAC if no real MAC exists in DB
+                        ip_parts = ip.split('.')
+                        if len(ip_parts) == 4:
+                            mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                            self.logger.debug(f"Created pseudo-MAC {mac} for {ip}")
                 
                 mac = mac.lower() if mac else "00:00:00:00:00:00"
                 
-                # Write to CSV
+                # Build in-memory list (no CSV write)
                 if not self.outer_instance.blacklistcheck or (mac not in self.outer_instance.mac_scan_blacklist and ip not in self.outer_instance.ip_scan_blacklist):
-                    with self.outer_instance.lock:
-                        with open(self.csv_scan_file, 'a', newline='') as file:
-                            writer = csv.writer(file)
-                            writer.writerow([ip, hostname, mac])
-                            self.ip_hostname_list.append((ip, hostname, mac))
-                    self.logger.debug(f"✅ Added to CSV: {ip} ({hostname}) - MAC: {mac}")
+                    self.ip_hostname_list.append((ip, hostname, mac))
+                    self.logger.debug(f"✅ Collected host data: {ip} ({hostname}) - MAC: {mac}")
 
-            self.outer_instance.sort_and_write_csv(self.csv_scan_file)
             self.logger.info(f"✅ Network scan complete: {len(self.ip_hostname_list)} hosts processed")
 
         def get_progress(self):
@@ -1188,6 +1049,8 @@ class NetworkScanner:
         def start(self):
             """
             Starts the network and port scanning process using nmap for efficiency.
+            # MAC/host resolution: SQLITE DB ONLY - CSV logic removed
+            # Reads host data from SQLite database, not from CSV files.
             """
             overall_start_time = time.time()
             
@@ -1196,11 +1059,19 @@ class NetworkScanner:
             # Combined discovery and port scan phase
             self.logger.info("📡 Running combined host discovery and port scanning")
             scan_start = time.time()
-            self.scan_network_and_write_to_csv()
+            self.scan_network_and_collect_hosts()
             scan_duration = time.time() - scan_start
             
-            time.sleep(1)
-            self.ip_data = self.outer_instance.GetIpFromCsv(self.outer_instance, self.csv_scan_file)
+            # Build ip_data structure from collected hosts (no CSV read)
+            # MAC/host resolution: SQLITE DB ONLY
+            class IpDataFromMemory:
+                """Simple data structure to hold scan results from database."""
+                def __init__(self, ip_hostname_list):
+                    self.ip_list = [item[0] for item in ip_hostname_list]
+                    self.hostname_list = [item[1] for item in ip_hostname_list]
+                    self.mac_list = [item[2] for item in ip_hostname_list]
+            
+            self.ip_data = IpDataFromMemory(self.ip_hostname_list)
             self.total_ips = len(self.ip_data.ip_list)
             self.logger.info(f"✅ Network scan complete: Found {self.total_ips} hosts in {scan_duration:.2f}s")
             
@@ -1531,50 +1402,42 @@ class NetworkScanner:
             self.logger.warning(f"⚠️  Ping test failed: {ping_error}")
         
         try:
+            # ===== STAGE 1: PORT DISCOVERY SCAN =====
+            self.logger.info(f"📡 STAGE 1: Port discovery scan starting...")
+            
             # Build nmap args depending on mode
             if use_top_ports:
                 # Fast scan of most common ports (top 10000) for broader coverage while still faster than full range
                 nmap_args = "-Pn -sT --top-ports 10000 --open -T4 --min-rate 500 --max-retries 1 -v"
-                self.logger.info(f"🚀 EXECUTING DEEP SCAN (TOP 10000): nmap {nmap_args} {ip}")
-                self.logger.info("   Mode: top10000 common ports (fast/extended)")
+                self.logger.info(f"🚀 Port scan mode: TOP 10000 common ports (fast)")
+                self.logger.info(f"   Command: nmap {nmap_args} {ip}")
             else:
                 # Full range scan (can be slow)
                 nmap_args = f"-Pn -sT -p{portstart}-{portend} --open -T4 --min-rate 1000 --max-retries 1 -v"
                 total_ports = portend - portstart + 1
-                self.logger.info(f"🚀 EXECUTING DEEP SCAN (FULL): nmap {nmap_args} {ip}")
-                self.logger.info(f"   Port range size: {total_ports} ports (expected longer duration)")
-            self.logger.info(f"   nmap.PortScanner object: {self.nm}")
-            self.logger.info(f"   Full command (copy/paste): nmap {nmap_args} {ip}")
+                self.logger.info(f"🚀 Port scan mode: FULL RANGE ({total_ports} ports)")
+                self.logger.info(f"   Command: nmap {nmap_args} {ip}")
             
             # Notify scan started
             if progress_callback:
-                progress_callback('scanning', {'message': 'Scan started'})
+                progress_callback('scanning', {'message': 'Stage 1: Port discovery'})
             
             scan_start = time.time()
+            self.logger.info(f"⏰ STAGE 1 START: {datetime.now().strftime('%H:%M:%S')}")
             
-            # CRITICAL: Log the actual nmap execution attempt
-            self.logger.info(f"⏰ SCAN START: {datetime.now().strftime('%H:%M:%S')} - Starting nmap scan...")
-            
-            # Execute the scan
+            # Execute the port discovery scan
             self.nm.scan(hosts=ip, arguments=nmap_args)
             
             scan_duration = time.time() - scan_start
-            self.logger.info(f"⏰ SCAN END: {datetime.now().strftime('%H:%M:%S')} - Scan took {scan_duration:.2f}s")
+            self.logger.info(f"⏰ STAGE 1 END: {datetime.now().strftime('%H:%M:%S')} - Took {scan_duration:.2f}s")
             
             # Check what hosts nmap found
             all_hosts = self.nm.all_hosts()
-            self.logger.info(f"🔎 NMAP RESULTS host_count={len(all_hosts)} hosts={all_hosts}")
-            self.logger.info(f"   Looking for target IP: {ip} in results...")
+            self.logger.info(f"🔎 STAGE 1 RESULTS: {len(all_hosts)} hosts found")
             
             if ip not in all_hosts:
-                self.logger.warning(f"❌ DEEP SCAN NO RESULTS: {ip} not found in nmap results after {scan_duration:.2f}s")
-                self.logger.warning(f"   This could mean:")
-                self.logger.warning(f"   1) Host is down or unreachable")
-                self.logger.warning(f"   2) Host has no open ports")
-                self.logger.warning(f"   3) Firewall blocking scans")
-                self.logger.warning(f"   4) Network connectivity issue")
-                self.logger.info(f"   Full nmap command: nmap {nmap_args} {ip}")
-                self.logger.info(f"   Consider testing with: ping {ip}")
+                self.logger.warning(f"❌ STAGE 1 FAILED: {ip} not found in results after {scan_duration:.2f}s")
+                self.logger.warning(f"   Possible reasons: host down, no open ports, or firewall blocking")
                 return {
                     'success': False,
                     'open_ports': [],
@@ -1582,10 +1445,8 @@ class NetworkScanner:
                     'message': f'No open ports found on {ip}'
                 }
             
-            # Extract results
+            # Extract port discovery results from STAGE 1
             hostname = self.nm[ip].hostname() or ''
-            
-            # Notify hostname found
             if progress_callback and hostname:
                 progress_callback('hostname', {'message': f'Name: {hostname[:20]}'})
             
@@ -1604,25 +1465,104 @@ class NetworkScanner:
                             'version': version,
                             'state': 'open'
                         }
-                        self.logger.info(f"   ✅ Port {port}/tcp open - {service} {version}")
+                        self.logger.info(f"   ✅ Port {port}/tcp OPEN - {service} {version}")
                         
-                        # Notify each port discovery (but limit to every 5 ports to avoid spam)
                         if progress_callback and len(open_ports) % 5 == 1:
-                            progress_callback('port_found', {'message': f'Port {port} found', 'port': port, 'service': service})
+                            progress_callback('port_found', {'message': f'{len(open_ports)} ports found', 'port': port, 'service': service})
+            
+            self.logger.info(f"✅ STAGE 1 COMPLETE: {len(open_ports)} open ports discovered in {scan_duration:.2f}s")
+            
+            # ===== STAGE 2: VULNERABILITY SCAN ON DISCOVERED PORTS ONLY =====
+            # This is a separate, faster scan using ONLY the vulners script on known open ports
+            vulnerabilities = {}
+            vuln_count = 0
+            
+            if open_ports:
+                self.logger.info(f"🔐 STAGE 2: Vulnerability scan on {len(open_ports)} discovered ports...")
+                if progress_callback:
+                    progress_callback('vuln_scanning', {'message': f'Stage 2: Scanning {len(open_ports)} ports for CVEs'})
+                
+                vuln_start = time.time()
+                self.logger.info(f"⏰ STAGE 2 START: {datetime.now().strftime('%H:%M:%S')}")
+                
+                try:
+                    # Run FAST vulnerability scan - NO version detection (-sV), just vulners script
+                    # We already have service info from stage 1, so skip -sV to save 90% of the time
+                    ports_str = ','.join(map(str, open_ports))
+                    vuln_args = f"-Pn --script vulners.nse -p{ports_str} -T4"
+                    
+                    self.logger.info(f"   Command: nmap {vuln_args} {ip}")
+                    self.nm.scan(hosts=ip, arguments=vuln_args)
+                    
+                    vuln_duration = time.time() - vuln_start
+                    self.logger.info(f"⏰ STAGE 2 END: {datetime.now().strftime('%H:%M:%S')} - Took {vuln_duration:.2f}s")
+                    vuln_duration = time.time() - vuln_start
+                    self.logger.info(f"⏰ STAGE 2 END: {datetime.now().strftime('%H:%M:%S')} - Took {vuln_duration:.2f}s")
+                    
+                    # Extract vulnerability information from STAGE 2 results
+                    if ip in self.nm.all_hosts() and 'tcp' in self.nm[ip]:
+                        for port in self.nm[ip]['tcp']:
+                            port_data = self.nm[ip]['tcp'][port]
+                            
+                            # Check if vulners script found anything
+                            if 'script' in port_data and 'vulners' in port_data['script']:
+                                vulners_output = port_data['script']['vulners']
+                                
+                                # Parse CVEs from vulners output
+                                cve_pattern = r'(CVE-\d{4}-\d+)'
+                                cves = re.findall(cve_pattern, vulners_output)
+                                
+                                if cves:
+                                    vulnerabilities[port] = {
+                                        'cves': cves,
+                                        'service': port_details.get(port, {}).get('service', 'unknown'),
+                                        'version': port_details.get(port, {}).get('version', ''),
+                                        'raw_output': vulners_output
+                                    }
+                                    vuln_count += len(cves)
+                                    
+                                    # Add vulnerabilities to port_details
+                                    if port in port_details:
+                                        port_details[port]['vulnerabilities'] = cves
+                                    
+                                    self.logger.info(f"   🔴 Port {port}: {len(cves)} CVEs found")
+                                    for cve in cves[:3]:
+                                        self.logger.info(f"      - {cve}")
+                                    
+                                    if progress_callback:
+                                        progress_callback('vuln_found', {
+                                            'message': f'Port {port}: {len(cves)} CVEs',
+                                            'port': port,
+                                            'cve_count': len(cves)
+                                        })
+                    
+                    if vuln_count > 0:
+                        self.logger.info(f"✅ STAGE 2 COMPLETE: {vuln_count} CVEs found across {len(vulnerabilities)} ports ({vuln_duration:.2f}s)")
+                    else:
+                        self.logger.info(f"✅ STAGE 2 COMPLETE: No CVEs found ({vuln_duration:.2f}s)")
+                        
+                except Exception as vuln_error:
+                    vuln_duration = time.time() - vuln_start
+                    self.logger.error(f"💥 STAGE 2 FAILED after {vuln_duration:.2f}s: {vuln_error}")
+                    self.logger.debug(f"Vuln scan traceback: {traceback.format_exc()}")
+            else:
+                self.logger.info(f"⏭️  STAGE 2 SKIPPED: No open ports to scan for vulnerabilities")
             
             # Now update the NetKB with deep scan results WITHOUT overwriting existing data
-            self._merge_deep_scan_results(ip, hostname, open_ports, port_details)
+            self._merge_deep_scan_results(ip, hostname, open_ports, port_details, vulnerabilities)
             
-            self.logger.info(f"✅ DEEP SCAN COMPLETE ip={ip} mode={scan_mode} open_ports={len(open_ports)} duration={scan_duration:.2f}s")
+            self.logger.info(f"✅ DEEP SCAN COMPLETE ip={ip} mode={scan_mode} open_ports={len(open_ports)} vulnerabilities={vuln_count} duration={scan_duration:.2f}s")
             
             return {
                 'success': True,
                 'open_ports': open_ports,
                 'hostname': hostname,
                 'port_details': port_details,
+                'vulnerabilities': vulnerabilities,
+                'vulnerability_count': vuln_count,
                 'scan_duration': scan_duration,
                 'mode': scan_mode,
-                'message': f'Deep scan complete ({scan_mode}): {len(open_ports)} open ports discovered'
+                'message': f'Deep scan complete ({scan_mode}): {len(open_ports)} open ports, {vuln_count} vulnerabilities discovered'
             }
             
         except Exception as e:
@@ -1635,15 +1575,19 @@ class NetworkScanner:
                 'message': f'Deep scan error: {str(e)}'
             }
     
-    def _merge_deep_scan_results(self, ip, hostname, open_ports, port_details):
+    def _merge_deep_scan_results(self, ip, hostname, open_ports, port_details, vulnerabilities=None):
         """
         Merge deep scan results into SQLite database (primary) and legacy CSV files.
         Adds new ports while preserving all existing information.
+        Includes vulnerability data from vulners.nse script.
         """
         # Local import to satisfy static analysis complaining about 'os' being unbound.
         # (Global import exists at module top; this is a defensive redundancy.)
         import os  # noqa: F401
         netkbfile = self.shared_data.netkbfile
+        
+        if vulnerabilities is None:
+            vulnerabilities = {}
         
         try:
             # ===== PART 0: Update SQLite Database (PRIMARY DATA STORE) =====
@@ -1668,17 +1612,30 @@ class NetworkScanner:
                     sorted_ports = sorted(merged_ports, key=lambda x: int(x) if x.isdigit() else 0)
                     ports_str = ','.join(sorted_ports)
                     
+                    # Build vulnerability summary
+                    vuln_summary = ""
+                    if vulnerabilities:
+                        vuln_entries = []
+                        for port, vuln_data in vulnerabilities.items():
+                            cves = vuln_data.get('cves', [])
+                            service = vuln_data.get('service', 'unknown')
+                            for cve in cves[:5]:  # Limit to first 5 CVEs per port
+                                vuln_entries.append(f"{port}/{service}: {cve}")
+                        vuln_summary = "; ".join(vuln_entries)
+                    
                     # Update the database
                     self.db.upsert_host(
                         mac=host['mac'],
                         ip=ip,
-                        hostname=hostname if hostname else host.get('hostname'),
+                        hostname=hostname if hostname else host.get('hostname', ''),
                         ports=ports_str,
+                        vulnerabilities=vuln_summary if vuln_summary else host.get('vulnerabilities', ''),
                         # Mark that this was a deep scan
-                        notes=f"Deep scan: {len(open_ports)} ports found on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        notes=f"Deep scan: {len(open_ports)} ports, {len(vulnerabilities)} vulns found on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                     )
                     
-                    self.logger.info(f"✅ Updated SQLite database for {ip}: {len(merged_ports)} total ports ({len(new_ports)} from deep scan)")
+                    vuln_msg = f", {len(vulnerabilities)} vulnerable ports" if vulnerabilities else ""
+                    self.logger.info(f"✅ Updated SQLite database for {ip}: {len(merged_ports)} total ports ({len(new_ports)} from deep scan{vuln_msg})")
                 else:
                     self.logger.warning(f"IP {ip} not found in database - creating new entry")
                     # Create new entry with pseudo-MAC if no existing record
@@ -1699,82 +1656,9 @@ class NetworkScanner:
                 self.logger.error(f"Failed to update SQLite database for {ip}: {db_error}")
                 self.logger.debug(f"Database error traceback: {traceback.format_exc()}")
             
-            
-            # ===== PART 1: Update NetKB (MAC-indexed, semicolon-separated) =====
-            if not os.path.exists(netkbfile):
-                self.logger.warning(f"NetKB file not found: {netkbfile}")
-            else:
-                # Read the entire file into memory
-                netkb_entries = {}
-                with open(netkbfile, 'r') as file:
-                    reader = csv.DictReader(file)
-                    headers = reader.fieldnames
-                    
-                    for row in reader:
-                        mac = row['MAC Address']
-                        netkb_entries[mac] = row
-                
-                # Find the MAC address for this IP
-                target_mac = None
-                for mac, data in netkb_entries.items():
-                    if ip in data.get('IPs', '').split(';'):
-                        target_mac = mac
-                        break
-                
-                if not target_mac:
-                    self.logger.warning(f"IP {ip} not found in NetKB - skipping NetKB merge")
-                else:
-                    # Get existing ports
-                    existing_ports_str = netkb_entries[target_mac].get('Ports', '')
-                    existing_ports = set()
-                    
-                    if existing_ports_str:
-                        # Parse existing ports (semicolon separated in NetKB)
-                        existing_ports = {p.strip() for p in existing_ports_str.split(';') if p.strip()}
-                    
-                    # Merge with new ports from deep scan
-                    new_ports = {str(p) for p in open_ports}
-                    merged_ports = existing_ports.union(new_ports)
-                    
-                    # Update the entry
-                    netkb_entries[target_mac]['Ports'] = ';'.join(sorted(merged_ports, key=lambda x: int(x) if x.isdigit() else 0))
-                    
-                    # Update hostname if we got one and it's not already set
-                    existing_hostname = netkb_entries[target_mac].get('Hostnames', '')
-                    if hostname and not existing_hostname:
-                        netkb_entries[target_mac]['Hostnames'] = hostname
-                    
-                    # Mark as deep scanned
-                    netkb_entries[target_mac]['Deep_Scanned'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    netkb_entries[target_mac]['Deep_Scan_Ports'] = str(len(open_ports))
-                    
-                    # Write back to file using atomic operation
-                    if headers and netkb_entries:  # Ensure headers and data exist
-                        import tempfile
-                        import shutil
-                        temp_fd, temp_path = tempfile.mkstemp(dir=os.path.dirname(netkbfile), suffix='.tmp')
-                        
-                        try:
-                            with os.fdopen(temp_fd, 'w', newline='') as file:
-                                writer = csv.DictWriter(file, fieldnames=headers)
-                                writer.writeheader()
-                                for mac in sorted(netkb_entries.keys()):
-                                    writer.writerow(netkb_entries[mac])
-                            
-                            # Verify and replace
-                            if os.path.getsize(temp_path) > 50:
-                                shutil.move(temp_path, netkbfile)
-                            else:
-                                self.logger.error("Temp file too small after deep scan merge - aborting write")
-                                os.unlink(temp_path)
-                        except Exception as write_error:
-                            self.logger.error(f"Error writing netkb after deep scan: {write_error}")
-                            if os.path.exists(temp_path):
-                                os.unlink(temp_path)
-                    else:
-                        self.logger.warning(f"No headers or entries found for NetKB file - skipping write")
-                    
-                    self.logger.info(f"📝 Merged deep scan results into NetKB: {ip} (MAC: {target_mac}) now has {len(merged_ports)} total ports ({len(new_ports)} from deep scan)")
+            # CSV netkb.csv is no longer used - all data is in SQLite database
+            # Deep scan results are persisted via db.upsert_host() above
+            self.logger.debug(f"Deep scan database update complete for {ip}")
             
             # ===== PART 2: Update WiFi-specific network file (IP-indexed, comma-separated) =====
             # This is the file the web UI actually displays!
