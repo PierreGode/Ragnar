@@ -140,29 +140,29 @@ class NetworkScanner:
         return hosts
 
     def run_arp_scan(self):
-    """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
-    # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
-    commands = [
-        [
-            'sudo', 'arp-scan',
-            f'--interface={self.arp_scan_interface}',
-            '--localnet',
-            '--retry=4',
-            '--timeout=300',
-            '--repeat=3'
-        ],
-        [
-            'sudo', 'arp-scan',
-            f'--interface={self.arp_scan_interface}',
-            '192.168.1.0/24',
-            '--retry=4',
-            '--timeout=300',
-            '--repeat=3'
+        """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
+        # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
+        commands = [
+            [
+                'sudo', 'arp-scan',
+                f'--interface={self.arp_scan_interface}',
+                '--localnet',
+                '--retry=4',
+                '--timeout=300',
+                '--repeat=3'
+            ],
+            [
+                'sudo', 'arp-scan',
+                f'--interface={self.arp_scan_interface}',
+                '192.168.1.0/24',
+                '--retry=4',
+                '--timeout=300',
+                '--repeat=3'
+            ]
         ]
-    ]
-    
-    all_hosts = {}
-        
+
+        all_hosts = {}
+
         for command in commands:
             self.logger.info(f"Running arp-scan for MAC/vendor discovery: {' '.join(command)}")
             try:
@@ -184,15 +184,15 @@ class NetworkScanner:
             except Exception as e:
                 self.logger.error(f"Unexpected error running arp-scan: {e}")
                 continue
-        
+
         self.logger.info(f"📋 arp-scan complete: {len(all_hosts)} hosts with MAC addresses discovered")
-        
+
         # Write ARP scan results to SQLite database
         try:
             for ip, metadata in all_hosts.items():
                 mac = metadata.get('mac', '').lower().strip()
                 vendor = metadata.get('vendor', '')
-                
+
                 if mac and mac != '00:00:00:00:00:00':
                     self.db.upsert_host(
                         mac=mac,
@@ -201,11 +201,11 @@ class NetworkScanner:
                     )
                     self.db.update_ping_status(mac, success=True)
                     self.db.add_scan_history(mac, ip, 'arp_scan')
-            
+
             self.logger.debug(f"✅ ARP scan results written to database")
         except Exception as e:
             self.logger.error(f"Failed to write ARP scan results to database: {e}")
-        
+
         return all_hosts
 
     def run_nmap_network_scan(self, network_cidr, portstart, portend, extra_ports):
