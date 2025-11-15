@@ -651,9 +651,11 @@ class NetworkScanner:
                 
                 # CRITICAL: Deduplicate entries that share the same IP address
                 # This prevents duplicate vulnerability scans when a host appears with different MACs/hostnames
+                # Also handles merging pseudo-MACs with real MACs from database
                 ip_to_primary_mac = {}  # Track which MAC "owns" each IP
                 duplicate_macs_to_remove = set()  # MACs to remove due to IP conflicts
                 
+                # First pass: identify the best MAC for each IP
                 for mac, data in netkb_entries.items():
                     if not data['IPs']:
                         continue
@@ -672,6 +674,11 @@ class NetworkScanner:
                         if not is_pseudo_mac and existing_is_pseudo:
                             # Real MAC wins over pseudo-MAC
                             keep_new = True
+                            self.logger.info(f"🔄 IP {ip}: Real MAC {mac} replacing pseudo-MAC {existing_mac}")
+                        elif is_pseudo_mac and not existing_is_pseudo:
+                            # Existing real MAC wins over new pseudo-MAC
+                            keep_new = False
+                            self.logger.info(f"🔄 IP {ip}: Keeping real MAC {existing_mac}, discarding pseudo-MAC {mac}")
                         elif is_pseudo_mac == existing_is_pseudo:
                             # Same MAC type - compare by data quality
                             new_hostnames = len([h for h in data['Hostnames'] if h])
@@ -689,22 +696,27 @@ class NetworkScanner:
                             # Mark old MAC for removal
                             duplicate_macs_to_remove.add(existing_mac)
                             ip_to_primary_mac[ip] = mac
-                            self.logger.debug(f"Deduplicating IP {ip}: keeping {mac}, removing {existing_mac}")
                         else:
                             # Merge data from new into existing before removing
                             existing_data['Hostnames'].update(data['Hostnames'])
                             existing_data['Ports'].update(data['Ports'])
                             # Mark new MAC for removal
                             duplicate_macs_to_remove.add(mac)
-                            self.logger.debug(f"Deduplicating IP {ip}: keeping {existing_mac}, removing {mac}")
                     else:
                         ip_to_primary_mac[ip] = mac
                 
-                # Remove duplicate MACs
+                # Remove duplicate MACs and delete from database
                 for mac in duplicate_macs_to_remove:
                     if mac in netkb_entries:
                         del netkb_entries[mac]
-                        self.logger.info(f"Removed duplicate entry for MAC {mac}")
+                        self.logger.info(f"✂️ Removed duplicate entry for MAC {mac} from scan data")
+                        
+                        # Also delete from database to clean up old duplicates
+                        try:
+                            self.db.delete_host(mac)
+                            self.logger.info(f"🗑️ Deleted duplicate MAC {mac} from database")
+                        except Exception as e:
+                            self.logger.warning(f"Could not delete duplicate MAC {mac} from database: {e}")
 
                 sorted_netkb_entries = sorted(netkb_entries.items(), key=lambda x: self.ip_key(sorted(x[1]['IPs'])[0]))
 

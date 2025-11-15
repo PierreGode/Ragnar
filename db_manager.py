@@ -431,6 +431,40 @@ class DatabaseManager:
             logger.error(f"Failed to upsert host {mac}: {e}")
             return False
     
+    def delete_host(self, mac: str) -> bool:
+        """
+        Delete a host record by MAC address.
+        
+        Args:
+            mac: MAC address to delete
+            
+        Returns:
+            bool: True if successful
+        """
+        if not mac:
+            logger.warning("Cannot delete host without MAC address")
+            return False
+        
+        # Normalize MAC address
+        mac = mac.lower().strip()
+        
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM hosts WHERE mac = ?", (mac,))
+                conn.commit()
+                
+                if cursor.rowcount > 0:
+                    logger.info(f"Deleted host: {mac}")
+                    return True
+                else:
+                    logger.debug(f"No host found to delete: {mac}")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete host {mac}: {e}")
+            return False
+    
     def get_host_by_mac(self, mac: str) -> Optional[Dict]:
         """Get host record by MAC address."""
         try:
