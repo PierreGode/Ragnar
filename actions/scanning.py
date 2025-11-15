@@ -140,14 +140,28 @@ class NetworkScanner:
         return hosts
 
     def run_arp_scan(self):
-        """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
-        # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
-        commands = [
-            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '--localnet'],
-            ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '192.168.1.0/24']
+    """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
+    # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
+    commands = [
+        [
+            'sudo', 'arp-scan',
+            f'--interface={self.arp_scan_interface}',
+            '--localnet',
+            '--retry=4',
+            '--timeout=300',
+            '--repeat=3'
+        ],
+        [
+            'sudo', 'arp-scan',
+            f'--interface={self.arp_scan_interface}',
+            '192.168.1.0/24',
+            '--retry=4',
+            '--timeout=300',
+            '--repeat=3'
         ]
-        
-        all_hosts = {}
+    ]
+    
+    all_hosts = {}
         
         for command in commands:
             self.logger.info(f"Running arp-scan for MAC/vendor discovery: {' '.join(command)}")
