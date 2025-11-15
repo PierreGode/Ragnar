@@ -136,8 +136,8 @@ class Display:
                         db_stats = self.shared_data.db.get_stats()
                         alive_hosts = self.shared_data.db.get_all_hosts()
                         alive_macs = {
-                            h['mac_address'] for h in alive_hosts 
-                            if h.get('status') == 'alive' and h.get('mac_address') != 'STANDALONE'
+                            h['mac'] for h in alive_hosts 
+                            if h.get('status') == 'alive' and h.get('mac') != 'STANDALONE'
                         }
                         logger.debug(f"Loaded {len(alive_macs)} alive MACs from database")
                     except Exception as e:
