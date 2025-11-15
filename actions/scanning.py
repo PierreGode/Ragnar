@@ -286,10 +286,26 @@ class NetworkScanner:
                 for host, data in nmap_results.items():
                     mac = data.get('mac', '')
                     if not mac or mac == '00:00:00:00:00:00':
-                        # Create pseudo-MAC for hosts without MAC address
-                        ip_parts = host.split('.')
-                        if len(ip_parts) == 4:
-                            mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                        # CRITICAL: Check if this IP already has a real MAC in database
+                        existing_host = self.db.get_host_by_ip(host)
+                        if existing_host and existing_host.get('mac_address'):
+                            existing_mac = existing_host['mac_address'].lower().strip()
+                            if not existing_mac.startswith("00:00:"):
+                                # Real MAC exists in database - use it instead of creating pseudo-MAC
+                                mac = existing_mac
+                                self.logger.info(f"🔗 Nmap result for {host}: Using existing real MAC {mac} from database")
+                            else:
+                                # Only pseudo-MAC exists - create new one (will be same anyway)
+                                ip_parts = host.split('.')
+                                if len(ip_parts) == 4:
+                                    mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                    self.logger.debug(f"Reusing pseudo-MAC {mac} for {host}")
+                        else:
+                            # No existing entry - create pseudo-MAC
+                            ip_parts = host.split('.')
+                            if len(ip_parts) == 4:
+                                mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                self.logger.debug(f"Created pseudo-MAC {mac} for new host {host}")
                     
                     if mac:
                         mac = mac.lower().strip()
@@ -383,11 +399,26 @@ class NetworkScanner:
                     )
 
                     if result.returncode == 0:
-                        mac = self.get_mac_address(ip_str, "")
-                        if not mac or mac == "00:00:00:00:00:00":
-                            ip_parts = ip_str.split('.')
-                            pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                            mac = pseudo_mac
+                        # CRITICAL: Check database first for existing real MAC
+                        existing_host = self.db.get_host_by_ip(ip_str)
+                        mac = None
+                        
+                        if existing_host and existing_host.get('mac_address'):
+                            existing_mac = existing_host['mac_address'].lower().strip()
+                            if not existing_mac.startswith("00:00:"):
+                                # Real MAC exists in database - use it
+                                mac = existing_mac
+                                self.logger.info(f"🔗 Ping sweep for {ip_str}: Using existing real MAC {mac} from database")
+                        
+                        # If no real MAC in database, try to get it via ARP
+                        if not mac:
+                            mac = self.get_mac_address(ip_str, "")
+                            if not mac or mac == "00:00:00:00:00:00":
+                                # Only create pseudo-MAC if we truly can't find a real one
+                                ip_parts = ip_str.split('.')
+                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
+                                mac = pseudo_mac
+                                self.logger.debug(f"Created pseudo-MAC {mac} for ping-discovered host {ip_str}")
 
                         ping_discovered[ip_str] = {
                             "mac": mac,
