@@ -466,20 +466,7 @@ def sync_vulnerability_count():
         shared_data.vulnerable_host_count = len(vulnerable_hosts)
         logger.debug(f"Updated vulnerable host count: {old_host_count} -> {shared_data.vulnerable_host_count}")
 
-        # Also update livestatus file if it exists
-        if os.path.exists(shared_data.livestatusfile):
-            try:
-                if pandas_available:
-                    df = pd.read_csv(shared_data.livestatusfile)
-                    if not df.empty:
-                        df.loc[0, 'Vulnerabilities Count'] = vuln_count
-                        df.to_csv(shared_data.livestatusfile, index=False)
-                        logger.debug(f"Updated livestatus file with vuln count: {vuln_count}")
-                else:
-                    logger.warning("Pandas not available, skipping livestatus update")
-            except Exception as e:
-                logger.warning(f"Could not update livestatus with sync vulnerability count: {e}")
-        
+        # SQLite is the primary source of truth - CSV livestatus file is deprecated
         logger.debug(f"Synchronized vulnerability count: {vuln_count}")
         return vuln_count
         
@@ -702,28 +689,9 @@ def sync_all_counts():
                 except Exception as e:
                     logger.debug(f"Could not count attack modules: {e}")
 
-            # Update livestatus file with all synchronized counts
-            try:
-                if pandas_available:
-                    # Create livestatus file if it doesn't exist
-                    if not os.path.exists(shared_data.livestatusfile):
-                        logger.info(f"Creating missing livestatus file: {shared_data.livestatusfile}")
-                        shared_data.create_livestatusfile()
-                    
-                    # Update the file with current counts
-                    df = pd.read_csv(shared_data.livestatusfile)
-                    if not df.empty:
-                        df.loc[0, 'Alive Hosts Count'] = safe_int(shared_data.targetnbr)
-                        df.loc[0, 'Total Open Ports'] = safe_int(shared_data.portnbr)
-                        df.loc[0, 'All Known Hosts Count'] = safe_int(getattr(shared_data, 'total_targetnbr', shared_data.targetnbr))
-                        df.loc[0, 'Vulnerabilities Count'] = safe_int(shared_data.vulnnbr)
-                        df.to_csv(shared_data.livestatusfile, index=False)
-                        logger.debug("Updated livestatus file with synchronized counts")
-                else:
-                    logger.warning("Pandas not available, skipping livestatus update")
-            except Exception as e:
-                logger.warning(f"Could not update livestatus with all sync counts: {e}")
-
+            # SQLite is the primary source of truth - CSV livestatus file is deprecated
+            # All counts are synchronized from SQLite database above
+            
             try:
                 shared_data.update_stats()
                 logger.debug(f"Updated gamification stats - Level: {shared_data.levelnbr}, Coins: {shared_data.coinnbr}")
