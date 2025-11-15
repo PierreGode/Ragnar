@@ -496,7 +496,7 @@ def sync_all_counts():
             # ==============================================================================
             
             aggregated_targets = 0
-            aggregated_ports = 0
+            unique_ports_set = set()  # Track unique port numbers across all hosts
             total_target_count = 0
             inactive_target_count = 0
             current_snapshot = {}
@@ -536,7 +536,7 @@ def sync_all_counts():
                     if is_active:
                         aggregated_targets += 1
                         
-                        # Count ports - support both comma (SQLite) and semicolon (CSV) delimiters
+                        # Track unique port numbers - support both comma (SQLite) and semicolon (CSV) delimiters
                         ports_str = host.get('ports', '')
                         if ports_str and ports_str != '0':
                             # Check for comma first (SQLite format), else semicolon (CSV format)
@@ -544,7 +544,7 @@ def sync_all_counts():
                                 port_list = [p.strip() for p in ports_str.split(',') if p.strip() and p.strip() != '0']
                             else:
                                 port_list = [p.strip() for p in ports_str.split(';') if p.strip() and p.strip() != '0']
-                            aggregated_ports += len(port_list)
+                            unique_ports_set.update(port_list)  # Add to unique ports set
                         else:
                             port_list = []
                         
@@ -566,11 +566,14 @@ def sync_all_counts():
                             'mac': mac
                         }
                 
+                # Calculate unique port count from the set
+                aggregated_ports = len(unique_ports_set)
+                
                 logger.info(f"[SYNC] ✅ Read data from SQLite database:")
                 logger.info(f"  - Total unique IPs: {total_target_count}")
                 logger.info(f"  - Active (alive): {aggregated_targets}")
                 logger.info(f"  - Inactive (degraded): {inactive_target_count}")
-                logger.info(f"  - Ports: {aggregated_ports}")
+                logger.info(f"  - Unique ports: {aggregated_ports} ({sorted(unique_ports_set)})")
                 
             except Exception as e:
                 logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
