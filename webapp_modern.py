@@ -7134,29 +7134,66 @@ def _collect_manual_targets():
     targets = []
     target_ips = set()  # Track unique IPs to avoid duplicates
 
-    # Read from the live status file first
-    if os.path.exists(shared_data.livestatusfile):
-        with open(shared_data.livestatusfile, 'r') as file:
-            reader = csv.DictReader(file)
-            for row in reader:
-                if row.get('Alive') == '1':  # Only alive targets
-                    ip = row.get('IP', '')
-                    hostname = row.get('Hostname', ip)
+    # Read from SQLite database (primary source)
+    try:
+        db = get_db(currentdir=shared_data.currentdir)
+        all_hosts = db.get_all_hosts()
+        
+        for host in all_hosts:
+            # Only include alive/up hosts
+            if host.get('status') in ['alive', 'up']:
+                ip = host.get('ip_address', '')
+                hostname = host.get('hostname', ip) or ip
+                
+                # Parse ports from comma or semicolon-separated string
+                ports_str = host.get('ports', '')
+                ports = []
+                if ports_str:
+                    if ',' in ports_str:
+                        ports = [p.strip() for p in ports_str.split(',') if p.strip()]
+                    else:
+                        ports = [p.strip() for p in ports_str.split(';') if p.strip()]
+                
+                if ip and ip not in target_ips:
+                    targets.append({
+                        'ip': ip,
+                        'hostname': hostname,
+                        'ports': ports,
+                        'source': 'Database'
+                    })
+                    target_ips.add(ip)
+        
+        logger.debug(f"Loaded {len(targets)} targets from SQLite database for manual attacks")
+    except Exception as e:
+        logger.error(f"Error reading targets from database: {e}")
+    
+    # Fallback: Read from CSV livestatus file if database is empty
+    if not targets and os.path.exists(shared_data.livestatusfile):
+        try:
+            with open(shared_data.livestatusfile, 'r') as file:
+                reader = csv.DictReader(file)
+                for row in reader:
+                    if row.get('Alive') == '1':  # Only alive targets
+                        ip = row.get('IP', '')
+                        hostname = row.get('Hostname', ip)
 
-                    # Get open ports
-                    ports = []
-                    for key, value in row.items():
-                        if key.isdigit() and value:  # Port columns with values
-                            ports.append(key)
+                        # Get open ports
+                        ports = []
+                        for key, value in row.items():
+                            if key.isdigit() and value:  # Port columns with values
+                                ports.append(key)
 
-                    if ip and ip not in target_ips:
-                        targets.append({
-                            'ip': ip,
-                            'hostname': hostname,
-                            'ports': ports,
-                            'source': 'Network Scan'
-                        })
-                        target_ips.add(ip)
+                        if ip and ip not in target_ips:
+                            targets.append({
+                                'ip': ip,
+                                'hostname': hostname,
+                                'ports': ports,
+                                'source': 'CSV Fallback'
+                            })
+                            target_ips.add(ip)
+            logger.debug(f"Loaded {len(targets)} targets from CSV fallback for manual attacks")
+        except Exception as e:
+            logger.error(f"Error reading CSV fallback: {e}")
 
     # Also include hosts from NetKB data
     try:
