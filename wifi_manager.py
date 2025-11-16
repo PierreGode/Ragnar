@@ -1203,7 +1203,7 @@ class WiFiManager:
                     self.logger.warning(f"Failed to connect to {ssid}")
                     
             except Exception as e:
-                self.logger.error(f"Error connecting to {network.get('ssid', 'unknown')}: {e}")
+                self.logger.error(f"Error connecting to {network.get('ssid', 'unknown')}: {e} Look a Ragnar.. he will show the IP-Adress")
         
         return False
     
