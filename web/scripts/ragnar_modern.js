@@ -7,6 +7,9 @@ const RECONNECT_DELAY_MAX = 15000;
 let currentTab = 'dashboard';
 let autoRefreshIntervals = {};
 
+// Track which tabs have been preloaded to avoid duplicate loading
+let preloadedTabs = new Set();
+
 // Configuration metadata for tooltips
 const configMetadata = {
     manual_mode: {
@@ -567,73 +570,163 @@ function initializeMobileMenu() {
 
 async function loadInitialData() {
     try {
-        // Load status
-        const status = await fetchAPI('/api/status');
-        if (status) {
-            updateDashboardStatus(status);
-        }
+        // Priority 1: Load critical dashboard stats first for immediate visibility
+        await Promise.all([
+            fetchAPI('/api/status').then(status => {
+                if (status) {
+                    updateDashboardStatus(status);
+                }
+            }),
+            loadDashboardData()
+        ]);
         
-        // Load dashboard statistics
-        await loadDashboardData();
+        // Priority 2: Load Wi-Fi status (medium priority, shown in nav)
+        refreshWifiStatus().catch(err => console.warn('WiFi status load failed:', err));
         
-        // Load initial console logs
-        await loadConsoleLogs();
+        // Priority 3: Load console logs last (lowest priority, background info)
+        setTimeout(() => {
+            loadConsoleLogs().then(() => {
+                addConsoleMessage('Ragnar Modern Web Interface Initialized', 'success');
+                addConsoleMessage('Dashboard loaded successfully', 'info');
+            }).catch(err => {
+                console.warn('Console logs load failed:', err);
+                addConsoleMessage('Error loading console logs', 'warning');
+            });
+        }, 100);
         
-        // Load initial Wi-Fi status
-        await refreshWifiStatus();
-        
-        // Add welcome message to console
-        addConsoleMessage('Ragnar Modern Web Interface Initialized', 'success');
-        addConsoleMessage('Dashboard loaded successfully', 'info');
+        // Priority 4: Preload all other tabs in background after dashboard is ready
+        setTimeout(() => {
+            preloadAllTabs();
+        }, 500);
         
     } catch (error) {
         console.error('Error loading initial data:', error);
-        addConsoleMessage('Error loading initial data', 'error');
+        addConsoleMessage('Error loading critical dashboard data', 'error');
+    }
+}
+
+// Preload all tabs in background for instant switching
+async function preloadAllTabs() {
+    console.log('Starting background preload of all tabs...');
+    
+    try {
+        // Preload in batches to avoid overwhelming the backend
+        
+        // Batch 1: Network tab (most frequently accessed after dashboard)
+        await loadNetworkData().catch(err => console.warn('Network preload failed:', err));
+        preloadedTabs.add('network');
+        
+        // Small delay between batches
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Batch 2: Discovered tab (credentials, loot, attacks, vulnerabilities)
+        await Promise.all([
+            loadCredentialsData().catch(err => console.warn('Credentials preload failed:', err)),
+            loadLootData().catch(err => console.warn('Loot preload failed:', err)),
+            loadAttackLogs().catch(err => console.warn('Attack logs preload failed:', err)),
+            loadVulnerabilityIntel().catch(err => console.warn('Vulnerability intel preload failed:', err))
+        ]);
+        preloadedTabs.add('discovered');
+        
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Batch 3: Threat Intel tab
+        await loadThreatIntelData().catch(err => console.warn('Threat intel preload failed:', err));
+        preloadedTabs.add('threat-intel');
+        
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Batch 4: Connect tab
+        await loadConnectData().catch(err => console.warn('Connect preload failed:', err));
+        preloadedTabs.add('connect');
+        
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Batch 5: E-Paper tab
+        await loadEpaperDisplay().catch(err => console.warn('E-Paper preload failed:', err));
+        preloadedTabs.add('epaper');
+        
+        await new Promise(resolve => setTimeout(resolve, 200));
+        
+        // Batch 6: Files and Config (lower priority)
+        await Promise.all([
+            loadFilesData().catch(err => console.warn('Files preload failed:', err)),
+            loadImagesData().catch(err => console.warn('Images preload failed:', err)),
+            loadConfigData().catch(err => console.warn('Config preload failed:', err))
+        ]);
+        preloadedTabs.add('files');
+        preloadedTabs.add('config');
+        
+        // System and NetKB tabs load on-demand (they use different patterns)
+        
+        console.log('Background tab preload completed');
+        addConsoleMessage('All tabs preloaded and ready', 'success');
+        
+    } catch (error) {
+        console.error('Error during tab preloading:', error);
     }
 }
 
 async function loadTabData(tabName) {
+    // If tab was already preloaded, skip reloading unless it's a dynamic tab
+    // System and netkb always load (they use polling/intervals)
+    const alreadyPreloaded = preloadedTabs.has(tabName);
+    
     switch(tabName) {
         case 'dashboard':
-            await Promise.all([
-                loadDashboardData(),
-                loadConsoleLogs()
-            ]);
+            // Load dashboard stats immediately, defer console logs
+            await loadDashboardData();
+            setTimeout(() => loadConsoleLogs(), 50);
             break;
         case 'network':
+            // Always refresh network data when switching to this tab
             await loadNetworkData();
             break;
         case 'connect':
-            await loadConnectData();
+            if (!alreadyPreloaded) {
+                await loadConnectData();
+            }
             break;
         case 'discovered':
-            await Promise.all([
-                loadCredentialsData(),
-                loadLootData(),
-                loadAttackLogs(),
-                loadVulnerabilityIntel()
-            ]);
+            if (!alreadyPreloaded) {
+                await Promise.all([
+                    loadCredentialsData(),
+                    loadLootData(),
+                    loadAttackLogs(),
+                    loadVulnerabilityIntel()
+                ]);
+            }
             break;
         case 'threat-intel':
-            await loadThreatIntelData();
+            if (!alreadyPreloaded) {
+                await loadThreatIntelData();
+            }
             break;
         case 'files':
-            await Promise.all([
-                loadFilesData(),
-                loadImagesData()
-            ]);
+            if (!alreadyPreloaded) {
+                await Promise.all([
+                    loadFilesData(),
+                    loadImagesData()
+                ]);
+            }
             break;
         case 'system':
+            // Always load system (uses intervals)
             loadSystemData();
             break;
         case 'netkb':
+            // Always load netkb
             loadNetkbData();
             break;
         case 'epaper':
-            await loadEpaperDisplay();
+            if (!alreadyPreloaded) {
+                await loadEpaperDisplay();
+            }
             break;
         case 'config':
-            await loadConfigData();
+            if (!alreadyPreloaded) {
+                await loadConfigData();
+            }
             break;
     }
 }
@@ -839,6 +932,9 @@ function displayStableNetworkTable(data) {
         return;
     }
     
+    // Use DocumentFragment for better performance
+    const fragment = document.createDocumentFragment();
+    
     data.hosts.forEach((host, index) => {
         // DEBUG: Log first few host objects to see structure
         if (index < 5) {
@@ -897,9 +993,17 @@ function displayStableNetworkTable(data) {
         // Set data-ip attribute for state management
         row.setAttribute('data-ip', host.ip);
         
-        tableBody.appendChild(row);
+        fragment.appendChild(row);
         
-        // Restore deep scan button state after adding to DOM
+        // Restore deep scan button state after adding to fragment
+        // (will be applied after fragment is appended to DOM)
+    });
+    
+    // Append all rows at once for better performance
+    tableBody.appendChild(fragment);
+    
+    // Now restore button states after DOM is updated
+    data.hosts.forEach(host => {
         restoreDeepScanButtonState(host.ip);
     });
     
@@ -1476,6 +1580,9 @@ function updateNetworkTableWithScanData(data) {
     
     // Convert hosts object to array for easier processing
     const hostArray = Object.values(data.hosts);
+    
+    // Use DocumentFragment for better performance
+    const fragment = document.createDocumentFragment();
     
     hostArray.forEach(host => {
         const row = document.createElement('tr');
@@ -3209,7 +3316,9 @@ function displayWifiNetworks(data) {
         const ssid = network.ssid || network.SSID || 'Unknown Network';
         const signal = network.signal || 0;
         const isSecure = network.security !== 'open' && network.security !== 'Open';
-        const isKnown = knownNetworks.includes(ssid);
+        // Check both backend-provided 'known' flag AND local knownNetworks list
+        // This ensures we catch both Ragnar's known networks AND NetworkManager system profiles
+        const isKnown = network.known || network.has_system_profile || knownNetworks.includes(ssid);
         const isCurrent = network.in_use || false;
         
         // Determine signal icon

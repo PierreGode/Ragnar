@@ -6,6 +6,8 @@
 # - Robust connection monitoring with proper timing
 # - Network scanning and credential management
 # - Integration with wpa_supplicant and NetworkManager
+# - SQLite database caching for improved scan performance
+# - Connection history tracking and analytics
 
 import os
 import time
@@ -17,6 +19,7 @@ import re
 import signal
 from datetime import datetime, timedelta
 from logger import Logger
+from db_manager import DatabaseManager
 
 
 class WiFiManager:
@@ -26,8 +29,19 @@ class WiFiManager:
         self.shared_data = shared_data
         self.logger = Logger(name="WiFiManager", level=logging.INFO)
         
+        # Initialize database for WiFi caching and analytics
+        try:
+            self.db = DatabaseManager()
+            self.logger.info("WiFi database manager initialized")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize WiFi database: {e}")
+            self.db = None
+        
         # Setup dedicated AP mode logging
         self.setup_ap_logger()
+        
+        # WiFi analytics tracking
+        self.current_connection_id = None  # Track current connection for duration logging
         
         # State management
         self.wifi_connected = False
@@ -874,7 +888,15 @@ class WiFiManager:
             if self.ap_mode_active:
                 return self.scan_networks_while_ap()
             
-            self.logger.info("Scanning for Wi-Fi networks...")
+            # Try to get cached networks first (within last 2 minutes for better performance)
+            if self.db:
+                cached_networks = self.db.get_cached_wifi_networks(max_age_seconds=120)
+                if cached_networks:
+                    self.logger.info(f"Using {len(cached_networks)} cached WiFi networks (age < 2min)")
+                    self.available_networks = cached_networks
+                    return cached_networks
+            
+            self.logger.info("Scanning for Wi-Fi networks (cache miss or disabled)...")
             
             # Get system WiFi profiles to mark known networks
             system_profiles = self.get_system_wifi_profiles()
@@ -901,7 +923,8 @@ class WiFiManager:
                                 'ssid': ssid,
                                 'signal': int(parts[1]) if parts[1].isdigit() else 0,
                                 'security': parts[2] if parts[2] else 'Open',
-                                'known': is_known
+                                'known': is_known,
+                                'has_system_profile': ssid in system_profiles
                             })
             
             # Remove duplicates and sort by signal strength
@@ -914,6 +937,14 @@ class WiFiManager:
             
             self.available_networks = unique_networks
             self.logger.info(f"Found {len(unique_networks)} unique networks")
+            
+            # Cache the scan results in database
+            if self.db and unique_networks:
+                try:
+                    self.db.cache_wifi_scan(unique_networks)
+                    self.logger.debug(f"Cached {len(unique_networks)} networks to database")
+                except Exception as cache_err:
+                    self.logger.warning(f"Failed to cache WiFi scan: {cache_err}")
             return unique_networks
             
         except Exception as e:
@@ -1203,27 +1234,54 @@ class WiFiManager:
                 # If password is provided and profile exists, try to update the password
                 if password:
                     self.logger.info(f"Updating password for existing profile {ssid}")
-                    update_cmd = ['nmcli', 'con', 'modify', ssid, 'wifi-sec.psk', password]
+                    update_cmd = ['sudo', 'nmcli', 'con', 'modify', ssid, 'wifi-sec.psk', password]
                     subprocess.run(update_cmd, capture_output=True, text=True)
                 
                 # Try to activate the existing connection
                 self.logger.info(f"Activating existing connection profile for {ssid}")
-                cmd = ['nmcli', 'con', 'up', ssid]
+                cmd = ['sudo', 'nmcli', 'con', 'up', ssid]
             else:
                 # No existing profile - create a new one
                 self.logger.info(f"No existing profile found for {ssid}, creating new connection")
-                cmd = ['nmcli', 'dev', 'wifi', 'connect', ssid]
+                cmd = ['sudo', 'nmcli', 'dev', 'wifi', 'connect', ssid]
                 if password:
                     cmd.extend(['password', password])
             
             self.logger.info(f"Executing: {' '.join(cmd[:3])} {ssid} {'password ***' if password else ''}")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
+            # Get signal strength if available
+            signal_strength = None
+            try:
+                for net in self.available_networks:
+                    if net['ssid'] == ssid:
+                        signal_strength = net.get('signal')
+                        break
+            except:
+                pass
+            
             if result.returncode == 0:
                 # Wait a moment and verify connection
                 self.logger.info(f"Connection command succeeded, verifying connection...")
                 time.sleep(5)
                 connected = self.check_wifi_connection()
+                
+                # Log connection attempt to database
+                if self.db:
+                    try:
+                        conn_id = self.db.log_wifi_connection_attempt(
+                            ssid=ssid,
+                            success=connected,
+                            failure_reason=None if connected else "Verification failed",
+                            signal_strength=signal_strength,
+                            network_profile_existed=profile_exists,
+                            from_ap_mode=self.ap_mode_active
+                        )
+                        if connected:
+                            self.current_connection_id = conn_id
+                    except Exception as db_err:
+                        self.logger.warning(f"Failed to log connection attempt: {db_err}")
+                
                 if connected:
                     self.logger.info(f"Successfully connected to {ssid}")
                 else:
@@ -1234,20 +1292,59 @@ class WiFiManager:
                 self.logger.error(f"nmcli connection failed for {ssid}: {error_msg}")
                 
                 # Parse common errors
+                failure_reason = error_msg
                 if "Secrets were required, but not provided" in error_msg:
                     self.logger.error("Password was required but not provided or incorrect")
+                    failure_reason = "Incorrect password"
                 elif "No network with SSID" in error_msg:
                     self.logger.error(f"Network {ssid} not found in range")
+                    failure_reason = "Network not in range"
+                
+                # Log failed connection attempt
+                if self.db:
+                    try:
+                        self.db.log_wifi_connection_attempt(
+                            ssid=ssid,
+                            success=False,
+                            failure_reason=failure_reason,
+                            signal_strength=signal_strength,
+                            network_profile_existed=profile_exists,
+                            from_ap_mode=self.ap_mode_active
+                        )
+                    except Exception as db_err:
+                        self.logger.warning(f"Failed to log connection failure: {db_err}")
                 
                 return False
                 
         except subprocess.TimeoutExpired:
             self.logger.error(f"Connection attempt to {ssid} timed out after 30 seconds")
+            if self.db:
+                try:
+                    self.db.log_wifi_connection_attempt(
+                        ssid=ssid,
+                        success=False,
+                        failure_reason="Connection timeout",
+                        network_profile_existed=profile_exists,
+                        from_ap_mode=self.ap_mode_active
+                    )
+                except:
+                    pass
             return False
         except Exception as e:
             self.logger.error(f"Error connecting to {ssid}: {e}")
             import traceback
             self.logger.error(traceback.format_exc())
+            if self.db:
+                try:
+                    self.db.log_wifi_connection_attempt(
+                        ssid=ssid,
+                        success=False,
+                        failure_reason=f"Exception: {str(e)}",
+                        network_profile_existed=profile_exists,
+                        from_ap_mode=self.ap_mode_active
+                    )
+                except:
+                    pass
             return False
 
     def disconnect_wifi(self):
@@ -1259,6 +1356,14 @@ class WiFiManager:
             
             current_ssid = self.get_current_ssid()
             self.logger.info(f"Disconnecting from Wi-Fi network: {current_ssid}")
+            
+            # Log disconnection in database
+            if self.db and current_ssid:
+                try:
+                    self.db.update_wifi_disconnection(ssid=current_ssid, connection_id=self.current_connection_id)
+                    self.current_connection_id = None
+                except Exception as db_err:
+                    self.logger.warning(f"Failed to log disconnection: {db_err}")
             
             # Disconnect using nmcli
             result = subprocess.run(['nmcli', 'device', 'disconnect', 'wlan0'], 

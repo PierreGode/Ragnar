@@ -197,8 +197,86 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_scan_history_timestamp ON scan_history(timestamp)
             """)
             
+            # Create WiFi scan cache table for optimized network scanning
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wifi_scan_cache (
+                    ssid TEXT PRIMARY KEY,
+                    signal INTEGER,
+                    security TEXT,
+                    frequency TEXT,
+                    channel INTEGER,
+                    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    scan_count INTEGER DEFAULT 1,
+                    is_known BOOLEAN DEFAULT 0,
+                    has_system_profile BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_scan_cache_last_seen ON wifi_scan_cache(last_seen)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_scan_cache_signal ON wifi_scan_cache(signal)
+            """)
+            
+            # Create WiFi connection history table for tracking all attempts
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wifi_connection_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ssid TEXT NOT NULL,
+                    connection_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    disconnection_time TIMESTAMP,
+                    success BOOLEAN NOT NULL,
+                    failure_reason TEXT,
+                    signal_strength INTEGER,
+                    duration_seconds INTEGER,
+                    was_auto_connect BOOLEAN DEFAULT 0,
+                    network_profile_existed BOOLEAN DEFAULT 0,
+                    from_ap_mode BOOLEAN DEFAULT 0
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_conn_history_ssid ON wifi_connection_history(ssid)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_conn_history_time ON wifi_connection_history(connection_time)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_conn_history_success ON wifi_connection_history(success)
+            """)
+            
+            # Create WiFi network analytics table for performance metrics
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS wifi_network_analytics (
+                    ssid TEXT PRIMARY KEY,
+                    total_connections INTEGER DEFAULT 0,
+                    successful_connections INTEGER DEFAULT 0,
+                    failed_connections INTEGER DEFAULT 0,
+                    total_connection_time_seconds INTEGER DEFAULT 0,
+                    average_signal INTEGER,
+                    min_signal INTEGER,
+                    max_signal INTEGER,
+                    last_connection_attempt TIMESTAMP,
+                    last_successful_connection TIMESTAMP,
+                    last_failure_reason TEXT,
+                    success_rate REAL DEFAULT 0.0,
+                    average_connection_duration REAL DEFAULT 0.0,
+                    priority_score REAL DEFAULT 50.0,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_analytics_success_rate ON wifi_network_analytics(success_rate)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_wifi_analytics_priority ON wifi_network_analytics(priority_score)
+            """)
+            
             conn.commit()
-            logger.info("Database schema initialized successfully")
+            logger.info("Database schema initialized successfully (includes WiFi tables)")
         
         # Perform CSV migration if needed
         self._migrate_from_csv()
@@ -998,6 +1076,487 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to export to CSV: {e}")
             return False
+
+
+    # ============================================================================
+    # WIFI MANAGEMENT METHODS
+    # ============================================================================
+    
+    def cache_wifi_scan(self, networks: List[Dict[str, Any]]):
+        """
+        Cache WiFi scan results to reduce expensive nmcli rescan calls.
+        
+        Args:
+            networks: List of network dicts with ssid, signal, security, etc.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                timestamp = datetime.now()
+                
+                for network in networks:
+                    ssid = network.get('ssid', '').strip()
+                    if not ssid or network.get('instruction'):  # Skip instruction entries
+                        continue
+                    
+                    # Check if network exists
+                    cursor.execute("""
+                        SELECT scan_count FROM wifi_scan_cache WHERE ssid = ?
+                    """, (ssid,))
+                    row = cursor.fetchone()
+                    
+                    if row:
+                        # Update existing entry
+                        scan_count = row[0] + 1
+                        cursor.execute("""
+                            UPDATE wifi_scan_cache
+                            SET signal = ?,
+                                security = ?,
+                                last_seen = ?,
+                                scan_count = ?,
+                                is_known = ?,
+                                has_system_profile = ?
+                            WHERE ssid = ?
+                        """, (
+                            network.get('signal', 0),
+                            network.get('security', ''),
+                            timestamp,
+                            scan_count,
+                            1 if network.get('known', False) else 0,
+                            1 if network.get('has_system_profile', False) else 0,
+                            ssid
+                        ))
+                    else:
+                        # Insert new entry
+                        cursor.execute("""
+                            INSERT INTO wifi_scan_cache 
+                            (ssid, signal, security, last_seen, scan_count, is_known, has_system_profile)
+                            VALUES (?, ?, ?, ?, 1, ?, ?)
+                        """, (
+                            ssid,
+                            network.get('signal', 0),
+                            network.get('security', ''),
+                            timestamp,
+                            1 if network.get('known', False) else 0,
+                            1 if network.get('has_system_profile', False) else 0
+                        ))
+                
+                conn.commit()
+                logger.debug(f"Cached {len([n for n in networks if not n.get('instruction')])} WiFi networks")
+                
+        except Exception as e:
+            logger.error(f"Error caching WiFi scan: {e}")
+    
+    def get_cached_wifi_networks(self, max_age_seconds: int = 300) -> List[Dict[str, Any]]:
+        """
+        Get cached WiFi networks scanned within the specified time window.
+        
+        Args:
+            max_age_seconds: Maximum age of cached data (default: 5 minutes)
+            
+        Returns:
+            List of network dicts
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cutoff_time = datetime.now() - timedelta(seconds=max_age_seconds)
+                
+                cursor.execute("""
+                    SELECT ssid, signal, security, last_seen, is_known, has_system_profile
+                    FROM wifi_scan_cache
+                    WHERE last_seen >= ?
+                    ORDER BY signal DESC
+                """, (cutoff_time,))
+                
+                networks = []
+                for row in cursor.fetchall():
+                    networks.append({
+                        'ssid': row[0],
+                        'signal': row[1],
+                        'security': row[2],
+                        'last_seen': row[3],
+                        'known': bool(row[4]),
+                        'has_system_profile': bool(row[5])
+                    })
+                
+                logger.debug(f"Retrieved {len(networks)} cached WiFi networks (max age: {max_age_seconds}s)")
+                return networks
+                
+        except Exception as e:
+            logger.error(f"Error retrieving cached WiFi networks: {e}")
+            return []
+    
+    def log_wifi_connection_attempt(self, ssid: str, success: bool, 
+                                    failure_reason: Optional[str] = None,
+                                    signal_strength: Optional[int] = None,
+                                    was_auto_connect: bool = False,
+                                    network_profile_existed: bool = False,
+                                    from_ap_mode: bool = False) -> int:
+        """
+        Log a WiFi connection attempt for history tracking.
+        
+        Returns:
+            Connection history ID
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    INSERT INTO wifi_connection_history
+                    (ssid, success, failure_reason, signal_strength, 
+                     was_auto_connect, network_profile_existed, from_ap_mode)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    ssid,
+                    1 if success else 0,
+                    failure_reason,
+                    signal_strength,
+                    1 if was_auto_connect else 0,
+                    1 if network_profile_existed else 0,
+                    1 if from_ap_mode else 0
+                ))
+                
+                conn_id = cursor.lastrowid
+                conn.commit()
+                
+                # Update analytics
+                self._update_wifi_analytics(ssid, success, failure_reason, signal_strength)
+                
+                logger.debug(f"Logged WiFi connection attempt: {ssid} (success={success})")
+                return conn_id
+                
+        except Exception as e:
+            logger.error(f"Error logging WiFi connection attempt: {e}")
+            return -1
+    
+    def update_wifi_disconnection(self, ssid: str, connection_id: Optional[int] = None):
+        """
+        Update WiFi connection history with disconnection time and calculate duration.
+        
+        Args:
+            ssid: Network SSID
+            connection_id: Specific connection ID, or None to update most recent
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                if connection_id:
+                    # Update specific connection
+                    cursor.execute("""
+                        SELECT connection_time FROM wifi_connection_history
+                        WHERE id = ? AND success = 1
+                    """, (connection_id,))
+                else:
+                    # Update most recent successful connection for this SSID
+                    cursor.execute("""
+                        SELECT id, connection_time FROM wifi_connection_history
+                        WHERE ssid = ? AND success = 1 AND disconnection_time IS NULL
+                        ORDER BY connection_time DESC
+                        LIMIT 1
+                    """, (ssid,))
+                
+                row = cursor.fetchone()
+                if row:
+                    if connection_id:
+                        conn_id = connection_id
+                        conn_time_str = row[0]
+                    else:
+                        conn_id = row[0]
+                        conn_time_str = row[1]
+                    
+                    # Calculate duration
+                    conn_time = datetime.fromisoformat(conn_time_str)
+                    duration = int((now - conn_time).total_seconds())
+                    
+                    cursor.execute("""
+                        UPDATE wifi_connection_history
+                        SET disconnection_time = ?,
+                            duration_seconds = ?
+                        WHERE id = ?
+                    """, (now, duration, conn_id))
+                    
+                    conn.commit()
+                    logger.debug(f"Updated disconnection for {ssid} (duration: {duration}s)")
+                
+        except Exception as e:
+            logger.error(f"Error updating WiFi disconnection: {e}")
+    
+    def _update_wifi_analytics(self, ssid: str, success: bool, 
+                              failure_reason: Optional[str] = None,
+                              signal_strength: Optional[int] = None):
+        """
+        Update WiFi network analytics based on connection attempt.
+        Internal method called after logging connection history.
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                now = datetime.now()
+                
+                # Get current analytics
+                cursor.execute("""
+                    SELECT total_connections, successful_connections, failed_connections,
+                           average_signal, min_signal, max_signal
+                    FROM wifi_network_analytics
+                    WHERE ssid = ?
+                """, (ssid,))
+                
+                row = cursor.fetchone()
+                
+                if row:
+                    # Update existing analytics
+                    total = row[0] + 1
+                    successful = row[1] + (1 if success else 0)
+                    failed = row[2] + (0 if success else 1)
+                    avg_signal = row[3]
+                    min_signal = row[4]
+                    max_signal = row[5]
+                    
+                    # Update signal stats if provided
+                    if signal_strength is not None:
+                        if avg_signal:
+                            avg_signal = (avg_signal * (total - 1) + signal_strength) / total
+                        else:
+                            avg_signal = signal_strength
+                        
+                        if min_signal is None or signal_strength < min_signal:
+                            min_signal = signal_strength
+                        if max_signal is None or signal_strength > max_signal:
+                            max_signal = signal_strength
+                    
+                    success_rate = (successful / total * 100.0) if total > 0 else 0.0
+                    
+                    # Calculate priority score (weighted: 60% success rate, 40% signal strength)
+                    priority_score = (success_rate * 0.6) + ((avg_signal or 0) * 0.4)
+                    
+                    cursor.execute("""
+                        UPDATE wifi_network_analytics
+                        SET total_connections = ?,
+                            successful_connections = ?,
+                            failed_connections = ?,
+                            average_signal = ?,
+                            min_signal = ?,
+                            max_signal = ?,
+                            last_connection_attempt = ?,
+                            last_successful_connection = CASE WHEN ? THEN ? ELSE last_successful_connection END,
+                            last_failure_reason = CASE WHEN ? THEN ? ELSE last_failure_reason END,
+                            success_rate = ?,
+                            priority_score = ?,
+                            updated_at = ?
+                        WHERE ssid = ?
+                    """, (
+                        total, successful, failed,
+                        avg_signal, min_signal, max_signal,
+                        now,
+                        success, now,
+                        not success, failure_reason,
+                        success_rate,
+                        priority_score,
+                        now,
+                        ssid
+                    ))
+                else:
+                    # Insert new analytics
+                    success_rate = 100.0 if success else 0.0
+                    priority_score = (success_rate * 0.6) + ((signal_strength or 0) * 0.4)
+                    
+                    cursor.execute("""
+                        INSERT INTO wifi_network_analytics
+                        (ssid, total_connections, successful_connections, failed_connections,
+                         average_signal, min_signal, max_signal,
+                         last_connection_attempt, last_successful_connection, last_failure_reason,
+                         success_rate, priority_score, updated_at)
+                        VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        ssid,
+                        1 if success else 0,
+                        0 if success else 1,
+                        signal_strength,
+                        signal_strength,
+                        signal_strength,
+                        now,
+                        now if success else None,
+                        failure_reason if not success else None,
+                        success_rate,
+                        priority_score,
+                        now
+                    ))
+                
+                conn.commit()
+                
+        except Exception as e:
+            logger.error(f"Error updating WiFi analytics: {e}")
+    
+    def get_wifi_network_analytics(self, ssid: str = None) -> List[Dict[str, Any]]:
+        """
+        Get WiFi network analytics for one or all networks.
+        
+        Args:
+            ssid: Specific SSID or None for all networks
+            
+        Returns:
+            List of analytics dicts sorted by priority score
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                if ssid:
+                    cursor.execute("""
+                        SELECT * FROM wifi_network_analytics
+                        WHERE ssid = ?
+                    """, (ssid,))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM wifi_network_analytics
+                        ORDER BY priority_score DESC
+                    """)
+                
+                columns = [desc[0] for desc in cursor.description]
+                results = []
+                
+                for row in cursor.fetchall():
+                    result = dict(zip(columns, row))
+                    results.append(result)
+                
+                logger.debug(f"Retrieved analytics for {len(results)} WiFi networks")
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error retrieving WiFi analytics: {e}")
+            return []
+    
+    def get_recommended_networks(self, available_ssids: List[str] = None, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Get recommended WiFi networks based on historical performance.
+        
+        Args:
+            available_ssids: List of currently available SSIDs (optional filter)
+            limit: Maximum number of recommendations
+            
+        Returns:
+            List of network analytics sorted by priority score
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                if available_ssids:
+                    placeholders = ','.join('?' * len(available_ssids))
+                    cursor.execute(f"""
+                        SELECT * FROM wifi_network_analytics
+                        WHERE ssid IN ({placeholders})
+                        AND success_rate > 50.0
+                        ORDER BY priority_score DESC
+                        LIMIT ?
+                    """, (*available_ssids, limit))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM wifi_network_analytics
+                        WHERE success_rate > 50.0
+                        ORDER BY priority_score DESC
+                        LIMIT ?
+                    """, (limit,))
+                
+                columns = [desc[0] for desc in cursor.description]
+                results = []
+                
+                for row in cursor.fetchall():
+                    result = dict(zip(columns, row))
+                    results.append(result)
+                
+                logger.info(f"Recommended {len(results)} WiFi networks")
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error getting recommended networks: {e}")
+            return []
+    
+    def get_wifi_connection_history(self, ssid: str = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Get WiFi connection history.
+        
+        Args:
+            ssid: Filter by specific SSID, or None for all
+            limit: Maximum number of records to return
+            
+        Returns:
+            List of connection history records
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                if ssid:
+                    cursor.execute("""
+                        SELECT * FROM wifi_connection_history
+                        WHERE ssid = ?
+                        ORDER BY connection_time DESC
+                        LIMIT ?
+                    """, (ssid, limit))
+                else:
+                    cursor.execute("""
+                        SELECT * FROM wifi_connection_history
+                        ORDER BY connection_time DESC
+                        LIMIT ?
+                    """, (limit,))
+                
+                columns = [desc[0] for desc in cursor.description]
+                results = []
+                
+                for row in cursor.fetchall():
+                    result = dict(zip(columns, row))
+                    results.append(result)
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error retrieving WiFi connection history: {e}")
+            return []
+    
+    def cleanup_old_wifi_data(self, days: int = 30):
+        """
+        Clean up old WiFi data to prevent database bloat.
+        
+        Args:
+            days: Remove data older than this many days
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cutoff_date = datetime.now() - timedelta(days=days)
+                
+                # Remove old scan cache
+                cursor.execute("""
+                    DELETE FROM wifi_scan_cache
+                    WHERE last_seen < ?
+                """, (cutoff_date,))
+                scan_deleted = cursor.rowcount
+                
+                # Remove old connection history
+                cursor.execute("""
+                    DELETE FROM wifi_connection_history
+                    WHERE connection_time < ?
+                """, (cutoff_date,))
+                history_deleted = cursor.rowcount
+                
+                # Remove analytics for networks not seen in the time period
+                cursor.execute("""
+                    DELETE FROM wifi_network_analytics
+                    WHERE last_connection_attempt < ?
+                """, (cutoff_date,))
+                analytics_deleted = cursor.rowcount
+                
+                conn.commit()
+                logger.info(f"Cleaned up old WiFi data: {scan_deleted} scans, "
+                          f"{history_deleted} history, {analytics_deleted} analytics")
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up WiFi data: {e}")
 
 
 # Singleton instance
