@@ -3316,7 +3316,9 @@ function displayWifiNetworks(data) {
         const ssid = network.ssid || network.SSID || 'Unknown Network';
         const signal = network.signal || 0;
         const isSecure = network.security !== 'open' && network.security !== 'Open';
-        const isKnown = knownNetworks.includes(ssid);
+        // Check both backend-provided 'known' flag AND local knownNetworks list
+        // This ensures we catch both Ragnar's known networks AND NetworkManager system profiles
+        const isKnown = network.known || network.has_system_profile || knownNetworks.includes(ssid);
         const isCurrent = network.in_use || false;
         
         // Determine signal icon
