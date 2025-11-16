@@ -567,17 +567,15 @@ function initializeMobileMenu() {
 
 async function loadInitialData() {
     try {
-        // Load all initial data in parallel for faster loading
+        // Load all initial data in parallel for faster page load
         const [status] = await Promise.all([
-            fetchAPI('/api/status').catch(err => {
-                console.error('Error loading status:', err);
-                return null;
-            }),
-            loadDashboardData().catch(err => console.error('Error loading dashboard:', err)),
-            loadConsoleLogs().catch(err => console.error('Error loading console logs:', err)),
-            refreshWifiStatus().catch(err => console.error('Error loading WiFi status:', err))
+            fetchAPI('/api/status'),
+            loadDashboardData(),
+            loadConsoleLogs(),
+            refreshWifiStatus()
         ]);
         
+        // Update status if available
         if (status) {
             updateDashboardStatus(status);
         }
@@ -839,6 +837,9 @@ function displayStableNetworkTable(data) {
         return;
     }
     
+    // Use DocumentFragment for better performance
+    const fragment = document.createDocumentFragment();
+    
     data.hosts.forEach((host, index) => {
         // DEBUG: Log first few host objects to see structure
         if (index < 5) {
@@ -897,9 +898,17 @@ function displayStableNetworkTable(data) {
         // Set data-ip attribute for state management
         row.setAttribute('data-ip', host.ip);
         
-        tableBody.appendChild(row);
+        fragment.appendChild(row);
         
-        // Restore deep scan button state after adding to DOM
+        // Restore deep scan button state after adding to fragment
+        // (will be applied after fragment is appended to DOM)
+    });
+    
+    // Append all rows at once for better performance
+    tableBody.appendChild(fragment);
+    
+    // Now restore button states after DOM is updated
+    data.hosts.forEach(host => {
         restoreDeepScanButtonState(host.ip);
     });
     
@@ -1476,6 +1485,9 @@ function updateNetworkTableWithScanData(data) {
     
     // Convert hosts object to array for easier processing
     const hostArray = Object.values(data.hosts);
+    
+    // Use DocumentFragment for better performance
+    const fragment = document.createDocumentFragment();
     
     hostArray.forEach(host => {
         const row = document.createElement('tr');
