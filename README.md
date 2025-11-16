@@ -68,14 +68,6 @@ Ragnar is a fork from the awesome project [Bjorn](https://github.com/infinition/
 
 Ragnar is built for 64-bit Raspberry Pi OS (Debian Trixie). 
 
-**Key Improvements Over Bjorn:**
-- **Smart WiFi Management**: Endless loop monitoring with automatic AP mode fallback
-- **Modern Web UI**: Tailwind CSS dashboard with real-time WebSocket updates
-- **Multi-Source Threat Intelligence**: Integration with CISA KEV, NVD, OTX, and MITRE ATT&CK
-- **Mobile Configuration**: Captive portal for on-the-go WiFi setup via smartphone
-- **Resource Optimization**: Hardware-specific profiles for Pi Zero 2W, Pi 4, and Pi 5
-- **Enhanced Display**: IP address display on e-Paper screen
-
 The e-Paper HAT display and web interface make it easy to monitor and interact with Ragnar, providing real-time updates and status information. With its extensible architecture and customizable actions, Ragnar can be adapted to suit a wide range of security testing and monitoring needs.
 
 ## 🌟 Features
@@ -124,6 +116,12 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
 
 Ragnar is built for 64 bit trixie and 
 Waveshare 2.13inch E-Paper Display HAT V4 for 32 bit system i recommend using Ragnars little brother [Bjorn](https://github.com/infinition/Bjorn) 
+
+#### Reccomendation
+- In nano, edit ~/.config/labwc/autostart and comment out the line
+#/usr/bin/lwrespawn /usr/bin/wf-panel-pi &
+(This disables the unneeded desktop panel that consumes resources.)
+- Ot sudo pkill wf-panel-pi to kill itt temporary 
 
 ### 🔨 Installation
 
