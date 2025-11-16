@@ -54,12 +54,12 @@
             backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 24px;
-            padding: 48px 40px;
+            padding: 56px 48px;
             box-shadow: 
                 0 25px 50px rgba(0, 0, 0, 0.4),
                 0 0 0 1px rgba(255, 255, 255, 0.1) inset;
             width: 100%;
-            max-width: 540px;
+            max-width: 600px;
             color: white;
             position: relative;
             animation: slideUp 0.6s ease-out;
@@ -116,12 +116,12 @@
         }
 
         .form-group {
-            margin-bottom: 28px;
+            margin-bottom: 36px;
         }
 
         label {
             display: block;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
             font-weight: 600;
             color: #f8fafc;
             font-size: 0.95rem;
@@ -130,7 +130,7 @@
 
         select, input {
             width: 100%;
-            padding: 16px 18px;
+            padding: 18px 20px;
             border: 1px solid rgba(255, 255, 255, 0.2);
             border-radius: 12px;
             font-size: 15px;
@@ -140,6 +140,11 @@
             color: white;
             font-family: inherit;
             font-weight: 500;
+            min-height: 42px;
+        }
+
+        select {
+            min-height: 42px;
         }
 
         select:focus, input:focus {
@@ -184,7 +189,7 @@
 
         .btn {
             width: 100%;
-            padding: 18px;
+            padding: 20px;
             background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
             color: white;
             border: none;
@@ -219,7 +224,7 @@
         .btn-secondary {
             background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
             box-shadow: 0 8px 20px rgba(124, 58, 237, 0.3);
-            margin-top: 12px;
+            margin-top: 16px;
         }
 
         .btn-secondary:hover {
@@ -300,7 +305,7 @@
         .network-controls {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 16px;
         }
 
         .network-controls select {
@@ -308,8 +313,8 @@
         }
 
         .manual-entry {
-            margin-top: 15px;
-            padding-top: 15px;
+            margin-top: 24px;
+            padding-top: 24px;
             border-top: 1px solid rgba(255, 255, 255, 0.1);
         }
 
@@ -384,7 +389,7 @@
         @media (max-width: 600px) {
             .portal-container {
                 margin: 10px;
-                padding: 40px 30px;
+                padding: 44px 32px;
                 border-radius: 20px;
             }
             
@@ -422,8 +427,8 @@
                 </div>
                 
                 <div class="manual-entry">
-                    <label for="manualSSID">✏️ Enter Network Manually</label>
-                    <input type="text" id="manualSSID" placeholder="Network name (SSID)">
+                    <label for="manualSSID">✏️  Enter Network Manually</label>
+                    <input type="text" id="manualSSID" placeholder="&nbsp;&nbsp;&nbsp;Network name (SSID)">
                 </div>
             </div>
 
@@ -632,7 +637,7 @@
             } catch (error) {
                 console.error('Error loading networks:', error);
                 showStatus('⚠️ Could not scan networks. Enter WiFi name manually.', 'info');
-                networkSelect.innerHTML = '<option value="">Enter network name manually below</option>';
+                networkSelect.innerHTML = '<option value="">&nbsp;&nbsp;Enter network name manually below</option>';
             } finally {
                 refreshBtn.disabled = false;
                 refreshBtn.textContent = '🔄';
