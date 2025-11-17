@@ -39,7 +39,7 @@ import json
 import pandas as pd
 import subprocess
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
@@ -90,14 +90,41 @@ class NmapVulnScanner:
         """
         Load the history of which ports have been scanned for each MAC address.
         Format: {
-            "4c:ed:fb:d5:fa:c9": ["135", "139", "445"],
-            "aa:bb:cc:dd:ee:ff": ["22", "80", "443"]
+            "4c:ed:fb:d5:fa:c9": {
+                "ports": ["135", "139", "445"],
+                "last_scan": "2024-01-15T10:30:00"
+            },
+            "aa:bb:cc:dd:ee:ff": {
+                "ports": ["22", "80", "443"],
+                "last_scan": "2024-01-15T11:45:00"
+            }
+        }
+        
+        Legacy format (auto-converted): {
+            "4c:ed:fb:d5:fa:c9": ["135", "139", "445"]
         }
         """
         try:
             if os.path.exists(self.scanned_ports_file):
                 with open(self.scanned_ports_file, 'r') as f:
-                    self.scanned_ports_history = json.load(f)
+                    data = json.load(f)
+                    
+                # Convert legacy format (list of ports) to new format (dict with ports and timestamp)
+                self.scanned_ports_history = {}
+                for mac, value in data.items():
+                    if isinstance(value, list):
+                        # Legacy format - convert to new format with old timestamp to force rescan
+                        self.scanned_ports_history[mac] = {
+                            "ports": value,
+                            "last_scan": datetime.min.isoformat()
+                        }
+                        logger.debug(f"Converted legacy format for MAC {mac}")
+                    elif isinstance(value, dict) and "ports" in value:
+                        # New format - use as-is
+                        self.scanned_ports_history[mac] = value
+                    else:
+                        logger.warning(f"Invalid format for MAC {mac}, skipping")
+                        
                 logger.info(f"📋 Loaded scanned ports history for {len(self.scanned_ports_history)} MAC addresses")
             else:
                 self.scanned_ports_history = {}
@@ -120,23 +147,37 @@ class NmapVulnScanner:
     
     def update_scanned_ports_for_mac(self, mac, scanned_ports):
         """
-        Update the list of scanned ports for a given MAC address.
+        Update the list of scanned ports for a given MAC address with timestamp.
         
         Args:
             mac: MAC address (e.g., "4c:ed:fb:d5:fa:c9")
             scanned_ports: List of port numbers that were just scanned
         """
         if mac not in self.scanned_ports_history:
-            self.scanned_ports_history[mac] = []
+            self.scanned_ports_history[mac] = {
+                "ports": [],
+                "last_scan": datetime.now().isoformat()
+            }
+        
+        # Ensure the entry has the new format
+        if isinstance(self.scanned_ports_history[mac], list):
+            self.scanned_ports_history[mac] = {
+                "ports": self.scanned_ports_history[mac],
+                "last_scan": datetime.now().isoformat()
+            }
         
         # Add new ports to the history (avoiding duplicates)
+        ports_list = self.scanned_ports_history[mac]["ports"]
         for port in scanned_ports:
             port_str = str(port).strip()
-            if port_str and port_str not in self.scanned_ports_history[mac]:
-                self.scanned_ports_history[mac].append(port_str)
+            if port_str and port_str not in ports_list:
+                ports_list.append(port_str)
         
         # Sort for cleaner output
-        self.scanned_ports_history[mac].sort(key=lambda x: int(x) if x.isdigit() else 0)
+        ports_list.sort(key=lambda x: int(x) if x.isdigit() else 0)
+        
+        # Update timestamp to current time
+        self.scanned_ports_history[mac]["last_scan"] = datetime.now().isoformat()
         
         # Save to disk
         self.save_scanned_ports_history()
@@ -144,20 +185,46 @@ class NmapVulnScanner:
     def get_new_ports_to_scan(self, mac, current_ports):
         """
         Determine which ports are NEW and need scanning.
+        Also checks if the last scan was more than 1 hour ago and forces a rescan if needed.
         
         Args:
             mac: MAC address to check
             current_ports: List of currently open ports on this host
             
         Returns:
-            List of NEW ports that haven't been scanned before
+            List of NEW ports that haven't been scanned before, or ALL ports if 1 hour has passed
         """
         if mac not in self.scanned_ports_history:
             # First time seeing this MAC - scan all ports
             logger.info(f"🆕 NEW MAC {mac} - will scan all {len(current_ports)} ports")
             return current_ports
         
-        previously_scanned = set(self.scanned_ports_history[mac])
+        # Ensure the entry has the new format
+        if isinstance(self.scanned_ports_history[mac], list):
+            # Legacy format - convert and force rescan
+            self.scanned_ports_history[mac] = {
+                "ports": self.scanned_ports_history[mac],
+                "last_scan": datetime.min.isoformat()
+            }
+        
+        # Check if last scan was more than 1 hour ago
+        last_scan_str = self.scanned_ports_history[mac].get("last_scan", datetime.min.isoformat())
+        try:
+            last_scan_time = datetime.fromisoformat(last_scan_str)
+            time_since_last_scan = datetime.now() - last_scan_time
+            
+            # If more than 1 hour has passed, force a full rescan
+            if time_since_last_scan > timedelta(hours=1):
+                logger.info(f"⏰ MAC {mac}: Last scan was {time_since_last_scan.total_seconds()/3600:.1f} hours ago - FORCING RESCAN of all {len(current_ports)} ports")
+                # Clear the ports history to force rescan, but keep the MAC entry
+                self.scanned_ports_history[mac]["ports"] = []
+                return current_ports
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid timestamp for MAC {mac}: {last_scan_str} - forcing rescan. Error: {e}")
+            self.scanned_ports_history[mac]["ports"] = []
+            return current_ports
+        
+        previously_scanned = set(self.scanned_ports_history[mac].get("ports", []))
         current_ports_set = set(str(p).strip() for p in current_ports if p)
         
         new_ports = current_ports_set - previously_scanned
@@ -167,7 +234,7 @@ class NmapVulnScanner:
             logger.info(f"   Previously scanned: {sorted(previously_scanned, key=lambda x: int(x) if x.isdigit() else 0)}")
             logger.info(f"   New ports: {sorted(new_ports, key=lambda x: int(x) if x.isdigit() else 0)}")
         else:
-            logger.info(f"✅ MAC {mac}: All {len(current_ports_set)} ports already scanned - SKIPPING")
+            logger.info(f"✅ MAC {mac}: All {len(current_ports_set)} ports already scanned (last scan: {time_since_last_scan.total_seconds()/60:.1f} minutes ago) - SKIPPING")
         
         return sorted(new_ports, key=lambda x: int(x) if x.isdigit() else 0)
     
@@ -200,16 +267,31 @@ class NmapVulnScanner:
         Returns:
             dict: Statistics including MAC count, total ports tracked, etc.
         """
-        total_ports = sum(len(ports) for ports in self.scanned_ports_history.values())
+        total_ports = 0
+        mac_details = {}
+        
+        for mac, data in self.scanned_ports_history.items():
+            # Handle both old and new format
+            if isinstance(data, list):
+                ports = data
+                last_scan = None
+            elif isinstance(data, dict):
+                ports = data.get("ports", [])
+                last_scan = data.get("last_scan")
+            else:
+                continue
+            
+            total_ports += len(ports)
+            mac_details[mac] = {
+                "port_count": len(ports),
+                "last_scan": last_scan
+            }
         
         return {
             'total_macs_tracked': len(self.scanned_ports_history),
             'total_ports_scanned': total_ports,
             'average_ports_per_mac': total_ports / len(self.scanned_ports_history) if self.scanned_ports_history else 0,
-            'mac_details': {
-                mac: len(ports) 
-                for mac, ports in self.scanned_ports_history.items()
-            }
+            'mac_details': mac_details
         }
 
     def update_database_vulnerabilities(self, ip, hostname, mac, port, vulnerabilities):
