@@ -548,6 +548,8 @@ class Orchestrator:
             for row in alive_hosts:
                 ip = row.get("IPs", "")
                 if not ip or ip == "STANDALONE":
+                    logger.debug(f"Skipping host with invalid IP: {ip!r}")
+                    scans_skipped += 1
                     continue
                 
                 action_key = "NmapVulnScanner"
@@ -598,21 +600,29 @@ class Orchestrator:
                     # Run scan directly - no executor needed
                     result = self.nmap_vuln_scanner.execute(ip, row, action_key)
                     
-                    # Update status
-                    result_status = 'success' if result == 'success' else 'failed'
-                    self._update_action_status(row, action_key, result_status)
-                    
-                    if result == 'success':
+                    # Handle different result types
+                    if result == 'skipped':
+                        # Host was skipped (already scanned via incremental scanning)
+                        logger.debug(f"⏭️  Vulnerability scan skipped for {ip} ({hostname}) - already scanned")
+                        scans_skipped += 1
+                        # Don't update action status for skipped scans - keep existing status
+                    elif result == 'success':
+                        # Scan completed successfully
                         logger.info(f"✅ Vulnerability scan successful for {ip} ({hostname})")
+                        self._update_action_status(row, action_key, 'success')
+                        scans_performed += 1
                     else:
+                        # Scan failed
                         logger.warning(f"❌ Vulnerability scan failed for {ip} ({hostname})")
+                        self._update_action_status(row, action_key, 'failed')
+                        scans_performed += 1  # Still count as attempted
                     
                     # SQLite writes happen automatically in vuln scanner - no CSV write needed
                     # self.shared_data.write_data(current_data)
-                    scans_performed += 1
                 except Exception as e:
                     logger.error(f"Error scanning {ip} ({hostname}): {e}")
                     self._update_action_status(row, action_key, 'failed')
+                    scans_performed += 1  # Count failed attempts
                     # SQLite writes happen automatically in vuln scanner - no CSV write needed
                     # self.shared_data.write_data(current_data)
             

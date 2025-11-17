@@ -362,6 +362,7 @@ class NmapVulnScanner:
     def execute(self, ip, row, status_key):
         """
         Executes the vulnerability scan for a given IP and row data.
+        Returns: 'success' if scan was performed, 'skipped' if already scanned, 'failed' on error
         """
         self.shared_data.ragnarorch_status = "NmapVulnScanner"
         ports = row.get("Ports", "")
@@ -372,8 +373,9 @@ class NmapVulnScanner:
             self.save_results(row["MAC Address"], ip, scan_result)
             return 'success'
         else:
-            return 'success' # considering failed as success as we just need to scan vulnerabilities once
-            # return 'failed'
+            # Returning 'skipped' to indicate scan was not performed (already scanned)
+            # This helps orchestrator track accurate metrics
+            return 'skipped'
 
     def prepare_port_list(self, ports) -> List[str]:
         """Normalize port values from the NetKB row"""
