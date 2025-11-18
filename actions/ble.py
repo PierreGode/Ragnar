@@ -11,6 +11,8 @@ import logging
 from typing import Dict, List, Optional, Tuple, Any
 import json
 import os
+import platform
+import sys
 
 # Required attributes for Ragnar action framework
 b_class = "BLE"
@@ -22,6 +24,7 @@ class BluetoothManager:
     """
     Comprehensive Bluetooth management class for Ragnar
     Supports both Classic Bluetooth and BLE operations
+    Works on both Linux (bluetoothctl) and Windows (PowerShell)
     """
     
     def __init__(self, logger=None):
@@ -30,6 +33,16 @@ class BluetoothManager:
         self.scan_start_time = 0.0
         self.discovered_devices = {}
         self.paired_devices = {}
+        self.os_type = platform.system()  # 'Linux', 'Windows', 'Darwin'
+        self.logger.info(f"BluetoothManager initialized for {self.os_type}")
+        
+    def _is_windows(self) -> bool:
+        """Check if running on Windows"""
+        return self.os_type == 'Windows'
+    
+    def _is_linux(self) -> bool:
+        """Check if running on Linux"""
+        return self.os_type == 'Linux'
         
     def check_bluetooth_availability(self) -> Tuple[bool, str]:
         """
@@ -37,16 +50,34 @@ class BluetoothManager:
         Returns: (available, message)
         """
         try:
-            result = subprocess.run(['bluetoothctl', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                return True, "Bluetooth available"
+            if self._is_windows():
+                # Check Windows Bluetooth availability using PowerShell
+                ps_script = """
+                $adapters = Get-PnpDevice -Class Bluetooth -Status OK
+                if ($adapters) { Write-Output "Available" } else { Write-Output "NotFound" }
+                """
+                result = subprocess.run(['powershell', '-Command', ps_script], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0 and 'Available' in result.stdout:
+                    return True, "Bluetooth available on Windows"
+                else:
+                    return False, "No Bluetooth adapters found on Windows"
             else:
-                return False, "bluetoothctl not found or not working"
+                # Linux/Unix method
+                result = subprocess.run(['bluetoothctl', '--version'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    return True, "Bluetooth available"
+                else:
+                    return False, "bluetoothctl not found or not working"
         except FileNotFoundError:
-            return False, "bluetoothctl command not found"
+            if self._is_windows():
+                return False, "PowerShell not found"
+            else:
+                return False, "bluetoothctl command not found"
         except subprocess.TimeoutExpired:
-            return False, "bluetoothctl command timed out"
+            return False, "Bluetooth check command timed out"
         except Exception as e:
             return False, f"Error checking Bluetooth: {str(e)}"
     
@@ -65,47 +96,87 @@ class BluetoothManager:
             'class': None,
             'powered': False,
             'error': None,
-            'controller_info': {}
+            'controller_info': {},
+            'os_type': self.os_type
         }
         
         try:
-            # Check if Bluetooth controller exists and get detailed info
-            result = subprocess.run(['bluetoothctl', 'show'], 
-                                  capture_output=True, text=True, timeout=10)
-            
-            if result.returncode == 0:
-                output = result.stdout
+            if self._is_windows():
+                # Windows-specific Bluetooth status check
+                ps_script = """
+                $adapters = Get-PnpDevice -Class Bluetooth -Status OK
+                if ($adapters) {
+                    $adapter = $adapters | Select-Object -First 1
+                    $info = @{
+                        Name = $adapter.FriendlyName
+                        Status = $adapter.Status
+                        InstanceId = $adapter.InstanceId
+                    }
+                    Write-Output ($info | ConvertTo-Json)
+                }
+                """
                 
-                # Parse detailed controller information
-                status['powered'] = 'Powered: yes' in output
-                status['enabled'] = status['powered']  # For backwards compatibility
-                status['discoverable'] = 'Discoverable: yes' in output
-                status['pairable'] = 'Pairable: yes' in output
+                result = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script],
+                                      capture_output=True, text=True, timeout=10)
                 
-                # Check actual scanning status from bluetoothctl
-                scan_status = self._check_scan_status()
-                if scan_status is not None:
-                    status['scanning'] = scan_status
-                    self.scan_active = scan_status  # Update internal state
-                
-                # Extract controller details
-                for line in output.split('\n'):
-                    line = line.strip()
-                    if line.startswith('Controller'):
-                        status['address'] = line.split()[1] if len(line.split()) > 1 else None
-                    elif line.startswith('Name:'):
-                        status['name'] = line.replace('Name:', '').strip()
-                    elif line.startswith('Class:'):
-                        status['class'] = line.replace('Class:', '').strip()
-                    elif line.startswith('Alias:'):
-                        status['controller_info']['alias'] = line.replace('Alias:', '').strip()
-                    elif line.startswith('Modalias:'):
-                        status['controller_info']['modalias'] = line.replace('Modalias:', '').strip()
+                if result.returncode == 0 and result.stdout.strip():
+                    try:
+                        adapter_info = json.loads(result.stdout.strip())
+                        status['enabled'] = adapter_info.get('Status', '').upper() == 'OK'
+                        status['powered'] = status['enabled']
+                        status['name'] = adapter_info.get('Name', 'Windows Bluetooth Adapter')
+                        status['controller_info'] = adapter_info
                         
-            else:
-                status['error'] = 'No Bluetooth controller found'
-                self.logger.warning("No Bluetooth controller available")
+                        self.logger.info(f"Windows Bluetooth adapter found: {status['name']}")
+                    except json.JSONDecodeError:
+                        status['enabled'] = True  # Assume enabled if we got output
+                        status['powered'] = True
+                else:
+                    status['error'] = 'No Bluetooth adapter found on Windows'
+                    self.logger.warning("No Bluetooth adapter available on Windows")
                 
+                # Windows scanning status
+                status['scanning'] = self.scan_active
+                
+            else:
+                # Linux/Unix Bluetooth status check
+                # Check if Bluetooth controller exists and get detailed info
+                result = subprocess.run(['bluetoothctl', 'show'], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                if result.returncode == 0:
+                    output = result.stdout
+                    
+                    # Parse detailed controller information
+                    status['powered'] = 'Powered: yes' in output
+                    status['enabled'] = status['powered']  # For backwards compatibility
+                    status['discoverable'] = 'Discoverable: yes' in output
+                    status['pairable'] = 'Pairable: yes' in output
+                    
+                    # Check actual scanning status from bluetoothctl
+                    scan_status = self._check_scan_status()
+                    if scan_status is not None:
+                        status['scanning'] = scan_status
+                        self.scan_active = scan_status  # Update internal state
+                    
+                    # Extract controller details
+                    for line in output.split('\n'):
+                        line = line.strip()
+                        if line.startswith('Controller'):
+                            status['address'] = line.split()[1] if len(line.split()) > 1 else None
+                        elif line.startswith('Name:'):
+                            status['name'] = line.replace('Name:', '').strip()
+                        elif line.startswith('Class:'):
+                            status['class'] = line.replace('Class:', '').strip()
+                        elif line.startswith('Alias:'):
+                            status['controller_info']['alias'] = line.replace('Alias:', '').strip()
+                        elif line.startswith('Modalias:'):
+                            status['controller_info']['modalias'] = line.replace('Modalias:', '').strip()
+                            
+                else:
+                    status['error'] = 'No Bluetooth controller found'
+                    self.logger.warning("No Bluetooth controller available")
+                    
         except subprocess.TimeoutExpired:
             status['error'] = 'Bluetooth status check timed out'
             self.logger.error("Bluetooth status check timed out")
@@ -237,6 +308,21 @@ class BluetoothManager:
         try:
             self.logger.info("Starting Bluetooth device scan...")
             
+            if self._is_windows():
+                # On Windows, scanning is done via get_discovered_devices
+                # Just mark scanning as active
+                self.scan_active = True
+                self.scan_start_time = time.time()
+                
+                message = "Bluetooth device scan started (Windows mode)"
+                if duration:
+                    message += f" (will run for {duration} seconds)"
+                message += ". Scanning for nearby Bluetooth devices..."
+                
+                self.logger.info("Windows Bluetooth scan initiated - devices will be discovered on demand")
+                return True, message
+            
+            # Linux-specific scanning code
             # Ensure Bluetooth is powered on first
             status = self.get_status()
             if not status['enabled']:
@@ -326,6 +412,14 @@ class BluetoothManager:
         """
         try:
             self.logger.info("Stopping Bluetooth device scan...")
+            
+            if self._is_windows():
+                # On Windows, just mark scanning as inactive
+                self.scan_active = False
+                self.logger.info("Bluetooth scan stopped (Windows mode)")
+                return True, "Bluetooth scan stopped successfully"
+            
+            # Linux method
             result = subprocess.run(['bluetoothctl', 'scan', 'off'], 
                                   capture_output=True, text=True, timeout=10)
             
@@ -377,129 +471,28 @@ class BluetoothManager:
         devices = {}
         
         try:
-            # Method 1: Get known devices from bluetoothctl devices
-            result = subprocess.run(['bluetoothctl', 'devices'], 
-                                  capture_output=True, text=True, timeout=10)
-            
-            self.logger.info(f"bluetoothctl devices returned: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
-            
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    line = line.strip()
-                    self.logger.debug(f"Processing device line: '{line}'")
-                    if line and line.startswith('Device '):
-                        parts = line.split(None, 2)
-                        if len(parts) >= 2:
-                            address = parts[1]
-                            name = parts[2] if len(parts) > 2 else 'Unknown Device'
-                            
-                            self.logger.info(f"Found device: {address} - {name}")
-                            
-                            device_info = {
-                                'address': address,
-                                'name': name,
-                                'rssi': None,
-                                'device_class': None,
-                                'device_type': 'Unknown',
-                                'services': [],
-                                'paired': False,
-                                'connected': False,
-                                'trusted': False,
-                                'last_seen': time.time()
-                            }
-                            
-                            # Get detailed device information if requested
-                            if refresh:
-                                detailed_info = self._get_device_details(address)
-                                device_info.update(detailed_info)
-                            
-                            devices[address] = device_info
+            if self._is_windows():
+                # Windows-specific device discovery using PowerShell
+                devices = self._get_windows_bluetooth_devices()
+                self.logger.info(f"Windows Bluetooth scan found {len(devices)} devices")
             else:
-                self.logger.warning(f"bluetoothctl devices failed with return code {result.returncode}")
-            
-            # Method 2: If scanning is active, try to get scan results
-            if self.scan_active or self._check_scan_status():
-                self.logger.info("Scanning is active, attempting to get scan results...")
-                scan_devices = self._get_scan_results()
-                if scan_devices:
-                    devices.update(scan_devices)
-                    self.logger.info(f"Found {len(scan_devices)} additional devices from scan")
-                            
-            self.discovered_devices = devices
-            self.logger.info(f"Total devices found: {len(devices)}")
-            
-        except subprocess.TimeoutExpired:
-            self.logger.error("Device list command timed out")
-        except Exception as e:
-            self.logger.error(f"Error getting device list: {e}")
-        
-        return devices
-    
-    def _get_scan_results(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Try to get devices discovered during active scanning using multiple methods
-        This is a workaround since bluetoothctl devices might not show newly discovered devices
-        """
-        scan_devices = {}
-        
-        # Method 1: Try hcitool lescan output
-        try:
-            result = subprocess.run(['timeout', '3', 'hcitool', 'lescan'], 
-                                  capture_output=True, text=True, timeout=5)
-            
-            if result.returncode in [0, 124]:  # 124 is timeout exit code
-                lines = result.stdout.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and ':' in line and len(line.split()) >= 2:
-                        parts = line.split(None, 1)
-                        if len(parts) >= 2:
-                            address = parts[0]
-                            name = parts[1] if len(parts) > 1 else 'Unknown Device'
-                            
-                            # Basic MAC address validation
-                            if len(address.split(':')) == 6:
-                                self.logger.info(f"Found device via hcitool: {address} - {name}")
+                # Linux method - Method 1: Get known devices from bluetoothctl devices
+                result = subprocess.run(['bluetoothctl', 'devices'], 
+                                      capture_output=True, text=True, timeout=10)
+                
+                self.logger.info(f"bluetoothctl devices returned: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
+                
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        line = line.strip()
+                        self.logger.debug(f"Processing device line: '{line}'")
+                        if line and line.startswith('Device '):
+                            parts = line.split(None, 2)
+                            if len(parts) >= 2:
+                                address = parts[1]
+                                name = parts[2] if len(parts) > 2 else 'Unknown Device'
                                 
-                                device_info = {
-                                    'address': address,
-                                    'name': name,
-                                    'rssi': None,
-                                    'device_class': None,
-                                    'device_type': 'BLE Device',
-                                    'services': [],
-                                    'paired': False,
-                                    'connected': False,
-                                    'trusted': False,
-                                    'last_seen': time.time(),
-                                    'from_scan': True,
-                                    'discovery_method': 'hcitool'
-                                }
-                                
-                                scan_devices[address] = device_info
-                                
-        except Exception as e:
-            self.logger.debug(f"hcitool lescan failed: {e}")
-        
-        # Method 2: Try bluetoothctl in batch mode (original method)
-        try:
-            # Try running bluetoothctl in batch mode to get scan results
-            result = subprocess.run(['timeout', '3', 'bluetoothctl'], 
-                                  input='scan on\ndevices\nexit\n',
-                                  capture_output=True, text=True, timeout=5)
-            
-            if result.returncode == 0 or result.returncode == 124:  # 124 is timeout exit code
-                lines = result.stdout.split('\n')
-                for line in lines:
-                    line = line.strip()
-                    if line and line.startswith('Device '):
-                        parts = line.split(None, 2)
-                        if len(parts) >= 2:
-                            address = parts[1]
-                            name = parts[2] if len(parts) > 2 else 'Unknown Device'
-                            
-                            if address not in scan_devices:  # Don't overwrite hcitool results
-                                self.logger.info(f"Found device via bluetoothctl batch: {address} - {name}")
+                                self.logger.info(f"Found device: {address} - {name}")
                                 
                                 device_info = {
                                     'address': address,
@@ -511,15 +504,356 @@ class BluetoothManager:
                                     'paired': False,
                                     'connected': False,
                                     'trusted': False,
+                                    'last_seen': time.time()
+                                }
+                                
+                                # Get detailed device information if requested
+                                if refresh:
+                                    detailed_info = self._get_device_details(address)
+                                    device_info.update(detailed_info)
+                                
+                                devices[address] = device_info
+                else:
+                    self.logger.warning(f"bluetoothctl devices failed with return code {result.returncode}")
+                
+                # Method 2: If scanning is active, try to get scan results
+                if self.scan_active or self._check_scan_status():
+                    self.logger.info("Scanning is active, attempting to get scan results...")
+                    scan_devices = self._get_scan_results()
+                    if scan_devices:
+                        devices.update(scan_devices)
+                        self.logger.info(f"Found {len(scan_devices)} additional devices from scan")
+                            
+            self.discovered_devices = devices
+            self.logger.info(f"Total devices found: {len(devices)}")
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error("Device list command timed out")
+        except Exception as e:
+            self.logger.error(f"Error getting device list: {e}")
+        
+        return devices
+    
+    def _get_windows_bluetooth_devices(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get Bluetooth devices on Windows using PowerShell
+        Returns: Dictionary of devices
+        """
+        devices = {}
+        
+        try:
+            # PowerShell script to discover Bluetooth devices
+            ps_script = """
+            Add-Type -AssemblyName System.Runtime.WindowsRuntime
+            $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+            
+            Function Await($WinRtTask, $ResultType) {
+                $asTask = $asTaskGeneric.MakeGenericMethod($ResultType)
+                $netTask = $asTask.Invoke($null, @($WinRtTask))
+                $netTask.Wait(-1) | Out-Null
+                $netTask.Result
+            }
+            
+            [Windows.Devices.Enumeration.DeviceInformation,Windows.Devices.Enumeration,ContentType=WindowsRuntime] | Out-Null
+            [Windows.Devices.Bluetooth.BluetoothDevice,Windows.Devices.Bluetooth,ContentType=WindowsRuntime] | Out-Null
+            
+            $deviceSelector = [Windows.Devices.Bluetooth.BluetoothDevice]::GetDeviceSelector()
+            $deviceWatcher = [Windows.Devices.Enumeration.DeviceInformation]::FindAllAsync($deviceSelector)
+            $devices = Await $deviceWatcher ([Windows.Devices.Enumeration.DeviceInformationCollection])
+            
+            foreach ($device in $devices) {
+                $output = @{
+                    Id = $device.Id
+                    Name = $device.Name
+                    IsPaired = $device.Pairing.IsPaired
+                    IsEnabled = $device.IsEnabled
+                }
+                Write-Output ($output | ConvertTo-Json -Compress)
+            }
+            """
+            
+            result = subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', ps_script],
+                                  capture_output=True, text=True, timeout=30)
+            
+            self.logger.info(f"Windows PowerShell BLE scan: returncode={result.returncode}")
+            self.logger.debug(f"PowerShell stdout: {result.stdout}")
+            self.logger.debug(f"PowerShell stderr: {result.stderr}")
+            
+            if result.returncode == 0 and result.stdout.strip():
+                # Parse JSON output from PowerShell
+                lines = result.stdout.strip().split('\n')
+                for line in lines:
+                    line = line.strip()
+                    if line.startswith('{'):
+                        try:
+                            device_data = json.loads(line)
+                            device_id = device_data.get('Id', '')
+                            
+                            # Extract MAC address from device ID if possible
+                            # Formats: 
+                            # BluetoothLE#BluetoothLE<mac>-<id>
+                            # Bluetooth#Bluetooth<mac>-<id>
+                            mac_match = re.search(r'Bluetooth(?:LE)?#Bluetooth(?:LE)?([0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2})', device_id)
+                            if not mac_match:
+                                mac_match = re.search(r'Bluetooth(?:LE)?([0-9a-fA-F]{12})', device_id)
+                            
+                            if mac_match:
+                                mac_raw = mac_match.group(1).replace(':', '')
+                                # Format as MAC address
+                                address = ':'.join([mac_raw[i:i+2] for i in range(0, 12, 2)]).upper()
+                            else:
+                                # Use device ID as fallback
+                                address = device_id
+                            
+                            device_info = {
+                                'address': address,
+                                'name': device_data.get('Name', 'Unknown Device'),
+                                'rssi': None,
+                                'device_class': None,
+                                'device_type': 'BLE Device',
+                                'services': [],
+                                'paired': device_data.get('IsPaired', False),
+                                'connected': device_data.get('IsEnabled', False),
+                                'trusted': False,
+                                'last_seen': time.time(),
+                                'windows_device_id': device_id
+                            }
+                            
+                            devices[address] = device_info
+                            self.logger.info(f"Found Windows BLE device: {device_info['name']} ({address})")
+                            
+                        except json.JSONDecodeError as e:
+                            self.logger.warning(f"Failed to parse device JSON: {line} - {e}")
+                
+            else:
+                self.logger.warning(f"Windows Bluetooth scan returned no devices or failed")
+                if result.stderr:
+                    self.logger.warning(f"PowerShell error: {result.stderr}")
+                    
+        except subprocess.TimeoutExpired:
+            self.logger.error("Windows Bluetooth device scan timed out")
+        except Exception as e:
+            self.logger.error(f"Error getting Windows Bluetooth devices: {e}", exc_info=True)
+        
+        return devices
+    
+    def _get_scan_results(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Try to get devices discovered during active scanning using multiple methods
+        This is a workaround since bluetoothctl devices might not show newly discovered devices
+        """
+        scan_devices = {}
+        
+        # Method 1: Use bluetoothctl in batch mode with device listing
+        try:
+            # Start a fresh bluetoothctl session that scans and lists devices
+            ps_script = '''
+import subprocess
+import time
+import re
+
+devices = {}
+
+# Start bluetoothctl process
+proc = subprocess.Popen(
+    ['bluetoothctl'],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    text=True,
+    bufsize=1
+)
+
+# Send scan on command
+proc.stdin.write('scan on\\n')
+proc.stdin.flush()
+
+# Wait for devices to appear
+time.sleep(3)
+
+# Send devices command
+proc.stdin.write('devices\\n')
+proc.stdin.flush()
+time.sleep(0.5)
+
+# Send exit
+proc.stdin.write('exit\\n')
+proc.stdin.flush()
+
+# Read output
+try:
+    output, _ = proc.communicate(timeout=2)
+    
+    # Parse device lines
+    for line in output.split('\\n'):
+        line = line.strip()
+        if line.startswith('Device '):
+            parts = line.split(None, 2)
+            if len(parts) >= 2:
+                addr = parts[1]
+                name = parts[2] if len(parts) > 2 else 'Unknown Device'
+                print(f"{addr}|{name}")
+except:
+    pass
+
+proc.kill()
+'''
+            
+            result = subprocess.run(
+                ['python3', '-c', ps_script],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().split('\n'):
+                    if '|' in line:
+                        parts = line.split('|', 1)
+                        if len(parts) == 2:
+                            address = parts[0].strip()
+                            name = parts[1].strip()
+                            
+                            # Validate MAC address format
+                            if re.match(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$', address):
+                                self.logger.info(f"Found device via Python method: {address} - {name}")
+                                
+                                device_info = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'Bluetooth Device',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
                                     'last_seen': time.time(),
                                     'from_scan': True,
-                                    'discovery_method': 'bluetoothctl'
+                                    'discovery_method': 'bluetoothctl-interactive'
                                 }
                                 
                                 scan_devices[address] = device_info
-                                
         except Exception as e:
-            self.logger.debug(f"bluetoothctl batch mode failed: {e}")
+            self.logger.debug(f"Python bluetoothctl method failed: {e}")
+        
+        # Method 2: Try hcitool lescan if available
+        if not scan_devices:
+            try:
+                result = subprocess.run(['timeout', '3', 'hcitool', 'lescan'], 
+                                      capture_output=True, text=True, timeout=5)
+                
+                if result.returncode in [0, 124]:  # 124 is timeout exit code
+                    lines = result.stdout.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and ':' in line and len(line.split()) >= 2:
+                            parts = line.split(None, 1)
+                            if len(parts) >= 2:
+                                address = parts[0]
+                                name = parts[1] if len(parts) > 1 else 'Unknown Device'
+                                
+                                # Basic MAC address validation
+                                if len(address.split(':')) == 6:
+                                    self.logger.info(f"Found device via hcitool: {address} - {name}")
+                                    
+                                    device_info = {
+                                        'address': address,
+                                        'name': name,
+                                        'rssi': None,
+                                        'device_class': None,
+                                        'device_type': 'BLE Device',
+                                        'services': [],
+                                        'paired': False,
+                                        'connected': False,
+                                        'trusted': False,
+                                        'last_seen': time.time(),
+                                        'from_scan': True,
+                                        'discovery_method': 'hcitool'
+                                    }
+                                    
+                                    scan_devices[address] = device_info
+                                    
+            except Exception as e:
+                self.logger.debug(f"hcitool lescan failed: {e}")
+        
+        # Method 3: Try bluetoothctl in batch mode (original method)
+        if not scan_devices:
+            try:
+                # Try running bluetoothctl in batch mode to get scan results
+                result = subprocess.run(['timeout', '3', 'bluetoothctl'], 
+                                      input='scan on\ndevices\nexit\n',
+                                      capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0 or result.returncode == 124:  # 124 is timeout exit code
+                    lines = result.stdout.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and line.startswith('Device '):
+                            parts = line.split(None, 2)
+                            if len(parts) >= 2:
+                                address = parts[1]
+                                name = parts[2] if len(parts) > 2 else 'Unknown Device'
+                                
+                                if address not in scan_devices:  # Don't overwrite hcitool results
+                                    self.logger.info(f"Found device via bluetoothctl batch: {address} - {name}")
+                                    
+                                    device_info = {
+                                        'address': address,
+                                        'name': name,
+                                        'rssi': None,
+                                        'device_class': None,
+                                        'device_type': 'Unknown',
+                                        'services': [],
+                                        'paired': False,
+                                        'connected': False,
+                                        'trusted': False,
+                                        'last_seen': time.time(),
+                                        'from_scan': True,
+                                        'discovery_method': 'bluetoothctl'
+                                    }
+                                    
+                                    scan_devices[address] = device_info
+                                    
+            except Exception as e:
+                self.logger.debug(f"bluetoothctl batch mode failed: {e}")
+        
+        # Method 4: Check bluetoothctl devices (may show cached devices)
+        if not scan_devices:
+            try:
+                result = subprocess.run(['bluetoothctl', 'devices'],
+                                      capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    lines = result.stdout.split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if line and line.startswith('Device '):
+                            parts = line.split(None, 2)
+                            if len(parts) >= 2:
+                                address = parts[1]
+                                name = parts[2] if len(parts) > 2 else 'Unknown Device'
+                                
+                                self.logger.info(f"Found device via bluetoothctl devices: {address} - {name}")
+                                
+                                device_info = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'Cached Device',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
+                                    'last_seen': time.time(),
+                                    'from_scan': False,
+                                    'discovery_method': 'bluetoothctl-cached'
+                                }
+                                
+                                scan_devices[address] = device_info
+            except Exception as e:
+                self.logger.debug(f"bluetoothctl devices check failed: {e}")
             
         return scan_devices
     
@@ -533,7 +867,8 @@ class BluetoothManager:
             'bluetooth_enabled': False,
             'scanning_active': False,
             'controller_info': {},
-            'recommendations': []
+            'recommendations': [],
+            'os_type': self.os_type
         }
         
         try:
@@ -563,19 +898,24 @@ class BluetoothManager:
             if len(paired) == 0:
                 diagnosis['recommendations'].append("No paired devices found. This might indicate Bluetooth setup issues.")
             
-            # Test basic bluetoothctl functionality
-            try:
-                result = subprocess.run(['bluetoothctl', 'list'], 
-                                      capture_output=True, text=True, timeout=5)
-                diagnosis['controllers_found'] = result.returncode == 0 and len(result.stdout.strip()) > 0
-                if not diagnosis['controllers_found']:
-                    diagnosis['recommendations'].append("No Bluetooth controllers found. Check hardware.")
-            except Exception:
-                diagnosis['controllers_found'] = False
-                diagnosis['recommendations'].append("Cannot communicate with bluetoothctl. Check installation.")
+            # Platform-specific diagnostics
+            if self._is_windows():
+                diagnosis['recommendations'].append("Running on Windows - using PowerShell Bluetooth APIs")
+                diagnosis['recommendations'].append("Make sure devices are in pairing/discoverable mode")
+            else:
+                # Test basic bluetoothctl functionality (Linux)
+                try:
+                    result = subprocess.run(['bluetoothctl', 'list'], 
+                                          capture_output=True, text=True, timeout=5)
+                    diagnosis['controllers_found'] = result.returncode == 0 and len(result.stdout.strip()) > 0
+                    if not diagnosis['controllers_found']:
+                        diagnosis['recommendations'].append("No Bluetooth controllers found. Check hardware.")
+                except Exception:
+                    diagnosis['controllers_found'] = False
+                    diagnosis['recommendations'].append("Cannot communicate with bluetoothctl. Check installation.")
             
             # Add general recommendations
-            if len(diagnosis['recommendations']) == 0:
+            if len(diagnosis['recommendations']) == 0 or (diagnosis['bluetooth_enabled'] and diagnosis['bluetooth_available']):
                 diagnosis['recommendations'].extend([
                     "Bluetooth appears to be working correctly.",
                     "Make sure nearby devices are in discoverable/pairable mode.",
@@ -782,6 +1122,14 @@ class BluetoothManager:
         paired_devices = {}
         
         try:
+            if self._is_windows():
+                # Get paired devices from Windows using the same method but filter for paired
+                all_devices = self._get_windows_bluetooth_devices()
+                paired_devices = {addr: dev for addr, dev in all_devices.items() if dev.get('paired', False)}
+                self.logger.info(f"Found {len(paired_devices)} paired devices on Windows")
+                return paired_devices
+            
+            # Linux method
             result = subprocess.run(['bluetoothctl', 'paired-devices'], 
                                   capture_output=True, text=True, timeout=10)
             
@@ -817,6 +1165,17 @@ class BluetoothManager:
         """
         self.logger.info(f"Starting {duration}-second Bluetooth scan...")
         
+        if self._is_linux():
+            # On Linux/Raspberry Pi, use an interactive approach that captures real-time discoveries
+            try:
+                devices = self._linux_interactive_scan(duration)
+                if devices:
+                    self.logger.info(f"Interactive scan found {len(devices)} devices")
+                    return devices
+            except Exception as e:
+                self.logger.warning(f"Interactive scan failed: {e}, falling back to standard method")
+        
+        # Fallback to standard method
         # Start scan
         success, message = self.start_scan()
         if not success:
@@ -834,6 +1193,173 @@ class BluetoothManager:
         
         self.logger.info(f"Scan completed. Found {len(devices)} devices.")
         return devices
+    
+    def _linux_interactive_scan(self, duration: int) -> Dict[str, Dict[str, Any]]:
+        """
+        Perform an interactive Bluetooth scan on Linux that captures devices in real-time
+        This is more reliable than relying on 'bluetoothctl devices' which may not update
+        """
+        devices = {}
+        
+        try:
+            import threading
+            import queue
+            
+            # Create a queue to collect output
+            output_queue = queue.Queue()
+            
+            # Start bluetoothctl process
+            proc = subprocess.Popen(
+                ['bluetoothctl'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+            
+            # Thread to read output
+            def read_output():
+                try:
+                    for line in proc.stdout:
+                        output_queue.put(line)
+                except:
+                    pass
+            
+            reader_thread = threading.Thread(target=read_output, daemon=True)
+            reader_thread.start()
+            
+            # Send commands
+            self.logger.info("Sending 'power on' to bluetoothctl")
+            proc.stdin.write('power on\n')
+            proc.stdin.flush()
+            time.sleep(1)
+            
+            self.logger.info("Sending 'scan on' to bluetoothctl")
+            proc.stdin.write('scan on\n')
+            proc.stdin.flush()
+            
+            # Monitor output for device discoveries
+            start_time = time.time()
+            self.logger.info(f"Monitoring for {duration} seconds...")
+            
+            while time.time() - start_time < duration:
+                try:
+                    line = output_queue.get(timeout=1)
+                    line = line.strip()
+                    
+                    # Log interesting lines
+                    if any(x in line for x in ['Device', 'CHG', 'NEW']):
+                        self.logger.debug(f"BT Output: {line}")
+                    
+                    # Parse device discoveries
+                    # Format: "[NEW] Device AA:BB:CC:DD:EE:FF Device Name"
+                    # Format: "Device AA:BB:CC:DD:EE:FF Device Name"
+                    if 'Device ' in line:
+                        # Extract MAC and name
+                        match = re.search(r'Device\s+([0-9A-Fa-f:]{17})(?:\s+(.+))?', line)
+                        if match:
+                            address = match.group(1).upper()
+                            name = match.group(2).strip() if match.group(2) else 'Unknown Device'
+                            
+                            # Filter out empty names
+                            if not name or name == 'Device':
+                                name = 'Unknown Device'
+                            
+                            if address not in devices:
+                                self.logger.info(f"Discovered: {address} - {name}")
+                                
+                                devices[address] = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'Bluetooth Device',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
+                                    'last_seen': time.time(),
+                                    'from_scan': True,
+                                    'discovery_method': 'interactive-scan'
+                                }
+                    
+                    # Parse RSSI if available
+                    # Format: "[CHG] Device AA:BB:CC:DD:EE:FF RSSI: -65"
+                    if 'RSSI:' in line:
+                        match = re.search(r'Device\s+([0-9A-Fa-f:]{17}).*RSSI:\s*(-?\d+)', line)
+                        if match:
+                            address = match.group(1).upper()
+                            rssi = int(match.group(2))
+                            if address in devices:
+                                devices[address]['rssi'] = rssi
+                                
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    self.logger.debug(f"Error parsing line: {e}")
+            
+            # Get final device list
+            self.logger.info("Requesting final device list...")
+            proc.stdin.write('devices\n')
+            proc.stdin.flush()
+            time.sleep(1)
+            
+            # Parse any remaining output
+            while not output_queue.empty():
+                try:
+                    line = output_queue.get_nowait().strip()
+                    if 'Device ' in line:
+                        match = re.search(r'Device\s+([0-9A-Fa-f:]{17})(?:\s+(.+))?', line)
+                        if match:
+                            address = match.group(1).upper()
+                            name = match.group(2).strip() if match.group(2) else 'Unknown Device'
+                            
+                            if address not in devices:
+                                self.logger.info(f"Found in final list: {address} - {name}")
+                                devices[address] = {
+                                    'address': address,
+                                    'name': name,
+                                    'rssi': None,
+                                    'device_class': None,
+                                    'device_type': 'Bluetooth Device',
+                                    'services': [],
+                                    'paired': False,
+                                    'connected': False,
+                                    'trusted': False,
+                                    'last_seen': time.time(),
+                                    'from_scan': True,
+                                    'discovery_method': 'interactive-scan'
+                                }
+                except:
+                    break
+            
+            # Stop scan
+            self.logger.info("Sending 'scan off' to bluetoothctl")
+            proc.stdin.write('scan off\n')
+            proc.stdin.flush()
+            time.sleep(0.5)
+            
+            # Exit bluetoothctl
+            proc.stdin.write('exit\n')
+            proc.stdin.flush()
+            
+            # Wait for process to finish
+            try:
+                proc.wait(timeout=2)
+            except:
+                proc.kill()
+            
+            self.logger.info(f"Interactive scan complete: found {len(devices)} devices")
+            return devices
+            
+        except Exception as e:
+            self.logger.error(f"Error in interactive scan: {e}", exc_info=True)
+            try:
+                proc.kill()
+            except:
+                pass
+            return {}
     
     def export_devices_to_json(self, filepath: str) -> bool:
         """
