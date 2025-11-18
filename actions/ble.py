@@ -336,20 +336,31 @@ class BluetoothManager:
             
             # Method 1: Standard bluetoothctl scan on
             try:
-                result = subprocess.run(['bluetoothctl', 'scan', 'on'], 
-                                      capture_output=True, text=True, timeout=10)
+                result = subprocess.run(
+                    ['bluetoothctl', 'scan', 'on'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
                 methods_tried.append(f"bluetoothctl scan on: rc={result.returncode}")
-                self.logger.info(f"Method 1 - bluetoothctl scan on: returncode={result.returncode}, stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'")
-                
+                self.logger.info(
+                    f"Method 1 - bluetoothctl scan on: returncode={result.returncode}, "
+                    f"stdout='{result.stdout.strip()}', stderr='{result.stderr.strip()}'"
+                )
+
                 if result.returncode == 0:
-                    # Wait and verify
-                    time.sleep(2)
-                    actual_scan_status = self._check_scan_status()
-                    if actual_scan_status is True:
-                        scan_started = True
-                        methods_tried.append("scan verified active")
-                    else:
-                        methods_tried.append("scan command ok but not active")
+                    # Treat a successful command as good enough; some stacks
+                    # don't immediately report Discovering: yes via bluetoothctl show.
+                    scan_started = True
+                    methods_tried.append("scan command succeeded (no discovering check)")
+
+                    # Still try to read discovering state for diagnostics only.
+                    try:
+                        time.sleep(2)
+                        actual_scan_status = self._check_scan_status()
+                        methods_tried.append(f"discovering={actual_scan_status}")
+                    except Exception as e2:
+                        methods_tried.append(f"discovering check failed: {e2}")
             except Exception as e:
                 methods_tried.append(f"bluetoothctl scan on failed: {e}")
             
