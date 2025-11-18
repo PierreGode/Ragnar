@@ -476,7 +476,16 @@ class BluetoothManager:
                 devices = self._get_windows_bluetooth_devices()
                 self.logger.info(f"Windows Bluetooth scan found {len(devices)} devices")
             else:
-                # Linux method - Method 1: Get known devices from bluetoothctl devices
+                # Linux method
+                # If scanning is active, use scan results method which captures real-time discoveries
+                if self.scan_active or self._check_scan_status():
+                    self.logger.info("Scanning is active, getting scan results...")
+                    scan_devices = self._get_scan_results()
+                    if scan_devices:
+                        devices.update(scan_devices)
+                        self.logger.info(f"Found {len(scan_devices)} devices from active scan")
+                
+                # Also check for cached/paired devices from bluetoothctl devices
                 result = subprocess.run(['bluetoothctl', 'devices'], 
                                       capture_output=True, text=True, timeout=10)
                 
@@ -492,37 +501,31 @@ class BluetoothManager:
                                 address = parts[1]
                                 name = parts[2] if len(parts) > 2 else 'Unknown Device'
                                 
-                                self.logger.info(f"Found device: {address} - {name}")
-                                
-                                device_info = {
-                                    'address': address,
-                                    'name': name,
-                                    'rssi': None,
-                                    'device_class': None,
-                                    'device_type': 'Unknown',
-                                    'services': [],
-                                    'paired': False,
-                                    'connected': False,
-                                    'trusted': False,
-                                    'last_seen': time.time()
-                                }
-                                
-                                # Get detailed device information if requested
-                                if refresh:
-                                    detailed_info = self._get_device_details(address)
-                                    device_info.update(detailed_info)
-                                
-                                devices[address] = device_info
+                                # Only add if not already in devices (scan results take priority)
+                                if address not in devices:
+                                    self.logger.info(f"Found cached device: {address} - {name}")
+                                    
+                                    device_info = {
+                                        'address': address,
+                                        'name': name,
+                                        'rssi': None,
+                                        'device_class': None,
+                                        'device_type': 'Cached',
+                                        'services': [],
+                                        'paired': False,
+                                        'connected': False,
+                                        'trusted': False,
+                                        'last_seen': time.time()
+                                    }
+                                    
+                                    # Get detailed device information if requested
+                                    if refresh:
+                                        detailed_info = self._get_device_details(address)
+                                        device_info.update(detailed_info)
+                                    
+                                    devices[address] = device_info
                 else:
                     self.logger.warning(f"bluetoothctl devices failed with return code {result.returncode}")
-                
-                # Method 2: If scanning is active, try to get scan results
-                if self.scan_active or self._check_scan_status():
-                    self.logger.info("Scanning is active, attempting to get scan results...")
-                    scan_devices = self._get_scan_results()
-                    if scan_devices:
-                        devices.update(scan_devices)
-                        self.logger.info(f"Found {len(scan_devices)} additional devices from scan")
                             
             self.discovered_devices = devices
             self.logger.info(f"Total devices found: {len(devices)}")
