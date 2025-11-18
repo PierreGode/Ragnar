@@ -3937,6 +3937,14 @@ async function startBluetoothScan() {
         if (response.success) {
             addConsoleMessage('Started Bluetooth device scan', 'info');
             
+            // Immediately fetch and display devices
+            try {
+                const initialDevices = await fetchAPI('/api/bluetooth/devices');
+                displayBluetoothDevices(initialDevices.devices || []);
+            } catch (error) {
+                console.error('Error getting initial Bluetooth devices:', error);
+            }
+            
             // Start periodic refresh to get discovered devices
             bluetoothScanInterval = setInterval(async () => {
                 try {
