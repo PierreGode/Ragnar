@@ -581,19 +581,6 @@ def sync_all_counts():
                 logger.debug(f"  - Active (alive): {aggregated_targets}")
                 logger.debug(f"  - Inactive (degraded): {inactive_target_count}")
                 logger.debug(f"  - Total open ports: {aggregated_ports}")
-                
-                # OPTIMIZATION: Only log port breakdown when debug logging is enabled
-                # Reduces log I/O on Pi Zero during normal operation
-                if port_debug_info and logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(f"[PORT COUNT BREAKDOWN] Counting ports from {len(port_debug_info)} alive hosts with open ports:")
-                    for info in port_debug_info[:10]:  # Limit to first 10 to reduce log spam
-                        logger.debug(f"    {info}")
-                    if len(port_debug_info) > 10:
-                        logger.debug(f"    ... and {len(port_debug_info) - 10} more hosts with ports")
-                
-            except Exception as e:
-                logger.error(f"[SQLITE SYNC] ❌ Error reading from SQLite database: {e}")
-                traceback.print_exc()
 
             old_targets = shared_data.targetnbr
             old_ports = shared_data.portnbr
