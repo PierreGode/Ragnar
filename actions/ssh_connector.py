@@ -8,7 +8,7 @@ import paramiko
 import socket
 import threading
 import logging
-from queue import Queue
+from queue import Queue, Empty
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, SpinnerColumn
 from shared import SharedData
@@ -134,12 +134,19 @@ class SSHConnector:
         """
         Worker thread to process items in the queue.
         """
-        while not self.queue.empty():
+        while True:
             if self.shared_data.orchestrator_should_exit:
                 logger.info("Orchestrator exit signal received, stopping worker thread.")
                 break
 
-            adresse_ip, user, password, mac_address, hostname, port = self.queue.get()
+            if success_flag[0]:
+                break
+
+            try:
+                adresse_ip, user, password, mac_address, hostname, port = self.queue.get(timeout=0.5)
+            except Empty:
+                break
+
             if self.ssh_connect(adresse_ip, user, password):
                 with self.lock:
                     entry = [mac_address, adresse_ip, hostname, user, password, port]
@@ -149,7 +156,9 @@ class SSHConnector:
                         f"Found SSH credentials -> IP: {adresse_ip} | User: {user} | Password: {password}"
                     )
                     self.save_results()
-                    success_flag[0] = True
+                    if not success_flag[0]:
+                        success_flag[0] = True
+                        self._clear_queue()
             self.queue.task_done()
             progress.update(task_id, advance=1)
 
@@ -208,6 +217,15 @@ class SSHConnector:
             self.removeduplicates()
 
         return success_flag[0], list(self.results)
+
+    def _clear_queue(self):
+        """Remove remaining queued tasks once credentials succeed."""
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+                self.queue.task_done()
+            except Empty:
+                break
 
 
     def save_results(self):

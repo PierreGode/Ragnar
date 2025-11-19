@@ -7482,7 +7482,7 @@ def _collect_manual_targets():
         for host in all_hosts:
             # Only include alive/up hosts
             if host.get('status') in ['alive', 'up']:
-                ip = host.get('ip_address', '')
+                ip = host.get('ip') or host.get('ip_address', '')
                 hostname = host.get('hostname', ip) or ip
                 
                 # Parse ports from comma or semicolon-separated string

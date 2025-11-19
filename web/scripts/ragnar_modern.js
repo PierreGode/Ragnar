@@ -359,6 +359,7 @@ function initializeSocket() {
         if (currentTab === 'config') {
             displayConfigForm(config);
         }
+        updateAttackWarningBanner(Boolean(config && config.enable_attacks));
     });
 
     socket.on('scan_started', function(data) {
@@ -5237,6 +5238,12 @@ function displayConfigForm(config) {
         'Display': ['epd_type', 'ref_width', 'ref_height']
     };
     
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'];
+    const checkboxHandlers = {
+        scan_vuln_running: 'handleVulnScanToggle(this)',
+        enable_attacks: 'handleEnableAttacksToggle(this)'
+    };
+
     for (const [sectionName, keys] of Object.entries(sections)) {
         html += `
             <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
@@ -5246,7 +5253,6 @@ function displayConfigForm(config) {
         
         keys.forEach(key => {
             // Check if config has the key, or provide defaults for known boolean settings
-            const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'];
             let value = config[key];
             
             // If key is missing and it's a known boolean, default to true (except manual_mode)
@@ -5264,11 +5270,12 @@ function displayConfigForm(config) {
                     const disabledAttr = (key === 'scan_vuln_no_ports' && !config.scan_vuln_running) ? 'disabled' : '';
                     const disabledClass = disabledAttr ? 'opacity-50 cursor-not-allowed' : '';
                     
+                    const handlerAttr = checkboxHandlers[key] ? `onchange="${checkboxHandlers[key]}"` : '';
                     html += `
                         <label class="flex items-center space-x-3 p-3 rounded-lg hover:bg-slate-700 hover:bg-opacity-50 transition-colors cursor-pointer ${disabledClass}">
                             <input type="checkbox" name="${key}" ${value ? 'checked' : ''} ${disabledAttr}
                                    class="w-5 h-5 rounded bg-slate-700 border-slate-600 text-Ragnar-500 focus:ring-Ragnar-500"
-                                   ${key === 'scan_vuln_running' ? 'onchange="handleVulnScanToggle(this)"' : ''}>
+                                   ${handlerAttr}>
                             <span class="flex items-center gap-2">
                                 ${label}
                                 <span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">ⓘ</span>
@@ -5306,6 +5313,9 @@ function displayConfigForm(config) {
         e.preventDefault();
         await saveConfig(e.target);
     });
+
+    const attacksEnabled = config.hasOwnProperty('enable_attacks') ? Boolean(config.enable_attacks) : true;
+    updateAttackWarningBanner(attacksEnabled);
 }
 
 // Handle vulnerability scanning checkbox toggle to enable/disable dependent options
@@ -5324,6 +5334,37 @@ function handleVulnScanToggle(checkbox) {
             }
         }
     }
+}
+
+function updateAttackWarningBanner(isEnabled) {
+    const banner = document.getElementById('attack-warning');
+    if (!banner) {
+        return;
+    }
+    if (isEnabled) {
+        banner.classList.remove('hidden');
+    } else {
+        banner.classList.add('hidden');
+    }
+}
+
+function handleEnableAttacksToggle(checkbox) {
+    if (checkbox.checked) {
+        const confirmed = confirm('Warning: enabling automated attacks will run offensive actions (bruteforce, credential reuse, file theft) against discovered hosts. Do you have authorization to continue?');
+        if (!confirmed) {
+            checkbox.checked = false;
+            updateAttackWarningBanner(false);
+            addConsoleMessage('Automated attacks remain disabled.', 'warning');
+            showNotification('Automated attacks remain disabled.', 'info');
+            return;
+        }
+        showNotification('Automated attacks are enabled. Ensure you are authorized before proceeding.', 'warning');
+        addConsoleMessage('Automated attacks enabled. Ragnar will launch offensive actions on discovered hosts.', 'warning');
+    } else {
+        addConsoleMessage('Automated attacks disabled.', 'info');
+    }
+
+    updateAttackWarningBanner(checkbox.checked);
 }
 
 async function saveConfig(form) {

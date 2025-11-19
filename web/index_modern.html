@@ -2131,6 +2131,10 @@
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Advanced Settings</h3>
                     <div class="glass rounded-lg p-4">
                         <p class="text-sm text-gray-400 mb-4">Fine-tune individual settings (changes will override hardware profile)</p>
+                        <div id="attack-warning" class="hidden mb-4 p-4 rounded-lg border border-red-500 bg-red-900 bg-opacity-30 text-sm text-red-100">
+                            <div class="font-semibold mb-1">⚠️ Automated Attacks Enabled</div>
+                            <p>When this setting is on, Ragnar will actively run offensive actions (bruteforce, credential reuse, file theft) against discovered hosts. Ensure you have proper authorization before continuing.</p>
+                        </div>
                         <div id="config-form">
                             <p class="text-gray-400">Loading configuration...</p>
                         </div>
