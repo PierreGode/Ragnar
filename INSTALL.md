@@ -29,7 +29,6 @@ I did not develop ragnar for the raspberry pi zero w2 64bits, but several feedba
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
 
-
 At the moment the paper screen v2  v4 have been tested and implemented.
 I juste hope the V1 & V3 will work the same.
  
