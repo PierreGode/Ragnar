@@ -183,7 +183,7 @@ class SharedData:
             "mac_scan_blacklist": [],
             "ip_scan_blacklist": [],
             "steal_file_names": ["ssh.csv","hack.txt"],
-            "steal_file_extensions": [".ragnar",".hack",".flag"],
+            "steal_file_extensions": [".sh",".py",".txt",".log",".conf",".cfg",".ini",".json",".xml",".csv",".db",".sql"],
             
             "__title_network__": "Network",
             "nmap_scan_aggressivity": "-T4",
