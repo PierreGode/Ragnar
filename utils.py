@@ -922,6 +922,8 @@ method=auto
             if os.path.exists(self.shared_data.datastolendir):
                 for root, dirs, files in os.walk(self.shared_data.datastolendir):
                     for file in files:
+                        if file.lower().endswith('.log'):
+                            continue
                         filepath = os.path.join(root, file)
                         try:
                             stat = os.stat(filepath)
