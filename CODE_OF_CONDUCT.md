@@ -21,9 +21,6 @@ We are committed to fostering an open and welcoming environment for all contribu
 - **Personal Attacks:** Personal attacks or insults.
 - **Public or Private Harassment:** Public or private harassment.
 
-## 📢 Reporting Misconduct
-
-If you encounter any behavior that violates this code of conduct, please report it by contacting [ragnar-cyberviking@outlook.com](mailto:ragnar-cyberviking@outlook.com). All complaints will be reviewed and handled appropriately.
 
 ## ⚖️ Enforcement
 
@@ -37,4 +34,4 @@ This code of conduct is adapted from the [Contributor Covenant, version 2.0](htt
 
 ## 📜 License
 
-2024 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2025 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.

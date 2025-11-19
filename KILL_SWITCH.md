@@ -110,8 +110,6 @@ fetch('http://localhost:8000/api/kill', {
 ### Database Files
 - `data/ragnar.db` - Main SQLite database
 - `data/netkb.csv` - Legacy CSV database
-- `data/network_data.json` - Network scan data
-- `data/network_full.json` - Full network data
 - `data/` - Entire data directory
 
 ### Log Files
