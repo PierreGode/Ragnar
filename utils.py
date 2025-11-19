@@ -922,14 +922,24 @@ method=auto
             if os.path.exists(self.shared_data.datastolendir):
                 for root, dirs, files in os.walk(self.shared_data.datastolendir):
                     for file in files:
+                        if file.lower().endswith('.log'):
+                            continue
                         filepath = os.path.join(root, file)
                         try:
                             stat = os.stat(filepath)
+                            relative_dir = os.path.relpath(root, self.shared_data.datastolendir)
+                            if relative_dir.startswith('..'):
+                                virtual_dir = '/data_stolen'
+                            else:
+                                cleaned = '' if relative_dir in {'.', ''} else relative_dir.replace('\\', '/').strip('/')
+                                virtual_dir = f"/data_stolen/{cleaned}" if cleaned else '/data_stolen'
+                            virtual_path = f"{virtual_dir.rstrip('/')}/{file}".replace('//', '/')
                             loot.append({
                                 'filename': file,
                                 'size': self._format_bytes(stat.st_size),
                                 'source': os.path.basename(root),
-                                'timestamp': self._format_timestamp(stat.st_mtime)
+                                'timestamp': self._format_timestamp(stat.st_mtime),
+                                'path': virtual_path
                             })
                         except Exception as e:
                             self.logger.error(f"Error reading file {file}: {e}")

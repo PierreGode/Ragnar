@@ -8,6 +8,7 @@ let currentTab = 'dashboard';
 let autoRefreshIntervals = {};
 
 let preloadedTabs = new Set();
+let pendingFileHighlight = null;
 
 const configMetadata = {
     manual_mode: {
@@ -5208,22 +5209,73 @@ function displayLootTable(data) {
     let html = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">`;
     
     data.forEach(item => {
+        const filename = escapeHtml(item.filename || 'Unknown File');
+        const size = escapeHtml(item.size || 'N/A');
+        const source = escapeHtml(item.source || 'Unknown');
+        const timestamp = escapeHtml(item.timestamp || 'Unknown');
+        const encodedPath = item.path ? encodeURIComponent(item.path) : '';
+        const buttonClasses = `bg-gray-800 rounded-lg p-4 text-left hover:bg-gray-700 transition-colors w-full ${encodedPath ? '' : 'opacity-60 cursor-not-allowed'}`;
+        const clickAttr = encodedPath ? `onclick="openLootFile('${encodedPath}')"` : 'disabled aria-disabled="true"';
+        const actionHint = encodedPath ? '<p class="text-xs text-Ragnar-400 mt-3">Open in Files →</p>' : '';
+        
         html += `
-            <div class="bg-gray-800 rounded-lg p-4 hover:bg-gray-700 transition-colors">
+            <button type="button" class="${buttonClasses}" ${clickAttr}>
                 <div class="flex items-center justify-between mb-2">
-                    <h3 class="text-lg font-semibold text-Ragnar-400 truncate" title="${item.filename || 'Unknown File'}">${item.filename || 'Unknown File'}</h3>
-                    <span class="text-xs text-gray-400 ml-2">${item.size || 'N/A'}</span>
+                    <h3 class="text-lg font-semibold text-Ragnar-400 truncate" title="${filename}">${filename}</h3>
+                    <span class="text-xs text-gray-400 ml-2">${size}</span>
                 </div>
                 <div class="space-y-2 text-sm text-gray-300">
-                    <p><span class="text-gray-400">Source:</span> ${item.source || 'Unknown'}</p>
-                    <p><span class="text-gray-400">Timestamp:</span> ${item.timestamp || 'Unknown'}</p>
+                    <p><span class="text-gray-400">Source:</span> ${source}</p>
+                    <p><span class="text-gray-400">Timestamp:</span> ${timestamp}</p>
                 </div>
-            </div>
+                ${actionHint}
+            </button>
         `;
     });
     
     html += '</div>';
     container.innerHTML = html;
+}
+
+function openLootFile(encodedPath) {
+    if (!encodedPath) {
+        showNotification('No file path available for this loot item.', 'warning');
+        return;
+    }
+
+    try {
+        const filePath = decodeURIComponent(encodedPath);
+        if (!filePath || filePath === '/data_stolen') {
+            showNotification('Unable to locate that file. It may have been moved or deleted.', 'warning');
+            return;
+        }
+
+        const lastSlashIndex = filePath.lastIndexOf('/');
+        if (lastSlashIndex === -1) {
+            showNotification('Invalid file path received for loot item.', 'error');
+            return;
+        }
+
+        const directory = lastSlashIndex === 0 ? '/' : filePath.substring(0, lastSlashIndex);
+        const fileName = filePath.substring(lastSlashIndex + 1);
+
+        if (!fileName) {
+            showNotification('Unable to determine file name for loot item.', 'error');
+            return;
+        }
+
+        pendingFileHighlight = {
+            directory,
+            file: fileName
+        };
+
+        showTab('files');
+        loadFiles(directory, fileName);
+        showNotification(`Opening ${fileName} in Files tab`, 'info');
+    } catch (error) {
+        console.error('Failed to open loot file:', error);
+        showNotification('Failed to open file from loot item.', 'error');
+    }
 }
 
 function displayConfigForm(config) {
@@ -5521,14 +5573,18 @@ function setupEpaperAutoRefresh() {
 let currentDirectory = '/';
 let fileOperationInProgress = false;
 
-function loadFiles(path = '/') {
+function loadFiles(path = '/', highlightFile = null) {
     if (fileOperationInProgress) return;
+    const desiredHighlight = highlightFile || (pendingFileHighlight && pendingFileHighlight.directory === path ? pendingFileHighlight.file : null);
     
     fetch(`/api/files/list?path=${encodeURIComponent(path)}`)
         .then(response => response.json())
         .then(files => {
-            displayFiles(files, path);
+            const appliedHighlight = displayFiles(files, path, desiredHighlight);
             updateCurrentPath(path);
+            if (desiredHighlight) {
+                pendingFileHighlight = null;
+            }
         })
         .catch(error => {
             console.error('Error loading files:', error);
@@ -5536,15 +5592,15 @@ function loadFiles(path = '/') {
         });
 }
 
-function displayFiles(files, path) {
+function displayFiles(files, path, highlightFile = null) {
     const fileList = document.getElementById('file-list');
     currentDirectory = path;
     
-    if (!fileList) return;
+    if (!fileList) return false;
     
     if (files.length === 0) {
         fileList.innerHTML = '<p class="text-gray-400 p-4">No files found in this directory</p>';
-        return;
+        return false;
     }
     
     let html = '<div class="space-y-2">';
@@ -5580,9 +5636,10 @@ function displayFiles(files, path) {
         
         const size = file.is_directory ? '' : formatBytes(file.size);
         const date = file.modified ? new Date(file.modified * 1000).toLocaleDateString() : '';
+        const fileKey = encodeURIComponent(file.name);
         
         html += `
-            <div class="flex items-center justify-between p-3 hover:bg-slate-700 rounded-lg transition-colors">
+            <div class="flex items-center justify-between p-3 hover:bg-slate-700 rounded-lg transition-colors" data-file-key="${fileKey}">
                 <div class="flex items-center cursor-pointer flex-1" onclick="${file.is_directory ? `loadFiles('${file.path}')` : ''}">
                     ${icon}
                     <div class="flex-1">
@@ -5610,6 +5667,22 @@ function displayFiles(files, path) {
     
     html += '</div>';
     fileList.innerHTML = html;
+
+    if (highlightFile) {
+        const highlightKey = encodeURIComponent(highlightFile);
+        const target = fileList.querySelector(`[data-file-key="${highlightKey}"]`);
+        if (target) {
+            target.classList.add('ring-2', 'ring-Ragnar-500', 'ring-offset-2', 'ring-offset-slate-900');
+            target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setTimeout(() => {
+                target.classList.remove('ring-2', 'ring-Ragnar-500', 'ring-offset-2', 'ring-offset-slate-900');
+            }, 4000);
+            return true;
+        }
+        addConsoleMessage(`Could not highlight ${highlightFile} under ${path}`, 'warning');
+    }
+
+    return false;
 }
 
 function displayDirectoryTree() {
@@ -6739,6 +6812,7 @@ window.uploadFile = uploadFile;
 window.clearFiles = clearFiles;
 window.refreshFiles = refreshFiles;
 window.closeFileModal = closeFileModal;
+window.openLootFile = openLootFile;
 
 // Image Management Functions
 window.loadImagesData = loadImagesData;
