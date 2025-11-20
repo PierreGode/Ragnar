@@ -8068,9 +8068,42 @@ def run_manual_lynis_pentest():
 
         def execute_manual_lynis():
             try:
+                # Emit scan started event
+                socketio.emit('lynis_update', {
+                    'type': 'lynis_started',
+                    'ip': target_ip,
+                    'message': f'Starting Lynis security audit on {target_ip}...'
+                })
+                
+                # Define progress callback to emit real-time updates
+                def progress_callback(event_type, data):
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_progress',
+                        'event': event_type,
+                        'ip': target_ip,
+                        'message': data.get('message', ''),
+                        'stage': data.get('stage'),
+                        'details': data.get('details')
+                    })
+                
                 action = LynisPentestSSH(shared_data)
-                status = action.run_manual(target_ip, username, password)
+                status = action.run_manual(target_ip, username, password, progress_callback=progress_callback)
                 success = status == 'success'
+                
+                # Emit final result
+                if success:
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_completed',
+                        'ip': target_ip,
+                        'message': f'Lynis audit completed successfully for {target_ip}'
+                    })
+                else:
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_error',
+                        'ip': target_ip,
+                        'message': f'Lynis audit failed for {target_ip}'
+                    })
+                
                 shared_data.ragnarstatustext = "IDLE"
                 shared_data.ragnarstatustext2 = (
                     "Lynis pentest completed" if success else "Lynis pentest failed"
@@ -8079,6 +8112,11 @@ def run_manual_lynis_pentest():
                 logger.info(f"Manual Lynis pentest finished for {target_ip} with status: {status}")
             except Exception as exc:
                 logger.error(f"Error during manual Lynis pentest for {target_ip}: {exc}")
+                socketio.emit('lynis_update', {
+                    'type': 'lynis_error',
+                    'ip': target_ip,
+                    'message': f'Lynis audit error: {str(exc)}'
+                })
                 shared_data.ragnarstatustext = "IDLE"
                 shared_data.ragnarstatustext2 = "Lynis pentest error"
                 broadcast_status_update()

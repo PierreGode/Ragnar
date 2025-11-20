@@ -389,6 +389,10 @@ function initializeSocket() {
         handleDeepScanUpdate(data);
     });
 
+    socket.on('lynis_update', function(data) {
+        handleLynisUpdate(data);
+    });
+
     socket.on('connect_error', function(error) {
         reconnectAttempts++;
         console.error('Connection error:', error);
@@ -1484,6 +1488,112 @@ async function triggerDeepScan(ip, options = {}) {
             clearDeepScanButtonState(ip);
         }
         return false;
+    }
+}
+
+function handleLynisUpdate(data) {
+    const { type, ip, message, stage, details } = data;
+    
+    // Get Lynis UI elements
+    const lynisButton = document.getElementById('manual-lynis-btn');
+    const lynisStatus = document.getElementById('lynis-audit-status');
+    
+    switch (type) {
+        case 'lynis_started':
+            addConsoleMessage(`🔐 ${message}`, 'info');
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+                lynisButton.classList.add('bg-blue-600', 'cursor-wait');
+                lynisButton.disabled = true;
+                lynisButton.textContent = 'Audit started';
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = message;
+                lynisStatus.className = 'text-sm text-blue-600 mt-2';
+            }
+            break;
+            
+        case 'lynis_progress':
+            // Update button with progress messages
+            if (lynisButton) {
+                const event = data.event;
+                if (event === 'connecting') {
+                    lynisButton.textContent = 'Connecting...';
+                } else if (event === 'connected') {
+                    lynisButton.textContent = 'Connected';
+                } else if (event === 'installing') {
+                    lynisButton.textContent = 'Installing Lynis...';
+                } else if (event === 'lynis_found') {
+                    lynisButton.textContent = 'Lynis ready';
+                } else if (event === 'audit_starting') {
+                    lynisButton.textContent = 'Running audit...';
+                } else if (event === 'processing') {
+                    lynisButton.textContent = 'Processing results...';
+                }
+            }
+            if (lynisStatus && message) {
+                lynisStatus.textContent = message;
+                if (details) {
+                    lynisStatus.textContent += ` (${details})`;
+                }
+            }
+            // Add console message for major stage changes
+            if (stage && ['connection', 'setup', 'audit', 'processing'].includes(stage)) {
+                addConsoleMessage(`   ${message}`, 'info');
+            }
+            break;
+            
+        case 'lynis_completed':
+            addConsoleMessage(`✅ ${message}`, 'success');
+            
+            // Update button to show completion
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-blue-600', 'cursor-wait');
+                lynisButton.classList.add('bg-green-600');
+                lynisButton.textContent = '✅ Audit complete';
+                lynisButton.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    if (lynisButton) {
+                        lynisButton.classList.remove('bg-green-600');
+                        lynisButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                        lynisButton.textContent = 'Run Lynis Audit';
+                        lynisButton.disabled = false;
+                    }
+                }, 3000);
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = `Audit completed for ${ip}. Check vulnerabilities directory for results.`;
+                lynisStatus.className = 'text-sm text-green-600 mt-2';
+            }
+            break;
+            
+        case 'lynis_error':
+            addConsoleMessage(`❌ ${message}`, 'error');
+            
+            // Update button to show error
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-blue-600', 'cursor-wait');
+                lynisButton.classList.add('bg-red-600');
+                lynisButton.textContent = '❌ Audit failed';
+                lynisButton.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    if (lynisButton) {
+                        lynisButton.classList.remove('bg-red-600');
+                        lynisButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                        lynisButton.textContent = 'Run Lynis Audit';
+                        lynisButton.disabled = false;
+                    }
+                }, 3000);
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = message;
+                lynisStatus.className = 'text-sm text-red-600 mt-2';
+            }
+            break;
     }
 }
 
@@ -4855,9 +4965,19 @@ async function runManualLynisPentest() {
         return;
     }
 
+    // Show live status element
+    const liveStatus = document.getElementById('lynis-audit-status');
+    if (liveStatus) {
+        liveStatus.classList.remove('hidden');
+        liveStatus.textContent = 'Initializing Lynis audit...';
+        liveStatus.className = 'text-sm text-blue-600 mt-2';
+    }
+    
     if (submitBtn) {
         submitBtn.disabled = true;
-        submitBtn.textContent = 'Launching...';
+        submitBtn.textContent = 'Starting audit...';
+        submitBtn.classList.add('bg-blue-600', 'cursor-wait');
+        submitBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
     }
 
     try {
@@ -4882,14 +5002,26 @@ async function runManualLynisPentest() {
         setStatus(successMessage, 'success');
         addConsoleMessage(successMessage, 'success');
         passInput.value = '';
+        
+        // Live status will be updated via WebSocket events
+        // Don't reset the button here - let WebSocket handler do it
+        return;
+        
     } catch (error) {
         console.error('Error running manual Lynis pentest:', error);
         setStatus(`Failed to start Lynis pentest: ${error.message}`, 'error');
         addConsoleMessage(`Manual Lynis error: ${error.message}`, 'error');
-    } finally {
+        
+        // Reset UI on error
         if (submitBtn) {
             submitBtn.disabled = false;
             submitBtn.textContent = 'Run Lynis Pentest';
+            submitBtn.classList.remove('bg-blue-600', 'cursor-wait');
+            submitBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+        }
+        if (liveStatus) {
+            liveStatus.textContent = `Error: ${error.message}`;
+            liveStatus.className = 'text-sm text-red-600 mt-2';
         }
     }
 }
