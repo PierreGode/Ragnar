@@ -7660,6 +7660,7 @@ def _collect_manual_targets():
                         'ip': ip,
                         'hostname': hostname,
                         'ports': ports,
+                        'mac': host.get('mac', '00:00:00:00:00:00'),
                         'source': 'Database'
                     })
                     target_ips.add(ip)
@@ -7689,6 +7690,7 @@ def _collect_manual_targets():
                                 'ip': ip,
                                 'hostname': hostname,
                                 'ports': ports,
+                                'mac': row.get('MAC', row.get('MAC Address', '00:00:00:00:00:00')),
                                 'source': 'CSV Fallback'
                             })
                             target_ips.add(ip)
@@ -7726,6 +7728,7 @@ def _collect_manual_targets():
                                         'ip': host_ip,
                                         'hostname': host_ip,  # Use IP as hostname if no other info
                                         'ports': ports,
+                                        'mac': '00:00:00:00:00:00',  # Default MAC for NetKB entries
                                         'source': 'NetKB'
                                     })
                                     target_ips.add(host_ip)
@@ -7958,7 +7961,7 @@ def trigger_network_scan():
 
 @app.route('/api/manual/scan/vulnerability', methods=['POST'])
 def trigger_vulnerability_scan():
-    """Trigger a manual vulnerability scan"""
+    """Trigger a manual vulnerability scan using the proper NmapVulnScanner method"""
     try:
         data = request.get_json(silent=True) or {}
         target_ip = (data.get('ip') or '').strip()
@@ -7969,63 +7972,84 @@ def trigger_vulnerability_scan():
 
         is_all_targets = not target_ip or target_ip.lower() == 'all'
 
-        if is_all_targets:
-            targets_to_scan = available_targets
-            status_target = 'All Targets'
-        else:
-            targets_to_scan = [t for t in available_targets if t.get('ip') == target_ip]
-            status_target = target_ip
-            if not targets_to_scan:
+        if not is_all_targets:
+            # Check if specific target exists
+            target_found = any(t.get('ip') == target_ip for t in available_targets)
+            if not target_found:
                 return jsonify({'success': False, 'error': f'Target {target_ip} not found'}), 404
+
+        status_target = 'All Targets' if is_all_targets else target_ip
 
         # Update status to show vulnerability scanning is active
         shared_data.ragnarstatustext = "NmapVulnScanner"
-        shared_data.ragnarstatustext2 = f"Scanning: {status_target}"
+        shared_data.ragnarstatustext2 = f"Starting scan: {status_target}"
 
         # Immediately broadcast the status change
         broadcast_status_update()
 
-        # Execute vulnerability scan in background
+        # Execute vulnerability scan in background using proper method
         def execute_vuln_scan():
             try:
                 # Import and create vulnerability scanner
                 from actions.nmap_vuln_scanner import NmapVulnScanner
                 vuln_scanner = NmapVulnScanner(shared_data)
 
-                for target in targets_to_scan:
-                    ip = target.get('ip')
-                    hostname = target.get('hostname') or ip
-                    ports = [str(port) for port in target.get('ports', []) if str(port).strip()]
+                def progress_callback(event_type, data):
+                    """Real-time callback for vulnerability scan progress"""
+                    try:
+                        if event_type == "scan_started":
+                            shared_data.ragnarstatustext2 = f"Scanning {data.get('total_hosts', 0)} hosts"
+                            broadcast_status_update()
+                        elif event_type == "scan_progress":
+                            current_ip = data.get('current_ip', '')
+                            scanned = data.get('scanned', 0)
+                            total = data.get('total_hosts', 0)
+                            progress = data.get('progress_percent', 0)
+                            shared_data.ragnarstatustext2 = f"Scanning {current_ip} ({scanned}/{total}) - {progress}%"
+                            broadcast_status_update()
+                        elif event_type == "scan_completed":
+                            scanned_count = data.get('scanned', 0)
+                            shared_data.ragnarstatustext2 = f"Completed: {scanned_count} hosts scanned"
+                            broadcast_status_update()
+                        elif event_type == "scan_error":
+                            error_ip = data.get('ip', 'unknown')
+                            shared_data.ragnarstatustext2 = f"Error scanning {error_ip}"
+                            broadcast_status_update()
+                    except Exception as callback_error:
+                        logger.error(f"Error in vulnerability scan callback: {callback_error}")
 
-                    if not ports:
-                        ports = ['1-65535']
-
-                    row = {
-                        'Ports': ';'.join(ports),
-                        'Hostnames': hostname,
-                        'MAC Address': target.get('mac', '00:00:00:00:00:00')
-                    }
-
-                    shared_data.ragnarstatustext2 = f"Scanning: {ip}"
-                    broadcast_status_update()
-
-                    vuln_scanner.execute(ip, row, "manual_vuln_scan")
+                if is_all_targets:
+                    # Use force_scan_all_hosts for all targets - this is the proper method
+                    scanned_count = vuln_scanner.force_scan_all_hosts(real_time_callback=progress_callback)
+                    logger.info(f"Manual vulnerability scan completed: {scanned_count} hosts scanned")
+                else:
+                    # For single target, use scan_single_host_realtime method
+                    target = next((t for t in available_targets if t.get('ip') == target_ip), None)
+                    if target:
+                        hostname = target.get('hostname', target_ip)
+                        mac = target.get('mac', '00:00:00:00:00:00')
+                        ports = target.get('ports', [])
+                        ports_str = ';'.join([str(p) for p in ports]) if ports else ''
+                        
+                        result = vuln_scanner.scan_single_host_realtime(
+                            ip=target_ip,
+                            hostname=hostname,
+                            mac=mac,
+                            ports=ports_str,
+                            callback=progress_callback
+                        )
+                        logger.info(f"Single host vulnerability scan completed for {target_ip}: {result}")
 
                 # Update status when scan completes
                 shared_data.ragnarstatustext = "IDLE"
                 shared_data.ragnarstatustext2 = "Vulnerability scan completed"
-
-                # Broadcast completion status
                 broadcast_status_update()
-                
-                logger.info(f"Manual vulnerability scan completed for: {status_target}")
                 
             except Exception as e:
                 logger.error(f"Error executing vulnerability scan: {e}")
                 # Reset status on error
                 shared_data.ragnarstatustext = "IDLE"
                 shared_data.ragnarstatustext2 = f"Vuln scan error: {str(e)[:40]}"
-                # Broadcast error status
                 broadcast_status_update()
         
         # Start scan in background thread
