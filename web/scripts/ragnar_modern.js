@@ -2516,6 +2516,12 @@ function displayVulnerabilityIntel(scans) {
                         </div>
                     </div>
                     <div class="flex items-center space-x-4">
+                        ${scan.download_url ? `
+                            <a href="${scan.download_url}" target="_blank" rel="noopener noreferrer"
+                               class="text-xs px-3 py-1 rounded-full bg-cyan-900/60 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-800/80 transition">
+                                View full report
+                            </a>
+                        ` : ''}
                         <span class="text-sm text-cyan-400">📡 ${serviceCount} services</span>
                         ${scriptCount > 0 ? `<span class="text-sm text-purple-400">📜 ${scriptCount} scripts</span>` : ''}
                         <span class="text-xs text-gray-500">${scan.scan_date}</span>

@@ -2150,6 +2150,27 @@ def get_loot():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/vulnerability-report/<path:filename>')
+def download_vulnerability_report(filename):
+    """Stream a vulnerability report file while preventing directory traversal."""
+    try:
+        vuln_dir = os.path.abspath(os.path.join('data', 'output', 'vulnerabilities'))
+        requested_path = os.path.normpath(os.path.join(vuln_dir, filename))
+
+        if not requested_path.startswith(vuln_dir):
+            logger.warning(f"Blocked traversal attempt for report: {filename}")
+            return jsonify({'error': 'File not found'}), 404
+
+        if not os.path.isfile(requested_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        rel_path = os.path.relpath(requested_path, vuln_dir)
+        return send_from_directory(vuln_dir, rel_path, as_attachment=True)
+    except Exception as exc:
+        logger.error(f"Error serving vulnerability report {filename}: {exc}")
+        return jsonify({'error': 'Unable to download report'}), 500
+
+
 @app.route('/api/vulnerability-intel')
 def get_vulnerability_intel():
     """Get interesting intelligence from scan files (not vulnerabilities - those are in threat intel)"""
@@ -2308,6 +2329,7 @@ def get_vulnerability_intel():
                             'hostname': hostname,
                             'scan_date': scan_date,
                             'filename': filename,
+                            'download_url': f"/api/vulnerability-report/{filename}",
                             'services': services,
                             'total_services': len(services)
                         })
@@ -2381,6 +2403,7 @@ def get_vulnerability_intel():
                         'hostname': hostname,
                         'scan_date': scan_date,
                         'filename': filename,
+                        'download_url': f"/api/vulnerability-report/{filename}",
                         'services': [service_entry],
                         'total_services': 1,
                         'scan_type': 'lynis'
