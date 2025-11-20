@@ -1,24 +1,26 @@
 #utils.py
 
-import json
-import subprocess
-import os
-import json
 import csv
-import zipfile
-import uuid
-try:
-    import cgi
-except ImportError:
-    # cgi module was removed in Python 3.13, use alternative for file uploads
-    cgi = None
 import io
 import importlib
+import json
 import logging
+import os
+import subprocess
+import uuid
+import zipfile
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from logger import Logger
 from urllib.parse import unquote
 from actions.nmap_vuln_scanner import NmapVulnScanner
+
+try:
+    cgi = importlib.import_module('cgi')  # type: ignore[import]
+except ModuleNotFoundError:
+    # cgi module was removed in Python 3.13, use alternative for file uploads
+    cgi = None
 
 
 
@@ -29,25 +31,32 @@ class WebUtils:
     def __init__(self, shared_data, logger):
         self.shared_data = shared_data
         self.logger = logger
-        self.actions = None  # List that contains all actions
-        self.standalone_actions = None  # List that contains all standalone actions
+        self.actions: List[Any] = []  # List that contains all actions
+        self.standalone_actions: List[Any] = []  # List that contains all standalone actions
+        self.actions_dir = getattr(shared_data, 'actions_dir', '')
+        self.actions_file = getattr(shared_data, 'actions_file', '')
+        self._actions_loaded = False
 
     def load_actions(self):
         """Load all actions from the actions file"""
-        if self.actions is None or self.standalone_actions is None:
-            self.actions = []  # reset the actions list
-            self.standalone_actions = []  # reset the standalone actions list
-            self.actions_dir = self.shared_data.actions_dir
-            with open(self.shared_data.actions_file, 'r') as file:
+        if self._actions_loaded:
+            return
+
+        self.actions.clear()
+        self.standalone_actions.clear()
+        self.actions_dir = self.shared_data.actions_dir
+        with open(self.shared_data.actions_file, 'r') as file:
                 actions_config = json.load(file)
-            for action in actions_config:
-                module_name = action["b_module"]
-                if module_name == 'scanning':
-                    self.load_scanner(module_name)
-                elif module_name == 'nmap_vuln_scanner':
-                    self.load_nmap_vuln_scanner(module_name)
-                else:
-                    self.load_action(module_name, action)
+        for action in actions_config:
+            module_name = action["b_module"]
+            if module_name == 'scanning':
+                self.load_scanner(module_name)
+            elif module_name == 'nmap_vuln_scanner':
+                self.load_nmap_vuln_scanner(module_name)
+            else:
+                self.load_action(module_name, action)
+
+        self._actions_loaded = True
 
     def load_scanner(self, module_name):
         """Load the network scanner"""
@@ -80,9 +89,10 @@ class WebUtils:
             netkb_file = self.shared_data.netkbfile
             with open(netkb_file, 'r', encoding='utf-8') as file:
                 reader = csv.DictReader(file)
-                data = [row for row in reader if row['Alive'] == '1']
+                data = [row for row in reader if row.get('Alive') == '1']
 
-            actions = reader.fieldnames[5:]  # Actions are all fields after 'Ports'
+            fieldnames = reader.fieldnames or []
+            actions = fieldnames[5:] if len(fieldnames) > 5 else []  # Actions are columns after 'Ports'
             response_data = {
                 'ips': [row['IPs'] for row in data],
                 'ports': {row['IPs']: row['Ports'].split(';') for row in data},
@@ -318,25 +328,6 @@ class WebUtils:
                 html += '</tbody>\n</table>\n'
         html += '</div>\n'
         return html
-
-    def list_files(self, directory):
-        files = []
-        for entry in os.scandir(directory):
-            if entry.is_dir():
-                files.append({
-                    "name": entry.name,
-                    "is_directory": True,
-                    "children": self.list_files(entry.path)
-                })
-            else:
-                files.append({
-                    "name": entry.name,
-                    "is_directory": False,
-                    "path": entry.path
-                })
-        return files
-
-
 
     def serve_file(self, handler, filename):
         try:

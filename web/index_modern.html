@@ -846,8 +846,14 @@
                                 </select>
                             </div>
                         </div>
-                        <button onclick="executeManualAttack()" class="w-full bg-orange-600 hover:bg-orange-700 text-white py-3 rounded-lg font-semibold tracking-wide">Execute Attack</button>
+                        <button id="manual-attack-launch-btn" onclick="executeManualAttack()" class="w-full bg-orange-600 hover:bg-orange-700 text-white py-3 rounded-lg font-semibold tracking-wide">Execute Attack</button>
                         <p class="text-xs text-gray-500">Actions reuse Ragnar credentials & payloads. Check the attack log in Discovered → Attack Logs for execution details.</p>
+                        <div id="manual-attack-status" class="hidden mt-4">
+                            <div id="manual-attack-status-message" class="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-gray-200"></div>
+                        </div>
+                        <div id="manual-attack-live-log" class="hidden mt-3 border border-slate-800 bg-slate-900/40 rounded-lg p-3 space-y-1 max-h-48 overflow-y-auto scrollbar-thin text-xs font-mono">
+                            <div class="text-gray-500">Manual attack updates will appear here.</div>
+                        </div>
                     </div>
                 </div>
             </div>

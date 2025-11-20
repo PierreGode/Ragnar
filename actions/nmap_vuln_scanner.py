@@ -528,7 +528,12 @@ class NmapVulnScanner:
                 parts = line.split()
                 if parts:
                     port_info = parts[0]
-                    current_port = port_info.split('/')[0]
+                    port_candidate = port_info.split('/')[0] if port_info else ''
+                    if not port_candidate:
+                        current_port = None
+                        continue
+                    port_key = port_candidate
+                    current_port = port_key
                     # Extract service information (usually at index 2 or later)
                     if len(parts) >= 3:
                         current_service = parts[2]
@@ -536,8 +541,8 @@ class NmapVulnScanner:
                         current_service = parts[1]
                     else:
                         current_service = "unknown"
-                    port_services[current_port] = current_service
-                    port_vulnerabilities.setdefault(current_port, [])
+                    port_services[port_key] = current_service
+                    port_vulnerabilities.setdefault(port_key, [])
                     in_vulners_section = False
                 continue
 

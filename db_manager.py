@@ -56,7 +56,23 @@ logger = Logger(name="db_manager.py", level=logging.INFO)
 class DatabaseManager:
     """
     Thread-safe SQLite database manager for Ragnar host/network data.
-    
+    ACTION_STATUS_COLUMNS = {
+        'ssh_connector',
+        'rdp_connector',
+        'ftp_connector',
+        'smb_connector',
+        'telnet_connector',
+        'sql_connector',
+        'steal_files_ssh',
+        'steal_files_rdp',
+        'steal_files_ftp',
+        'steal_files_smb',
+        'steal_files_telnet',
+        'steal_data_sql',
+        'nmap_vuln_scanner',
+        'scanner_status'
+    }
+
     This class handles all database operations including:
     - Schema creation and migrations
     - CRUD operations for hosts
@@ -641,6 +657,54 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.error(f"Failed to upsert host {mac}: {e}")
+            return False
+
+    def _normalize_action_column(self, action_name: Optional[str]) -> Optional[str]:
+        """Map user-facing action names to database columns."""
+        if not action_name:
+            return None
+
+        normalized = action_name.strip().lower()
+        alias_map = {
+            'nmapvulnscanner': 'nmap_vuln_scanner',
+            'nmap_vulnscanner': 'nmap_vuln_scanner',
+            'nmap_vuln_scanner': 'nmap_vuln_scanner',
+            'scanner': 'scanner_status'
+        }
+
+        if normalized in alias_map:
+            return alias_map[normalized]
+
+        if normalized in self.ACTION_STATUS_COLUMNS:
+            return normalized
+
+        lower_columns = {col.lower(): col for col in self.ACTION_STATUS_COLUMNS}
+        return lower_columns.get(normalized)
+
+    def update_host_action_status(self, mac: str, action_name: str, status: str) -> bool:
+        """Update a host action status column in the database."""
+        if not mac:
+            logger.warning("Cannot update action status without MAC address")
+            return False
+
+        column = self._normalize_action_column(action_name)
+        if not column:
+            logger.warning(f"Unknown action column for '{action_name}'")
+            return False
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"UPDATE hosts SET {column} = ?, updated_at = CURRENT_TIMESTAMP WHERE lower(mac) = lower(?)",
+                    (status, mac)
+                )
+                updated = cursor.rowcount > 0
+                if not updated:
+                    logger.debug(f"No host updated for MAC {mac} when setting {column}")
+                return updated
+        except Exception as exc:
+            logger.error(f"Failed to update action status for {mac}: {exc}")
             return False
     
     def delete_host(self, mac: str) -> bool:

@@ -4838,18 +4838,88 @@ function updateManualPorts() {
     }
 }
 
+const MANUAL_ATTACK_LOG_LIMIT = 40;
+
+function setManualAttackStatus(message, type = 'info') {
+    const statusWrap = document.getElementById('manual-attack-status');
+    const statusMessage = document.getElementById('manual-attack-status-message');
+    if (!statusWrap || !statusMessage) return;
+
+    const styles = {
+        success: 'border-green-500/40 bg-green-900/30 text-green-200',
+        error: 'border-red-500/50 bg-red-900/40 text-red-200',
+        warning: 'border-yellow-500/40 bg-yellow-900/30 text-yellow-200',
+        info: 'border-slate-700 bg-slate-900/70 text-gray-200'
+    };
+
+    statusWrap.classList.remove('hidden');
+    statusMessage.className = `rounded-lg px-4 py-3 text-sm ${styles[type] || styles.info}`;
+    statusMessage.textContent = message;
+}
+
+function appendManualAttackLog(message, type = 'info') {
+    const logContainer = document.getElementById('manual-attack-live-log');
+    if (!logContainer) return;
+
+    const colors = {
+        success: 'text-green-300',
+        error: 'text-red-300',
+        warning: 'text-yellow-300',
+        info: 'text-gray-300'
+    };
+
+    if (logContainer.dataset.initialized !== 'true') {
+        logContainer.innerHTML = '';
+        logContainer.dataset.initialized = 'true';
+    }
+
+    logContainer.classList.remove('hidden');
+    const line = document.createElement('div');
+    line.className = `flex text-xs font-mono ${colors[type] || colors.info}`;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    logContainer.appendChild(line);
+
+    while (logContainer.childElementCount > MANUAL_ATTACK_LOG_LIMIT) {
+        logContainer.removeChild(logContainer.firstChild);
+    }
+
+    logContainer.scrollTop = logContainer.scrollHeight;
+}
+
 async function executeManualAttack() {
     const ip = document.getElementById('manual-ip-dropdown')?.value;
     const port = document.getElementById('manual-port-dropdown')?.value;
     const action = document.getElementById('manual-action-dropdown')?.value;
+    const launchBtn = document.getElementById('manual-attack-launch-btn');
+
+    const setButtonState = (busy, label) => {
+        if (!launchBtn) return;
+        launchBtn.disabled = !!busy;
+        launchBtn.classList.toggle('cursor-wait', !!busy);
+        if (busy) {
+            launchBtn.classList.remove('bg-orange-600', 'hover:bg-orange-700');
+            launchBtn.classList.add('bg-orange-500');
+        } else {
+            launchBtn.classList.remove('bg-orange-500');
+            launchBtn.classList.add('bg-orange-600', 'hover:bg-orange-700');
+        }
+        launchBtn.textContent = label || (busy ? 'Launching...' : 'Execute Attack');
+    };
     
     if (!ip || !port || !action) {
         addConsoleMessage('Please select IP, Port, and Action for manual attack', 'error');
+        setManualAttackStatus('Please select a target IP, port, and action before launching.', 'error');
+        appendManualAttackLog('Manual attack aborted - missing selections.', 'error');
         return;
     }
     
+    const attackLabel = `${action.toUpperCase()} on ${ip}:${port}`;
+    
     try {
-        addConsoleMessage(`Executing manual attack: ${action} on ${ip}:${port}`, 'info');
+        addConsoleMessage(`Executing manual attack: ${attackLabel}`, 'info');
+        setManualAttackStatus(`Dispatching ${attackLabel}. This may take up to a minute depending on module output.`, 'info');
+        appendManualAttackLog(`Queued ${attackLabel}`, 'info');
+        setButtonState(true, 'Launching...');
         
         const data = await postAPI('/api/manual/execute-attack', {
             ip: ip,
@@ -4858,14 +4928,25 @@ async function executeManualAttack() {
         });
         
         if (data.success) {
-            addConsoleMessage(`Manual attack executed successfully: ${data.message}`, 'success');
+            const successMessage = data.message || 'Manual attack executed successfully';
+            addConsoleMessage(`Manual attack executed successfully: ${successMessage}`, 'success');
+            setManualAttackStatus(`${successMessage}. Monitor Discovered → Attack Logs for module output.`, 'success');
+            appendManualAttackLog(successMessage, 'success');
         } else {
-            addConsoleMessage(`Manual attack failed: ${data.message || 'Unknown error'}`, 'error');
+            const failureMessage = data.message || 'Unknown error';
+            addConsoleMessage(`Manual attack failed: ${failureMessage}`, 'error');
+            setManualAttackStatus(`Manual attack failed: ${failureMessage}`, 'error');
+            appendManualAttackLog(`Attack failed: ${failureMessage}`, 'error');
         }
+        
+        setTimeout(() => setButtonState(false), 1200);
         
     } catch (error) {
         console.error('Error executing manual attack:', error);
         addConsoleMessage('Failed to execute manual attack due to network error', 'error');
+        setManualAttackStatus(`Network error launching manual attack: ${error.message}`, 'error');
+        appendManualAttackLog(`Network error: ${error.message}`, 'error');
+        setButtonState(false, 'Execute Attack');
     }
 }
 
