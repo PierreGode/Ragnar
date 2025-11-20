@@ -404,9 +404,6 @@ class SharedData:
             #     test_image = test_image.rotate(180)
             # self.epd_helper.epd.display(self.epd_helper.epd.getbuffer(test_image))
             # logger.info("Test image displayed on EPD.")
-        except Exception as e:
-            logger.error(f"Error initializing EPD display: {e}")
-            raise
         
     def initialize_variables(self):
         """Initialize the variables."""
@@ -426,8 +423,8 @@ class SharedData:
         self.ragnarorch_status = "IDLE"
         self.ragnarstatustext = "IDLE"
         self.ragnarstatustext2 = "Awakening..."
-        self.scale_factor_x = self.width / self.ref_width
-        self.scale_factor_y = self.height / self.ref_height
+        self.scale_factor_x = self.width / self.config['ref_width']
+        self.scale_factor_y = self.height / self.config['ref_height']
         self.text_frame_top = int(88 * self.scale_factor_x)
         self.text_frame_bottom = int(159 * self.scale_factor_y)
         self.y_text = self.text_frame_top + 2

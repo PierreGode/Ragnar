@@ -21,7 +21,7 @@ class Commentaireia:
     def __init__(self):
         self.shared_data = shared_data
         self.last_comment_time = 0  # Initialize last_comment_time
-        self.comment_delay = random.randint(self.shared_data.comment_delaymin, self.shared_data.comment_delaymax)  # Initialize comment_delay
+        self.comment_delay = random.randint(self.shared_data.config['comment_delaymin'], self.shared_data.config['comment_delaymax'])  # Initialize comment_delay
         self.last_theme = None  # Initialize last_theme
         self.themes = self.load_comments(self.shared_data.commentsfile)  # Load themes from JSON file
 
@@ -57,7 +57,7 @@ class Commentaireia:
                     "StealFilesSMB", "StealFilesFTP", "StealDataSQL", 
                     "StealFilesSSH", "SSHBruteforce", "SMBBruteforce", 
                     "RDPBruteforce", "LogStandalone", "LogStandalone2",
-                    "SQLBruteforce", "ZombifySSH"
+                    "SQLBruteforce", "ZombifySSH", "LynisPentest"
                 ]
                 
                 for theme in required_themes:
