@@ -50,6 +50,7 @@ from init_shared import shared_data
 from utils import WebUtils
 from logger import Logger
 from threat_intelligence import ThreatIntelligenceFusion
+from lynis_parser import parse_lynis_dat
 
 # Initialize logger
 logger = Logger(name="webapp_modern.py", level=logging.DEBUG)
@@ -2195,6 +2196,41 @@ def get_vulnerability_intel():
             'services_with_intel': 0,
             'script_outputs': 0
         }
+
+        def format_lynis_section(title, entries, limit=25):
+            entries = list(entries or [])
+            if not entries:
+                return None
+
+            lines = []
+            for entry in entries[:limit]:
+                parts = []
+                code = entry.get('code') or entry.get('package') or title.upper()
+                if code:
+                    parts.append(f"[{code}]")
+                message = entry.get('message') or entry.get('package') or entry.get('raw') or ''
+                if message:
+                    parts.append(message)
+                detail = entry.get('detail') or entry.get('version') or ''
+                if detail:
+                    parts.append(detail)
+                remediation = entry.get('remediation') or entry.get('reference') or ''
+                if remediation:
+                    parts.append(f"Fix: {remediation}")
+                line = ' | '.join(part for part in parts if part)
+                if line:
+                    lines.append(line)
+
+            if len(entries) > limit:
+                lines.append(f"...and {len(entries) - limit} more")
+
+            if not lines:
+                return None
+
+            return {
+                'name': title,
+                'output': '\n'.join(lines)
+            }
         
         vuln_files = os.listdir(vuln_dir)
 
@@ -2330,6 +2366,7 @@ def get_vulnerability_intel():
                             'scan_date': scan_date,
                             'filename': filename,
                             'download_url': f"/api/vulnerability-report/{filename}",
+                            'log_url': f"/api/vulnerability-report/{filename}",
                             'services': services,
                             'total_services': len(services)
                         })
@@ -2348,70 +2385,96 @@ def get_vulnerability_intel():
             if not match:
                 continue
 
-                file_path = os.path.join(vuln_dir, filename)
-                stats['total_scanned'] += 1
+            file_path = os.path.join(vuln_dir, filename)
+            stats['total_scanned'] += 1
 
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                        content = handle.read()
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                    content = handle.read()
 
-                    ip = match.group('ip')
-                    timestamp_raw = match.group('ts')
-                    hostname = f"{ip} (Lynis)"
+                ip = match.group('ip')
+                timestamp_raw = match.group('ts')
+                hostname = f"{ip} (Lynis)"
 
-                    mod_time = os.path.getmtime(file_path)
-                    scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+                mod_time = os.path.getmtime(file_path)
+                scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
 
-                    findings = []
-                    for line in content.splitlines():
-                        stripped = line.strip()
-                        lowered = stripped.lower()
-                        if not stripped:
-                            continue
-                        if lowered.startswith('warning[') or lowered.startswith('suggestion['):
-                            findings.append(stripped)
-                        elif 'hardening index' in lowered:
-                            findings.append(stripped)
+                dat_filename = filename.replace('_pentest.txt', '.dat')
+                dat_path = os.path.join(vuln_dir, dat_filename)
+                parsed_report = {}
+                if os.path.exists(dat_path):
+                    with open(dat_path, 'r', encoding='utf-8', errors='ignore') as dat_handle:
+                        parsed_report = parse_lynis_dat(dat_handle.read()) or {}
 
-                    if not findings:
-                        snippet = content.strip().splitlines()[:40]
-                        findings = snippet if snippet else ['No explicit warnings captured; see full report for details.']
+                findings = []
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    lowered = stripped.lower()
+                    if not stripped:
+                        continue
+                    if lowered.startswith('warning[') or lowered.startswith('suggestion['):
+                        findings.append(stripped)
+                    elif 'hardening index' in lowered:
+                        findings.append(stripped)
 
-                    report_excerpt = '\n'.join(findings)
-                    # Keep payload manageable for the UI
-                    if len(report_excerpt) > 8000:
-                        report_excerpt = report_excerpt[:8000] + '\n...[truncated]'
+                if not findings:
+                    snippet = content.strip().splitlines()[:40]
+                    findings = snippet if snippet else ['No explicit warnings captured; see full report for details.']
 
-                    service_entry = {
-                        'port': 'system',
-                        'service': 'lynis pentest',
-                        'version': timestamp_raw,
-                        'scripts': [
-                            {
-                                'name': 'security_audit',
-                                'output': report_excerpt
-                            }
-                        ]
-                    }
+                report_excerpt = '\n'.join(findings)
+                if len(report_excerpt) > 8000:
+                    report_excerpt = report_excerpt[:8000] + '\n...[truncated]'
 
-                    stats['services_with_intel'] += 1
-                    stats['script_outputs'] += 1
-                    stats['interesting_hosts'] += 1
+                scripts = [{
+                    'name': 'security_audit',
+                    'output': report_excerpt
+                }]
 
-                    scans.append({
-                        'ip': ip,
-                        'hostname': hostname,
-                        'scan_date': scan_date,
-                        'filename': filename,
-                        'download_url': f"/api/vulnerability-report/{filename}",
-                        'services': [service_entry],
-                        'total_services': 1,
-                        'scan_type': 'lynis'
-                    })
+                warnings_section = format_lynis_section('warnings', parsed_report.get('warnings', []))
+                if warnings_section:
+                    scripts.append(warnings_section)
 
-                except Exception as exc:
-                    logger.error(f"Error parsing Lynis report {filename}: {exc}")
-                    continue
+                suggestions_section = format_lynis_section('suggestions', parsed_report.get('suggestions', []))
+                if suggestions_section:
+                    scripts.append(suggestions_section)
+
+                packages_section = format_lynis_section('packages', parsed_report.get('vulnerable_packages', []))
+                if packages_section:
+                    scripts.append(packages_section)
+
+                hardening_index = None
+                metadata = parsed_report.get('metadata') if isinstance(parsed_report, dict) else {}
+                if isinstance(metadata, dict):
+                    hardening_index = metadata.get('hardening_index')
+
+                service_entry = {
+                    'port': 'system',
+                    'service': 'lynis pentest',
+                    'version': f"Hardening index: {hardening_index} @ {timestamp_raw}" if hardening_index else timestamp_raw,
+                    'scripts': scripts
+                }
+
+                stats['services_with_intel'] += 1
+                stats['script_outputs'] += len(scripts)
+                stats['interesting_hosts'] += 1
+
+                download_target = dat_filename if os.path.exists(dat_path) else filename
+
+                scans.append({
+                    'ip': ip,
+                    'hostname': hostname,
+                    'scan_date': scan_date,
+                    'filename': filename,
+                    'download_url': f"/api/vulnerability-report/{download_target}",
+                    'log_url': f"/api/vulnerability-report/{filename}",
+                    'services': [service_entry],
+                    'total_services': 1,
+                    'scan_type': 'lynis'
+                })
+
+            except Exception as exc:
+                logger.error(f"Error parsing Lynis report {filename}: {exc}")
+                continue
         
         # Sort scans by interesting content (most services and scripts first), then by scan date
         scans.sort(key=lambda x: (

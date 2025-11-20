@@ -2519,7 +2519,13 @@ function displayVulnerabilityIntel(scans) {
                         ${scan.download_url ? `
                             <a href="${scan.download_url}" target="_blank" rel="noopener noreferrer"
                                class="text-xs px-3 py-1 rounded-full bg-cyan-900/60 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-800/80 transition">
-                                View full report
+                                ${scan.scan_type === 'lynis' ? 'Download full report' : 'View full report'}
+                            </a>
+                        ` : ''}
+                        ${(scan.log_url && scan.log_url !== scan.download_url) ? `
+                            <a href="${scan.log_url}" target="_blank" rel="noopener noreferrer"
+                               class="text-xs px-3 py-1 rounded-full bg-slate-900/60 text-slate-200 border border-slate-500/40 hover:bg-slate-800/80 transition">
+                                View audit log
                             </a>
                         ` : ''}
                         <span class="text-sm text-cyan-400">📡 ${serviceCount} services</span>
