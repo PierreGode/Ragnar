@@ -2477,15 +2477,61 @@ def get_vulnerability_intel():
                 logger.error(f"Error parsing Lynis report {filename}: {exc}")
                 continue
         
-        # Sort scans by interesting content (most services and scripts first), then by scan date
-        scans.sort(key=lambda x: (
+        # Consolidate scans by IP address to prevent duplicates
+        consolidated_scans = {}
+        
+        for scan in scans:
+            ip = scan['ip']
+            
+            if ip not in consolidated_scans:
+                # First scan for this IP - use as base
+                consolidated_scans[ip] = scan.copy()
+            else:
+                # Merge services from additional scans for same IP
+                existing_scan = consolidated_scans[ip]
+                
+                # Merge services, avoiding duplicates
+                existing_services = {f"{svc['port']}_{svc['service']}": svc for svc in existing_scan['services']}
+                
+                for new_service in scan['services']:
+                    service_key = f"{new_service['port']}_{new_service['service']}"
+                    if service_key not in existing_services:
+                        existing_scan['services'].append(new_service)
+                    else:
+                        # Merge scripts if service already exists
+                        existing_service = existing_services[service_key]
+                        for script in new_service.get('scripts', []):
+                            if script not in existing_service.get('scripts', []):
+                                existing_service.setdefault('scripts', []).append(script)
+                
+                # Update totals
+                existing_scan['total_services'] = len(existing_scan['services'])
+                
+                # Use most recent scan date and filename
+                if scan['scan_date'] > existing_scan['scan_date']:
+                    existing_scan['scan_date'] = scan['scan_date']
+                    existing_scan['filename'] = scan['filename']
+                    existing_scan['download_url'] = scan['download_url']
+                    existing_scan['log_url'] = scan['log_url']
+                
+                # Combine scan types if different
+                if scan.get('scan_type') != existing_scan.get('scan_type'):
+                    existing_types = existing_scan.get('scan_type', 'nmap').split('+')
+                    new_type = scan.get('scan_type', 'nmap')
+                    if new_type not in existing_types:
+                        existing_types.append(new_type)
+                        existing_scan['scan_type'] = '+'.join(sorted(existing_types))
+        
+        # Convert back to list and sort by interesting content
+        final_scans = list(consolidated_scans.values())
+        final_scans.sort(key=lambda x: (
             -x['total_services'],  # Most services first
             -sum(len(svc.get('scripts', [])) for svc in x['services']),  # Most scripts first
             x['scan_date']  # Then by date descending
         ), reverse=False)  # reverse=False because we're using negative values
         
         return jsonify({
-            'scans': scans,
+            'scans': final_scans,
             'statistics': stats
         })
         
