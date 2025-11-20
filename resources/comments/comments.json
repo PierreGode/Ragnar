@@ -1758,7 +1758,7 @@
         "Zombie army expanded successfully",
         "SSH backdoor: mission accomplished..."
     ],
-    "LynisPentest": [
+    "LynisPentestSSH": [
         "Running Lynis security audit...",
         "Scanning system hardening status...",
         "Analyzing security vulnerabilities with Lynis...",

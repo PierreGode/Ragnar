@@ -57,7 +57,7 @@ class Commentaireia:
                     "StealFilesSMB", "StealFilesFTP", "StealDataSQL", 
                     "StealFilesSSH", "SSHBruteforce", "SMBBruteforce", 
                     "RDPBruteforce", "LogStandalone", "LogStandalone2",
-                    "SQLBruteforce", "ZombifySSH", "LynisPentest"
+                    "SQLBruteforce", "ZombifySSH", "LynisPentestSSH"
                 ]
                 
                 for theme in required_themes:
