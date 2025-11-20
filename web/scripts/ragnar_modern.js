@@ -8066,3 +8066,121 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+// ============================================================================
+// AI INSIGHTS FUNCTIONS
+// ============================================================================
+
+// Load AI status and insights
+async function loadAIInsights() {
+    try {
+        // First check AI status
+        const statusResponse = await fetch('/api/ai/status');
+        const status = await statusResponse.json();
+        
+        const aiSection = document.getElementById('ai-insights-section');
+        const aiNotConfigured = document.getElementById('ai-not-configured');
+        
+        if (!status.enabled || !status.configured) {
+            // Show configuration message
+            if (aiSection) aiSection.style.display = 'none';
+            if (aiNotConfigured) aiNotConfigured.style.display = 'block';
+            return;
+        }
+        
+        // Show AI insights section
+        if (aiSection) aiSection.style.display = 'block';
+        if (aiNotConfigured) aiNotConfigured.style.display = 'none';
+        
+        // Update model name
+        const modelName = document.getElementById('ai-model-name');
+        if (modelName && status.model) {
+            modelName.textContent = status.model;
+        }
+        
+        // Load comprehensive insights
+        const insightsResponse = await fetch('/api/ai/insights');
+        const insights = await insightsResponse.json();
+        
+        if (insights.enabled) {
+            // Update network summary
+            const networkSummary = document.getElementById('ai-network-summary');
+            if (networkSummary) {
+                networkSummary.textContent = insights.network_summary || 'Analyzing network...';
+            }
+            
+            // Update vulnerability analysis
+            const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+            const vulnSection = document.getElementById('ai-vuln-section');
+            if (vulnAnalysis) {
+                if (insights.vulnerability_analysis) {
+                    vulnAnalysis.textContent = insights.vulnerability_analysis;
+                    if (vulnSection) vulnSection.style.display = 'block';
+                } else {
+                    vulnAnalysis.textContent = 'No vulnerabilities detected';
+                    if (vulnSection) vulnSection.style.display = 'block';
+                }
+            }
+            
+            // Update weakness analysis
+            const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+            const weaknessSection = document.getElementById('ai-weakness-section');
+            if (weaknessAnalysis) {
+                if (insights.weakness_analysis) {
+                    weaknessAnalysis.textContent = insights.weakness_analysis;
+                    if (weaknessSection) weaknessSection.style.display = 'block';
+                } else {
+                    weaknessAnalysis.textContent = 'Analyzing network topology...';
+                    if (weaknessSection) weaknessSection.style.display = 'block';
+                }
+            }
+            
+            // Update last update time
+            const lastUpdate = document.getElementById('ai-last-update');
+            if (lastUpdate) {
+                lastUpdate.textContent = 'Just now';
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error loading AI insights:', error);
+        // Silently fail - don't disrupt the dashboard if AI is unavailable
+    }
+}
+
+// Refresh AI insights
+async function refreshAIInsights() {
+    try {
+        // Clear cache first
+        await fetch('/api/ai/clear-cache', { method: 'POST' });
+        
+        // Show loading state
+        const networkSummary = document.getElementById('ai-network-summary');
+        const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+        const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        
+        if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
+        if (vulnAnalysis) vulnAnalysis.textContent = 'Analyzing vulnerabilities...';
+        if (weaknessAnalysis) weaknessAnalysis.textContent = 'Identifying network weaknesses...';
+        
+        // Reload insights
+        await loadAIInsights();
+        
+        showNotification('AI insights refreshed successfully', 'success');
+    } catch (error) {
+        console.error('Error refreshing AI insights:', error);
+        showNotification('Failed to refresh AI insights', 'error');
+    }
+}
+
+// Add AI insights to dashboard load
+const originalLoadDashboard = loadDashboard;
+loadDashboard = async function() {
+    if (originalLoadDashboard) {
+        await originalLoadDashboard();
+    }
+    
+    // Load AI insights after a short delay to not block main dashboard
+    setTimeout(() => {
+        loadAIInsights();
+    }, 1000);
+};

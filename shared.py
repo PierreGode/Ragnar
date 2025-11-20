@@ -57,6 +57,10 @@ class SharedData:
         self.network_intelligence = None
         self.initialize_network_intelligence()
         
+        # Initialize AI service (after paths and config are ready)
+        self.ai_service = None
+        self.initialize_ai_service()
+        
         self.create_livestatusfile() 
         self.load_fonts() # Load the fonts used by the application
         self.load_images() # Load the images used by the application
@@ -74,6 +78,19 @@ class SharedData:
         except Exception as e:
             logger.error(f"Failed to initialize network intelligence: {e}")
             self.network_intelligence = None
+    
+    def initialize_ai_service(self):
+        """Initialize the AI service"""
+        try:
+            from ai_service import AIService
+            self.ai_service = AIService(self)
+            if self.ai_service.is_enabled():
+                logger.info("AI service initialized successfully with GPT-5 Nano")
+            else:
+                logger.info("AI service initialized but not enabled (check configuration)")
+        except Exception as e:
+            logger.error(f"Failed to initialize AI service: {e}")
+            self.ai_service = None
 
     def initialize_paths(self):
         """Initialize the paths used by the application."""
@@ -227,6 +244,16 @@ class SharedData:
             "network_change_grace": 300,
             "network_intelligence_enabled": True,
             "network_auto_resolution": True,
+
+            "__title_ai__": "AI Integration (GPT-5 Nano)",
+            "ai_enabled": False,
+            "openai_api_token": "",
+            "ai_model": "gpt-5-nano",
+            "ai_analysis_enabled": True,
+            "ai_vulnerability_summaries": True,
+            "ai_network_insights": True,
+            "ai_max_tokens": 500,
+            "ai_temperature": 0.7,
         }
 
     def _normalize_config_keys(self, config):

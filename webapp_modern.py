@@ -9402,6 +9402,200 @@ def export_netkb_data():
         return jsonify({'error': str(e)}), 500
 
 # ============================================================================
+# AI INSIGHTS ENDPOINTS
+# ============================================================================
+
+@app.route('/api/ai/status')
+def get_ai_status():
+    """Get AI service status and configuration"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service:
+            return jsonify({
+                'enabled': False,
+                'available': False,
+                'message': 'AI service not initialized'
+            })
+        
+        return jsonify({
+            'enabled': ai_service.is_enabled(),
+            'available': True,
+            'model': ai_service.model,
+            'capabilities': {
+                'network_insights': ai_service.network_insights,
+                'vulnerability_summaries': ai_service.vulnerability_summaries
+            },
+            'configured': bool(ai_service.api_token)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/insights')
+def get_ai_insights():
+    """Get comprehensive AI-generated insights about the network"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled. Configure OpenAI API token in settings.'
+            })
+        
+        # Generate insights
+        insights = ai_service.generate_insights()
+        
+        return jsonify(insights)
+        
+    except Exception as e:
+        logger.error(f"Error getting AI insights: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/network-summary')
+def get_ai_network_summary():
+    """Get AI-generated network security summary"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get current network data
+        network_data = {
+            'target_count': safe_int(shared_data.targetnbr),
+            'port_count': safe_int(shared_data.portnbr),
+            'vulnerability_count': safe_int(shared_data.vulnnbr),
+            'credential_count': safe_int(shared_data.crednbr)
+        }
+        
+        # Get AI summary
+        summary = ai_service.analyze_network_summary(network_data)
+        
+        return jsonify({
+            'enabled': True,
+            'summary': summary,
+            'network_data': network_data
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI network summary: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/vulnerabilities')
+def get_ai_vulnerability_analysis():
+    """Get AI-generated vulnerability analysis"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get vulnerabilities from network intelligence
+        vulnerabilities = []
+        if (hasattr(shared_data, 'network_intelligence') and 
+            shared_data.network_intelligence):
+            findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+            vulnerabilities = list(findings.get('vulnerabilities', {}).values())
+        
+        if not vulnerabilities:
+            return jsonify({
+                'enabled': True,
+                'analysis': None,
+                'message': 'No vulnerabilities found to analyze'
+            })
+        
+        # Get AI analysis
+        analysis = ai_service.analyze_vulnerabilities(vulnerabilities)
+        
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'vulnerability_count': len(vulnerabilities)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI vulnerability analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/weaknesses')
+def get_ai_weakness_analysis():
+    """Get AI-identified network weaknesses"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get network data
+        network_data = {
+            'target_count': safe_int(shared_data.targetnbr),
+            'port_count': safe_int(shared_data.portnbr),
+            'vulnerability_count': safe_int(shared_data.vulnnbr)
+        }
+        
+        # Get findings
+        findings = []
+        if (hasattr(shared_data, 'network_intelligence') and 
+            shared_data.network_intelligence):
+            findings_data = shared_data.network_intelligence.get_active_findings_for_dashboard()
+            vulnerabilities = list(findings_data.get('vulnerabilities', {}).values())
+            credentials = list(findings_data.get('credentials', {}).values())
+            findings = vulnerabilities + credentials
+        
+        # Get AI analysis
+        analysis = ai_service.identify_network_weaknesses(network_data, findings)
+        
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'findings_count': len(findings)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI weakness analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/clear-cache', methods=['POST'])
+def clear_ai_cache():
+    """Clear AI response cache"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service:
+            return jsonify({
+                'success': False,
+                'message': 'AI service not available'
+            })
+        
+        ai_service.clear_cache()
+        
+        return jsonify({
+            'success': True,
+            'message': 'AI cache cleared successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error clearing AI cache: {e}")
+        return jsonify({'error': str(e)}), 500
+
+# ============================================================================
 # SIGNAL HANDLERS
 # ============================================================================
 
