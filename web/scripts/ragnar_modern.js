@@ -9,11 +9,13 @@ let autoRefreshIntervals = {};
 
 let preloadedTabs = new Set();
 let pendingFileHighlight = null;
+let manualModeActive = false;
+let manualDataPrimed = false;
 
 const configMetadata = {
     manual_mode: {
-        label: "Manual Mode",
-        description: "Hold Ragnar in manual control. Disable this to let the orchestrator continuously discover devices, run actions, and launch vulnerability scans automatically."
+        label: "Pentest Mode",
+        description: "Hold Ragnar in hands-on pentest control. Disable this to let the orchestrator continuously discover devices, run actions, and launch vulnerability scans automatically."
     },
     debug_mode: {
         label: "Debug Mode",
@@ -28,7 +30,7 @@ const configMetadata = {
         description: "When enabled, vulnerability scans will scan the top 50 common ports on hosts where no ports were discovered. When disabled, only hosts with discovered ports will be scanned."
     },
     enable_attacks: {
-        label: "Enable Attacks",
+        label: "Enable Automatic Attacks",
         description: "Allow Ragnar to perform automated attacks (SSH, FTP, SMB, SQL, etc.) on discovered targets. Disable to only scan without attacking."
     },
     retry_success_actions: {
@@ -387,6 +389,10 @@ function initializeSocket() {
         handleDeepScanUpdate(data);
     });
 
+    socket.on('lynis_update', function(data) {
+        handleLynisUpdate(data);
+    });
+
     socket.on('connect_error', function(error) {
         reconnectAttempts++;
         console.error('Connection error:', error);
@@ -506,6 +512,8 @@ function setupAutoRefresh() {
     autoRefreshIntervals.connect = setInterval(() => {
         if (currentTab === 'connect') {
             refreshWifiStatus();
+        }
+        if (currentTab === 'pentest' && manualModeActive) {
             refreshBluetoothStatus();
         }
     }, 15000); // Every 15 seconds
@@ -706,6 +714,14 @@ async function loadTabData(tabName) {
         case 'connect':
             if (!alreadyPreloaded) {
                 await loadConnectData();
+            }
+            break;
+        case 'pentest':
+            if (manualModeActive) {
+                await loadPentestData();
+            } else {
+                addConsoleMessage('Enable Pentest Mode to access the Pentest tab', 'warning');
+                showTab('dashboard');
             }
             break;
         case 'discovered':
@@ -1472,6 +1488,112 @@ async function triggerDeepScan(ip, options = {}) {
             clearDeepScanButtonState(ip);
         }
         return false;
+    }
+}
+
+function handleLynisUpdate(data) {
+    const { type, ip, message, stage, details } = data;
+    
+    // Get Lynis UI elements
+    const lynisButton = document.getElementById('manual-lynis-btn');
+    const lynisStatus = document.getElementById('lynis-audit-status');
+    
+    switch (type) {
+        case 'lynis_started':
+            addConsoleMessage(`🔐 ${message}`, 'info');
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-red-600', 'hover:bg-red-700');
+                lynisButton.classList.add('bg-blue-600', 'cursor-wait');
+                lynisButton.disabled = true;
+                lynisButton.textContent = 'Audit started';
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = message;
+                lynisStatus.className = 'text-sm text-blue-600 mt-2';
+            }
+            break;
+            
+        case 'lynis_progress':
+            // Update button with progress messages
+            if (lynisButton) {
+                const event = data.event;
+                if (event === 'connecting') {
+                    lynisButton.textContent = 'Connecting...';
+                } else if (event === 'connected') {
+                    lynisButton.textContent = 'Connected';
+                } else if (event === 'installing') {
+                    lynisButton.textContent = 'Installing Lynis...';
+                } else if (event === 'lynis_found') {
+                    lynisButton.textContent = 'Lynis ready';
+                } else if (event === 'audit_starting') {
+                    lynisButton.textContent = 'Running audit...';
+                } else if (event === 'processing') {
+                    lynisButton.textContent = 'Processing results...';
+                }
+            }
+            if (lynisStatus && message) {
+                lynisStatus.textContent = message;
+                if (details) {
+                    lynisStatus.textContent += ` (${details})`;
+                }
+            }
+            // Add console message for major stage changes
+            if (stage && ['connection', 'setup', 'audit', 'processing'].includes(stage)) {
+                addConsoleMessage(`   ${message}`, 'info');
+            }
+            break;
+            
+        case 'lynis_completed':
+            addConsoleMessage(`✅ ${message}`, 'success');
+            
+            // Update button to show completion
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-blue-600', 'cursor-wait');
+                lynisButton.classList.add('bg-green-600');
+                lynisButton.textContent = '✅ Audit complete';
+                lynisButton.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    if (lynisButton) {
+                        lynisButton.classList.remove('bg-green-600');
+                        lynisButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                        lynisButton.textContent = 'Run Lynis Audit';
+                        lynisButton.disabled = false;
+                    }
+                }, 3000);
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = `Audit completed for ${ip}. Check vulnerabilities directory for results.`;
+                lynisStatus.className = 'text-sm text-green-600 mt-2';
+            }
+            break;
+            
+        case 'lynis_error':
+            addConsoleMessage(`❌ ${message}`, 'error');
+            
+            // Update button to show error
+            if (lynisButton) {
+                lynisButton.classList.remove('bg-blue-600', 'cursor-wait');
+                lynisButton.classList.add('bg-red-600');
+                lynisButton.textContent = '❌ Audit failed';
+                lynisButton.disabled = true;
+                
+                // Reset button after 3 seconds
+                setTimeout(() => {
+                    if (lynisButton) {
+                        lynisButton.classList.remove('bg-red-600');
+                        lynisButton.classList.add('bg-red-600', 'hover:bg-red-700');
+                        lynisButton.textContent = 'Run Lynis Audit';
+                        lynisButton.disabled = false;
+                    }
+                }, 3000);
+            }
+            if (lynisStatus) {
+                lynisStatus.textContent = message;
+                lynisStatus.className = 'text-sm text-red-600 mt-2';
+            }
+            break;
     }
 }
 
@@ -2516,6 +2638,18 @@ function displayVulnerabilityIntel(scans) {
                         </div>
                     </div>
                     <div class="flex items-center space-x-4">
+                        ${scan.download_url ? `
+                            <a href="${scan.download_url}" target="_blank" rel="noopener noreferrer"
+                               class="text-xs px-3 py-1 rounded-full bg-cyan-900/60 text-cyan-200 border border-cyan-500/40 hover:bg-cyan-800/80 transition">
+                                ${scan.scan_type === 'lynis' ? 'Download full report' : 'View full report'}
+                            </a>
+                        ` : ''}
+                        ${(scan.log_url && scan.log_url !== scan.download_url) ? `
+                            <a href="${scan.log_url}" target="_blank" rel="noopener noreferrer"
+                               class="text-xs px-3 py-1 rounded-full bg-slate-900/60 text-slate-200 border border-slate-500/40 hover:bg-slate-800/80 transition">
+                                View audit log
+                            </a>
+                        ` : ''}
                         <span class="text-sm text-cyan-400">📡 ${serviceCount} services</span>
                         ${scriptCount > 0 ? `<span class="text-sm text-purple-400">📜 ${scriptCount} scripts</span>` : ''}
                         <span class="text-xs text-gray-500">${scan.scan_date}</span>
@@ -4529,6 +4663,32 @@ async function downloadPentestReport() {
 // MANUAL MODE FUNCTIONS
 // ============================================================================
 
+function syncManualModeUI(isManualMode) {
+    manualModeActive = isManualMode;
+
+    const manualHint = document.getElementById('manual-mode-hint');
+    if (manualHint) {
+        manualHint.classList.toggle('hidden', isManualMode);
+    }
+
+    document.querySelectorAll('.pentest-nav-btn').forEach(btn => {
+        btn.classList.toggle('hidden', !isManualMode);
+    });
+
+    if (!isManualMode && currentTab === 'pentest') {
+        showTab('dashboard');
+    }
+
+    if (isManualMode) {
+        if (!manualDataPrimed) {
+            loadManualModeData();
+            manualDataPrimed = true;
+        }
+    } else {
+        manualDataPrimed = false;
+    }
+}
+
 async function loadManualModeData() {
     try {
         // Store current selections before reloading
@@ -4614,8 +4774,18 @@ async function loadManualModeData() {
         }
         
     } catch (error) {
-        console.error('Error loading manual mode data:', error);
-        addConsoleMessage('Failed to load manual mode data', 'error');
+        console.error('Error loading Pentest Mode data:', error);
+        addConsoleMessage('Failed to load Pentest Mode data', 'error');
+    }
+}
+
+async function loadPentestData() {
+    try {
+        await loadManualModeData();
+        await refreshBluetoothStatus();
+    } catch (error) {
+        console.error('Error loading pentest data:', error);
+        addConsoleMessage('Failed to load pentest data', 'error');
     }
 }
 
@@ -4684,11 +4854,6 @@ async function startOrchestrator() {
             updateElement('ragnar-mode', 'Auto');
             document.getElementById('ragnar-mode').className = 'text-green-400 font-semibold';
             
-            // Hide manual controls
-            const manualControls = document.getElementById('manual-controls');
-            if (manualControls) {
-                manualControls.classList.add('hidden');
-            }
         } else {
             addConsoleMessage(`Failed to start automatic mode: ${data.message || 'Unknown error'}`, 'error');
         }
@@ -4706,17 +4871,10 @@ async function stopOrchestrator() {
         const data = await postAPI('/api/manual/orchestrator/stop', {});
         
         if (data.success) {
-            addConsoleMessage('Automatic mode stopped - Manual mode activated', 'warning');
+            addConsoleMessage('Automatic mode stopped - Pentest Mode activated', 'warning');
             updateElement('ragnar-mode', 'Manual');
             document.getElementById('ragnar-mode').className = 'text-orange-400 font-semibold';
             
-            // Show manual controls
-            const manualControls = document.getElementById('manual-controls');
-            if (manualControls) {
-                manualControls.classList.remove('hidden');
-                // Load manual mode data
-                loadManualModeData();
-            }
         } else {
             addConsoleMessage(`Failed to stop automatic mode: ${data.message || 'Unknown error'}`, 'error');
         }
@@ -4765,6 +4923,106 @@ async function triggerVulnScan() {
     } catch (error) {
         console.error('Error triggering vulnerability scan:', error);
         addConsoleMessage('Failed to trigger vulnerability scan', 'error');
+    }
+}
+
+async function runManualLynisPentest() {
+    const ipInput = document.getElementById('manual-lynis-ip');
+    const userInput = document.getElementById('manual-lynis-username');
+    const passInput = document.getElementById('manual-lynis-password');
+    const statusWrap = document.getElementById('manual-lynis-status');
+    const statusMessage = document.getElementById('manual-lynis-status-message');
+    const submitBtn = document.getElementById('manual-lynis-btn');
+
+    if (!ipInput || !userInput || !passInput) {
+        addConsoleMessage('Manual Lynis form is missing elements', 'error');
+        return;
+    }
+
+    const ip = ipInput.value.trim();
+    const username = userInput.value.trim();
+    const password = passInput.value;
+
+    const setStatus = (message, type = 'info') => {
+        if (!statusWrap || !statusMessage) return;
+        const styles = {
+            success: 'border-green-500/40 bg-green-900/30 text-green-200',
+            error: 'border-red-500/50 bg-red-900/40 text-red-200',
+            info: 'border-slate-700 bg-slate-900/70 text-gray-200'
+        };
+        statusWrap.classList.remove('hidden');
+        statusMessage.className = `rounded-lg px-4 py-3 text-sm ${styles[type] || styles.info}`;
+        statusMessage.textContent = message;
+    };
+
+    if (!ip || !username || !password) {
+        setStatus('IP, username, and password are required to run Lynis manually.', 'error');
+        return;
+    }
+
+    if (!isValidIPv4(ip)) {
+        setStatus('Please enter a valid IPv4 address.', 'error');
+        return;
+    }
+
+    // Show live status element
+    const liveStatus = document.getElementById('lynis-audit-status');
+    if (liveStatus) {
+        liveStatus.classList.remove('hidden');
+        liveStatus.textContent = 'Initializing Lynis audit...';
+        liveStatus.className = 'text-sm text-blue-600 mt-2';
+    }
+    
+    if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Starting audit...';
+        submitBtn.classList.add('bg-blue-600', 'cursor-wait');
+        submitBtn.classList.remove('bg-red-600', 'hover:bg-red-700');
+    }
+
+    try {
+        const response = await fetch('/api/manual/pentest/lynis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip, username, password })
+        });
+
+        let payload = {};
+        try {
+            payload = await response.json();
+        } catch (parseError) {
+            console.warn('Unable to parse manual Lynis response JSON', parseError);
+        }
+
+        if (!response.ok || (payload && payload.success === false)) {
+            throw new Error((payload && (payload.error || payload.message)) || `Request failed (${response.status})`);
+        }
+
+        const successMessage = (payload && payload.message) || `Lynis pentest initiated for ${ip}`;
+        setStatus(successMessage, 'success');
+        addConsoleMessage(successMessage, 'success');
+        passInput.value = '';
+        
+        // Live status will be updated via WebSocket events
+        // Don't reset the button here - let WebSocket handler do it
+        return;
+        
+    } catch (error) {
+        console.error('Error running manual Lynis pentest:', error);
+        setStatus(`Failed to start Lynis pentest: ${error.message}`, 'error');
+        addConsoleMessage(`Manual Lynis error: ${error.message}`, 'error');
+        
+        // Reset UI on error
+        if (submitBtn) {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Run Lynis Pentest';
+            submitBtn.classList.remove('bg-blue-600', 'cursor-wait');
+            submitBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+        }
+        if (liveStatus) {
+            liveStatus.textContent = `Error: ${error.message}`;
+            liveStatus.className = 'text-sm text-red-600 mt-2';
+        }
     }
 }
 
@@ -4841,7 +5099,7 @@ function updateDashboardStatus(data) {
     updateElement('Ragnar-says', (data.ragnar_says || 'Hacking away...'));
     
     // Update mode and handle manual controls
-    const isManualMode = data.manual_mode;
+    const isManualMode = Boolean(data.manual_mode);
     updateElement('Ragnar-mode', isManualMode ? 'Manual' : 'Auto');
     
     // Update mode styling
@@ -4854,20 +5112,7 @@ function updateDashboardStatus(data) {
         }
     }
     
-    // Show/hide manual controls based on mode
-    const manualControls = document.getElementById('manual-controls');
-    if (manualControls) {
-        if (isManualMode) {
-            const wasHidden = manualControls.classList.contains('hidden');
-            manualControls.classList.remove('hidden');
-            // Only load manual mode data when first showing controls, not on every status update
-            if (wasHidden) {
-                loadManualModeData();
-            }
-        } else {
-            manualControls.classList.add('hidden');
-        }
-    }
+    syncManualModeUI(isManualMode);
     
     // Update connectivity status with WiFi SSID
     updateConnectivityIndicator('wifi-status', data.wifi_connected, data.current_ssid, data.ap_mode_active);
@@ -5206,9 +5451,12 @@ function displayLootTable(data) {
         return;
     }
     
-    let html = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">`;
+    const previewCount = 6;
+    const hasMoreItems = data.length > previewCount;
+    const previewItems = data.slice(0, previewCount);
+    const hiddenItems = hasMoreItems ? data.slice(previewCount) : [];
     
-    data.forEach(item => {
+    function createLootItemHTML(item) {
         const filename = escapeHtml(item.filename || 'Unknown File');
         const size = escapeHtml(item.size || 'N/A');
         const source = escapeHtml(item.source || 'Unknown');
@@ -5218,7 +5466,7 @@ function displayLootTable(data) {
         const clickAttr = encodedPath ? `onclick="openLootFile('${encodedPath}')"` : 'disabled aria-disabled="true"';
         const actionHint = encodedPath ? '<p class="text-xs text-Ragnar-400 mt-3">Open in Files →</p>' : '';
         
-        html += `
+        return `
             <button type="button" class="${buttonClasses}" ${clickAttr}>
                 <div class="flex items-center justify-between mb-2">
                     <h3 class="text-lg font-semibold text-Ragnar-400 truncate" title="${filename}">${filename}</h3>
@@ -5231,10 +5479,67 @@ function displayLootTable(data) {
                 ${actionHint}
             </button>
         `;
+    }
+    
+    let html = `<div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" id="loot-preview-items">`;
+    
+    // Add preview items
+    previewItems.forEach(item => {
+        html += createLootItemHTML(item);
     });
     
     html += '</div>';
+    
+    // Add expandable section for remaining items
+    if (hasMoreItems) {
+        html += `
+            <div class="mt-4">
+                <button onclick="toggleLootExpansion()" 
+                        class="flex items-center justify-center w-full py-3 px-4 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors text-gray-300 hover:text-white">
+                    <span id="loot-expand-text">Show ${hiddenItems.length} more items</span>
+                    <svg id="loot-expand-arrow" class="w-4 h-4 ml-2 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                    </svg>
+                </button>
+                <div id="loot-hidden-items" class="hidden mt-4">
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        `;
+        
+        hiddenItems.forEach(item => {
+            html += createLootItemHTML(item);
+        });
+        
+        html += `
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    
     container.innerHTML = html;
+}
+
+function toggleLootExpansion() {
+    const hiddenItems = document.getElementById('loot-hidden-items');
+    const expandText = document.getElementById('loot-expand-text');
+    const expandArrow = document.getElementById('loot-expand-arrow');
+    
+    if (!hiddenItems || !expandText || !expandArrow) return;
+    
+    const isHidden = hiddenItems.classList.contains('hidden');
+    
+    if (isHidden) {
+        // Show hidden items
+        hiddenItems.classList.remove('hidden');
+        expandText.textContent = 'Show less';
+        expandArrow.style.transform = 'rotate(180deg)';
+    } else {
+        // Hide items
+        hiddenItems.classList.add('hidden');
+        const hiddenItemCount = hiddenItems.querySelectorAll('button').length;
+        expandText.textContent = `Show ${hiddenItemCount} more items`;
+        expandArrow.style.transform = 'rotate(0deg)';
+    }
 }
 
 function openLootFile(encodedPath) {

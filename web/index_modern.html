@@ -203,6 +203,16 @@
                     <button onclick="showTab('discovered')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="discovered">
                         Discovered
                     </button>
+                    <button id="pentest-nav-btn" onclick="showTab('pentest')"
+                            class="nav-btn px-4 py-2 rounded-lg transition-colors pentest-nav-btn hidden"
+                            data-tab="pentest">
+                        <span class="flex items-center space-x-2">
+                            <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.455 19h13.09a1 1 0 00.894-1.447L12.894 5.553a1 1 0 00-1.788 0L4.561 17.553A1 1 0 005.455 19z"></path>
+                            </svg>
+                            <span class="uppercase tracking-wide text-sm">Pentest</span>
+                        </span>
+                    </button>
                     <button onclick="showTab('threat-intel')" class="nav-btn px-4 py-2 rounded-lg hover:bg-slate-700 transition-colors" data-tab="threat-intel">
                         Threat Intel
                     </button>
@@ -238,6 +248,12 @@
                 <button onclick="showTab('dashboard')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Dashboard</button>
                 <button onclick="showTab('network')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Network</button>
                 <button onclick="showTab('discovered')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Discovered</button>
+                <button onclick="showTab('pentest')"
+                        id="mobile-pentest-nav"
+                        class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 pentest-nav-btn hidden"
+                        data-tab="pentest">
+                    Pentest
+                </button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">E-Paper</button>
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
@@ -455,83 +471,20 @@
                 </div>
             </div>
             
-            <!-- Manual Mode Controls (shown only when manual mode is active) -->
-            <div id="manual-controls" class="glass rounded-xl p-6 mb-8 hidden">
-                <h2 class="text-xl font-bold mb-4 flex items-center">
-                    <svg class="w-6 h-6 mr-2 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6V4m0 2a2 2 0 100 4m0-4a2 2 0 110 4m-6 8a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4m6 6v10m6-2a2 2 0 100-4m0 4a2 2 0 100 4m0-4v2m0-6V4"></path>
+            <!-- Pentest Mode Hint -->
+            <div id="manual-mode-hint" class="glass rounded-xl p-6 mb-8">
+                <div class="flex items-start space-x-4">
+                    <svg class="w-10 h-10 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.455 19h13.09a1 1 0 00.894-1.447L12.894 5.553a1 1 0 00-1.788 0L4.561 17.553A1 1 0 005.455 19z"></path>
                     </svg>
-                    Manual Controls
-                    <span class="ml-3 text-sm bg-orange-600 px-2 py-1 rounded">Manual Mode Active</span>
-                </h2>
-                
-                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                    
-                    <!-- General Controls -->
-                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
-                        <h3 class="font-semibold mb-4 text-Ragnar-400">System Controls</h3>
-                        <div class="grid grid-cols-2 gap-3">
-                            <button onclick="startOrchestrator()" 
-                                    class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h1m4 0h1m-6 4h.01M19 10a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                </svg>
-                                Start Auto
-                            </button>
-                            <button onclick="stopOrchestrator()" 
-                                    class="bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 10h6v4H9z"></path>
-                                </svg>
-                                Stop Auto
-                            </button>
-                            <button onclick="triggerNetworkScan()" 
-                                    class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                                </svg>
-                                Network Scan
-                            </button>
-                            <button onclick="triggerVulnScan()" 
-                                    class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
-                                </svg>
-                                Vuln Scan
-                            </button>
-                        </div>
+                    <div>
+                        <h3 class="text-lg font-semibold text-white">Pentest tab is disabled in automated mode</h3>
+                        <p class="text-sm text-gray-300 mt-1">
+                            Enable Pentest Mode to reveal the new <span class="text-red-400 font-semibold">Pentest</span> tab.
+                            It now contains manual attacks, Bluetooth pentests, and the new on-demand Lynis audit launcher.
+                        </p>
+                        <p class="text-xs text-gray-500 mt-3">The tab remains hidden until Pentest Mode is active to prevent accidental offensive actions.</p>
                     </div>
-                    
-                    <!-- Manual Attack Controls -->
-                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
-                        <h3 class="font-semibold mb-4 text-Ragnar-400">Manual Attack</h3>
-                        <div class="space-y-3">
-                            <div class="grid grid-cols-3 gap-2">
-                                <select id="manual-ip-dropdown" 
-                                        onchange="updateManualPorts()" 
-                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
-                                    <option value="">Select IP</option>
-                                </select>
-                                <select id="manual-port-dropdown" 
-                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
-                                    <option value="">Select Port</option>
-                                </select>
-                                <select id="manual-action-dropdown" 
-                                        class="bg-slate-700 text-white rounded px-3 py-2 border border-slate-600 focus:border-Ragnar-400 focus:outline-none">
-                                    <option value="">Select Action</option>
-                                </select>
-                            </div>
-                            <button onclick="executeManualAttack()" 
-                                    class="w-full bg-orange-600 hover:bg-orange-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
-                                </svg>
-                                Execute Attack
-                            </button>
-                        </div>
-                    </div>
-                    
                 </div>
             </div>
             
@@ -797,278 +750,346 @@
                 </div>
             </div>
 
-                           <!-- Bluetooth Management Section -->
-                <div class="mb-8">
-                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Management</h3>
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        
-                        <!-- Bluetooth Status Card -->
-                        <div class="glass rounded-lg p-4">
-                            <div class="flex items-center justify-between mb-3">
-                                <h4 class="font-medium">Bluetooth Status</h4>
-                                <span id="bluetooth-status-indicator" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
-                            </div>
-                            <div id="bluetooth-info" class="text-sm text-gray-400 mb-3">
-                                Loading Bluetooth status...
-                            </div>
-                            <button onclick="refreshBluetoothStatus()" 
-                                    class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                                </svg>
-                                Refresh Status
-                            </button>
-                            <button onclick="toggleBluetoothPower()" 
-                                    id="bluetooth-power-btn"
-                                    class="w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12l.01 0M12 12l.01 0M16 12l.01 0M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
-                                </svg>
-                                <span id="bluetooth-power-text">Enable Bluetooth</span>
-                            </button>
+        </div>
+        
+        <!-- Pentest Tab -->
+        <div id="pentest-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6 mb-6 border border-red-800 bg-red-950/30">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                    <div>
+                        <div class="flex items-center space-x-3 mb-2">
+                            <svg class="w-6 h-6 text-red-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M5.455 19h13.09a1 1 0 00.894-1.447L12.894 5.553a1 1 0 00-1.788 0L4.561 17.553A1 1 0 005.455 19z"></path>
+                            </svg>
+                            <h2 class="text-2xl font-bold text-red-200">Manual Pentest Operations</h2>
                         </div>
-                        
-                        <!-- Bluetooth Scanning Card -->
-                        <div class="glass rounded-lg p-4">
-                            <div class="flex items-center justify-between mb-3">
-                                <h4 class="font-medium">Device Discovery</h4>
-                                <span id="bluetooth-scan-status" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Ready</span>
-                            </div>
-                            <div class="text-sm text-gray-400 mb-3">
-                                Scan for nearby Bluetooth devices
-                            </div>
-                            <button onclick="startBluetoothScan()" 
-                                    id="bluetooth-scan-btn"
-                                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded transition-colors mb-2">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
-                                </svg>
-                                <span id="bluetooth-scan-text">Start Scan</span>
-                            </button>
-                            <button onclick="toggleBluetoothDiscoverable()" 
-                                    id="bluetooth-discoverable-btn"
-                                    class="w-full bg-cyan-600 hover:bg-cyan-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
-                                </svg>
-                                <span id="bluetooth-discoverable-text">Make Discoverable</span>
-                            </button>
-                        </div>
-                        
+                        <p class="text-sm text-red-100/80">Pentest Mode is active. Tools inside this tab can disrupt remote systems. Only proceed on targets you own or have explicit authorization to test.</p>
                     </div>
-                    
-                    <!-- Discovered Bluetooth Devices -->
-                    <div class="glass rounded-lg p-4 mt-4">
-                        <div class="flex items-center justify-between mb-4">
-                            <h4 class="font-medium">Discovered Devices</h4>
-                            <button onclick="clearBluetoothDevices()" 
-                                    class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-sm">
-                                <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                </svg>
-                                Clear
-                            </button>
-                        </div>
-                        
-                        <!-- Devices List -->
-                        <div id="bluetooth-devices-list" class="space-y-2 max-h-96 overflow-y-auto scrollbar-thin">
-                            <div class="text-center text-gray-400 py-8">
-                                Start a Bluetooth scan to discover nearby devices
-                            </div>
-                        </div>
+                    <div class="flex items-center justify-center space-x-3 text-sm">
+                        <span class="text-red-200 bg-red-900/60 px-3 py-1 rounded-full uppercase tracking-wide">
+                            Pentest Mode
+                        </span>
+                        <span class="text-gray-300">
+                            Unauthorized use is prohibited.
+                        </span>
                     </div>
-                    
-                    <!-- Bluetooth Pentest Section -->
-                    <div class="glass rounded-lg p-4 mt-4 border-2 border-red-900">
-                        <div class="flex items-center justify-between mb-4">
-                            <div class="flex items-center">
-                                <h4 class="font-medium text-red-400">⚠️ Bluetooth Penetration Testing</h4>
-                            </div>
-                            <span class="text-xs text-red-400 bg-red-900 px-2 py-1 rounded">Authorized Use Only</span>
-                        </div>
-                        
-                        <div class="text-xs text-gray-400 mb-4 p-2 bg-red-900 bg-opacity-20 rounded border border-red-800">
-                            <strong>WARNING:</strong> These tools are for authorized security testing only. 
-                            Only use on systems you own or have explicit written permission to test.
-                        </div>
-                        
-                        <!-- Pentest Action Buttons -->
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            
-                            <!-- Beacon Tracking -->
-                            <div class="bg-slate-800 rounded p-3">
-                                <div class="flex items-center mb-2">
-                                    <svg class="w-5 h-5 mr-2 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                    </svg>
-                                    <h5 class="font-medium text-sm">Beacon Tracking</h5>
-                                </div>
-                                <p class="text-xs text-gray-400 mb-2">Track iBeacon, Eddystone & AltBeacon advertisements</p>
-                                <div class="flex gap-2">
-                                    <input type="number" id="beacon-duration" value="60" min="10" max="600" 
-                                           class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
-                                    <button onclick="startBeaconTracking()" 
-                                            id="beacon-track-btn"
-                                            class="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-sm transition-colors">
-                                        Start Tracking
-                                    </button>
-                                </div>
-                                <div id="beacon-results" class="mt-2 text-xs text-gray-400 hidden"></div>
-                            </div>
-                            
-                            <!-- Data Exfiltration -->
-                            <div class="bg-slate-800 rounded p-3">
-                                <div class="flex items-center mb-2">
-                                    <svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                                    </svg>
-                                    <h5 class="font-medium text-sm">Data Exfiltration</h5>
-                                </div>
-                                <p class="text-xs text-gray-400 mb-2">Extract services, contacts, files & messages</p>
-                                <input type="text" id="exfil-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)"
-                                       class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
-                                <button onclick="startDataExfiltration()" 
-                                        id="exfil-btn"
-                                        class="w-full bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm transition-colors">
-                                    Start Exfiltration
-                                </button>
-                                <div id="exfil-results" class="mt-2 text-xs text-gray-400 hidden"></div>
-                            </div>
-                            
-                            <!-- BlueBorne Scan -->
-                            <div class="bg-slate-800 rounded p-3">
-                                <div class="flex items-center mb-2">
-                                    <svg class="w-5 h-5 mr-2 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                                    </svg>
-                                    <h5 class="font-medium text-sm">BlueBorne Scanner</h5>
-                                </div>
-                                <p class="text-xs text-gray-400 mb-2">Scan for BlueBorne vulnerabilities (CVE-2017-*)</p>
-                                <input type="text" id="blueborne-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)"
-                                       class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
-                                <button onclick="startBlueBorneScan()" 
-                                        id="blueborne-btn"
-                                        class="w-full bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-sm transition-colors">
-                                    Scan for Vulnerabilities
-                                </button>
-                                <div id="blueborne-results" class="mt-2 text-xs text-gray-400 hidden"></div>
-                            </div>
-                            
-                            <!-- Device Movement Tracking -->
-                            <div class="bg-slate-800 rounded p-3">
-                                <div class="flex items-center mb-2">
-                                    <svg class="w-5 h-5 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path>
-                                    </svg>
-                                    <h5 class="font-medium text-sm">Movement Tracking</h5>
-                                </div>
-                                <p class="text-xs text-gray-400 mb-2">Track device proximity via RSSI over time</p>
-                                <input type="text" id="track-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)"
-                                       class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
-                                <div class="flex gap-2">
-                                    <input type="number" id="track-duration" value="300" min="60" max="3600" 
-                                           class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
-                                    <button onclick="startMovementTracking()" 
-                                            id="track-btn"
-                                            class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-1 rounded text-sm transition-colors">
-                                        Start Tracking
-                                    </button>
-                                </div>
-                                <div id="track-results" class="mt-2 text-xs text-gray-400 hidden"></div>
-                            </div>
-                            
-                        </div>
-                        
-                        <!-- Pentest Results Summary -->
-                        <div id="pentest-summary" class="mt-4 p-3 bg-slate-800 rounded hidden">
-                            <h5 class="font-medium text-sm mb-2">Pentest Results</h5>
-                            <div id="pentest-summary-content" class="text-xs text-gray-400 space-y-1"></div>
-                            <button onclick="downloadPentestReport()" 
-                                    class="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-                                </svg>
-                                Download Full Report
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 xl:grid-cols-3 gap-6 mb-6">
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-xl font-semibold flex items-center space-x-2">
+                            <svg class="w-5 h-5 text-orange-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3"></path>
+                            </svg>
+                            <span>System Controls</span>
+                        </h3>
+                        <span id="manual-mode-pill" class="text-xs text-orange-200 bg-orange-900/50 px-2 py-1 rounded">Manual Active</span>
+                    </div>
+                    <div class="space-y-4">
+                        <div class="grid grid-cols-2 gap-3">
+                            <button onclick="startOrchestrator()" class="bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded transition-colors">
+                                Resume Auto
                             </button>
+                            <button onclick="stopOrchestrator()" class="bg-red-600 hover:bg-red-700 text-white py-2 px-3 rounded transition-colors">
+                                Hold Manual
+                            </button>
+                        </div>
+                        <div class="grid grid-cols-2 gap-3">
+                            <button onclick="triggerNetworkScan()" class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-3 rounded transition-colors">
+                                Network Scan
+                            </button>
+                            <button onclick="triggerVulnScan()" class="bg-purple-600 hover:bg-purple-700 text-white py-2 px-3 rounded transition-colors">
+                                Vuln Scan
+                            </button>
+                        </div>
+                        <div>
+                            <label for="vuln-ip-dropdown" class="text-xs uppercase tracking-wide text-gray-400">Vulnerability scan scope</label>
+                            <select id="vuln-ip-dropdown" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                                <option value="all">All Targets</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-2">Choose a specific host to rerun scanners on recently changed systems.</p>
                         </div>
                     </div>
                 </div>
-            <!-- Bluetooth Device Detail Modal -->
-            <div id="bluetooth-device-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
-                <div class="glass rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+                
+                <div class="glass rounded-xl p-6 xl:col-span-2">
                     <div class="flex items-center justify-between mb-4">
-                        <h3 class="text-xl font-bold">Bluetooth Device Details</h3>
-                        <button onclick="closeBluetoothDeviceModal()" class="text-gray-400 hover:text-white">
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                            </svg>
-                        </button>
+                        <div>
+                            <h3 class="text-xl font-semibold">Manual Attack Launchpad</h3>
+                            <p class="text-sm text-gray-400">Select a discovered host, narrow to an open port, and run a targeted action.</p>
+                        </div>
+                        <button onclick="loadManualModeData()" class="text-xs text-gray-300 bg-slate-800 hover:bg-slate-700 px-3 py-1 rounded border border-slate-600">Refresh Targets</button>
                     </div>
-                    
                     <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Device Name</label>
-                            <input type="text" id="bt-device-name" readonly
-                                   class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">MAC Address</label>
-                            <input type="text" id="bt-device-mac" readonly
-                                   class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Signal Strength (RSSI)</label>
-                            <input type="text" id="bt-device-rssi" readonly
-                                   class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Device Class</label>
-                            <input type="text" id="bt-device-class" readonly
-                                   class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Services</label>
-                            <div id="bt-device-services" class="bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white min-h-[60px] text-sm">
-                                <div class="text-gray-400">No services detected</div>
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            <div>
+                                <label class="text-xs uppercase tracking-wide text-gray-400">Target IP</label>
+                                <select id="manual-ip-dropdown" onchange="updateManualPorts()" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                                    <option value="">Select IP</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-xs uppercase tracking-wide text-gray-400">Port</label>
+                                <select id="manual-port-dropdown" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                                    <option value="">Select Port</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-xs uppercase tracking-wide text-gray-400">Action</label>
+                                <select id="manual-action-dropdown" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                                    <option value="">Select Action</option>
+                                </select>
                             </div>
                         </div>
-                        
-                        <div id="bt-device-actions" class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-4 border-t border-slate-600">
-                            <button onclick="pairBluetoothDevice()" 
-                                    id="bt-pair-btn"
-                                    class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
-                                </svg>
-                                Pair Device
-                            </button>
-                            <button onclick="enumerateBluetoothServices()" 
-                                    id="bt-enumerate-btn"
-                                    class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors">
-                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
-                                </svg>
-                                Enumerate Services
-                            </button>
-                        </div>
-                        
-                        <div id="bt-device-status" class="hidden">
-                            <div class="bg-slate-700 rounded p-3 text-sm"></div>
-                        </div>
+                        <button onclick="executeManualAttack()" class="w-full bg-orange-600 hover:bg-orange-700 text-white py-3 rounded-lg font-semibold tracking-wide">Execute Attack</button>
+                        <p class="text-xs text-gray-500">Actions reuse Ragnar credentials & payloads. Check the attack log in Discovered → Attack Logs for execution details.</p>
                     </div>
-                    
-                    <div class="flex justify-end mt-6">
-                        <button onclick="closeBluetoothDeviceModal()" 
-                                class="bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
-                            Close
+                </div>
+            </div>
+
+            <div class="glass rounded-xl p-6 mb-6">
+                <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-4">
+                    <div>
+                        <h3 class="text-xl font-semibold text-red-200 flex items-center gap-2">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                            </svg>
+                            On-Demand Lynis Audit
+                        </h3>
+                        <p class="text-sm text-gray-400">Run a privileged Lynis assessment over SSH and ingest the results into Service & Threat Intelligence.</p>
+                    </div>
+                    <span class="text-xs text-red-200 bg-red-900/50 px-3 py-1 rounded-full">Requires SSH credentials</span>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Target IP</label>
+                        <input id="manual-lynis-ip" type="text" placeholder="192.168.0.42" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Username</label>
+                        <input id="manual-lynis-username" type="text" placeholder="root" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                    </div>
+                    <div>
+                        <label class="text-xs uppercase tracking-wide text-gray-400">Password</label>
+                        <input id="manual-lynis-password" type="password" placeholder="Required" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-Ragnar-400">
+                    </div>
+                </div>
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mt-4">
+                    <p class="text-xs text-gray-500 flex-1">Credentials are only used to start the remote `lynis audit system` run. They are redacted from logs and never stored.</p>
+                    <button id="manual-lynis-btn" onclick="runManualLynisPentest()" class="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-lg font-semibold tracking-wide">Run Lynis Pentest</button>
+                </div>
+                <div id="manual-lynis-status" class="hidden mt-4">
+                    <div id="manual-lynis-status-message" class="rounded-lg border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-gray-200"></div>
+                </div>
+                
+                <!-- Live Status Display -->
+                <div id="lynis-audit-status" class="text-sm text-gray-400 mt-2 hidden"></div>
+            </div>
+
+            <div class="mb-8">
+                <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Operations</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Bluetooth Status</h4>
+                            <span id="bluetooth-status-indicator" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Checking...</span>
+                        </div>
+                        <div id="bluetooth-info" class="text-sm text-gray-400 mb-3">
+                            Loading Bluetooth status...
+                        </div>
+                        <button onclick="refreshBluetoothStatus()" class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh Status
+                        </button>
+                        <button onclick="toggleBluetoothPower()" id="bluetooth-power-btn" class="w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12l.01 0M12 12l.01 0M16 12l.01 0M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                            </svg>
+                            <span id="bluetooth-power-text">Enable Bluetooth</span>
                         </button>
                     </div>
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-center justify-between mb-3">
+                            <h4 class="font-medium">Device Discovery</h4>
+                            <span id="bluetooth-scan-status" class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Ready</span>
+                        </div>
+                        <div class="text-sm text-gray-400 mb-3">
+                            Scan for nearby Bluetooth devices and optionally expose Ragnar as discoverable.
+                        </div>
+                        <button onclick="startBluetoothScan()" id="bluetooth-scan-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+                            </svg>
+                            <span id="bluetooth-scan-text">Start Scan</span>
+                        </button>
+                        <button onclick="toggleBluetoothDiscoverable()" id="bluetooth-discoverable-btn" class="w-full bg-cyan-600 hover:bg-cyan-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path>
+                            </svg>
+                            <span id="bluetooth-discoverable-text">Make Discoverable</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="glass rounded-lg p-4 mb-4">
+                    <div class="flex items-center justify-between mb-4">
+                        <h4 class="font-medium">Discovered Devices</h4>
+                        <button onclick="clearBluetoothDevices()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded transition-colors text-sm">
+                            <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
+                            </svg>
+                            Clear
+                        </button>
+                    </div>
+                    <div id="bluetooth-devices-list" class="space-y-2 max-h-96 overflow-y-auto scrollbar-thin">
+                        <div class="text-center text-gray-400 py-8">
+                            Start a Bluetooth scan to discover nearby devices
+                        </div>
+                    </div>
+                </div>
+
+                <div class="glass rounded-lg p-4 border-2 border-red-900">
+                    <div class="flex items-center justify-between mb-4">
+                        <h4 class="font-medium text-red-400">⚠️ Bluetooth Penetration Testing</h4>
+                        <span class="text-xs text-red-400 bg-red-900 px-2 py-1 rounded">Authorized Use Only</span>
+                    </div>
+                    <div class="text-xs text-gray-400 mb-4 p-2 bg-red-900/30 rounded border border-red-800">
+                        <strong>Warning:</strong> Offensive Bluetooth tooling can disrupt devices. Collect written permission before launching these actions.
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div class="bg-slate-800 rounded p-3">
+                            <div class="flex items-center mb-2">
+                                <svg class="w-5 h-5 mr-2 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                                </svg>
+                                <h5 class="font-medium text-sm">Beacon Tracking</h5>
+                            </div>
+                            <p class="text-xs text-gray-400 mb-2">Track iBeacon, Eddystone & AltBeacon advertisements</p>
+                            <div class="flex gap-2">
+                                <input type="number" id="beacon-duration" value="60" min="10" max="600" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <button onclick="startBeaconTracking()" id="beacon-track-btn" class="flex-1 bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-1 rounded text-sm transition-colors">Start Tracking</button>
+                            </div>
+                            <div id="beacon-results" class="mt-2 text-xs text-gray-400 hidden"></div>
+                        </div>
+
+                        <div class="bg-slate-800 rounded p-3">
+                            <div class="flex items-center mb-2">
+                                <svg class="w-5 h-5 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                                </svg>
+                                <h5 class="font-medium text-sm">Data Exfiltration</h5>
+                            </div>
+                            <p class="text-xs text-gray-400 mb-2">Extract services, contacts, files & messages</p>
+                            <input type="text" id="exfil-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)" class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
+                            <button onclick="startDataExfiltration()" id="exfil-btn" class="w-full bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded text-sm transition-colors">Start Exfiltration</button>
+                            <div id="exfil-results" class="mt-2 text-xs text-gray-400 hidden"></div>
+                        </div>
+
+                        <div class="bg-slate-800 rounded p-3">
+                            <div class="flex items-center mb-2">
+                                <svg class="w-5 h-5 mr-2 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
+                                </svg>
+                                <h5 class="font-medium text-sm">BlueBorne Scanner</h5>
+                            </div>
+                            <p class="text-xs text-gray-400 mb-2">Scan for BlueBorne vulnerabilities (CVE-2017-*)</p>
+                            <input type="text" id="blueborne-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)" class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
+                            <button onclick="startBlueBorneScan()" id="blueborne-btn" class="w-full bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-sm transition-colors">Scan for Vulnerabilities</button>
+                            <div id="blueborne-results" class="mt-2 text-xs text-gray-400 hidden"></div>
+                        </div>
+
+                        <div class="bg-slate-800 rounded p-3">
+                            <div class="flex items-center mb-2">
+                                <svg class="w-5 h-5 mr-2 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path>
+                                </svg>
+                                <h5 class="font-medium text-sm">Movement Tracking</h5>
+                            </div>
+                            <p class="text-xs text-gray-400 mb-2">Track device proximity via RSSI over time</p>
+                            <input type="text" id="track-target" placeholder="MAC Address (AA:BB:CC:DD:EE:FF)" class="w-full bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm mb-2">
+                            <div class="flex gap-2">
+                                <input type="number" id="track-duration" value="300" min="60" max="3600" class="w-20 bg-slate-700 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <button onclick="startMovementTracking()" id="track-btn" class="flex-1 bg-cyan-600 hover:bg-cyan-700 text-white px-3 py-1 rounded text-sm transition-colors">Start Tracking</button>
+                            </div>
+                            <div id="track-results" class="mt-2 text-xs text-gray-400 hidden"></div>
+                        </div>
+                    </div>
+                    <div id="pentest-summary" class="mt-4 p-3 bg-slate-800 rounded hidden">
+                        <h5 class="font-medium text-sm mb-2">Pentest Results</h5>
+                        <div id="pentest-summary-content" class="text-xs text-gray-400 space-y-1"></div>
+                        <button onclick="downloadPentestReport()" class="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded text-sm transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                            </svg>
+                            Download Full Report
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bluetooth Device Detail Modal -->
+        <div id="bluetooth-device-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
+            <div class="glass rounded-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] overflow-y-auto">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-xl font-bold">Bluetooth Device Details</h3>
+                    <button onclick="closeBluetoothDeviceModal()" class="text-gray-400 hover:text-white">
+                        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                        </svg>
+                    </button>
+                </div>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Device Name</label>
+                        <input type="text" id="bt-device-name" readonly class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-2">MAC Address</label>
+                        <input type="text" id="bt-device-mac" readonly class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Signal Strength (RSSI)</label>
+                        <input type="text" id="bt-device-rssi" readonly class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Device Class</label>
+                        <input type="text" id="bt-device-class" readonly class="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Services</label>
+                        <div id="bt-device-services" class="bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white min-h-[60px] text-sm">
+                            <div class="text-gray-400">No services detected</div>
+                        </div>
+                    </div>
+                    <div id="bt-device-actions" class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-4 border-t border-slate-600">
+                        <button onclick="pairBluetoothDevice()" id="bt-pair-btn" class="bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"></path>
+                            </svg>
+                            Pair Device
+                        </button>
+                        <button onclick="enumerateBluetoothServices()" id="bt-enumerate-btn" class="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
+                            </svg>
+                            Enumerate Services
+                        </button>
+                    </div>
+                    <div id="bt-device-status" class="hidden">
+                        <div class="bg-slate-700 rounded p-3 text-sm"></div>
+                    </div>
+                </div>
+                <div class="flex justify-end mt-6">
+                    <button onclick="closeBluetoothDeviceModal()" class="bg-gray-600 hover:bg-gray-700 text-white py-2 px-4 rounded transition-colors">
+                        Close
+                    </button>
                 </div>
             </div>
         </div>

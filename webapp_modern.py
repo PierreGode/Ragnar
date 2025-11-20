@@ -50,6 +50,8 @@ from init_shared import shared_data
 from utils import WebUtils
 from logger import Logger
 from threat_intelligence import ThreatIntelligenceFusion
+from lynis_parser import parse_lynis_dat
+from actions.lynis_pentest_ssh import LynisPentestSSH
 
 # Initialize logger
 logger = Logger(name="webapp_modern.py", level=logging.DEBUG)
@@ -2150,6 +2152,27 @@ def get_loot():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/vulnerability-report/<path:filename>')
+def download_vulnerability_report(filename):
+    """Stream a vulnerability report file while preventing directory traversal."""
+    try:
+        vuln_dir = os.path.abspath(os.path.join('data', 'output', 'vulnerabilities'))
+        requested_path = os.path.normpath(os.path.join(vuln_dir, filename))
+
+        if not requested_path.startswith(vuln_dir):
+            logger.warning(f"Blocked traversal attempt for report: {filename}")
+            return jsonify({'error': 'File not found'}), 404
+
+        if not os.path.isfile(requested_path):
+            return jsonify({'error': 'File not found'}), 404
+
+        rel_path = os.path.relpath(requested_path, vuln_dir)
+        return send_from_directory(vuln_dir, rel_path, as_attachment=True)
+    except Exception as exc:
+        logger.error(f"Error serving vulnerability report {filename}: {exc}")
+        return jsonify({'error': 'Unable to download report'}), 500
+
+
 @app.route('/api/vulnerability-intel')
 def get_vulnerability_intel():
     """Get interesting intelligence from scan files (not vulnerabilities - those are in threat intel)"""
@@ -2174,9 +2197,46 @@ def get_vulnerability_intel():
             'services_with_intel': 0,
             'script_outputs': 0
         }
+
+        def format_lynis_section(title, entries, limit=25):
+            entries = list(entries or [])
+            if not entries:
+                return None
+
+            lines = []
+            for entry in entries[:limit]:
+                parts = []
+                code = entry.get('code') or entry.get('package') or title.upper()
+                if code:
+                    parts.append(f"[{code}]")
+                message = entry.get('message') or entry.get('package') or entry.get('raw') or ''
+                if message:
+                    parts.append(message)
+                detail = entry.get('detail') or entry.get('version') or ''
+                if detail:
+                    parts.append(detail)
+                remediation = entry.get('remediation') or entry.get('reference') or ''
+                if remediation:
+                    parts.append(f"Fix: {remediation}")
+                line = ' | '.join(part for part in parts if part)
+                if line:
+                    lines.append(line)
+
+            if len(entries) > limit:
+                lines.append(f"...and {len(entries) - limit} more")
+
+            if not lines:
+                return None
+
+            return {
+                'name': title,
+                'output': '\n'.join(lines)
+            }
         
+        vuln_files = os.listdir(vuln_dir)
+
         # Process all scan files
-        for filename in os.listdir(vuln_dir):
+        for filename in vuln_files:
             if filename.endswith('_vuln_scan.txt'):
                 file_path = os.path.join(vuln_dir, filename)
                 stats['total_scanned'] += 1
@@ -2306,6 +2366,8 @@ def get_vulnerability_intel():
                             'hostname': hostname,
                             'scan_date': scan_date,
                             'filename': filename,
+                            'download_url': f"/api/vulnerability-report/{filename}",
+                            'log_url': f"/api/vulnerability-report/{filename}",
                             'services': services,
                             'total_services': len(services)
                         })
@@ -2315,6 +2377,105 @@ def get_vulnerability_intel():
                 except Exception as e:
                     logger.error(f"Error parsing scan file {filename}: {e}")
                     continue
+
+        # Process Lynis pentest reports
+        lynis_pattern = re.compile(r'^lynis_(?P<ip>[^_]+)_(?P<ts>\d{8}_\d{6})_pentest\.txt$')
+
+        for filename in vuln_files:
+            match = lynis_pattern.match(filename)
+            if not match:
+                continue
+
+            file_path = os.path.join(vuln_dir, filename)
+            stats['total_scanned'] += 1
+
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                    content = handle.read()
+
+                ip = match.group('ip')
+                timestamp_raw = match.group('ts')
+                hostname = f"{ip} (Lynis)"
+
+                mod_time = os.path.getmtime(file_path)
+                scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+
+                dat_filename = filename.replace('_pentest.txt', '.dat')
+                dat_path = os.path.join(vuln_dir, dat_filename)
+                parsed_report = {}
+                if os.path.exists(dat_path):
+                    with open(dat_path, 'r', encoding='utf-8', errors='ignore') as dat_handle:
+                        parsed_report = parse_lynis_dat(dat_handle.read()) or {}
+
+                findings = []
+                for line in content.splitlines():
+                    stripped = line.strip()
+                    lowered = stripped.lower()
+                    if not stripped:
+                        continue
+                    if lowered.startswith('warning[') or lowered.startswith('suggestion['):
+                        findings.append(stripped)
+                    elif 'hardening index' in lowered:
+                        findings.append(stripped)
+
+                if not findings:
+                    snippet = content.strip().splitlines()[:40]
+                    findings = snippet if snippet else ['No explicit warnings captured; see full report for details.']
+
+                report_excerpt = '\n'.join(findings)
+                if len(report_excerpt) > 8000:
+                    report_excerpt = report_excerpt[:8000] + '\n...[truncated]'
+
+                scripts = [{
+                    'name': 'security_audit',
+                    'output': report_excerpt
+                }]
+
+                warnings_section = format_lynis_section('warnings', parsed_report.get('warnings', []))
+                if warnings_section:
+                    scripts.append(warnings_section)
+
+                suggestions_section = format_lynis_section('suggestions', parsed_report.get('suggestions', []))
+                if suggestions_section:
+                    scripts.append(suggestions_section)
+
+                packages_section = format_lynis_section('packages', parsed_report.get('vulnerable_packages', []))
+                if packages_section:
+                    scripts.append(packages_section)
+
+                hardening_index = None
+                metadata = parsed_report.get('metadata') if isinstance(parsed_report, dict) else {}
+                if isinstance(metadata, dict):
+                    hardening_index = metadata.get('hardening_index')
+
+                service_entry = {
+                    'port': 'system',
+                    'service': 'lynis pentest',
+                    'version': f"Hardening index: {hardening_index} @ {timestamp_raw}" if hardening_index else timestamp_raw,
+                    'scripts': scripts
+                }
+
+                stats['services_with_intel'] += 1
+                stats['script_outputs'] += len(scripts)
+                stats['interesting_hosts'] += 1
+
+                download_target = dat_filename if os.path.exists(dat_path) else filename
+
+                scans.append({
+                    'ip': ip,
+                    'hostname': hostname,
+                    'scan_date': scan_date,
+                    'filename': filename,
+                    'download_url': f"/api/vulnerability-report/{download_target}",
+                    'log_url': f"/api/vulnerability-report/{filename}",
+                    'services': [service_entry],
+                    'total_services': 1,
+                    'scan_type': 'lynis'
+                })
+
+            except Exception as exc:
+                logger.error(f"Error parsing Lynis report {filename}: {exc}")
+                continue
         
         # Sort scans by interesting content (most services and scripts first), then by scan date
         scans.sort(key=lambda x: (
@@ -7883,6 +8044,92 @@ def trigger_vulnerability_scan():
         # Reset status on error
         shared_data.ragnarstatustext = "IDLE"
         shared_data.ragnarstatustext2 = f"Failed to start vuln scan"
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/manual/pentest/lynis', methods=['POST'])
+def run_manual_lynis_pentest():
+    """Manually trigger a Lynis pentest for a specific host."""
+    try:
+        if not shared_data.config.get('manual_mode', False):
+            return jsonify({'success': False, 'error': 'Enable Pentest Mode to run manual pentests'}), 400
+
+        data = request.get_json(silent=True) or {}
+        target_ip = (data.get('ip') or '').strip()
+        username = (data.get('username') or '').strip()
+        password = data.get('password') or ''
+
+        if not target_ip or not username or not password:
+            return jsonify({'success': False, 'error': 'IP, username, and password are required'}), 400
+
+        shared_data.ragnarstatustext = "LynisPentest"
+        shared_data.ragnarstatustext2 = f"Manual pentest: {target_ip}"
+        broadcast_status_update()
+
+        def execute_manual_lynis():
+            try:
+                # Emit scan started event
+                socketio.emit('lynis_update', {
+                    'type': 'lynis_started',
+                    'ip': target_ip,
+                    'message': f'Starting Lynis security audit on {target_ip}...'
+                })
+                
+                # Define progress callback to emit real-time updates
+                def progress_callback(event_type, data):
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_progress',
+                        'event': event_type,
+                        'ip': target_ip,
+                        'message': data.get('message', ''),
+                        'stage': data.get('stage'),
+                        'details': data.get('details')
+                    })
+                
+                action = LynisPentestSSH(shared_data)
+                status = action.run_manual(target_ip, username, password, progress_callback=progress_callback)
+                success = status == 'success'
+                
+                # Emit final result
+                if success:
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_completed',
+                        'ip': target_ip,
+                        'message': f'Lynis audit completed successfully for {target_ip}'
+                    })
+                else:
+                    socketio.emit('lynis_update', {
+                        'type': 'lynis_error',
+                        'ip': target_ip,
+                        'message': f'Lynis audit failed for {target_ip}'
+                    })
+                
+                shared_data.ragnarstatustext = "IDLE"
+                shared_data.ragnarstatustext2 = (
+                    "Lynis pentest completed" if success else "Lynis pentest failed"
+                )
+                broadcast_status_update()
+                logger.info(f"Manual Lynis pentest finished for {target_ip} with status: {status}")
+            except Exception as exc:
+                logger.error(f"Error during manual Lynis pentest for {target_ip}: {exc}")
+                socketio.emit('lynis_update', {
+                    'type': 'lynis_error',
+                    'ip': target_ip,
+                    'message': f'Lynis audit error: {str(exc)}'
+                })
+                shared_data.ragnarstatustext = "IDLE"
+                shared_data.ragnarstatustext2 = "Lynis pentest error"
+                broadcast_status_update()
+
+        threading.Thread(target=execute_manual_lynis, daemon=True).start()
+
+        return jsonify({'success': True, 'message': f'Lynis pentest initiated for {target_ip}'})
+
+    except Exception as e:
+        logger.error(f"Error starting manual Lynis pentest: {e}")
+        shared_data.ragnarstatustext = "IDLE"
+        shared_data.ragnarstatustext2 = "Lynis pentest error"
+        broadcast_status_update()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ============================================================================

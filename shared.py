@@ -182,8 +182,8 @@ class SharedData:
             "portlist": [20, 21, 22, 23, 25, 53, 67, 68, 69, 80, 88, 110, 111, 119, 123, 135, 137, 138, 139, 143, 161, 162, 179, 389, 443, 445, 465, 514, 515, 520, 554, 587, 631, 636, 993, 995, 1024, 1025, 1080, 1194, 1433, 1434, 1521, 1723, 1812, 1813, 1883, 1900, 2049, 2082, 2083, 2181, 2375, 2376, 2483, 2484, 25565, 3000, 3001, 3002, 3003, 3004, 3005, 3006, 3007, 3008, 3009, 4000, 5000, 5003, 5004, 5060, 5061, 5432, 5500, 5555, 5631, 5632, 5900, 5985, 5986, 6000, 6379, 6667, 6881, 6969, 7000, 7070, 8080, 8081, 8086, 8181, 8443, 8888, 9000, 9090, 9100, 9200, 9418, 9999, 10000],
             "mac_scan_blacklist": [],
             "ip_scan_blacklist": [],
-            "steal_file_names": ["ssh.csv","hack.txt"],
-            "steal_file_extensions": [".sh",".py",".txt",".conf",".cfg",".ini",".json",".xml",".csv",".db",".sql"],
+            "steal_file_names": ["ssh.csv","hack.txt","password","passwd","credential","key","secret","config","backup"],
+            "steal_file_extensions": [".txt",".conf",".json",".xml",".db",".sql",".key",".pem",".crt",".log"],
             
             "__title_network__": "Network",
             "nmap_scan_aggressivity": "-T4",
