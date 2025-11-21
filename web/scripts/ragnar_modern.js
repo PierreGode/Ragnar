@@ -8234,23 +8234,79 @@ function formatAIText(text) {
     // Escape HTML to prevent XSS
     const escaped = escapeHtml(text);
     
-    // Convert numbered lists (1., 2., 3.) to HTML lists
-    let formatted = escaped.replace(/(\d+\.\s+[^\n]+)/g, '<li>$1</li>');
-    if (formatted.includes('<li>')) {
-        formatted = '<ul class="list-disc list-inside space-y-1">' + formatted + '</ul>';
+    // Split into lines for processing
+    const lines = escaped.split('\n');
+    const output = [];
+    let inList = false;
+    
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+        
+        if (!line) {
+            // Close any open list
+            if (inList) {
+                output.push('</ul>');
+                inList = false;
+            }
+            // Add spacing between sections
+            output.push('<div class="mb-3"></div>');
+            continue;
+        }
+        
+        // Convert **Bold Headers** to styled headers
+        if (line.match(/^\*\*(.+?)\*\*:?$/)) {
+            if (inList) {
+                output.push('</ul>');
+                inList = false;
+            }
+            const headerText = line.replace(/^\*\*(.+?)\*\*:?$/, '$1');
+            output.push(`<div class="font-bold text-sky-300 mt-4 mb-2">${headerText}</div>`);
+            continue;
+        }
+        
+        // Handle bullet points (-, *, •)
+        if (line.match(/^[\-\*\•]\s+(.+)$/)) {
+            if (!inList) {
+                output.push('<ul class="list-disc list-inside space-y-1 ml-4 text-gray-300">');
+                inList = true;
+            }
+            const content = line.replace(/^[\-\*\•]\s+(.+)$/, '$1');
+            output.push(`<li>${content}</li>`);
+            continue;
+        }
+        
+        // Handle numbered lists (1., 2., 3. or 1. **Title**)
+        if (line.match(/^\d+\.\s+/)) {
+            if (!inList) {
+                output.push('<ul class="list-decimal list-inside space-y-2 ml-4 text-gray-300">');
+                inList = true;
+            }
+            let content = line.replace(/^\d+\.\s+/, '');
+            // Handle bold within numbered items
+            content = content.replace(/\*\*(.+?)\*\*/g, '<strong class="text-sky-200">$1</strong>');
+            output.push(`<li class="mb-1">${content}</li>`);
+            continue;
+        }
+        
+        // Close list if we hit regular text
+        if (inList) {
+            output.push('</ul>');
+            inList = false;
+        }
+        
+        // Handle inline **bold** text in regular paragraphs
+        line = line.replace(/\*\*(.+?)\*\*/g, '<strong class="text-sky-200">$1</strong>');
+        
+        // Regular paragraph
+        output.push(`<p class="mb-2 text-gray-300">${line}</p>`);
     }
     
-    // Convert bullet points (-, *, •) to HTML lists
-    formatted = formatted.replace(/^[\-\*\•]\s+(.+)$/gm, '<li class="ml-4">$1</li>');
+    // Close any unclosed list
+    if (inList) {
+        output.push('</ul>');
+    }
     
-    // Convert double line breaks to paragraph breaks
-    formatted = formatted.replace(/\n\n/g, '</p><p class="mt-3">');
-    formatted = '<p>' + formatted + '</p>';
-    
-    // Convert single line breaks to <br> tags
-    formatted = formatted.replace(/\n/g, '<br>');
-    
-    return formatted;
+    return output.join('');
 }
 
 // ============================================================================
