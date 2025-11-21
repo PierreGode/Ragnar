@@ -802,10 +802,6 @@ async function loadDashboardData() {
             // Also update status since quick endpoint includes it
             updateDashboardStatus(data);
         }
-        
-        // Load AI insights after main dashboard data
-        await loadAIInsights();
-        
     } catch (error) {
         console.error('Error loading dashboard data:', error);
         // Remove pulse animation on error too
