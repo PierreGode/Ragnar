@@ -125,7 +125,33 @@ class AIService:
     # ===================================================================
 
     def is_enabled(self):
-        return self.enabled and self.client is not None and self.initialization_error is None
+        """Return True when the service is enabled and the client is ready."""
+        return self.ensure_ready()
+
+    def ensure_ready(self):
+        """Lazily initialize the OpenAI client if configuration says AI is enabled."""
+        if not self.enabled:
+            return False
+
+        # Already initialized and healthy
+        if self.client is not None and self.initialization_error is None:
+            return True
+
+        # Don't keep retrying when we've already recorded a failure
+        if self.initialization_error:
+            return False
+
+        # Refresh token from disk if we don't have one yet
+        if not self.api_token:
+            self.api_token = self.env_manager.get_token()
+
+        if not self.api_token:
+            self.initialization_error = "No OpenAI API key found."
+            self.logger.warning(self.initialization_error)
+            return False
+
+        self._initialize_client()
+        return self.client is not None and self.initialization_error is None
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
