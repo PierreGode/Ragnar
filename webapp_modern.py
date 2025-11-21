@@ -1534,6 +1534,8 @@ def update_config():
                 else:
                     ai_service.enabled = False
                     ai_service.client = None
+                    ai_service.legacy_openai = None
+                    ai_service.using_legacy_sdk = False
                     ai_service.initialization_error = None
                     ai_reload_success = True
         

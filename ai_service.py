@@ -18,13 +18,11 @@ from env_manager import EnvManager, load_env
 # Load environment variables immediately
 load_env()
 
-# OpenAI SDK
+# OpenAI SDK (modern client optional)
 try:
-    from openai import OpenAI
-    OPENAI_SDK_OK = True
+    from openai import OpenAI as OpenAIClient
 except Exception:
-    OPENAI_SDK_OK = False
-    OpenAI = None
+    OpenAIClient = None
 
 
 
@@ -62,6 +60,8 @@ class AIService:
 
         # Client initialization
         self.client = None
+        self.legacy_openai = None
+        self.using_legacy_sdk = False
         self.initialization_error = None
         self._initialize_client()
 
@@ -75,26 +75,50 @@ class AIService:
         if not self.enabled:
             return
 
-        if not OPENAI_SDK_OK:
-            self.initialization_error = (
-                "OpenAI SDK missing. Install with: pip install openai"
-            )
-            self.logger.error(self.initialization_error)
-            return
-
         if not self.api_token:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return
 
+        # Reset state
+        self.client = None
+        self.legacy_openai = None
+        self.using_legacy_sdk = False
+
+        # Attempt modern SDK first if available
+        if OpenAIClient is not None:
+            try:
+                self.client = OpenAIClient(api_key=self.api_token)
+                self.logger.info(f"AI Service initialized using model: {self.model}")
+                self.initialization_error = None
+                return
+            except Exception as modern_error:
+                self.logger.warning(
+                    f"Modern OpenAI client initialization failed ({modern_error}). Falling back to legacy SDK..."
+                )
+
+        # Fallback to legacy openai module
         try:
-            if OpenAI is None:  # Safety guard for type checkers
-                raise RuntimeError("OpenAI SDK unavailable during initialization")
-            self.client = OpenAI(api_key=self.api_token)
-            self.logger.info(f"AI Service initialized using model: {self.model}")
-        except Exception as e:
-            self.initialization_error = f"Failed to initialize OpenAI client: {e}"
-            self.logger.error(self.initialization_error)
+            import importlib
+
+            legacy_module = importlib.import_module("openai")
+            setattr(legacy_module, "api_key", self.api_token)
+            self.legacy_openai = legacy_module
+            self.using_legacy_sdk = True
+
+            if self.model.startswith("gpt-5"):
+                self.logger.info(
+                    f"Legacy OpenAI SDK detected; overriding model '{self.model}' → 'gpt-3.5-turbo' for compatibility"
+                )
+                self.model = "gpt-3.5-turbo"
+
+            self.initialization_error = None
+            self.logger.info(f"AI Service initialized using legacy OpenAI SDK (model: {self.model})")
+        except Exception as legacy_error:
+            self.initialization_error = (
+                "OpenAI SDK not accessible. Ensure the 'openai' package is installed and up to date."
+            )
+            self.logger.error(f"Legacy OpenAI initialization failed: {legacy_error}")
 
 
     def reload_token(self) -> bool:
@@ -106,6 +130,8 @@ class AIService:
 
         self.api_token = self.env_manager.get_token()
         self.client = None
+        self.legacy_openai = None
+        self.using_legacy_sdk = False
         self.initialization_error = None
 
         if not self.enabled:
@@ -118,7 +144,8 @@ class AIService:
             return False
 
         self._initialize_client()
-        success = self.client is not None and self.initialization_error is None
+        has_client = (self.client is not None) or (self.legacy_openai is not None)
+        success = has_client and self.initialization_error is None
 
         if success:
             self.logger.info("AI service reloaded with updated token.")
@@ -139,7 +166,8 @@ class AIService:
     # ===================================================================
 
     def is_enabled(self):
-        return self.enabled and self.client is not None and self.initialization_error is None
+        active_client = self.client if not self.using_legacy_sdk else self.legacy_openai
+        return self.enabled and active_client is not None and self.initialization_error is None
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
@@ -171,6 +199,9 @@ class AIService:
 
         if not self.is_enabled():
             return None
+
+        if self.using_legacy_sdk:
+            return self._ask_legacy(system_msg, user_msg)
 
         if self.client is None:
             self.logger.error("AI client unavailable despite service being enabled.")
@@ -232,6 +263,54 @@ class AIService:
         try:
             return result.output_text.strip()
         except:
+            return None
+
+
+    def _ask_legacy(self, system_msg: str, user_msg: str, allow_retry: bool = True) -> Optional[str]:
+        """Fallback path using legacy openai.ChatCompletion API."""
+
+        if not self.legacy_openai:
+            self.logger.error("Legacy OpenAI client unavailable despite fallback mode.")
+            return None
+
+        temperature = self.temperature if self.temperature_supported and self.temperature is not None else None
+
+        try:
+            completion = self.legacy_openai.ChatCompletion.create(  # type: ignore[attr-defined]
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=temperature,
+                max_tokens=self.max_tokens or 512,
+            )
+
+            usage = completion.get("usage", {}) if isinstance(completion, dict) else {}
+            if usage:
+                self.logger.info(
+                    f"AI Tokens → input:{usage.get('prompt_tokens')} output:{usage.get('completion_tokens')} total:{usage.get('total_tokens')}"
+                )
+
+            choices = completion.get("choices") if isinstance(completion, dict) else None
+            if not choices:
+                return None
+
+            return choices[0]["message"]["content"].strip()
+
+        except Exception as legacy_error:
+            error_text = str(legacy_error).lower()
+            if (
+                allow_retry
+                and temperature is not None
+                and "temperature" in error_text
+                and "unsupported" in error_text
+            ):
+                self.temperature_supported = False
+                self.logger.warning("Legacy model does not support temperature — retrying without it.")
+                return self._ask_legacy(system_msg, user_msg, allow_retry=False)
+
+            self.logger.error(f"Legacy OpenAI call failed: {legacy_error}")
             return None
 
 
