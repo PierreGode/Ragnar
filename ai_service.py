@@ -80,20 +80,6 @@ class AIService:
         
         return True, None
     
-    def _check_prerequisites(self):
-        """Check if prerequisites for AI service are met
-        
-        Returns:
-            tuple: (success: bool, error_message: str or None)
-        """
-        if not OPENAI_AVAILABLE:
-            return False, "OpenAI library not available. Install with: pip install openai"
-        
-        if not self.api_token:
-            return False, "No API token found. Please configure your OpenAI API token."
-        
-        return True, None
-    
     def reload_token(self):
         """Reload API token from environment and reinitialize client"""
         self.logger.info("Reloading API token from environment...")
