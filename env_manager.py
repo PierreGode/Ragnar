@@ -19,7 +19,22 @@ class EnvManager:
         
         # Get the actual user's home directory, not root's
         # When running with sudo, SUDO_USER contains the actual user
-        actual_user = os.environ.get('SUDO_USER') or os.environ.get('USER') or os.getlogin()
+        actual_user = os.environ.get('SUDO_USER') or os.environ.get('USER')
+        
+        # If still root, try to detect the real user from the Ragnar directory ownership
+        if not actual_user or actual_user == 'root':
+            try:
+                # Get the owner of the current working directory (Ragnar directory)
+                import pwd
+                ragnar_dir = Path.cwd()
+                stat_info = ragnar_dir.stat()
+                owner_uid = stat_info.st_uid
+                owner_info = pwd.getpwuid(owner_uid)
+                actual_user = owner_info.pw_name
+                self.logger.info(f"Detected actual user from directory ownership: {actual_user}")
+            except Exception as e:
+                self.logger.warning(f"Could not detect user from directory: {e}")
+                actual_user = os.getlogin()
         
         if actual_user and actual_user != 'root':
             # Use the actual user's home directory
