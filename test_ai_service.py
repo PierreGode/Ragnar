@@ -26,7 +26,7 @@ class MockSharedData:
 
         base_config = {
             'ai_enabled': True,
-            'ai_model': 'gpt-5.1',  # ✔ VALID GPT-5 MODEL
+            'ai_model': 'gpt-5-nano',  # ✔ VALID GPT-5 MODEL
 
             # GPT-5 no longer uses these:
             'ai_max_tokens': None,
