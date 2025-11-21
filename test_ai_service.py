@@ -13,12 +13,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ai_service import AIService
 from env_manager import EnvManager
 import json
+from typing import Any, cast
 
 
 class MockSharedData:
     """Mock shared data object for testing"""
-    def __init__(self):
-        self.config = {
+    def __init__(self, config_override=None):
+        base_config = {
             'ai_enabled': True,
             'ai_model': 'gpt-5-nano',
             'ai_max_tokens': 500,
@@ -26,11 +27,42 @@ class MockSharedData:
             'ai_vulnerability_summaries': True,
             'ai_network_insights': True
         }
+        if config_override:
+            base_config.update(config_override)
+        self.config = base_config
         self.targetnbr = 5
         self.portnbr = 23
         self.vulnnbr = 8
         self.crednbr = 3
         self.network_intelligence = None
+
+
+class FakeUsage:
+    def __init__(self):
+        self.input_tokens = 10
+        self.output_tokens = 15
+        self.total_tokens = 25
+
+
+class FakeResponse:
+    def __init__(self, text):
+        self.output_text = text
+        self.usage = FakeUsage()
+
+
+class FakeOpenAIClient:
+    """Simulates OpenAI client to test temperature fallback logic."""
+    def __init__(self):
+        self.responses = self
+        self.call_count = 0
+        self.last_payload = None
+
+    def create(self, **kwargs):
+        self.call_count += 1
+        if self.call_count == 1:
+            raise Exception("Unsupported parameter: 'temperature' is not supported with this model.")
+        self.last_payload = kwargs
+        return FakeResponse("Fallback success")
 
 
 def test_env_manager():
@@ -213,10 +245,41 @@ def test_weakness_identification():
         return False
 
 
-def test_generate_insights():
-    """Test 6: Generate combined insights"""
+def test_temperature_fallback():
+    """Test 6: Temperature unsupported fallback behavior"""
     print("\n" + "="*60)
-    print("TEST 6: Generate Combined Insights")
+    print("TEST 6: Temperature Fallback")
+    print("="*60)
+
+    shared_data = MockSharedData()
+    ai_service = AIService(shared_data)
+
+    # Override client with fake implementation to avoid real API calls
+    fake_client: Any = FakeOpenAIClient()
+    ai_service.client = cast(Any, fake_client)
+    ai_service.temperature_supported = True
+    ai_service.enabled = True
+    ai_service.initialization_error = None
+
+    print("Simulating model rejection of temperature parameter...")
+    result = ai_service._ask("System check", "Fallback test input")
+
+    if (
+        result == "Fallback success"
+        and ai_service.temperature_supported is False
+        and 'temperature' not in (fake_client.last_payload or {})
+    ):
+        print("✓ Temperature parameter automatically disabled after error")
+        return True
+
+    print("✗ Temperature fallback did not behave as expected")
+    return False
+
+
+def test_generate_insights():
+    """Test 7: Generate combined insights"""
+    print("\n" + "="*60)
+    print("TEST 7: Generate Combined Insights")
     print("="*60)
     
     shared_data = MockSharedData()
@@ -240,9 +303,9 @@ def test_generate_insights():
 
 
 def test_cache():
-    """Test 7: Caching functionality"""
+    """Test 8: Caching functionality"""
     print("\n" + "="*60)
-    print("TEST 7: Cache Functionality")
+    print("TEST 8: Cache Functionality")
     print("="*60)
     
     shared_data = MockSharedData()
@@ -298,6 +361,7 @@ def main():
     results['network_summary'] = test_network_summary()
     results['vulnerability_analysis'] = test_vulnerability_analysis()
     results['weakness_identification'] = test_weakness_identification()
+    results['temperature_fallback'] = test_temperature_fallback()
     results['insights'] = test_generate_insights()
     results['cache'] = test_cache()
     

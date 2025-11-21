@@ -41,6 +41,7 @@ class AIService:
         self.model = cfg.get('ai_model', 'gpt-5-nano')
         self.max_tokens = cfg.get('ai_max_tokens', 500)
         self.temperature = cfg.get('ai_temperature', 0.7)
+        self.temperature_supported = True
         self.vulnerability_summaries = cfg.get('ai_vulnerability_summaries', True)
         self.network_insights = cfg.get('ai_network_insights', True)
 
@@ -116,16 +117,21 @@ class AIService:
         if not self.is_enabled():
             return None
 
+        payload = {
+            "model": self.model,
+            "input": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "max_output_tokens": self.max_tokens,
+        }
+
+        include_temperature = self.temperature_supported and self.temperature is not None
+        if include_temperature:
+            payload["temperature"] = self.temperature
+
         try:
-            result = self.client.responses.create(
-                model=self.model,
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_output_tokens=self.max_tokens,
-                temperature=self.temperature
-            )
+            result = self.client.responses.create(**payload)
 
             output = result.output_text
 
@@ -139,8 +145,18 @@ class AIService:
             return output.strip()
 
         except Exception as e:
+            if include_temperature and self._temperature_not_supported(e):
+                self.temperature_supported = False
+                self.logger.warning(
+                    "Model reported temperature parameter is unsupported; retrying without it."
+                )
+                return self._ask(system_prompt, user_prompt)
             self.logger.error(f"OpenAI request failed: {e}")
             return None
+
+    def _temperature_not_supported(self, error: Exception) -> bool:
+        message = str(error).lower()
+        return "temperature" in message and "unsupported" in message
 
     # -----------------------------------------------------------
     # Network Summary
