@@ -204,7 +204,7 @@ Costs vary based on:
 - Network size
 - Comment generation frequency (controlled by comment delay settings)
 
-**Note**: AI-generated comments are cached for 5 minutes and respect the same comment delay settings as static comments (default: 15-30 seconds between comments), minimizing API costs.
+**Note**: AI-generated comments are cached for 2 minutes and respect the same comment delay settings as static comments (default: 15-30 seconds between comments), minimizing API costs.
 
 ## Troubleshooting
 

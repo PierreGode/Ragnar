@@ -53,6 +53,7 @@ class AIService:
         # Cache
         self.cache = {}
         self.cache_ttl = 3600  # 1 hour (3600 seconds) - reduce token consumption
+        self.comment_cache_duration = 120  # 2 minutes for comments - balances variety and cost
 
         # Client initialization
         self.client = None
@@ -483,8 +484,9 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
         if not self.is_enabled() or not generated_comments_enabled:
             return None
 
-        # Use shorter cache TTL (2 minutes) for better variety while still reducing costs
-        key = self._cache_key("comment", {"theme": theme, "time": int(time.time() / 120)})  # 2-min buckets
+        # Use shorter cache TTL (comment_cache_duration) for better variety while still reducing costs
+        cache_bucket = int(time.time() / self.comment_cache_duration)
+        key = self._cache_key("comment", {"theme": theme, "time": cache_bucket})
         cached = self._cache_get(key)
         if cached:
             return cached
