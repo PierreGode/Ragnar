@@ -46,6 +46,7 @@ class AIService:
 
         self.vulnerability_summaries = cfg.get("ai_vulnerability_summaries", True)
         self.network_insights = cfg.get("ai_network_insights", True)
+        self.generated_comments = cfg.get("ai_generated_comments", False)
 
         self.api_token = self.env_manager.get_token()
 
@@ -465,6 +466,81 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
 
         return output
 
+
+
+    # ===================================================================
+    #   AI-GENERATED COMMENTS
+    # ===================================================================
+
+    def generate_comment(self, theme: str) -> Optional[str]:
+        """
+        Generate a witty, context-aware comment for the given theme/status.
+        Returns None if AI comments are disabled or service unavailable.
+        """
+        if not self.is_enabled() or not self.generated_comments:
+            return None
+
+        # Use shorter cache TTL for comments to keep them fresh
+        key = self._cache_key("comment", {"theme": theme, "time": int(time.time() / 300)})  # 5-min buckets
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        system = (
+            "You are Ragnar, a witty cybersecurity Viking AI with personality. "
+            "Generate ONE SHORT comment (max 15 words) that's witty, clever, and fits the context. "
+            "Style: Mix of hacker culture, Viking references, movie quotes, and tech humor. "
+            "Tone: Casual, confident, sometimes sarcastic but always entertaining."
+        )
+
+        # Map themes to contextual descriptions
+        theme_contexts = {
+            "IDLE": "waiting for action, bored, standing by",
+            "NetworkScanner": "actively scanning network, discovering targets, reconnaissance",
+            "NmapVulnScanner": "vulnerability scanning, finding weaknesses, security assessment",
+            "FTPBruteforce": "brute forcing FTP credentials, testing passwords",
+            "TelnetBruteforce": "brute forcing Telnet, attacking legacy protocol",
+            "SSHBruteforce": "brute forcing SSH access, cracking secure shell",
+            "SMBBruteforce": "attacking network shares, SMB authentication",
+            "RDPBruteforce": "brute forcing remote desktop, RDP attack",
+            "SQLBruteforce": "attacking database, SQL authentication testing",
+            "StealFilesSSH": "extracting files via SSH, data exfiltration",
+            "StealFilesRDP": "stealing files via remote desktop",
+            "StealFilesFTP": "plundering FTP server files",
+            "StealFilesSMB": "raiding network shares, SMB file theft",
+            "StealFilesTelnet": "extracting files via Telnet",
+            "StealDataSQL": "stealing database contents, SQL data extraction",
+            "ZombifySSH": "creating SSH backdoor, establishing persistence",
+            "LynisPentestSSH": "running security audit, Lynis assessment",
+            "LogStandalone": "monitoring logs, watching system activity",
+            "LogStandalone2": "deep log analysis, extended monitoring",
+        }
+
+        context = theme_contexts.get(theme, f"performing {theme} operation")
+
+        user = f"""
+Generate ONE witty, short comment (max 15 words) for this situation:
+
+Current Activity: {context}
+
+Examples of style:
+- "Mess with the best, die like the rest"
+- "Hack the planet!"
+- "All this power and nothing to hack?"
+- "Why couldn't the bicycle stand? It was two tired!"
+- "I'm bored... Let's hack something!"
+- "Channeling my inner Zero Cool"
+- "Caffeine levels critical... need more exploits!"
+
+Generate ONE unique comment that matches this style and fits the activity.
+"""
+
+        resp = self._ask(system, user)
+        if resp:
+            # Clean up the response - remove quotes if AI added them
+            resp = resp.strip().strip('"').strip("'").strip()
+            self._cache_set(key, resp)
+        return resp
 
 
     # ===================================================================

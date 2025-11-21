@@ -6035,6 +6035,15 @@ async function loadAIConfiguration(config) {
     } catch (error) {
         console.error('Failed to fetch AI token status:', error);
     }
+
+    // Load AI-generated comments checkbox
+    const aiGeneratedCommentsCheckbox = document.getElementById('ai-generated-comments-toggle');
+    if (aiGeneratedCommentsCheckbox) {
+        const aiGeneratedComments = config && Object.prototype.hasOwnProperty.call(config, 'ai_generated_comments')
+            ? Boolean(config.ai_generated_comments)
+            : false;
+        aiGeneratedCommentsCheckbox.checked = aiGeneratedComments;
+    }
 }
 
 async function toggleAIEnabled() {
