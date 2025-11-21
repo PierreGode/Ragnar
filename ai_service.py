@@ -13,7 +13,10 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from logger import Logger
-from env_manager import EnvManager
+from env_manager import EnvManager, load_env
+
+# Load environment variables from .env file at import time
+load_env()
 
 # OpenAI SDK (modern 2.x)
 try:
