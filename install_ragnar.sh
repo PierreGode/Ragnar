@@ -553,6 +553,8 @@ setup_ragnar() {
         ["flask-socketio>=5.3.0"]="flask_socketio"
         ["flask-cors>=4.0.0"]="flask_cors"
         ["psutil>=5.9.0"]="psutil"
+        ["logger>=1.4"]="logger"
+        ["openai>=2.0.0"]="openai"
     )
     
     # Install each package individually with retries if not already installed
