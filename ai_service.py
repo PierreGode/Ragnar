@@ -46,12 +46,14 @@ class AIService:
 
         self.vulnerability_summaries = cfg.get("ai_vulnerability_summaries", True)
         self.network_insights = cfg.get("ai_network_insights", True)
+        self.generated_comments = cfg.get("ai_generated_comments", False)
 
         self.api_token = self.env_manager.get_token()
 
         # Cache
         self.cache = {}
         self.cache_ttl = 3600  # 1 hour (3600 seconds) - reduce token consumption
+        self.comment_cache_duration = 120  # 2 minutes for comments - balances variety and cost
 
         # Client initialization
         self.client = None
@@ -465,6 +467,98 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
 
         return output
 
+
+
+    # ===================================================================
+    #   AI-GENERATED COMMENTS
+    # ===================================================================
+
+    def generate_comment(self, theme: str) -> Optional[str]:
+        """
+        Generate a witty, context-aware comment for the given theme/status.
+        
+        Args:
+            theme: The current system status/theme (e.g., "IDLE", "NetworkScanner", 
+                   "SSHBruteforce", etc.). See comment.py for full list of supported themes.
+        
+        Returns:
+            A short AI-generated comment (max 15 words) matching Ragnar's personality,
+            or None if AI comments are disabled or service unavailable.
+        
+        Behavior:
+            - Comments are cached for `comment_cache_duration` (default 2 minutes)
+            - Reads config dynamically to support runtime changes
+            - Falls back to None if AI is disabled, allowing comment.py to use static comments
+            - Generates context-aware responses based on the theme
+        """
+        # Read config dynamically to support runtime changes
+        generated_comments_enabled = self.shared_data.config.get('ai_generated_comments', False)
+        
+        if not self.is_enabled() or not generated_comments_enabled:
+            return None
+
+        # Use shorter cache TTL (comment_cache_duration) for better variety while still reducing costs
+        cache_bucket = int(time.time() / self.comment_cache_duration)
+        key = self._cache_key("comment", {"theme": theme, "time": cache_bucket})
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        system = (
+            "You are Ragnar, a witty cybersecurity Viking AI with personality. "
+            "Generate ONE SHORT comment (max 15 words) that's witty, clever, and fits the context. "
+            "Style: Mix of hacker culture, Viking references, movie quotes, and tech humor. "
+            "Tone: Casual, confident, sometimes sarcastic but always entertaining."
+        )
+
+        # Map themes to contextual descriptions
+        theme_contexts = {
+            "IDLE": "waiting for action, bored, standing by",
+            "NetworkScanner": "actively scanning network, discovering targets, reconnaissance",
+            "NmapVulnScanner": "vulnerability scanning, finding weaknesses, security assessment",
+            "FTPBruteforce": "brute forcing FTP credentials, testing passwords",
+            "TelnetBruteforce": "brute forcing Telnet, attacking legacy protocol",
+            "SSHBruteforce": "brute forcing SSH access, cracking secure shell",
+            "SMBBruteforce": "attacking network shares, SMB authentication",
+            "RDPBruteforce": "brute forcing remote desktop, RDP attack",
+            "SQLBruteforce": "attacking database, SQL authentication testing",
+            "StealFilesSSH": "extracting files via SSH, data exfiltration",
+            "StealFilesRDP": "stealing files via remote desktop",
+            "StealFilesFTP": "plundering FTP server files",
+            "StealFilesSMB": "raiding network shares, SMB file theft",
+            "StealFilesTelnet": "extracting files via Telnet",
+            "StealDataSQL": "stealing database contents, SQL data extraction",
+            "ZombifySSH": "creating SSH backdoor, establishing persistence",
+            "LynisPentestSSH": "running security audit, Lynis assessment",
+            "LogStandalone": "monitoring logs, watching system activity",
+            "LogStandalone2": "deep log analysis, extended monitoring",
+        }
+
+        context = theme_contexts.get(theme, f"performing {theme} operation")
+
+        user = f"""
+Generate ONE witty, short comment (max 15 words) for this situation:
+
+Current Activity: {context}
+
+Examples of style:
+- "Mess with the best, die like the rest"
+- "Hack the planet!"
+- "All this power and nothing to hack?"
+- "Why couldn't the bicycle stand? It was two tired!"
+- "I'm bored... Let's hack something!"
+- "Channeling my inner Zero Cool"
+- "Caffeine levels critical... need more exploits!"
+
+Generate ONE unique comment that matches this style and fits the activity.
+"""
+
+        resp = self._ask(system, user)
+        if resp:
+            # Clean up the response - remove quotes if AI added them
+            resp = resp.strip().strip('"').strip("'").strip()
+            self._cache_set(key, resp)
+        return resp
 
 
     # ===================================================================

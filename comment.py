@@ -136,6 +136,18 @@ class Commentaireia:
             self.last_comment_time = current_time   # Update the last comment time
             self.last_theme = theme   # Update the last theme
 
+            # Try AI-generated comments first if enabled and available
+            if hasattr(self.shared_data, 'ai_service') and self.shared_data.ai_service:
+                try:
+                    ai_comment = self.shared_data.ai_service.generate_comment(theme)
+                    if ai_comment:
+                        logger.debug(f"Using AI-generated comment for theme '{theme}': {ai_comment}")
+                        return ai_comment
+                except Exception as e:
+                    logger.warning(f"Failed to generate AI comment for theme '{theme}': {e}")
+                    # Fall through to static comments
+
+            # Fall back to static comments from JSON file
             # Handle theme case variations and missing themes
             original_theme = theme
             if theme not in self.themes:

@@ -6035,6 +6035,15 @@ async function loadAIConfiguration(config) {
     } catch (error) {
         console.error('Failed to fetch AI token status:', error);
     }
+
+    // Load AI-generated comments checkbox
+    const aiGeneratedCommentsCheckbox = document.getElementById('ai-generated-comments-toggle');
+    if (aiGeneratedCommentsCheckbox) {
+        const aiGeneratedComments = config && Object.prototype.hasOwnProperty.call(config, 'ai_generated_comments')
+            ? Boolean(config.ai_generated_comments)
+            : false;
+        aiGeneratedCommentsCheckbox.checked = aiGeneratedComments;
+    }
 }
 
 async function toggleAIEnabled() {
@@ -6081,6 +6090,65 @@ async function toggleAIEnabled() {
         setTimeout(() => {
             statusDiv.classList.add('hidden');
         }, 5000);
+    }
+}
+
+// Helper function to show AI status messages
+function showAIStatus(statusDiv, statusMessage, isSuccess, message, autoHideDuration = 4000) {
+    if (!statusDiv || !statusMessage) return;
+    
+    statusDiv.className = isSuccess
+        ? 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700'
+        : 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+    statusMessage.textContent = message;
+    statusDiv.classList.remove('hidden');
+    
+    if (autoHideDuration > 0) {
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, autoHideDuration);
+    }
+}
+
+// Helper function to show AI error messages
+function showAIError(statusDiv, statusMessage, message, autoHideDuration = 5000) {
+    if (!statusDiv || !statusMessage) return;
+    
+    statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+    statusMessage.textContent = message;
+    statusDiv.classList.remove('hidden');
+    
+    if (autoHideDuration > 0) {
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, autoHideDuration);
+    }
+}
+
+async function toggleAIGeneratedComments() {
+    const checkbox = document.getElementById('ai-generated-comments-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    const payload = { ai_generated_comments: desiredState };
+
+    try {
+        await postAPI('/api/config', payload);
+
+        const message = desiredState
+            ? '🎭 AI-Generated Comments enabled! Ragnar is now alive with dynamic personality!'
+            : 'ℹ AI-Generated Comments disabled. Using static comments from JSON file.';
+        showAIStatus(statusDiv, statusMessage, desiredState, message);
+
+    } catch (error) {
+        console.error('Failed to toggle AI-generated comments:', error);
+        checkbox.checked = !desiredState;
+        showAIError(statusDiv, statusMessage, 
+            `✗ Failed to ${desiredState ? 'enable' : 'disable'} AI-Generated Comments (${error.message || 'unknown error'})`);
     }
 }
 
