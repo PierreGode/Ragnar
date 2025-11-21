@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Service for Ragnar
-Provides intelligent network analysis and vulnerability summaries using OpenAI GPT-5 Nano
+Provides intelligent network analysis and vulnerability summaries using OpenAI GPT
 Similar to PWNAGOTCHI's personality and analysis capabilities
 """
 
@@ -14,11 +14,15 @@ from typing import Dict, List, Optional, Any
 from logger import Logger
 from env_manager import EnvManager
 
+# More robust OpenAI import check
+OPENAI_AVAILABLE = False
 try:
     import openai
+    from openai import OpenAI
     OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+except ImportError as e:
+    openai = None
+    OpenAI = None
 
 
 class AIService:
@@ -35,7 +39,7 @@ class AIService:
         # Get API token from EnvManager (which checks .env and os.environ)
         self.api_token = self.env_manager.get_token()
         
-        self.model = shared_data.config.get('ai_model', 'gpt-4-turbo-preview') # Updated model
+        self.model = shared_data.config.get('ai_model', 'gpt-4o-mini') # Cost-effective current model
         self.max_tokens = shared_data.config.get('ai_max_tokens', 500)
         self.temperature = shared_data.config.get('ai_temperature', 0.7)
         
@@ -60,7 +64,11 @@ class AIService:
             else:
                 try:
                     # Use the new client initialization method
-                    self.client = openai.OpenAI(api_key=self.api_token)
+                    if OpenAI is not None:
+                        self.client = OpenAI(api_key=self.api_token)
+                    else:
+                        from openai import OpenAI as OpenAIClient
+                        self.client = OpenAIClient(api_key=self.api_token)
                     self.logger.info(f"AI Service initialized with model {self.model}")
                 except Exception as e:
                     self.logger.error(f"Failed to initialize OpenAI client: {e}")
@@ -73,7 +81,15 @@ class AIService:
             tuple: (success: bool, error_message: str or None)
         """
         if not OPENAI_AVAILABLE:
-            return False, "OpenAI library not available. Install with: pip install openai"
+            try:
+                # Try importing again to get detailed error
+                import openai
+                from openai import OpenAI
+                # If we get here, it actually works
+                global OPENAI_AVAILABLE
+                OPENAI_AVAILABLE = True
+            except ImportError as e:
+                return False, f"OpenAI library not available: {str(e)}. Install with: pip3 install --upgrade openai"
         
         if not self.api_token:
             return False, "No API token found. Please configure your OpenAI API token."
@@ -107,7 +123,11 @@ class AIService:
         
         # Prerequisites met - try to initialize client
         try:
-            self.client = openai.OpenAI(api_key=self.api_token)
+            if OpenAI is not None:
+                self.client = OpenAI(api_key=self.api_token)
+            else:
+                from openai import OpenAI as OpenAIClient
+                self.client = OpenAIClient(api_key=self.api_token)
             self.logger.info("AI Service reinitialized with new token")
             return True
         except Exception as e:
@@ -144,7 +164,7 @@ class AIService:
             'timestamp': time.time()
         }
     
-    def _call_openai(self, prompt: str, system_prompt: str = None) -> Optional[str]:
+    def _call_openai(self, prompt: str, system_prompt: Optional[str] = None) -> Optional[str]:
         """Make a call to OpenAI API"""
         if not self.is_enabled():
             return None
