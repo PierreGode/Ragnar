@@ -9646,6 +9646,15 @@ def save_ai_token():
         result = env_manager.save_token(token)
         
         if result['success']:
+            auto_enabled = False
+            if not shared_data.config.get('ai_enabled', False):
+                shared_data.config['ai_enabled'] = True
+                setattr(shared_data, 'ai_enabled', True)
+                shared_data.save_config()
+                socketio.emit('config_updated', shared_data.config)
+                auto_enabled = True
+                logger.info("AI Insights automatically enabled after saving API token")
+            
             # Reinitialize AI service with new token
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
@@ -9658,6 +9667,8 @@ def save_ai_token():
                 'success': True,
                 'message': result['message'],
                 'configured': True,
+                'ai_enabled': shared_data.config.get('ai_enabled', False),
+                'auto_enabled': auto_enabled,
                 'env_file': str(env_manager.env_file_path)
             })
         else:
