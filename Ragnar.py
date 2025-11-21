@@ -34,6 +34,7 @@ from webapp_modern import run_server, handle_exit as handle_exit_web
 from orchestrator import Orchestrator
 from logger import Logger
 from wifi_manager import WiFiManager
+from env_manager import load_env
 
 logger = Logger(name="Ragnar.py", level=logging.DEBUG)
 
@@ -200,6 +201,9 @@ def handle_exit(sig, frame, display_thread, ragnar_thread, web_thread):
 
 
 if __name__ == "__main__":
+    # Load environment variables from .env file at the very beginning
+    load_env()
+    
     logger.info("Starting threads")
 
     try:

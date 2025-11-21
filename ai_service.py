@@ -31,9 +31,11 @@ class AIService:
         
         # Configuration
         self.enabled = shared_data.config.get('ai_enabled', False)
-        # Get API token from environment variable instead of config
+        
+        # Get API token from EnvManager (which checks .env and os.environ)
         self.api_token = self.env_manager.get_token()
-        self.model = shared_data.config.get('ai_model', 'gpt-5-nano')
+        
+        self.model = shared_data.config.get('ai_model', 'gpt-4-turbo-preview') # Updated model
         self.max_tokens = shared_data.config.get('ai_max_tokens', 500)
         self.temperature = shared_data.config.get('ai_temperature', 0.7)
         
@@ -49,9 +51,9 @@ class AIService:
         self.client = None
         if self.enabled and OPENAI_AVAILABLE and self.api_token:
             try:
-                openai.api_key = self.api_token
-                self.client = openai
-                self.logger.info("AI Service initialized with OpenAI GPT-5 Nano")
+                # Use the new client initialization method
+                self.client = openai.OpenAI(api_key=self.api_token)
+                self.logger.info(f"AI Service initialized with model {self.model}")
             except Exception as e:
                 self.logger.error(f"Failed to initialize OpenAI client: {e}")
                 self.enabled = False
@@ -59,7 +61,7 @@ class AIService:
             self.logger.warning("AI enabled but OpenAI library not available. Install with: pip install openai")
             self.enabled = False
         elif self.enabled and not self.api_token:
-            self.logger.warning("AI enabled but no API token configured")
+            self.logger.warning("AI enabled but no API token found in .env file or environment variables.")
             self.enabled = False
     
     def reload_token(self):
@@ -72,8 +74,8 @@ class AIService:
         self.client = None
         if self.enabled and OPENAI_AVAILABLE and self.api_token:
             try:
-                openai.api_key = self.api_token
-                self.client = openai
+                # Use the new client initialization method
+                self.client = openai.OpenAI(api_key=self.api_token)
                 self.logger.info("AI Service reinitialized with new token")
                 return True
             except Exception as e:
@@ -81,7 +83,7 @@ class AIService:
                 self.enabled = False
                 return False
         elif self.enabled and not self.api_token:
-            self.logger.warning("AI enabled but no API token found")
+            self.logger.warning("AI enabled but no API token found after reload.")
             self.enabled = False
             return False
         return False
@@ -135,7 +137,7 @@ class AIService:
             })
             
             # Call OpenAI API
-            response = self.client.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,
@@ -184,7 +186,7 @@ You are knowledgeable, witty, and provide insightful analysis of network securit
 Your responses should be concise, actionable, and occasionally include a touch of personality.
 You help identify network weaknesses and provide strategic recommendations."""
             
-            prompt = f"""Analyze this network scan data and provide a brief security summary:
+            prompt = f"""Analyze this network scan data and provide a brief, witty security summary in the persona of Ragnar:
 
 Network Statistics:
 - Active Targets: {targets}
@@ -193,7 +195,7 @@ Network Statistics:
 - Credentials Discovered: {credentials}
 
 Provide a 2-3 sentence summary of the network's security posture and key findings.
-Focus on the most critical insights and actionable recommendations."""
+Focus on the most critical insights and actionable recommendations, with a bit of Viking flair."""
             
             # Get AI response
             response = self._call_openai(prompt, system_prompt)
@@ -244,7 +246,7 @@ Focus on the most critical insights and actionable recommendations."""
 You help prioritize security findings and provide clear, actionable remediation advice.
 Keep your analysis concise and focused on the most critical issues."""
             
-            prompt = f"""Analyze these vulnerabilities and provide key insights:
+            prompt = f"""In the persona of Ragnar, analyze these vulnerabilities and provide key insights:
 
 Total Vulnerabilities: {len(vulnerabilities)}
 
@@ -252,11 +254,11 @@ Top Findings:
 {json.dumps(vuln_summary, indent=2)}
 
 Provide a brief analysis focusing on:
-1. Most critical vulnerabilities
-2. Recommended priority for remediation
-3. Overall risk assessment
+1. The most critical vulnerabilities that are easy targets.
+2. Recommended priority for remediation (what to fix first).
+3. Your overall risk assessment, as if you were planning an attack.
 
-Keep it to 3-4 sentences."""
+Keep it to 3-4 sentences with a confident, expert tone."""
             
             # Get AI response
             response = self._call_openai(prompt, system_prompt)
@@ -312,7 +314,7 @@ Keep it to 3-4 sentences."""
 You identify attack vectors, weaknesses, and potential exploitation paths.
 Provide tactical insights that would help both attackers and defenders."""
             
-            prompt = f"""Analyze this network for potential weaknesses and attack vectors:
+            prompt = f"""As the penetration testing AI Ragnar, analyze this network for weaknesses:
 
 Network Overview:
 - Devices: {targets}
@@ -322,7 +324,7 @@ Key Findings:
 {json.dumps(findings_summary, indent=2)}
 
 Identify the top 2-3 network weaknesses and potential attack vectors.
-Keep it concise and actionable."""
+Be concise, tactical, and speak as if you are identifying opportunities for exploitation."""
             
             # Get AI response
             response = self._call_openai(prompt, system_prompt)
