@@ -11,6 +11,7 @@ let preloadedTabs = new Set();
 let pendingFileHighlight = null;
 let manualModeActive = false;
 let manualDataPrimed = false;
+let imagesLoaded = false;
 
 const configMetadata = {
     manual_mode: {
@@ -2814,6 +2815,7 @@ async function loadFilesData() {
     try {
         displayDirectoryTree();
         loadFiles('/');
+        // Don't automatically load images - user must click "Load Images" button
     } catch (error) {
         console.error('Error loading files data:', error);
     }
@@ -6627,9 +6629,24 @@ function showNotification(message, type) {
 
 let currentImageFilter = 'all';
 let allImages = [];
-let imagesLoaded = false;
+
+function manualLoadImages() {
+    loadImagesData();
+}
 
 function loadImagesData() {
+    // Check if images have already been loaded
+    if (imagesLoaded) {
+        console.log('Images already loaded, skipping...');
+        return;
+    }
+    
+    // Show loading state
+    const imageGrid = document.getElementById('image-grid');
+    if (imageGrid) {
+        imageGrid.innerHTML = '<div class="col-span-full text-center py-12"><p class="text-blue-400">Loading images...</p></div>';
+    }
+    
     fetch('/api/images/list')
         .then(response => response.json())
         .then(images => {
@@ -6637,15 +6654,13 @@ function loadImagesData() {
             imagesLoaded = true;
             displayImages(images);
             
-            // Hide the load images button after loading
-            const loadBtn = document.getElementById('load-images-btn');
-            if (loadBtn) {
-                loadBtn.style.display = 'none';
-            }
+            console.log(`Loaded ${images.length} images`);
         })
         .catch(error => {
             console.error('Error loading images:', error);
-            showImageError('Failed to load images: ' + error.message);
+            if (imageGrid) {
+                imageGrid.innerHTML = '<div class="col-span-full text-center py-12"><p class="text-red-400">Failed to load images: ' + error.message + '</p></div>';
+            }
         });
 }
 
