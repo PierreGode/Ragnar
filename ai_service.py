@@ -17,8 +17,13 @@ from env_manager import EnvManager
 try:
     import openai
     OPENAI_AVAILABLE = True
-except ImportError:
+    OPENAI_IMPORT_ERROR = None
+except ImportError as e:
     OPENAI_AVAILABLE = False
+    OPENAI_IMPORT_ERROR = str(e)
+except Exception as e:
+    OPENAI_AVAILABLE = False
+    OPENAI_IMPORT_ERROR = f"Unexpected error importing openai: {str(e)}"
 
 
 class AIService:
@@ -73,7 +78,14 @@ class AIService:
             tuple: (success: bool, error_message: str or None)
         """
         if not OPENAI_AVAILABLE:
-            return False, "OpenAI library not available. Install with: pip install openai"
+            if OPENAI_IMPORT_ERROR:
+                # Provide detailed error message about what went wrong
+                if "No module named" in OPENAI_IMPORT_ERROR:
+                    return False, f"OpenAI library not installed. Install with: pip install openai\nError: {OPENAI_IMPORT_ERROR}"
+                else:
+                    return False, f"OpenAI library import failed: {OPENAI_IMPORT_ERROR}\nTry: pip install --force-reinstall openai"
+            else:
+                return False, "OpenAI library not available. Install with: pip install openai"
         
         if not self.api_token:
             return False, "No API token found. Please configure your OpenAI API token."
