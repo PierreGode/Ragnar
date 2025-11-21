@@ -7740,7 +7740,9 @@ background_thread_health = {
     'sync_last_run': 0,
     'arp_last_run': 0,
     'sync_alive': False,
-    'arp_alive': False
+    'arp_alive': False,
+    'ai_intelligence_last_run': 0,
+    'ai_intelligence_alive': False
 }
 
 def background_health_monitor():
@@ -7774,6 +7776,49 @@ def background_health_monitor():
         except Exception as e:
             logger.error(f"Error in health monitor: {e}")
             time.sleep(15)
+
+
+def background_ai_intelligence_loop():
+    """Periodically process pending AI intelligence evaluations"""
+    global background_thread_health
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    interval = 300  # 5 minutes default
+    
+    while not shared_data.webapp_should_exit:
+        try:
+            # Check if AI intelligence is enabled and available
+            if (hasattr(shared_data, 'ai_target_evaluator') and 
+                shared_data.ai_target_evaluator and 
+                shared_data.ai_target_evaluator.is_enabled()):
+                
+                # Process pending evaluations (dynamic, change-based)
+                evaluated_count = shared_data.process_pending_ai_evaluations()
+                
+                if evaluated_count > 0:
+                    logger.info(f"🤖 AI Intelligence: Evaluated {evaluated_count} targets with detected changes")
+                else:
+                    logger.debug("AI Intelligence: No targets need evaluation")
+                
+                consecutive_errors = 0  # Reset on success
+                background_thread_health['ai_intelligence_last_run'] = time.time()
+                background_thread_health['ai_intelligence_alive'] = True
+            else:
+                # AI intelligence not available - sleep longer
+                logger.debug("AI Intelligence not enabled, skipping evaluation cycle")
+                time.sleep(60)
+                continue
+                
+        except Exception as e:
+            consecutive_errors += 1
+            logger.error(f"AI Intelligence background error (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
+            
+            if consecutive_errors >= max_consecutive_errors:
+                logger.critical(f"AI Intelligence background task failed {max_consecutive_errors} times! Resetting counter...")
+                consecutive_errors = 0
+                time.sleep(60)  # Wait longer after multiple failures
+        
+        time.sleep(max(30, interval))
 
 
 # ============================================================================
@@ -9847,6 +9892,171 @@ def remove_ai_token():
 
 
 # ============================================================================
+# AI INTELLIGENCE API ENDPOINTS
+# ============================================================================
+
+@app.route('/api/ai-intelligence/stats')
+def get_ai_intelligence_stats():
+    """Get AI intelligence statistics"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            stats = shared_data.ai_target_evaluator.get_statistics()
+            return jsonify({
+                'success': True,
+                'stats': stats
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting AI intelligence stats: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/targets')
+def get_ai_intelligence_targets():
+    """Get all targets with AI intelligence"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            targets = shared_data.ai_target_evaluator.get_all_intelligence()
+            return jsonify({
+                'success': True,
+                'targets': targets,
+                'count': len(targets)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting AI intelligence targets: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/target/<target_id>')
+def get_target_intelligence(target_id):
+    """Get AI intelligence for a specific target"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            intel = shared_data.ai_target_evaluator.get_target_intelligence(target_id)
+            if intel:
+                return jsonify({
+                    'success': True,
+                    'intelligence': intel
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Target not found'
+                }), 404
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting target intelligence: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/pending')
+def get_pending_evaluations():
+    """Get targets that need AI evaluation"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            manager = shared_data.ai_target_evaluator.ai_intel_manager
+            targets = manager.get_targets_needing_evaluation()
+            return jsonify({
+                'success': True,
+                'targets': targets,
+                'count': len(targets)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting pending evaluations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/evaluate', methods=['POST'])
+def trigger_ai_evaluation():
+    """Manually trigger AI evaluation of pending targets"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            data = request.get_json() or {}
+            max_targets = data.get('max_targets', 5)
+            
+            # Process pending evaluations
+            evaluated_count = shared_data.process_pending_ai_evaluations(max_targets=max_targets)
+            
+            return jsonify({
+                'success': True,
+                'evaluated_count': evaluated_count,
+                'message': f'Evaluated {evaluated_count} targets'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error triggering AI evaluation: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/target/<target_id>/history')
+def get_target_change_history(target_id):
+    """Get change history for a target"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            manager = shared_data.ai_target_evaluator.ai_intel_manager
+            limit = request.args.get('limit', 50, type=int)
+            history = manager.get_target_change_history(target_id, limit=limit)
+            return jsonify({
+                'success': True,
+                'history': history,
+                'count': len(history)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting target change history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai-intelligence/target/<target_id>/analyses')
+def get_target_analysis_history(target_id):
+    """Get AI analysis history for a target"""
+    try:
+        if hasattr(shared_data, 'ai_target_evaluator') and shared_data.ai_target_evaluator:
+            manager = shared_data.ai_target_evaluator.ai_intel_manager
+            limit = request.args.get('limit', 20, type=int)
+            analyses = manager.get_target_analysis_history(target_id, limit=limit)
+            return jsonify({
+                'success': True,
+                'analyses': analyses,
+                'count': len(analyses)
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'AI intelligence not initialized'
+            }), 503
+    except Exception as e:
+        logger.error(f"Error getting target analysis history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================================================
 # SIGNAL HANDLERS
 # ============================================================================
 
@@ -9918,6 +10128,7 @@ def run_server(host='0.0.0.0', port=8000):
         socketio.start_background_task(background_sync_loop)
         socketio.start_background_task(background_arp_scan_loop)
         socketio.start_background_task(background_health_monitor)
+        socketio.start_background_task(background_ai_intelligence_loop)
         
         logger.info("✅ All background threads started successfully")
 
