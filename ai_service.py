@@ -130,6 +130,10 @@ class AIService:
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
+        # Sync enabled state with config in case it changed
+        if hasattr(self.shared_data, "config"):
+            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+        
         if not self.enabled:
             return False
 
@@ -137,9 +141,11 @@ class AIService:
         if self.client is not None and self.initialization_error is None:
             return True
 
-        # Don't keep retrying when we've already recorded a failure
-        if self.initialization_error:
-            return False
+        # Don't keep retrying when we've already recorded a permanent failure
+        # But allow retry if token was added after initial failure
+        if self.initialization_error and self.api_token:
+            # Clear error and retry if we have a token now
+            self.initialization_error = None
 
         # Refresh token from disk if we don't have one yet
         if not self.api_token:

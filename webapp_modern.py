@@ -1524,9 +1524,24 @@ def update_config():
         shared_data.save_config()
         
         # Reload AI service if ai_enabled was changed
-        if 'ai_enabled' in data and hasattr(shared_data, 'ai_service'):
-            ai_service = shared_data.ai_service
-            if ai_service:
+        if 'ai_enabled' in data:
+            ai_service = getattr(shared_data, 'ai_service', None)
+            
+            # If AI service doesn't exist and user enabled it, try to initialize
+            if not ai_service and data['ai_enabled']:
+                try:
+                    shared_data.initialize_ai_service()
+                    ai_service = shared_data.ai_service
+                    if ai_service and ai_service.is_enabled():
+                        ai_reload_success = True
+                    else:
+                        ai_reload_success = False
+                        ai_reload_error = getattr(ai_service, 'initialization_error', 'Failed to initialize AI service') if ai_service else 'AI service creation failed'
+                except Exception as e:
+                    ai_reload_success = False
+                    ai_reload_error = str(e)
+            # If AI service exists, reload or disable it
+            elif ai_service:
                 if data['ai_enabled']:
                     ai_reload_success = ai_service.reload_token()
                     if not ai_reload_success:
