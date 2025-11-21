@@ -72,9 +72,7 @@ class AIService:
     # ===================================================================
 
     def _initialize_client(self):
-        if not self.enabled:
-            return
-
+        # ALWAYS initialize if we have a token, ignore the enabled flag
         if not OPENAI_SDK_OK:
             self.initialization_error = (
                 "OpenAI SDK missing. Install with: pip install openai"
@@ -99,7 +97,8 @@ class AIService:
     # ===================================================================
 
     def is_enabled(self):
-        return self.enabled and self.client is not None and self.initialization_error is None
+        # If we have a client and token, we're enabled regardless of config flag
+        return self.client is not None and self.initialization_error is None and self.api_token
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
