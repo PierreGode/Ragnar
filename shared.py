@@ -83,13 +83,25 @@ class SharedData:
         """Initialize the AI service"""
         try:
             from ai_service import AIService
+            logger.info("Attempting to initialize AI service...")
             self.ai_service = AIService(self)
             if self.ai_service.is_enabled():
                 logger.info("AI service initialized successfully with GPT-5 Nano")
             else:
-                logger.info("AI service initialized but not enabled (check configuration)")
+                init_error = getattr(self.ai_service, 'initialization_error', None)
+                if init_error:
+                    logger.warning(f"AI service initialized but not enabled: {init_error}")
+                else:
+                    logger.info("AI service initialized but not enabled (check configuration)")
+        except ImportError as e:
+            logger.error(f"Failed to import AI service module: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.ai_service = None
         except Exception as e:
             logger.error(f"Failed to initialize AI service: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.ai_service = None
 
     def initialize_paths(self):
