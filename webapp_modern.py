@@ -3519,6 +3519,85 @@ def get_connectivity_tracking():
         logger.error(f"Error getting connectivity tracking info: {e}")
         return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
 
+@app.route('/api/debug/ai-service')
+def get_ai_service_diagnostic():
+    """Detailed AI service diagnostic information"""
+    try:
+        import traceback
+        diagnostic = {
+            'timestamp': datetime.now().isoformat(),
+            'ai_service_exists': hasattr(shared_data, 'ai_service'),
+            'ai_service_is_none': getattr(shared_data, 'ai_service', 'MISSING') is None,
+            'config_ai_enabled': shared_data.config.get('ai_enabled', False),
+            'env_file_exists': os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')),
+        }
+        
+        # Try to get token from env
+        try:
+            from env_manager import EnvManager
+            env_mgr = EnvManager()
+            token = env_mgr.get_token()
+            diagnostic['env_token_found'] = bool(token)
+            diagnostic['env_token_preview'] = f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None
+        except Exception as e:
+            diagnostic['env_manager_error'] = str(e)
+            diagnostic['env_manager_traceback'] = traceback.format_exc()
+        
+        # Check AI service object
+        ai_service = getattr(shared_data, 'ai_service', None)
+        if ai_service:
+            diagnostic['ai_service_details'] = {
+                'enabled': getattr(ai_service, 'enabled', None),
+                'model': getattr(ai_service, 'model', None),
+                'api_token_set': bool(getattr(ai_service, 'api_token', None)),
+                'client_exists': getattr(ai_service, 'client', None) is not None,
+                'initialization_error': getattr(ai_service, 'initialization_error', None),
+                'is_enabled_result': ai_service.is_enabled() if hasattr(ai_service, 'is_enabled') else 'NO_METHOD'
+            }
+        else:
+            diagnostic['ai_service_details'] = 'SERVICE_IS_NONE'
+            
+            # Try to initialize it now
+            diagnostic['initialization_attempt'] = {}
+            try:
+                diagnostic['initialization_attempt']['status'] = 'attempting'
+                shared_data.initialize_ai_service()
+                ai_service = getattr(shared_data, 'ai_service', None)
+                if ai_service:
+                    diagnostic['initialization_attempt']['status'] = 'success'
+                    diagnostic['ai_service_details'] = {
+                        'enabled': getattr(ai_service, 'enabled', None),
+                        'model': getattr(ai_service, 'model', None),
+                        'api_token_set': bool(getattr(ai_service, 'api_token', None)),
+                        'client_exists': getattr(ai_service, 'client', None) is not None,
+                        'initialization_error': getattr(ai_service, 'initialization_error', None),
+                    }
+                else:
+                    diagnostic['initialization_attempt']['status'] = 'failed_still_none'
+            except Exception as e:
+                diagnostic['initialization_attempt']['status'] = 'exception'
+                diagnostic['initialization_attempt']['error'] = str(e)
+                diagnostic['initialization_attempt']['traceback'] = traceback.format_exc()
+        
+        # Try importing the module directly
+        try:
+            from ai_service import AIService
+            diagnostic['ai_service_import'] = 'success'
+        except Exception as e:
+            diagnostic['ai_service_import'] = 'failed'
+            diagnostic['ai_service_import_error'] = str(e)
+            diagnostic['ai_service_import_traceback'] = traceback.format_exc()
+        
+        return jsonify(diagnostic)
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
 @app.route('/api/debug/force-arp-scan', methods=['POST'])
 def force_arp_scan():
     """Force an ARP scan and update the cache manually for debugging"""
