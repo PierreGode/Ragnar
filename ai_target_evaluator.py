@@ -19,7 +19,15 @@ from typing import Dict, List, Optional
 
 from logger import Logger
 from ai_intelligence_manager import get_ai_intelligence_manager
-from ai_service import AIService
+
+# Import AIService with fallback for environments without openai
+try:
+    from ai_service import AIService
+except ImportError as e:
+    # OpenAI not installed - AI evaluation will be disabled
+    AIService = None
+    import sys
+    print(f"Warning: AIService unavailable ({e}), AI evaluation features disabled", file=sys.stderr)
 
 logger = Logger(name="AITargetEvaluator", level=logging.INFO)
 

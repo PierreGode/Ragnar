@@ -61,6 +61,10 @@ class SharedData:
         self.ai_service = None
         self.initialize_ai_service()
         
+        # Initialize AI intelligence tracking (after AI service is ready)
+        self.ai_target_evaluator = None
+        self.initialize_ai_intelligence()
+        
         self.create_livestatusfile() 
         self.load_fonts() # Load the fonts used by the application
         self.load_images() # Load the images used by the application
@@ -103,6 +107,24 @@ class SharedData:
             import traceback
             logger.error(traceback.format_exc())
             self.ai_service = None
+    
+    def initialize_ai_intelligence(self):
+        """Initialize the AI intelligence tracking system"""
+        try:
+            from ai_target_evaluator import get_ai_target_evaluator
+            logger.info("Attempting to initialize AI intelligence tracking...")
+            self.ai_target_evaluator = get_ai_target_evaluator(self)
+            logger.info("AI intelligence tracking initialized successfully")
+        except ImportError as e:
+            logger.error(f"Failed to import AI intelligence module: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.ai_target_evaluator = None
+        except Exception as e:
+            logger.error(f"Failed to initialize AI intelligence tracking: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            self.ai_target_evaluator = None
 
     def initialize_paths(self):
         """Initialize the paths used by the application."""
@@ -1107,6 +1129,62 @@ class SharedData:
 
             return total_added
 
+
+    def track_target_for_ai_intelligence(self, ip: str, mac: str = None, hostname: str = None,
+                                        ports: str = None, vulnerabilities: str = None,
+                                        services: str = None):
+        """
+        Track target state changes for AI intelligence evaluation.
+        Automatically triggers AI re-evaluation when changes are detected.
+        
+        Args:
+            ip: IP address
+            mac: MAC address
+            hostname: Hostname
+            ports: Current ports (comma-separated or JSON)
+            vulnerabilities: Current vulnerabilities (JSON)
+            services: Current services (JSON)
+        """
+        if not self.ai_target_evaluator:
+            return
+        
+        try:
+            # Check and update target - returns True if changes detected
+            has_changes = self.ai_target_evaluator.check_and_update_target(
+                ip=ip,
+                mac=mac,
+                hostname=hostname,
+                ports=ports,
+                vulnerabilities=vulnerabilities,
+                services=services
+            )
+            
+            if has_changes:
+                logger.debug(f"Target {ip} marked for AI evaluation due to detected changes")
+        except Exception as e:
+            logger.error(f"Error tracking target for AI intelligence: {e}")
+
+
+    def process_pending_ai_evaluations(self, max_targets: int = None):
+        """
+        Process pending AI evaluations for targets with detected changes.
+        This should be called periodically (e.g., every 5 minutes) to evaluate
+        targets dynamically instead of on a fixed schedule.
+        
+        Args:
+            max_targets: Maximum number of targets to evaluate (default: batch size from config)
+        
+        Returns:
+            int: Number of targets evaluated
+        """
+        if not self.ai_target_evaluator:
+            return 0
+        
+        try:
+            return self.ai_target_evaluator.process_pending_evaluations(max_targets=max_targets)
+        except Exception as e:
+            logger.error(f"Error processing AI evaluations: {e}")
+            return 0
 
     def print(self, message):
         """Print a debug message if debug mode is enabled."""
