@@ -6049,7 +6049,11 @@ async function toggleAIEnabled() {
     const payload = { ai_enabled: desiredState };
 
     try {
-        await postAPI('/api/config', payload);
+        const result = await postAPI('/api/config', payload);
+
+        if (desiredState && result && result.ai_reload_success === false) {
+            throw new Error(result.ai_reload_error || 'AI engine failed to initialize. Check server logs.');
+        }
 
         statusDiv.className = desiredState
             ? 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700'

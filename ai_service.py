@@ -79,13 +79,17 @@ class AIService:
             self.initialization_error = (
                 "OpenAI SDK missing. Install with: pip install openai"
             )
+            self.logger.error(self.initialization_error)
             return
 
         if not self.api_token:
             self.initialization_error = "No OpenAI API key found."
+            self.logger.warning(self.initialization_error)
             return
 
         try:
+            if OpenAI is None:  # Safety guard for type checkers
+                raise RuntimeError("OpenAI SDK unavailable during initialization")
             self.client = OpenAI(api_key=self.api_token)
             self.logger.info(f"AI Service initialized using model: {self.model}")
         except Exception as e:
@@ -119,7 +123,12 @@ class AIService:
         if success:
             self.logger.info("AI service reloaded with updated token.")
         else:
-            self.logger.error("AI service failed to reinitialize after token reload.")
+            if self.initialization_error:
+                self.logger.error(
+                    f"AI service failed to reinitialize after token reload: {self.initialization_error}"
+                )
+            else:
+                self.logger.error("AI service failed to reinitialize after token reload.")
 
         return success
 

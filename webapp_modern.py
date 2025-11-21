@@ -1509,6 +1509,9 @@ def update_config():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
         
+        ai_reload_success = None
+        ai_reload_error = None
+
         # Update configuration (allow new keys to be added)
         for key, value in data.items():
             # Skip private/internal keys that start with __
@@ -1522,12 +1525,28 @@ def update_config():
         
         # Reload AI service if ai_enabled was changed
         if 'ai_enabled' in data and hasattr(shared_data, 'ai_service'):
-            shared_data.ai_service.reload_token()
+            ai_service = shared_data.ai_service
+            if ai_service:
+                if data['ai_enabled']:
+                    ai_reload_success = ai_service.reload_token()
+                    if not ai_reload_success:
+                        ai_reload_error = getattr(ai_service, 'initialization_error', None)
+                else:
+                    ai_service.enabled = False
+                    ai_service.client = None
+                    ai_service.initialization_error = None
+                    ai_reload_success = True
         
         # Emit update to all connected clients
         socketio.emit('config_updated', shared_data.config)
         
-        return jsonify({'success': True, 'message': 'Configuration updated'})
+        response = {'success': True, 'message': 'Configuration updated'}
+        if ai_reload_success is not None:
+            response['ai_reload_success'] = ai_reload_success
+            if ai_reload_error:
+                response['ai_reload_error'] = ai_reload_error
+
+        return jsonify(response)
     except Exception as e:
         logger.error(f"Error updating config: {e}")
         return jsonify({'error': str(e)}), 500
