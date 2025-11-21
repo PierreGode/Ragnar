@@ -1509,6 +1509,9 @@ def update_config():
         if not data:
             return jsonify({'error': 'No data provided'}), 400
         
+        ai_reload_success = None
+        ai_reload_error = None
+
         # Update configuration (allow new keys to be added)
         for key, value in data.items():
             # Skip private/internal keys that start with __
@@ -1520,10 +1523,45 @@ def update_config():
         # Save configuration
         shared_data.save_config()
         
+        # Reload AI service if ai_enabled was changed
+        if 'ai_enabled' in data:
+            ai_service = getattr(shared_data, 'ai_service', None)
+            
+            # If AI service doesn't exist and user enabled it, try to initialize
+            if not ai_service and data['ai_enabled']:
+                try:
+                    shared_data.initialize_ai_service()
+                    ai_service = shared_data.ai_service
+                    if ai_service and ai_service.is_enabled():
+                        ai_reload_success = True
+                    else:
+                        ai_reload_success = False
+                        ai_reload_error = getattr(ai_service, 'initialization_error', 'Failed to initialize AI service') if ai_service else 'AI service creation failed'
+                except Exception as e:
+                    ai_reload_success = False
+                    ai_reload_error = str(e)
+            # If AI service exists, reload or disable it
+            elif ai_service:
+                if data['ai_enabled']:
+                    ai_reload_success = ai_service.reload_token()
+                    if not ai_reload_success:
+                        ai_reload_error = getattr(ai_service, 'initialization_error', None)
+                else:
+                    ai_service.enabled = False
+                    ai_service.client = None
+                    ai_service.initialization_error = None
+                    ai_reload_success = True
+        
         # Emit update to all connected clients
         socketio.emit('config_updated', shared_data.config)
         
-        return jsonify({'success': True, 'message': 'Configuration updated'})
+        response = {'success': True, 'message': 'Configuration updated'}
+        if ai_reload_success is not None:
+            response['ai_reload_success'] = ai_reload_success
+            if ai_reload_error:
+                response['ai_reload_error'] = ai_reload_error
+
+        return jsonify(response)
     except Exception as e:
         logger.error(f"Error updating config: {e}")
         return jsonify({'error': str(e)}), 500
@@ -3480,6 +3518,85 @@ def get_connectivity_tracking():
     except Exception as e:
         logger.error(f"Error getting connectivity tracking info: {e}")
         return jsonify({'error': str(e), 'timestamp': datetime.now().isoformat()}), 500
+
+@app.route('/api/debug/ai-service')
+def get_ai_service_diagnostic():
+    """Detailed AI service diagnostic information"""
+    try:
+        import traceback
+        diagnostic = {
+            'timestamp': datetime.now().isoformat(),
+            'ai_service_exists': hasattr(shared_data, 'ai_service'),
+            'ai_service_is_none': getattr(shared_data, 'ai_service', 'MISSING') is None,
+            'config_ai_enabled': shared_data.config.get('ai_enabled', False),
+            'env_file_exists': os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')),
+        }
+        
+        # Try to get token from env
+        try:
+            from env_manager import EnvManager
+            env_mgr = EnvManager()
+            token = env_mgr.get_token()
+            diagnostic['env_token_found'] = bool(token)
+            diagnostic['env_token_preview'] = f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None
+        except Exception as e:
+            diagnostic['env_manager_error'] = str(e)
+            diagnostic['env_manager_traceback'] = traceback.format_exc()
+        
+        # Check AI service object
+        ai_service = getattr(shared_data, 'ai_service', None)
+        if ai_service:
+            diagnostic['ai_service_details'] = {
+                'enabled': getattr(ai_service, 'enabled', None),
+                'model': getattr(ai_service, 'model', None),
+                'api_token_set': bool(getattr(ai_service, 'api_token', None)),
+                'client_exists': getattr(ai_service, 'client', None) is not None,
+                'initialization_error': getattr(ai_service, 'initialization_error', None),
+                'is_enabled_result': ai_service.is_enabled() if hasattr(ai_service, 'is_enabled') else 'NO_METHOD'
+            }
+        else:
+            diagnostic['ai_service_details'] = 'SERVICE_IS_NONE'
+            
+            # Try to initialize it now
+            diagnostic['initialization_attempt'] = {}
+            try:
+                diagnostic['initialization_attempt']['status'] = 'attempting'
+                shared_data.initialize_ai_service()
+                ai_service = getattr(shared_data, 'ai_service', None)
+                if ai_service:
+                    diagnostic['initialization_attempt']['status'] = 'success'
+                    diagnostic['ai_service_details'] = {
+                        'enabled': getattr(ai_service, 'enabled', None),
+                        'model': getattr(ai_service, 'model', None),
+                        'api_token_set': bool(getattr(ai_service, 'api_token', None)),
+                        'client_exists': getattr(ai_service, 'client', None) is not None,
+                        'initialization_error': getattr(ai_service, 'initialization_error', None),
+                    }
+                else:
+                    diagnostic['initialization_attempt']['status'] = 'failed_still_none'
+            except Exception as e:
+                diagnostic['initialization_attempt']['status'] = 'exception'
+                diagnostic['initialization_attempt']['error'] = str(e)
+                diagnostic['initialization_attempt']['traceback'] = traceback.format_exc()
+        
+        # Try importing the module directly
+        try:
+            from ai_service import AIService
+            diagnostic['ai_service_import'] = 'success'
+        except Exception as e:
+            diagnostic['ai_service_import'] = 'failed'
+            diagnostic['ai_service_import_error'] = str(e)
+            diagnostic['ai_service_import_traceback'] = traceback.format_exc()
+        
+        return jsonify(diagnostic)
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': str(e),
+            'traceback': traceback.format_exc(),
+            'timestamp': datetime.now().isoformat()
+        }), 500
 
 @app.route('/api/debug/force-arp-scan', methods=['POST'])
 def force_arp_scan():
@@ -9400,6 +9517,334 @@ def export_netkb_data():
     except Exception as e:
         logger.error(f"Error exporting NetKB data: {e}")
         return jsonify({'error': str(e)}), 500
+
+# ============================================================================
+# AI INSIGHTS ENDPOINTS
+# ============================================================================
+
+@app.route('/api/ai/status')
+def get_ai_status():
+    """Get AI service status and configuration"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        config_enabled = shared_data.config.get('ai_enabled', False)
+        
+        # If the AI service object isn't present but config says it should be enabled, try to initialize it
+        if not ai_service and config_enabled:
+            try:
+                logger.info("AI service not found but config_enabled=true, attempting initialization...")
+                shared_data.initialize_ai_service()
+                ai_service = getattr(shared_data, 'ai_service', None)
+            except Exception as e:
+                logger.error(f"Failed to auto-initialize AI service: {e}")
+        
+        # If the AI service object still isn't present, report not available
+        if not ai_service:
+            return jsonify({
+                'enabled': False,
+                'available': True,  # Always assume SDK is installed
+                'config_enabled': config_enabled,
+                'configured': False,
+                'message': 'AI service not initialized'
+            })
+        
+        status = {
+            'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
+            'config_enabled': config_enabled,  # User's intent from config
+            'available': True,  # Always assume SDK is installed
+            'model': getattr(ai_service, 'model', None),
+            'capabilities': {
+                'network_insights': getattr(ai_service, 'network_insights', False),
+                'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
+            },
+            'configured': bool(getattr(ai_service, 'api_token', None))
+        }
+        
+        # Include initialization error if present (but skip SDK-related ones)
+        init_error = getattr(ai_service, 'initialization_error', None)
+        if init_error and 'OpenAI SDK' not in str(init_error):
+            status['error'] = init_error
+        
+        return jsonify(status)
+        
+    except Exception as e:
+        logger.error(f"Error getting AI status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/insights')
+def get_ai_insights():
+    """Get comprehensive AI-generated insights about the network"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled. Configure OpenAI API token in settings.'
+            })
+        
+        # Generate insights
+        insights = ai_service.generate_insights()
+        
+        return jsonify(insights)
+        
+    except Exception as e:
+        logger.error(f"Error getting AI insights: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/network-summary')
+def get_ai_network_summary():
+    """Get AI-generated network security summary"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get current network data
+        network_data = {
+            'target_count': safe_int(shared_data.targetnbr),
+            'port_count': safe_int(shared_data.portnbr),
+            'vulnerability_count': safe_int(shared_data.vulnnbr),
+            'credential_count': safe_int(shared_data.crednbr)
+        }
+        
+        # Get AI summary
+        summary = ai_service.analyze_network_summary(network_data)
+        
+        return jsonify({
+            'enabled': True,
+            'summary': summary,
+            'network_data': network_data
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI network summary: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/vulnerabilities')
+def get_ai_vulnerability_analysis():
+    """Get AI-generated vulnerability analysis"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get vulnerabilities from network intelligence
+        vulnerabilities = []
+        if (hasattr(shared_data, 'network_intelligence') and 
+            shared_data.network_intelligence):
+            findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+            vulnerabilities = list(findings.get('vulnerabilities', {}).values())
+        
+        if not vulnerabilities:
+            return jsonify({
+                'enabled': True,
+                'analysis': None,
+                'message': 'No vulnerabilities found to analyze'
+            })
+        
+        # Get AI analysis
+        analysis = ai_service.analyze_vulnerabilities(vulnerabilities)
+        
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'vulnerability_count': len(vulnerabilities)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI vulnerability analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/weaknesses')
+def get_ai_weakness_analysis():
+    """Get AI-identified network weaknesses"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({
+                'enabled': False,
+                'message': 'AI service is not enabled'
+            })
+        
+        # Get network data
+        network_data = {
+            'target_count': safe_int(shared_data.targetnbr),
+            'port_count': safe_int(shared_data.portnbr),
+            'vulnerability_count': safe_int(shared_data.vulnnbr)
+        }
+        
+        # Get findings
+        findings = []
+        if (hasattr(shared_data, 'network_intelligence') and 
+            shared_data.network_intelligence):
+            findings_data = shared_data.network_intelligence.get_active_findings_for_dashboard()
+            vulnerabilities = list(findings_data.get('vulnerabilities', {}).values())
+            credentials = list(findings_data.get('credentials', {}).values())
+            findings = vulnerabilities + credentials
+        
+        # Get AI analysis
+        analysis = ai_service.identify_network_weaknesses(network_data, findings)
+        
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'findings_count': len(findings)
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI weakness analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/clear-cache', methods=['POST'])
+def clear_ai_cache():
+    """Clear AI response cache"""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        
+        if not ai_service:
+            return jsonify({
+                'success': False,
+                'message': 'AI service not available'
+            })
+        
+        ai_service.clear_cache()
+        
+        return jsonify({
+            'success': True,
+            'message': 'AI cache cleared successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error clearing AI cache: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/token', methods=['GET'])
+def get_ai_token():
+    """Get OpenAI API token status (without revealing the actual token)"""
+    try:
+        from env_manager import EnvManager
+        env_manager = EnvManager()
+        
+        token = env_manager.get_token()
+        
+        return jsonify({
+            'configured': bool(token),
+            'token_preview': f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI token status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/token', methods=['POST'])
+def save_ai_token():
+    """Save OpenAI API token to .env file"""
+    try:
+        from env_manager import EnvManager
+        env_manager = EnvManager()
+        
+        data = request.get_json()
+        if not data or 'token' not in data:
+            return jsonify({'error': 'No token provided'}), 400
+        
+        token = data['token'].strip()
+        
+        # Log save attempt
+        logger.info(f"Attempting to save AI token to {env_manager.env_file_path}")
+        
+        # Save token to .env file
+        result = env_manager.save_token(token)
+        
+        if result['success']:
+            auto_enabled = False
+            if not shared_data.config.get('ai_enabled', False):
+                shared_data.config['ai_enabled'] = True
+                setattr(shared_data, 'ai_enabled', True)
+                shared_data.save_config()
+                socketio.emit('config_updated', shared_data.config)
+                auto_enabled = True
+                logger.info("AI Insights automatically enabled after saving API token")
+            
+            # Reinitialize AI service with new token
+            ai_service = getattr(shared_data, 'ai_service', None)
+            if ai_service:
+                if ai_service.reload_token():
+                    logger.info("AI service reloaded with new token")
+                else:
+                    logger.warning("AI service failed to reload with new token")
+            
+            return jsonify({
+                'success': True,
+                'message': result['message'],
+                'configured': True,
+                'ai_enabled': shared_data.config.get('ai_enabled', False),
+                'auto_enabled': auto_enabled,
+                'env_file': str(env_manager.env_file_path)
+            })
+        else:
+            logger.error(f"Failed to save token to {env_manager.env_file_path}")
+            return jsonify({
+                'success': False,
+                'message': result.get('message', 'Failed to save token. Check server logs for details.'),
+                'env_file': str(env_manager.env_file_path)
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error saving AI token: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/token', methods=['DELETE'])
+def remove_ai_token():
+    """Remove OpenAI API token from .env file"""
+    try:
+        from env_manager import EnvManager
+        import os
+        env_manager = EnvManager()
+        
+        # Remove the .env file
+        if os.path.exists(env_manager.env_file_path):
+            os.remove(env_manager.env_file_path)
+            
+            # Disable AI service
+            ai_service = getattr(shared_data, 'ai_service', None)
+            if ai_service:
+                ai_service.api_token = ''
+                ai_service.enabled = False
+            
+            return jsonify({
+                'success': True,
+                'message': 'Token removed from .env successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'No token file found'
+            }), 404
+        
+    except Exception as e:
+        logger.error(f"Error removing AI token: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 # ============================================================================
 # SIGNAL HANDLERS

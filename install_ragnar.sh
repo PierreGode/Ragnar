@@ -535,6 +535,7 @@ setup_ragnar() {
     # - netifaces: Network interface detection for NetworkScanner
     # - smbprotocol/pysmb: SMB protocol support for StealFilesSMB and SMBBruteforce
     # - sqlalchemy: SQL database operations for StealDataSQL
+    # - openai: AI-powered network analysis and vulnerability insights
     log "INFO" "Installing remaining Python packages..."
     
     # Array of packages to install with their import names
@@ -553,6 +554,7 @@ setup_ragnar() {
         ["flask-socketio>=5.3.0"]="flask_socketio"
         ["flask-cors>=4.0.0"]="flask_cors"
         ["psutil>=5.9.0"]="psutil"
+        ["logger>=1.4"]="logger"
     )
     
     # Install each package individually with retries if not already installed
@@ -567,6 +569,13 @@ setup_ragnar() {
             }
         fi
     done
+    
+    # Install OpenAI package separately for root (since service runs as root)
+    log "INFO" "Installing OpenAI package for root user..."
+    sudo pip3 install --break-system-packages --ignore-installed "openai>=2.0.0" || {
+        log "WARNING" "Failed to install openai package for root. AI features may not work."
+        log "WARNING" "You can install it manually later with: sudo pip3 install --break-system-packages --ignore-installed openai>=2.0.0"
+    }
 
     # Verify Waveshare e-Paper Python library (already installed in main())
     log "INFO" "Verifying Waveshare e-Paper library installation for $EPD_VERSION..."

@@ -11,6 +11,7 @@ let preloadedTabs = new Set();
 let pendingFileHighlight = null;
 let manualModeActive = false;
 let manualDataPrimed = false;
+let imagesLoaded = false;
 
 const configMetadata = {
     manual_mode: {
@@ -260,6 +261,14 @@ const configMetadata = {
     network_auto_resolution: {
         label: "Automatic Resolution",
         description: "Automatically resolve and enrich newly discovered or changed devices."
+    },
+    ai_enabled: {
+        label: "Enable AI Insights",
+        description: "Enable AI-powered network analysis and vulnerability insights using OpenAI GPT."
+    },
+    openai_api_token: {
+        label: "OpenAI API Token",
+        description: "Your OpenAI API key for AI-powered features. Keep this confidential."
     }
 };
 
@@ -794,6 +803,9 @@ async function loadDashboardData() {
             // Also update status since quick endpoint includes it
             updateDashboardStatus(data);
         }
+        
+        // Load AI insights if configured
+        await loadAIInsights();
     } catch (error) {
         console.error('Error loading dashboard data:', error);
         // Remove pulse animation on error too
@@ -2764,6 +2776,9 @@ async function loadConfigData() {
         const config = await fetchAPI('/api/config');
         displayConfigForm(config);
         
+        // Load AI configuration
+        loadAIConfiguration(config);
+        
         // Load hardware profiles
         await loadHardwareProfiles();
         
@@ -2800,6 +2815,7 @@ async function loadFilesData() {
     try {
         displayDirectoryTree();
         loadFiles('/');
+        // Don't automatically load images - user must click "Load Images" button
     } catch (error) {
         console.error('Error loading files data:', error);
     }
@@ -5991,6 +6007,137 @@ async function saveConfig(form) {
     }
 }
 
+// AI Configuration Functions
+async function loadAIConfiguration(config) {
+    // Mirror current configuration for AI enable toggle
+    const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
+    if (aiEnabledCheckbox) {
+        const aiEnabled = config && Object.prototype.hasOwnProperty.call(config, 'ai_enabled')
+            ? Boolean(config.ai_enabled)
+            : false;
+        aiEnabledCheckbox.checked = aiEnabled;
+    }
+    
+    // Fetch token status from environment variable
+    try {
+        const tokenStatus = await fetchAPI('/api/ai/token');
+        const apiTokenInput = document.getElementById('openai-api-token');
+        if (apiTokenInput) {
+            if (tokenStatus.configured && tokenStatus.token_preview) {
+                // Show preview of token
+                apiTokenInput.value = '';
+                apiTokenInput.placeholder = `Configured: ${tokenStatus.token_preview}`;
+            } else {
+                apiTokenInput.value = '';
+                apiTokenInput.placeholder = 'sk-...';
+            }
+        }
+    } catch (error) {
+        console.error('Failed to fetch AI token status:', error);
+    }
+}
+
+async function toggleAIEnabled() {
+    const checkbox = document.getElementById('ai-enabled-toggle');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    const payload = { ai_enabled: desiredState };
+
+    try {
+        const result = await postAPI('/api/config', payload);
+
+        if (desiredState && result && result.ai_reload_success === false) {
+            throw new Error(result.ai_reload_error || 'AI engine failed to initialize. Check server logs.');
+        }
+
+        statusDiv.className = desiredState
+            ? 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700'
+            : 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? '✓ AI Insights enabled. Ragnar will request GPT analysis for dashboards.'
+            : 'ℹ AI Insights disabled. Ragnar will stop requesting GPT analysis until re-enabled.';
+        statusDiv.classList.remove('hidden');
+
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, 4000);
+
+        if (currentTab === 'dashboard') {
+            setTimeout(() => {
+                loadAIInsights().catch(err => console.error('Failed to refresh AI insights after toggle:', err));
+            }, 500);
+        }
+    } catch (error) {
+        console.error('Failed to toggle AI insights:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = `✗ Failed to ${desiredState ? 'enable' : 'disable'} AI Insights (${error.message || 'unknown error'})`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, 5000);
+    }
+}
+
+async function saveAIToken() {
+    const tokenInput = document.getElementById('openai-api-token');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const token = tokenInput.value.trim();
+    
+    if (!token) {
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 border border-yellow-700';
+        statusMessage.textContent = '⚠ Please enter an API token.';
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 3000);
+        return;
+    }
+    
+    try {
+        // Save token to .bashrc as environment variable
+        const result = await postAPI('/api/ai/token', { token: token });
+        
+        if (result.success) {
+            statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
+            let message = result.message || '✓ API token saved to .bashrc successfully. AI features are now ready to use.';
+            if (result.user) {
+                message += ` (User: ${result.user})`;
+            }
+            statusMessage.textContent = message;
+            statusDiv.classList.remove('hidden');
+            
+            addConsoleMessage('OpenAI API token saved to environment variable', 'success');
+            
+            // Reload AI configuration to show token preview
+            const config = await fetchAPI('/api/config');
+            await loadAIConfiguration(config);
+            
+            // Hide status after 8 seconds (longer to show additional info)
+            setTimeout(() => {
+                statusDiv.classList.add('hidden');
+            }, 8000);
+            
+            // Refresh dashboard to update AI insights
+            if (currentTab === 'dashboard') {
+                setTimeout(() => refreshDashboard(), 500);
+            }
+        } else {
+            throw new Error(result.message || 'Failed to save token');
+        }
+        
+    } catch (error) {
+        console.error('Failed to save AI token:', error);
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = `✗ Failed to save API token: ${error.message || 'Please try again.'}`;
+        statusDiv.classList.remove('hidden');
+    }
+}
+
 // E-Paper Display Functions
 async function loadEpaperDisplay() {
     try {
@@ -6483,9 +6630,24 @@ function showNotification(message, type) {
 
 let currentImageFilter = 'all';
 let allImages = [];
-let imagesLoaded = false;
+
+function manualLoadImages() {
+    loadImagesData();
+}
 
 function loadImagesData() {
+    // Check if images have already been loaded
+    if (imagesLoaded) {
+        console.log('Images already loaded, skipping...');
+        return;
+    }
+    
+    // Show loading state
+    const imageGrid = document.getElementById('image-grid');
+    if (imageGrid) {
+        imageGrid.innerHTML = '<div class="col-span-full text-center py-12"><p class="text-blue-400">Loading images...</p></div>';
+    }
+    
     fetch('/api/images/list')
         .then(response => response.json())
         .then(images => {
@@ -6493,15 +6655,13 @@ function loadImagesData() {
             imagesLoaded = true;
             displayImages(images);
             
-            // Hide the load images button after loading
-            const loadBtn = document.getElementById('load-images-btn');
-            if (loadBtn) {
-                loadBtn.style.display = 'none';
-            }
+            console.log(`Loaded ${images.length} images`);
         })
         .catch(error => {
             console.error('Error loading images:', error);
-            showImageError('Failed to load images: ' + error.message);
+            if (imageGrid) {
+                imageGrid.innerHTML = '<div class="col-span-full text-center py-12"><p class="text-red-400">Failed to load images: ' + error.message + '</p></div>';
+            }
         });
 }
 
@@ -8065,4 +8225,192 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// Format AI text with proper line breaks and structure
+function formatAIText(text) {
+    if (!text || typeof text !== 'string') return '';
+    
+    // Escape HTML to prevent XSS
+    const escaped = escapeHtml(text);
+    
+    // Split into lines for processing
+    const lines = escaped.split('\n');
+    const output = [];
+    let inList = false;
+    
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].trim();
+        
+        if (!line) {
+            // Close any open list
+            if (inList) {
+                output.push('</ul>');
+                inList = false;
+            }
+            // Add spacing between sections
+            output.push('<div class="mb-3"></div>');
+            continue;
+        }
+        
+        // Convert **Bold Headers** to styled headers
+        if (line.match(/^\*\*(.+?)\*\*:?$/)) {
+            if (inList) {
+                output.push('</ul>');
+                inList = false;
+            }
+            const headerText = line.replace(/^\*\*(.+?)\*\*:?$/, '$1');
+            output.push(`<div class="font-bold text-sky-300 mt-4 mb-2">${headerText}</div>`);
+            continue;
+        }
+        
+        // Handle bullet points (-, *, •)
+        if (line.match(/^[\-\*\•]\s+(.+)$/)) {
+            if (!inList) {
+                output.push('<ul class="list-disc list-inside space-y-1 ml-4 text-gray-300">');
+                inList = true;
+            }
+            const content = line.replace(/^[\-\*\•]\s+(.+)$/, '$1');
+            output.push(`<li>${content}</li>`);
+            continue;
+        }
+        
+        // Handle numbered lists (1., 2., 3. or 1. **Title**)
+        if (line.match(/^\d+\.\s+/)) {
+            if (!inList) {
+                output.push('<ul class="list-decimal list-inside space-y-2 ml-4 text-gray-300">');
+                inList = true;
+            }
+            let content = line.replace(/^\d+\.\s+/, '');
+            // Handle bold within numbered items
+            content = content.replace(/\*\*(.+?)\*\*/g, '<strong class="text-sky-200">$1</strong>');
+            output.push(`<li class="mb-1">${content}</li>`);
+            continue;
+        }
+        
+        // Close list if we hit regular text
+        if (inList) {
+            output.push('</ul>');
+            inList = false;
+        }
+        
+        // Handle inline **bold** text in regular paragraphs
+        line = line.replace(/\*\*(.+?)\*\*/g, '<strong class="text-sky-200">$1</strong>');
+        
+        // Regular paragraph
+        output.push(`<p class="mb-2 text-gray-300">${line}</p>`);
+    }
+    
+    // Close any unclosed list
+    if (inList) {
+        output.push('</ul>');
+    }
+    
+    return output.join('');
+}
+
+// ============================================================================
+// AI INSIGHTS FUNCTIONS
+// ============================================================================
+
+// Load AI status and insights
+async function loadAIInsights() {
+    try {
+        // First check AI status
+        const statusResponse = await fetch('/api/ai/status');
+        const status = await statusResponse.json();
+        
+        const aiSection = document.getElementById('ai-insights-section');
+        const aiNotConfigured = document.getElementById('ai-not-configured');
+        
+        if (!status.enabled || !status.configured) {
+            // Show configuration message
+            if (aiSection) aiSection.style.display = 'none';
+            if (aiNotConfigured) aiNotConfigured.style.display = 'block';
+            return;
+        }
+        
+        // Show AI insights section
+        if (aiSection) aiSection.style.display = 'block';
+        if (aiNotConfigured) aiNotConfigured.style.display = 'none';
+        
+        // Update model name
+        const modelName = document.getElementById('ai-model-name');
+        if (modelName && status.model) {
+            modelName.textContent = status.model;
+        }
+        
+        // Load comprehensive insights
+        const insightsResponse = await fetch('/api/ai/insights');
+        const insights = await insightsResponse.json();
+        
+        if (insights.enabled) {
+            // Update network summary
+            const networkSummary = document.getElementById('ai-network-summary');
+            if (networkSummary) {
+                networkSummary.innerHTML = formatAIText(insights.network_summary || 'Analyzing network...');
+            }
+            
+            // Update vulnerability analysis
+            const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+            const vulnSection = document.getElementById('ai-vuln-section');
+            if (vulnAnalysis) {
+                if (insights.vulnerability_analysis) {
+                    vulnAnalysis.innerHTML = formatAIText(insights.vulnerability_analysis);
+                    if (vulnSection) vulnSection.style.display = 'block';
+                } else {
+                    vulnAnalysis.textContent = 'No vulnerabilities detected';
+                    if (vulnSection) vulnSection.style.display = 'block';
+                }
+            }
+            
+            // Update weakness analysis
+            const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+            const weaknessSection = document.getElementById('ai-weakness-section');
+            if (weaknessAnalysis) {
+                if (insights.weakness_analysis) {
+                    weaknessAnalysis.innerHTML = formatAIText(insights.weakness_analysis);
+                    if (weaknessSection) weaknessSection.style.display = 'block';
+                } else {
+                    weaknessAnalysis.textContent = 'Analyzing network topology...';
+                    if (weaknessSection) weaknessSection.style.display = 'block';
+                }
+            }
+            
+            // Update last update time
+            const lastUpdate = document.getElementById('ai-last-update');
+            if (lastUpdate) {
+                lastUpdate.textContent = 'Just now';
+            }
+        }
+        
+    } catch (error) {
+        console.error('Error loading AI insights:', error);
+        // Silently fail - don't disrupt the dashboard if AI is unavailable
+    }
+}
+
+// Refresh AI insights
+async function refreshAIInsights() {
+    try {
+        // Clear cache first
+        await fetch('/api/ai/clear-cache', { method: 'POST' });
+        
+        // Show loading state
+        const networkSummary = document.getElementById('ai-network-summary');
+        const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+        const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        
+        if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
+        if (vulnAnalysis) vulnAnalysis.textContent = 'Analyzing vulnerabilities...';
+        if (weaknessAnalysis) weaknessAnalysis.textContent = 'Identifying network weaknesses...';
+        
+        // Reload insights
+        await loadAIInsights();
+        
+        showNotification('AI insights refreshed successfully', 'success');
+    } catch (error) {
+        console.error('Error refreshing AI insights:', error);
+        showNotification('Failed to refresh AI insights', 'error');
+    }
 }
