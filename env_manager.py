@@ -151,13 +151,23 @@ class EnvManager:
                 except Exception as e:
                     self.logger.warning(f"Could not verify .bashrc write: {e}")
             
+            # Validate .bashrc syntax
+            if not self._validate_bashrc():
+                self.logger.error("✗ .bashrc validation failed - syntax errors detected!")
+                return False
+            
             # Set in current environment immediately
             os.environ[self.env_var_name] = token
             self.logger.info(f"✓ Set {self.env_var_name} in current environment")
             
+            # Automatically source .bashrc to load the token
+            if self._source_bashrc():
+                self.logger.info("✓ Successfully sourced .bashrc")
+            else:
+                self.logger.warning("⚠ Could not automatically source .bashrc - may need manual reload")
+            
             self.logger.info(f"Successfully saved token to {self.bashrc_path}")
             self.logger.info("Token will be available in new shell sessions")
-            self.logger.info(f"To load in current session, run: source ~/.bashrc")
             return True
             
         except Exception as e:
@@ -208,6 +218,72 @@ class EnvManager:
             
         except Exception as e:
             self.logger.error(f"Error removing token from .bashrc: {e}")
+            return False
+    
+    def _validate_bashrc(self) -> bool:
+        """
+        Validate .bashrc syntax by running bash -n
+        
+        Returns:
+            bool: True if valid, False if syntax errors
+        """
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['bash', '-n', str(self.bashrc_path)],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0:
+                self.logger.info("✓ .bashrc syntax validation passed")
+                return True
+            else:
+                self.logger.error(f"✗ .bashrc syntax errors: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("✗ .bashrc validation timeout")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Could not validate .bashrc: {e}")
+            # Don't fail the operation if validation fails
+            return True
+    
+    def _source_bashrc(self) -> bool:
+        """
+        Source .bashrc to load environment variables into current process
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            import subprocess
+            # Use bash -c to source the bashrc and print the env var
+            result = subprocess.run(
+                ['bash', '-c', f'source {self.bashrc_path} && echo ${self.env_var_name}'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                token_from_source = result.stdout.strip()
+                if token_from_source and token_from_source != '':
+                    self.logger.info(f"✓ Sourced .bashrc and verified token is set")
+                    # Update current environment with the sourced value
+                    os.environ[self.env_var_name] = token_from_source
+                    return True
+            
+            self.logger.warning("⚠ Could not verify token after sourcing .bashrc")
+            return False
+            
+        except subprocess.TimeoutExpired:
+            self.logger.error("✗ .bashrc sourcing timeout")
+            return False
+        except Exception as e:
+            self.logger.warning(f"Could not source .bashrc: {e}")
             return False
     
     def validate_token(self, token: str) -> bool:
