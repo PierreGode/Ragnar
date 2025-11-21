@@ -27,6 +27,19 @@ Identifies potential attack vectors and security gaps in your network:
 - Exposed services
 - Potential exploitation paths
 
+### 4. AI-Generated Comments - "Make Ragnar Alive!" 🎭
+Replace static comments with dynamic, context-aware personality responses:
+- Real-time AI-generated witty comments based on current activity
+- Viking/hacker personality matching Ragnar's character
+- Never repeats - every comment is unique
+- Seamlessly falls back to static comments if AI unavailable
+- Makes Ragnar feel truly alive with dynamic personality
+
+When enabled, Ragnar generates comments like:
+- "Mapping the digital battlefield like a Viking scout!" (during network scanning)
+- "Mess with the best, die like the rest!" (during attacks)
+- "Channeling my inner Zero Cool..." (when idle)
+
 ## Configuration
 
 ### 1. Enable AI in Config Tab
@@ -41,6 +54,7 @@ Identifies potential attack vectors and security gaps in your network:
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
+- **ai_generated_comments**: 🎭 Enable AI-generated personality comments - "Make Ragnar Alive!"
 - **ai_max_tokens**: Maximum tokens per response (default: 500)
 - **ai_temperature**: Creativity setting (default: 0.7)
 
@@ -180,6 +194,7 @@ The OpenAI API is pay-per-use. To minimize costs:
 With default settings (500 tokens max):
 - Network summary: ~0.5-1 cent per request
 - Vulnerability analysis: ~0.5-1 cent per request
+- AI-generated comment: ~0.1-0.3 cents per comment
 - Total per refresh: ~1.5-3 cents
 
 Costs vary based on:
@@ -187,6 +202,9 @@ Costs vary based on:
 - Token limits
 - Refresh frequency
 - Network size
+- Comment generation frequency (controlled by comment delay settings)
+
+**Note**: AI-generated comments are cached for 5 minutes and respect the same comment delay settings as static comments (default: 15-30 seconds between comments), minimizing API costs.
 
 ## Troubleshooting
 
