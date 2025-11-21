@@ -567,7 +567,7 @@
                     <div class="flex-1">
                         <h3 class="text-lg font-semibold text-white mb-2">AI Analysis Available (GPT-5 Nano)</h3>
                         <p class="text-sm text-gray-300 mb-3">
-                            Enable AI-powered network analysis similar to PWNAGOTCHI. Get intelligent insights about network weaknesses, vulnerability summaries, and security recommendations.
+                            Enable AI-powered network analysis. Get intelligent insights about network weaknesses, vulnerability summaries, and security recommendations.
                         </p>
                         <p class="text-xs text-gray-400 mb-3">
                             To enable AI insights, configure your OpenAI API token in the Config tab.
@@ -577,7 +577,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path>
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path>
                             </svg>
-                            Configure AI in Settings
+                            Configure AI in config tab
                         </button>
                     </div>
                 </div>
@@ -2173,6 +2173,58 @@
                     </div>
                 </div>
                 
+                <!-- AI Configuration Section -->
+                <div class="mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">AI Integration</h3>
+                    <div class="glass rounded-lg p-4">
+                        <div class="flex items-start space-x-4 mb-4">
+                            <svg class="w-10 h-10 text-purple-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                            </svg>
+                            <div class="flex-1">
+                                <h4 class="font-medium text-lg mb-2">AI-Powered Network Analysis</h4>
+                                <p class="text-sm text-gray-400 mb-4">
+                                    Enable AI insights to get intelligent analysis of your network vulnerabilities, threat assessments, and actionable recommendations powered by OpenAI.
+                                </p>
+                                <div class="space-y-3">
+                                    <div>
+                                        <label class="flex items-center space-x-3 cursor-pointer">
+                                            <input type="checkbox" id="ai-enabled-toggle" onchange="toggleAIEnabled()" class="w-5 h-5 rounded border-gray-600 text-purple-600 focus:ring-purple-500 focus:ring-offset-gray-900">
+                                            <span class="text-sm font-medium">Enable AI Insights</span>
+                                        </label>
+                                        <p class="text-xs text-gray-500 ml-8 mt-1">Activate AI-powered vulnerability analysis and network intelligence</p>
+                                    </div>
+                                    <div>
+                                        <label for="openai-api-token" class="block text-sm font-medium text-gray-300 mb-2">OpenAI API Token</label>
+                                        <div class="flex space-x-2">
+                                            <input type="password" id="openai-api-token" placeholder="sk-..." 
+                                                   class="flex-1 bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <button onclick="saveAIToken()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap">
+                                                Save Token
+                                            </button>
+                                        </div>
+                                        <p class="text-xs text-gray-500 mt-1">Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a></p>
+                                    </div>
+                                    <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
+                                        <span id="ai-config-status-message"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="border-t border-slate-700 pt-4 mt-4">
+                            <div class="flex items-start space-x-3">
+                                <svg class="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                                </svg>
+                                <div class="text-xs text-gray-400">
+                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> API calls are sent directly to OpenAI. Your token is stored locally and never shared.</p>
+                                    <p><strong class="text-gray-300">Cost:</strong> AI features consume OpenAI API credits based on usage. Monitor your usage at OpenAI's platform.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Hardware Profile Configuration Section -->
                 <div class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Hardware Resource Configuration</h3>
