@@ -44,7 +44,6 @@ class TestAIServiceErrorHandling(unittest.TestCase):
             del sys.modules['ai_service']
         
         # Mock the import to fail with ModuleNotFoundError
-        import importlib.util
         original_import = __builtins__.__import__
         
         def mock_import(name, *args, **kwargs):
@@ -54,7 +53,6 @@ class TestAIServiceErrorHandling(unittest.TestCase):
         
         with patch('builtins.__import__', side_effect=mock_import):
             # Force reimport
-            import importlib
             if 'ai_service' in sys.modules:
                 del sys.modules['ai_service']
             
