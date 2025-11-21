@@ -20,9 +20,8 @@ class EnvManager:
         if project_root:
             self.project_root = project_root
         else:
-            # This logic assumes the script is in the root or a direct subfolder.
-            # Adjust if the project structure is different.
-            self.project_root = os.path.dirname(os.path.abspath(__file__))
+            # Correctly determine project root by going up one level from the script's directory
+            self.project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
         self.env_file_path = os.path.join(self.project_root, '.env')
         logger.info(f"Project root identified as: {self.project_root}")
@@ -88,7 +87,8 @@ def load_env(project_root=None):
     """
     # Determine project root relative to this file's location
     if not project_root:
-        project_root = os.path.dirname(os.path.abspath(__file__))
+        # Correctly determine project root by going up one level
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     env_path = os.path.join(project_root, '.env')
 
