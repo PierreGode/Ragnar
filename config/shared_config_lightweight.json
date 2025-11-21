@@ -1,9 +1,10 @@
 {
-  "__comment": "Pi Zero W2 Lightweight Mode - Optimized for 416MB RAM",
-  "__memory_target": "Reduce idle usage from 70% to 40-50%",
+  "__comment": "Pi Zero W2 Lightweight Mode - WEB-FIRST ARCHITECTURE",
+  "__memory_target": "Keep web 100% uptime, throttle backend to 40-50% memory",
+  "__priority": "Web server ALWAYS running - users can always access UI",
   
   "manual_mode": false,
-  "websrv": false,
+  "websrv": true,
   "web_increment": false,
   "debug_mode": false,
   
