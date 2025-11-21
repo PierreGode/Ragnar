@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 AI Service for Ragnar
-GPT-5-nano version using OpenAI SDK 2.x
-Provides intelligent network analysis, summaries, and insights
+GPT-5 version using OpenAI SDK 2.x
+Provides intelligent network analysis, summaries, and insights.
 """
 
 import os
@@ -15,10 +15,10 @@ from typing import Dict, List, Optional, Any
 from logger import Logger
 from env_manager import EnvManager, load_env
 
-# Load environment variables from .env file at import time
+# Load environment variables immediately
 load_env()
 
-# OpenAI SDK (modern 2.x)
+# OpenAI SDK
 try:
     from openai import OpenAI
     OPENAI_SDK_OK = True
@@ -27,54 +27,62 @@ except Exception:
     OpenAI = None
 
 
+
+# ===================================================================
+#   AI SERVICE
+# ===================================================================
+
 class AIService:
-    """AI-powered network analysis and vulnerability assessment service"""
+    """AI-powered network analysis, vulnerability interpretation, and insights."""
 
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self.logger = Logger(name="AIService", level=logging.INFO)
         self.env_manager = EnvManager()
 
-        # Configuration (kept exactly as original for compatibility)
         cfg = shared_data.config
-        self.enabled = cfg.get('ai_enabled', False)
-        self.model = cfg.get('ai_model', 'gpt-5-nano')
-        self.max_tokens = cfg.get('ai_max_tokens', 500)
-        self.temperature = cfg.get('ai_temperature', 0.7)
-        self.temperature_supported = True
-        self.vulnerability_summaries = cfg.get('ai_vulnerability_summaries', True)
-        self.network_insights = cfg.get('ai_network_insights', True)
 
-        # Token from environment manager
+        # Configuration
+        self.enabled = cfg.get("ai_enabled", False)
+        self.model = cfg.get("ai_model", "gpt-5-nano")
+
+        # These must remain for backward compatibility (but not used)
+        self.max_tokens = cfg.get("ai_max_tokens")
+        self.temperature = cfg.get("ai_temperature")
+        self.temperature_supported = True  # will disable on first failure
+
+        self.vulnerability_summaries = cfg.get("ai_vulnerability_summaries", True)
+        self.network_insights = cfg.get("ai_network_insights", True)
+
         self.api_token = self.env_manager.get_token()
 
         # Cache
         self.cache = {}
-        self.cache_ttl = 300  # seconds
+        self.cache_ttl = 300  # 5 minutes
 
-        # Initialization status
+        # Client initialization
         self.client = None
         self.initialization_error = None
-
         self._initialize_client()
 
-    # -----------------------------------------------------------
-    # Initialization
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   INITIALIZATION
+    # ===================================================================
 
     def _initialize_client(self):
-        """Initialize OpenAI client if possible"""
         if not self.enabled:
             return
 
         if not OPENAI_SDK_OK:
             self.initialization_error = (
-                "OpenAI library missing: install using pip3 install openai --break-system-packages"
+                "OpenAI SDK missing. Install with: pip install openai"
             )
             return
 
         if not self.api_token:
-            self.initialization_error = "No API token found in environment or .env"
+            self.initialization_error = "No OpenAI API key found."
             return
 
         try:
@@ -84,9 +92,11 @@ class AIService:
             self.initialization_error = f"Failed to initialize OpenAI client: {e}"
             self.logger.error(self.initialization_error)
 
-    # -----------------------------------------------------------
-    # Utility
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   UTILITY HELPERS
+    # ===================================================================
 
     def is_enabled(self):
         return self.enabled and self.client is not None and self.initialization_error is None
@@ -100,67 +110,91 @@ class AIService:
         item = self.cache.get(key)
         if not item:
             return None
-        if time.time() - item['timestamp'] > self.cache_ttl:
+        if time.time() - item["timestamp"] > self.cache_ttl:
             del self.cache[key]
             return None
-        return item['value']
+        return item["value"]
 
     def _cache_set(self, key: str, value: Any):
         self.cache[key] = {"timestamp": time.time(), "value": value}
 
-    # -----------------------------------------------------------
-    # Core OpenAI Call (GPT-5-nano)
-    # Includes Token Logging
-    # -----------------------------------------------------------
 
-    def _ask(self, system_prompt: str, user_prompt: str) -> Optional[str]:
+
+    # ===================================================================
+    #   CORE GPT-5 CALL — NEW RESPONSES API
+    # ===================================================================
+
+    def _ask(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """
+        Unified GPT-5 call with temperature fallback (required for tests).
+        """
+
         if not self.is_enabled():
             return None
 
+        # Base GPT-5 payload
         payload = {
             "model": self.model,
             "input": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
             ],
-            "max_output_tokens": self.max_tokens,
+            "reasoning": {"effort": "low"},
+            "text": {"verbosity": "low"},
         }
 
-        include_temperature = self.temperature_supported and self.temperature is not None
-        if include_temperature:
+        # Include temperature ONLY if still marked supported
+        if self.temperature_supported and self.temperature is not None:
             payload["temperature"] = self.temperature
 
+        # FIRST ATTEMPT
         try:
             result = self.client.responses.create(**payload)
-
-            output = result.output_text
-
-            # Token logging (you enabled this)
-            if hasattr(result, "usage"):
-                u = result.usage
-                self.logger.info(
-                    f"AI Tokens → input:{u.input_tokens} output:{u.output_tokens} total:{u.total_tokens}"
-                )
-
-            return output.strip()
+            return self._extract_output(result)
 
         except Exception as e:
-            if include_temperature and self._temperature_not_supported(e):
+            error_text = str(e).lower()
+
+            # Handle GPT-5 "temperature unsupported" case
+            if "temperature" in error_text and "unsupported" in error_text:
                 self.temperature_supported = False
                 self.logger.warning(
-                    "Model reported temperature parameter is unsupported; retrying without it."
+                    "Model reported temperature as unsupported — retrying without it."
                 )
-                return self._ask(system_prompt, user_prompt)
-            self.logger.error(f"OpenAI request failed: {e}")
+
+                payload.pop("temperature", None)
+
+                # SECOND ATTEMPT WITHOUT TEMPERATURE
+                try:
+                    result = self.client.responses.create(**payload)
+                    return self._extract_output(result)
+                except Exception as e2:
+                    self.logger.error(f"Retry after removing temperature failed: {e2}")
+                    return None
+
+            self.logger.error(f"OpenAI call failed: {e}")
             return None
 
-    def _temperature_not_supported(self, error: Exception) -> bool:
-        message = str(error).lower()
-        return "temperature" in message and "unsupported" in message
 
-    # -----------------------------------------------------------
-    # Network Summary
-    # -----------------------------------------------------------
+
+    def _extract_output(self, result):
+        """Extract output text and log token usage."""
+        if hasattr(result, "usage"):
+            u = result.usage
+            self.logger.info(
+                f"AI Tokens → input:{u.input_tokens} output:{u.output_tokens} total:{u.total_tokens}"
+            )
+
+        try:
+            return result.output_text.strip()
+        except:
+            return None
+
+
+
+    # ===================================================================
+    #   NETWORK SUMMARY
+    # ===================================================================
 
     def analyze_network_summary(self, network_data):
         if not self.is_enabled() or not self.network_insights:
@@ -171,30 +205,32 @@ class AIService:
         if cached:
             return cached
 
-        system_prompt = (
+        system = (
             "You are Ragnar, a witty cybersecurity Viking AI. "
-            "Provide concise, sharp insights with a hint of personality."
+            "Provide concise, aggressive but clear summaries."
         )
 
-        user_prompt = f"""
+        user = f"""
 Analyze this network scan:
 
-Targets: {network_data.get('target_count', 0)}
-Open Ports: {network_data.get('port_count', 0)}
-Vulnerabilities Found: {network_data.get('vulnerability_count', 0)}
-Credentials Found: {network_data.get('credential_count', 0)}
+Targets: {network_data.get('target_count')}
+Open Ports: {network_data.get('port_count')}
+Vulnerabilities Found: {network_data.get('vulnerability_count')}
+Credentials Found: {network_data.get('credential_count')}
 
-Give a 2–3 sentence summary in Ragnar's tone.
+Give a 2–3 sentence Viking-style summary.
 """
 
-        resp = self._ask(system_prompt, user_prompt)
+        resp = self._ask(system, user)
         if resp:
             self._cache_set(key, resp)
         return resp
 
-    # -----------------------------------------------------------
-    # Vulnerability Analysis
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   VULNERABILITY ANALYSIS
+    # ===================================================================
 
     def analyze_vulnerabilities(self, vulnerabilities: List[Dict]):
         if not self.is_enabled() or not self.vulnerability_summaries:
@@ -205,89 +241,90 @@ Give a 2–3 sentence summary in Ragnar's tone.
         if cached:
             return cached
 
-        top = vulnerabilities[:10]
-        user_data = json.dumps(top, indent=2)
+        limited = vulnerabilities[:10]
+        data_json = json.dumps(limited, indent=2)
 
-        system_prompt = (
-            "You are Ragnar, an elite vulnerability analyst. "
-            "Provide critical, actionable advice with high clarity."
+        system = (
+            "You are Ragnar, an elite vulnerability hunter. "
+            "Analyze weaknesses with precision and battle-readiness."
         )
 
-        user_prompt = f"""
-Analyze these vulnerabilities:
-
-Total: {len(vulnerabilities)}
+        user = f"""
+Vulnerabilities Detected: {len(vulnerabilities)}
 
 Top Findings:
-{user_data}
+{data_json}
 
 Provide:
-1. The most critical weaknesses
-2. What should be fixed *first*
+1. Critical weaknesses
+2. What must be fixed FIRST
 3. Overall attack risk
 
-Keep it short, sharp, and Viking-like.
+Tone: fierce Viking strategist.
 """
 
-        resp = self._ask(system_prompt, user_prompt)
+        resp = self._ask(system, user)
         if resp:
             self._cache_set(key, resp)
         return resp
 
-    # -----------------------------------------------------------
-    # Weakness Identification
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   ATTACK VECTOR IDENTIFICATION
+    # ===================================================================
 
     def identify_network_weaknesses(self, network_data: Dict, findings: List[Dict]):
         if not self.is_enabled():
             return None
 
-        key = self._cache_key("weakness", {"targets": network_data.get("target_count", 0),
-                                           "findings": len(findings)})
+        key = self._cache_key("weakness", {
+            "targets": network_data.get("target_count"),
+            "findings": len(findings),
+        })
         cached = self._cache_get(key)
         if cached:
             return cached
 
-        sample = findings[:5]
-        fjson = json.dumps(sample, indent=2)
+        sample = json.dumps(findings[:5], indent=2)
 
-        system_prompt = (
+        system = (
             "You are Ragnar, a penetration strategist. "
-            "Identify attack paths with tactical precision."
+            "Identify viable attack vectors with tactical precision."
         )
 
-        user_prompt = f"""
-Devices: {network_data.get('target_count', 0)}
-Ports: {network_data.get('port_count', 0)}
+        user = f"""
+Devices: {network_data.get('target_count')}
+Ports: {network_data.get('port_count')}
 
 Key Findings:
-{fjson}
+{sample}
 
-Identify 2–3 attack vectors Ragnar would exploit.
+List 2–3 attack paths Ragnar would exploit.
 """
 
-        resp = self._ask(system_prompt, user_prompt)
+        resp = self._ask(system, user)
         if resp:
             self._cache_set(key, resp)
         return resp
 
-    # -----------------------------------------------------------
-    # Parallel Future Support (requested)
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   PARALLEL BATCH PREP (FUTURE SUPPORT)
+    # ===================================================================
 
     def analyze_batch(self, tasks: List[Dict]) -> List[Optional[str]]:
-        """
-        Prepares Ragnar for future parallel insight pipelines.
-        Currently runs sequentially but structure supports parallelization.
-        """
         results = []
         for t in tasks:
             results.append(self._ask(t["system"], t["user"]))
         return results
 
-    # -----------------------------------------------------------
-    # Generate Combined Insights
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   COMBINED INSIGHTS FOR UI
+    # ===================================================================
 
     def generate_insights(self):
         output = {
@@ -295,41 +332,44 @@ Identify 2–3 attack vectors Ragnar would exploit.
             "timestamp": datetime.now().isoformat(),
             "network_summary": None,
             "vulnerability_analysis": None,
-            "weakness_analysis": None
+            "weakness_analysis": None,
         }
 
         if not self.is_enabled():
-            output["message"] = self.initialization_error or "AI is disabled"
+            output["message"] = self.initialization_error or "AI disabled"
             return output
 
-        # Basic network data
         net = {
-            'target_count': self.shared_data.targetnbr,
-            'port_count': self.shared_data.portnbr,
-            'vulnerability_count': self.shared_data.vulnnbr,
-            'credential_count': self.shared_data.crednbr
+            "target_count": self.shared_data.targetnbr,
+            "port_count": self.shared_data.portnbr,
+            "vulnerability_count": self.shared_data.vulnnbr,
+            "credential_count": self.shared_data.crednbr,
         }
 
         # Summary
-        output['network_summary'] = self.analyze_network_summary(net)
+        output["network_summary"] = self.analyze_network_summary(net)
 
-        # Vulnerabilities + weaknesses
-        if hasattr(self.shared_data, "network_intelligence") and self.shared_data.network_intelligence:
+        # Additional analyses if intelligence system is available
+        if hasattr(self.shared_data, "network_intelligence") and \
+           self.shared_data.network_intelligence:
+
             findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
-            vulns = list(findings.get('vulnerabilities', {}).values())
 
+            vulns = list(findings.get("vulnerabilities", {}).values())
             if vulns:
-                output['vulnerability_analysis'] = self.analyze_vulnerabilities(vulns)
+                output["vulnerability_analysis"] = self.analyze_vulnerabilities(vulns)
 
-                creds = list(findings.get('credentials', {}).values())
+                creds = list(findings.get("credentials", {}).values())
                 combined = vulns + creds
-                output['weakness_analysis'] = self.identify_network_weaknesses(net, combined)
+                output["weakness_analysis"] = self.identify_network_weaknesses(net, combined)
 
         return output
 
-    # -----------------------------------------------------------
-    # Cache Clear
-    # -----------------------------------------------------------
+
+
+    # ===================================================================
+    #   CACHE CLEAR
+    # ===================================================================
 
     def clear_cache(self):
         self.cache.clear()
