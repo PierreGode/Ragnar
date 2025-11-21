@@ -387,10 +387,7 @@ List 2–3 attack paths Ragnar would exploit.
         self.initialization_error = None
         self.client = None
 
-        if not self.enabled:
-            self.logger.info("AI Service disabled via configuration; client cleared.")
-            return False
-
+        # ALWAYS try to initialize if we have a token, ignore the enabled flag
         self._initialize_client()
 
         ready = self.client is not None and self.initialization_error is None
