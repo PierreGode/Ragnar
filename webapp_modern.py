@@ -9424,18 +9424,18 @@ def get_ai_status():
                 'message': 'AI service not initialized'
             })
 
-        # Determine availability based on runtime client and SDK presence
-        try:
-            from ai_service import OPENAI_SDK_OK
-        except Exception:
-            OPENAI_SDK_OK = False
-
-        available = bool(OPENAI_SDK_OK)
-
+        # Determine availability: SDK is available if either client exists OR no SDK-related error
+        # The ai_service instance already knows the truth from its initialization
+        sdk_available = True
+        init_error = getattr(ai_service, 'initialization_error', None)
+        
+        if init_error and 'OpenAI SDK' in str(init_error):
+            sdk_available = False
+        
         status = {
             'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
             'config_enabled': shared_data.config.get('ai_enabled', False),  # User's intent from config
-            'available': available,
+            'available': sdk_available,
             'model': getattr(ai_service, 'model', None),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
@@ -9445,15 +9445,8 @@ def get_ai_status():
         }
         
         # Include initialization error if present
-        if getattr(ai_service, 'initialization_error', None):
-            # If OPENAI_SDK_OK is False and there is an initialization error, make it explicit
-            if not status['available'] and 'OpenAI SDK' in str(ai_service.initialization_error):
-                status['error'] = (
-                    f"{ai_service.initialization_error}. "
-                    "Install the official OpenAI Python SDK: pip install openai"
-                )
-            else:
-                status['error'] = ai_service.initialization_error
+        if init_error:
+            status['error'] = init_error
         
         return jsonify(status)
         
