@@ -82,11 +82,14 @@ class AIService:
                 self.logger.error(f"Failed to reinitialize OpenAI client: {e}")
                 self.enabled = False
                 return False
-        elif self.enabled and not self.api_token:
+        elif self.api_token:
+            # Token was loaded successfully, even if AI is disabled
+            self.logger.info("API token loaded successfully (AI is currently disabled in config)")
+            return True
+        else:
             self.logger.warning("AI enabled but no API token found after reload.")
             self.enabled = False
             return False
-        return False
     
     def is_enabled(self) -> bool:
         """Check if AI service is enabled and ready"""
