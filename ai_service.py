@@ -477,11 +477,14 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
         Generate a witty, context-aware comment for the given theme/status.
         Returns None if AI comments are disabled or service unavailable.
         """
-        if not self.is_enabled() or not self.generated_comments:
+        # Read config dynamically to support runtime changes
+        generated_comments_enabled = self.shared_data.config.get('ai_generated_comments', False)
+        
+        if not self.is_enabled() or not generated_comments_enabled:
             return None
 
-        # Use shorter cache TTL for comments to keep them fresh
-        key = self._cache_key("comment", {"theme": theme, "time": int(time.time() / 300)})  # 5-min buckets
+        # Use shorter cache TTL (2 minutes) for better variety while still reducing costs
+        key = self._cache_key("comment", {"theme": theme, "time": int(time.time() / 120)})  # 2-min buckets
         cached = self._cache_get(key)
         if cached:
             return cached
