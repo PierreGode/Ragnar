@@ -1520,6 +1520,10 @@ def update_config():
         # Save configuration
         shared_data.save_config()
         
+        # Reload AI service if ai_enabled was changed
+        if 'ai_enabled' in data and hasattr(shared_data, 'ai_service'):
+            shared_data.ai_service.reload_token()
+        
         # Emit update to all connected clients
         socketio.emit('config_updated', shared_data.config)
         
