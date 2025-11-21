@@ -9448,20 +9448,30 @@ def get_ai_status():
     """Get AI service status and configuration"""
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
+        config_enabled = shared_data.config.get('ai_enabled', False)
         
-        # If the AI service object isn't present, report not available
+        # If the AI service object isn't present but config says it should be enabled, try to initialize it
+        if not ai_service and config_enabled:
+            try:
+                logger.info("AI service not found but config_enabled=true, attempting initialization...")
+                shared_data.initialize_ai_service()
+                ai_service = getattr(shared_data, 'ai_service', None)
+            except Exception as e:
+                logger.error(f"Failed to auto-initialize AI service: {e}")
+        
+        # If the AI service object still isn't present, report not available
         if not ai_service:
             return jsonify({
                 'enabled': False,
                 'available': True,  # Always assume SDK is installed
-                'config_enabled': shared_data.config.get('ai_enabled', False),
+                'config_enabled': config_enabled,
                 'configured': False,
                 'message': 'AI service not initialized'
             })
         
         status = {
             'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
-            'config_enabled': shared_data.config.get('ai_enabled', False),  # User's intent from config
+            'config_enabled': config_enabled,  # User's intent from config
             'available': True,  # Always assume SDK is installed
             'model': getattr(ai_service, 'model', None),
             'capabilities': {
