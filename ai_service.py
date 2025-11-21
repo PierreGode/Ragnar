@@ -93,6 +93,37 @@ class AIService:
             self.logger.error(self.initialization_error)
 
 
+    def reload_token(self) -> bool:
+        """Refresh the API token from disk and reinitialize the OpenAI client."""
+
+        # Keep enabled flag synced with latest config intent
+        if hasattr(self.shared_data, "config"):
+            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+
+        self.api_token = self.env_manager.get_token()
+        self.client = None
+        self.initialization_error = None
+
+        if not self.enabled:
+            self.logger.info("AI service disabled in config; skipping token reload.")
+            return False
+
+        if not self.api_token:
+            self.logger.warning("AI token reload requested but no token present in environment.")
+            self.initialization_error = "No OpenAI API key found."
+            return False
+
+        self._initialize_client()
+        success = self.client is not None and self.initialization_error is None
+
+        if success:
+            self.logger.info("AI service reloaded with updated token.")
+        else:
+            self.logger.error("AI service failed to reinitialize after token reload.")
+
+        return success
+
+
 
     # ===================================================================
     #   UTILITY HELPERS
@@ -130,6 +161,10 @@ class AIService:
         """
 
         if not self.is_enabled():
+            return None
+
+        if self.client is None:
+            self.logger.error("AI client unavailable despite service being enabled.")
             return None
 
         # Base GPT-5 payload
