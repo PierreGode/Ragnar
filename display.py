@@ -26,6 +26,7 @@ from PIL import Image, ImageDraw
 from init_shared import shared_data  
 from comment import Commentaireia
 from logger import Logger
+from resource_monitor import resource_monitor
 import subprocess  
 
 logger = Logger(name="display.py", level=logging.DEBUG)
@@ -100,8 +101,21 @@ class Display:
 
     def update_main_image(self):
         """Update the main image on the display with the latest immagegen data."""
+        consecutive_low_memory_count = 0
+        
         while not self.shared_data.display_should_exit:
             try:
+                # MEMORY CHECK: Defer display updates if memory is low
+                if not resource_monitor.is_system_healthy():
+                    consecutive_low_memory_count += 1
+                    if consecutive_low_memory_count >= 3:
+                        logger.warning("System memory low, deferring display update to prevent OOM")
+                        time.sleep(30)  # Wait longer when memory is tight
+                        consecutive_low_memory_count = 0
+                        continue
+                else:
+                    consecutive_low_memory_count = 0
+                
                 self.shared_data.update_image_randomizer()
                 if self.shared_data.imagegen:
                     self.main_image = self.shared_data.imagegen

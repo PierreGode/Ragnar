@@ -53,7 +53,8 @@ class Orchestrator:
         
         # CRITICAL: Pi Zero W2 resource management - limit concurrent actions
         # Running too many actions simultaneously causes memory exhaustion and hangs
-        self.semaphore = threading.Semaphore(2)  # Max 2 concurrent actions for Pi Zero W2
+        # REDUCED to 1 to prevent OOM kills during AI + scanning + display updates
+        self.semaphore = threading.Semaphore(1)  # Max 1 concurrent action for Pi Zero W2
         
         # No longer using ThreadPoolExecutor - direct threading is more reliable
         # and avoids "cannot schedule new futures after interpreter shutdown" errors
@@ -306,6 +307,11 @@ class Orchestrator:
                     if row["Alive"] != '1':
                         continue
                     
+                    # MEMORY CHECK: Prevent OOM kills
+                    if not resource_monitor.can_start_operation(f"action_{action_key}", min_memory_mb=30):
+                        logger.warning(f"Insufficient memory to execute {action_key}, skipping to prevent OOM")
+                        continue
+                    
                     ip = row["IPs"]
                     ports = self._extract_ports(row)
                     
@@ -332,6 +338,11 @@ class Orchestrator:
                 
                 for row in current_data:
                     if row["Alive"] != '1':
+                        continue
+                    
+                    # MEMORY CHECK: Prevent OOM kills
+                    if not resource_monitor.can_start_operation(f"child_action_{action_key}", min_memory_mb=30):
+                        logger.warning(f"Insufficient memory to execute child {action_key}, skipping to prevent OOM")
                         continue
                     
                     ip = row["IPs"]
@@ -763,15 +774,20 @@ class Orchestrator:
             logger.info(f"ORCHESTRATOR CYCLE #{cycle_count}")
             logger.info(f"{'=' * 70}")
             
-            # Periodically log resource status (every 5 minutes)
-            if time.time() - last_resource_log_time > 300:
+            # Periodically log resource status (every 3 minutes - reduced for Pi Zero W2)
+            if time.time() - last_resource_log_time > 180:
                 resource_monitor.log_system_status()
                 last_resource_log_time = time.time()
                 
-                # Force garbage collection if memory is high
-                if resource_monitor.get_memory_usage() > 75:
-                    logger.info("High memory usage detected - forcing garbage collection")
+                # CRITICAL: Aggressive garbage collection for Pi Zero W2 (512MB RAM)
+                # Force GC if memory usage exceeds 65% to prevent OOM kills
+                mem_usage = resource_monitor.get_memory_usage()
+                if mem_usage > 65:
+                    logger.warning(f"Memory usage at {mem_usage:.1f}% - forcing garbage collection to prevent OOM")
                     resource_monitor.force_garbage_collection()
+                    # Log again after GC to confirm memory freed
+                    new_mem = resource_monitor.get_memory_usage()
+                    logger.info(f"After GC: Memory usage now {new_mem:.1f}% (freed {mem_usage - new_mem:.1f}%)")
             
             # ================================================================
             # CYCLE PHASE 1: Periodic Network Scan (ARP + Port Scan)

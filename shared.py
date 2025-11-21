@@ -902,6 +902,28 @@ class SharedData:
             logger.error(f"Error loading images: {e}")
             raise
 
+    # Image cache management for memory efficiency
+    _image_cache = {}
+    _max_cached_images = 20  # Limit cached images to prevent OOM
+    
+    def _get_cached_image(self, image_path):
+        """Get image from cache or load and cache it (with memory limit)"""
+        if image_path in self._image_cache:
+            return self._image_cache[image_path]
+        
+        # Check if cache is full
+        if len(self._image_cache) >= self._max_cached_images:
+            # Clear oldest entry (simple FIFO)
+            oldest_key = next(iter(self._image_cache))
+            del self._image_cache[oldest_key]
+            logger.debug(f"Image cache full, evicted {oldest_key}")
+        
+        # Load and cache
+        img = self.load_image(image_path)
+        if img:
+            self._image_cache[image_path] = img
+        return img
+
     def update_ragnarstatus(self):
         """ Using getattr to obtain the reference of the attribute with the name stored in self.ragnarorch_status"""
         try:
@@ -928,11 +950,12 @@ class SharedData:
             raise
 
     def update_image_randomizer(self):
-        """Update the image randomizer and the imagegen variable."""
+        """Update the image randomizer and the imagegen variable (memory-optimized)."""
         try:
             status = self.ragnarstatustext
             if status in self.image_series and self.image_series[status]:
                 random_index = random.randint(0, len(self.image_series[status]) - 1)
+                # Images are already loaded in memory from load_images()
                 self.imagegen = self.image_series[status][random_index]
                 self.x_center = (self.width - self.imagegen.width) // 2
                 self.y_bottom = self.height - self.imagegen.height

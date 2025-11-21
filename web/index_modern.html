@@ -1605,66 +1605,6 @@
                 
             </div>
 
-            <div class="glass rounded-xl p-6 mt-8">
-                <div class="flex items-center justify-between mb-6">
-                    <div>
-                        <h2 class="text-2xl font-bold">Image Gallery</h2>
-                        <p class="text-sm text-gray-400 mt-1">Browse captured screenshots and other stored images.</p>
-                    </div>
-                    <div class="flex space-x-3">
-                        <button onclick="captureScreenshot()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                            </svg>
-                            Capture Screenshot
-                        </button>
-                        <button onclick="refreshImages()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                            </svg>
-                            Refresh
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Image Filter Controls -->
-                <div class="mb-6">
-                    <div class="flex flex-wrap gap-2">
-                        <button onclick="filterImages('all')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-Ragnar-600 text-white" data-filter="all">
-                            All Images
-                        </button>
-                        <button onclick="filterImages('screenshots')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="screenshots">
-                            Screenshots
-                        </button>
-                        <button onclick="filterImages('captured_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="captured_images">
-                            Captured
-                        </button>
-                        <button onclick="filterImages('status_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="status_images">
-                            Status
-                        </button>
-                        <button onclick="filterImages('static_images')" class="image-filter-btn px-3 py-1 rounded-full text-sm bg-gray-600 text-white" data-filter="static_images">
-                            Static
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Image Grid -->
-                <div class="glass-card p-4">
-                    <div id="image-grid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
-                        <div class="col-span-full text-center py-12">
-                            <p class="text-gray-400 mb-4">Images are not loaded to save processing power</p>
-                            <button id="load-images-btn" onclick="manualLoadImages()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-6 py-3 rounded-lg transition-colors inline-flex items-center">
-                                <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
-                                </svg>
-                                Load Images
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
             <!-- File Operations Modal -->
             <div id="file-operations-modal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
                 <div class="glass rounded-xl p-6 max-w-md w-full mx-4">
@@ -1683,48 +1623,6 @@
                 </div>
             </div>
 
-            <!-- Image Detail Modal -->
-            <div id="image-detail-modal" class="fixed inset-0 bg-black bg-opacity-80 hidden items-center justify-center z-50">
-                <div class="glass rounded-xl p-6 max-w-4xl w-full mx-4 max-h-[90vh] overflow-y-auto">
-                    <div class="flex items-center justify-between mb-4">
-                        <h3 id="image-detail-title" class="text-lg font-semibold">Image Details</h3>
-                        <button onclick="closeImageModal()" class="text-gray-400 hover:text-white">
-                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
-                            </svg>
-                        </button>
-                    </div>
-
-                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                        <!-- Image Display -->
-                        <div class="text-center">
-                            <img id="image-detail-img" src="" alt="" class="max-w-full max-h-96 mx-auto rounded-lg shadow-lg">
-                        </div>
-
-                        <!-- Image Information -->
-                        <div class="space-y-4">
-                            <div id="image-detail-info" class="space-y-2 text-sm">
-                                <!-- Dynamic content -->
-                            </div>
-
-                            <div class="flex space-x-3">
-                                <button id="download-image-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
-                                    </svg>
-                                    Download
-                                </button>
-                                <button id="delete-image-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
-                                    <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                                    </svg>
-                                    Delete
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
         </div>
         
         <!-- System Tab -->

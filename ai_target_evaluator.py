@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 
 from logger import Logger
 from ai_intelligence_manager import get_ai_intelligence_manager
+from resource_monitor import resource_monitor
 
 # Import AIService with fallback for environments without openai
 try:
@@ -57,7 +58,8 @@ class AITargetEvaluator:
         
         # Configuration
         self.enabled = shared_data.config.get('ai_target_evaluation_enabled', True)
-        self.batch_size = shared_data.config.get('ai_evaluation_batch_size', 5)
+        # REDUCED from 5 to 1 to prevent OOM kills during concurrent operations
+        self.batch_size = shared_data.config.get('ai_evaluation_batch_size', 1)
         self.evaluation_interval = shared_data.config.get('ai_evaluation_check_interval', 300)  # 5 minutes
         
         # State tracking
@@ -129,6 +131,11 @@ class AITargetEvaluator:
         """
         if not self.is_enabled():
             logger.warning("AI evaluation disabled or not available")
+            return False
+        
+        # MEMORY CHECK: AI evaluations can consume significant memory
+        if not resource_monitor.can_start_operation("ai_target_evaluation", min_memory_mb=40):
+            logger.warning("Insufficient memory for AI evaluation, deferring to prevent OOM")
             return False
         
         try:
