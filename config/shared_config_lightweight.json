@@ -15,7 +15,7 @@
   "retry_failed_actions": true,
   "blacklistcheck": true,
   
-  "displaying_csv": false,
+  "displaying_csv": true,
   
   "log_debug": false,
   "log_info": true,
