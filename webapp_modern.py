@@ -9639,6 +9639,7 @@ def save_ai_token():
         # Log current user and path info
         current_user = getpass.getuser()
         logger.info(f"Attempting to save AI token for user: {current_user}")
+        logger.info(f"Actual user (from env_manager): {env_manager.actual_user}")
         logger.info(f"Target bashrc: {env_manager.bashrc_path}")
         
         # Save token to .bashrc
@@ -9653,9 +9654,10 @@ def save_ai_token():
             
             return jsonify({
                 'success': True,
-                'message': f'Token saved to ~/.bashrc successfully. Run "source ~/.bashrc" to load it in current shell.',
+                'message': f'Token saved to ~/.bashrc successfully for user {env_manager.actual_user}. Run "source ~/.bashrc" to load it in current shell.',
                 'configured': True,
-                'user': current_user,
+                'user': env_manager.actual_user,
+                'process_user': current_user,
                 'bashrc_path': str(env_manager.bashrc_path)
             })
         else:

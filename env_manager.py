@@ -16,7 +16,30 @@ class EnvManager:
     
     def __init__(self):
         self.logger = Logger(name="EnvManager", level=logging.INFO)
-        self.bashrc_path = Path.home() / '.bashrc'
+        
+        # Get the actual user's home directory, not root's
+        # When running with sudo, SUDO_USER contains the actual user
+        actual_user = os.environ.get('SUDO_USER') or os.environ.get('USER') or os.getlogin()
+        
+        if actual_user and actual_user != 'root':
+            # Use the actual user's home directory
+            import pwd
+            try:
+                user_info = pwd.getpwnam(actual_user)
+                self.bashrc_path = Path(user_info.pw_dir) / '.bashrc'
+                self.actual_user = actual_user
+                self.logger.info(f"Using bashrc for user: {actual_user} at {self.bashrc_path}")
+            except KeyError:
+                # Fallback to Path.home() if user not found
+                self.bashrc_path = Path.home() / '.bashrc'
+                self.actual_user = actual_user
+                self.logger.warning(f"Could not find user {actual_user}, using Path.home()")
+        else:
+            # Running as root without sudo - use root's bashrc
+            self.bashrc_path = Path.home() / '.bashrc'
+            self.actual_user = 'root'
+            self.logger.warning("Running as root - using /root/.bashrc")
+        
         self.env_var_name = 'RAGNAR_OPENAI_API_KEY'
         self.marker_start = '# >>> Ragnar OpenAI Configuration >>>'
         self.marker_end = '# <<< Ragnar OpenAI Configuration <<<'
@@ -51,7 +74,9 @@ class EnvManager:
             # Log the user and bashrc path being used
             import getpass
             current_user = getpass.getuser()
-            self.logger.info(f"Saving token for user: {current_user}")
+            effective_user = os.environ.get('SUDO_USER', current_user)
+            self.logger.info(f"Current process user: {current_user}")
+            self.logger.info(f"Saving token for actual user: {self.actual_user}")
             self.logger.info(f"Target .bashrc path: {self.bashrc_path}")
             self.logger.info(f".bashrc exists: {self.bashrc_path.exists()}")
             
