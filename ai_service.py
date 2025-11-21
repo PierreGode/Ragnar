@@ -47,22 +47,38 @@ class AIService:
         self.cache = {}
         self.cache_ttl = 300  # 5 minutes cache
         
-        # Initialize OpenAI client if available
+        # Track initialization errors
+        self.initialization_error = None
+        
+        # Initialize OpenAI client if enabled
         self.client = None
-        if self.enabled and OPENAI_AVAILABLE and self.api_token:
-            try:
-                # Use the new client initialization method
-                self.client = openai.OpenAI(api_key=self.api_token)
-                self.logger.info(f"AI Service initialized with model {self.model}")
-            except Exception as e:
-                self.logger.error(f"Failed to initialize OpenAI client: {e}")
-                self.enabled = False
-        elif self.enabled and not OPENAI_AVAILABLE:
-            self.logger.warning("AI enabled but OpenAI library not available. Install with: pip install openai")
-            self.enabled = False
-        elif self.enabled and not self.api_token:
-            self.logger.warning("AI enabled but no API token found in .env file or environment variables.")
-            self.enabled = False
+        if self.enabled:
+            prerequisites_ok, error_msg = self._check_prerequisites()
+            if not prerequisites_ok:
+                self.logger.warning(f"AI enabled but prerequisites not met: {error_msg}")
+                self.initialization_error = error_msg
+            else:
+                try:
+                    # Use the new client initialization method
+                    self.client = openai.OpenAI(api_key=self.api_token)
+                    self.logger.info(f"AI Service initialized with model {self.model}")
+                except Exception as e:
+                    self.logger.error(f"Failed to initialize OpenAI client: {e}")
+                    self.initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
+    
+    def _check_prerequisites(self):
+        """Check if prerequisites for AI service are met
+        
+        Returns:
+            tuple: (success: bool, error_message: str or None)
+        """
+        if not OPENAI_AVAILABLE:
+            return False, "OpenAI library not available. Install with: pip install openai"
+        
+        if not self.api_token:
+            return False, "No API token found. Please configure your OpenAI API token."
+        
+        return True, None
     
     def reload_token(self):
         """Reload API token from environment and reinitialize client"""
@@ -70,25 +86,33 @@ class AIService:
         self.api_token = self.env_manager.get_token()
         self.enabled = self.shared_data.config.get('ai_enabled', False)
         
+        # Clear any previous initialization errors
+        self.initialization_error = None
+        
         # Reinitialize OpenAI client
         self.client = None
-        if self.enabled and OPENAI_AVAILABLE and self.api_token:
-            try:
-                # Use the new client initialization method
-                self.client = openai.OpenAI(api_key=self.api_token)
-                self.logger.info("AI Service reinitialized with new token")
-                return True
-            except Exception as e:
-                self.logger.error(f"Failed to reinitialize OpenAI client: {e}")
-                self.enabled = False
-                return False
-        elif self.api_token:
-            # Token was loaded successfully, even if AI is disabled
-            self.logger.info("API token loaded successfully (AI is currently disabled in config)")
+        
+        # If AI is not enabled, nothing more to do
+        if not self.enabled:
+            if self.api_token:
+                self.logger.info("API token loaded successfully (AI is currently disabled in config)")
             return True
-        else:
-            self.logger.warning("AI enabled but no API token found after reload.")
-            self.enabled = False
+        
+        # AI is enabled - check prerequisites
+        prerequisites_ok, error_msg = self._check_prerequisites()
+        if not prerequisites_ok:
+            self.logger.warning(f"AI enabled but prerequisites not met: {error_msg}")
+            self.initialization_error = error_msg
+            return False
+        
+        # Prerequisites met - try to initialize client
+        try:
+            self.client = openai.OpenAI(api_key=self.api_token)
+            self.logger.info("AI Service reinitialized with new token")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to reinitialize OpenAI client: {e}")
+            self.initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
             return False
     
     def is_enabled(self) -> bool:

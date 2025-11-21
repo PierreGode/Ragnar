@@ -9422,8 +9422,9 @@ def get_ai_status():
                 'message': 'AI service not initialized'
             })
         
-        return jsonify({
-            'enabled': ai_service.is_enabled(),
+        status = {
+            'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
+            'config_enabled': shared_data.config.get('ai_enabled', False),  # User's intent from config
             'available': True,
             'model': ai_service.model,
             'capabilities': {
@@ -9431,7 +9432,13 @@ def get_ai_status():
                 'vulnerability_summaries': ai_service.vulnerability_summaries
             },
             'configured': bool(ai_service.api_token)
-        })
+        }
+        
+        # Include initialization error if present
+        if ai_service.initialization_error:
+            status['error'] = ai_service.initialization_error
+        
+        return jsonify(status)
         
     except Exception as e:
         logger.error(f"Error getting AI status: {e}")
