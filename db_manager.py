@@ -653,11 +653,44 @@ class DatabaseManager:
                     logger.info(f"Inserted new host: {mac} ({ip})")
                 
                 conn.commit()
+                
+                # Track target for AI intelligence (after successful update)
+                self._track_for_ai_intelligence(ip, mac, hostname, ports, vulnerabilities, services)
+                
                 return True
                 
         except Exception as e:
             logger.error(f"Failed to upsert host {mac}: {e}")
             return False
+    
+    def _track_for_ai_intelligence(self, ip: str = None, mac: str = None, hostname: str = None,
+                                   ports: str = None, vulnerabilities: str = None, services: str = None):
+        """
+        Track target for AI intelligence evaluation.
+        Uses lazy import to avoid circular dependencies.
+        """
+        if not ip:
+            return  # Nothing to track without IP
+        
+        try:
+            # Lazy import to avoid circular dependency
+            import sys
+            # Check if shared_data is already loaded
+            if 'init_shared' in sys.modules:
+                from init_shared import shared_data
+                if hasattr(shared_data, 'track_target_for_ai_intelligence'):
+                    shared_data.track_target_for_ai_intelligence(
+                        ip=ip,
+                        mac=mac,
+                        hostname=hostname,
+                        ports=ports,
+                        vulnerabilities=vulnerabilities,
+                        services=services
+                    )
+        except Exception as e:
+            # Don't fail the main operation if tracking fails
+            # Just log at debug level to avoid noise
+            pass
 
     def _normalize_action_column(self, action_name: Optional[str]) -> Optional[str]:
         """Map user-facing action names to database columns."""
