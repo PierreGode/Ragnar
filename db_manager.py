@@ -667,23 +667,30 @@ class DatabaseManager:
                                    ports: str = None, vulnerabilities: str = None, services: str = None):
         """
         Track target for AI intelligence evaluation.
-        Integrates with shared_data if available.
+        Uses lazy import to avoid circular dependencies.
         """
+        if not ip:
+            return  # Nothing to track without IP
+        
         try:
-            # Import here to avoid circular dependencies
-            from init_shared import shared_data
-            if hasattr(shared_data, 'track_target_for_ai_intelligence') and ip:
-                shared_data.track_target_for_ai_intelligence(
-                    ip=ip,
-                    mac=mac,
-                    hostname=hostname,
-                    ports=ports,
-                    vulnerabilities=vulnerabilities,
-                    services=services
-                )
+            # Lazy import to avoid circular dependency
+            import sys
+            # Check if shared_data is already loaded
+            if 'init_shared' in sys.modules:
+                from init_shared import shared_data
+                if hasattr(shared_data, 'track_target_for_ai_intelligence'):
+                    shared_data.track_target_for_ai_intelligence(
+                        ip=ip,
+                        mac=mac,
+                        hostname=hostname,
+                        ports=ports,
+                        vulnerabilities=vulnerabilities,
+                        services=services
+                    )
         except Exception as e:
             # Don't fail the main operation if tracking fails
-            logger.debug(f"Could not track for AI intelligence: {e}")
+            # Just log at debug level to avoid noise
+            pass
 
     def _normalize_action_column(self, action_name: Optional[str]) -> Optional[str]:
         """Map user-facing action names to database columns."""

@@ -7783,7 +7783,9 @@ def background_ai_intelligence_loop():
     global background_thread_health
     consecutive_errors = 0
     max_consecutive_errors = 10
-    interval = 300  # 5 minutes default
+    # Configurable interval (default 5 minutes)
+    interval = shared_data.config.get('ai_evaluation_check_interval', 300)
+    min_sleep_time = shared_data.config.get('ai_evaluation_min_sleep', 30)
     
     while not shared_data.webapp_should_exit:
         try:
@@ -7818,7 +7820,7 @@ def background_ai_intelligence_loop():
                 consecutive_errors = 0
                 time.sleep(60)  # Wait longer after multiple failures
         
-        time.sleep(max(30, interval))
+        time.sleep(max(min_sleep_time, interval))
 
 
 # ============================================================================

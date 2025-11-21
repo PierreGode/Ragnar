@@ -181,10 +181,34 @@ class AIIntelligenceManager:
         return hashlib.sha256(data_str.encode()).hexdigest()
     
     def _create_target_id(self, ip: str, mac: str = None) -> str:
-        """Create a stable target ID from IP and MAC."""
+        """
+        Create a stable target ID from IP and MAC.
+        
+        Args:
+            ip: IP address (required)
+            mac: MAC address (optional)
+        
+        Returns:
+            Target ID string
+        """
+        if not ip:
+            raise ValueError("IP address is required for target ID")
+        
+        # Sanitize IP address
+        ip_clean = ip.strip()
+        
         if mac:
-            return f"{ip}_{mac.replace(':', '')}"
-        return ip
+            # Validate and normalize MAC address
+            mac_clean = mac.strip().lower().replace(':', '').replace('-', '')
+            # Basic validation - MAC should be 12 hex characters
+            if len(mac_clean) == 12 and all(c in '0123456789abcdef' for c in mac_clean):
+                return f"{ip_clean}_{mac_clean}"
+            else:
+                # Invalid MAC format - use IP only
+                logger.warning(f"Invalid MAC address format '{mac}', using IP only for target ID")
+        
+        # Use IP only (with hash to avoid conflicts)
+        return f"{ip_clean}_ip{hashlib.md5(ip_clean.encode()).hexdigest()[:8]}"
     
     def check_target_changes(self, target_id: str, ports: str = None, 
                            vulnerabilities: str = None, services: str = None) -> bool:
@@ -271,34 +295,70 @@ class AIIntelligenceManager:
                 
                 if exists:
                     # Update existing target
-                    cursor.execute("""
-                        UPDATE target_intelligence
-                        SET ip_address = ?,
-                            mac_address = ?,
-                            hostname = ?,
-                            ports_hash = ?,
-                            vulnerabilities_hash = ?,
-                            services_hash = ?,
-                            current_ports = ?,
-                            current_vulnerabilities = ?,
-                            current_services = ?,
-                            last_seen = ?,
-                            state_changed = ?,
-                            last_state_change = CASE WHEN ? THEN ? ELSE last_state_change END,
-                            needs_ai_evaluation = CASE WHEN ? THEN 1 ELSE needs_ai_evaluation END,
-                            updated_at = ?
-                        WHERE target_id = ?
-                    """, (
-                        ip, mac, hostname,
-                        ports_hash, vulns_hash, services_hash,
-                        ports, vulnerabilities, services,
-                        now,
-                        1 if has_changes else 0,
-                        has_changes, now,
-                        has_changes,
-                        now,
-                        target_id
-                    ))
+                    update_fields = []
+                    update_values = []
+                    
+                    if ip is not None:
+                        update_fields.append("ip_address = ?")
+                        update_values.append(ip)
+                    
+                    if mac is not None:
+                        update_fields.append("mac_address = ?")
+                        update_values.append(mac)
+                    
+                    if hostname is not None:
+                        cleaned_hostname = self.sanitize_hostname(hostname)
+                        update_fields.append("hostname = ?")
+                        update_values.append(cleaned_hostname)
+                    
+                    if ports_hash is not None:
+                        update_fields.append("ports_hash = ?")
+                        update_values.append(ports_hash)
+                    
+                    if vulns_hash is not None:
+                        update_fields.append("vulnerabilities_hash = ?")
+                        update_values.append(vulns_hash)
+                    
+                    if services_hash is not None:
+                        update_fields.append("services_hash = ?")
+                        update_values.append(services_hash)
+                    
+                    if ports is not None:
+                        update_fields.append("current_ports = ?")
+                        update_values.append(ports)
+                    
+                    if vulnerabilities is not None:
+                        update_fields.append("current_vulnerabilities = ?")
+                        update_values.append(vulnerabilities)
+                    
+                    if services is not None:
+                        update_fields.append("current_services = ?")
+                        update_values.append(services)
+                    
+                    # Always update last_seen
+                    update_fields.append("last_seen = ?")
+                    update_values.append(now)
+                    
+                    # Update state_changed flag
+                    update_fields.append("state_changed = ?")
+                    update_values.append(1 if has_changes else 0)
+                    
+                    # Update last_state_change if changes detected
+                    if has_changes:
+                        update_fields.append("last_state_change = ?")
+                        update_values.append(now)
+                        update_fields.append("needs_ai_evaluation = ?")
+                        update_values.append(1)
+                    
+                    # Always update timestamp
+                    update_fields.append("updated_at = ?")
+                    update_values.append(now)
+                    
+                    # Add target_id for WHERE clause
+                    update_values.append(target_id)
+                    
+                    sql = f"UPDATE target_intelligence SET {', '.join(update_fields)} WHERE target_id = ?"
+                    cursor.execute(sql, update_values)
                     
                     if has_changes:
                         logger.info(f"Target {target_id} state changed - needs AI evaluation")
