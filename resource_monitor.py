@@ -19,9 +19,10 @@ class ResourceMonitor:
     def __init__(self):
         self.logger = logger
         
-        # Pi Zero W2 thresholds (conservative for 512MB RAM device)
-        self.memory_warning_threshold = 70  # % - Start warning
-        self.memory_critical_threshold = 85  # % - Block new operations
+        # Pi Zero W2 thresholds (ULTRA-conservative for 416MB actual usable RAM)
+        # System has 512MB total but only ~416MB available for apps
+        self.memory_warning_threshold = 60  # % - Start warning (lowered from 70%)
+        self.memory_critical_threshold = 75  # % - Block new operations (lowered from 85%)
         self.cpu_warning_threshold = 80  # %
         self.cpu_critical_threshold = 95  # %
         
@@ -112,6 +113,30 @@ class ResourceMonitor:
             return False
         
         return self.is_system_healthy()
+    
+    def is_memory_pressure_critical(self):
+        """
+        Check if we're in critical memory pressure (< 80MB free)
+        Emergency threshold for 416MB systems
+        
+        Returns:
+            bool: True if critical memory pressure detected
+        """
+        available_mb = self.get_available_memory_mb()
+        
+        if available_mb < 80:
+            self.logger.critical(
+                f"🚨 CRITICAL MEMORY PRESSURE: Only {available_mb:.1f}MB free! "
+                f"Emergency pause recommended."
+            )
+            return True
+        elif available_mb < 120:
+            self.logger.warning(
+                f"⚠️  Memory pressure detected: {available_mb:.1f}MB free"
+            )
+            return False
+        
+        return False
     
     def get_system_status(self):
         """Get comprehensive system status"""

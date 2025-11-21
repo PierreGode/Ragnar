@@ -38,12 +38,14 @@ check_memory() {
 check_oom_kills() {
     echo ""
     echo "Checking for OOM kills in last 24 hours..."
-    oom_count=$(journalctl --since "24 hours ago" | grep -c "killed process" 2>/dev/null || echo "0")
+    oom_count=$(journalctl --since "24 hours ago" 2>/dev/null | grep -c "killed process" || echo "0")
+    # Remove any whitespace/newlines that might cause integer comparison issues
+    oom_count=$(echo "$oom_count" | tr -d '[:space:]')
     
-    if [ "$oom_count" -gt 0 ]; then
+    if [ "$oom_count" -gt 0 ] 2>/dev/null; then
         echo -e "${RED}💥 Found ${oom_count} OOM kill(s) in last 24h${NC}"
         echo "Recent OOM kills:"
-        journalctl --since "24 hours ago" | grep "killed process" | tail -5
+        journalctl --since "24 hours ago" 2>/dev/null | grep "killed process" | tail -5
     else
         echo -e "${GREEN}✅ No OOM kills in last 24 hours${NC}"
     fi

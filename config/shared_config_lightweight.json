@@ -1,0 +1,52 @@
+{
+  "__comment": "Pi Zero W2 Lightweight Mode - Optimized for 416MB RAM",
+  "__memory_target": "Reduce idle usage from 70% to 40-50%",
+  
+  "manual_mode": false,
+  "websrv": false,
+  "web_increment": false,
+  "debug_mode": false,
+  
+  "scan_vuln_running": true,
+  "scan_vuln_no_ports": false,
+  "enable_attacks": true,
+  "retry_success_actions": true,
+  "retry_failed_actions": true,
+  "blacklistcheck": true,
+  
+  "displaying_csv": false,
+  
+  "log_debug": false,
+  "log_info": true,
+  "log_warning": true,
+  "log_error": true,
+  "log_critical": true,
+  
+  "startup_delay": 10,
+  "web_delay": 30,
+  "screen_delay": 60,
+  "comment_delaymin": 30,
+  "comment_delaymax": 120,
+  "livestatus_delay": 30,
+  "image_display_delaymin": 10,
+  "image_display_delaymax": 30,
+  
+  "scan_interval": 300,
+  "scan_vuln_interval": 1800,
+  "failed_retry_delay": 300,
+  "success_retry_delay": 600,
+  
+  "network_device_retention_days": 30,
+  "network_resolution_timeout": 300,
+  "network_confirmation_scans": 2,
+  "network_change_grace": 60,
+  "network_intelligence_enabled": true,
+  "network_auto_resolution": true,
+  
+  "ai_enabled": false,
+  "ai_target_evaluation_enabled": false,
+  "ai_vulnerability_summaries": false,
+  "ai_network_insights": false,
+  "ai_generated_comments": false,
+  "openai_api_token": ""
+}

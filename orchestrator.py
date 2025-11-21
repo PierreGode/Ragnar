@@ -779,10 +779,10 @@ class Orchestrator:
                 resource_monitor.log_system_status()
                 last_resource_log_time = time.time()
                 
-                # CRITICAL: Aggressive garbage collection for Pi Zero W2 (512MB RAM)
-                # Force GC if memory usage exceeds 65% to prevent OOM kills
+                # CRITICAL: Ultra-aggressive GC for Pi Zero W2 (416MB usable RAM)
+                # Force GC if memory usage exceeds 55% to prevent OOM kills
                 mem_usage = resource_monitor.get_memory_usage()
-                if mem_usage > 65:
+                if mem_usage > 55:
                     logger.warning(f"Memory usage at {mem_usage:.1f}% - forcing garbage collection to prevent OOM")
                     resource_monitor.force_garbage_collection()
                     # Log again after GC to confirm memory freed
@@ -876,6 +876,13 @@ class Orchestrator:
                 logger.warning("System resources critical - pausing orchestrator for 30 seconds")
                 resource_monitor.log_system_status()
                 time.sleep(30)
+                continue
+            
+            # EMERGENCY: Check for critical memory pressure (<80MB free)
+            if resource_monitor.is_memory_pressure_critical():
+                logger.critical("EMERGENCY: Critical memory pressure - forcing GC and pausing 60 seconds")
+                resource_monitor.force_garbage_collection()
+                time.sleep(60)
                 continue
             
             # Prefer fresh in-memory scan results over CSV file reads
