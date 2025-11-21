@@ -476,7 +476,20 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
     def generate_comment(self, theme: str) -> Optional[str]:
         """
         Generate a witty, context-aware comment for the given theme/status.
-        Returns None if AI comments are disabled or service unavailable.
+        
+        Args:
+            theme: The current system status/theme (e.g., "IDLE", "NetworkScanner", 
+                   "SSHBruteforce", etc.). See comment.py for full list of supported themes.
+        
+        Returns:
+            A short AI-generated comment (max 15 words) matching Ragnar's personality,
+            or None if AI comments are disabled or service unavailable.
+        
+        Behavior:
+            - Comments are cached for `comment_cache_duration` (default 2 minutes)
+            - Reads config dynamically to support runtime changes
+            - Falls back to None if AI is disabled, allowing comment.py to use static comments
+            - Generates context-aware responses based on the theme
         """
         # Read config dynamically to support runtime changes
         generated_comments_enabled = self.shared_data.config.get('ai_generated_comments', False)
