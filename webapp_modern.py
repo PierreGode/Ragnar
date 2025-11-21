@@ -9414,29 +9414,46 @@ def get_ai_status():
     """Get AI service status and configuration"""
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
-        
+        # If the AI service object isn't present, report not available
         if not ai_service:
             return jsonify({
                 'enabled': False,
                 'available': False,
+                'config_enabled': shared_data.config.get('ai_enabled', False),
+                'configured': False,
                 'message': 'AI service not initialized'
             })
-        
+
+        # Determine availability based on runtime client and SDK presence
+        try:
+            from ai_service import OPENAI_SDK_OK
+        except Exception:
+            OPENAI_SDK_OK = False
+
+        available = bool(OPENAI_SDK_OK)
+
         status = {
             'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
             'config_enabled': shared_data.config.get('ai_enabled', False),  # User's intent from config
-            'available': True,
-            'model': ai_service.model,
+            'available': available,
+            'model': getattr(ai_service, 'model', None),
             'capabilities': {
-                'network_insights': ai_service.network_insights,
-                'vulnerability_summaries': ai_service.vulnerability_summaries
+                'network_insights': getattr(ai_service, 'network_insights', False),
+                'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
             },
-            'configured': bool(ai_service.api_token)
+            'configured': bool(getattr(ai_service, 'api_token', None))
         }
         
         # Include initialization error if present
-        if ai_service.initialization_error:
-            status['error'] = ai_service.initialization_error
+        if getattr(ai_service, 'initialization_error', None):
+            # If OPENAI_SDK_OK is False and there is an initialization error, make it explicit
+            if not status['available'] and 'OpenAI SDK' in str(ai_service.initialization_error):
+                status['error'] = (
+                    f"{ai_service.initialization_error}. "
+                    "Install the official OpenAI Python SDK: pip install openai"
+                )
+            else:
+                status['error'] = ai_service.initialization_error
         
         return jsonify(status)
         
