@@ -9617,10 +9617,9 @@ def get_ai_token():
 
 @app.route('/api/ai/token', methods=['POST'])
 def save_ai_token():
-    """Save OpenAI API token to .bashrc as environment variable"""
+    """Save OpenAI API token to .env file"""
     try:
         from env_manager import EnvManager
-        import getpass
         env_manager = EnvManager()
         
         data = request.get_json()
@@ -9629,21 +9628,20 @@ def save_ai_token():
         
         token = data['token'].strip()
         
-        # Validate token format
-        if not env_manager.validate_token(token):
+        # Basic validation - OpenAI tokens start with 'sk-'
+        if not token.startswith('sk-'):
             return jsonify({
                 'success': False,
                 'message': 'Invalid token format. OpenAI API keys must start with "sk-"'
             }), 400
         
-        # Log current user and path info
-        current_user = getpass.getuser()
-        logger.info(f"Attempting to save AI token for user: {current_user}")
-        logger.info(f"Actual user (from env_manager): {env_manager.actual_user}")
-        logger.info(f"Target bashrc: {env_manager.bashrc_path}")
+        # Log save attempt
+        logger.info(f"Attempting to save AI token to {env_manager.env_file_path}")
         
-        # Save token to .bashrc
-        if env_manager.save_token(token):
+        # Save token to .env file
+        result = env_manager.save_token(token)
+        
+        if result['success']:
             # Reinitialize AI service with new token
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
@@ -9654,19 +9652,16 @@ def save_ai_token():
             
             return jsonify({
                 'success': True,
-                'message': f'Token saved to ~/.bashrc successfully for user {env_manager.actual_user}. Run "source ~/.bashrc" to load it in current shell.',
+                'message': result['message'],
                 'configured': True,
-                'user': env_manager.actual_user,
-                'process_user': current_user,
-                'bashrc_path': str(env_manager.bashrc_path)
+                'env_file': str(env_manager.env_file_path)
             })
         else:
-            logger.error(f"Failed to save token to {env_manager.bashrc_path}")
+            logger.error(f"Failed to save token to {env_manager.env_file_path}")
             return jsonify({
                 'success': False,
-                'message': f'Failed to save token to ~/.bashrc. Check server logs for details. Running as user: {current_user}',
-                'user': current_user,
-                'bashrc_path': str(env_manager.bashrc_path)
+                'message': result.get('message', 'Failed to save token. Check server logs for details.'),
+                'env_file': str(env_manager.env_file_path)
             }), 500
         
     except Exception as e:
@@ -9678,12 +9673,16 @@ def save_ai_token():
 
 @app.route('/api/ai/token', methods=['DELETE'])
 def remove_ai_token():
-    """Remove OpenAI API token from .bashrc"""
+    """Remove OpenAI API token from .env file"""
     try:
         from env_manager import EnvManager
+        import os
         env_manager = EnvManager()
         
-        if env_manager.remove_token():
+        # Remove the .env file
+        if os.path.exists(env_manager.env_file_path):
+            os.remove(env_manager.env_file_path)
+            
             # Disable AI service
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
@@ -9692,13 +9691,13 @@ def remove_ai_token():
             
             return jsonify({
                 'success': True,
-                'message': 'Token removed from .bashrc successfully'
+                'message': 'Token removed from .env successfully'
             })
         else:
             return jsonify({
                 'success': False,
-                'message': 'Failed to remove token from .bashrc'
-            }), 500
+                'message': 'No token file found'
+            }), 404
         
     except Exception as e:
         logger.error(f"Error removing AI token: {e}")
