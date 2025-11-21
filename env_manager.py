@@ -275,13 +275,27 @@ class EnvManager:
         """
         try:
             import subprocess
-            # Use bash -c to source the bashrc and print the env var
-            result = subprocess.run(
-                ['bash', '-c', f'source {self.bashrc_path} && echo ${self.env_var_name}'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
+            
+            # If running as root but targeting another user's bashrc, run as that user
+            current_user = os.getlogin() if hasattr(os, 'getlogin') else os.environ.get('USER', 'root')
+            
+            if current_user == 'root' and self.actual_user != 'root':
+                # Run as the actual user using su
+                self.logger.info(f"Running source as user {self.actual_user} (current: {current_user})")
+                result = subprocess.run(
+                    ['su', '-', self.actual_user, '-c', f'source {self.bashrc_path} && echo ${self.env_var_name}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+            else:
+                # Run normally
+                result = subprocess.run(
+                    ['bash', '-c', f'source {self.bashrc_path} && echo ${self.env_var_name}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
             
             if result.returncode == 0 and result.stdout.strip():
                 token_from_source = result.stdout.strip()
