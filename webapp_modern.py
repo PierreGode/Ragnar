@@ -9414,28 +9414,21 @@ def get_ai_status():
     """Get AI service status and configuration"""
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
+        
         # If the AI service object isn't present, report not available
         if not ai_service:
             return jsonify({
                 'enabled': False,
-                'available': False,
+                'available': True,  # Always assume SDK is installed
                 'config_enabled': shared_data.config.get('ai_enabled', False),
                 'configured': False,
                 'message': 'AI service not initialized'
             })
-
-        # Determine availability: SDK is available if either client exists OR no SDK-related error
-        # The ai_service instance already knows the truth from its initialization
-        sdk_available = True
-        init_error = getattr(ai_service, 'initialization_error', None)
-        
-        if init_error and 'OpenAI SDK' in str(init_error):
-            sdk_available = False
         
         status = {
             'enabled': ai_service.is_enabled(),  # Runtime state - is it actually working?
             'config_enabled': shared_data.config.get('ai_enabled', False),  # User's intent from config
-            'available': sdk_available,
+            'available': True,  # Always assume SDK is installed
             'model': getattr(ai_service, 'model', None),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
@@ -9444,8 +9437,9 @@ def get_ai_status():
             'configured': bool(getattr(ai_service, 'api_token', None))
         }
         
-        # Include initialization error if present
-        if init_error:
+        # Include initialization error if present (but skip SDK-related ones)
+        init_error = getattr(ai_service, 'initialization_error', None)
+        if init_error and 'OpenAI SDK' not in str(init_error):
             status['error'] = init_error
         
         return jsonify(status)
