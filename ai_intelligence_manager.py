@@ -307,9 +307,8 @@ class AIIntelligenceManager:
                         update_values.append(mac)
                     
                     if hostname is not None:
-                        cleaned_hostname = self.sanitize_hostname(hostname)
                         update_fields.append("hostname = ?")
-                        update_values.append(cleaned_hostname)
+                        update_values.append(hostname)
                     
                     if ports_hash is not None:
                         update_fields.append("ports_hash = ?")
