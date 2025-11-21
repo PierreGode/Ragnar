@@ -9640,8 +9640,10 @@ def save_ai_token():
             # Reinitialize AI service with new token
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
-                ai_service.api_token = token
-                ai_service.__init__(shared_data)  # Reinitialize
+                if ai_service.reload_token():
+                    logger.info("AI service reloaded with new token")
+                else:
+                    logger.warning("AI service failed to reload with new token")
             
             return jsonify({
                 'success': True,

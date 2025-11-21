@@ -62,6 +62,30 @@ class AIService:
             self.logger.warning("AI enabled but no API token configured")
             self.enabled = False
     
+    def reload_token(self):
+        """Reload API token from environment and reinitialize client"""
+        self.logger.info("Reloading API token from environment...")
+        self.api_token = self.env_manager.get_token()
+        self.enabled = self.shared_data.config.get('ai_enabled', False)
+        
+        # Reinitialize OpenAI client
+        self.client = None
+        if self.enabled and OPENAI_AVAILABLE and self.api_token:
+            try:
+                openai.api_key = self.api_token
+                self.client = openai
+                self.logger.info("AI Service reinitialized with new token")
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to reinitialize OpenAI client: {e}")
+                self.enabled = False
+                return False
+        elif self.enabled and not self.api_token:
+            self.logger.warning("AI enabled but no API token found")
+            self.enabled = False
+            return False
+        return False
+    
     def is_enabled(self) -> bool:
         """Check if AI service is enabled and ready"""
         return self.enabled and self.client is not None
