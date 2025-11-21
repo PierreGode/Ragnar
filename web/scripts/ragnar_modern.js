@@ -802,6 +802,9 @@ async function loadDashboardData() {
             // Also update status since quick endpoint includes it
             updateDashboardStatus(data);
         }
+        
+        // Load AI insights if configured
+        await loadAIInsights();
     } catch (error) {
         console.error('Error loading dashboard data:', error);
         // Remove pulse animation on error too
@@ -8300,16 +8303,3 @@ async function refreshAIInsights() {
         showNotification('Failed to refresh AI insights', 'error');
     }
 }
-
-// Add AI insights to dashboard load
-const originalLoadDashboard = loadDashboard;
-loadDashboard = async function() {
-    if (originalLoadDashboard) {
-        await originalLoadDashboard();
-    }
-    
-    // Load AI insights after a short delay to not block main dashboard
-    setTimeout(() => {
-        loadAIInsights();
-    }, 1000);
-};
