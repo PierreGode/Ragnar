@@ -2203,7 +2203,10 @@
                                                 Save Token
                                             </button>
                                         </div>
-                                        <p class="text-xs text-gray-500 mt-1">Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a></p>
+                                        <p class="text-xs text-gray-500 mt-1">
+                                            Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a>. 
+                                            Token will be saved to ~/.bashrc as RAGNAR_OPENAI_API_KEY environment variable.
+                                        </p>
                                     </div>
                                     <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
                                         <span id="ai-config-status-message"></span>
@@ -2217,7 +2220,7 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                                 <div class="text-xs text-gray-400">
-                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> API calls are sent directly to OpenAI. Your token is stored locally and never shared.</p>
+                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> API calls are sent directly to OpenAI. Your token is stored in ~/.bashrc as an environment variable and never shared.</p>
                                     <p><strong class="text-gray-300">Cost:</strong> AI features consume OpenAI API credits based on usage. Monitor your usage at OpenAI's platform.</p>
                                 </div>
                             </div>

@@ -9595,6 +9595,99 @@ def clear_ai_cache():
         logger.error(f"Error clearing AI cache: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+@app.route('/api/ai/token', methods=['GET'])
+def get_ai_token():
+    """Get OpenAI API token status (without revealing the actual token)"""
+    try:
+        from env_manager import EnvManager
+        env_manager = EnvManager()
+        
+        token = env_manager.get_token()
+        
+        return jsonify({
+            'configured': bool(token),
+            'token_preview': f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting AI token status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/token', methods=['POST'])
+def save_ai_token():
+    """Save OpenAI API token to .bashrc as environment variable"""
+    try:
+        from env_manager import EnvManager
+        env_manager = EnvManager()
+        
+        data = request.get_json()
+        if not data or 'token' not in data:
+            return jsonify({'error': 'No token provided'}), 400
+        
+        token = data['token'].strip()
+        
+        # Validate token format
+        if not env_manager.validate_token(token):
+            return jsonify({
+                'success': False,
+                'message': 'Invalid token format. OpenAI API keys must start with "sk-"'
+            }), 400
+        
+        # Save token to .bashrc
+        if env_manager.save_token(token):
+            # Reinitialize AI service with new token
+            ai_service = getattr(shared_data, 'ai_service', None)
+            if ai_service:
+                ai_service.api_token = token
+                ai_service.__init__(shared_data)  # Reinitialize
+            
+            return jsonify({
+                'success': True,
+                'message': 'Token saved to .bashrc successfully. It will be available in new shell sessions.',
+                'configured': True
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to save token to .bashrc'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error saving AI token: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/token', methods=['DELETE'])
+def remove_ai_token():
+    """Remove OpenAI API token from .bashrc"""
+    try:
+        from env_manager import EnvManager
+        env_manager = EnvManager()
+        
+        if env_manager.remove_token():
+            # Disable AI service
+            ai_service = getattr(shared_data, 'ai_service', None)
+            if ai_service:
+                ai_service.api_token = ''
+                ai_service.enabled = False
+            
+            return jsonify({
+                'success': True,
+                'message': 'Token removed from .bashrc successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to remove token from .bashrc'
+            }), 500
+        
+    except Exception as e:
+        logger.error(f"Error removing AI token: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 # ============================================================================
 # SIGNAL HANDLERS
 # ============================================================================

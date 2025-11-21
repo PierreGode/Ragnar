@@ -6006,24 +6006,29 @@ async function saveConfig(form) {
 }
 
 // AI Configuration Functions
-function loadAIConfiguration(config) {
+async function loadAIConfiguration(config) {
     // Set AI enabled checkbox
     const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
     if (aiEnabledCheckbox) {
         aiEnabledCheckbox.checked = config.ai_enabled || false;
     }
     
-    // Set API token (show masked version if exists)
-    const apiTokenInput = document.getElementById('openai-api-token');
-    if (apiTokenInput) {
-        if (config.openai_api_token && config.openai_api_token.length > 0) {
-            // Show masked token
-            apiTokenInput.value = '••••••••••••••••';
-            apiTokenInput.placeholder = 'Token configured (hidden for security)';
-        } else {
-            apiTokenInput.value = '';
-            apiTokenInput.placeholder = 'sk-...';
+    // Fetch token status from environment variable
+    try {
+        const tokenStatus = await fetchAPI('/api/ai/token');
+        const apiTokenInput = document.getElementById('openai-api-token');
+        if (apiTokenInput) {
+            if (tokenStatus.configured && tokenStatus.token_preview) {
+                // Show preview of token
+                apiTokenInput.value = '';
+                apiTokenInput.placeholder = `Configured: ${tokenStatus.token_preview}`;
+            } else {
+                apiTokenInput.value = '';
+                apiTokenInput.placeholder = 'sk-...';
+            }
         }
+    } catch (error) {
+        console.error('Failed to fetch AI token status:', error);
     }
 }
 
@@ -6084,41 +6089,44 @@ async function saveAIToken() {
     // Basic validation - OpenAI tokens start with 'sk-'
     if (!token.startsWith('sk-')) {
         statusDiv.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 border border-yellow-700';
-        statusMessage.textContent = '⚠ OpenAI API tokens typically start with "sk-". Please verify your token.';
+        statusMessage.textContent = '⚠ OpenAI API tokens must start with "sk-". Please verify your token.';
         statusDiv.classList.remove('hidden');
         setTimeout(() => statusDiv.classList.add('hidden'), 5000);
         return;
     }
     
     try {
-        const config = await fetchAPI('/api/config');
-        config.openai_api_token = token;
+        // Save token to .bashrc as environment variable
+        const result = await postAPI('/api/ai/token', { token: token });
         
-        await postAPI('/api/config', config);
-        
-        statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
-        statusMessage.textContent = '✓ API token saved successfully. AI features are now ready to use.';
-        statusDiv.classList.remove('hidden');
-        
-        addConsoleMessage('OpenAI API token saved', 'success');
-        
-        // Clear the input for security
-        tokenInput.value = '••••••••••••••••';
-        
-        // Hide status after 5 seconds
-        setTimeout(() => {
-            statusDiv.classList.add('hidden');
-        }, 5000);
-        
-        // Refresh dashboard to update AI insights
-        if (currentTab === 'dashboard') {
-            setTimeout(() => refreshDashboard(), 500);
+        if (result.success) {
+            statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
+            statusMessage.textContent = '✓ API token saved to .bashrc successfully. AI features are now ready to use.';
+            statusDiv.classList.remove('hidden');
+            
+            addConsoleMessage('OpenAI API token saved to environment variable', 'success');
+            
+            // Reload AI configuration to show token preview
+            const config = await fetchAPI('/api/config');
+            await loadAIConfiguration(config);
+            
+            // Hide status after 5 seconds
+            setTimeout(() => {
+                statusDiv.classList.add('hidden');
+            }, 5000);
+            
+            // Refresh dashboard to update AI insights
+            if (currentTab === 'dashboard') {
+                setTimeout(() => refreshDashboard(), 500);
+            }
+        } else {
+            throw new Error(result.message || 'Failed to save token');
         }
         
     } catch (error) {
         console.error('Failed to save AI token:', error);
         statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
-        statusMessage.textContent = '✗ Failed to save API token. Please try again.';
+        statusMessage.textContent = `✗ Failed to save API token: ${error.message || 'Please try again.'}`;
         statusDiv.classList.remove('hidden');
     }
 }

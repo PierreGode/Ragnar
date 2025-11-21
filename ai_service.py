@@ -12,6 +12,7 @@ import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from logger import Logger
+from env_manager import EnvManager
 
 try:
     import openai
@@ -26,10 +27,12 @@ class AIService:
     def __init__(self, shared_data):
         self.shared_data = shared_data
         self.logger = Logger(name="AIService", level=logging.INFO)
+        self.env_manager = EnvManager()
         
         # Configuration
         self.enabled = shared_data.config.get('ai_enabled', False)
-        self.api_token = shared_data.config.get('openai_api_token', '')
+        # Get API token from environment variable instead of config
+        self.api_token = self.env_manager.get_token()
         self.model = shared_data.config.get('ai_model', 'gpt-5-nano')
         self.max_tokens = shared_data.config.get('ai_max_tokens', 500)
         self.temperature = shared_data.config.get('ai_temperature', 0.7)
