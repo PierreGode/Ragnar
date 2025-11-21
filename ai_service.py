@@ -47,6 +47,9 @@ class AIService:
         self.cache = {}
         self.cache_ttl = 300  # 5 minutes cache
         
+        # Track initialization errors
+        self.initialization_error = None
+        
         # Initialize OpenAI client if available
         self.client = None
         if self.enabled and OPENAI_AVAILABLE and self.api_token:
@@ -56,13 +59,13 @@ class AIService:
                 self.logger.info(f"AI Service initialized with model {self.model}")
             except Exception as e:
                 self.logger.error(f"Failed to initialize OpenAI client: {e}")
-                self.enabled = False
+                self.initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
         elif self.enabled and not OPENAI_AVAILABLE:
             self.logger.warning("AI enabled but OpenAI library not available. Install with: pip install openai")
-            self.enabled = False
+            self.initialization_error = "OpenAI library not available. Install with: pip install openai"
         elif self.enabled and not self.api_token:
             self.logger.warning("AI enabled but no API token found in .env file or environment variables.")
-            self.enabled = False
+            self.initialization_error = "No API token found. Please configure your OpenAI API token."
     
     def reload_token(self):
         """Reload API token from environment and reinitialize client"""
@@ -70,8 +73,18 @@ class AIService:
         self.api_token = self.env_manager.get_token()
         self.enabled = self.shared_data.config.get('ai_enabled', False)
         
+        # Clear any previous initialization errors
+        self.initialization_error = None
+        
         # Reinitialize OpenAI client
         self.client = None
+        
+        # Check if AI is enabled but library not available
+        if self.enabled and not OPENAI_AVAILABLE:
+            self.logger.warning("AI enabled but OpenAI library not available.")
+            self.initialization_error = "OpenAI library not available. Install with: pip install openai"
+            return False
+        
         if self.enabled and OPENAI_AVAILABLE and self.api_token:
             try:
                 # Use the new client initialization method
@@ -80,15 +93,17 @@ class AIService:
                 return True
             except Exception as e:
                 self.logger.error(f"Failed to reinitialize OpenAI client: {e}")
-                self.enabled = False
+                self.initialization_error = f"Failed to initialize OpenAI client: {str(e)}"
                 return False
         elif self.api_token:
             # Token was loaded successfully, even if AI is disabled
             self.logger.info("API token loaded successfully (AI is currently disabled in config)")
             return True
         else:
-            self.logger.warning("AI enabled but no API token found after reload.")
-            self.enabled = False
+            if self.enabled:
+                # AI is enabled but no token found
+                self.logger.warning("AI enabled but no API token found after reload.")
+                self.initialization_error = "No API token found. Please configure your OpenAI API token."
             return False
     
     def is_enabled(self) -> bool:
