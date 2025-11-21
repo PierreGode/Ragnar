@@ -9620,6 +9620,7 @@ def save_ai_token():
     """Save OpenAI API token to .bashrc as environment variable"""
     try:
         from env_manager import EnvManager
+        import getpass
         env_manager = EnvManager()
         
         data = request.get_json()
@@ -9635,6 +9636,11 @@ def save_ai_token():
                 'message': 'Invalid token format. OpenAI API keys must start with "sk-"'
             }), 400
         
+        # Log current user and path info
+        current_user = getpass.getuser()
+        logger.info(f"Attempting to save AI token for user: {current_user}")
+        logger.info(f"Target bashrc: {env_manager.bashrc_path}")
+        
         # Save token to .bashrc
         if env_manager.save_token(token):
             # Reinitialize AI service with new token
@@ -9647,17 +9653,24 @@ def save_ai_token():
             
             return jsonify({
                 'success': True,
-                'message': 'Token saved to .bashrc successfully. It will be available in new shell sessions.',
-                'configured': True
+                'message': f'Token saved to ~/.bashrc successfully. Run "source ~/.bashrc" to load it in current shell.',
+                'configured': True,
+                'user': current_user,
+                'bashrc_path': str(env_manager.bashrc_path)
             })
         else:
+            logger.error(f"Failed to save token to {env_manager.bashrc_path}")
             return jsonify({
                 'success': False,
-                'message': 'Failed to save token to .bashrc'
+                'message': f'Failed to save token to ~/.bashrc. Check server logs for details. Running as user: {current_user}',
+                'user': current_user,
+                'bashrc_path': str(env_manager.bashrc_path)
             }), 500
         
     except Exception as e:
         logger.error(f"Error saving AI token: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
 
 

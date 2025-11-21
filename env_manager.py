@@ -48,24 +48,46 @@ class EnvManager:
                 self.logger.error("Invalid token format - must start with 'sk-'")
                 return False
             
+            # Log the user and bashrc path being used
+            import getpass
+            current_user = getpass.getuser()
+            self.logger.info(f"Saving token for user: {current_user}")
+            self.logger.info(f"Target .bashrc path: {self.bashrc_path}")
+            self.logger.info(f".bashrc exists: {self.bashrc_path.exists()}")
+            
             # Read existing .bashrc content
             bashrc_content = []
             if self.bashrc_path.exists():
-                with open(self.bashrc_path, 'r') as f:
-                    bashrc_content = f.readlines()
+                try:
+                    with open(self.bashrc_path, 'r') as f:
+                        bashrc_content = f.readlines()
+                    self.logger.info(f"Read {len(bashrc_content)} lines from .bashrc")
+                except PermissionError as e:
+                    self.logger.error(f"Permission denied reading .bashrc: {e}")
+                    return False
+            else:
+                self.logger.warning(f".bashrc does not exist at {self.bashrc_path}, will create it")
             
             # Remove existing Ragnar configuration block if present
             new_content = []
             skip_block = False
+            removed_lines = 0
             for line in bashrc_content:
                 if self.marker_start in line:
                     skip_block = True
+                    removed_lines += 1
                     continue
                 if self.marker_end in line:
                     skip_block = False
+                    removed_lines += 1
                     continue
                 if not skip_block:
                     new_content.append(line)
+                else:
+                    removed_lines += 1
+            
+            if removed_lines > 0:
+                self.logger.info(f"Removed existing Ragnar config block ({removed_lines} lines)")
             
             # Ensure file ends with newline
             if new_content and not new_content[-1].endswith('\n'):
@@ -80,18 +102,43 @@ class EnvManager:
             ]
             
             # Write updated content back to .bashrc
-            with open(self.bashrc_path, 'w') as f:
-                f.writelines(new_content + config_block)
+            try:
+                with open(self.bashrc_path, 'w') as f:
+                    f.writelines(new_content + config_block)
+                self.logger.info(f"Successfully wrote {len(new_content) + len(config_block)} lines to .bashrc")
+            except PermissionError as e:
+                self.logger.error(f"Permission denied writing to .bashrc: {e}")
+                return False
+            except Exception as e:
+                self.logger.error(f"Error writing to .bashrc: {e}")
+                return False
+            
+            # Verify the write was successful
+            if self.bashrc_path.exists():
+                try:
+                    with open(self.bashrc_path, 'r') as f:
+                        content = f.read()
+                        if self.env_var_name in content:
+                            self.logger.info("✓ Verified token was written to .bashrc")
+                        else:
+                            self.logger.error("✗ Token not found in .bashrc after write!")
+                            return False
+                except Exception as e:
+                    self.logger.warning(f"Could not verify .bashrc write: {e}")
             
             # Set in current environment immediately
             os.environ[self.env_var_name] = token
+            self.logger.info(f"✓ Set {self.env_var_name} in current environment")
             
             self.logger.info(f"Successfully saved token to {self.bashrc_path}")
             self.logger.info("Token will be available in new shell sessions")
+            self.logger.info(f"To load in current session, run: source ~/.bashrc")
             return True
             
         except Exception as e:
             self.logger.error(f"Error saving token to .bashrc: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             return False
     
     def remove_token(self) -> bool:

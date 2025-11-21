@@ -6101,7 +6101,11 @@ async function saveAIToken() {
         
         if (result.success) {
             statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
-            statusMessage.textContent = '✓ API token saved to .bashrc successfully. AI features are now ready to use.';
+            let message = result.message || '✓ API token saved to .bashrc successfully. AI features are now ready to use.';
+            if (result.user) {
+                message += ` (User: ${result.user})`;
+            }
+            statusMessage.textContent = message;
             statusDiv.classList.remove('hidden');
             
             addConsoleMessage('OpenAI API token saved to environment variable', 'success');
@@ -6110,10 +6114,10 @@ async function saveAIToken() {
             const config = await fetchAPI('/api/config');
             await loadAIConfiguration(config);
             
-            // Hide status after 5 seconds
+            // Hide status after 8 seconds (longer to show additional info)
             setTimeout(() => {
                 statusDiv.classList.add('hidden');
-            }, 5000);
+            }, 8000);
             
             // Refresh dashboard to update AI insights
             if (currentTab === 'dashboard') {
