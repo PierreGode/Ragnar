@@ -44,7 +44,7 @@ class AIService:
 
         # Configuration
         self.enabled = cfg.get("ai_enabled", False)
-        self.model = cfg.get("ai_model", "gpt-5-nano")
+        self.model = cfg.get("ai_model", "gpt-5.1")
 
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
@@ -72,7 +72,9 @@ class AIService:
     # ===================================================================
 
     def _initialize_client(self):
-        # ALWAYS initialize if we have a token, ignore the enabled flag
+        if not self.enabled:
+            return
+
         if not OPENAI_SDK_OK:
             self.initialization_error = (
                 "OpenAI SDK missing. Install with: pip install openai"
@@ -97,8 +99,7 @@ class AIService:
     # ===================================================================
 
     def is_enabled(self):
-        # If we have a client and token, we're enabled regardless of config flag
-        return self.client is not None and self.initialization_error is None and self.api_token
+        return self.enabled and self.client is not None and self.initialization_error is None
 
     def _cache_key(self, name: str, content: Any):
         import hashlib
@@ -363,43 +364,6 @@ List 2–3 attack paths Ragnar would exploit.
                 output["weakness_analysis"] = self.identify_network_weaknesses(net, combined)
 
         return output
-
-
-
-    # ===================================================================
-    #   CONFIG / TOKEN RELOAD
-    # ===================================================================
-
-    def reload_token(self) -> bool:
-        """Reload AI configuration, refresh API token, and rebuild the client."""
-
-        cfg = getattr(self.shared_data, "config", {})
-        if cfg:
-            self.enabled = cfg.get("ai_enabled", self.enabled)
-            self.model = cfg.get("ai_model", self.model)
-            self.max_tokens = cfg.get("ai_max_tokens", self.max_tokens)
-            self.temperature = cfg.get("ai_temperature", self.temperature)
-            self.vulnerability_summaries = cfg.get("ai_vulnerability_summaries", self.vulnerability_summaries)
-            self.network_insights = cfg.get("ai_network_insights", self.network_insights)
-
-        # Always refresh the token from disk/env before rebuilding the client
-        self.api_token = self.env_manager.get_token()
-        self.initialization_error = None
-        self.client = None
-
-        # ALWAYS try to initialize if we have a token, ignore the enabled flag
-        self._initialize_client()
-
-        ready = self.client is not None and self.initialization_error is None
-        if ready:
-            self.clear_cache()
-            self.logger.info("AI Service client reloaded with latest configuration")
-        else:
-            self.logger.warning(
-                "AI Service reload failed; check token/configuration and try again."
-            )
-
-        return ready
 
 
 

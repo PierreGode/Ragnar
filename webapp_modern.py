@@ -9643,13 +9643,6 @@ def save_ai_token():
         
         token = data['token'].strip()
         
-        # Basic validation - OpenAI tokens start with 'sk-'
-        if not token.startswith('sk-'):
-            return jsonify({
-                'success': False,
-                'message': 'Invalid token format. OpenAI API keys must start with "sk-"'
-            }), 400
-        
         # Log save attempt
         logger.info(f"Attempting to save AI token to {env_manager.env_file_path}")
         

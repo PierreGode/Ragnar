@@ -6009,10 +6009,13 @@ async function saveConfig(form) {
 
 // AI Configuration Functions
 async function loadAIConfiguration(config) {
-    // AI checkbox is always checked (always enabled when token is present)
+    // Mirror current configuration for AI enable toggle
     const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
     if (aiEnabledCheckbox) {
-        aiEnabledCheckbox.checked = true;  // Always checked
+        const aiEnabled = config && Object.prototype.hasOwnProperty.call(config, 'ai_enabled')
+            ? Boolean(config.ai_enabled)
+            : false;
+        aiEnabledCheckbox.checked = aiEnabled;
     }
     
     // Fetch token status from environment variable
@@ -6038,19 +6041,43 @@ async function toggleAIEnabled() {
     const checkbox = document.getElementById('ai-enabled-toggle');
     const statusDiv = document.getElementById('ai-config-status');
     const statusMessage = document.getElementById('ai-config-status-message');
-    
-    // AI is always enabled if token is configured - checkbox does nothing
-    // Just show a message
-    statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
-    statusMessage.textContent = 'ℹ AI Insights are automatically enabled when you configure an API token.';
-    statusDiv.classList.remove('hidden');
-    
-    // Keep checkbox checked
-    checkbox.checked = true;
-    
-    setTimeout(() => {
-        statusDiv.classList.add('hidden');
-    }, 3000);
+    if (!checkbox || !statusDiv || !statusMessage) {
+        return;
+    }
+
+    const desiredState = checkbox.checked;
+    const payload = { ai_enabled: desiredState };
+
+    try {
+        await postAPI('/api/config', payload);
+
+        statusDiv.className = desiredState
+            ? 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700'
+            : 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+        statusMessage.textContent = desiredState
+            ? '✓ AI Insights enabled. Ragnar will request GPT analysis for dashboards.'
+            : 'ℹ AI Insights disabled. Ragnar will stop requesting GPT analysis until re-enabled.';
+        statusDiv.classList.remove('hidden');
+
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, 4000);
+
+        if (currentTab === 'dashboard') {
+            setTimeout(() => {
+                loadAIInsights().catch(err => console.error('Failed to refresh AI insights after toggle:', err));
+            }, 500);
+        }
+    } catch (error) {
+        console.error('Failed to toggle AI insights:', error);
+        checkbox.checked = !desiredState;  // Revert UI state on failure
+        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
+        statusMessage.textContent = `✗ Failed to ${desiredState ? 'enable' : 'disable'} AI Insights (${error.message || 'unknown error'})`;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => {
+            statusDiv.classList.add('hidden');
+        }, 5000);
+    }
 }
 
 async function saveAIToken() {
@@ -6064,15 +6091,6 @@ async function saveAIToken() {
         statusMessage.textContent = '⚠ Please enter an API token.';
         statusDiv.classList.remove('hidden');
         setTimeout(() => statusDiv.classList.add('hidden'), 3000);
-        return;
-    }
-    
-    // Basic validation - OpenAI tokens start with 'sk-'
-    if (!token.startsWith('sk-')) {
-        statusDiv.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 border border-yellow-700';
-        statusMessage.textContent = '⚠ OpenAI API tokens must start with "sk-". Please verify your token.';
-        statusDiv.classList.remove('hidden');
-        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
         return;
     }
     
