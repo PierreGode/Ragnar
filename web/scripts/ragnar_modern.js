@@ -8226,6 +8226,33 @@ function escapeHtml(text) {
     div.textContent = text;
     return div.innerHTML;
 }
+
+// Format AI text with proper line breaks and structure
+function formatAIText(text) {
+    if (!text || typeof text !== 'string') return '';
+    
+    // Escape HTML to prevent XSS
+    const escaped = escapeHtml(text);
+    
+    // Convert numbered lists (1., 2., 3.) to HTML lists
+    let formatted = escaped.replace(/(\d+\.\s+[^\n]+)/g, '<li>$1</li>');
+    if (formatted.includes('<li>')) {
+        formatted = '<ul class="list-disc list-inside space-y-1">' + formatted + '</ul>';
+    }
+    
+    // Convert bullet points (-, *, •) to HTML lists
+    formatted = formatted.replace(/^[\-\*\•]\s+(.+)$/gm, '<li class="ml-4">$1</li>');
+    
+    // Convert double line breaks to paragraph breaks
+    formatted = formatted.replace(/\n\n/g, '</p><p class="mt-3">');
+    formatted = '<p>' + formatted + '</p>';
+    
+    // Convert single line breaks to <br> tags
+    formatted = formatted.replace(/\n/g, '<br>');
+    
+    return formatted;
+}
+
 // ============================================================================
 // AI INSIGHTS FUNCTIONS
 // ============================================================================
@@ -8265,7 +8292,7 @@ async function loadAIInsights() {
             // Update network summary
             const networkSummary = document.getElementById('ai-network-summary');
             if (networkSummary) {
-                networkSummary.textContent = insights.network_summary || 'Analyzing network...';
+                networkSummary.innerHTML = formatAIText(insights.network_summary || 'Analyzing network...');
             }
             
             // Update vulnerability analysis
@@ -8273,7 +8300,7 @@ async function loadAIInsights() {
             const vulnSection = document.getElementById('ai-vuln-section');
             if (vulnAnalysis) {
                 if (insights.vulnerability_analysis) {
-                    vulnAnalysis.textContent = insights.vulnerability_analysis;
+                    vulnAnalysis.innerHTML = formatAIText(insights.vulnerability_analysis);
                     if (vulnSection) vulnSection.style.display = 'block';
                 } else {
                     vulnAnalysis.textContent = 'No vulnerabilities detected';
@@ -8286,7 +8313,7 @@ async function loadAIInsights() {
             const weaknessSection = document.getElementById('ai-weakness-section');
             if (weaknessAnalysis) {
                 if (insights.weakness_analysis) {
-                    weaknessAnalysis.textContent = insights.weakness_analysis;
+                    weaknessAnalysis.innerHTML = formatAIText(insights.weakness_analysis);
                     if (weaknessSection) weaknessSection.style.display = 'block';
                 } else {
                     weaknessAnalysis.textContent = 'Analyzing network topology...';

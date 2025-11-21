@@ -305,7 +305,8 @@ Give a 2–3 sentence Viking-style summary.
 
         system = (
             "You are Ragnar, an elite vulnerability hunter. "
-            "Analyze weaknesses with precision and battle-readiness."
+            "Structure your analysis clearly with sections and bullet points. "
+            "Use markdown-style formatting for readability."
         )
 
         user = f"""
@@ -314,12 +315,24 @@ Vulnerabilities Detected: {len(vulnerabilities)}
 Top Findings:
 {data_json}
 
-Provide:
-1. Critical weaknesses
-2. What must be fixed FIRST
-3. Overall attack risk
+Provide a structured analysis:
 
-Tone: fierce Viking strategist.
+**Critical Weaknesses:**
+- List the most severe vulnerabilities (CVE numbers if available)
+- Include affected hosts/ports
+- Note severity ratings
+
+**Immediate Actions Required:**
+- Prioritized remediation steps
+- What to patch/fix first
+- Quick wins for risk reduction
+
+**Overall Risk Assessment:**
+- Current attack surface severity (Critical/High/Medium)
+- Potential impact if exploited
+- Recommended timeline for fixes
+
+Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
 """
 
         resp = self._ask(system, user)
@@ -349,17 +362,45 @@ Tone: fierce Viking strategist.
 
         system = (
             "You are Ragnar, a penetration strategist. "
-            "Identify viable attack vectors with tactical precision."
+            "Structure attack vector analysis clearly with numbered attack paths. "
+            "Use markdown formatting for readability."
         )
 
         user = f"""
-Devices: {network_data.get('target_count')}
-Ports: {network_data.get('port_count')}
+Network Profile:
+- Devices: {network_data.get('target_count')}
+- Open Ports: {network_data.get('port_count')}
 
 Key Findings:
 {sample}
 
-List 2–3 attack paths Ragnar would exploit.
+Provide structured attack vector analysis:
+
+**Primary Attack Paths:**
+
+1. **[Attack Name]**
+   - Target: [specific host/service]
+   - Method: [exploitation technique]
+   - Risk Level: [Critical/High/Medium]
+   - Ease of Exploitation: [Easy/Moderate/Difficult]
+
+2. **[Attack Name]**
+   - Target: [specific host/service]
+   - Method: [exploitation technique]
+   - Risk Level: [Critical/High/Medium]
+   - Ease of Exploitation: [Easy/Moderate/Difficult]
+
+3. **[Attack Name]** (if applicable)
+   - Target: [specific host/service]
+   - Method: [exploitation technique]
+   - Risk Level: [Critical/High/Medium]
+   - Ease of Exploitation: [Easy/Moderate/Difficult]
+
+**Defense Recommendations:**
+- Immediate hardening steps
+- Network segmentation suggestions
+
+Limit to 2-3 most viable attack paths. Be specific and tactical.
 """
 
         resp = self._ask(system, user)
