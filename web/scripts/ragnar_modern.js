@@ -6009,10 +6009,10 @@ async function saveConfig(form) {
 
 // AI Configuration Functions
 async function loadAIConfiguration(config) {
-    // Set AI enabled checkbox
+    // AI checkbox is always checked (always enabled when token is present)
     const aiEnabledCheckbox = document.getElementById('ai-enabled-toggle');
     if (aiEnabledCheckbox) {
-        aiEnabledCheckbox.checked = config.ai_enabled || false;
+        aiEnabledCheckbox.checked = true;  // Always checked
     }
     
     // Fetch token status from environment variable
@@ -6039,39 +6039,18 @@ async function toggleAIEnabled() {
     const statusDiv = document.getElementById('ai-config-status');
     const statusMessage = document.getElementById('ai-config-status-message');
     
-    try {
-        const config = await fetchAPI('/api/config');
-        config.ai_enabled = checkbox.checked;
-        
-        await postAPI('/api/config', config);
-        
-        // Show status message
-        statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
-        statusMessage.textContent = checkbox.checked 
-            ? '✓ AI Insights enabled. Configure your API token below to start using AI features.'
-            : 'AI Insights disabled.';
-        statusDiv.classList.remove('hidden');
-        
-        addConsoleMessage(`AI Insights ${checkbox.checked ? 'enabled' : 'disabled'}`, 'info');
-        
-        // Hide status after 5 seconds
-        setTimeout(() => {
-            statusDiv.classList.add('hidden');
-        }, 5000);
-        
-        // Refresh dashboard to update AI insights section
-        if (currentTab === 'dashboard') {
-            setTimeout(() => refreshDashboard(), 500);
-        }
-        
-    } catch (error) {
-        console.error('Failed to toggle AI:', error);
-        statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
-        statusMessage.textContent = '✗ Failed to update AI setting.';
-        statusDiv.classList.remove('hidden');
-        // Revert checkbox
-        checkbox.checked = !checkbox.checked;
-    }
+    // AI is always enabled if token is configured - checkbox does nothing
+    // Just show a message
+    statusDiv.className = 'p-3 rounded-lg text-sm bg-blue-900/30 border border-blue-700';
+    statusMessage.textContent = 'ℹ AI Insights are automatically enabled when you configure an API token.';
+    statusDiv.classList.remove('hidden');
+    
+    // Keep checkbox checked
+    checkbox.checked = true;
+    
+    setTimeout(() => {
+        statusDiv.classList.add('hidden');
+    }, 3000);
 }
 
 async function saveAIToken() {
