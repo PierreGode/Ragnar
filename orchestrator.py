@@ -322,12 +322,12 @@ class Orchestrator:
                             self.shared_data.ragnarorch_status = action_executed_status
                             
                             # After parent succeeds, immediately try child actions on same host
+                            # Note: Already within semaphore context, no need to re-acquire
                             for child_action in self.actions:
                                 if child_action.b_parent_action == action_key:
-                                    with self.semaphore:
-                                        if self.execute_action(child_action, ip, ports, row, child_action.action_name, current_data):
-                                            action_executed_status = child_action.action_name
-                                            self.shared_data.ragnarorch_status = action_executed_status
+                                    if self.execute_action(child_action, ip, ports, row, child_action.action_name, current_data):
+                                        action_executed_status = child_action.action_name
+                                        self.shared_data.ragnarorch_status = action_executed_status
                     
                     # Continue processing remaining hosts for this action
 
