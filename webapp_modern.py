@@ -3870,7 +3870,9 @@ def _parse_nmap_ping_output(output):
 # Global variables for network scanning
 network_scan_cache = {}
 network_scan_last_update = 0
-ARP_SCAN_INTERVAL = 60  # seconds
+# DEPRECATED: Background ARP scan disabled to reduce resource usage
+# ARP scans now run via orchestrator at service start and between cycles
+ARP_SCAN_INTERVAL = 60  # seconds (kept for backward compatibility with API endpoints)
 
 @app.route('/api/scan/arp-localnet')
 def get_arp_scan_localnet():
@@ -7655,7 +7657,16 @@ def background_sync_loop(interval=SYNC_BACKGROUND_INTERVAL):
         time.sleep(max(1, interval))
 
 def background_arp_scan_loop():
-    """Continuously run ARP scans to keep network data fresh"""
+    """
+    DISABLED: Continuously run ARP scans to keep network data fresh
+    
+    This function is no longer called automatically to reduce resource consumption.
+    ARP scans now run only via the orchestrator at:
+    1. Service start (orchestrator Phase 1)
+    2. Between orchestrator cycles (every scan_interval, default 180s)
+    
+    This function is kept for potential future use or manual triggering.
+    """
     global network_scan_cache, network_scan_last_update, background_thread_health
     consecutive_errors = 0
     max_consecutive_errors = 10
@@ -7738,9 +7749,9 @@ def background_arp_scan_loop():
 # Health monitoring for background threads
 background_thread_health = {
     'sync_last_run': 0,
-    'arp_last_run': 0,
+    'arp_last_run': 0,  # No longer updated - ARP runs via orchestrator only
     'sync_alive': False,
-    'arp_alive': False
+    'arp_alive': True  # Set to True since ARP is now handled by orchestrator, not a background thread
 }
 
 def background_health_monitor():
@@ -7760,14 +7771,9 @@ def background_health_monitor():
                 else:
                     background_thread_health['sync_alive'] = True
             
-            # Check ARP thread - should run every 10 seconds  
-            if background_thread_health['arp_last_run'] > 0:
-                time_since_arp = current_time - background_thread_health['arp_last_run']
-                if time_since_arp > 60:  # No ARP scan for 60 seconds
-                    logger.warning(f"⚠️ Background ARP scan thread appears stuck! Last run was {time_since_arp:.0f}s ago")
-                    background_thread_health['arp_alive'] = False
-                else:
-                    background_thread_health['arp_alive'] = True
+            # ARP thread health check disabled - ARP scans now run via orchestrator only
+            # Background ARP scan loop is disabled to reduce resource consumption
+            # ARP scans happen at service start and between orchestrator cycles
             
             time.sleep(15)  # Check every 15 seconds
             
@@ -9729,10 +9735,11 @@ def run_server(host='0.0.0.0', port=8000):
         # Start background status broadcaster
         socketio.start_background_task(broadcast_status_updates)
         socketio.start_background_task(background_sync_loop)
-        socketio.start_background_task(background_arp_scan_loop)
+        # DISABLED: Continuous background ARP scan - now runs only via orchestrator at startup and between cycles
+        # socketio.start_background_task(background_arp_scan_loop)
         socketio.start_background_task(background_health_monitor)
         
-        logger.info("✅ All background threads started successfully")
+        logger.info("✅ All background threads started successfully (ARP scan now runs via orchestrator only)")
 
         # Run the server
         socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
