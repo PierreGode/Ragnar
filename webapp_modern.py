@@ -3870,7 +3870,7 @@ def _parse_nmap_ping_output(output):
 # Global variables for network scanning
 network_scan_cache = {}
 network_scan_last_update = 0
-# DEPRECATED: Background ARP scan disabled to reduce resource usage
+# NOTE: Background ARP scan disabled to reduce resource usage
 # ARP scans now run via orchestrator at service start and between cycles
 ARP_SCAN_INTERVAL = 60  # seconds (kept for backward compatibility with API endpoints)
 
@@ -7747,11 +7747,13 @@ def background_arp_scan_loop():
 
 
 # Health monitoring for background threads
+# NOTE: arp_last_run and arp_alive kept for backward compatibility but no longer used
+# ARP scans are now managed by the orchestrator, not a background thread
 background_thread_health = {
     'sync_last_run': 0,
-    'arp_last_run': 0,  # No longer updated - ARP runs via orchestrator only
+    'arp_last_run': 0,  # No longer updated - kept for backward compatibility
     'sync_alive': False,
-    'arp_alive': True  # Set to True since ARP is now handled by orchestrator, not a background thread
+    'arp_alive': True  # Set to True since ARP is now handled by orchestrator
 }
 
 def background_health_monitor():
@@ -9739,7 +9741,7 @@ def run_server(host='0.0.0.0', port=8000):
         # socketio.start_background_task(background_arp_scan_loop)
         socketio.start_background_task(background_health_monitor)
         
-        logger.info("✅ All background threads started successfully (ARP scan now runs via orchestrator only)")
+        logger.info("✅ Background threads started successfully (ARP scan now handled by orchestrator only)")
 
         # Run the server
         socketio.run(app, host=host, port=port, debug=False, allow_unsafe_werkzeug=True)
