@@ -112,6 +112,13 @@
         "b_parent": "SSHBruteforce"
     },
     {
+        "b_module": "lynis_pentest_ssh",
+        "b_class": "LynisPentestSSH",
+        "b_port": 22,
+        "b_status": "lynis_pentest_ssh",
+        "b_parent": "SSHBruteforce"
+    },
+    {
         "b_module": "steal_files_telnet",
         "b_class": "StealFilesTelnet",
         "b_port": 23,
