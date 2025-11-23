@@ -8115,16 +8115,25 @@ function extractAISummary(text) {
     let cleanText = text.replace(/\*\*/g, '').replace(/\*/g, '').trim();
     
     // Find first sentence or first line break
-    const firstSentence = cleanText.split(/[.\n]/).filter(s => s.trim().length > 0)[0];
+    const sentences = cleanText.split(/[.\n]/).filter(s => s.trim().length > 0);
+    const firstSentence = sentences.length > 0 ? sentences[0] : '';
     
-    if (!firstSentence) return cleanText.substring(0, 150) + '...';
+    if (!firstSentence || firstSentence.length === 0) {
+        const truncated = cleanText.substring(0, 150);
+        return truncated.length < cleanText.length ? truncated + '...' : truncated;
+    }
     
     // Limit to 150 characters
     if (firstSentence.length > 150) {
         return firstSentence.substring(0, 150) + '...';
     }
     
-    return firstSentence + '.';
+    // Add period only if it doesn't already end with punctuation
+    if (!/[.!?]$/.test(firstSentence.trim())) {
+        return firstSentence + '.';
+    }
+    
+    return firstSentence;
 }
 
 function displayAIInsights(insights) {
