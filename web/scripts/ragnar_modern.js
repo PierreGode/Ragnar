@@ -8115,28 +8115,58 @@ function displayAIInsights(insights) {
             networkSummary.innerHTML = formatAIText(insights.network_summary || 'Analyzing network...');
         }
         
-        // Update vulnerability analysis
-        const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+        // Update vulnerability analysis with summary/details split
         const vulnSection = document.getElementById('ai-vuln-section');
-        if (vulnAnalysis) {
+        const vulnSummary = document.getElementById('ai-vuln-summary');
+        const vulnDetails = document.getElementById('ai-vuln-details');
+        const vulnToggle = document.getElementById('ai-vuln-toggle');
+        
+        if (vulnSummary && vulnDetails) {
             if (insights.vulnerability_analysis) {
-                vulnAnalysis.innerHTML = formatAIText(insights.vulnerability_analysis);
+                const { summary, details } = splitAIContent(insights.vulnerability_analysis);
+                vulnSummary.innerHTML = formatAIText(summary);
+                vulnDetails.innerHTML = formatAIText(details);
+                
+                // Show toggle button if there are details
+                if (vulnToggle && details.trim()) {
+                    vulnToggle.style.display = 'flex';
+                } else if (vulnToggle) {
+                    vulnToggle.style.display = 'none';
+                }
+                
                 if (vulnSection) vulnSection.style.display = 'block';
             } else {
-                vulnAnalysis.textContent = 'No vulnerabilities detected';
+                vulnSummary.textContent = 'No vulnerabilities detected';
+                vulnDetails.innerHTML = '';
+                if (vulnToggle) vulnToggle.style.display = 'none';
                 if (vulnSection) vulnSection.style.display = 'block';
             }
         }
         
-        // Update weakness analysis
-        const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        // Update weakness analysis with summary/details split
         const weaknessSection = document.getElementById('ai-weakness-section');
-        if (weaknessAnalysis) {
+        const weaknessSummary = document.getElementById('ai-weakness-summary');
+        const weaknessDetails = document.getElementById('ai-weakness-details');
+        const weaknessToggle = document.getElementById('ai-weakness-toggle');
+        
+        if (weaknessSummary && weaknessDetails) {
             if (insights.weakness_analysis) {
-                weaknessAnalysis.innerHTML = formatAIText(insights.weakness_analysis);
+                const { summary, details } = splitAIContent(insights.weakness_analysis);
+                weaknessSummary.innerHTML = formatAIText(summary);
+                weaknessDetails.innerHTML = formatAIText(details);
+                
+                // Show toggle button if there are details
+                if (weaknessToggle && details.trim()) {
+                    weaknessToggle.style.display = 'flex';
+                } else if (weaknessToggle) {
+                    weaknessToggle.style.display = 'none';
+                }
+                
                 if (weaknessSection) weaknessSection.style.display = 'block';
             } else {
-                weaknessAnalysis.textContent = 'Analyzing network topology...';
+                weaknessSummary.textContent = 'Analyzing network topology...';
+                weaknessDetails.innerHTML = '';
+                if (weaknessToggle) weaknessToggle.style.display = 'none';
                 if (weaknessSection) weaknessSection.style.display = 'block';
             }
         }
@@ -8167,12 +8197,12 @@ async function refreshAIInsights() {
         
         // Show loading state
         const networkSummary = document.getElementById('ai-network-summary');
-        const vulnAnalysis = document.getElementById('ai-vuln-analysis');
-        const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        const vulnSummary = document.getElementById('ai-vuln-summary');
+        const weaknessSummary = document.getElementById('ai-weakness-summary');
         
         if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
-        if (vulnAnalysis) vulnAnalysis.textContent = 'Analyzing vulnerabilities...';
-        if (weaknessAnalysis) weaknessAnalysis.textContent = 'Identifying network weaknesses...';
+        if (vulnSummary) vulnSummary.textContent = 'Analyzing vulnerabilities...';
+        if (weaknessSummary) weaknessSummary.textContent = 'Identifying network weaknesses...';
         
         // Reload insights (will fetch fresh data since cache is cleared)
         await loadAIInsights();
@@ -8181,5 +8211,59 @@ async function refreshAIInsights() {
     } catch (error) {
         console.error('Error refreshing AI insights:', error);
         showNotification('Failed to refresh AI insights', 'error');
+    }
+}
+
+// Split AI content into summary and details
+function splitAIContent(content) {
+    if (!content || typeof content !== 'string') {
+        return { summary: '', details: '' };
+    }
+    
+    // Split by double newlines or major headers to find logical sections
+    const sections = content.split(/\n\n+/);
+    
+    if (sections.length <= 1) {
+        // If no clear sections, just show first 200 chars as summary
+        if (content.length <= 200) {
+            return { summary: content, details: '' };
+        }
+        return {
+            summary: content.substring(0, 200) + '...',
+            details: content
+        };
+    }
+    
+    // First section is summary, rest is details
+    const summary = sections[0];
+    const details = sections.slice(1).join('\n\n');
+    
+    return { summary, details };
+}
+
+// Toggle AI section expansion
+function toggleAISection(section) {
+    const detailsId = `ai-${section}-details`;
+    const toggleTextId = `ai-${section}-toggle-text`;
+    const toggleIconId = `ai-${section}-toggle-icon`;
+    
+    const details = document.getElementById(detailsId);
+    const toggleText = document.getElementById(toggleTextId);
+    const toggleIcon = document.getElementById(toggleIconId);
+    
+    if (!details) return;
+    
+    const isHidden = details.style.display === 'none';
+    
+    if (isHidden) {
+        // Expand
+        details.style.display = 'block';
+        if (toggleText) toggleText.textContent = 'Show Less';
+        if (toggleIcon) toggleIcon.classList.add('rotate-180');
+    } else {
+        // Collapse
+        details.style.display = 'none';
+        if (toggleText) toggleText.textContent = 'Show More';
+        if (toggleIcon) toggleIcon.classList.remove('rotate-180');
     }
 }

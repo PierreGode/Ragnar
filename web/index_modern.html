@@ -509,8 +509,17 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
                             </svg>
                             <div class="flex-1">
-                                <h3 class="text-sm font-semibold text-red-300 mb-2">Vulnerability Assessment</h3>
-                                <p id="ai-vuln-analysis" class="text-sm text-gray-300 leading-relaxed">No vulnerabilities to analyze</p>
+                                <div class="flex items-center justify-between mb-2">
+                                    <h3 class="text-sm font-semibold text-red-300">Vulnerability Assessment</h3>
+                                    <button id="ai-vuln-toggle" onclick="toggleAISection('vuln')" class="text-xs text-red-300 hover:text-red-200 transition-colors flex items-center" style="display:none;">
+                                        <span id="ai-vuln-toggle-text">Show More</span>
+                                        <svg id="ai-vuln-toggle-icon" class="w-4 h-4 ml-1 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div id="ai-vuln-summary" class="text-sm text-gray-300 leading-relaxed mb-2"></div>
+                                <div id="ai-vuln-details" class="text-sm text-gray-300 leading-relaxed" style="display:none;"></div>
                             </div>
                         </div>
                     </div>
@@ -522,8 +531,17 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                             </svg>
                             <div class="flex-1">
-                                <h3 class="text-sm font-semibold text-yellow-300 mb-2">Network Weaknesses & Attack Vectors</h3>
-                                <p id="ai-weakness-analysis" class="text-sm text-gray-300 leading-relaxed">Analyzing network for potential weaknesses...</p>
+                                <div class="flex items-center justify-between mb-2">
+                                    <h3 class="text-sm font-semibold text-yellow-300">Network Weaknesses & Attack Vectors</h3>
+                                    <button id="ai-weakness-toggle" onclick="toggleAISection('weakness')" class="text-xs text-yellow-300 hover:text-yellow-200 transition-colors flex items-center" style="display:none;">
+                                        <span id="ai-weakness-toggle-text">Show More</span>
+                                        <svg id="ai-weakness-toggle-icon" class="w-4 h-4 ml-1 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div id="ai-weakness-summary" class="text-sm text-gray-300 leading-relaxed mb-2"></div>
+                                <div id="ai-weakness-details" class="text-sm text-gray-300 leading-relaxed" style="display:none;"></div>
                             </div>
                         </div>
                     </div>
@@ -2232,7 +2250,7 @@
     </main>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.min.js"></script>
+    <script src="/web/scripts/ragnar_modern.min.js?v=20251123"></script>
     
 </body>
 </html>
