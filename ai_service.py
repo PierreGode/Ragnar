@@ -317,6 +317,10 @@ Top Findings:
 
 Provide a structured analysis:
 
+First, give a brief Viking-style tactical summary (max 50 words) of the overall vulnerability situation.
+
+Then provide detailed analysis:
+
 **Critical Weaknesses:**
 - List the most severe vulnerabilities (CVE numbers if available)
 - Include affected hosts/ports
@@ -375,6 +379,10 @@ Key Findings:
 {sample}
 
 Provide structured attack vector analysis:
+
+First, give a brief, witty Viking-style summary (max 50 words) describing the network's exploitability and main attack surface.
+
+Then provide detailed attack paths:
 
 **Primary Attack Paths:**
 
