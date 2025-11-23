@@ -9,6 +9,7 @@ from rich.progress import Progress, BarColumn, TextColumn, SpinnerColumn
 from queue import Queue
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import CredentialChecker
 
 # Configure the logger
 logger = Logger(name="sql_bruteforce.py", level=logging.DEBUG)
@@ -39,9 +40,34 @@ class SQLBruteforce:
     def execute(self, ip, port, row, status_key):
         """
         Execute the brute force attack and update status.
+        Optimization: Skip bruteforce if valid credentials already exist for this host.
         """
+        logger.info(f"Executing SQLBruteforce on {ip}:{port}...")
+        
+        # Check if we already have valid credentials for this host
+        existing_creds = CredentialChecker.check_existing_credentials(
+            self.shared_data.sqlfile, ip
+        )
+        if existing_creds:
+            logger.info(f"SQL credentials already exist for {ip} - verifying instead of bruteforcing...")
+            # Verify credentials still work
+            if self._verify_credentials(ip, existing_creds):
+                logger.success(f"Existing SQL credentials verified for {ip}: {len(existing_creds)} account(s)")
+                return 'success'
+            else:
+                logger.warning(f"Existing credentials for {ip} no longer valid, will re-bruteforce")
+        
         success, results = self.bruteforce_sql(ip, port)
         return 'success' if success else 'failed'
+    
+    def _verify_credentials(self, ip, credentials):
+        """Verify that existing credentials still work (quick check)."""
+        for user, password in credentials:
+            result = self.sql_connector.sql_connect(ip, user, password)
+            if result:  # If we got database list, credentials are valid
+                logger.debug(f"Verified SQL credential for {ip}: {user}")
+                return True
+        return False
 
 class SQLConnector:
     """
