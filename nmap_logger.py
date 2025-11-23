@@ -1,5 +1,5 @@
 # nmap_logger.py
-# Utility module for logging all nmap commands and their results to /var/log/nmap.log
+# Utility module for logging all nmap commands and their results to data/logs/nmap.log
 
 import os
 import subprocess
@@ -11,10 +11,14 @@ import threading
 class NmapLogger:
     """
     Centralized logger for all nmap operations in Ragnar.
-    Ensures all nmap commands and their results are logged to /var/log/nmap.log
+    Ensures all nmap commands and their results are logged to data/logs/nmap.log
     """
     
-    def __init__(self, log_file: str = "/var/log/nmap.log"):
+    def __init__(self, log_file: str = None):
+        # Default to data/logs/nmap.log in the project directory
+        if log_file is None:
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            log_file = os.path.join(project_root, 'data', 'logs', 'nmap.log')
         self.log_file = log_file
         self.lock = threading.Lock()
         self._ensure_log_directory()
@@ -23,13 +27,7 @@ class NmapLogger:
     def _ensure_log_directory(self):
         """Ensure the log directory exists"""
         log_dir = os.path.dirname(self.log_file)
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-        except PermissionError:
-            # If we can't create /var/log, fall back to local directory
-            self.log_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'var', 'log', 'nmap.log')
-            log_dir = os.path.dirname(self.log_file)
-            os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
     
     def _setup_logger(self):
         """Setup the logger for nmap operations"""
