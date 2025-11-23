@@ -2594,7 +2594,7 @@ def get_logs():
             with open(orchestrator_log, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
                 # Get last 100 lines of orchestrator logs
-                orch_logs = [line.strip() for line in lines[-100:] if line.strip()]
+                orch_logs = [line.strip() for line in lines[-20:] if line.strip()]
                 all_logs.extend(orch_logs)
         
         # 2. Get scanning.py logs (network scanning details)
@@ -2603,7 +2603,7 @@ def get_logs():
             with open(scanning_log, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
                 # Get last 50 lines of scanning logs
-                scan_logs = [line.strip() for line in lines[-50:] if line.strip()]
+                scan_logs = [line.strip() for line in lines[-10:] if line.strip()]
                 all_logs.extend(scan_logs)
         
         # 3. Get nmap_vuln_scanner.py logs (vulnerability scanning)
@@ -2612,7 +2612,7 @@ def get_logs():
             with open(vuln_scanner_log, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
                 # Get last 50 lines of vuln scanner logs
-                vuln_logs = [line.strip() for line in lines[-50:] if line.strip()]
+                vuln_logs = [line.strip() for line in lines[-10:] if line.strip()]
                 all_logs.extend(vuln_logs)
         
         # 2. Get Ragnar main activity logs from data/logs directory
@@ -7511,7 +7511,7 @@ def get_recent_logs():
         if os.path.exists(log_file):
             with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                 lines = f.readlines()
-                web_logs = [line.strip() for line in lines[-50:] if line.strip()]
+                web_logs = [line.strip() for line in lines[-10:] if line.strip()]
                 # Filter for security-relevant logs only
                 filtered_web_logs = [log for log in web_logs if should_include_realtime_log(log)]
                 logs.extend([f"[WEB] {log}" for log in filtered_web_logs[-10:]])  # Last 10 relevant logs

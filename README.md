@@ -95,7 +95,7 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
   - System monitoring and configuration
   - Hardware profile auto-detection for optimal performance
 - **E-Paper Display**: Real-time status display showing targets, vulnerabilities, credentials, and network info including IP address.
-- **Comprehensive Logging**: All nmap commands and their results are automatically logged to `/var/log/nmap.log` (or `var/log/nmap.log` in the project directory on Windows) for audit trails and troubleshooting.
+- **Comprehensive Logging**: All nmap commands and their results are automatically logged to `data/logs/nmap.log` for audit trails and troubleshooting.
 
 <p align="center">
   <img width="150" height="300" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />

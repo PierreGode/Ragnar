@@ -13,6 +13,7 @@ from smb.SMBConnection import SMBConnection
 from queue import Queue
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import CredentialChecker
 
 # Configure the logger
 logger = Logger(name="smb_connector.py", level=logging.DEBUG)
@@ -45,10 +46,35 @@ class SMBBruteforce:
     def execute(self, ip, port, row, status_key):
         """
         Execute the brute force attack and update status.
+        Optimization: Skip bruteforce if valid credentials already exist for this host.
         """
+        logger.info(f"Executing SMBBruteforce on {ip}:{port}...")
+        
+        # Check if we already have valid credentials for this host
+        existing_creds = CredentialChecker.check_existing_credentials(
+            self.shared_data.smbfile, ip
+        )
+        if existing_creds:
+            logger.info(f"SMB credentials already exist for {ip} - verifying instead of bruteforcing...")
+            # Verify credentials still work
+            if self._verify_credentials(ip, existing_creds):
+                logger.success(f"Existing SMB credentials verified for {ip}: {len(existing_creds)} account(s)")
+                return 'success'
+            else:
+                logger.warning(f"Existing credentials for {ip} no longer valid, will re-bruteforce")
+        
         self.shared_data.ragnarorch_status = "SMBBruteforce"
         success, results = self.bruteforce_smb(ip, port)
         return 'success' if success else 'failed'
+    
+    def _verify_credentials(self, ip, credentials):
+        """Verify that existing credentials still work (quick check)."""
+        for user, password in credentials:
+            shares = self.smb_connector.smb_connect(ip, user, password)
+            if shares:  # If we got any accessible shares, credentials are valid
+                logger.debug(f"Verified SMB credential for {ip}: {user}")
+                return True
+        return False
 
 class SMBConnector:
     """

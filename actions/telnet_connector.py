@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, SpinnerColumn
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import CredentialChecker
 
 # Configure the logger
 logger = Logger(name="telnet_connector.py", level=logging.DEBUG)
@@ -48,10 +49,34 @@ class TelnetBruteforce:
     def execute(self, ip, port, row, status_key):
         """
         Execute the brute-force attack.
+        Optimization: Skip bruteforce if valid credentials already exist for this host.
         """
+        logger.info(f"Executing TelnetBruteforce on {ip}:{port}...")
+        
+        # Check if we already have valid credentials for this host
+        existing_creds = CredentialChecker.check_existing_credentials(
+            self.shared_data.telnetfile, ip
+        )
+        if existing_creds:
+            logger.info(f"Telnet credentials already exist for {ip} - verifying instead of bruteforcing...")
+            # Verify credentials still work
+            if self._verify_credentials(ip, existing_creds):
+                logger.success(f"Existing Telnet credentials verified for {ip}: {len(existing_creds)} account(s)")
+                return 'success'
+            else:
+                logger.warning(f"Existing credentials for {ip} no longer valid, will re-bruteforce")
+        
         self.shared_data.ragnarorch_status = "TelnetBruteforce"
         success, results = self.bruteforce_telnet(ip, port)
         return 'success' if success else 'failed'
+    
+    def _verify_credentials(self, ip, credentials):
+        """Verify that existing credentials still work (quick check)."""
+        for user, password in credentials:
+            if self.telnet_connector.telnet_connect(ip, user, password):
+                logger.debug(f"Verified Telnet credential for {ip}: {user}")
+                return True
+        return False
 
 class TelnetConnector:
     """
