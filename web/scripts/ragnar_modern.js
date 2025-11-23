@@ -8107,25 +8107,27 @@ async function loadAIInsights() {
 }
 
 // Display AI insights (separated for reuse with cache)
-// Extract a short summary from AI text (first sentence or up to 150 chars)
+// Extract a short summary from AI text (first sentence or up to MAX_SUMMARY_LENGTH chars)
 function extractAISummary(text) {
+    const MAX_SUMMARY_LENGTH = 150;
+    
     if (!text || typeof text !== 'string') return '';
     
     // Remove markdown formatting
     let cleanText = text.replace(/\*\*/g, '').replace(/\*/g, '').trim();
     
-    // Find first sentence or first line break
-    const sentences = cleanText.split(/[.\n]/).filter(s => s.trim().length > 0);
+    // Find first sentence (ending with ., !, ?, or newline)
+    const sentences = cleanText.split(/[.!?\n]/).filter(s => s.trim().length > 0);
     const firstSentence = sentences.length > 0 ? sentences[0] : '';
     
-    if (!firstSentence || firstSentence.length === 0) {
-        const truncated = cleanText.substring(0, 150);
+    if (!firstSentence) {
+        const truncated = cleanText.substring(0, MAX_SUMMARY_LENGTH);
         return truncated.length < cleanText.length ? truncated + '...' : truncated;
     }
     
-    // Limit to 150 characters
-    if (firstSentence.length > 150) {
-        return firstSentence.substring(0, 150) + '...';
+    // Limit to MAX_SUMMARY_LENGTH characters
+    if (firstSentence.length > MAX_SUMMARY_LENGTH) {
+        return firstSentence.substring(0, MAX_SUMMARY_LENGTH) + '...';
     }
     
     // Add period only if it doesn't already end with punctuation
