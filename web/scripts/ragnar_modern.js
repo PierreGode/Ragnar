@@ -8107,6 +8107,26 @@ async function loadAIInsights() {
 }
 
 // Display AI insights (separated for reuse with cache)
+// Extract a short summary from AI text (first sentence or up to 150 chars)
+function extractAISummary(text) {
+    if (!text || typeof text !== 'string') return '';
+    
+    // Remove markdown formatting
+    let cleanText = text.replace(/\*\*/g, '').replace(/\*/g, '').trim();
+    
+    // Find first sentence or first line break
+    const firstSentence = cleanText.split(/[.\n]/).filter(s => s.trim().length > 0)[0];
+    
+    if (!firstSentence) return cleanText.substring(0, 150) + '...';
+    
+    // Limit to 150 characters
+    if (firstSentence.length > 150) {
+        return firstSentence.substring(0, 150) + '...';
+    }
+    
+    return firstSentence + '.';
+}
+
 function displayAIInsights(insights) {
     if (insights.enabled) {
         // Update network summary
@@ -8117,12 +8137,18 @@ function displayAIInsights(insights) {
         
         // Update vulnerability analysis
         const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+        const vulnSummary = document.getElementById('ai-vuln-summary');
         const vulnSection = document.getElementById('ai-vuln-section');
         if (vulnAnalysis) {
             if (insights.vulnerability_analysis) {
-                vulnAnalysis.innerHTML = formatAIText(insights.vulnerability_analysis);
+                const fullText = insights.vulnerability_analysis;
+                const summary = extractAISummary(fullText);
+                
+                if (vulnSummary) vulnSummary.textContent = summary;
+                vulnAnalysis.innerHTML = formatAIText(fullText);
                 if (vulnSection) vulnSection.style.display = 'block';
             } else {
+                if (vulnSummary) vulnSummary.textContent = 'No vulnerabilities detected';
                 vulnAnalysis.textContent = 'No vulnerabilities detected';
                 if (vulnSection) vulnSection.style.display = 'block';
             }
@@ -8130,12 +8156,18 @@ function displayAIInsights(insights) {
         
         // Update weakness analysis
         const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        const weaknessSummary = document.getElementById('ai-weakness-summary');
         const weaknessSection = document.getElementById('ai-weakness-section');
         if (weaknessAnalysis) {
             if (insights.weakness_analysis) {
-                weaknessAnalysis.innerHTML = formatAIText(insights.weakness_analysis);
+                const fullText = insights.weakness_analysis;
+                const summary = extractAISummary(fullText);
+                
+                if (weaknessSummary) weaknessSummary.textContent = summary;
+                weaknessAnalysis.innerHTML = formatAIText(fullText);
                 if (weaknessSection) weaknessSection.style.display = 'block';
             } else {
+                if (weaknessSummary) weaknessSummary.textContent = 'Analyzing network topology...';
                 weaknessAnalysis.textContent = 'Analyzing network topology...';
                 if (weaknessSection) weaknessSection.style.display = 'block';
             }
@@ -8168,11 +8200,15 @@ async function refreshAIInsights() {
         // Show loading state
         const networkSummary = document.getElementById('ai-network-summary');
         const vulnAnalysis = document.getElementById('ai-vuln-analysis');
+        const vulnSummary = document.getElementById('ai-vuln-summary');
         const weaknessAnalysis = document.getElementById('ai-weakness-analysis');
+        const weaknessSummary = document.getElementById('ai-weakness-summary');
         
         if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
         if (vulnAnalysis) vulnAnalysis.textContent = 'Analyzing vulnerabilities...';
+        if (vulnSummary) vulnSummary.textContent = 'Analyzing vulnerabilities...';
         if (weaknessAnalysis) weaknessAnalysis.textContent = 'Identifying network weaknesses...';
+        if (weaknessSummary) weaknessSummary.textContent = 'Identifying network weaknesses...';
         
         // Reload insights (will fetch fresh data since cache is cleared)
         await loadAIInsights();
@@ -8181,5 +8217,21 @@ async function refreshAIInsights() {
     } catch (error) {
         console.error('Error refreshing AI insights:', error);
         showNotification('Failed to refresh AI insights', 'error');
+    }
+}
+
+// Toggle AI section dropdown
+function toggleAISection(section) {
+    const detailsElement = document.getElementById(`ai-${section}-details`);
+    const toggleIcon = document.getElementById(`ai-${section}-toggle-icon`);
+    
+    if (detailsElement && toggleIcon) {
+        if (detailsElement.classList.contains('hidden')) {
+            detailsElement.classList.remove('hidden');
+            toggleIcon.style.transform = 'rotate(180deg)';
+        } else {
+            detailsElement.classList.add('hidden');
+            toggleIcon.style.transform = 'rotate(0deg)';
+        }
     }
 }
