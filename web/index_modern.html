@@ -514,7 +514,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
                             </svg>
                             <div class="flex-1">
-                                <div class="flex items-center justify-between cursor-pointer" onclick="toggleAISection('vuln')">
+                                <div id="ai-vuln-header" class="flex items-center justify-between cursor-pointer" onclick="toggleAISection('vuln')" role="button" aria-expanded="false" aria-controls="ai-vuln-details" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){toggleAISection('vuln');event.preventDefault();}">
                                     <h3 class="text-sm font-semibold text-red-300 mb-2">Vulnerability Assessment</h3>
                                     <svg id="ai-vuln-toggle-icon" class="w-5 h-5 text-red-300 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
@@ -535,7 +535,7 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                             </svg>
                             <div class="flex-1">
-                                <div class="flex items-center justify-between cursor-pointer" onclick="toggleAISection('weakness')">
+                                <div id="ai-weakness-header" class="flex items-center justify-between cursor-pointer" onclick="toggleAISection('weakness')" role="button" aria-expanded="false" aria-controls="ai-weakness-details" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){toggleAISection('weakness');event.preventDefault();}">
                                     <h3 class="text-sm font-semibold text-yellow-300 mb-2">Network Weaknesses & Attack Vectors</h3>
                                     <svg id="ai-weakness-toggle-icon" class="w-5 h-5 text-yellow-300 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>

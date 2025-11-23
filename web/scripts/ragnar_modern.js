@@ -8236,13 +8236,19 @@ function toggleAISection(section) {
     const detailsElement = document.getElementById(`ai-${section}-details`);
     const toggleIcon = document.getElementById(`ai-${section}-toggle-icon`);
     
+    const headerElement = document.getElementById(`ai-${section}-header`);
+    
     if (detailsElement && toggleIcon) {
-        if (detailsElement.classList.contains('hidden')) {
+        const isHidden = detailsElement.classList.contains('hidden');
+        
+        if (isHidden) {
             detailsElement.classList.remove('hidden');
             toggleIcon.style.transform = 'rotate(180deg)';
+            if (headerElement) headerElement.setAttribute('aria-expanded', 'true');
         } else {
             detailsElement.classList.add('hidden');
             toggleIcon.style.transform = 'rotate(0deg)';
+            if (headerElement) headerElement.setAttribute('aria-expanded', 'false');
         }
     }
 }
