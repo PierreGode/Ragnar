@@ -748,16 +748,15 @@ EOF
     chmod +x $ragnar_PATH/kill_port_8000.sh
     chown ragnar:ragnar $ragnar_PATH/kill_port_8000.sh
 
-    # Create ragnar service
+    # Create ragnar service (core - orchestrator, scanner, display)
     cat > /etc/systemd/system/ragnar.service << EOF
 [Unit]
-Description=ragnar Service
+Description=Ragnar Core Service (Orchestrator + Scanner + Display)
 DefaultDependencies=no
 Before=basic.target
 After=local-fs.target
 
 [Service]
-ExecStartPre=/home/ragnar/Ragnar/kill_port_8000.sh
 ExecStart=/usr/bin/python3 -OO /home/ragnar/Ragnar/Ragnar.py
 WorkingDirectory=/home/ragnar/Ragnar
 StandardOutput=inherit
@@ -765,8 +764,35 @@ StandardError=inherit
 Restart=always
 User=root
 
-# Check open files and restart if it reached the limit (ulimit -n buffer of 10000)
-# ExecStartPost=/bin/bash -c 'FILE_LIMIT=\$(ulimit -n); THRESHOLD=\$(( FILE_LIMIT - 10000 )); while :; do TOTAL_OPEN_FILES=\$(lsof -w 2>/dev/null | wc -l); if [ "\$TOTAL_OPEN_FILES" -ge "\$THRESHOLD" ]; then echo "File descriptor threshold reached: \$TOTAL_OPEN_FILES (threshold: \$THRESHOLD). Restarting service."; systemctl restart ragnar.service; exit 0; fi; sleep 10; done &'
+# Resource limits to prevent OOM
+MemoryMax=384M
+MemoryHigh=320M
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create ragnar-web service (web UI - separate service)
+    cat > /etc/systemd/system/ragnar-web.service << EOF
+[Unit]
+Description=Ragnar Web Service (Flask Web UI)
+DefaultDependencies=no
+After=network.target ragnar.service
+Wants=ragnar.service
+
+[Service]
+ExecStartPre=/home/ragnar/Ragnar/kill_port_8000.sh
+ExecStart=/usr/bin/python3 -OO /home/ragnar/Ragnar/ragnar_web.py
+WorkingDirectory=/home/ragnar/Ragnar
+StandardOutput=inherit
+StandardError=inherit
+Restart=always
+RestartSec=10
+User=root
+
+# Resource limits to prevent OOM
+MemoryMax=256M
+MemoryHigh=200M
 
 [Install]
 WantedBy=multi-user.target
@@ -800,6 +826,9 @@ EOF
     # Enable and start services
     systemctl daemon-reload
     systemctl enable ragnar.service
+    systemctl enable ragnar-web.service
+    
+    log "SUCCESS" "Both ragnar.service and ragnar-web.service configured and enabled"
 
     check_success "Services setup completed"
 }
@@ -959,17 +988,23 @@ else:
     
     # Check if services are running
     if ! systemctl is-active --quiet ragnar.service; then
-        log "WARNING" "ragnar service is not running"
+        log "WARNING" "ragnar.service (core) is not running"
     else
-        log "SUCCESS" "ragnar service is running"
+        log "SUCCESS" "ragnar.service (core) is running"
+    fi
+    
+    if ! systemctl is-active --quiet ragnar-web.service; then
+        log "WARNING" "ragnar-web.service is not running"
+    else
+        log "SUCCESS" "ragnar-web.service is running"
     fi
     
     # Check web interface
     sleep 5
     if curl -s http://localhost:8000 > /dev/null; then
-        log "SUCCESS" "Web interface is accessible"
+        log "SUCCESS" "Web interface is accessible on http://localhost:8000"
     else
-        log "WARNING" "Web interface is not responding"
+        log "WARNING" "Web interface is not responding (ragnar-web service may need to start)"
     fi
     
     log "INFO" "WiFi timer functionality will be available when AP mode is active"
@@ -1149,11 +1184,23 @@ main() {
     echo "   - DNS Servers: 8.8.8.8, 8.8.4.4"
     echo "2. Web interface will be available at: http://[device-ip]:8000"
     echo "3. Make sure your e-Paper HAT (2.13-inch) is properly connected"
+    echo ""
+    echo -e "${GREEN}Service Architecture (NEW):${NC}"
+    echo "   - ragnar.service: Core functionality (orchestrator, scanner, display)"
+    echo "   - ragnar-web.service: Web UI (Flask/SocketIO dashboard)"
+    echo "   Both services start automatically and run independently."
+    echo ""
+    echo -e "${BLUE}Service Management:${NC}"
+    echo "   sudo systemctl status ragnar         # Check core service"
+    echo "   sudo systemctl status ragnar-web     # Check web service"
+    echo "   sudo systemctl restart ragnar        # Restart core"
+    echo "   sudo systemctl restart ragnar-web    # Restart web UI"
+    echo ""
     echo -e "\n${BLUE}To update ragnar in the future:${NC}"
     echo "   cd /home/ragnar/Ragnar"
     echo "   sudo git stash  # Save any local changes"
     echo "   sudo git pull   # Get latest updates"
-    echo "   sudo systemctl restart ragnar"
+    echo "   sudo systemctl restart ragnar ragnar-web"
 
     read -p "Would you like to reboot now? (y/n): " reboot_now
     if [ "$reboot_now" = "y" ]; then

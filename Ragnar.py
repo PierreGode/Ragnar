@@ -30,7 +30,8 @@ import subprocess
 from init_shared import shared_data
 from display import Display, handle_exit_display
 from comment import Commentaireia
-from webapp_modern import run_server, handle_exit as handle_exit_web
+# Web server now runs as separate ragnar-web service
+# from webapp_modern import run_server, handle_exit as handle_exit_web
 from orchestrator import Orchestrator
 from logger import Logger
 from wifi_manager import WiFiManager
@@ -171,8 +172,8 @@ class Ragnar:
         
         return display_thread
 
-def handle_exit(sig, frame, display_thread, ragnar_thread, web_thread):
-    """Handles the termination of the main, display, and web threads."""
+def handle_exit(sig, frame, display_thread, ragnar_thread):
+    """Handles the termination of the main and display threads."""
     logger.info("Received exit signal, initiating clean shutdown...")
     
     # Stop Ragnar instance first
@@ -183,7 +184,7 @@ def handle_exit(sig, frame, display_thread, ragnar_thread, web_thread):
     shared_data.should_exit = True
     shared_data.orchestrator_should_exit = True
     shared_data.display_should_exit = True
-    shared_data.webapp_should_exit = True
+    # Note: ragnar-web service manages its own exit flag independently
     
     # Stop individual threads
     handle_exit_display(sig, frame, display_thread, exit_process=False)
@@ -192,10 +193,8 @@ def handle_exit(sig, frame, display_thread, ragnar_thread, web_thread):
         display_thread.join(timeout=5)
     if ragnar_thread and ragnar_thread.is_alive():
         ragnar_thread.join(timeout=5)
-    if web_thread and web_thread.is_alive():
-        web_thread.join(timeout=5)
     
-    logger.info("Main loop finished. Clean exit.")
+    logger.info("Ragnar core stopped. Clean exit.")
     sys.exit(0)
 
 
@@ -225,15 +224,12 @@ if __name__ == "__main__":
         ragnar_thread = threading.Thread(target=ragnar.run)
         ragnar_thread.start()
 
-        if shared_data.config["websrv"]:
-            logger.info("Starting the web server...")
-            web_thread = threading.Thread(target=run_server)
-            web_thread.start()
-        else:
-            web_thread = None
+        # Web server now runs as separate ragnar-web service
+        # Start it with: sudo systemctl start ragnar-web
+        logger.info("Ragnar core started. Web UI available via ragnar-web service.")
 
-        signal.signal(signal.SIGINT, lambda sig, frame: handle_exit(sig, frame, display_thread, ragnar_thread, web_thread))
-        signal.signal(signal.SIGTERM, lambda sig, frame: handle_exit(sig, frame, display_thread, ragnar_thread, web_thread))
+        signal.signal(signal.SIGINT, lambda sig, frame: handle_exit(sig, frame, display_thread, ragnar_thread))
+        signal.signal(signal.SIGTERM, lambda sig, frame: handle_exit(sig, frame, display_thread, ragnar_thread))
 
     except Exception as e:
         logger.error(f"An exception occurred during thread start: {e}")
