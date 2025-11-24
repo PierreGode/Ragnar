@@ -150,6 +150,44 @@ All discovered data is automatically organized in the `data/output/` directory, 
 
 No constant monitoring needed - just deploy and let Ragnar do what it does best: hunt for vulnerabilities.
 
+## 🏗️ Service Architecture
+
+Ragnar now runs as **two independent systemd services** for better stability and performance:
+
+```text
+┌───────────────────┐       ┌──────────────────────┐
+│   ragnar.service  │       │  ragnar-web.service  │
+│ (scanner, logic)  │ <──>  │  (Flask dashboard)   │
+└───────────────────┘       └──────────────────────┘
+        │                               │
+        │ writes                        │ reads
+        ▼                               ▼
+     sqlite.db                    sqlite.db / cache
+```
+
+**Benefits:**
+- ✅ Lower CPU usage - Web UI doesn't block scanning
+- ✅ Better stability - Services can restart independently
+- ✅ Reduced memory pressure - Separate resource limits
+- ✅ Easier debugging - Separate logs per service
+
+**Service Management:**
+```bash
+# Check status
+sudo systemctl status ragnar         # Core service
+sudo systemctl status ragnar-web     # Web UI
+
+# Restart services
+sudo systemctl restart ragnar        # Restart core only
+sudo systemctl restart ragnar-web    # Restart web UI only
+
+# View logs
+sudo journalctl -u ragnar -f         # Core logs
+sudo journalctl -u ragnar-web -f     # Web logs
+```
+
+See [SERVICE_SEPARATION.md](SERVICE_SEPARATION.md) for detailed architecture documentation.
+
 🔧 Expand Ragnar's Arsenal!
 Ragnar is designed to be a community-driven weapon forge. Create and share your own attack modules!
 
