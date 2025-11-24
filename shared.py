@@ -29,6 +29,14 @@ from logger import Logger
 from epd_helper import EPDHelper
 from db_manager import get_db
 
+DEFAULT_EPD_TYPE = "epd2in13_V4"
+DISPLAY_PROFILES = {
+    "epd2in7": {"ref_width": 176, "ref_height": 264, "default_flip": False},
+    "epd2in13_V2": {"ref_width": 122, "ref_height": 250, "default_flip": False},
+    "epd2in13_V3": {"ref_width": 122, "ref_height": 250, "default_flip": True},
+    "epd2in13_V4": {"ref_width": 122, "ref_height": 250, "default_flip": False},
+}
+
 
 logger = Logger(name="shared.py", level=logging.DEBUG) # Create a logger object 
 
@@ -43,6 +51,11 @@ class SharedData:
         self.config = self.default_config.copy() # Configuration of the application
         # Load existing configuration first
         self.load_config()
+        # Ensure the selected EPD profile is consistent and expose flip settings early
+        self.config.setdefault('epd_type', DEFAULT_EPD_TYPE)
+        self.apply_display_profile(self.config['epd_type'], set_orientation_if_missing=True, persist=True)
+        self.screen_reversed = bool(self.config.get('screen_reversed', False))
+        self.web_screen_reversed = self.screen_reversed
 
         # Initialize SQLite database manager
         self.db = get_db(currentdir=self.currentdir)
@@ -168,6 +181,7 @@ class SharedData:
         """ The configuration below is used to set the default values of the configuration settings."""
         """ It can be used to reset the configuration settings to their default values."""
         """ You can mofify the json file shared_config.json or on the web page to change the default values of the configuration settings."""
+        default_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
         return {
             "__title_Ragnar__": "Settings",
             "manual_mode": False,
@@ -202,9 +216,10 @@ class SharedData:
             "success_retry_delay": 300,
             "action_timeout": 300,
             "vuln_scan_timeout": 1800,
-            "ref_width" :122 ,
-            "ref_height" : 250,
-            "epd_type": "epd2in13_V4",
+            "ref_width": default_profile["ref_width"],
+            "ref_height": default_profile["ref_height"],
+            "epd_type": DEFAULT_EPD_TYPE,
+            "screen_reversed": default_profile.get("default_flip", False),
             
             
             "__title_lists__": "List Settings",
@@ -267,6 +282,34 @@ class SharedData:
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
         }
+
+    def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):
+        """Align reference dimensions (and optional orientation) with the chosen EPD profile."""
+        epd_key = epd_type or self.config.get('epd_type') or DEFAULT_EPD_TYPE
+        profile = DISPLAY_PROFILES.get(epd_key)
+        if not profile:
+            logger.warning(f"Unknown EPD profile '{epd_key}' – skipping display calibration")
+            return False
+
+        changed = False
+        if self.config.get('ref_width') != profile['ref_width']:
+            self.config['ref_width'] = profile['ref_width']
+            changed = True
+        if self.config.get('ref_height') != profile['ref_height']:
+            self.config['ref_height'] = profile['ref_height']
+            changed = True
+
+        needs_orientation = set_orientation_if_missing or 'screen_reversed' not in self.config
+        if needs_orientation:
+            desired_orientation = profile.get('default_flip', False)
+            if self.config.get('screen_reversed') != desired_orientation:
+                self.config['screen_reversed'] = desired_orientation
+                changed = True
+
+        if persist and changed:
+            self.save_config()
+
+        return changed
 
     def _normalize_config_keys(self, config):
         """Ensure legacy or malformed configuration keys are aligned with the current schema."""
@@ -401,24 +444,12 @@ class SharedData:
         try:
             logger.info("Initializing EPD display...")
             time.sleep(1)
-            self.epd_helper = EPDHelper(self.config["epd_type"])
-            # self.epd_helper = EPDHelper(self.epd_type)  # FIXED: Commented out invalid duplicate initialization
-            if self.config["epd_type"] == "epd2in7":
-                logger.info("EPD type: epd2in7 screen reversed")
-                self.screen_reversed = False
-                self.web_screen_reversed = False
-            elif self.config["epd_type"] == "epd2in13_V2":
-                logger.info("EPD type: epd2in13_V2 screen reversed")
-                self.screen_reversed = False
-                self.web_screen_reversed = False
-            elif self.config["epd_type"] == "epd2in13_V3":
-                logger.info("EPD type: epd2in13_V3 screen reversed")
-                self.screen_reversed = True
-                self.web_screen_reversed = True
-            elif self.config["epd_type"] == "epd2in13_V4":
-                logger.info("EPD type: epd2in13_V4 screen normal (not reversed)")
-                self.screen_reversed = False
-                self.web_screen_reversed = False
+            epd_type = self.config.get("epd_type", DEFAULT_EPD_TYPE)
+            self.epd_helper = EPDHelper(epd_type)
+            self.apply_display_profile(epd_type)
+            self.screen_reversed = bool(self.config.get("screen_reversed", False))
+            self.web_screen_reversed = self.screen_reversed
+            logger.info(f"EPD type: {epd_type} | flipped: {self.screen_reversed}")
             self.epd_helper.init_full_update()
             self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
             logger.info(f"EPD {self.config['epd_type']} initialized with size: {self.width}x{self.height}")
@@ -427,10 +458,12 @@ class SharedData:
             logger.warning("Continuing without EPD display support")
             # Set default values and continue without EPD
             self.epd_helper = None
-            self.width = 122  # Default width from config
-            self.height = 250  # Default height from config
-            self.screen_reversed = False
-            self.web_screen_reversed = False
+            fallback_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
+            profile = DISPLAY_PROFILES.get(self.config.get('epd_type'), fallback_profile) or fallback_profile
+            self.width = self.config.get('ref_width', profile['ref_width'])
+            self.height = self.config.get('ref_height', profile['ref_height'])
+            self.screen_reversed = bool(self.config.get('screen_reversed', False))
+            self.web_screen_reversed = self.screen_reversed
             
             # NOTE: Test image code below was used to verify EPD hardware. 
             # Commented out to allow normal Ragnar display to show.

@@ -126,6 +126,10 @@ const configMetadata = {
         label: "Reference Height",
         description: "Reference pixel height used to scale drawings for the e-paper display."
     },
+    screen_reversed: {
+        label: "Flip E-Paper Output",
+        description: "Rotate the Waveshare e-paper output 180° so the content appears upright when the panel is mounted upside down."
+    },
     epd_type: {
         label: "EPD Type",
         description: "Model identifier for the connected Waveshare e-paper display."
@@ -278,6 +282,19 @@ function getConfigLabel(key) {
     }
     return key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 }
+
+const displaySelectOptions = {
+    epd_type: [
+        { value: 'epd2in13_V4', label: 'Waveshare 2.13" V4 (122x250)' },
+        { value: 'epd2in13_V3', label: 'Waveshare 2.13" V3 (122x250)' },
+        { value: 'epd2in13_V2', label: 'Waveshare 2.13" V2 (122x250)' },
+        { value: 'epd2in7', label: 'Waveshare 2.7" (176x264)' }
+    ],
+    screen_reversed: [
+        { value: 'false', label: 'Normal orientation' },
+        { value: 'true', label: 'Flip 180°' }
+    ]
+};
 
 function getConfigDescription(key) {
     if (configMetadata[key] && configMetadata[key].description) {
@@ -5828,10 +5845,10 @@ function displayConfigForm(config) {
     const sections = {
         'General': ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'],
         'Timing': ['startup_delay', 'web_delay', 'screen_delay', 'scan_interval'],
-        'Display': ['epd_type', 'ref_width', 'ref_height']
+        'Display': ['epd_type', 'screen_reversed']
     };
     
-    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck'];
+    const knownBooleans = ['manual_mode', 'debug_mode', 'scan_vuln_running', 'scan_vuln_no_ports', 'enable_attacks', 'blacklistcheck', 'screen_reversed'];
     const checkboxHandlers = {
         scan_vuln_running: 'handleVulnScanToggle(this)',
         enable_attacks: 'handleEnableAttacksToggle(this)'
@@ -5854,11 +5871,25 @@ function displayConfigForm(config) {
             }
             
             if (config.hasOwnProperty(key) || knownBooleans.includes(key)) {
+                const selectOptions = displaySelectOptions[key];
                 const type = typeof value === 'boolean' ? 'checkbox' : 'text';
                 const label = getConfigLabel(key);
                 const description = escapeHtml(getConfigDescription(key));
                 
-                if (type === 'checkbox') {
+                if (Array.isArray(selectOptions)) {
+                    const selectedValue = typeof value === 'boolean' ? String(value) : (value ?? '');
+                    html += `
+                        <div class="space-y-2">
+                            <label class="flex items-center gap-2 text-sm text-gray-400">
+                                ${label}
+                                <span class="info-icon" tabindex="0" role="button" aria-label="${description}" data-tooltip="${description}">ⓘ</span>
+                            </label>
+                            <select name="${key}" class="w-full px-4 py-2 rounded-lg bg-slate-700 border border-slate-600 focus:border-Ragnar-500 focus:ring-1 focus:ring-Ragnar-500">
+                                ${selectOptions.map(option => `<option value="${option.value}" ${option.value === String(selectedValue) ? 'selected' : ''}>${option.label}</option>`).join('')}
+                            </select>
+                        </div>
+                    `;
+                } else if (type === 'checkbox') {
                     // Determine if this checkbox should be disabled based on dependencies
                     const disabledAttr = (key === 'scan_vuln_no_ports' && !config.scan_vuln_running) ? 'disabled' : '';
                     const disabledClass = disabledAttr ? 'opacity-50 cursor-not-allowed' : '';
@@ -5975,6 +6006,8 @@ async function saveConfig(form) {
         const input = form.elements[key];
         if (input.type === 'checkbox') {
             config[key] = input.checked;
+        } else if (value === 'true' || value === 'false') {
+            config[key] = value === 'true';
         } else if (!isNaN(value) && value !== '') {
             config[key] = Number(value);
         } else {

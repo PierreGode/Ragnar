@@ -205,10 +205,12 @@
             <div class="flex items-center justify-between h-16">
                 <!-- Logo -->
                 <div class="flex items-center space-x-3">
-                    <img src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9">
-                    <span class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent">
-                        Ragnar
-                    </span>
+                    <a href="/web/index_modern.html" aria-label="Go to main dashboard" class="flex items-center space-x-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-Ragnar-400">
+                        <img src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9">
+                        <span class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent">
+                            Ragnar
+                        </span>
+                    </a>
                     <span id="connection-status" class="flex items-center space-x-2">
                         <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
                         <span class="text-xs text-gray-400">Connected</span>
@@ -903,7 +905,7 @@
                         <p class="text-sm text-red-100/80">Pentest Mode is active. Tools inside this tab can disrupt remote systems. Only proceed on targets you own or have explicit authorization to test.</p>
                     </div>
                     <div class="flex items-center justify-center space-x-3 text-sm">
-                        <span class="text-red-200 bg-red-900/60 px-3 py-1 rounded-full uppercase tracking-wide">
+                        <span class="inline-flex items-center justify-center text-red-200 bg-red-900/60 px-3 py-1 rounded-full uppercase tracking-wide">
                             Pentest Mode
                         </span>
                         <span class="text-gray-300">

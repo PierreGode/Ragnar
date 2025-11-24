@@ -1511,6 +1511,7 @@ def update_config():
         
         ai_reload_success = None
         ai_reload_error = None
+        epd_type_changed = 'epd_type' in data
 
         # Update configuration (allow new keys to be added)
         for key, value in data.items():
@@ -1519,9 +1520,16 @@ def update_config():
                 shared_data.config[key] = value
                 # Also set as attribute on shared_data for immediate access
                 setattr(shared_data, key, value)
+
+        if epd_type_changed:
+            shared_data.apply_display_profile(shared_data.config.get('epd_type'))
         
         # Save configuration
         shared_data.save_config()
+
+        # Reflect orientation changes immediately for both hardware and screenshots
+        shared_data.screen_reversed = bool(shared_data.config.get('screen_reversed', False))
+        shared_data.web_screen_reversed = shared_data.screen_reversed
         
         # Reload AI service if ai_enabled was changed
         if 'ai_enabled' in data:

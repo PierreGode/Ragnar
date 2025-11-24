@@ -564,6 +564,9 @@ class Display:
         while not self.shared_data.display_should_exit:
             try:
                 self.epd_helper.init_partial_update()
+                # Pull latest orientation settings so web toggles take effect without restarting the service.
+                self.screen_reversed = self.shared_data.screen_reversed
+                self.web_screen_reversed = self.shared_data.web_screen_reversed
                 self.display_comment(self.shared_data.ragnarorch_status)
                 image = Image.new('1', (self.shared_data.width, self.shared_data.height))
                 draw = ImageDraw.Draw(image)
