@@ -25,12 +25,6 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
 ```
 
-> [!IMPORTANT]  
-> **For educational use only!**
-
-> Ragnar includes a built-in kill switch endpoint (`/api/kill`) that completely wipes all databases, logs, This ensures no sensitive data remains after demonstrations or training sessions.
-> If Ragnar is to be found without permission in a network anyone kan completely wipe all databases + delete the entire repository rendering Ragnar dead.
-> **📖 Full Documentation:** See [kill switch doc](KILL_SWITCH.md) for complete usage instructions and safety guidelines.
 
 ### 🔨 Installation
 
@@ -158,6 +152,14 @@ No constant monitoring needed - just deploy and let Ragnar do what it does best:
 
 🔧 Expand Ragnar's Arsenal!
 Ragnar is designed to be a community-driven weapon forge. Create and share your own attack modules!
+
+> [!IMPORTANT]  
+> **For educational use only!**
+
+> Ragnar includes a built-in kill switch endpoint (`/api/kill`) that completely wipes all databases, logs, This ensures no sensitive data remains after demonstrations or training sessions.
+> If Ragnar is to be found without permission in a network anyone kan completely wipe all databases + delete the entire repository rendering Ragnar dead.
+> **📖 Full Documentation:** See [kill switch doc](KILL_SWITCH.md) for complete usage instructions and safety guidelines.
+
 
 ⚠️ **For educational and authorized testing purposes only** ⚠️
 
