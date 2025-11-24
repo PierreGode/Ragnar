@@ -142,11 +142,11 @@ class Ragnar:
         if hasattr(self, 'wifi_manager'):
             self.wifi_manager.stop()
         
-        # Set exit flags
+        # Set exit flags for core components only
         self.shared_data.should_exit = True
         self.shared_data.orchestrator_should_exit = True
         self.shared_data.display_should_exit = True
-        self.shared_data.webapp_should_exit = True
+        # Note: ragnar-web.service manages its own exit flag independently
         
         logger.info("Ragnar stopped successfully")
 

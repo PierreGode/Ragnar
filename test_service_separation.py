@@ -10,6 +10,9 @@ Verifies that:
 import sys
 import os
 
+# Get the repository root directory (where this script is located)
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+
 def test_ragnar_web_imports():
     """Test that ragnar_web.py imports correctly"""
     print("Testing ragnar_web.py imports...")
@@ -17,7 +20,8 @@ def test_ragnar_web_imports():
         # We can't actually run it without the full environment,
         # but we can check if it compiles
         import py_compile
-        py_compile.compile('/home/runner/work/Ragnar/Ragnar/ragnar_web.py', doraise=True)
+        ragnar_web_path = os.path.join(REPO_ROOT, 'ragnar_web.py')
+        py_compile.compile(ragnar_web_path, doraise=True)
         print("   ✓ ragnar_web.py compiles successfully")
         return True
     except Exception as e:
@@ -30,11 +34,12 @@ def test_ragnar_core_imports():
     try:
         # Check that Ragnar.py compiles
         import py_compile
-        py_compile.compile('/home/runner/work/Ragnar/Ragnar/Ragnar.py', doraise=True)
+        ragnar_path = os.path.join(REPO_ROOT, 'Ragnar.py')
+        py_compile.compile(ragnar_path, doraise=True)
         print("   ✓ Ragnar.py compiles successfully")
         
         # Check that webapp_modern is commented out
-        with open('/home/runner/work/Ragnar/Ragnar/Ragnar.py', 'r') as f:
+        with open(ragnar_path, 'r') as f:
             content = f.read()
             if 'from webapp_modern import run_server' in content and \
                not content.count('# from webapp_modern import run_server'):
@@ -51,7 +56,7 @@ def test_service_files_exist():
     print("\nChecking service configuration...")
     
     # Check install script mentions both services
-    install_script = '/home/runner/work/Ragnar/Ragnar/install_ragnar.sh'
+    install_script = os.path.join(REPO_ROOT, 'install_ragnar.sh')
     if os.path.exists(install_script):
         with open(install_script, 'r') as f:
             content = f.read()
@@ -72,14 +77,15 @@ def test_documentation():
     """Test that documentation exists"""
     print("\nChecking documentation...")
     
-    if os.path.exists('/home/runner/work/Ragnar/Ragnar/SERVICE_SEPARATION.md'):
+    service_sep_doc = os.path.join(REPO_ROOT, 'SERVICE_SEPARATION.md')
+    if os.path.exists(service_sep_doc):
         print("   ✓ SERVICE_SEPARATION.md exists")
     else:
         print("   ✗ SERVICE_SEPARATION.md missing")
         return False
     
     # Check README mentions service separation
-    readme = '/home/runner/work/Ragnar/Ragnar/README.md'
+    readme = os.path.join(REPO_ROOT, 'README.md')
     if os.path.exists(readme):
         with open(readme, 'r') as f:
             content = f.read()
