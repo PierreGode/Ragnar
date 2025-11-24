@@ -735,7 +735,8 @@ EOF
 setup_services() {
     log "INFO" "Setting up system services..."
     
-    # Create kill_port_8000.sh script
+    # Create kill_port_8000.sh script (used by ragnar-web service)
+    # This ensures no stale processes are using port 8000 before starting the web UI
     cat > $ragnar_PATH/kill_port_8000.sh << 'EOF'
 #!/bin/bash
 PORT=8000
@@ -747,6 +748,7 @@ fi
 EOF
     chmod +x $ragnar_PATH/kill_port_8000.sh
     chown ragnar:ragnar $ragnar_PATH/kill_port_8000.sh
+    log "SUCCESS" "Created port cleanup script for ragnar-web service"
 
     # Create ragnar service (core - orchestrator, scanner, display)
     cat > /etc/systemd/system/ragnar.service << EOF

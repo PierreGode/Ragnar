@@ -38,14 +38,18 @@ def test_ragnar_core_imports():
         py_compile.compile(ragnar_path, doraise=True)
         print("   ✓ Ragnar.py compiles successfully")
         
-        # Check that webapp_modern is commented out
+        # Check that webapp_modern import is commented out
         with open(ragnar_path, 'r') as f:
             content = f.read()
-            if 'from webapp_modern import run_server' in content and \
-               not content.count('# from webapp_modern import run_server'):
-                print("   ✗ Ragnar.py still imports webapp_modern (not commented)")
+            # Check if there's an uncommented import
+            has_uncommented_import = 'from webapp_modern import run_server' in content
+            # Count commented versions
+            commented_count = content.count('# from webapp_modern import run_server')
+            
+            if has_uncommented_import and commented_count == 0:
+                print("   ✗ Ragnar.py still has uncommented webapp_modern import")
                 return False
-            print("   ✓ Ragnar.py does not import webapp_modern")
+            print("   ✓ Ragnar.py does not import webapp_modern (properly commented)")
         return True
     except Exception as e:
         print(f"   ✗ Ragnar.py compilation failed: {e}")

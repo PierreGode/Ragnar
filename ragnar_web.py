@@ -28,9 +28,11 @@ def main():
         shared_data.load_config()
         
         # Check if web server is enabled in config
+        # Since this is now a dedicated web service, we default to True
+        # This allows the service to run independently of the config setting
         if not shared_data.config.get("websrv", True):
-            logger.warning("Web server is disabled in config. Enable 'websrv' in config to start.")
-            sys.exit(1)
+            logger.warning("Note: 'websrv' is disabled in config, but ragnar-web service is running anyway.")
+            logger.warning("To fully disable the web UI, use: sudo systemctl stop ragnar-web")
         
         # Set up signal handlers
         signal.signal(signal.SIGINT, lambda sig, frame: handle_exit(sig, frame))
