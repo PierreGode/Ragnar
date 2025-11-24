@@ -130,12 +130,36 @@ sudo systemctl restart ragnar ragnar-web
 
 ## Migration from Old Architecture
 
-If upgrading from the old single-service architecture:
+If upgrading from the old single-service architecture, you have two options:
 
+### Option 1: Automated Migration (Recommended)
+Use the migration script to automatically update your installation:
+
+```bash
+cd /home/ragnar/Ragnar
+sudo git pull  # Get the latest updates
+sudo ./migrate_to_separated_services.sh
+```
+
+The script will:
+- Stop the old single service
+- Create new service files with resource limits
+- Enable and start both services
+- Verify everything is working
+
+### Option 2: Manual Migration
 1. **Stop old service**: `sudo systemctl stop ragnar`
 2. **Pull updates**: `cd /home/ragnar/Ragnar && sudo git pull`
 3. **Reinstall**: Run `sudo ./install_ragnar.sh` to create new service files
 4. **Reboot**: `sudo reboot` to start both services
+
+### Option 3: Fresh Install
+If you prefer a clean slate:
+```bash
+cd /home/ragnar/Ragnar
+sudo ./uninstall_ragnar.sh  # Remove old installation
+sudo ./install_ragnar.sh    # Fresh install with new architecture
+```
 
 ## Benefits
 
