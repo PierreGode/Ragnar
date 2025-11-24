@@ -416,9 +416,9 @@ class SharedData:
                 self.screen_reversed = True
                 self.web_screen_reversed = True
             elif self.config["epd_type"] == "epd2in13_V4":
-                logger.info("EPD type: epd2in13_V4 screen normal (not reversed)")
-                self.screen_reversed = False
-                self.web_screen_reversed = False
+                logger.info("EPD type: epd2in13_V4 screen reversed")
+                self.screen_reversed = True
+                self.web_screen_reversed = True
             self.epd_helper.init_full_update()
             self.width, self.height = self.epd_helper.epd.width, self.epd_helper.epd.height
             logger.info(f"EPD {self.config['epd_type']} initialized with size: {self.width}x{self.height}")
