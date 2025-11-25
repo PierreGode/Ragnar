@@ -754,9 +754,9 @@
                 </div>
                 
                 <div id="network-table" class="overflow-x-auto">
-                    <table class="w-full">
+                    <table class="w-full min-w-max">
                         <thead>
-                            <tr class="border-b border-slate-600">
+                            <tr class="border-b border-slate-600 whitespace-nowrap">
                                 <th class="text-left py-3 px-5 font-medium">Status</th>
                                 <th class="text-left py-3 px-5 font-medium">IP Address</th>
                                 <th class="text-left py-3 px-5 font-medium">Hostname</th>
@@ -767,7 +767,7 @@
                                 <th class="text-left py-3 px-5 font-medium">Actions</th>
                             </tr>
                         </thead>
-                        <tbody id="network-hosts-table">
+                        <tbody id="network-hosts-table" class="whitespace-nowrap">
                             <tr>
                                 <td colspan="8" class="text-center py-8 text-gray-400">
                                     Loading network data...
@@ -777,7 +777,7 @@
                     </table>
                 </div>
             </div>
-        </div>
+
         
         <!-- Connect Tab -->
         <div id="connect-tab" class="tab-content hidden">
