@@ -4500,6 +4500,58 @@ def check_updates():
             latest_commit = result.stdout.strip()
         except:
             latest_commit = "Unable to fetch latest commit"
+
+        # Collect local working tree state so the UI can warn about conflicts/stashes
+        git_status = {
+            'is_dirty': False,
+            'has_conflicts': False,
+            'has_stash': False,
+            'stash_entries': 0,
+            'modified_files': [],
+            'conflicted_files': [],
+            'status_error': ''
+        }
+
+        try:
+            status_result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            status_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
+            git_status['is_dirty'] = bool(status_lines)
+
+            conflict_codes = {'AA', 'DD', 'AU', 'UA', 'DU', 'UD', 'UU'}
+            for raw_line in status_lines:
+                code = raw_line[:2]
+                path_fragment = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
+                entry = {'code': code, 'path': path_fragment}
+                git_status['modified_files'].append(entry)
+                if code in conflict_codes or 'U' in code:
+                    git_status['conflicted_files'].append(entry)
+
+            git_status['has_conflicts'] = bool(git_status['conflicted_files'])
+        except subprocess.CalledProcessError as status_error:
+            git_status['status_error'] = status_error.stderr.strip() or str(status_error)
+            logger.warning(f"git status failed during update check: {git_status['status_error']}")
+
+        try:
+            stash_result = subprocess.run(
+                ['git', 'stash', 'list'],
+                cwd=repo_path,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            stash_lines = [line for line in stash_result.stdout.splitlines() if line.strip()]
+            git_status['stash_entries'] = len(stash_lines)
+            git_status['has_stash'] = git_status['stash_entries'] > 0
+        except subprocess.CalledProcessError as stash_error:
+            stash_msg = stash_error.stderr.strip() or str(stash_error)
+            git_status['status_error'] = git_status['status_error'] or stash_msg
+            logger.warning(f"git stash list failed during update check: {stash_msg}")
         
         logger.info(f"Update check result - Behind: {commits_behind}, Current: {current_commit}, Latest: {latest_commit}")
         
@@ -4508,7 +4560,8 @@ def check_updates():
             'commits_behind': commits_behind,
             'current_commit': current_commit,
             'latest_commit': latest_commit,
-            'repo_path': repo_path
+            'repo_path': repo_path,
+            'git_status': git_status
         })
         
     except Exception as e:

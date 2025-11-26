@@ -3047,11 +3047,25 @@ function displayCurrentProfile(config) {
 
 async function checkForUpdates() {
     try {
+        const updateBtn = document.getElementById('update-btn');
+        const updateStatusEl = document.getElementById('update-status');
+
+        if (updateBtn) {
+            updateBtn.onclick = performUpdate;
+            updateBtn.disabled = true;
+            updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
+        }
+        updateElement('update-btn-text', 'Update System');
+
         updateElement('update-status', 'Checking...');
+        if (updateStatusEl) {
+            updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-gray-700 text-gray-300';
+        }
         updateElement('update-info', 'Checking for updates...');
         addConsoleMessage('Checking for system updates...', 'info');
         
         const data = await fetchAPI('/api/system/check-updates');
+        const gitStatus = data.git_status || {};
         
         // Debug logging
         console.log('Update check response:', data);
@@ -3060,28 +3074,75 @@ async function checkForUpdates() {
         addConsoleMessage(`Debug: Latest commit: ${data.latest_commit}`, 'info');
         addConsoleMessage(`Debug: Commits behind: ${data.commits_behind}`, 'info');
         
+        let infoMessage = '';
         if (data.updates_available && data.commits_behind > 0) {
+            infoMessage = `${data.commits_behind} commits behind. Latest: ${data.latest_commit || 'Unknown'}`;
             updateElement('update-status', 'Update Available');
-            document.getElementById('update-status').className = 'text-sm px-2 py-1 rounded bg-orange-700 text-orange-300';
-            updateElement('update-info', `${data.commits_behind} commits behind. Latest: ${data.latest_commit || 'Unknown'}`);
-            
-            // Enable update button
-            const updateBtn = document.getElementById('update-btn');
-            updateBtn.disabled = false;
-            updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-            
+            if (updateStatusEl) {
+                updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-orange-700 text-orange-300';
+            }
+            if (updateBtn) {
+                updateBtn.disabled = false;
+                updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
+            }
             addConsoleMessage(`Update available: ${data.commits_behind} commits behind`, 'warning');
         } else {
+            infoMessage = 'System is up to date';
             updateElement('update-status', 'Up to Date');
-            document.getElementById('update-status').className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
-            updateElement('update-info', 'System is up to date');
-            
-            // Disable update button
-            const updateBtn = document.getElementById('update-btn');
-            updateBtn.disabled = true;
-            updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
-            
+            if (updateStatusEl) {
+                updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-green-700 text-green-300';
+            }
+            if (updateBtn) {
+                updateBtn.disabled = true;
+                updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
+            }
             addConsoleMessage('System is up to date', 'success');
+        }
+
+        const localStateMessages = [];
+        const modifiedCount = Array.isArray(gitStatus.modified_files) ? gitStatus.modified_files.length : 0;
+
+        if (gitStatus.has_conflicts) {
+            localStateMessages.push('Local merge conflicts detected');
+        } else if (gitStatus.is_dirty) {
+            localStateMessages.push(`${modifiedCount} local change${modifiedCount === 1 ? '' : 's'}`);
+        }
+
+        if (gitStatus.has_stash) {
+            const stashCount = gitStatus.stash_entries || 0;
+            localStateMessages.push(`${stashCount} stash entr${stashCount === 1 ? 'y' : 'ies'}`);
+        }
+
+        if (gitStatus.status_error) {
+            localStateMessages.push(`git status error: ${gitStatus.status_error}`);
+        }
+
+        if (localStateMessages.length) {
+            infoMessage = `${infoMessage} Local state: ${localStateMessages.join(' • ')}.`;
+        }
+
+        updateElement('update-info', infoMessage);
+
+        if (gitStatus.has_conflicts) {
+            if (updateBtn) {
+                updateBtn.disabled = true;
+                updateBtn.className = 'w-full bg-red-700 text-white py-2 px-4 rounded cursor-not-allowed';
+                updateElement('update-btn-text', 'Resolve Git Conflicts');
+            }
+            updateElement('update-status', 'Local Conflict');
+            if (updateStatusEl) {
+                updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-200';
+            }
+            addConsoleMessage('Local git conflicts detected. Resolve them before updating.', 'error');
+            return;
+        }
+
+        if (gitStatus.is_dirty && data.updates_available && updateBtn) {
+            updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
+        }
+
+        if (gitStatus.has_stash && updateBtn) {
+            updateElement('update-btn-text', 'Update (stash present)');
         }
         
     } catch (error) {
