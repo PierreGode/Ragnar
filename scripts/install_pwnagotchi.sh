@@ -101,6 +101,17 @@ fi
 
 write_status "installing" "System packages installed" "dependencies"
 
+echo "[INFO] Cloning Pwnagotchi repository to ${PWN_DIR}"
+if [[ -d "$PWN_DIR/.git" ]]; then
+    echo "[INFO] Repository exists, pulling latest changes"
+    git -C "$PWN_DIR" pull --ff-only
+else
+    rm -rf "$PWN_DIR"
+    git clone "$PWN_REPO" "$PWN_DIR"
+fi
+
+write_status "installing" "Installing Pwnagotchi from source" "python"
+
 echo "[INFO] Upgrading pip"
 pip_flags_upgrade=("--upgrade")
 if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
@@ -108,33 +119,21 @@ if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
 fi
 python3 -m pip install "${pip_flags_upgrade[@]}" pip 2>/dev/null || echo "[WARN] pip upgrade skipped"
 
-pip_flags=("--no-cache-dir" "--upgrade")
-pip_break_supported=false
+pip_flags=("--no-cache-dir")
 if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
     pip_flags+=("--break-system-packages")
-    pip_break_supported=true
-else
-    echo "[WARN] pip does not support --break-system-packages on this image. Continuing without it."
 fi
 
-write_status "installing" "Installing Pwnagotchi python package" "python"
-if ! python3 -m pip install "${pip_flags[@]}" pwnagotchi; then
-    if [[ "$pip_break_supported" == true ]]; then
-        echo "[WARN] pip install with --break-system-packages failed. Retrying without the flag."
-        python3 -m pip install --no-cache-dir --upgrade pwnagotchi
-    else
-        echo "[ERROR] pip install failed even without --break-system-packages"
-        exit 1
-    fi
+echo "[INFO] Installing Pwnagotchi dependencies from ${PWN_DIR}"
+cd "$PWN_DIR"
+if [[ -f "requirements.txt" ]]; then
+    python3 -m pip install "${pip_flags[@]}" -r requirements.txt
+else
+    echo "[WARN] No requirements.txt found, skipping dependency installation"
 fi
 
-echo "[INFO] Ensuring repository at ${PWN_DIR}"
-if [[ -d "$PWN_DIR/.git" ]]; then
-    git -C "$PWN_DIR" pull --ff-only
-else
-    rm -rf "$PWN_DIR"
-    git clone "$PWN_REPO" "$PWN_DIR"
-fi
+echo "[INFO] Installing Pwnagotchi package"
+python3 -m pip install "${pip_flags[@]}" -e .
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
