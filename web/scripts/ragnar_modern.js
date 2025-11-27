@@ -13,6 +13,8 @@ let manualModeActive = false;
 let manualDataPrimed = false;
 let imagesLoaded = false;
 const PWN_STATUS_POLL_INTERVAL = 15000;
+const PWN_STATUS_FAST_INTERVAL = 4000;
+const PWN_LOG_POLL_INTERVAL = 2500;
 let pwnStatus = {
     state: 'not_installed',
     message: 'Waiting for status...',
@@ -24,9 +26,17 @@ let pwnStatus = {
     last_switch: '',
     service_active: false,
     service_enabled: false,
-    timestamp: null
+    timestamp: null,
+    log_file: null
 };
 let lastPwnState = null;
+let currentPwnStatusInterval = PWN_STATUS_POLL_INTERVAL;
+let pwnLogCursor = 0;
+let pwnLogStreamTimer = null;
+let pwnLogStreaming = false;
+let pwnLogStopTimeout = null;
+let pwnLogActiveFile = null;
+let pwnLogFetchInFlight = false;
 
 const configMetadata = {
     manual_mode: {
@@ -623,11 +633,7 @@ function setupAutoRefresh() {
         checkForUpdatesQuiet();
     }, 30000); // Check 30 seconds after page load (deferred from 5s)
 
-    autoRefreshIntervals.pwn = setInterval(() => {
-        if (currentTab === 'config' || currentTab === 'discovered') {
-            refreshPwnagotchiStatus({ silent: true });
-        }
-    }, PWN_STATUS_POLL_INTERVAL);
+    setPwnStatusPollInterval(PWN_STATUS_POLL_INTERVAL);
 }
 
 function initializeMobileMenu() {
@@ -2873,6 +2879,25 @@ async function loadConfigData() {
     }
 }
 
+function setPwnStatusPollInterval(intervalMs = PWN_STATUS_POLL_INTERVAL) {
+    const normalized = Math.max(2000, intervalMs || PWN_STATUS_POLL_INTERVAL);
+
+    if (currentPwnStatusInterval === normalized && autoRefreshIntervals.pwn) {
+        return;
+    }
+
+    if (autoRefreshIntervals.pwn) {
+        clearInterval(autoRefreshIntervals.pwn);
+    }
+
+    currentPwnStatusInterval = normalized;
+    autoRefreshIntervals.pwn = setInterval(() => {
+        if (currentTab === 'config' || currentTab === 'discovered') {
+            refreshPwnagotchiStatus({ silent: true });
+        }
+    }, normalized);
+}
+
 function initializePwnUI() {
     const badge = document.getElementById('pwn-status-badge');
     if (!badge) {
@@ -2889,17 +2914,18 @@ function initializePwnUI() {
         swapToPwnBtn.addEventListener('click', () => handlePwnSwap('pwnagotchi'));
     }
 
-    const swapToRagnarBtn = document.getElementById('pwn-swap-to-ragnar-btn');
-    if (swapToRagnarBtn) {
-        swapToRagnarBtn.addEventListener('click', () => handlePwnSwap('ragnar'));
-    }
-
     const refreshBtn = document.getElementById('pwn-refresh-btn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => refreshPwnagotchiStatus());
     }
 
+    const logRefreshBtn = document.getElementById('pwn-log-refresh-btn');
+    if (logRefreshBtn) {
+        logRefreshBtn.addEventListener('click', () => fetchPwnLogs({ initial: pwnLogCursor === 0 }));
+    }
+
     updatePwnButtons();
+    resetPwnLogState();
     refreshPwnagotchiStatus({ silent: true });
 }
 
@@ -2927,6 +2953,8 @@ function updatePwnagotchiUI(status = {}) {
     if (!status || typeof status !== 'object') {
         return;
     }
+
+    const wasInstalling = Boolean(pwnStatus.installing);
 
     pwnStatus = {
         ...pwnStatus,
@@ -2990,6 +3018,10 @@ function updatePwnagotchiUI(status = {}) {
 
     updatePwnDiscoveredCard(pwnStatus, visuals);
     updatePwnButtons();
+    if (pwnStatus.installing && !wasInstalling) {
+        resetPwnLogState('Installer output will stream here during installation.');
+    }
+    ensurePwnLogStreamingForStatus(pwnStatus);
     lastPwnState = pwnStatus.state;
 }
 
@@ -3014,22 +3046,9 @@ function updatePwnButtons() {
         swapToPwnBtn.classList.toggle('cursor-not-allowed', disableSwapToPwn);
     }
 
-    const swapToRagnarBtn = document.getElementById('pwn-swap-to-ragnar-btn');
-    if (swapToRagnarBtn) {
-        const busySwitching = pwnStatus.state === 'switching';
-        const switchingToRagnar = busySwitching && pwnStatus.target_mode === 'ragnar';
-        const switchingToPwn = busySwitching && pwnStatus.target_mode === 'pwnagotchi';
-        const allowReturn = pwnStatus.mode === 'pwnagotchi' || switchingToPwn;
-        const disableSwapToRagnar = pwnStatus.installing || (busySwitching && !switchingToRagnar && !switchingToPwn) || !allowReturn;
-        swapToRagnarBtn.disabled = disableSwapToRagnar;
-        swapToRagnarBtn.textContent = switchingToRagnar ? 'Switch Scheduled...' : 'Return to Ragnar';
-        swapToRagnarBtn.classList.toggle('opacity-60', disableSwapToRagnar);
-        swapToRagnarBtn.classList.toggle('cursor-not-allowed', disableSwapToRagnar);
-    }
-
     const swapHint = document.getElementById('pwn-swap-hint');
     if (swapHint) {
-        let hint = 'Ragnar UI becomes unavailable once the service stops. Keep SSH access handy before swapping.';
+        let hint = 'Ragnar UI becomes unavailable once the service stops. Plan to reboot via SSH to come back.';
         if (!pwnStatus.installed) {
             hint = 'Install Pwnagotchi first to enable service swapping.';
         } else if (pwnStatus.installing) {
@@ -3089,6 +3108,234 @@ function updatePwnDiscoveredCard(status, visuals) {
     updateElement('pwn-card-target', formatPwnModeLabel(status.target_mode));
     updateElement('pwn-card-last-switch', status.last_switch ? formatTimestamp(status.last_switch) : 'Never');
     updateElement('pwn-card-updated', `Updated: ${status.timestamp ? formatTimestamp(status.timestamp) : new Date().toLocaleString()}`);
+}
+
+function resetPwnLogState(message) {
+    pwnLogCursor = 0;
+    pwnLogActiveFile = null;
+    clearPwnLogViewer(message || 'Installer output will stream here during installation.');
+    updatePwnLogPath(null);
+    setPwnLogIndicator(false);
+}
+
+function clearPwnLogViewer(message) {
+    const viewer = document.getElementById('pwn-log-viewer');
+    const placeholder = document.getElementById('pwn-log-empty');
+    if (!viewer || !placeholder) {
+        return;
+    }
+    viewer.querySelectorAll('[data-pwn-log-line="true"]').forEach(line => line.remove());
+    if (message) {
+        placeholder.textContent = message;
+    }
+    placeholder.classList.remove('hidden');
+}
+
+function setPwnLogIndicator(active) {
+    const indicator = document.getElementById('pwn-log-stream-indicator');
+    if (!indicator) {
+        return;
+    }
+    indicator.classList.toggle('hidden', !active);
+}
+
+function updatePwnLogPath(path) {
+    const pathElement = document.getElementById('pwn-log-path');
+    if (!pathElement) {
+        return;
+    }
+    if (path) {
+        pathElement.textContent = path;
+        pathElement.classList.remove('text-gray-500');
+    } else {
+        pathElement.textContent = 'Log path will appear once the installer starts.';
+        pathElement.classList.add('text-gray-500');
+    }
+}
+
+function appendPwnLogEntries(lines = []) {
+    const viewer = document.getElementById('pwn-log-viewer');
+    if (!viewer || !Array.isArray(lines) || lines.length === 0) {
+        return;
+    }
+    const placeholder = document.getElementById('pwn-log-empty');
+    if (placeholder) {
+        placeholder.classList.add('hidden');
+    }
+
+    const shouldStick = (viewer.scrollHeight - viewer.clientHeight - viewer.scrollTop) < 40;
+
+    lines.forEach(line => {
+        const row = document.createElement('div');
+        row.dataset.pwnLogLine = 'true';
+        row.className = `whitespace-pre-wrap break-words leading-snug ${getPwnLogLineClass(line)}`;
+        row.textContent = line || ' ';
+        viewer.appendChild(row);
+    });
+
+    trimPwnLogBuffer();
+
+    if (shouldStick) {
+        viewer.scrollTop = viewer.scrollHeight;
+    }
+}
+
+function trimPwnLogBuffer(limit = 600) {
+    const viewer = document.getElementById('pwn-log-viewer');
+    if (!viewer) {
+        return;
+    }
+    const lines = viewer.querySelectorAll('[data-pwn-log-line="true"]');
+    if (lines.length <= limit) {
+        return;
+    }
+    const removeCount = lines.length - limit;
+    for (let i = 0; i < removeCount; i++) {
+        lines[i].remove();
+    }
+}
+
+function getPwnLogLineClass(line = '') {
+    const normalized = line.toLowerCase();
+    if (normalized.includes('error') || normalized.includes('failed') || normalized.includes('[err')) {
+        return 'text-red-300';
+    }
+    if (normalized.includes('warn')) {
+        return 'text-yellow-200';
+    }
+    if (normalized.includes('info') || normalized.includes('[info')) {
+        return 'text-blue-200';
+    }
+    return 'text-gray-200';
+}
+
+function startPwnLogStreaming(options = {}) {
+    const viewer = document.getElementById('pwn-log-viewer');
+    if (!viewer) {
+        return;
+    }
+    if (pwnLogStreamTimer) {
+        return;
+    }
+    if (pwnLogStopTimeout) {
+        clearTimeout(pwnLogStopTimeout);
+        pwnLogStopTimeout = null;
+    }
+    pwnLogStreaming = true;
+    setPwnLogIndicator(true);
+    fetchPwnLogs({ initial: Boolean(options.initial) || pwnLogCursor === 0, silent: true });
+    pwnLogStreamTimer = setInterval(() => fetchPwnLogs({ silent: true }), PWN_LOG_POLL_INTERVAL);
+}
+
+function stopPwnLogStreaming() {
+    if (pwnLogStreamTimer) {
+        clearInterval(pwnLogStreamTimer);
+        pwnLogStreamTimer = null;
+    }
+    pwnLogStreaming = false;
+    setPwnLogIndicator(false);
+}
+
+function schedulePwnLogStop() {
+    if (pwnLogStopTimeout) {
+        return;
+    }
+    pwnLogStopTimeout = setTimeout(() => {
+        stopPwnLogStreaming();
+        pwnLogStopTimeout = null;
+    }, 12000);
+}
+
+function setPwnLogEmptyMessage(message) {
+    const placeholder = document.getElementById('pwn-log-empty');
+    if (!placeholder) {
+        return;
+    }
+    placeholder.textContent = message;
+    placeholder.classList.remove('hidden');
+}
+
+async function fetchPwnLogs(options = {}) {
+    if (pwnLogFetchInFlight) {
+        return;
+    }
+
+    const viewer = document.getElementById('pwn-log-viewer');
+    if (!viewer) {
+        return;
+    }
+
+    pwnLogFetchInFlight = true;
+
+    try {
+        const params = new URLSearchParams();
+        if (pwnLogCursor > 0 && !options.initial) {
+            params.set('cursor', pwnLogCursor.toString());
+        } else {
+            params.set('tail', '8192');
+        }
+
+        const result = await fetchAPI(`/api/pwnagotchi/logs?${params.toString()}`);
+
+        if (!result || result.success === false) {
+            if (!options.silent) {
+                setPwnLogEmptyMessage((result && result.error) ? result.error : 'Installer log not available yet');
+            }
+            if (!result || !result.installing) {
+                schedulePwnLogStop();
+            }
+            return;
+        }
+
+        if (typeof result.cursor === 'number') {
+            pwnLogCursor = result.cursor;
+        }
+
+        if (result.file && result.file !== pwnLogActiveFile) {
+            pwnLogActiveFile = result.file;
+            clearPwnLogViewer('Streaming installer output…');
+            updatePwnLogPath(result.file);
+        }
+
+        if (Array.isArray(result.entries) && result.entries.length > 0) {
+            appendPwnLogEntries(result.entries);
+        } else if (!options.silent && !pwnLogStreaming) {
+            setPwnLogEmptyMessage('No installer activity yet.');
+        }
+
+        if (!result.installing) {
+            schedulePwnLogStop();
+        }
+
+    } catch (error) {
+        console.error('Error fetching Pwnagotchi logs:', error);
+        if (!options.silent) {
+            setPwnLogEmptyMessage(`Failed to load installer log (${error.message})`);
+        }
+    } finally {
+        pwnLogFetchInFlight = false;
+    }
+}
+
+function ensurePwnLogStreamingForStatus(status) {
+    if (!status) {
+        return;
+    }
+
+    if (status.log_file && status.log_file !== pwnLogActiveFile) {
+        pwnLogActiveFile = status.log_file;
+        updatePwnLogPath(status.log_file);
+    }
+
+    if (status.installing) {
+        setPwnStatusPollInterval(PWN_STATUS_FAST_INTERVAL);
+        startPwnLogStreaming({ initial: pwnLogCursor === 0 });
+    } else {
+        setPwnStatusPollInterval(PWN_STATUS_POLL_INTERVAL);
+        if (pwnLogStreaming) {
+            schedulePwnLogStop();
+        }
+    }
 }
 
 function getPwnStateVisuals(status) {
@@ -3172,6 +3419,9 @@ async function handlePwnInstallClick() {
         installBtn.classList.add('opacity-70', 'cursor-not-allowed');
     }
 
+    resetPwnLogState('Installer requested. Waiting for output...');
+    startPwnLogStreaming({ initial: true });
+
     try {
         const result = await postPwnAPI('/api/pwnagotchi/install', {});
         addConsoleMessage('Pwnagotchi installer started', 'success');
@@ -3183,6 +3433,8 @@ async function handlePwnInstallClick() {
     } catch (error) {
         console.error('Failed to start Pwnagotchi installer:', error);
         addConsoleMessage(`Install failed: ${error.message}`, 'error');
+        stopPwnLogStreaming();
+        setPwnLogEmptyMessage('Installer failed to start. Check Ragnar logs for details.');
     } finally {
         updatePwnButtons();
     }

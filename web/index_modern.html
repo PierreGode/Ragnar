@@ -2275,13 +2275,10 @@
                         </div>
                         <div class="glass rounded-lg p-4">
                             <h4 class="font-medium text-lg mb-2">Swap Control</h4>
-                            <p class="text-sm text-gray-400 mb-4">Trigger a graceful hand-off between Ragnar and Pwnagotchi services. Switching to Pwnagotchi will stop this dashboard until you reboot back to Ragnar.</p>
-                            <div class="flex flex-col gap-3">
-                                <button id="pwn-swap-to-pwn-btn" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white py-2 px-4 rounded-lg transition-colors">
+                            <p class="text-sm text-gray-400 mb-4">Trigger a graceful hand-off between Ragnar and Pwnagotchi. Ragnar UI will stop responding once the switch begins, so plan to reboot back via SSH.</p>
+                            <div>
+                                <button id="pwn-swap-to-pwn-btn" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white py-2 px-4 rounded-lg transition-colors w-full">
                                     Switch to Pwnagotchi
-                                </button>
-                                <button id="pwn-swap-to-ragnar-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded-lg transition-colors">
-                                    Return to Ragnar
                                 </button>
                             </div>
                             <p id="pwn-swap-hint" class="text-xs text-gray-500 mt-3">Ragnar UI becomes unavailable once the service stops. Keep SSH access handy before swapping.</p>
@@ -2289,6 +2286,25 @@
                     </div>
                     <div id="pwn-status-alert" class="hidden mt-4 p-4 rounded-lg border border-slate-700 bg-slate-900 text-sm text-gray-200">
                         Awaiting first status update...
+                    </div>
+                    <div class="glass rounded-lg p-4 mt-4">
+                        <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h4 class="font-medium text-lg">Installer Log</h4>
+                                    <span id="pwn-log-stream-indicator" class="hidden text-xs font-semibold uppercase tracking-wide px-2 py-0.5 rounded-full bg-green-700/40 text-green-200">Live</span>
+                                </div>
+                                <p id="pwn-log-path" class="text-xs text-gray-500 mt-1 truncate">Log path will appear once the installer starts.</p>
+                            </div>
+                            <div class="flex items-center gap-2">
+                                <button id="pwn-log-refresh-btn" class="bg-slate-800 hover:bg-slate-700 text-white text-sm px-3 py-1.5 rounded-lg transition-colors">
+                                    Refresh Log
+                                </button>
+                            </div>
+                        </div>
+                        <div id="pwn-log-viewer" class="mt-3 bg-slate-950/70 border border-slate-800 rounded-lg p-3 h-56 overflow-y-auto font-mono text-xs text-gray-200">
+                            <p id="pwn-log-empty" class="text-gray-500">Installer output will stream here during installation.</p>
+                        </div>
                     </div>
                 </div>
                 

@@ -343,6 +343,45 @@ def _emit_pwn_status_update(status: Optional[dict] = None) -> dict:
     return payload
 
 
+def _read_pwn_log_chunk(cursor: Optional[int] = None, tail_bytes: int = 4096, max_bytes: int = 8192):
+    """Return a slice of the installer log starting at cursor or tail bytes from end."""
+    status = _build_pwnagotchi_status(persist=False)
+    log_file = status.get('log_file')
+
+    if not log_file or not os.path.exists(log_file):
+        return status, None, 0, []
+
+    try:
+        file_size = os.path.getsize(log_file)
+    except OSError:
+        return status, None, 0, []
+
+    if cursor is None or cursor < 0:
+        tail_bytes = max(0, min(tail_bytes, 65536))
+        start = max(file_size - tail_bytes, 0)
+    else:
+        start = max(0, min(cursor, file_size))
+
+    max_bytes = max(1024, min(max_bytes, 65536))
+
+    entries: list[str] = []
+    new_cursor = start
+
+    try:
+        with open(log_file, 'r', encoding='utf-8', errors='replace') as handle:
+            handle.seek(start)
+            chunk = handle.read(max_bytes)
+            new_cursor = handle.tell()
+    except Exception as exc:
+        logger.debug(f"Failed reading Pwnagotchi installer log: {exc}")
+        return status, log_file, new_cursor, []
+
+    if chunk:
+        entries = chunk.splitlines()
+
+    return status, log_file, new_cursor, entries
+
+
 def _schedule_pwn_mode_switch(target_mode: str) -> None:
     if target_mode not in {'pwnagotchi', 'ragnar'}:
         logger.warning(f"Invalid Pwnagotchi target mode requested: {target_mode}")
@@ -5002,6 +5041,34 @@ def install_pwnagotchi_from_dashboard():
     except Exception as e:
         logger.error(f"Error starting Pwnagotchi install: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pwnagotchi/logs')
+def stream_pwnagotchi_logs():
+    try:
+        cursor_arg = request.args.get('cursor', default=None, type=int)
+        tail_bytes = request.args.get('tail', default=4096, type=int)
+        max_bytes = request.args.get('max_bytes', default=8192, type=int)
+
+        status, log_file, cursor, entries = _read_pwn_log_chunk(cursor=cursor_arg, tail_bytes=tail_bytes, max_bytes=max_bytes)
+
+        response = {
+            'success': bool(log_file),
+            'entries': entries,
+            'cursor': cursor,
+            'file': log_file,
+            'state': status.get('state'),
+            'installing': status.get('installing', False)
+        }
+
+        if not log_file:
+            response['error'] = 'Installer log not available yet'
+
+        return jsonify(response)
+
+    except Exception as exc:
+        logger.error(f"Error streaming Pwnagotchi logs: {exc}")
+        return jsonify({'success': False, 'error': 'Failed to read installer logs'}), 500
 
 
 @app.route('/api/pwnagotchi/swap', methods=['POST'])
