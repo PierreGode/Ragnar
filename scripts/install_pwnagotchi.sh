@@ -103,14 +103,14 @@ write_status "installing" "System packages installed" "dependencies"
 
 echo "[INFO] Upgrading pip"
 pip_flags_upgrade=("--upgrade")
-if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
+if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
     pip_flags_upgrade+=("--break-system-packages")
 fi
 python3 -m pip install "${pip_flags_upgrade[@]}" pip 2>/dev/null || echo "[WARN] pip upgrade skipped"
 
 pip_flags=("--no-cache-dir" "--upgrade")
 pip_break_supported=false
-if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
+if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
     pip_flags+=("--break-system-packages")
     pip_break_supported=true
 else
