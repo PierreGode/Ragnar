@@ -55,6 +55,8 @@ packages=(
     python3-pip
     python3-setuptools
     python3-dev
+    python3-full
+    python3-venv
     libpcap-dev
     libffi-dev
     libssl-dev
@@ -84,37 +86,30 @@ fi
 
 write_status "installing" "System packages installed" "dependencies"
 
-echo "[INFO] Upgrading pip"
-if ! python3 -m pip install --upgrade pip; then
-    echo "[WARN] Unable to upgrade pip automatically. Continuing with existing version."
-fi
-
-pip_flags=("--no-cache-dir" "--upgrade")
-pip_break_supported=false
-if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
-    pip_flags+=("--break-system-packages")
-    pip_break_supported=true
-else
-    echo "[WARN] pip does not support --break-system-packages on this image. Continuing without it."
-fi
-
-write_status "installing" "Installing Pwnagotchi python package" "python"
-if ! python3 -m pip install "${pip_flags[@]}" pwnagotchi; then
-    if [[ "$pip_break_supported" == true ]]; then
-        echo "[WARN] pip install with --break-system-packages failed. Retrying without the flag."
-        python3 -m pip install --no-cache-dir --upgrade pwnagotchi
-    else
-        echo "[ERROR] pip install failed even without --break-system-packages"
-        exit 1
-    fi
-fi
-
 echo "[INFO] Ensuring repository at ${PWN_DIR}"
 if [[ -d "$PWN_DIR/.git" ]]; then
     git -C "$PWN_DIR" pull --ff-only
 else
     rm -rf "$PWN_DIR"
     git clone "$PWN_REPO" "$PWN_DIR"
+fi
+
+# Create virtual environment
+VENV_DIR="$PWN_DIR/venv"
+echo "[INFO] Creating virtual environment at ${VENV_DIR}"
+if [[ ! -d "$VENV_DIR" ]]; then
+    python3 -m venv "$VENV_DIR"
+fi
+
+# Upgrade pip in virtual environment
+echo "[INFO] Upgrading pip in virtual environment"
+"$VENV_DIR/bin/python" -m pip install --upgrade pip
+
+write_status "installing" "Installing Pwnagotchi python package in virtual environment" "python"
+echo "[INFO] Installing pwnagotchi in virtual environment"
+if ! "$VENV_DIR/bin/pip" install --no-cache-dir pwnagotchi; then
+    echo "[ERROR] pip install failed in virtual environment"
+    exit 1
 fi
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
@@ -139,7 +134,7 @@ After=multi-user.target network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/env python3 -m pwnagotchi --config ${CONFIG_FILE}
+ExecStart=${PWN_DIR}/venv/bin/python -m pwnagotchi --config ${CONFIG_FILE}
 WorkingDirectory=${PWN_DIR}
 Restart=on-failure
 RestartSec=5
