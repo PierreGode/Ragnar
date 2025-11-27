@@ -139,7 +139,7 @@ class SSHConnector:
                 port=22,
                 timeout=15,
                 auth_timeout=15,
-                banner_timeout=15,
+                banner_timeout=30,
                 look_for_keys=False,  # Prevent consuming auth attempts with key probing
                 allow_agent=False
             )
