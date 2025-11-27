@@ -53,9 +53,10 @@ if [[ -n "$available_space" ]] && [[ "$available_space" -gt 0 ]]; then
     echo "[INFO] Available disk space in /tmp: ${available_space} MB"
     if [[ $available_space -lt 300 ]]; then
         echo "[ERROR] Insufficient disk space in /tmp (${available_space} MB). Need at least 300 MB."
-        echo "[ERROR] /tmp appears to be a small tmpfs partition. Installation cannot proceed."
-        echo "[INFO] Consider increasing tmpfs size or using a different temporary directory."
-        write_status "error" "Insufficient disk space in /tmp: ${available_space} MB available, need at least 300 MB" "preflight"
+        echo "[ERROR] Installation cannot proceed with current disk space."
+        echo "[INFO] If /tmp is a tmpfs partition, consider increasing its size."
+        echo "[INFO] Alternatively, ensure sufficient disk space is available for installation."
+        write_status "error" "Insufficient disk space in /tmp: ${available_space} MB available, need at least 300 MB. Installation cannot proceed." "preflight"
         exit 1
     elif [[ $available_space -lt 500 ]]; then
         echo "[WARN] Low disk space detected in /tmp (${available_space} MB). Installation may fail."
