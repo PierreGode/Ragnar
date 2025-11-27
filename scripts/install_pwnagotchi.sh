@@ -56,7 +56,6 @@ packages=(
     python3-setuptools
     python3-dev
     libpcap-dev
-    libatlas-base-dev
     libffi-dev
     libssl-dev
     libcap2-bin
@@ -68,6 +67,7 @@ optional_packages=(
     bettercap
     hcxdumptool
     hcxtools
+    libatlas-base-dev
 )
 
 echo "[INFO] Installing required packages"
