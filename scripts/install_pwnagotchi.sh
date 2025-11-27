@@ -126,14 +126,30 @@ fi
 
 echo "[INFO] Installing Pwnagotchi dependencies from ${PWN_DIR}"
 cd "$PWN_DIR"
-if [[ -f "requirements.txt" ]]; then
-    python3 -m pip install "${pip_flags[@]}" -r requirements.txt
-else
-    echo "[WARN] No requirements.txt found, skipping dependency installation"
-fi
+
+# Pwnagotchi's requirements.txt is from 2019 and incompatible with Python 3.13+
+# We'll install modern equivalents that work with current Python
+echo "[INFO] Installing compatible dependencies for modern Python"
+python3 -m pip install "${pip_flags[@]}" \
+    pycryptodome \
+    requests \
+    PyYAML \
+    scapy \
+    numpy \
+    scipy \
+    pillow \
+    flask \
+    flask-cors \
+    tornado \
+    tweepy \
+    toml \
+    websocket-client \
+    inky \
+    watchdog || echo "[WARN] Some dependencies failed, continuing..."
 
 echo "[INFO] Installing Pwnagotchi package"
-python3 -m pip install "${pip_flags[@]}" -e .
+# Install in editable mode, ignoring requirements.txt since it's outdated
+python3 -m pip install "${pip_flags[@]}" --no-deps -e .
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
