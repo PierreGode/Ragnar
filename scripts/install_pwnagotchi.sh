@@ -43,6 +43,31 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Check available disk space (in MB)
+if ! available_space=$(df /tmp 2>/dev/null | awk 'NR==2 {print int($4/1024)}'); then
+    echo "[WARN] Unable to check disk space in /tmp. Proceeding with caution."
+    available_space=0
+fi
+
+if [[ -n "$available_space" ]] && [[ "$available_space" -gt 0 ]]; then
+    echo "[INFO] Available disk space in /tmp: ${available_space} MB"
+    if [[ $available_space -lt 500 ]]; then
+        echo "[WARN] Low disk space detected (${available_space} MB). Installation may fail."
+        echo "[INFO] Attempting to clean up temporary files..."
+        rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* /var/cache/apt/archives/*.deb 2>/dev/null || true
+        apt-get clean
+        available_space=$(df /tmp 2>/dev/null | awk 'NR==2 {print int($4/1024)}')
+        echo "[INFO] Available disk space after cleanup: ${available_space} MB"
+        if [[ $available_space -lt 300 ]]; then
+            echo "[ERROR] Insufficient disk space (${available_space} MB). Need at least 300 MB."
+            write_status "error" "Insufficient disk space: ${available_space} MB available, need at least 300 MB" "preflight"
+            exit 1
+        fi
+    fi
+else
+    echo "[WARN] Unable to determine available disk space. Proceeding with installation."
+fi
+
 write_status "installing" "Starting Pwnagotchi installation" "preflight"
 echo "[INFO] Beginning Pwnagotchi installation..."
 
@@ -84,6 +109,11 @@ if [[ ${#optional_packages[@]} -gt 0 ]]; then
     done
 fi
 
+# Clean up apt cache to free disk space
+echo "[INFO] Cleaning up apt cache to free disk space"
+apt-get clean
+rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
+
 write_status "installing" "System packages installed" "dependencies"
 
 echo "[INFO] Ensuring repository at ${PWN_DIR}"
@@ -108,18 +138,33 @@ else
     python3 -m venv "$VENV_DIR"
 fi
 
-# Upgrade pip in virtual environment
-echo "[INFO] Upgrading pip in virtual environment"
-if ! "$VENV_DIR/bin/python" -m pip install --upgrade pip; then
-    echo "[WARN] Unable to upgrade pip in virtual environment. Continuing with existing version."
+# Clean up pip cache and temporary build directories to free up space
+echo "[INFO] Cleaning up pip cache and temporary build directories"
+"$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
+rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
+
+# Upgrade pip, setuptools, and wheel to prefer pre-built wheels
+echo "[INFO] Upgrading pip, setuptools, and wheel in virtual environment"
+if ! "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel; then
+    echo "[WARN] Unable to upgrade pip/setuptools/wheel in virtual environment. Continuing with existing version."
 fi
 
 write_status "installing" "Installing Pwnagotchi python package in virtual environment" "python"
 echo "[INFO] Installing pwnagotchi in virtual environment"
+# Use --no-cache-dir to avoid filling disk with cache
+# Install dependencies first to allow cleanup between packages
 if ! "$VENV_DIR/bin/pip" install --no-cache-dir "$PWN_DIR"; then
     echo "[ERROR] pip install failed in virtual environment"
+    # Clean up on failure
+    "$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
+    rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
     exit 1
 fi
+
+# Final cleanup after successful installation
+echo "[INFO] Cleaning up temporary files after installation"
+"$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
+rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
