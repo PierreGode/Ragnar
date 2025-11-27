@@ -955,6 +955,7 @@ function updateDashboardStats(stats) {
     const points = toNumber(stats.points ?? stats.coins, 0);
 
     updateElement('target-count', activeTargets);
+    scaleStatNumber('target-count', activeTargets);
     updateElement('target-total-count', totalTargets);
     updateElement('target-inactive-count', inactiveTargets);
     updateElement('target-new-count', newTargets);
@@ -971,11 +972,16 @@ function updateDashboardStats(stats) {
     }
 
     updateElement('port-count', portCount);
+    scaleStatNumber('port-count', portCount);
     updateElement('vuln-count', vulnCount);
+    scaleStatNumber('vuln-count', vulnCount);
     updateElement('dashboard-vulnerable-hosts-count', vulnerableHostsCount);
     updateElement('cred-count', credCount);
+    scaleStatNumber('cred-count', credCount);
     updateElement('level-count', level);
+    scaleStatNumber('level-count', level);
     updateElement('points-count', points);
+    scaleStatNumber('points-count', points);
 
     const activeSummary = totalTargets > 0 ? `${activeTargets}/${totalTargets} active` : `${activeTargets} active`;
     const newSummary = newTargets > 0 ? `${newTargets} new` : 'No new targets';
@@ -5682,6 +5688,36 @@ function updateElement(id, value) {
     const element = document.getElementById(id);
     if (element) {
         element.textContent = value;
+    }
+}
+
+function scaleStatNumber(elementId, value, options = {}) {
+    const element = document.getElementById(elementId);
+    if (!element) {
+        return;
+    }
+
+    const config = {
+        mediumDigits: 3,
+        largeDigits: 4,
+        baseClass: 'text-3xl',
+        mediumClass: 'text-2xl',
+        smallClass: 'text-xl',
+        ...options
+    };
+
+    const numericValue = Number(value);
+    const safeValue = Number.isFinite(numericValue) ? Math.trunc(numericValue) : 0;
+    const digitCount = Math.abs(safeValue).toString().length;
+
+    element.classList.remove(config.baseClass, config.mediumClass, config.smallClass);
+
+    if (digitCount >= config.largeDigits) {
+        element.classList.add(config.smallClass);
+    } else if (digitCount >= config.mediumDigits) {
+        element.classList.add(config.mediumClass);
+    } else {
+        element.classList.add(config.baseClass);
     }
 }
 
