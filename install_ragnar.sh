@@ -475,14 +475,15 @@ setup_ragnar() {
 
     # Update the default EPD type in shared.py with the detected version
     log "INFO" "Updating E-Paper display default configuration in shared.py..."
-    if [ -f "$ragnar_PATH/shared.py" ]; then
+    if [ -z "${EPD_VERSION:-}" ]; then
+        log "WARNING" "EPD version not detected - skipping shared.py update"
+    elif [ -f "$ragnar_PATH/shared.py" ]; then
         # Replace the hardcoded default epd_type in get_default_config() method
         sed -i "s/\"epd_type\": \"epd2in13_V4\"/\"epd_type\": \"$EPD_VERSION\"/" "$ragnar_PATH/shared.py"
         check_success "Updated shared.py default EPD configuration to $EPD_VERSION"
         log "INFO" "Modified: $ragnar_PATH/shared.py"
     else
-        log "ERROR" "shared.py not found at $ragnar_PATH/shared.py"
-        handle_error "E-Paper display configuration update"
+        log "WARNING" "shared.py not found at $ragnar_PATH/shared.py - skipping E-Paper configuration update"
     fi
 
     # Install requirements with --break-system-packages flag
