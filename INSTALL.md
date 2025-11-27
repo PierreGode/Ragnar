@@ -9,6 +9,7 @@
 - [Prerequisites](#-prerequisites)
 - [Quick Install](#-quick-install)
 - [Manual Install](#-manual-install)
+- [Pwnagotchi Bridge](#-pwnagotchi-bridge)
 - [License](#-license)
 
 Use Raspberry Pi Imager to install your OS
@@ -198,6 +199,29 @@ Add:
 ```
 fs.file-max = 2097152
 ```
+
+### 🐝 Pwnagotchi Bridge
+
+Running Ragnar and Pwnagotchi on the same SD card is now supported through a helper script plus new dashboard controls. The workflow is optional and completely disabled until you run the installer.
+
+1. **Execute the installer as root inside the Ragnar repository:**
+    ```bash
+    cd /home/ragnar/Ragnar
+    sudo ./scripts/install_pwnagotchi.sh
+    ```
+2. The script will:
+    - Install the required apt packages (python3, libpcap-dev, hcxdumptool, etc.).
+    - Upgrade `pip` when possible and install the `pwnagotchi` Python module system-wide.
+    - Clone the upstream repo into `/opt/pwnagotchi` and generate `/etc/pwnagotchi/config.toml` plus plugin folders.
+    - Drop `pwnagotchi.service` in `/etc/systemd/system/` but leave it disabled so Ragnar keeps control after installation.
+    - Stream logs to `/var/log/ragnar/pwnagotchi_install_<timestamp>.log` and write a JSON status file at `data/pwnagotchi_status.json`.
+3. **Use the web UI to manage swaps:** open the Ragnar dashboard → Config tab → *Pwnagotchi Bridge*.
+    - *Install or Repair* re-runs the script in the background.
+    - *Switch to Pwnagotchi* schedules a service hand-off (Ragnar stops, Pwnagotchi starts). Keep SSH open because the web UI becomes unreachable until you return.
+    - *Return to Ragnar* brings the original service back (usually after rebooting out of Pwnagotchi).
+4. A read-only card also appears in the Discovered tab showing the latest status, phase, and last switch timestamp so you can monitor the bridge while viewing loot.
+
+Re-run the installer any time you need to refresh dependencies or repair a failed upgrade. It is idempotent: existing repos/configs are updated in place.
 
 Apply the changes:
 

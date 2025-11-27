@@ -1316,6 +1316,46 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Pwnagotchi Summary (hidden until installed) -->
+            <div id="pwn-discovered-card" class="glass rounded-xl p-6 mb-6 hidden">
+                <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-2xl font-bold">Pwnagotchi Activity</h2>
+                        <p class="text-sm text-gray-400">Live status is mirrored from the Config tab so you can track swaps and installs while reviewing loot.</p>
+                    </div>
+                    <span id="pwn-card-badge" class="text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full bg-slate-700 text-slate-200">Status Pending</span>
+                </div>
+                <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-1">Message</div>
+                        <div id="pwn-card-message" class="text-base text-white font-medium">Waiting for status...</div>
+                    </div>
+                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-1">Mode</div>
+                        <div id="pwn-card-mode" class="text-xl font-semibold text-green-400">Ragnar</div>
+                        <p class="text-xs text-gray-400 mt-2">Phase: <span id="pwn-card-phase">Idle</span></p>
+                    </div>
+                    <div class="bg-slate-800 bg-opacity-50 rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-1">Service State</div>
+                        <div class="flex items-center gap-2">
+                            <span id="pwn-card-service" class="text-xl font-semibold text-slate-200">Stopped</span>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-2">Enabled: <span id="pwn-card-enabled">No</span></p>
+                    </div>
+                </div>
+                <div class="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div class="bg-slate-900 bg-opacity-60 rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-1">Target Mode</div>
+                        <div id="pwn-card-target" class="text-base font-semibold text-slate-100">Ragnar</div>
+                    </div>
+                    <div class="bg-slate-900 bg-opacity-60 rounded-lg p-4">
+                        <div class="text-sm text-gray-400 mb-1">Last Switch</div>
+                        <div id="pwn-card-last-switch" class="text-base font-semibold text-slate-100">Never</div>
+                    </div>
+                </div>
+                <div class="mt-4 text-xs text-gray-400" id="pwn-card-updated">Updated: pending</div>
+            </div>
             
             <!-- Vulnerability Intel Section -->
             <div class="glass rounded-xl p-6 mb-6">
@@ -2171,6 +2211,86 @@
                         
                     </div>
                 </div>
+
+                <!-- Pwnagotchi Bridge Section -->
+                <div class="mb-8">
+                    <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h3 class="text-xl font-semibold text-Ragnar-400">Pwnagotchi Bridge</h3>
+                            <p class="text-sm text-gray-400 mt-1">Install Pwnagotchi alongside Ragnar and swap which service owns the display without reflashing the SD card.</p>
+                        </div>
+                        <div class="flex items-center gap-3">
+                            <span id="pwn-status-badge" class="text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full bg-slate-700 text-slate-200">Status Pending</span>
+                            <button id="pwn-refresh-btn" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg transition-colors">
+                                Refresh Status
+                            </button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mt-4">
+                        <div class="glass rounded-lg p-4">
+                            <div class="space-y-3">
+                                <div>
+                                    <p class="text-sm text-gray-400">Current Message</p>
+                                    <p id="pwn-status-message" class="text-base text-white font-medium mt-1">Waiting for status...</p>
+                                </div>
+                                <div class="grid grid-cols-1 gap-2 text-sm text-gray-300">
+                                    <div class="flex justify-between">
+                                        <span>Active Mode</span>
+                                        <span id="pwn-mode-value" class="font-semibold text-green-400">Ragnar</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Target Mode</span>
+                                        <span id="pwn-target-value" class="font-semibold text-slate-200">Ragnar</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Phase</span>
+                                        <span id="pwn-phase-value" class="font-semibold text-slate-200">Idle</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Service State</span>
+                                        <span id="pwn-service-state" class="font-semibold text-slate-200">Stopped</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Service Enabled</span>
+                                        <span id="pwn-service-enabled" class="font-semibold text-slate-200">No</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Last Switch</span>
+                                        <span id="pwn-last-switch-value" class="font-semibold text-slate-200">Never</span>
+                                    </div>
+                                    <div class="flex justify-between">
+                                        <span>Updated</span>
+                                        <span id="pwn-last-updated" class="font-semibold text-slate-200">—</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="glass rounded-lg p-4">
+                            <h4 class="font-medium text-lg mb-2">Install or Repair</h4>
+                            <p class="text-sm text-gray-400 mb-4">Run the bundled installer to fetch dependencies, clone Pwnagotchi, and stage services. This can take 5-10 minutes on a Raspberry Pi.</p>
+                            <button id="pwn-install-btn" class="w-full bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-lg transition-colors">
+                                Install Pwnagotchi
+                            </button>
+                            <p id="pwn-install-note" class="text-xs text-gray-500 mt-3">Installer runs in the background and updates the status card as it progresses.</p>
+                        </div>
+                        <div class="glass rounded-lg p-4">
+                            <h4 class="font-medium text-lg mb-2">Swap Control</h4>
+                            <p class="text-sm text-gray-400 mb-4">Trigger a graceful hand-off between Ragnar and Pwnagotchi services. Switching to Pwnagotchi will stop this dashboard until you reboot back to Ragnar.</p>
+                            <div class="flex flex-col gap-3">
+                                <button id="pwn-swap-to-pwn-btn" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white py-2 px-4 rounded-lg transition-colors">
+                                    Switch to Pwnagotchi
+                                </button>
+                                <button id="pwn-swap-to-ragnar-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded-lg transition-colors">
+                                    Return to Ragnar
+                                </button>
+                            </div>
+                            <p id="pwn-swap-hint" class="text-xs text-gray-500 mt-3">Ragnar UI becomes unavailable once the service stops. Keep SSH access handy before swapping.</p>
+                        </div>
+                    </div>
+                    <div id="pwn-status-alert" class="hidden mt-4 p-4 rounded-lg border border-slate-700 bg-slate-900 text-sm text-gray-200">
+                        Awaiting first status update...
+                    </div>
+                </div>
                 
                 <!-- AI Configuration Section -->
                 <div class="mb-8">
@@ -2332,7 +2452,7 @@
     </main>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.min.js?v=20251123"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20251127"></script>
     
 </body>
 </html>

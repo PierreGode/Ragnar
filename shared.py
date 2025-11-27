@@ -161,6 +161,7 @@ class SharedData:
         self.netkbfile = os.path.join(self.datadir, "netkb.csv")
         self.livestatusfile = os.path.join(self.datadir, 'livestatus.csv')
         self.gamification_file = os.path.join(self.datadir, 'gamification.json')
+        self.pwnagotchi_status_file = os.path.join(self.datadir, 'pwnagotchi_status.json')
         # Files directly under vulnerabilities_dir
         self.vuln_summary_file = os.path.join(self.vulnerabilities_dir, 'vulnerability_summary.csv')
         self.vuln_scan_progress_file = os.path.join(self.vulnerabilities_dir, 'scan_progress.json')
@@ -281,6 +282,12 @@ class SharedData:
             "ai_network_insights": True,
             "ai_max_tokens": 500,
             "ai_temperature": 0.7,
+
+            "__title_pwnagotchi__": "Pwnagotchi Integration",
+            "pwnagotchi_installed": False,
+            "pwnagotchi_mode": "ragnar",
+            "pwnagotchi_last_switch": "",
+            "pwnagotchi_last_status": "Not installed"
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):

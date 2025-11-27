@@ -12,6 +12,21 @@ let pendingFileHighlight = null;
 let manualModeActive = false;
 let manualDataPrimed = false;
 let imagesLoaded = false;
+const PWN_STATUS_POLL_INTERVAL = 15000;
+let pwnStatus = {
+    state: 'not_installed',
+    message: 'Waiting for status...',
+    phase: 'idle',
+    installed: false,
+    installing: false,
+    mode: 'ragnar',
+    target_mode: 'ragnar',
+    last_switch: '',
+    service_active: false,
+    service_enabled: false,
+    timestamp: null
+};
+let lastPwnState = null;
 
 const configMetadata = {
     manual_mode: {
@@ -325,6 +340,7 @@ document.addEventListener('DOMContentLoaded', function() {
     setupAutoRefresh();
     setupEpaperAutoRefresh();
     setupEventListeners();
+    initializePwnUI();
 });
 
 
@@ -343,6 +359,7 @@ function initializeSocket() {
         
         socket.emit('request_status');
         socket.emit('request_logs');
+        refreshPwnagotchiStatus({ silent: true });
     });
 
     socket.on('disconnect', function() {
@@ -363,6 +380,14 @@ function initializeSocket() {
 
     socket.on('log_update', function(logs) {
         updateConsole(logs);
+    });
+
+    socket.on('pwnagotchi_status', function(statusPacket) {
+        const previousState = pwnStatus.state;
+        updatePwnagotchiUI(statusPacket);
+        if (statusPacket && statusPacket.state && statusPacket.state !== previousState) {
+            addConsoleMessage(`Pwnagotchi status changed: ${formatPwnStateLabel(statusPacket.state)}`, 'info');
+        }
     });
 
     socket.on('network_update', function(data) {
@@ -597,6 +622,12 @@ function setupAutoRefresh() {
     setTimeout(() => {
         checkForUpdatesQuiet();
     }, 30000); // Check 30 seconds after page load (deferred from 5s)
+
+    autoRefreshIntervals.pwn = setInterval(() => {
+        if (currentTab === 'config' || currentTab === 'discovered') {
+            refreshPwnagotchiStatus({ silent: true });
+        }
+    }, PWN_STATUS_POLL_INTERVAL);
 }
 
 function initializeMobileMenu() {
@@ -757,6 +788,9 @@ async function loadTabData(tabName) {
         case 'connect':
             if (!alreadyPreloaded) {
                 await loadConnectData();
+            } else {
+                await refreshWifiStatus().catch(err => console.warn('WiFi refresh failed:', err));
+                await refreshBluetoothStatus().catch(err => console.warn('Bluetooth refresh failed:', err));
             }
             break;
         case 'pentest':
@@ -776,6 +810,7 @@ async function loadTabData(tabName) {
                     loadVulnerabilityIntel()
                 ]);
             }
+            await refreshPwnagotchiStatus({ silent: true });
             break;
         case 'threat-intel':
             // Always refresh threat intel data when switching to this tab
@@ -804,6 +839,8 @@ async function loadTabData(tabName) {
         case 'config':
             if (!alreadyPreloaded) {
                 await loadConfigData();
+            } else {
+                await refreshPwnagotchiStatus({ silent: true });
             }
             break;
     }
@@ -2827,12 +2864,387 @@ async function loadConfigData() {
         
         // Update vulnerability count in data management card
         updateVulnerabilityCount();
+        await refreshPwnagotchiStatus({ silent: true });
         
         // Also check for updates when loading config tab
         checkForUpdates();
     } catch (error) {
         console.error('Error loading config:', error);
     }
+}
+
+function initializePwnUI() {
+    const badge = document.getElementById('pwn-status-badge');
+    if (!badge) {
+        return;
+    }
+
+    const installBtn = document.getElementById('pwn-install-btn');
+    if (installBtn) {
+        installBtn.addEventListener('click', handlePwnInstallClick);
+    }
+
+    const swapToPwnBtn = document.getElementById('pwn-swap-to-pwn-btn');
+    if (swapToPwnBtn) {
+        swapToPwnBtn.addEventListener('click', () => handlePwnSwap('pwnagotchi'));
+    }
+
+    const swapToRagnarBtn = document.getElementById('pwn-swap-to-ragnar-btn');
+    if (swapToRagnarBtn) {
+        swapToRagnarBtn.addEventListener('click', () => handlePwnSwap('ragnar'));
+    }
+
+    const refreshBtn = document.getElementById('pwn-refresh-btn');
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', () => refreshPwnagotchiStatus());
+    }
+
+    updatePwnButtons();
+    refreshPwnagotchiStatus({ silent: true });
+}
+
+async function refreshPwnagotchiStatus(options = {}) {
+    const silent = Boolean(options && options.silent);
+    try {
+        const response = await fetchAPI('/api/pwnagotchi/status');
+        if (response && response.success && response.status) {
+            updatePwnagotchiUI(response.status);
+            return response.status;
+        }
+        if (!silent) {
+            addConsoleMessage('Unable to load Pwnagotchi status', 'warning');
+        }
+    } catch (error) {
+        console.error('Error refreshing Pwnagotchi status:', error);
+        if (!silent) {
+            addConsoleMessage(`Pwnagotchi status error: ${error.message}`, 'error');
+        }
+    }
+    return null;
+}
+
+function updatePwnagotchiUI(status = {}) {
+    if (!status || typeof status !== 'object') {
+        return;
+    }
+
+    pwnStatus = {
+        ...pwnStatus,
+        ...status
+    };
+    pwnStatus.installing = Boolean(pwnStatus.installing);
+
+    const visuals = getPwnStateVisuals(pwnStatus);
+
+    const badge = document.getElementById('pwn-status-badge');
+    if (badge) {
+        badge.textContent = visuals.badgeText;
+        badge.className = `text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full ${visuals.badgeClass}`;
+    }
+
+    updateElement('pwn-status-message', pwnStatus.message || 'Waiting for status...');
+
+    const modeLabel = formatPwnModeLabel(pwnStatus.mode);
+    updateElement('pwn-mode-value', modeLabel);
+    const modeElement = document.getElementById('pwn-mode-value');
+    if (modeElement) {
+        modeElement.className = `font-semibold ${pwnStatus.mode === 'pwnagotchi' ? 'text-fuchsia-300' : 'text-green-400'}`;
+    }
+
+    updateElement('pwn-target-value', formatPwnModeLabel(pwnStatus.target_mode));
+    updateElement('pwn-phase-value', formatPwnPhaseLabel(pwnStatus.phase));
+
+    updateElement('pwn-service-state', pwnStatus.service_active ? 'Running' : 'Stopped');
+    const serviceStateElement = document.getElementById('pwn-service-state');
+    if (serviceStateElement) {
+        serviceStateElement.className = `font-semibold ${pwnStatus.service_active ? 'text-green-400' : 'text-slate-200'}`;
+    }
+
+    updateElement('pwn-service-enabled', pwnStatus.service_enabled ? 'Enabled' : 'Disabled');
+    const serviceEnabledElement = document.getElementById('pwn-service-enabled');
+    if (serviceEnabledElement) {
+        serviceEnabledElement.className = `font-semibold ${pwnStatus.service_enabled ? 'text-green-300' : 'text-slate-200'}`;
+    }
+
+    updateElement('pwn-last-switch-value', pwnStatus.last_switch ? formatTimestamp(pwnStatus.last_switch) : 'Never');
+    updateElement('pwn-last-updated', pwnStatus.timestamp ? formatTimestamp(pwnStatus.timestamp) : new Date().toLocaleString());
+
+    const alertBox = document.getElementById('pwn-status-alert');
+    if (alertBox) {
+        if (pwnStatus.message) {
+            alertBox.className = `mt-4 p-4 rounded-lg border text-sm text-gray-200 ${visuals.alertClass}`;
+            alertBox.innerHTML = `
+                <div class="flex items-start gap-3">
+                    <div class="text-xl">${visuals.icon}</div>
+                    <div>
+                        <p class="font-semibold">${escapeHtml(pwnStatus.message)}</p>
+                        <p class="text-xs text-gray-300 mt-1">Phase: ${formatPwnPhaseLabel(pwnStatus.phase)} | Mode: ${modeLabel}</p>
+                    </div>
+                </div>
+            `;
+            alertBox.classList.remove('hidden');
+        } else {
+            alertBox.classList.add('hidden');
+        }
+    }
+
+    updatePwnDiscoveredCard(pwnStatus, visuals);
+    updatePwnButtons();
+    lastPwnState = pwnStatus.state;
+}
+
+function updatePwnButtons() {
+    const installBtn = document.getElementById('pwn-install-btn');
+    if (installBtn) {
+        const label = pwnStatus.installed ? 'Reinstall Pwnagotchi' : 'Install Pwnagotchi';
+        installBtn.textContent = pwnStatus.installing ? 'Installing...' : label;
+        installBtn.disabled = pwnStatus.installing;
+        installBtn.classList.toggle('opacity-70', pwnStatus.installing);
+        installBtn.classList.toggle('cursor-not-allowed', pwnStatus.installing);
+    }
+
+    const swapToPwnBtn = document.getElementById('pwn-swap-to-pwn-btn');
+    if (swapToPwnBtn) {
+        const busySwitching = pwnStatus.state === 'switching';
+        const switchingToPwn = busySwitching && pwnStatus.target_mode === 'pwnagotchi';
+        const disableSwapToPwn = !pwnStatus.installed || pwnStatus.installing || busySwitching;
+        swapToPwnBtn.disabled = disableSwapToPwn;
+        swapToPwnBtn.textContent = switchingToPwn ? 'Switch Scheduled...' : 'Switch to Pwnagotchi';
+        swapToPwnBtn.classList.toggle('opacity-60', disableSwapToPwn);
+        swapToPwnBtn.classList.toggle('cursor-not-allowed', disableSwapToPwn);
+    }
+
+    const swapToRagnarBtn = document.getElementById('pwn-swap-to-ragnar-btn');
+    if (swapToRagnarBtn) {
+        const busySwitching = pwnStatus.state === 'switching';
+        const switchingToRagnar = busySwitching && pwnStatus.target_mode === 'ragnar';
+        const switchingToPwn = busySwitching && pwnStatus.target_mode === 'pwnagotchi';
+        const allowReturn = pwnStatus.mode === 'pwnagotchi' || switchingToPwn;
+        const disableSwapToRagnar = pwnStatus.installing || (busySwitching && !switchingToRagnar && !switchingToPwn) || !allowReturn;
+        swapToRagnarBtn.disabled = disableSwapToRagnar;
+        swapToRagnarBtn.textContent = switchingToRagnar ? 'Switch Scheduled...' : 'Return to Ragnar';
+        swapToRagnarBtn.classList.toggle('opacity-60', disableSwapToRagnar);
+        swapToRagnarBtn.classList.toggle('cursor-not-allowed', disableSwapToRagnar);
+    }
+
+    const swapHint = document.getElementById('pwn-swap-hint');
+    if (swapHint) {
+        let hint = 'Ragnar UI becomes unavailable once the service stops. Keep SSH access handy before swapping.';
+        if (!pwnStatus.installed) {
+            hint = 'Install Pwnagotchi first to enable service swapping.';
+        } else if (pwnStatus.installing) {
+            hint = 'Installer is still running. Swapping will be available once it completes.';
+        } else if (pwnStatus.state === 'switching') {
+            hint = 'Switch scheduled. Wait for the service hand-off to complete before sending another request.';
+        }
+        swapHint.textContent = hint;
+    }
+}
+
+function updatePwnDiscoveredCard(status, visuals) {
+    if (!status || typeof status !== 'object') {
+        return;
+    }
+    const container = document.getElementById('pwn-discovered-card');
+    if (!container) {
+        return;
+    }
+
+    const shouldShow = Boolean(status.installing || status.installed);
+    if (!shouldShow) {
+        container.classList.add('hidden');
+        return;
+    }
+
+    container.classList.remove('hidden');
+
+    const badge = document.getElementById('pwn-card-badge');
+    if (badge) {
+        badge.textContent = visuals.badgeText;
+        badge.className = `text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full ${visuals.badgeClass}`;
+    }
+
+    updateElement('pwn-card-message', status.message || 'Waiting for status...');
+
+    const modeElement = document.getElementById('pwn-card-mode');
+    if (modeElement) {
+        modeElement.textContent = formatPwnModeLabel(status.mode);
+        modeElement.className = `text-xl font-semibold ${status.mode === 'pwnagotchi' ? 'text-fuchsia-300' : 'text-green-400'}`;
+    }
+
+    updateElement('pwn-card-phase', formatPwnPhaseLabel(status.phase));
+
+    const serviceEl = document.getElementById('pwn-card-service');
+    if (serviceEl) {
+        serviceEl.textContent = status.service_active ? 'Running' : 'Stopped';
+        serviceEl.className = `text-xl font-semibold ${status.service_active ? 'text-green-400' : 'text-slate-200'}`;
+    }
+
+    const enabledEl = document.getElementById('pwn-card-enabled');
+    if (enabledEl) {
+        enabledEl.textContent = status.service_enabled ? 'Yes' : 'No';
+        enabledEl.className = status.service_enabled ? 'text-green-300 font-semibold' : 'text-slate-200 font-semibold';
+    }
+
+    updateElement('pwn-card-target', formatPwnModeLabel(status.target_mode));
+    updateElement('pwn-card-last-switch', status.last_switch ? formatTimestamp(status.last_switch) : 'Never');
+    updateElement('pwn-card-updated', `Updated: ${status.timestamp ? formatTimestamp(status.timestamp) : new Date().toLocaleString()}`);
+}
+
+function getPwnStateVisuals(status) {
+    const state = (status.state || 'not_installed').toLowerCase();
+    if (state.includes('fail') || state.includes('error')) {
+        return {
+            badgeText: 'Error',
+            badgeClass: 'bg-red-700 text-red-100',
+            alertClass: 'border-red-500 bg-red-900/30',
+            icon: '⚠️'
+        };
+    }
+    if (status.installing || ['preflight', 'dependencies', 'python', 'installing'].includes(state)) {
+        return {
+            badgeText: 'Installing',
+            badgeClass: 'bg-yellow-700 text-yellow-100',
+            alertClass: 'border-yellow-500 bg-yellow-900/30',
+            icon: '⏳'
+        };
+    }
+    if (state === 'switching') {
+        return {
+            badgeText: 'Switching',
+            badgeClass: 'bg-orange-700 text-orange-100',
+            alertClass: 'border-orange-500 bg-orange-900/30',
+            icon: '🔄'
+        };
+    }
+    if (state === 'running') {
+        return {
+            badgeText: 'Running',
+            badgeClass: 'bg-green-700 text-green-100',
+            alertClass: 'border-green-500 bg-green-900/30',
+            icon: '✅'
+        };
+    }
+    if (state === 'installed') {
+        return {
+            badgeText: 'Installed',
+            badgeClass: 'bg-blue-700 text-blue-100',
+            alertClass: 'border-blue-500 bg-blue-900/30',
+            icon: 'ℹ️'
+        };
+    }
+    return {
+        badgeText: 'Not Installed',
+        badgeClass: 'bg-slate-700 text-slate-200',
+        alertClass: 'border-slate-700 bg-slate-900',
+        icon: 'ℹ️'
+    };
+}
+
+function formatPwnStateLabel(state) {
+    if (!state) {
+        return 'Unknown';
+    }
+    return state.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function formatPwnModeLabel(mode) {
+    return mode === 'pwnagotchi' ? 'Pwnagotchi' : 'Ragnar';
+}
+
+function formatPwnPhaseLabel(phase) {
+    if (!phase) {
+        return 'Idle';
+    }
+    return phase.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
+}
+
+async function handlePwnInstallClick() {
+    if (pwnStatus.installing) {
+        addConsoleMessage('Pwnagotchi installer already running', 'warning');
+        return;
+    }
+
+    const installBtn = document.getElementById('pwn-install-btn');
+    if (installBtn) {
+        installBtn.disabled = true;
+        installBtn.textContent = 'Starting installer...';
+        installBtn.classList.add('opacity-70', 'cursor-not-allowed');
+    }
+
+    try {
+        const result = await postPwnAPI('/api/pwnagotchi/install', {});
+        addConsoleMessage('Pwnagotchi installer started', 'success');
+        if (result && result.status) {
+            updatePwnagotchiUI(result.status);
+        } else {
+            refreshPwnagotchiStatus({ silent: true });
+        }
+    } catch (error) {
+        console.error('Failed to start Pwnagotchi installer:', error);
+        addConsoleMessage(`Install failed: ${error.message}`, 'error');
+    } finally {
+        updatePwnButtons();
+    }
+}
+
+async function handlePwnSwap(targetMode) {
+    const normalized = targetMode === 'pwnagotchi' ? 'pwnagotchi' : 'ragnar';
+
+    if (normalized === 'pwnagotchi' && !pwnStatus.installed) {
+        addConsoleMessage('Install Pwnagotchi before swapping', 'warning');
+        return;
+    }
+
+    const buttonId = normalized === 'pwnagotchi' ? 'pwn-swap-to-pwn-btn' : 'pwn-swap-to-ragnar-btn';
+    const button = document.getElementById(buttonId);
+    if (button) {
+        button.disabled = true;
+        button.textContent = 'Scheduling switch...';
+        button.classList.add('opacity-60', 'cursor-not-allowed');
+    }
+
+    try {
+        const result = await postPwnAPI('/api/pwnagotchi/swap', { target: normalized });
+        const message = (result && result.message) ? result.message : `Switch scheduled to ${formatPwnModeLabel(normalized)}`;
+        addConsoleMessage(message, 'info');
+        if (result && result.status) {
+            updatePwnagotchiUI(result.status);
+        } else {
+            refreshPwnagotchiStatus({ silent: true });
+        }
+    } catch (error) {
+        console.error('Failed to schedule Pwnagotchi swap:', error);
+        addConsoleMessage(`Swap failed: ${error.message}`, 'error');
+    } finally {
+        updatePwnButtons();
+    }
+}
+
+async function postPwnAPI(endpoint, payload = {}) {
+    const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload)
+    });
+
+    let data = null;
+    try {
+        data = await response.json();
+    } catch (error) {
+        data = null;
+    }
+
+    if (!response.ok || (data && data.success === false)) {
+        const errorMessage = data && (data.error || data.message)
+            ? (data.error || data.message)
+            : `Request failed (${response.status})`;
+        throw new Error(errorMessage);
+    }
+
+    return data || { success: true };
 }
 
 async function loadConnectData() {

@@ -28,6 +28,7 @@ import ipaddress
 import socket
 import traceback
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from email.utils import format_datetime
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response
 from flask_socketio import SocketIO, emit
@@ -98,6 +99,8 @@ processed_scan_files = {}  # Track which files we've already processed: {filenam
 DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'
 SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pwnagotchi.sh')
+PWN_SWAP_DELAY_SECONDS = 3
 
 
 def _normalize_value(value, default='Unknown'):
@@ -215,6 +218,151 @@ def run_targeted_arp_scan(ip, interface=DEFAULT_ARP_SCAN_INTERFACE):
         logger.error(f"Error running targeted arp-scan for {ip}: {e}")
         return ''
 
+
+def _update_pwn_config(updates: dict) -> None:
+    if not updates:
+        return
+
+    changed = False
+    for key, value in updates.items():
+        if shared_data.config.get(key) != value:
+            shared_data.config[key] = value
+            setattr(shared_data, key, value)
+            changed = True
+
+    if changed:
+        try:
+            shared_data.save_config()
+        except Exception as exc:
+            logger.error(f"Failed to persist Pwnagotchi config updates: {exc}")
+
+
+def _read_pwn_status_file() -> dict:
+    status_path = getattr(shared_data, 'pwnagotchi_status_file', os.path.join(shared_data.datadir, 'pwnagotchi_status.json'))
+    if not os.path.exists(status_path):
+        return {}
+
+    try:
+        with open(status_path, 'r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"Malformed Pwnagotchi status file: {exc}")
+    except Exception as exc:
+        logger.debug(f"Unable to read Pwnagotchi status file: {exc}")
+    return {}
+
+
+def _write_pwn_status_file(state: str, message: str, phase: str = 'dashboard', extra: Optional[dict] = None) -> dict:
+    payload = _read_pwn_status_file()
+    payload.update(extra or {})
+    payload.update({
+        'state': state,
+        'message': message,
+        'phase': phase,
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    })
+
+    status_path = getattr(shared_data, 'pwnagotchi_status_file', os.path.join(shared_data.datadir, 'pwnagotchi_status.json'))
+    os.makedirs(os.path.dirname(status_path), exist_ok=True)
+
+    try:
+        with open(status_path, 'w', encoding='utf-8') as handle:
+            json.dump(payload, handle, indent=2)
+    except Exception as exc:
+        logger.error(f"Failed to update Pwnagotchi status file: {exc}")
+
+    return payload
+
+
+def _systemctl_check(command: list[str]) -> bool:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        return result.returncode == 0
+    except FileNotFoundError:
+        logger.warning(f"systemctl not available when running: {' '.join(command)}")
+    except Exception as exc:
+        logger.debug(f"systemctl check failed for {' '.join(command)}: {exc}")
+    return False
+
+
+def _build_pwnagotchi_status(persist: bool = True) -> dict:
+    status = {
+        'state': 'not_installed',
+        'message': 'Pwnagotchi is not installed',
+        'phase': 'idle',
+        'installed': bool(shared_data.config.get('pwnagotchi_installed', False)),
+        'installing': False,
+        'mode': shared_data.config.get('pwnagotchi_mode', 'ragnar'),
+        'last_switch': shared_data.config.get('pwnagotchi_last_switch', ''),
+        'service_active': False,
+        'service_enabled': False,
+        'log_file': None,
+        'config_file': None,
+        'target_mode': shared_data.config.get('pwnagotchi_mode', 'ragnar'),
+        'timestamp': datetime.utcnow().isoformat() + 'Z'
+    }
+
+    file_data = _read_pwn_status_file()
+    if file_data:
+        for key, value in file_data.items():
+            # Only update known keys to avoid leaking arbitrary data
+            if key in {'state', 'message', 'phase', 'log_file', 'config_file', 'repo_dir', 'target_mode', 'timestamp'}:
+                status[key] = value
+
+    state = status.get('state', 'not_installed')
+    status['installing'] = state in {'preflight', 'dependencies', 'python', 'installing'}
+
+    status['service_active'] = _systemctl_check(['systemctl', 'is-active', 'pwnagotchi'])
+    status['service_enabled'] = _systemctl_check(['systemctl', 'is-enabled', 'pwnagotchi'])
+
+    if status['service_active']:
+        status['state'] = 'running'
+        status['message'] = 'Pwnagotchi service is running'
+
+    status['installed'] = status['installed'] or state in {'installed', 'running'} or status['service_enabled']
+
+    config_updates = {}
+    if status['installed'] != bool(shared_data.config.get('pwnagotchi_installed', False)):
+        config_updates['pwnagotchi_installed'] = status['installed']
+
+    if status.get('message') and status['message'] != shared_data.config.get('pwnagotchi_last_status'):
+        config_updates['pwnagotchi_last_status'] = status['message']
+
+    if persist and config_updates:
+        _update_pwn_config(config_updates)
+
+    return status
+
+
+def _emit_pwn_status_update(status: Optional[dict] = None) -> dict:
+    payload = status or _build_pwnagotchi_status()
+    try:
+        socketio.emit('pwnagotchi_status', payload)
+    except Exception as exc:
+        logger.debug(f"Failed to emit pwnagotchi_status event: {exc}")
+    return payload
+
+
+def _schedule_pwn_mode_switch(target_mode: str) -> None:
+    if target_mode not in {'pwnagotchi', 'ragnar'}:
+        logger.warning(f"Invalid Pwnagotchi target mode requested: {target_mode}")
+        return
+
+    if target_mode == 'pwnagotchi':
+        script = f"sleep {PWN_SWAP_DELAY_SECONDS}; systemctl stop ragnar || true; systemctl start pwnagotchi"
+    else:
+        script = f"sleep {PWN_SWAP_DELAY_SECONDS}; systemctl stop pwnagotchi || true; systemctl start ragnar"
+
+    try:
+        subprocess.Popen(
+            ['sudo', '/bin/bash', '-c', script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        logger.info(f"Scheduled service handoff to {target_mode}")
+    except Exception as exc:
+        logger.error(f"Failed to schedule Pwnagotchi mode switch: {exc}")
 
 def resolve_ip_hostname(ip):
     try:
@@ -1480,6 +1628,8 @@ def get_status():
             'pan_connected': safe_bool(shared_data.pan_connected),
             'usb_active': safe_bool(shared_data.usb_active),
             'manual_mode': safe_bool(shared_data.config.get('manual_mode', False)),
+            'pwnagotchi_mode': shared_data.config.get('pwnagotchi_mode', 'ragnar'),
+            'pwnagotchi_installed': safe_bool(shared_data.config.get('pwnagotchi_installed', False)),
             'timestamp': datetime.now().isoformat()
         }
         
@@ -4806,6 +4956,93 @@ def fix_git_safe_directory():
     except Exception as e:
         logger.error(f"Error fixing git safe directory: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
+
+
+# ============================================================================
+# PWNAGOTCHI INTEGRATION ENDPOINTS
+# ============================================================================
+
+@app.route('/api/pwnagotchi/status')
+def get_pwnagotchi_status():
+    try:
+        status = _build_pwnagotchi_status()
+        return jsonify({'success': True, 'status': status})
+    except Exception as e:
+        logger.error(f"Error retrieving Pwnagotchi status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pwnagotchi/install', methods=['POST'])
+def install_pwnagotchi_from_dashboard():
+    try:
+        if not os.path.exists(PWN_INSTALL_SCRIPT):
+            return jsonify({'success': False, 'error': 'Installer script not found', 'script': PWN_INSTALL_SCRIPT}), 404
+
+        current_status = _build_pwnagotchi_status(persist=False)
+        if current_status.get('installing'):
+            return jsonify({'success': False, 'error': 'Installation already in progress'}), 409
+
+        logger.info("Launching Pwnagotchi installer from dashboard request")
+        _write_pwn_status_file('installing', 'Launching Pwnagotchi installer…', 'install')
+
+        try:
+            subprocess.Popen(
+                ['sudo', '/bin/bash', PWN_INSTALL_SCRIPT],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except Exception as exc:
+            logger.error(f"Failed to spawn installer: {exc}")
+            return jsonify({'success': False, 'error': f'Failed to start installer: {exc}'}), 500
+
+        status = _emit_pwn_status_update()
+        return jsonify({'success': True, 'message': 'Installer started in background', 'status': status})
+
+    except Exception as e:
+        logger.error(f"Error starting Pwnagotchi install: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/pwnagotchi/swap', methods=['POST'])
+def swap_to_pwnagotchi_mode():
+    try:
+        data = request.get_json(silent=True) or {}
+        target_mode = (data.get('target') or 'pwnagotchi').strip().lower()
+
+        if target_mode not in {'pwnagotchi', 'ragnar'}:
+            return jsonify({'success': False, 'error': f'Invalid target mode: {target_mode}'}), 400
+
+        status = _build_pwnagotchi_status()
+        if not status.get('installed'):
+            return jsonify({'success': False, 'error': 'Pwnagotchi is not installed'}), 409
+
+        if target_mode == status.get('mode', 'ragnar') and target_mode == 'pwnagotchi':
+            return jsonify({'success': False, 'error': 'Already scheduled for Pwnagotchi mode'}), 409
+
+        if target_mode == 'pwnagotchi':
+            message = 'Ragnar service will stop and Pwnagotchi will start. Reboot to return to Ragnar.'
+        else:
+            message = 'Switching back to Ragnar service. This is typically triggered after reboot.'
+
+        _write_pwn_status_file('switching', message, 'swap', {'target_mode': target_mode})
+
+        timestamp = datetime.utcnow().isoformat() + 'Z'
+        _update_pwn_config({
+            'pwnagotchi_mode': target_mode,
+            'pwnagotchi_last_switch': timestamp,
+            'pwnagotchi_last_status': message
+        })
+
+        status_payload = _emit_pwn_status_update()
+        _schedule_pwn_mode_switch(target_mode)
+
+        return jsonify({'success': True, 'message': message, 'status': status_payload})
+
+    except Exception as e:
+        logger.error(f"Error scheduling Pwnagotchi swap: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 @app.route('/api/kill', methods=['POST'])
 def kill_switch():

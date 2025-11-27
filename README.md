@@ -135,6 +135,23 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 
 For **detailed information** about **installation** process go to [Install Guide](INSTALL.md)
 
+### 🐝 Ragnar + Pwnagotchi Side by Side
+
+Want to keep Ragnar online while occasionally hopping into Pwnagotchi mode? A bundled helper script plus new dashboard controls make the swap painless:
+
+1. SSH into Ragnar and run the installer as root:
+  ```bash
+  cd /home/ragnar/Ragnar
+  sudo ./scripts/install_pwnagotchi.sh
+  ```
+  - The script installs Python dependencies, clones the upstream repo into `/opt/pwnagotchi`, writes `/etc/pwnagotchi/config.toml`, and drops a disabled `pwnagotchi.service`.
+  - Progress is streamed to `/var/log/ragnar/pwnagotchi_install_<timestamp>.log` and mirrored in `data/pwnagotchi_status.json` for the UI.
+2. Open the Ragnar web UI → **Config** tab → **Pwnagotchi Bridge**.
+  - Use **Install or Repair** to re-run the script, **Switch to Pwnagotchi** to hand off the systemd services, and **Return to Ragnar** after rebooting.
+  - Status, phase, and service health also show up on the Discovered tab card once the installer has finished, so you can monitor swaps while reviewing loot.
+
+When you schedule a switch to Pwnagotchi, the dashboard warns that Ragnar's web API will go offline until you reboot or trigger the return flow. Plan for SSH access before swapping.
+
 ## ⚡ Quick Start
 
 
