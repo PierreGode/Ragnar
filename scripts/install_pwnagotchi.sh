@@ -116,7 +116,7 @@ fi
 
 write_status "installing" "Installing Pwnagotchi python package in virtual environment" "python"
 echo "[INFO] Installing pwnagotchi in virtual environment"
-if ! "$VENV_DIR/bin/pip" install --no-cache-dir pwnagotchi; then
+if ! "$VENV_DIR/bin/pip" install --no-cache-dir "$PWN_DIR"; then
     echo "[ERROR] pip install failed in virtual environment"
     exit 1
 fi
