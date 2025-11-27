@@ -152,11 +152,23 @@ echo "[INFO] Installing Pwnagotchi package"
 # Install in editable mode, ignoring requirements.txt since it's outdated
 python3 -m pip install "${pip_flags[@]}" --no-deps -e .
 
-# Fix the generated executable wrapper to not check versions
-echo "[INFO] Patching pwnagotchi executable to remove version checks"
-if [[ -f "/usr/local/bin/pwnagotchi" ]]; then
-    sed -i "s/__import__('pkg_resources').require('pwnagotchi==.*')/__import__('pkg_resources').run_script('pwnagotchi','pwnagotchi')/" /usr/local/bin/pwnagotchi 2>/dev/null || true
-fi
+# Create a clean wrapper script that bypasses pkg_resources version checking
+echo "[INFO] Creating wrapper script to bypass version checks"
+cat > /usr/local/bin/pwnagotchi_wrapper <<'WRAPPER_EOF'
+#!/usr/bin/env python3
+import sys
+import os
+
+# Add pwnagotchi to path
+sys.path.insert(0, '/opt/pwnagotchi')
+
+# Run pwnagotchi main without pkg_resources checks
+if __name__ == '__main__':
+    from pwnagotchi import main
+    sys.exit(main())
+WRAPPER_EOF
+
+chmod +x /usr/local/bin/pwnagotchi_wrapper
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -180,7 +192,7 @@ After=multi-user.target network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/pwnagotchi --config ${CONFIG_FILE}
+ExecStart=/usr/local/bin/pwnagotchi_wrapper --config ${CONFIG_FILE}
 WorkingDirectory=${PWN_DIR}
 Restart=on-failure
 RestartSec=5
