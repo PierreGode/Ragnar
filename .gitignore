@@ -134,9 +134,6 @@ $RECYCLE.BIN/
 *.sln
 *.sw?
 
-# Note: Excluding web/scripts from the general scripts ignore
-scripts
-!web/scripts/
 */certs/
 
 # Bjorn-specific files and directories
