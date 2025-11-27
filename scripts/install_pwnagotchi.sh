@@ -51,18 +51,14 @@ fi
 
 if [[ -n "$available_space" ]] && [[ "$available_space" -gt 0 ]]; then
     echo "[INFO] Available disk space in /tmp: ${available_space} MB"
-    if [[ $available_space -lt 500 ]]; then
-        echo "[WARN] Low disk space detected (${available_space} MB). Installation may fail."
-        echo "[INFO] Attempting to clean up temporary files..."
-        rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* /var/cache/apt/archives/*.deb 2>/dev/null || true
-        apt-get clean
-        available_space=$(df /tmp 2>/dev/null | awk 'NR==2 {print int($4/1024)}')
-        echo "[INFO] Available disk space after cleanup: ${available_space} MB"
-        if [[ $available_space -lt 300 ]]; then
-            echo "[ERROR] Insufficient disk space (${available_space} MB). Need at least 300 MB."
-            write_status "error" "Insufficient disk space: ${available_space} MB available, need at least 300 MB" "preflight"
-            exit 1
-        fi
+    if [[ $available_space -lt 300 ]]; then
+        echo "[ERROR] Insufficient disk space in /tmp (${available_space} MB). Need at least 300 MB."
+        echo "[ERROR] /tmp appears to be a small tmpfs partition. Installation cannot proceed."
+        echo "[INFO] Consider increasing tmpfs size or using a different temporary directory."
+        write_status "error" "Insufficient disk space in /tmp: ${available_space} MB available, need at least 300 MB" "preflight"
+        exit 1
+    elif [[ $available_space -lt 500 ]]; then
+        echo "[WARN] Low disk space detected in /tmp (${available_space} MB). Installation may fail."
     fi
 else
     echo "[WARN] Unable to determine available disk space. Proceeding with installation."
