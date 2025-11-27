@@ -325,13 +325,19 @@ class NetworkScanner:
         ping_discovered = {}
         known_ips = set(arp_hosts.keys())
         
-        # Define CIDRs to scan
-        target_cidrs = ['192.168.1.0/24']
-        
-        # CRITICAL TARGET: Always ensure 192.168.1.192 is checked explicitly
-        priority_targets = ['192.168.1.192']
+        # Define CIDRs to scan based on the adapter Ragnar is currently using
+        detected_network = self.get_network()
+        if detected_network:
+            target_cidrs = [str(detected_network)]
+            cidr_host_count = max(detected_network.num_addresses - 2, 0)  # ignore network+broadcast
+        else:
+            target_cidrs = ['192.168.1.0/24']
+            cidr_host_count = 254
+            self.logger.warning("⚠️ Falling back to default subnet 192.168.1.0/24 for ping sweep")
 
-        self.logger.info(f"🔍 Starting ping sweep - ARP found {len(arp_hosts)} hosts, checking {254} additional IPs")
+        self.logger.info(
+            f"🔍 Starting ping sweep - ARP found {len(arp_hosts)} hosts, checking {cidr_host_count} additional IPs"
+        )
 
         for cidr in target_cidrs:
             try:
@@ -340,59 +346,14 @@ class NetworkScanner:
                 self.logger.error(f"Invalid network {cidr}: {e}")
                 continue
 
-            # First, ping priority targets explicitly
-            for priority_ip in priority_targets:
-                if priority_ip in known_ips:
-                    self.logger.info(f"✅ Priority target {priority_ip} already found by ARP scan")
-                    continue
-                
-                self.logger.info(f"🎯 PRIORITY PING: Testing critical target {priority_ip}")
-                try:
-                    result = subprocess.run(
-                        ['ping', '-c', '3', '-W', '3', priority_ip],  # 3 pings, 3 sec timeout
-                        capture_output=True, text=True, timeout=10
-                    )
-
-                    if result.returncode == 0:
-                        mac = self.get_mac_address(priority_ip, "")
-                        if not mac or mac == "00:00:00:00:00:00":
-                            # MAC/host resolution: SQLITE DB ONLY
-                            # Check if this IP already exists in database with a real MAC
-                            existing_hosts = self.db.get_all_hosts()
-                            existing_mac = next((h['mac'] for h in existing_hosts if h.get('ip') == priority_ip and not h['mac'].startswith('00:00:c0:a8')), None)
-                            
-                            if existing_mac:
-                                mac = existing_mac
-                                self.logger.info(f"✅ Priority target {priority_ip}: Found existing MAC {mac} from DB, skipping pseudo-MAC")
-                            else:
-                                # Pseudo-MAC generation: temporary, will be reconciled in update_netkb()
-                                ip_parts = priority_ip.split('.')
-                                pseudo_mac = f"00:00:{int(ip_parts[0]):02x}:{int(ip_parts[1]):02x}:{int(ip_parts[2]):02x}:{int(ip_parts[3]):02x}"
-                                mac = pseudo_mac
-                                self.logger.warning(f"⚠️ Priority target {priority_ip}: Creating temporary pseudo-MAC {mac} (will be reconciled in update_netkb)")
-
-                        ping_discovered[priority_ip] = {
-                            "mac": mac,
-                            "vendor": "Priority target (discovered by ping)"
-                        }
-                        self.logger.info(f"🎉 PRIORITY TARGET FOUND: {priority_ip} (MAC: {mac})")
-                    else:
-                        self.logger.warning(f"❌ Priority target {priority_ip} not responding to ping")
-
-                except subprocess.TimeoutExpired:
-                    self.logger.warning(f"⏰ Priority target {priority_ip} ping timed out")
-                except Exception as e:
-                    self.logger.error(f"💥 Priority target {priority_ip} ping failed: {e}")
-
-            # Then scan the rest of the network
             for ip in network.hosts():  # skips network/broadcast
                 ip_str = str(ip)
-                if ip_str in known_ips or ip_str in priority_targets:
+                if ip_str in known_ips:
                     continue
 
                 try:
                     result = subprocess.run(
-                        ['ping', '-c', '1', '-W', '2', ip_str],
+                        ['ping', '-c', '2', '-W', '3', ip_str],
                         capture_output=True, text=True, timeout=5
                     )
 
