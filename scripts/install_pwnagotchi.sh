@@ -11,9 +11,16 @@ PWN_REPO="https://github.com/evilsocket/pwnagotchi.git"
 SERVICE_FILE="/etc/systemd/system/pwnagotchi.service"
 CONFIG_DIR="/etc/pwnagotchi"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
+TEMP_DIR="/home/ragnar/tmp_pwnagotchi_install"
+MIN_SPACE_MB=300
 
 mkdir -p "$LOG_DIR"
 mkdir -p "$REPO_ROOT/data"
+mkdir -p "$TEMP_DIR"
+
+export TMPDIR="$TEMP_DIR"
+export TEMP="$TEMP_DIR"
+export TMP="$TEMP_DIR"
 
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
@@ -43,33 +50,18 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-# Check available disk space (in MB)
-if ! available_space=$(df /tmp 2>/dev/null | awk 'NR==2 {print int($4/1024)}'); then
-    echo "[WARN] Unable to check disk space in /tmp. Proceeding with caution."
-    available_space=0
-fi
-
-if [[ -n "$available_space" ]] && [[ "$available_space" -gt 0 ]]; then
-    echo "[INFO] Available disk space in /tmp: ${available_space} MB"
-    if [[ $available_space -lt 500 ]]; then
-        echo "[WARN] Low disk space detected (${available_space} MB). Installation may fail."
-        echo "[INFO] Attempting to clean up temporary files..."
-        rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* /var/cache/apt/archives/*.deb 2>/dev/null || true
-        apt-get clean
-        available_space=$(df /tmp 2>/dev/null | awk 'NR==2 {print int($4/1024)}')
-        echo "[INFO] Available disk space after cleanup: ${available_space} MB"
-        if [[ $available_space -lt 300 ]]; then
-            echo "[ERROR] Insufficient disk space (${available_space} MB). Need at least 300 MB."
-            write_status "error" "Insufficient disk space: ${available_space} MB available, need at least 300 MB" "preflight"
-            exit 1
-        fi
-    fi
-else
-    echo "[WARN] Unable to determine available disk space. Proceeding with installation."
-fi
-
 write_status "installing" "Starting Pwnagotchi installation" "preflight"
 echo "[INFO] Beginning Pwnagotchi installation..."
+
+echo "[INFO] Checking disk space in $TEMP_DIR..."
+available_space=$(df -m "$TEMP_DIR" | awk 'NR==2 {print $4}')
+echo "[INFO] Available disk space: ${available_space} MB"
+
+if [[ $available_space -lt $MIN_SPACE_MB ]]; then
+    echo "[ERROR] Insufficient disk space (${available_space} MB). Need at least ${MIN_SPACE_MB} MB."
+    write_status "error" "Insufficient disk space. Free up space and retry." "preflight"
+    exit 1
+fi
 
 echo "[INFO] Updating apt repositories"
 apt-get update -y
@@ -80,8 +72,6 @@ packages=(
     python3-pip
     python3-setuptools
     python3-dev
-    python3-full
-    python3-venv
     libpcap-dev
     libffi-dev
     libssl-dev
@@ -109,12 +99,34 @@ if [[ ${#optional_packages[@]} -gt 0 ]]; then
     done
 fi
 
-# Clean up apt cache to free disk space
-echo "[INFO] Cleaning up apt cache to free disk space"
-apt-get clean
-rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
-
 write_status "installing" "System packages installed" "dependencies"
+
+echo "[INFO] Upgrading pip"
+pip_flags_upgrade=("--upgrade")
+if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
+    pip_flags_upgrade+=("--break-system-packages")
+fi
+python3 -m pip install "${pip_flags_upgrade[@]}" pip 2>/dev/null || echo "[WARN] pip upgrade skipped"
+
+pip_flags=("--no-cache-dir" "--upgrade")
+pip_break_supported=false
+if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
+    pip_flags+=("--break-system-packages")
+    pip_break_supported=true
+else
+    echo "[WARN] pip does not support --break-system-packages on this image. Continuing without it."
+fi
+
+write_status "installing" "Installing Pwnagotchi python package" "python"
+if ! python3 -m pip install "${pip_flags[@]}" pwnagotchi; then
+    if [[ "$pip_break_supported" == true ]]; then
+        echo "[WARN] pip install with --break-system-packages failed. Retrying without the flag."
+        python3 -m pip install --no-cache-dir --upgrade pwnagotchi
+    else
+        echo "[ERROR] pip install failed even without --break-system-packages"
+        exit 1
+    fi
+fi
 
 echo "[INFO] Ensuring repository at ${PWN_DIR}"
 if [[ -d "$PWN_DIR/.git" ]]; then
@@ -123,48 +135,6 @@ else
     rm -rf "$PWN_DIR"
     git clone "$PWN_REPO" "$PWN_DIR"
 fi
-
-# Create virtual environment
-VENV_DIR="$PWN_DIR/venv"
-echo "[INFO] Creating virtual environment at ${VENV_DIR}"
-if [[ -d "$VENV_DIR" ]]; then
-    echo "[INFO] Virtual environment already exists, verifying..."
-    if ! "$VENV_DIR/bin/python" --version >/dev/null 2>&1; then
-        echo "[WARN] Existing virtual environment is corrupted, recreating..."
-        rm -rf "$VENV_DIR"
-        python3 -m venv "$VENV_DIR"
-    fi
-else
-    python3 -m venv "$VENV_DIR"
-fi
-
-# Clean up pip cache and temporary build directories to free up space
-echo "[INFO] Cleaning up pip cache and temporary build directories"
-"$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
-rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
-
-# Upgrade pip, setuptools, and wheel to prefer pre-built wheels
-echo "[INFO] Upgrading pip, setuptools, and wheel in virtual environment"
-if ! "$VENV_DIR/bin/python" -m pip install --upgrade pip setuptools wheel; then
-    echo "[WARN] Unable to upgrade pip/setuptools/wheel in virtual environment. Continuing with existing version."
-fi
-
-write_status "installing" "Installing Pwnagotchi python package in virtual environment" "python"
-echo "[INFO] Installing pwnagotchi in virtual environment"
-# Use --no-cache-dir to avoid filling disk with cache
-# Install dependencies first to allow cleanup between packages
-if ! "$VENV_DIR/bin/pip" install --no-cache-dir "$PWN_DIR"; then
-    echo "[ERROR] pip install failed in virtual environment"
-    # Clean up on failure
-    "$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
-    rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
-    exit 1
-fi
-
-# Final cleanup after successful installation
-echo "[INFO] Cleaning up temporary files after installation"
-"$VENV_DIR/bin/python" -m pip cache purge 2>/dev/null || true
-rm -rf /tmp/pip-* /tmp/pip-build-* /tmp/pip-install-* 2>/dev/null || true
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -188,7 +158,7 @@ After=multi-user.target network.target
 
 [Service]
 Type=simple
-ExecStart=${PWN_DIR}/venv/bin/python -m pwnagotchi --config ${CONFIG_FILE}
+ExecStart=/usr/bin/env python3 -m pwnagotchi --config ${CONFIG_FILE}
 WorkingDirectory=${PWN_DIR}
 Restart=on-failure
 RestartSec=5
@@ -201,6 +171,9 @@ chmod 644 "$SERVICE_FILE"
 systemctl daemon-reload
 systemctl disable pwnagotchi >/dev/null 2>&1 || true
 systemctl stop pwnagotchi >/dev/null 2>&1 || true
+
+echo "[INFO] Cleaning up temporary files..."
+rm -rf "$TEMP_DIR"
 
 write_status "installed" "Pwnagotchi installed. Use Ragnar dashboard to launch." "complete"
 echo "[INFO] Installation complete. Service disabled until manually started."
