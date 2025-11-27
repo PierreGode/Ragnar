@@ -97,13 +97,22 @@ fi
 # Create virtual environment
 VENV_DIR="$PWN_DIR/venv"
 echo "[INFO] Creating virtual environment at ${VENV_DIR}"
-if [[ ! -d "$VENV_DIR" ]]; then
+if [[ -d "$VENV_DIR" ]]; then
+    echo "[INFO] Virtual environment already exists, verifying..."
+    if ! "$VENV_DIR/bin/python" --version >/dev/null 2>&1; then
+        echo "[WARN] Existing virtual environment is corrupted, recreating..."
+        rm -rf "$VENV_DIR"
+        python3 -m venv "$VENV_DIR"
+    fi
+else
     python3 -m venv "$VENV_DIR"
 fi
 
 # Upgrade pip in virtual environment
 echo "[INFO] Upgrading pip in virtual environment"
-"$VENV_DIR/bin/python" -m pip install --upgrade pip
+if ! "$VENV_DIR/bin/python" -m pip install --upgrade pip; then
+    echo "[WARN] Unable to upgrade pip in virtual environment. Continuing with existing version."
+fi
 
 write_status "installing" "Installing Pwnagotchi python package in virtual environment" "python"
 echo "[INFO] Installing pwnagotchi in virtual environment"
