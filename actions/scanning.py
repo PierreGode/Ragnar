@@ -143,13 +143,58 @@ class NetworkScanner:
 
         return hosts
 
-    def run_arp_scan(self):
+    def run_fping_discovery(self):
+        """Run fping to quickly enumerate ICMP-responsive hosts on the current subnet."""
+        detected_network = self.get_network()
+        if not detected_network:
+            self.logger.warning("⚠️ fping discovery skipped - no network detected")
+            return []
+
+        cidr_str = str(detected_network)
+        command = ['sudo', 'fping', '-a', '-g', cidr_str]
+        self.logger.info(f"⚡ Running fping discovery: {' '.join(command)}")
+
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=120
+            )
+            alive_ips = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            self.logger.info(f"fping discovered {len(alive_ips)} responsive hosts")
+            return alive_ips
+        except FileNotFoundError:
+            self.logger.warning("fping not installed - skipping pre-discovery step")
+        except subprocess.TimeoutExpired as e:
+            self.logger.error(f"fping timed out: {e}")
+            alive_ips = [line.strip() for line in (e.stdout or '').splitlines() if line.strip()]
+            return alive_ips
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"fping exited with code {e.returncode}: {e.stderr.strip() if e.stderr else 'no stderr'}")
+        except Exception as e:
+            self.logger.error(f"Unexpected error running fping: {e}")
+
+        return []
+
+    def run_arp_scan(self, target_ips=None):
         """Execute arp-scan to get MAC addresses and vendor information for local network hosts."""
         # Try both --localnet and explicit subnet scanning for comprehensive MAC discovery
-        commands = [
+        commands = []
+
+        if target_ips:
+            self.logger.info(f"🎯 Targeted arp-scan requested for {len(target_ips)} IPs discovered by fping")
+            batch_size = 128
+            for i in range(0, len(target_ips), batch_size):
+                batch = target_ips[i:i + batch_size]
+                commands.append(['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', *batch])
+
+        # Always include broad scans to ensure coverage beyond ICMP responders
+        commands.extend([
             ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '--localnet'],
             ['sudo', 'arp-scan', f'--interface={self.arp_scan_interface}', '192.168.1.0/24']
-        ]
+        ])
         
         all_hosts = {}
         
@@ -940,9 +985,12 @@ class NetworkScanner:
             # Scans network and stores results directly to SQLite database.
             # No intermediate CSV files for host state tracking.
             """
+            self.logger.info("🎯 Phase 0: Fast ICMP discovery via fping")
+            responsive_ips = self.outer_instance.run_fping_discovery()
+
             self.logger.info("🎯 Phase 1: Getting MAC addresses via arp-scan")
             # Get MAC addresses and vendor info from arp-scan (writes to DB internally)
-            self.arp_hosts = self.outer_instance.run_arp_scan()
+            self.arp_hosts = self.outer_instance.run_arp_scan(responsive_ips)
             
             self.logger.info("🎯 Phase 2: Network-wide nmap scan for hosts and ports")
             # Run nmap network-wide scan for host discovery AND port scanning (writes to DB internally)

@@ -249,6 +249,8 @@ install_dependencies() {
         "lsof"
         "git"
         "sudo"
+        "arp-scan"
+        "fping"
         "libopenjp2-7"
         "nmap"
         "libopenblas-dev"
