@@ -100,7 +100,8 @@ DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'
 SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
 PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pwnagotchi.sh')
-PWN_SWAP_DELAY_SECONDS = 3
+PWN_SWAP_DELAY_SECONDS = 5
+PWN_INSTALL_STALE_SECONDS = 600  # Treat installer as stale after 10 minutes
 
 
 def _normalize_value(value, default='Unknown'):
@@ -312,6 +313,17 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     state = status.get('state', 'not_installed')
     status['installing'] = state in {'preflight', 'dependencies', 'python', 'installing'}
 
+    if status['installing'] and not _pwn_install_process_running() and _is_pwn_install_stale(file_data):
+        stale_message = 'Pwnagotchi installer stopped unexpectedly. Press Install again to retry.'
+        status['installing'] = False
+        status['state'] = 'error'
+        status['phase'] = 'error'
+        status['message'] = stale_message
+        _write_pwn_status_file('error', stale_message, 'error', {
+            'log_file': status.get('log_file'),
+            'target_mode': status.get('target_mode', 'ragnar')
+        })
+
     status['service_active'] = _systemctl_check(['systemctl', 'is-active', 'pwnagotchi'])
     status['service_enabled'] = _systemctl_check(['systemctl', 'is-enabled', 'pwnagotchi'])
 
@@ -341,6 +353,37 @@ def _emit_pwn_status_update(status: Optional[dict] = None) -> dict:
     except Exception as exc:
         logger.debug(f"Failed to emit pwnagotchi_status event: {exc}")
     return payload
+
+
+def _pwn_install_process_running() -> bool:
+    script_name = os.path.basename(PWN_INSTALL_SCRIPT)
+    try:
+        result = subprocess.run(['pgrep', '-f', script_name], capture_output=True, text=True)
+        return result.returncode == 0
+    except FileNotFoundError:
+        logger.debug('pgrep not available to verify Pwnagotchi installer state')
+    except Exception as exc:
+        logger.debug(f"Unable to determine installer process state: {exc}")
+    return False
+
+
+def _is_pwn_install_stale(status: Optional[dict], max_age_seconds: int = PWN_INSTALL_STALE_SECONDS) -> bool:
+    if not status:
+        return True
+
+    timestamp = status.get('timestamp')
+    if not timestamp:
+        return True
+
+    normalized = timestamp.replace('Z', '+00:00')
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        logger.debug(f"Unable to parse Pwnagotchi installer timestamp: {timestamp}")
+        return True
+
+    age = datetime.now(timezone.utc) - parsed
+    return age.total_seconds() > max_age_seconds
 
 
 def _read_pwn_log_chunk(cursor: Optional[int] = None, tail_bytes: int = 4096, max_bytes: int = 8192):
@@ -5019,7 +5062,9 @@ def install_pwnagotchi_from_dashboard():
 
         current_status = _build_pwnagotchi_status(persist=False)
         if current_status.get('installing'):
-            return jsonify({'success': False, 'error': 'Installation already in progress'}), 409
+            if _pwn_install_process_running() and not _is_pwn_install_stale(current_status):
+                return jsonify({'success': False, 'error': 'Installation already in progress'}), 409
+            logger.info('Previous Pwnagotchi install attempt appears stale. Restarting installer.')
 
         logger.info("Launching Pwnagotchi installer from dashboard request")
         _write_pwn_status_file('installing', 'Launching Pwnagotchi installer…', 'install')
