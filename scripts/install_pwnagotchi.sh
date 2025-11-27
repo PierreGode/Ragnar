@@ -90,12 +90,24 @@ if ! python3 -m pip install --upgrade pip; then
 fi
 
 pip_flags=("--no-cache-dir" "--upgrade")
-if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
+pip_break_supported=false
+if python3 -m pip install --help 2>&1 | grep -q "--break-system-packages"; then
     pip_flags+=("--break-system-packages")
+    pip_break_supported=true
+else
+    echo "[WARN] pip does not support --break-system-packages on this image. Continuing without it."
 fi
 
 write_status "installing" "Installing Pwnagotchi python package" "python"
-python3 -m pip install "${pip_flags[@]}" pwnagotchi
+if ! python3 -m pip install "${pip_flags[@]}" pwnagotchi; then
+    if [[ "$pip_break_supported" == true ]]; then
+        echo "[WARN] pip install with --break-system-packages failed. Retrying without the flag."
+        python3 -m pip install --no-cache-dir --upgrade pwnagotchi
+    else
+        echo "[ERROR] pip install failed even without --break-system-packages"
+        exit 1
+    fi
+fi
 
 echo "[INFO] Ensuring repository at ${PWN_DIR}"
 if [[ -d "$PWN_DIR/.git" ]]; then
