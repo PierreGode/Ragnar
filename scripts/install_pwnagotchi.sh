@@ -7,7 +7,7 @@ STATUS_FILE="$REPO_ROOT/data/pwnagotchi_status.json"
 LOG_DIR="/var/log/ragnar"
 LOG_FILE="$LOG_DIR/pwnagotchi_install_$(date +%Y%m%d_%H%M%S).log"
 PWN_DIR="/opt/pwnagotchi"
-PWN_REPO="https://github.com/evilsocket/pwnagotchi.git"
+PWN_REPO="https://github.com/PierreGode/pwnagotchi.git"
 SERVICE_FILE="/etc/systemd/system/pwnagotchi.service"
 CONFIG_DIR="/etc/pwnagotchi"
 CONFIG_FILE="$CONFIG_DIR/config.toml"
@@ -126,49 +126,14 @@ fi
 
 echo "[INFO] Installing Pwnagotchi dependencies from ${PWN_DIR}"
 cd "$PWN_DIR"
-
-# Pwnagotchi's requirements.txt is from 2019 and incompatible with Python 3.13+
-# We'll install modern equivalents that work with current Python
-echo "[INFO] Installing compatible dependencies for modern Python"
-python3 -m pip install "${pip_flags[@]}" \
-    pycryptodome \
-    requests \
-    PyYAML \
-    scapy \
-    numpy \
-    scipy \
-    pillow \
-    flask \
-    flask-cors \
-    tornado \
-    tweepy \
-    toml \
-    websockets \
-    websocket-client \
-    inky \
-    watchdog || echo "[WARN] Some dependencies failed, continuing..."
+if [[ -f "requirements.txt" ]]; then
+    python3 -m pip install "${pip_flags[@]}" -r requirements.txt
+else
+    echo "[WARN] requirements.txt not found; skipping dependency pre-install"
+fi
 
 echo "[INFO] Installing Pwnagotchi package"
-# Install in editable mode, ignoring requirements.txt since it's outdated
-python3 -m pip install "${pip_flags[@]}" --no-deps -e .
-
-# Create a clean wrapper script that bypasses pkg_resources version checking
-echo "[INFO] Creating wrapper script to bypass version checks"
-cat > /usr/local/bin/pwnagotchi_wrapper <<'WRAPPER_EOF'
-#!/usr/bin/env python3
-import sys
-import os
-
-# Add pwnagotchi to path
-sys.path.insert(0, '/opt/pwnagotchi')
-
-# Run pwnagotchi main without pkg_resources checks
-if __name__ == '__main__':
-    from pwnagotchi import main
-    sys.exit(main())
-WRAPPER_EOF
-
-chmod +x /usr/local/bin/pwnagotchi_wrapper
+python3 -m pip install "${pip_flags[@]}" -e .
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -192,7 +157,7 @@ After=multi-user.target network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/pwnagotchi_wrapper --config ${CONFIG_FILE}
+ExecStart=/usr/local/bin/pwnagotchi --config ${CONFIG_FILE}
 WorkingDirectory=${PWN_DIR}
 Restart=on-failure
 RestartSec=5
