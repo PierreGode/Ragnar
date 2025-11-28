@@ -119,7 +119,7 @@ if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
 fi
 python3 -m pip install "${pip_flags_upgrade[@]}" pip 2>/dev/null || echo "[WARN] pip upgrade skipped"
 
-pip_flags=("--no-cache-dir")
+pip_flags=("--no-cache-dir" "--ignore-installed")
 if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
     pip_flags+=("--break-system-packages")
 fi
