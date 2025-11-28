@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pierre Gode (Updated Installer - Debian 12/13 Compatible)
+# Pierre Gode (Updated Installer - Debian 12/13 Compatible + Key Fix + pwngrid Disable)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -43,6 +43,9 @@ EOF
 
 trap 'write_status "error" "Installation failed (line ${LINENO}). Check ${LOG_FILE}." "error"' ERR
 
+# -------------------------------------------------------------------
+# PRECHECK
+# -------------------------------------------------------------------
 if [[ $EUID -ne 0 ]]; then
     echo "This installer must be run as root."
     exit 1
@@ -64,7 +67,9 @@ fi
 echo "[INFO] Updating apt repositories"
 apt-get update -y
 
-# REQUIRED SYSTEM DEPENDENCIES
+# -------------------------------------------------------------------
+# SYSTEM PACKAGES
+# -------------------------------------------------------------------
 packages=(
     git
     python3
@@ -83,7 +88,6 @@ packages=(
     meson
 )
 
-# OPTIONAL WIRELESS TOOLS (FIXED: replaced libatlas-base-dev)
 optional_packages=(
     bettercap
     hcxdumptool
@@ -104,6 +108,9 @@ done
 
 write_status "installing" "System packages installed" "dependencies"
 
+# -------------------------------------------------------------------
+# CLONE REPOSITORY
+# -------------------------------------------------------------------
 echo "[INFO] Cloning Pwnagotchi repository to ${PWN_DIR}"
 rm -rf "$PWN_DIR"
 git clone "$PWN_REPO" "$PWN_DIR"
@@ -111,6 +118,9 @@ git clone "$PWN_REPO" "$PWN_DIR"
 write_status "installing" "Installing Pwnagotchi from source" "python"
 cd "$PWN_DIR"
 
+# -------------------------------------------------------------------
+# PIP + INSTALL
+# -------------------------------------------------------------------
 echo "[INFO] Upgrading pip..."
 python3 -m pip install --upgrade --break-system-packages pip || echo "[WARN] pip upgrade skipped"
 
@@ -129,12 +139,31 @@ python3 -m pip install \
     --use-pep517 \
     -e .
 
-# -------------------
-# CONFIGURATION SETUP
-# -------------------
+# -------------------------------------------------------------------
+# VALIDATE + FIX /etc/pwnagotchi
+# -------------------------------------------------------------------
+echo "[INFO] Validating /etc/pwnagotchi directory..."
 
-mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
+mkdir -p "$CONFIG_DIR"
+chmod 700 "$CONFIG_DIR"
+chown root:root "$CONFIG_DIR"
 
+# -------------------------------------------------------------------
+# RSA KEY VALIDATION + AUTO-GENERATION
+# -------------------------------------------------------------------
+if [[ ! -f "$CONFIG_DIR/id_rsa" ]]; then
+    echo "[INFO] Generating new RSA keypair for Pwnagotchi..."
+    ssh-keygen -t rsa -b 2048 -f "$CONFIG_DIR/id_rsa" -N ""
+else
+    echo "[INFO] RSA private key already exists — skipping generation."
+fi
+
+chmod 600 "$CONFIG_DIR/id_rsa"
+chmod 644 "$CONFIG_DIR/id_rsa.pub"
+
+# -------------------------------------------------------------------
+# CONFIG FILE SETUP
+# -------------------------------------------------------------------
 if [[ ! -f "$CONFIG_FILE" ]]; then
     cat >"$CONFIG_FILE" <<'EOF'
 main.name = "RagnarPwn"
@@ -149,10 +178,28 @@ EOF
     echo "[INFO] Created default config at ${CONFIG_FILE}"
 fi
 
-# -------------------
-# SYSTEMD SERVICE SETUP
-# -------------------
+mkdir -p "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
 
+# -------------------------------------------------------------------
+# DISABLE PWNGIRD EXECUTION (REMOVE LOG SPAM)
+# -------------------------------------------------------------------
+echo "[INFO] Installing pwngrid no-op shim..."
+
+if [[ ! -f "/usr/local/bin/pwngrid" ]]; then
+    cat >/usr/local/bin/pwngrid <<'EOF'
+#!/bin/bash
+# Dummy pwngrid replacement to avoid log spam
+exit 0
+EOF
+    chmod +x /usr/local/bin/pwngrid
+    echo "[INFO] pwngrid shim installed."
+else
+    echo "[INFO] pwngrid shim already exists — skipping."
+fi
+
+# -------------------------------------------------------------------
+# SYSTEMD SERVICE SETUP
+# -------------------------------------------------------------------
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
 Description=Pwnagotchi Mode Service
@@ -174,6 +221,9 @@ systemctl daemon-reload
 systemctl disable pwnagotchi >/dev/null 2>&1 || true
 systemctl stop pwnagotchi >/dev/null 2>&1 || true
 
+# -------------------------------------------------------------------
+# CLEANUP
+# -------------------------------------------------------------------
 echo "[INFO] Cleaning up temporary files..."
 rm -rf "$TEMP_DIR"
 
