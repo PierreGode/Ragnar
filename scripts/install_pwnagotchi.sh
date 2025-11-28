@@ -78,6 +78,9 @@ packages=(
     libcap2-bin
     python3-smbus
     i2c-tools
+    libglib2.0-dev
+    pkg-config
+    meson
 )
 
 optional_packages=(
@@ -102,13 +105,8 @@ fi
 write_status "installing" "System packages installed" "dependencies"
 
 echo "[INFO] Cloning Pwnagotchi repository to ${PWN_DIR}"
-if [[ -d "$PWN_DIR/.git" ]]; then
-    echo "[INFO] Repository exists, pulling latest changes"
-    git -C "$PWN_DIR" pull --ff-only
-else
-    rm -rf "$PWN_DIR"
-    git clone "$PWN_REPO" "$PWN_DIR"
-fi
+rm -rf "$PWN_DIR"
+git clone "$PWN_REPO" "$PWN_DIR"
 
 write_status "installing" "Installing Pwnagotchi from source" "python"
 
