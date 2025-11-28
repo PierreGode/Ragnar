@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pierre Gode 
+# Pierre Gode (Updated Installer - Debian 12/13 Compatible)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -14,9 +14,7 @@ CONFIG_FILE="$CONFIG_DIR/config.toml"
 TEMP_DIR="/home/ragnar/tmp_pwnagotchi_install"
 MIN_SPACE_MB=300
 
-mkdir -p "$LOG_DIR"
-mkdir -p "$REPO_ROOT/data"
-mkdir -p "$TEMP_DIR"
+mkdir -p "$LOG_DIR" "$REPO_ROOT/data" "$TEMP_DIR"
 
 export TMPDIR="$TEMP_DIR"
 export TEMP="$TEMP_DIR"
@@ -66,12 +64,14 @@ fi
 echo "[INFO] Updating apt repositories"
 apt-get update -y
 
+# REQUIRED SYSTEM DEPENDENCIES
 packages=(
     git
     python3
     python3-pip
     python3-setuptools
     python3-dev
+    python3-venv
     libpcap-dev
     libffi-dev
     libssl-dev
@@ -83,24 +83,24 @@ packages=(
     meson
 )
 
+# OPTIONAL WIRELESS TOOLS (FIXED: replaced libatlas-base-dev)
 optional_packages=(
     bettercap
     hcxdumptool
     hcxtools
-    libatlas-base-dev
+    libopenblas-dev
+    liblapack-dev
 )
 
-echo "[INFO] Installing required packages"
+echo "[INFO] Installing required packages..."
 apt-get install -y "${packages[@]}"
 
-if [[ ${#optional_packages[@]} -gt 0 ]]; then
-    echo "[INFO] Installing optional wireless tools"
-    for pkg in "${optional_packages[@]}"; do
-        if ! apt-get install -y "$pkg"; then
-            echo "[WARN] Optional package $pkg failed to install"
-        fi
-    done
-fi
+echo "[INFO] Installing optional wireless tools..."
+for pkg in "${optional_packages[@]}"; do
+    if ! apt-get install -y "$pkg"; then
+        echo "[WARN] Optional package $pkg failed to install"
+    fi
+done
 
 write_status "installing" "System packages installed" "dependencies"
 
@@ -109,31 +109,32 @@ rm -rf "$PWN_DIR"
 git clone "$PWN_REPO" "$PWN_DIR"
 
 write_status "installing" "Installing Pwnagotchi from source" "python"
-
-echo "[INFO] Upgrading pip"
-pip_flags_upgrade=("--upgrade")
-if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
-    pip_flags_upgrade+=("--break-system-packages")
-fi
-python3 -m pip install "${pip_flags_upgrade[@]}" pip 2>/dev/null || echo "[WARN] pip upgrade skipped"
-
-pip_flags=("--no-cache-dir" "--ignore-installed")
-if python3 -m pip install --help 2>&1 | grep -q "break-system-packages"; then
-    pip_flags+=("--break-system-packages")
-fi
-
-echo "[INFO] Installing Pwnagotchi dependencies from ${PWN_DIR}"
 cd "$PWN_DIR"
-if [[ -f "requirements.txt" ]]; then
-    python3 -m pip install "${pip_flags[@]}" -r requirements.txt
-else
-    echo "[WARN] requirements.txt not found; skipping dependency pre-install"
-fi
 
-echo "[INFO] Installing Pwnagotchi package"
-python3 -m pip install "${pip_flags[@]}" -e .
+echo "[INFO] Upgrading pip..."
+python3 -m pip install --upgrade --break-system-packages pip || echo "[WARN] pip upgrade skipped"
+
+echo "[INFO] Installing Pwnagotchi dependencies..."
+python3 -m pip install \
+    --no-cache-dir \
+    --ignore-installed \
+    --break-system-packages \
+    -r requirements.txt
+
+echo "[INFO] Installing Pwnagotchi package (editable mode)..."
+python3 -m pip install \
+    --no-cache-dir \
+    --ignore-installed \
+    --break-system-packages \
+    --use-pep517 \
+    -e .
+
+# -------------------
+# CONFIGURATION SETUP
+# -------------------
 
 mkdir -p "$CONFIG_DIR" "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
+
 if [[ ! -f "$CONFIG_FILE" ]]; then
     cat >"$CONFIG_FILE" <<'EOF'
 main.name = "RagnarPwn"
@@ -147,6 +148,10 @@ plugins.grid.enabled = false
 EOF
     echo "[INFO] Created default config at ${CONFIG_FILE}"
 fi
+
+# -------------------
+# SYSTEMD SERVICE SETUP
+# -------------------
 
 cat >"$SERVICE_FILE" <<EOF
 [Unit]
