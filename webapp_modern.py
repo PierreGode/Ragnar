@@ -441,29 +441,116 @@ def _schedule_pwn_mode_switch(target_mode: str) -> None:
         logger.warning(f"Invalid Pwnagotchi target mode requested: {target_mode}")
         return
 
-    if target_mode == 'pwnagotchi':
-        script = (
-            f"sleep {PWN_SWAP_DELAY_SECONDS}; "
-            f"systemctl start pwnagotchi.service && "
-            f"systemctl stop ragnar.service || true"
-        )
-    else:
-        script = (
-            f"sleep {PWN_SWAP_DELAY_SECONDS}; "
-            f"systemctl start ragnar.service && "
-            f"systemctl stop pwnagotchi.service || true"
-        )
+    def _thread_target():
+        try:
+            _execute_pwn_mode_switch(target_mode)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.error(f"Unhandled error during Pwnagotchi handoff to {target_mode}: {exc}")
 
+    thread = threading.Thread(
+        target=_thread_target,
+        name=f"pwn-switch-{target_mode}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _run_systemctl(args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Execute systemctl with sudo and capture output."""
+    return subprocess.run(
+        ['sudo', 'systemctl', *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _summarize_status_output(output: str, limit: int = 600) -> str:
+    """Condense systemctl status output into a single readable line."""
+    if not output:
+        return ''
+    collapsed = ' | '.join(line.strip() for line in output.splitlines() if line.strip())
+    return (collapsed[:limit].rstrip() + ('…' if len(collapsed) > limit else ''))
+
+
+def _collect_service_status(service_name: str) -> str:
     try:
-        subprocess.Popen(
-            ['sudo', '/bin/bash', '-c', script],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        logger.info(f"Scheduled service handoff to {target_mode}")
-    except Exception as exc:
-        logger.error(f"Failed to schedule Pwnagotchi mode switch: {exc}")
+        status_proc = _run_systemctl(['status', service_name, '--no-pager'], timeout=10)
+        status_output = status_proc.stdout.strip() or status_proc.stderr.strip()
+        return _summarize_status_output(status_output)
+    except Exception as exc:  # pragma: no cover - best effort
+        return f"Unable to collect status for {service_name}: {exc}"
+
+
+def _wait_for_service_active(service_name: str, timeout: int = 45, poll_interval: int = 3) -> tuple[bool, str]:
+    deadline = time.monotonic() + timeout
+    last_state = ''
+    while time.monotonic() < deadline:
+        state_proc = _run_systemctl(['is-active', service_name], timeout=10)
+        state = state_proc.stdout.strip() or state_proc.stderr.strip()
+        last_state = state or last_state or 'unknown'
+        if state == 'active':
+            return True, 'active'
+        if state in {'failed', 'inactive'}:
+            return False, _collect_service_status(service_name) or f"{service_name} reported state {state}"
+        time.sleep(poll_interval)
+    return False, _collect_service_status(service_name) or f"{service_name} did not become active within {timeout}s (last state: {last_state})"
+
+
+def _start_service_with_monitor(service_name: str, timeout: int = 45) -> tuple[bool, str]:
+    start_proc = _run_systemctl(['start', service_name])
+    if start_proc.returncode != 0:
+        detail = start_proc.stderr.strip() or start_proc.stdout.strip() or f"systemctl start {service_name} failed with {start_proc.returncode}"
+        status_excerpt = _collect_service_status(service_name)
+        summary = status_excerpt or detail
+        return False, summary
+    return _wait_for_service_active(service_name, timeout=timeout)
+
+
+def _stop_service(service_name: str) -> tuple[bool, str]:
+    stop_proc = _run_systemctl(['stop', service_name])
+    if stop_proc.returncode != 0:
+        detail = stop_proc.stderr.strip() or stop_proc.stdout.strip() or f"systemctl stop {service_name} failed with {stop_proc.returncode}"
+        logger.warning(detail)
+        return False, detail
+    return True, 'stopped'
+
+
+def _execute_pwn_mode_switch(target_mode: str) -> None:
+    logger.info(f"Preparing service handoff to {target_mode}")
+    time.sleep(PWN_SWAP_DELAY_SECONDS)
+
+    if target_mode == 'pwnagotchi':
+        success, detail = _start_service_with_monitor('pwnagotchi.service')
+        if success:
+            logger.info("Pwnagotchi service reported active; stopping Ragnar service")
+            _stop_service('ragnar.service')
+            message = 'Pwnagotchi service is running'
+            _write_pwn_status_file('running', message, 'swap', {'target_mode': 'pwnagotchi'})
+            _update_pwn_config({'pwnagotchi_mode': 'pwnagotchi', 'pwnagotchi_last_status': message})
+        else:
+            logger.error(f"Pwnagotchi service failed to start: {detail}")
+            failure_message = f"Failed to start Pwnagotchi: {detail}"
+            _write_pwn_status_file('error', failure_message, 'error', {'target_mode': 'ragnar'})
+            _update_pwn_config({'pwnagotchi_mode': 'ragnar', 'pwnagotchi_last_status': failure_message})
+            _start_service_with_monitor('ragnar.service', timeout=30)
+    else:
+        success, detail = _start_service_with_monitor('ragnar.service')
+        if success:
+            logger.info("Ragnar service reported active; stopping Pwnagotchi service")
+            _stop_service('pwnagotchi.service')
+            message = 'Ragnar service is running'
+            _write_pwn_status_file('running', message, 'swap', {'target_mode': 'ragnar'})
+            _update_pwn_config({'pwnagotchi_mode': 'ragnar', 'pwnagotchi_last_status': message})
+        else:
+            logger.error(f"Ragnar service failed to start: {detail}")
+            failure_message = f"Failed to start Ragnar service: {detail}"
+            _write_pwn_status_file('error', failure_message, 'error', {'target_mode': 'pwnagotchi'})
+            _update_pwn_config({'pwnagotchi_mode': 'pwnagotchi', 'pwnagotchi_last_status': failure_message})
+            _start_service_with_monitor('pwnagotchi.service', timeout=30)
+
+    _emit_pwn_status_update()
 
 def resolve_ip_hostname(ip):
     try:

@@ -3782,10 +3782,6 @@ async function checkForUpdates() {
             localStateMessages.push(`git status error: ${gitStatus.status_error}`);
         }
 
-        if (localStateMessages.length) {
-            infoMessage = `${infoMessage} Local state: ${localStateMessages.join(' • ')}.`;
-        }
-
         updateElement('update-info', infoMessage);
 
         if (gitStatus.has_conflicts) {
