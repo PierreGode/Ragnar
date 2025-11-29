@@ -99,12 +99,10 @@ optional_packages=(
 echo "[INFO] Installing required packages..."
 apt-get install -y "${packages[@]}"
 
-echo "[INFO] Installing optional wireless tools..."
-for pkg in "${optional_packages[@]}"; do
-    if ! apt-get install -y "$pkg"; then
-        echo "[WARN] Optional package $pkg failed to install"
-    fi
-done
+echo "[INFO] Installing optional wireless tools in one batch..."
+if ! apt-get install -y "${optional_packages[@]}"; then
+    echo "[WARN] Optional wireless bundle had installation issues. Continuing with required packages only."
+fi
 
 write_status "installing" "System packages installed" "dependencies"
 
