@@ -4988,11 +4988,9 @@ def stash_and_update():
             'success': False,
             'error': update_result['error'] or 'Unknown error during git pull',
             'warnings': update_result['warnings'],
-            'stash_created': stash_created,
-            'stash_retained': stash_created
+            'local_changes_preserved': stash_created
         }), 500
 
-    stash_drop_output = ''
     stash_drop_warning = ''
     if stash_created and stash_ref:
         try:
@@ -5003,7 +5001,6 @@ def stash_and_update():
                 text=True,
                 check=True
             )
-            stash_drop_output = drop_proc.stdout.strip() or drop_proc.stderr.strip() or ''
             logger.info(f"Dropped temporary auto stash {stash_ref}")
         except subprocess.CalledProcessError as e:
             stash_drop_warning = e.stderr.strip() or e.stdout.strip() or str(e)
@@ -5014,11 +5011,7 @@ def stash_and_update():
 
     return jsonify({
         'success': True,
-        'message': 'Local changes stashed, update applied, stash dropped.' if stash_created else 'Update applied (no local changes were stashed).',
-        'stash_created': stash_created,
-        'stash_dropped': bool(stash_created and not stash_drop_warning),
-        'stash_output': stash_stdout,
-        'stash_drop_output': stash_drop_output,
+        'message': 'Update applied successfully.',
         'warnings': update_result['warnings'],
         'update_output': update_result['output']
     })

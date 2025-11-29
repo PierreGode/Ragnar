@@ -3778,11 +3778,6 @@ async function checkForUpdates() {
             localStateMessages.push(`${modifiedCount} local change${modifiedCount === 1 ? '' : 's'}`);
         }
 
-        if (gitStatus.has_stash) {
-            const stashCount = gitStatus.stash_entries || 0;
-            localStateMessages.push(`${stashCount} stash entr${stashCount === 1 ? 'y' : 'ies'}`);
-        }
-
         if (gitStatus.status_error) {
             localStateMessages.push(`git status error: ${gitStatus.status_error}`);
         }
@@ -3812,14 +3807,12 @@ async function checkForUpdates() {
             if (gitStatus.is_dirty) {
                 updateBtn.onclick = autoStashAndUpdate;
                 updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
-                updateElement('update-btn-text', 'Update');
-                addConsoleMessage('Local edits detected. Ragnar can stash them automatically before updating.', 'info');
+                updateElement('update-btn-text', 'Update System');
+                addConsoleMessage('Local edits detected. Ragnar will handle them automatically during the update.', 'info');
             } else {
                 updateBtn.onclick = performUpdate;
-                updateElement('update-btn-text', gitStatus.has_stash ? 'Update' : 'Update System');
+                updateElement('update-btn-text', 'Update System');
             }
-        } else if (gitStatus.has_stash && updateBtn) {
-            updateElement('update-btn-text', 'Update');
         }
         
     } catch (error) {
@@ -3923,7 +3916,7 @@ async function performUpdate() {
 }
 
 async function autoStashAndUpdate() {
-    if (!confirm('This will stash local changes (including untracked files), update Ragnar, and drop the temporary stash. Continue?')) {
+    if (!confirm('This will update the system and restart the service. Continue?')) {
         return;
     }
 
@@ -3942,34 +3935,31 @@ async function autoStashAndUpdate() {
 
     try {
         setButtonState(true, 'Updating...');
-        addConsoleMessage('Preparing auto stash before update...', 'info');
+        addConsoleMessage('Applying update...', 'info');
 
         const response = await postAPI('/api/system/stash-update', {});
 
         if (response.success) {
-            if (response.stash_created) {
-                addConsoleMessage('Local changes stashed temporarily for update.', 'info');
-            } else {
-                addConsoleMessage('No local changes detected; continuing with update.', 'info');
-            }
-            addConsoleMessage('Update completed successfully via auto stash.', 'success');
-            updateElement('update-info', 'Local changes stored safely. Update applied and system restarting...');
+            addConsoleMessage('Update completed successfully.', 'success');
+            addConsoleMessage('System will restart automatically...', 'info');
+            updateElement('update-info', 'Update applied. System restarting...');
 
-            // Keep button disabled while service restarts
-            updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
-            updateElement('update-btn-text', 'Auto Stash + Update');
+            if (updateBtn) {
+                updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
+                updateElement('update-btn-text', 'Updating...');
+            }
 
             setTimeout(async () => {
                 await verifyServiceRestart();
             }, 10000);
         } else {
-            throw new Error(response.error || 'Auto stash update failed');
+            throw new Error(response.error || 'Update failed');
         }
     } catch (error) {
-        console.error('Auto stash update error:', error);
-        addConsoleMessage(`Auto stash update failed: ${error.message}`, 'error');
-        setButtonState(false, 'Auto Stash + Update');
-        updateElement('update-info', 'Auto stash update failed. Fix issues and retry.');
+        console.error('Auto update error:', error);
+        addConsoleMessage(`Update failed: ${error.message}`, 'error');
+        setButtonState(false, 'Update System');
+        updateElement('update-info', 'Update failed. Fix issues and retry.');
     }
 }
 
