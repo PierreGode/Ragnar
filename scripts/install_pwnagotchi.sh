@@ -116,6 +116,12 @@ git clone "$PWN_REPO" "$PWN_DIR"
 write_status "installing" "Installing Pwnagotchi from source" "python"
 cd "$PWN_DIR"
 
+# Remove problematic packages we already ship (ex: waveshare-epd has no wheels on newer Python)
+if grep -q '^waveshare-epd' requirements.txt 2>/dev/null; then
+    echo "[INFO] Removing waveshare-epd from Pwnagotchi requirements (handled by Ragnar installer)"
+    sed -i '/^waveshare-epd/d' requirements.txt
+fi
+
 # -------------------------------------------------------------------
 # PIP + INSTALL
 # -------------------------------------------------------------------
