@@ -3941,7 +3941,7 @@ async function autoStashAndUpdate() {
     };
 
     try {
-        setButtonState(true, 'Stashing & Updating...');
+        setButtonState(true, 'Updating...');
         addConsoleMessage('Preparing auto stash before update...', 'info');
 
         const response = await postAPI('/api/system/stash-update', {});
