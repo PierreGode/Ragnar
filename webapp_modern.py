@@ -4991,21 +4991,25 @@ def stash_and_update():
             'local_changes_preserved': stash_created
         }), 500
 
-    stash_drop_warning = ''
     if stash_created and stash_ref:
         try:
-            drop_proc = subprocess.run(
-                ['git', 'stash', 'drop', stash_ref],
+            pop_proc = subprocess.run(
+                ['git', 'stash', 'pop', stash_ref],
                 cwd=repo_path,
                 capture_output=True,
                 text=True,
                 check=True
             )
-            logger.info(f"Dropped temporary auto stash {stash_ref}")
+            pop_msg = pop_proc.stdout.strip() or pop_proc.stderr.strip() or ''
+            if pop_msg:
+                logger.debug(f"Stash pop output: {pop_msg}")
+            logger.info(f"Reapplied local changes from {stash_ref}")
         except subprocess.CalledProcessError as e:
-            stash_drop_warning = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.warning(f"Failed to drop stash {stash_ref}: {stash_drop_warning}")
-            update_result['warnings'].append(f"Failed to drop auto stash {stash_ref}. Please clean manually.")
+            stash_pop_warning = e.stderr.strip() or e.stdout.strip() or str(e)
+            logger.warning(f"Failed to reapply stash {stash_ref}: {stash_pop_warning}")
+            update_result['warnings'].append(
+                "Local changes were saved but could not be re-applied automatically. Resolve conflicts and run 'git stash pop' manually."
+            )
 
     _schedule_service_restart()
 
