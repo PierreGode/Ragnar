@@ -100,6 +100,7 @@ DEFAULT_ARP_SCAN_INTERFACE = 'wlan0'
 SEP_SCAN_COMMAND = ['sudo', 'sep-scan']
 MAC_REGEX = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
 PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pwnagotchi.sh')
+PWN_SERVICE_FILE = '/etc/systemd/system/pwnagotchi.service'
 PWN_SWAP_DELAY_SECONDS = 5
 PWN_INSTALL_STALE_SECONDS = 600  # Treat installer as stale after 10 minutes
 
@@ -327,11 +328,21 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     status['service_active'] = _systemctl_check(['systemctl', 'is-active', 'pwnagotchi'])
     status['service_enabled'] = _systemctl_check(['systemctl', 'is-enabled', 'pwnagotchi'])
 
+    service_file_exists = os.path.exists(PWN_SERVICE_FILE)
+    status['service_file_exists'] = service_file_exists
+    if service_file_exists and not status.get('service_file'):
+        status['service_file'] = PWN_SERVICE_FILE
+
     if status['service_active']:
         status['state'] = 'running'
         status['message'] = 'Pwnagotchi service is running'
 
-    status['installed'] = status['installed'] or state in {'installed', 'running'} or status['service_enabled']
+    status['installed'] = (
+        status['installed']
+        or state in {'installed', 'running'}
+        or status['service_enabled']
+        or service_file_exists
+    )
 
     config_updates = {}
     if status['installed'] != bool(shared_data.config.get('pwnagotchi_installed', False)):
