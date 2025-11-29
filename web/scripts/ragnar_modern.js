@@ -3802,7 +3802,7 @@ async function checkForUpdates() {
         if (data.updates_available && data.commits_behind > 0 && updateBtn) {
             if (gitStatus.is_dirty) {
                 updateBtn.onclick = autoStashAndUpdate;
-                updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
+                updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
                 updateElement('update-btn-text', 'Update System');
                 addConsoleMessage('Local edits detected. Ragnar will handle them automatically during the update.', 'info');
             } else {
@@ -3925,7 +3925,7 @@ async function autoStashAndUpdate() {
         updateBtn.disabled = !!busy;
         updateBtn.className = busy
             ? 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-wait'
-            : 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
+            : 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
         updateElement('update-btn-text', label);
     };
 
