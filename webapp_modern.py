@@ -103,6 +103,7 @@ PWN_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'install_pw
 PWN_SERVICE_FILE = '/etc/systemd/system/pwnagotchi.service'
 PWN_SWAP_DELAY_SECONDS = 5
 PWN_INSTALL_STALE_SECONDS = 600  # Treat installer as stale after 10 minutes
+PWN_SWITCH_STALE_SECONDS = 60  # Consider switch stuck after 60 seconds
 
 
 def _normalize_value(value, default='Unknown'):
@@ -254,6 +255,20 @@ def _read_pwn_status_file() -> dict:
     return {}
 
 
+def _parse_iso_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        normalized = value.replace('Z', '+00:00')
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed
+    except Exception as exc:
+        logger.debug(f"Failed to parse Pwnagotchi status timestamp '{value}': {exc}")
+    return None
+
+
 def _write_pwn_status_file(state: str, message: str, phase: str = 'dashboard', extra: Optional[dict] = None) -> dict:
     payload = _read_pwn_status_file()
     payload.update(extra or {})
@@ -285,6 +300,22 @@ def _systemctl_check(command: list[str]) -> bool:
     except Exception as exc:
         logger.debug(f"systemctl check failed for {' '.join(command)}: {exc}")
     return False
+
+
+def _systemctl_state_label(service_name: str) -> str:
+    try:
+        result = subprocess.run(
+            ['systemctl', 'is-active', service_name],
+            capture_output=True,
+            text=True
+        )
+        label = result.stdout.strip() or result.stderr.strip() or 'unknown'
+        return label
+    except FileNotFoundError:
+        logger.warning("systemctl not available while querying %s", service_name)
+    except Exception as exc:
+        logger.debug(f"systemctl state query failed for {service_name}: {exc}")
+    return 'unknown'
 
 
 def _build_pwnagotchi_status(persist: bool = True) -> dict:
@@ -325,8 +356,14 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
             'target_mode': status.get('target_mode', 'ragnar')
         })
 
-    status['service_active'] = _systemctl_check(['systemctl', 'is-active', 'pwnagotchi'])
+    pwn_service_state = _systemctl_state_label('pwnagotchi')
+    status['service_state'] = pwn_service_state
+    status['service_active'] = pwn_service_state == 'active'
     status['service_enabled'] = _systemctl_check(['systemctl', 'is-enabled', 'pwnagotchi'])
+
+    ragnar_service_state = _systemctl_state_label('ragnar')
+    status['ragnar_service_state'] = ragnar_service_state
+    ragnar_service_active = ragnar_service_state == 'active'
 
     service_file_exists = os.path.exists(PWN_SERVICE_FILE)
     status['service_file_exists'] = service_file_exists
@@ -336,6 +373,79 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     if status['service_active']:
         status['state'] = 'running'
         status['message'] = 'Pwnagotchi service is running'
+        status['mode'] = 'pwnagotchi'
+    elif ragnar_service_active:
+        status['mode'] = 'ragnar'
+        if status['state'] not in {'error', 'installing'}:
+            status['state'] = 'running'
+            status['message'] = 'Ragnar service is running'
+    else:
+        status['mode'] = status.get('mode', shared_data.config.get('pwnagotchi_mode', 'ragnar'))
+
+    state = status.get('state', state)
+
+    stale_switch = False
+    if state == 'switching' and not status['installing']:
+        timestamp_obj = _parse_iso_timestamp(status.get('timestamp'))
+        if not timestamp_obj:
+            stale_switch = True
+        else:
+            age = datetime.now(timezone.utc) - timestamp_obj
+            stale_switch = age.total_seconds() >= PWN_SWITCH_STALE_SECONDS
+
+    if stale_switch:
+        target_mode = (status.get('target_mode') or shared_data.config.get('pwnagotchi_mode', 'ragnar')).lower()
+        if target_mode not in {'pwnagotchi', 'ragnar'}:
+            target_mode = 'ragnar'
+
+        if target_mode == 'pwnagotchi':
+            if status['service_active']:
+                status['state'] = 'running'
+                status['phase'] = 'active'
+                status['message'] = 'Pwnagotchi service is running'
+                status['mode'] = 'pwnagotchi'
+                status['target_mode'] = 'pwnagotchi'
+            else:
+                status['state'] = 'error'
+                status['phase'] = 'error'
+                status['mode'] = 'ragnar' if ragnar_service_active else 'ragnar'
+                status['target_mode'] = 'ragnar'
+                status['message'] = (
+                    f"Switch to Pwnagotchi failed: pwnagotchi.service is {pwn_service_state}. "
+                    f"Ragnar service is {ragnar_service_state}."
+                )
+        else:  # target_mode == 'ragnar'
+            if ragnar_service_active:
+                status['state'] = 'running'
+                status['phase'] = 'idle'
+                status['message'] = 'Ragnar service is running'
+                status['mode'] = 'ragnar'
+                status['target_mode'] = 'ragnar'
+            else:
+                status['state'] = 'error'
+                status['phase'] = 'error'
+                status['mode'] = 'pwnagotchi' if status['service_active'] else 'ragnar'
+                status['target_mode'] = 'pwnagotchi'
+                status['message'] = (
+                    f"Switch to Ragnar failed: ragnar.service is {ragnar_service_state}. "
+                    f"Pwnagotchi service is {pwn_service_state}."
+                )
+
+        updated_payload = _write_pwn_status_file(
+            status['state'],
+            status['message'],
+            status.get('phase', 'dashboard'),
+            {
+                'target_mode': status.get('target_mode'),
+                'log_file': status.get('log_file'),
+                'config_file': status.get('config_file'),
+                'service_state': status.get('service_state')
+            }
+        )
+        for key in ('state', 'message', 'phase', 'timestamp', 'target_mode'):
+            if key in updated_payload:
+                status[key] = updated_payload[key]
+        state = status['state']
 
     status['installed'] = (
         status['installed']
@@ -347,6 +457,9 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     config_updates = {}
     if status['installed'] != bool(shared_data.config.get('pwnagotchi_installed', False)):
         config_updates['pwnagotchi_installed'] = status['installed']
+
+    if status.get('mode') and status['mode'] != shared_data.config.get('pwnagotchi_mode'):
+        config_updates['pwnagotchi_mode'] = status['mode']
 
     if status.get('message') and status['message'] != shared_data.config.get('pwnagotchi_last_status'):
         config_updates['pwnagotchi_last_status'] = status['message']
