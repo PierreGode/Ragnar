@@ -596,6 +596,52 @@ def _collect_service_status(service_name: str) -> str:
         return f"Unable to collect status for {service_name}: {exc}"
 
 
+def _ensure_pwn_launcher() -> None:
+    """Ensure /usr/bin/pwnagotchi-launcher exists and is executable."""
+    launcher_path = '/usr/bin/pwnagotchi-launcher'
+    try:
+        if os.path.exists(launcher_path):
+            if os.access(launcher_path, os.X_OK):
+                return
+            os.chmod(launcher_path, 0o755)
+            logger.info("Repaired permissions for %s", launcher_path)
+            return
+
+        candidates = [
+            shutil.which('pwnagotchi'),
+            shutil.which('pwnagotchi-launcher'),
+            '/usr/local/bin/pwnagotchi',
+            '/usr/local/bin/pwnagotchi-launcher'
+        ]
+        target = next((c for c in candidates if c and os.path.exists(c)), None)
+        if not target:
+            logger.warning("Unable to locate pwnagotchi binary; launcher shim not created")
+            return
+
+        script = f"#!/bin/bash\nexec {target} \"$@\"\n"
+        with open(launcher_path, 'w', encoding='utf-8') as handle:
+            handle.write(script)
+        os.chmod(launcher_path, 0o755)
+        logger.info("Created pwnagotchi launcher shim at %s → %s", launcher_path, target)
+    except PermissionError as exc:
+        logger.error("Permission error while ensuring pwnagotchi launcher: %s", exc)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        logger.error("Failed to prepare pwnagotchi launcher: %s", exc)
+
+
+def _unit_name(service_name: str) -> str:
+    unit = service_name.strip()
+    if unit.endswith('.service'):
+        unit = unit[:-8]
+    return unit or service_name
+
+
+def _format_service_failure_message(service_name: str) -> str:
+    unit = _unit_name(service_name)
+    readable = unit.replace('_', ' ').replace('-', ' ').title()
+    return f"Failed to start {readable} service. Review journalctl -u {unit} -f for details."
+
+
 def _wait_for_service_active(service_name: str, timeout: int = 45, poll_interval: int = 3) -> tuple[bool, str]:
     deadline = time.monotonic() + timeout
     last_state = ''
@@ -635,6 +681,7 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
     time.sleep(PWN_SWAP_DELAY_SECONDS)
 
     if target_mode == 'pwnagotchi':
+        _ensure_pwn_launcher()
         success, detail = _start_service_with_monitor('pwnagotchi.service')
         if success:
             logger.info("Pwnagotchi service reported active; stopping Ragnar service")
@@ -644,8 +691,11 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
             _update_pwn_config({'pwnagotchi_mode': 'pwnagotchi', 'pwnagotchi_last_status': message})
         else:
             logger.error(f"Pwnagotchi service failed to start: {detail}")
-            failure_message = f"Failed to start Pwnagotchi: {detail}"
-            _write_pwn_status_file('error', failure_message, 'error', {'target_mode': 'ragnar'})
+            failure_message = _format_service_failure_message('pwnagotchi.service')
+            extra = {'target_mode': 'ragnar'}
+            if detail:
+                extra['service_error_detail'] = detail
+            _write_pwn_status_file('error', failure_message, 'error', extra)
             _update_pwn_config({'pwnagotchi_mode': 'ragnar', 'pwnagotchi_last_status': failure_message})
             _start_service_with_monitor('ragnar.service', timeout=30)
     else:
@@ -658,8 +708,11 @@ def _execute_pwn_mode_switch(target_mode: str) -> None:
             _update_pwn_config({'pwnagotchi_mode': 'ragnar', 'pwnagotchi_last_status': message})
         else:
             logger.error(f"Ragnar service failed to start: {detail}")
-            failure_message = f"Failed to start Ragnar service: {detail}"
-            _write_pwn_status_file('error', failure_message, 'error', {'target_mode': 'pwnagotchi'})
+            failure_message = _format_service_failure_message('ragnar.service')
+            extra = {'target_mode': 'pwnagotchi'}
+            if detail:
+                extra['service_error_detail'] = detail
+            _write_pwn_status_file('error', failure_message, 'error', extra)
             _update_pwn_config({'pwnagotchi_mode': 'pwnagotchi', 'pwnagotchi_last_status': failure_message})
             _start_service_with_monitor('pwnagotchi.service', timeout=30)
 

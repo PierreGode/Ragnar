@@ -198,6 +198,37 @@ else
 fi
 
 # -------------------------------------------------------------------
+# ENSURE LAUNCHER WRAPPER EXISTS
+# -------------------------------------------------------------------
+echo "[INFO] Ensuring /usr/bin/pwnagotchi-launcher wrapper exists..."
+launcher_candidates=(
+    "$(command -v pwnagotchi 2>/dev/null)"
+    "$(command -v pwnagotchi-launcher 2>/dev/null)"
+    "/usr/local/bin/pwnagotchi"
+    "/usr/local/bin/pwnagotchi-launcher"
+)
+
+launcher_target=""
+for candidate in "${launcher_candidates[@]}"; do
+    if [[ -n "$candidate" && -x "$candidate" && "$candidate" != "/usr/bin/pwnagotchi-launcher" ]]; then
+        launcher_target="$candidate"
+        break
+    fi
+done
+
+if [[ -n "$launcher_target" ]]; then
+    cat > /usr/bin/pwnagotchi-launcher <<EOF
+#!/bin/bash
+exec ${launcher_target} "\$@"
+EOF
+    chmod 755 /usr/bin/pwnagotchi-launcher
+    chown root:root /usr/bin/pwnagotchi-launcher
+    echo "[INFO] Launcher wrapper points to ${launcher_target}"
+else
+    echo "[WARN] Could not determine pwnagotchi binary path; launcher wrapper not updated."
+fi
+
+# -------------------------------------------------------------------
 # SYSTEMD SERVICE SETUP
 # -------------------------------------------------------------------
 cat >"$SERVICE_FILE" <<EOF
