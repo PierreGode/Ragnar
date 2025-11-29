@@ -431,9 +431,17 @@ def _schedule_pwn_mode_switch(target_mode: str) -> None:
         return
 
     if target_mode == 'pwnagotchi':
-        script = f"sleep {PWN_SWAP_DELAY_SECONDS}; systemctl stop ragnar || true; systemctl start pwnagotchi"
+        script = (
+            f"sleep {PWN_SWAP_DELAY_SECONDS}; "
+            f"systemctl start pwnagotchi.service && "
+            f"systemctl stop ragnar.service || true"
+        )
     else:
-        script = f"sleep {PWN_SWAP_DELAY_SECONDS}; systemctl stop pwnagotchi || true; systemctl start ragnar"
+        script = (
+            f"sleep {PWN_SWAP_DELAY_SECONDS}; "
+            f"systemctl start ragnar.service && "
+            f"systemctl stop pwnagotchi.service || true"
+        )
 
     try:
         subprocess.Popen(
