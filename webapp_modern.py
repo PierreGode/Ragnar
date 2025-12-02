@@ -1318,9 +1318,22 @@ def safe_str(value, default=""):
         return default
 
 def safe_bool(value, default=False):
-    """Safely convert value to boolean"""
+    """Safely convert value to boolean, supporting common string inputs."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off", ""}:
+            return False
+        return default
     try:
-        return bool(value) if value is not None else default
+        return bool(value)
     except (ValueError, TypeError):
         return default
 
