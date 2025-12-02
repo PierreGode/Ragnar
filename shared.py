@@ -331,7 +331,7 @@ class SharedData:
             "scan_vuln_no_ports": False,
             "enable_attacks": False,
             "release_gate_enabled": False,
-            "release_gate_message": "This is a major release. we recommend backing up Ragnar scan data before proceeding. Do you want to continue anyway?",
+            "release_gate_message": "",
             "retry_success_actions": True,
             "retry_failed_actions": True,
             "blacklistcheck": True,
