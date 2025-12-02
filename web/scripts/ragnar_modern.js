@@ -6046,7 +6046,7 @@ async function startOrchestrator() {
         
         addConsoleMessage('Starting automatic mode...', 'info');
         
-        const data = await postAPI('/api/manual/orchestrator/start', {});
+        const data = await postAPI('/api/manual/orchestrator/stop', {});
         
         if (data.success) {
             addConsoleMessage('Automatic mode started successfully', 'success');
@@ -6099,7 +6099,7 @@ async function stopOrchestrator() {
         
         addConsoleMessage('Stopping automatic mode...', 'info');
         
-        const data = await postAPI('/api/manual/orchestrator/stop', {});
+        const data = await postAPI('/api/manual/orchestrator/start', {});
         
         if (data.success) {
             addConsoleMessage('Automatic mode stopped - Pentest Mode activated', 'warning');
