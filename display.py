@@ -468,28 +468,20 @@ class Display:
         effective_quality = raw_quality if raw_quality is not None else self._dbm_to_quality(signal_dbm)
         ip_last_octet = self.get_wifi_ip_last_octet()
 
-        if effective_quality is None:
-            image.paste(self.shared_data.wifi, (base_x, base_y))
-            if ip_last_octet:
-                draw.text((int(14 * self.scale_factor_x), int(10 * self.scale_factor_y)), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
-            return
-
         waves = self.get_wifi_wave_count(effective_quality)
+        if waves <= 0:
+            waves = 1  # Always show at least one wave when connected
 
-        dot_radius = max(2, int(2 * scale))
+        base_radius = max(2, int(2 * scale))
         wave_spacing = max(3, int(3 * scale))
         line_width = max(1, int(scale))
 
-        center_x = base_x + dot_radius + wave_spacing * 2
-        center_y = base_y + dot_radius + wave_spacing * 2
-
-        # Draw center dot
-        draw.ellipse((center_x - dot_radius, center_y - dot_radius,
-                      center_x + dot_radius, center_y + dot_radius), fill=0)
+        center_x = base_x + base_radius + wave_spacing * 2
+        center_y = base_y + base_radius + wave_spacing * 2
 
         # Draw expanding arcs to mimic Wi-Fi waves
         for i in range(waves):
-            radius = dot_radius + (i + 1) * wave_spacing
+            radius = base_radius + (i + 1) * wave_spacing
             bbox = (
                 center_x - radius,
                 center_y - radius,
@@ -499,8 +491,8 @@ class Display:
             draw.arc(bbox, start=210, end=330, fill=0, width=line_width)
 
         if ip_last_octet:
-            text_x = center_x + wave_spacing + dot_radius
-            text_y = center_y - dot_radius
+            text_x = center_x + wave_spacing + base_radius
+            text_y = center_y - base_radius
             draw.text((text_x, text_y), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
 
     def get_wifi_ip_last_octet(self):
