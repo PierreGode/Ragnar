@@ -644,6 +644,7 @@ setup_ragnar() {
     chmod +x $ragnar_PATH/install_modern_webapp.sh 2>/dev/null || true
     chmod +x $ragnar_PATH/init_data_files.sh 2>/dev/null || true
     chmod +x $ragnar_PATH/preserve_local_data.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/wipe_epd.py 2>/dev/null || true
     
     # Ensure ragnar user owns all script files
     chown $ragnar_USER:$ragnar_USER $ragnar_PATH/*.sh 2>/dev/null || true
@@ -766,6 +767,10 @@ setup_services() {
     log "INFO" "Setting up system services..."
 
     local entrypoint_file="$RAGNAR_ENTRYPOINT"
+    local wipe_exec=""
+    if [ "$HEADLESS_MODE" != true ]; then
+        wipe_exec="ExecStartPre=/usr/bin/python3 -OO /home/ragnar/Ragnar/wipe_epd.py"
+    fi
     
     # Create kill_port_8000.sh script
     cat > $ragnar_PATH/kill_port_8000.sh << 'EOF'
@@ -790,6 +795,15 @@ After=local-fs.target
 
 [Service]
 ExecStartPre=/home/ragnar/Ragnar/kill_port_8000.sh
+EOF
+
+    if [ -n "$wipe_exec" ]; then
+        cat >> /etc/systemd/system/ragnar.service << EOF
+$wipe_exec
+EOF
+    fi
+
+    cat >> /etc/systemd/system/ragnar.service << EOF
 ExecStart=/usr/bin/python3 -OO /home/ragnar/Ragnar/${entrypoint_file}
 WorkingDirectory=/home/ragnar/Ragnar
 StandardOutput=inherit
