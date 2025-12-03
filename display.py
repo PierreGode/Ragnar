@@ -451,8 +451,7 @@ class Display:
         if quality is None:
             return 0
 
-        # The first three thresholds preserve previous behavior; the last one enables a 4th arc.
-        thresholds = [30, 55, 80, 95]
+        thresholds = [15, 35, 65, 85]
         waves = 0
         for threshold in thresholds:
             if quality >= threshold:
