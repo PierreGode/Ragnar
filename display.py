@@ -22,6 +22,7 @@ import logging
 import random
 import sys
 import csv
+import json
 from PIL import Image, ImageDraw
 from init_shared import shared_data  
 from comment import Commentaireia
@@ -76,6 +77,61 @@ class Display:
 
         self.scale_factor_x = self.shared_data.scale_factor_x
         self.scale_factor_y = self.shared_data.scale_factor_y
+        self.wifi_indicator_config_path = os.path.join(os.path.dirname(__file__), 'config', 'wifi_indicator.json')
+        self._wifi_indicator_config_mtime = None
+        self._wifi_indicator_config = self._load_wifi_indicator_config()
+
+    def _wifi_indicator_default_config(self):
+        return {
+            "base_x_multiplier": 3,
+            "base_y_multiplier": 4,
+            "base_radius_scale": 1.5,
+            "base_radius_min": 2,
+            "wave_spacing_scale": 2.5,
+            "wave_spacing_extra": 2,
+            "wave_spacing_trim": 4,
+            "wave_spacing_min": 2,
+            "line_width_offset": 1,
+            "line_width_min": 1,
+            "center_wave_multiplier": 2,
+            "thresholds": [15, 35, 65, 85],
+            "ip_text_offset_scale": 2
+        }
+
+    def _load_wifi_indicator_config(self):
+        defaults = self._wifi_indicator_default_config()
+        try:
+            with open(self.wifi_indicator_config_path, 'r', encoding='utf-8') as cfg_file:
+                loaded = json.load(cfg_file)
+            if not isinstance(loaded, dict):
+                raise ValueError("WiFi indicator config must be a JSON object")
+            merged = defaults.copy()
+            for key, value in loaded.items():
+                if key == "thresholds" and isinstance(value, list) and value:
+                    merged[key] = value
+                elif key in defaults and isinstance(value, (int, float)):
+                    merged[key] = value
+            logger.debug("Loaded WiFi indicator config overrides: %s", merged)
+            return merged
+        except FileNotFoundError:
+            logger.debug("wifi_indicator.json not found, using defaults")
+        except (json.JSONDecodeError, ValueError) as exc:
+            logger.warning(f"Invalid WiFi indicator config, using defaults: {exc}")
+        return defaults
+
+    def _refresh_wifi_indicator_config(self):
+        try:
+            current_mtime = os.path.getmtime(self.wifi_indicator_config_path)
+        except FileNotFoundError:
+            current_mtime = None
+
+        if current_mtime != self._wifi_indicator_config_mtime:
+            self._wifi_indicator_config = self._load_wifi_indicator_config()
+            self._wifi_indicator_config_mtime = current_mtime
+
+    def _get_wifi_indicator_config(self):
+        self._refresh_wifi_indicator_config()
+        return self._wifi_indicator_config
 
     def get_frise_position(self):
         """Get the frise position based on the display type."""
@@ -446,12 +502,14 @@ class Display:
 
         return None, None
 
-    def get_wifi_wave_count(self, quality):
+    def get_wifi_wave_count(self, quality, thresholds=None):
         """Translate a 0-100 quality value into 0-4 wave arcs."""
         if quality is None:
             return 0
 
-        thresholds = [15, 35, 65, 85]
+        if thresholds is None:
+            thresholds = self._wifi_indicator_default_config()["thresholds"]
+
         waves = 0
         for threshold in thresholds:
             if quality >= threshold:
@@ -460,28 +518,41 @@ class Display:
 
     def render_wifi_wave_indicator(self, image, draw):
         """Render a live Wi-Fi indicator using wave arcs with no dBm text."""
-        base_x = int(3 * self.scale_factor_x)
-        base_y = int(4 * self.scale_factor_y)
+        config = self._get_wifi_indicator_config()
+        base_x = int(config["base_x_multiplier"] * self.scale_factor_x)
+        base_y = int(config["base_y_multiplier"] * self.scale_factor_y)
         scale = min(self.scale_factor_x, self.scale_factor_y)
         signal_dbm = getattr(self.shared_data, 'wifi_signal_dbm', None)
         raw_quality = getattr(self.shared_data, 'wifi_signal_quality', None)
         effective_quality = raw_quality if raw_quality is not None else self._dbm_to_quality(signal_dbm)
         ip_last_octet = self.get_wifi_ip_last_octet()
 
-        waves = self.get_wifi_wave_count(effective_quality)
+        waves = self.get_wifi_wave_count(effective_quality, config.get("thresholds"))
         if waves <= 0:
             waves = 1  # Always show at least one wave when connected
 
-        base_radius = max(2, int(1.5 * scale))
-        wave_spacing = max(2, int(2.5 * scale) + 2)
-        line_width = max(1, int(scale) + 1)
+        base_radius = max(
+            int(config["base_radius_min"]),
+            int(config["base_radius_scale"] * scale)
+        )
+        wave_spacing = max(
+            int(config["wave_spacing_min"]),
+            int(config["wave_spacing_scale"] * scale) + int(config["wave_spacing_extra"])
+        )
+        line_width = max(
+            int(config["line_width_min"]),
+            int(scale) + int(config["line_width_offset"])
+        )
 
-        center_x = base_x + base_radius + wave_spacing * 2
-        center_y = base_y + base_radius + wave_spacing * 2
+        center_x = base_x + base_radius + wave_spacing * int(config["center_wave_multiplier"])
+        center_y = base_y + base_radius + wave_spacing * int(config["center_wave_multiplier"])
 
         # Draw expanding arcs to mimic Wi-Fi waves
         for i in range(waves):
-            radius = max(2, base_radius + (i + 1) * wave_spacing - 4)
+            radius = max(
+                int(config["base_radius_min"]),
+                base_radius + (i + 1) * wave_spacing - int(config["wave_spacing_trim"])
+            )
             bbox = (
                 center_x - radius,
                 center_y - radius,
@@ -492,7 +563,7 @@ class Display:
 
         if ip_last_octet:
             text_x = center_x + wave_spacing + base_radius
-            text_y = center_y - base_radius - max(1, int(2 * self.scale_factor_y))
+            text_y = center_y - base_radius - max(1, int(config["ip_text_offset_scale"] * self.scale_factor_y))
             draw.text((text_x, text_y), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
 
     def get_wifi_ip_last_octet(self):

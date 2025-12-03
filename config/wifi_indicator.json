@@ -1,0 +1,15 @@
+{
+  "base_x_multiplier": 3,
+  "base_y_multiplier": 4,
+  "base_radius_scale": 1.5,
+  "base_radius_min": 2,
+  "wave_spacing_scale": 2.5,
+  "wave_spacing_extra": 2,
+  "wave_spacing_trim": 4,
+  "wave_spacing_min": 2,
+  "line_width_offset": 1,
+  "line_width_min": 1,
+  "center_wave_multiplier": 2,
+  "thresholds": [15, 35, 65, 85],
+  "ip_text_offset_scale": 2
+}
