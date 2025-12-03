@@ -461,7 +461,7 @@ class Display:
     def render_wifi_wave_indicator(self, image, draw):
         """Render a live Wi-Fi indicator using wave arcs with no dBm text."""
         base_x = int(3 * self.scale_factor_x)
-        base_y = int(3 * self.scale_factor_y)
+        base_y = int(6 * self.scale_factor_y)
         scale = min(self.scale_factor_x, self.scale_factor_y)
         signal_dbm = getattr(self.shared_data, 'wifi_signal_dbm', None)
         raw_quality = getattr(self.shared_data, 'wifi_signal_quality', None)
@@ -472,8 +472,8 @@ class Display:
         if waves <= 0:
             waves = 1  # Always show at least one wave when connected
 
-        base_radius = max(2, int(2 * scale))
-        wave_spacing = max(3, int(3 * scale))
+        base_radius = max(2, int(1.5 * scale))
+        wave_spacing = max(2, int(2.5 * scale))
         line_width = max(1, int(scale))
 
         center_x = base_x + base_radius + wave_spacing * 2
