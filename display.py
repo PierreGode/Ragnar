@@ -492,7 +492,7 @@ class Display:
 
         if ip_last_octet:
             text_x = center_x + wave_spacing + base_radius
-            text_y = center_y - base_radius - max(1, int(4 * self.scale_factor_y))
+            text_y = center_y - base_radius - max(1, int(5 * self.scale_factor_y))
             draw.text((text_x, text_y), ip_last_octet, font=self.shared_data.font_arial9, fill=0)
 
     def get_wifi_ip_last_octet(self):
