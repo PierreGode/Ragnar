@@ -670,7 +670,7 @@
                 if (error.name === 'TypeError' || error.name === 'AbortError' || error.message.includes('fetch')) {
                     showStatus('✅ Credentials sent! Ragnar is switching to WiFi mode.', 'success');
                     setTimeout(() => {
-                        showStatus('ℹ️ This portal has closed. If connection fails, Ragnar will restart AP mode automatically.', 'info');
+                        showStatus('ℹ️ This portal has closed. Check Ragnar E-paper for connection status and IP. If connection fails, Ragnar will restart AP mode automatically.', 'info');
                     }, 2000);
                 } else {
                     // Unexpected error

