@@ -41,6 +41,39 @@ write_status() {
 EOF
 }
 
+select_monitor_interface() {
+    local attempt=0
+    while true; do
+        attempt=$((attempt + 1))
+        mapfile -t wlan_ifaces < <(ls /sys/class/net 2>/dev/null | grep -E '^wlan[0-9]+' | sort || true)
+        for iface in "${wlan_ifaces[@]}"; do
+            if [[ "$iface" != "wlan0" ]]; then
+                echo "$iface"
+                return 0
+            fi
+        done
+        echo "[WARN] No secondary wlan interface detected (attempt ${attempt})." >&2
+        echo "[WARN] Connect a USB WiFi adapter (wlan1/wlan2...) for monitor mode." >&2
+        read -rp "Press Enter to rescan or type 'abort' to cancel installation: " response || true
+        if [[ "${response,,}" == "abort" ]]; then
+            return 1
+        fi
+        sleep 2
+    done
+}
+
+set_or_update_config_value() {
+    local key="$1"
+    local value="$2"
+    local escaped_key
+    escaped_key=$(printf '%s\n' "$key" | sed 's/[][.[\*^$&/|]/\\&/g')
+    if [[ -f "$CONFIG_FILE" ]] && grep -Eq "^${escaped_key}[[:space:]]*=" "$CONFIG_FILE"; then
+        sed -i "s|^${escaped_key}[[:space:]]*=.*|$key = \"$value\"|" "$CONFIG_FILE"
+    else
+        echo "$key = \"$value\"" >> "$CONFIG_FILE"
+    fi
+}
+
 trap 'write_status "error" "Installation failed (line ${LINENO}). Check ${LOG_FILE}." "error"' ERR
 
 # -------------------------------------------------------------------
@@ -176,6 +209,16 @@ mkdir -p "$CONFIG_DIR"
 chmod 700 "$CONFIG_DIR"
 chown root:root "$CONFIG_DIR"
 
+MONITOR_IFACE="${PWN_MON_IFACE:-}"
+if [[ -z "$MONITOR_IFACE" ]]; then
+    if ! MONITOR_IFACE=$(select_monitor_interface); then
+        echo "[ERROR] Unable to detect a wlan interface other than wlan0. Exiting." >&2
+        write_status "error" "Missing dedicated WiFi adapter for monitor mode" "preflight"
+        exit 1
+    fi
+fi
+echo "[INFO] Using monitor interface: ${MONITOR_IFACE}"
+
 # -------------------------------------------------------------------
 # RSA KEY VALIDATION + AUTO-GENERATION
 # -------------------------------------------------------------------
@@ -193,17 +236,25 @@ chmod 644 "$CONFIG_DIR/id_rsa.pub"
 # CONFIG FILE SETUP
 # -------------------------------------------------------------------
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    cat >"$CONFIG_FILE" <<'EOF'
+    cat >"$CONFIG_FILE" <<EOF
 main.name = "RagnarPwn"
 main.confd = "/etc/pwnagotchi/conf.d"
 main.custom_plugins = "/etc/pwnagotchi/custom_plugins"
+main.iface = "${MONITOR_IFACE}"
+main.mon_start_cmd = "/usr/bin/monstart"
+main.mon_stop_cmd = "/usr/bin/monstop"
 ui.display.enabled = false
 ui.web.enabled = true
 ui.web.username = "ragnar"
 ui.web.password = "ragnar"
+ui.font.name = "DejaVuSansMono" # for japanese: fonts-japanese-gothic
 plugins.grid.enabled = false
 EOF
     echo "[INFO] Created default config at ${CONFIG_FILE}"
+else
+    set_or_update_config_value "main.iface" "${MONITOR_IFACE}"
+    set_or_update_config_value "main.mon_start_cmd" "/usr/bin/monstart"
+    set_or_update_config_value "main.mon_stop_cmd" "/usr/bin/monstop"
 fi
 
 mkdir -p "$CONFIG_DIR/conf.d" "$CONFIG_DIR/custom_plugins"
