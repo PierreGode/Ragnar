@@ -277,6 +277,24 @@ systemctl disable pwnagotchi >/dev/null 2>&1 || true
 systemctl stop pwnagotchi >/dev/null 2>&1 || true
 
 # -------------------------------------------------------------------
+# BETTERCAP SERVICE SYNC
+# -------------------------------------------------------------------
+if [[ -f "/usr/bin/bettercap-launcher" ]]; then
+    echo "[INFO] Ensuring bettercap launcher permissions..."
+    chmod 755 /usr/bin/bettercap-launcher
+else
+    echo "[WARN] /usr/bin/bettercap-launcher not found; skipping chmod."
+fi
+
+if systemctl list-unit-files | grep -q '^bettercap\.service'; then
+    echo "[INFO] Reloading systemd units and restarting bettercap..."
+    systemctl daemon-reload
+    systemctl restart bettercap
+else
+    echo "[WARN] bettercap.service not detected; skipping restart."
+fi
+
+# -------------------------------------------------------------------
 # CLEANUP
 # -------------------------------------------------------------------
 echo "[INFO] Cleaning up temporary files..."
