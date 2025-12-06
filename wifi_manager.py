@@ -158,6 +158,74 @@ class WiFiManager:
             self.interface_cache_time.get(target_iface)
         )
 
+    def _get_known_ssids(self):
+        """Return a deduplicated list of Ragnar-configured SSIDs."""
+        known_ssids = []
+        seen = set()
+        try:
+            for entry in self.known_networks or []:
+                if isinstance(entry, dict):
+                    ssid = entry.get('ssid')
+                else:
+                    ssid = str(entry).strip()
+                if ssid and ssid not in seen:
+                    known_ssids.append(ssid)
+                    seen.add(ssid)
+        except Exception as exc:
+            self.logger.debug(f"Unable to enumerate known SSIDs: {exc}")
+        return known_ssids
+
+    def _run_iwlist_scan(self, interface, *, system_profiles=None, known_ssids=None, log_target=None):
+        """Execute iwlist scan and return normalized network list."""
+        logger_target = log_target or self.logger
+        system_profiles = set(system_profiles or [])
+        known_set = set(known_ssids or self._get_known_ssids())
+        cmd = ['sudo', 'iwlist', interface, 'scan']
+        logger_target.debug(f"Running iwlist scan on {interface}: {' '.join(cmd)}")
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        except FileNotFoundError:
+            logger_target.warning("iwlist command not available; cannot perform fallback scan")
+            return []
+        except Exception as exc:
+            logger_target.warning(f"iwlist scan execution failed: {exc}")
+            return []
+
+        if result.returncode != 0:
+            stderr_snippet = (result.stderr or '').strip()
+            logger_target.warning(f"iwlist scan returned code {result.returncode} on {interface}: {stderr_snippet}")
+            return []
+
+        parsed_networks = self._parse_iwlist_output(result.stdout or '') or []
+        if not parsed_networks:
+            logger_target.info(f"iwlist scan on {interface} returned no parseable networks")
+            return []
+
+        deduped = {}
+        for network in parsed_networks:
+            ssid = network.get('ssid')
+            if not ssid or ssid == self.ap_ssid:
+                continue
+            try:
+                signal = int(network.get('signal', 0) or 0)
+            except (TypeError, ValueError):
+                signal = 0
+            existing = deduped.get(ssid)
+            if not existing or signal > existing.get('signal', 0):
+                enriched = {
+                    'ssid': ssid,
+                    'signal': signal,
+                    'security': network.get('security', 'Unknown'),
+                    'known': ssid in known_set or ssid in system_profiles,
+                    'has_system_profile': ssid in system_profiles,
+                    'scan_method': 'iwlist'
+                }
+                deduped[ssid] = enriched
+
+        final_networks = sorted(deduped.values(), key=lambda x: x.get('signal', 0), reverse=True)
+        logger_target.info(f"iwlist scan discovered {len(final_networks)} networks on {interface}")
+        return final_networks
+
     def _set_current_ssid(self, ssid):
         """Update current SSID and notify shared storage manager."""
         self.current_ssid = ssid
@@ -1028,7 +1096,7 @@ class WiFiManager:
             
             # Get system WiFi profiles to mark known networks
             system_profiles = self.get_system_wifi_profiles()
-            ragnar_known = [net['ssid'] for net in self.known_networks]
+            ragnar_known = self._get_known_ssids()
             
             # Trigger a new scan
             rescan_cmd = ['nmcli', 'dev', 'wifi', 'rescan']
@@ -1041,6 +1109,8 @@ class WiFiManager:
             if target_iface:
                 list_cmd.extend(['ifname', target_iface])
             result = subprocess.run(list_cmd, capture_output=True, text=True, timeout=15)
+            if result.returncode != 0:
+                self.logger.warning(f"nmcli scan command failed on {target_iface} with code {result.returncode}: {result.stderr}")
             
             networks = []
             if result.returncode == 0:
@@ -1066,6 +1136,20 @@ class WiFiManager:
                 if network['ssid'] not in seen_ssids:
                     seen_ssids.add(network['ssid'])
                     unique_networks.append(network)
+            
+            if not unique_networks:
+                self.logger.warning(
+                    f"nmcli reported zero networks on {target_iface}; attempting iwlist fallback"
+                )
+                fallback_networks = self._run_iwlist_scan(
+                    target_iface,
+                    system_profiles=system_profiles,
+                    known_ssids=ragnar_known
+                )
+                if fallback_networks:
+                    unique_networks = fallback_networks
+                else:
+                    self.logger.info(f"Fallback iwlist scan also returned zero networks on {target_iface}")
             
             self._cache_interface_networks(target_iface, unique_networks)
             self.logger.info(f"Found {len(unique_networks)} unique networks on {target_iface}")
@@ -1114,72 +1198,15 @@ class WiFiManager:
                     return real_networks
             
             # Strategy 3: Try iwlist scan (non-disruptive to AP mode)
-            networks = []
-            try:
-                self.ap_logger.debug(f"Attempting iwlist scan on interface {target_iface}...")
-                result = subprocess.run(['sudo', 'iwlist', target_iface, 'scan'], 
-                                      capture_output=True, text=True, timeout=15)
-                
-                if result.returncode == 0:
-                    self.ap_logger.debug("iwlist scan successful, parsing results...")
-                    lines = result.stdout.split('\n')
-                    current_network = {}
-                    
-                    for line in lines:
-                        line = line.strip()
-                        if 'Cell ' in line and 'Address:' in line:
-                            # Start of new network, save previous if complete
-                            if 'ssid' in current_network and current_network['ssid'] != self.ap_ssid:
-                                networks.append(current_network.copy())
-                            current_network = {}
-                        elif 'ESSID:' in line:
-                            # Extract SSID
-                            essid_part = line.split('ESSID:')[1].strip('"')
-                            if essid_part and essid_part != self.ap_ssid:
-                                current_network['ssid'] = essid_part
-                        elif 'Signal level=' in line:
-                            # Extract signal strength
-                            try:
-                                signal_part = line.split('Signal level=')[1].split()[0]
-                                if 'dBm' in signal_part:
-                                    dbm = int(signal_part.replace('dBm', ''))
-                                    # Convert dBm to percentage (rough approximation)
-                                    signal = max(0, min(100, (dbm + 100) * 2))
-                                else:
-                                    signal = 50  # Default
-                                current_network['signal'] = signal
-                            except:
-                                current_network['signal'] = 50
-                        elif 'Encryption key:on' in line:
-                            current_network['security'] = 'WPA2'
-                        elif 'Encryption key:off' in line:
-                            current_network['security'] = 'Open'
-                    
-                    # Add last network if complete
-                    if 'ssid' in current_network and current_network['ssid'] != self.ap_ssid:
-                        networks.append(current_network.copy())
-                    
-                    if networks:
-                        self.ap_logger.info(f"iwlist scan found {len(networks)} networks")
-                        
-                        # Remove duplicates and sort
-                        seen_ssids = set()
-                        unique_networks = []
-                        for network in sorted(networks, key=lambda x: x.get('signal', 0), reverse=True):
-                            if network['ssid'] not in seen_ssids:
-                                seen_ssids.add(network['ssid'])
-                                # Add known network flag - check BOTH Ragnar and system profiles
-                                ssid = network['ssid']
-                                network['known'] = ssid in ragnar_known or ssid in system_profiles
-                                unique_networks.append(network)
-                        
-                        # Cache the results
-                        self._cache_interface_networks(target_iface, unique_networks)
-                        
-                        return unique_networks
-                    
-            except Exception as iwlist_error:
-                self.ap_logger.debug(f"iwlist scan failed: {iwlist_error}")
+            fallback_networks = self._run_iwlist_scan(
+                target_iface,
+                system_profiles=system_profiles,
+                known_ssids=ragnar_known,
+                log_target=self.ap_logger
+            )
+            if fallback_networks:
+                self._cache_interface_networks(target_iface, fallback_networks)
+                return fallback_networks
             
             # Strategy 4: Return known networks as available options
             if self.known_networks:
