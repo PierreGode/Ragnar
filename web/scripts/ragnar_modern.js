@@ -4756,6 +4756,23 @@ async function scanWifiNetworks() {
     
     if (!networksList) return;
     const interfaceName = getActiveWifiInterface();
+    const hasNetworkEntries = (payload) => {
+        if (!payload) return false;
+        if (Array.isArray(payload.available) && payload.available.length > 0) {
+            return true;
+        }
+        if (Array.isArray(payload.networks) && payload.networks.length > 0) {
+            return true;
+        }
+        return false;
+    };
+    const applyInterfaceContext = (payload) => {
+        if (payload && interfaceName && !payload.interface) {
+            payload.interface = interfaceName;
+        }
+        return payload;
+    };
+    let displayedFromScan = false;
     
     try {
         // Disable button and show scanning message
@@ -4779,20 +4796,31 @@ async function scanWifiNetworks() {
         `;
         
         // Trigger scan
-    const scanPayload = interfaceName ? { interface: interfaceName } : {};
-    await postAPI('/api/wifi/scan', scanPayload);
+        const scanPayload = interfaceName ? { interface: interfaceName } : {};
+        let scanResponse = null;
+        try {
+            scanResponse = applyInterfaceContext(await postAPI('/api/wifi/scan', scanPayload));
+        } catch (scanError) {
+            throw scanError;
+        }
+        if (scanResponse && (hasNetworkEntries(scanResponse) || scanResponse.warning || scanResponse.error)) {
+            displayWifiNetworks(scanResponse);
+            displayedFromScan = true;
+        }
         
         // Wait a bit for scan to complete
         await new Promise(resolve => setTimeout(resolve, 3000));
         
         // Get networks
-    const query = interfaceName ? `/api/wifi/networks?interface=${encodeURIComponent(interfaceName)}` : '/api/wifi/networks';
-    const data = await fetchAPI(query);
+        const query = interfaceName ? `/api/wifi/networks?interface=${encodeURIComponent(interfaceName)}` : '/api/wifi/networks';
+        const data = applyInterfaceContext(await fetchAPI(query));
         
         console.log('Wi-Fi networks data:', data);
         
-        // Display networks
-        displayWifiNetworks(data);
+        if (!displayedFromScan || hasNetworkEntries(data)) {
+            displayWifiNetworks(data);
+            displayedFromScan = true;
+        }
         
     } catch (error) {
         console.error('Error scanning Wi-Fi networks:', error);
@@ -4823,6 +4851,11 @@ function displayWifiNetworks(data) {
     let networks = [];
     let knownNetworks = [];
     const interfaceName = data.interface || getActiveWifiInterface();
+    const warningMarkup = data.warning ? `
+        <div class="text-xs text-yellow-300 bg-yellow-900/40 border border-yellow-800 rounded px-3 py-2 mb-3">
+            ${escapeHtml(data.warning)}
+        </div>
+    ` : '';
     const sectionHeader = interfaceName ? `
         <div class="text-xs text-gray-400 mb-3">
             Showing results for interface <span class="font-semibold text-gray-100">${interfaceName}</span>
@@ -4852,9 +4885,10 @@ function displayWifiNetworks(data) {
     if (!networks || networks.length === 0) {
         networksList.innerHTML = `
             ${sectionHeader}
+            ${warningMarkup}
             <div class="text-center text-gray-400 py-8">
-                <p>No Wi-Fi networks found</p>
-                <p class="text-sm mt-2">Try scanning again or check your Wi-Fi interface</p>
+                <p>No Wi-Fi networks found${interfaceName ? ` on <span class="font-semibold text-gray-100">${interfaceName}</span>` : ''}</p>
+                <p class="text-sm mt-2">Ensure the adapter is active and try scanning again. You can also switch interfaces above.</p>
             </div>
         `;
         return;
@@ -4867,7 +4901,7 @@ function displayWifiNetworks(data) {
     currentWifiNetworks = networks;
     
     // Build network list HTML
-    networksList.innerHTML = sectionHeader + networks.map(network => {
+    networksList.innerHTML = sectionHeader + warningMarkup + networks.map(network => {
         const ssid = network.ssid || network.SSID || 'Unknown Network';
         const signal = network.signal || 0;
         const isSecure = network.security !== 'open' && network.security !== 'Open';

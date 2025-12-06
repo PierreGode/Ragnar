@@ -6080,6 +6080,11 @@ def scan_wifi_networks():
         if wifi_manager and hasattr(wifi_manager, 'wifi_manager'):
             manager = wifi_manager.wifi_manager
             effective_interface = requested_interface or getattr(manager, 'default_wifi_interface', 'wlan0')
+            known_networks = []
+            try:
+                known_networks = manager.get_known_networks()
+            except Exception as known_err:
+                logger.debug(f"Unable to load known networks during scan: {known_err}")
             # Check if we're in AP mode and handle accordingly
             if manager.ap_mode_active:
                 logger.info("Scanning networks while in AP mode (Pi Zero W2 compatible)")
@@ -6090,6 +6095,7 @@ def scan_wifi_networks():
                 if networks and any(net.get('instruction') for net in networks):
                     return jsonify({
                         'networks': networks,
+                        'known': known_networks,
                         'warning': 'Live scanning limited in AP mode. Manual entry recommended.',
                         'manual_entry_available': True,
                         'ap_mode': True,
@@ -6098,6 +6104,7 @@ def scan_wifi_networks():
                 else:
                     return jsonify({
                         'networks': networks,
+                        'known': known_networks,
                         'success': True,
                         'ap_mode': True,
                         'interface': effective_interface
@@ -6107,6 +6114,7 @@ def scan_wifi_networks():
                 networks = manager.scan_networks(interface=requested_interface)
                 return jsonify({
                     'networks': networks,
+                    'known': known_networks,
                     'success': True,
                     'ap_mode': False,
                     'interface': effective_interface
@@ -6125,6 +6133,7 @@ def scan_wifi_networks():
                 known_networks = wifi_manager.wifi_manager.get_known_networks()
                 return jsonify({
                     'networks': known_networks,
+                    'known': known_networks,
                     'warning': 'Live scan failed, showing known networks only',
                     'manual_entry_available': True
                 })
@@ -6133,6 +6142,7 @@ def scan_wifi_networks():
         
         return jsonify({
             'networks': [],
+            'known': [],
             'error': 'Scanning failed',
             'manual_entry_available': True
         }), 500
