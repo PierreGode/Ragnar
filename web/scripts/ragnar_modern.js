@@ -4547,6 +4547,25 @@ let selectedWifiNetwork = null;
 const WIFI_INTERFACE_STORAGE_KEY = 'wifi-selected-interface';
 let selectedWifiInterface = null;
 let wifiInterfaceMetadata = [];
+const WIFI_NETWORK_CACHE_KEY_DEFAULT = '__default__';
+const wifiNetworkResultCache = new Map();
+
+function cacheWifiNetworkResult(interfaceName, payload) {
+    if (!payload) {
+        return;
+    }
+    const key = interfaceName || WIFI_NETWORK_CACHE_KEY_DEFAULT;
+    wifiNetworkResultCache.set(key, {
+        payload,
+        timestamp: Date.now()
+    });
+}
+
+function getCachedWifiNetworkResult(interfaceName) {
+    const key = interfaceName || WIFI_NETWORK_CACHE_KEY_DEFAULT;
+    const cached = wifiNetworkResultCache.get(key);
+    return cached ? cached.payload : null;
+}
 
 function handleWifiInterfaceChange(event) {
     const nextInterface = (event?.target?.value || '').trim() || null;
@@ -4844,13 +4863,39 @@ async function scanWifiNetworks() {
     }
 }
 
-function displayWifiNetworks(data) {
+function displayWifiNetworks(data, options = {}) {
     const networksList = document.getElementById('wifi-networks-list');
     if (!networksList) return;
-    
+
     let networks = [];
     let knownNetworks = [];
-    const interfaceName = data.interface || getActiveWifiInterface();
+    const activeInterface = options.forceInterface || getActiveWifiInterface();
+    const responseInterface = data.interface || null;
+    const cacheKeyInterface = responseInterface || activeInterface || null;
+
+    if (cacheKeyInterface) {
+        cacheWifiNetworkResult(cacheKeyInterface, data);
+    } else {
+        cacheWifiNetworkResult(null, data);
+    }
+
+    if (!options.skipInterfaceCheck && responseInterface && activeInterface && responseInterface !== activeInterface) {
+        console.info(`Ignoring Wi-Fi scan results for ${responseInterface} because ${activeInterface} is selected`);
+        const cachedActive = getCachedWifiNetworkResult(activeInterface);
+        if (cachedActive && cachedActive !== data) {
+            displayWifiNetworks(cachedActive, { forceInterface: activeInterface, skipInterfaceCheck: true });
+            return;
+        }
+        networksList.innerHTML = `
+            <div class="text-center text-gray-400 py-8">
+                <p>Scan results for <span class="font-semibold text-gray-100">${escapeHtml(responseInterface)}</span> are ready.</p>
+                <p class="text-sm mt-2">Switch to that interface or run a new scan for <span class="font-semibold text-gray-100">${escapeHtml(activeInterface)}</span>.</p>
+            </div>
+        `;
+        return;
+    }
+
+    const interfaceName = options.forceInterface || responseInterface || activeInterface;
     const warningMarkup = data.warning ? `
         <div class="text-xs text-yellow-300 bg-yellow-900/40 border border-yellow-800 rounded px-3 py-2 mb-3">
             ${escapeHtml(data.warning)}
@@ -4858,7 +4903,7 @@ function displayWifiNetworks(data) {
     ` : '';
     const sectionHeader = interfaceName ? `
         <div class="text-xs text-gray-400 mb-3">
-            Showing results for interface <span class="font-semibold text-gray-100">${interfaceName}</span>
+            Showing results for interface <span class="font-semibold text-gray-100">${escapeHtml(interfaceName)}</span>
         </div>
     ` : '';
     if (interfaceName) {
@@ -4866,40 +4911,40 @@ function displayWifiNetworks(data) {
     } else {
         delete networksList.dataset.interface;
     }
-    
+
     // Extract networks from response
     if (data.available) {
         networks = data.available;
     } else if (data.networks) {
         networks = data.networks;
     }
-    
+
     // Extract known networks
     if (data.known) {
         knownNetworks = data.known.map(n => n.ssid || n);
     }
-    
+
     console.log('Displaying networks:', networks);
     console.log('Known networks:', knownNetworks);
-    
+
     if (!networks || networks.length === 0) {
         networksList.innerHTML = `
             ${sectionHeader}
             ${warningMarkup}
             <div class="text-center text-gray-400 py-8">
-                <p>No Wi-Fi networks found${interfaceName ? ` on <span class="font-semibold text-gray-100">${interfaceName}</span>` : ''}</p>
+                <p>No Wi-Fi networks found${interfaceName ? ` on <span class="font-semibold text-gray-100">${escapeHtml(interfaceName)}</span>` : ''}</p>
                 <p class="text-sm mt-2">Ensure the adapter is active and try scanning again. You can also switch interfaces above.</p>
             </div>
         `;
         return;
     }
-    
+
     // Sort networks by signal strength
     networks.sort((a, b) => (b.signal || 0) - (a.signal || 0));
-    
+
     // Store for later use
     currentWifiNetworks = networks;
-    
+
     // Build network list HTML
     networksList.innerHTML = sectionHeader + warningMarkup + networks.map(network => {
         const ssid = network.ssid || network.SSID || 'Unknown Network';
