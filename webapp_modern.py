@@ -6015,6 +6015,14 @@ def _toggle_scan_interface(enable: bool):
         return jsonify({'success': False, 'error': str(invalid_iface)}), 400
     if not interface:
         return jsonify({'success': False, 'error': 'interface is required'}), 400
+
+    if enable and not shared_data.config.get('wifi_multi_network_scans_enabled', False):
+        shared_data.config['wifi_multi_network_scans_enabled'] = True
+        try:
+            shared_data.save_config()
+        except Exception as exc:
+            logger.warning(f"Failed to persist global scan enable: {exc}")
+
     updated = state.set_scan_enabled(interface, enable)
     if not updated:
         return jsonify({'success': False, 'error': 'interface not managed'}), 404
