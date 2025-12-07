@@ -4645,20 +4645,33 @@ function renderDashboardMultiInterfaceSummary(state, statusData = {}) {
         return;
     }
 
-    const markup = state.interfaces.map(entry => {
-        const roleClass = entry.role === 'external'
+    // Determine which interface is selected for dashboard display
+    const activeInterface = getActiveWifiInterface();
+    let selectedEntry = null;
+    if (activeInterface) {
+        selectedEntry = state.interfaces.find(entry => entry.name === activeInterface);
+    }
+    // Fallback: show first connected, else first
+    if (!selectedEntry) {
+        selectedEntry = state.interfaces.find(entry => entry.connected && entry.connected_ssid) || state.interfaces[0];
+    }
+
+    // Show only the selected interface's data
+    let markup = '';
+    if (selectedEntry) {
+        const roleClass = selectedEntry.role === 'external'
             ? 'bg-indigo-900 text-indigo-100'
             : 'bg-slate-800 text-slate-100';
-        const scanActive = Boolean(entry.scan_enabled && entry.connected && entry.connected_ssid);
+        const scanActive = Boolean(selectedEntry.scan_enabled && selectedEntry.connected && selectedEntry.connected_ssid);
         const scanLabel = scanActive ? 'Scanning' : 'Paused';
         const scanClass = scanActive ? 'text-green-300' : 'text-gray-400';
-        const reason = entry.reason ? ` • ${formatInterfaceReason(entry.reason)}` : '';
-        const ssidLabel = entry.connected_ssid ? escapeHtml(entry.connected_ssid) : 'No SSID';
-        return `
+        const reason = selectedEntry.reason ? ` • ${formatInterfaceReason(selectedEntry.reason)}` : '';
+        const ssidLabel = selectedEntry.connected_ssid ? escapeHtml(selectedEntry.connected_ssid) : 'No SSID';
+        markup = `
             <div class="flex items-center justify-between gap-2">
                 <div class="flex items-center gap-2 text-gray-100">
-                    <span class="font-semibold text-xs">${escapeHtml(entry.name || 'iface')}</span>
-                    <span class="text-[10px] px-2 py-0.5 rounded ${roleClass}">${formatInterfaceRole(entry.role)}</span>
+                    <span class="font-semibold text-xs">${escapeHtml(selectedEntry.name || 'iface')}</span>
+                    <span class="text-[10px] px-2 py-0.5 rounded ${roleClass}">${formatInterfaceRole(selectedEntry.role)}</span>
                 </div>
                 <div class="text-right leading-tight text-[11px] ${scanClass}">
                     <div>${ssidLabel}</div>
@@ -4666,12 +4679,12 @@ function renderDashboardMultiInterfaceSummary(state, statusData = {}) {
                 </div>
             </div>
         `;
-    }).join('');
+    }
     container.innerHTML = markup;
 
-    const connectedEntry = state.interfaces.find(entry => entry.connected && entry.connected_ssid);
-    const anyConnected = state.interfaces.some(entry => entry.connected);
-    const fallbackSsid = connectedEntry ? connectedEntry.connected_ssid : (statusData && statusData.current_ssid);
+    // Update connectivity indicator for selected interface
+    const anyConnected = !!selectedEntry && selectedEntry.connected;
+    const fallbackSsid = selectedEntry ? selectedEntry.connected_ssid : (statusData && statusData.current_ssid);
     const apMode = Boolean(statusData && statusData.ap_mode_active);
     updateConnectivityIndicator('wifi-status', anyConnected || Boolean(statusData && statusData.wifi_connected), fallbackSsid, apMode);
     renderDashboardInterfaceSwitch(state);
