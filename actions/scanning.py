@@ -87,7 +87,7 @@ class NetworkScanner:
         self.nm = nmap.PortScanner()  # Initialize nmap.PortScanner()
         self.running = False
         self.arp_scan_interface = "wlan0"
-    self._active_scan_network = None
+        self._active_scan_network = None
         # Initialize SQLite database manager
         self.db = get_db(currentdir=self.currentdir)
 

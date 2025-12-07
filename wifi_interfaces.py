@@ -58,6 +58,74 @@ def _get_interface_ipv4_details(interface_name: str) -> Dict[str, Optional[str]]
         }
 
 
+def _infer_frequency_band(freq_mhz: Optional[int]) -> Optional[str]:
+    if freq_mhz is None:
+        return None
+    if freq_mhz >= 57000:
+        return '60GHz'
+    if freq_mhz >= 5925:
+        return '6GHz'
+    if freq_mhz >= 4900:
+        return '5GHz'
+    if freq_mhz >= 2400:
+        return '2.4GHz'
+    return None
+
+
+def _get_interface_link_details(interface_name: str) -> Dict[str, Optional[str]]:
+    """Collect SSID/frequency information for an interface via iw/iwgetid."""
+    details: Dict[str, Optional[str]] = {
+        'ssid': None,
+        'frequency_mhz': None,
+        'band': None,
+    }
+    try:
+        result = subprocess.run(
+            ['iw', 'dev', interface_name, 'link'],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        if result.returncode == 0:
+            stdout = result.stdout.strip()
+            if stdout and 'Not connected' not in stdout:
+                ssid_match = re.search(r'SSID:\s*(.+)', stdout)
+                freq_match = re.search(r'freq:\s*(\d+)', stdout)
+                if ssid_match:
+                    details['ssid'] = ssid_match.group(1).strip()
+                if freq_match:
+                    freq_value = int(freq_match.group(1))
+                    details['frequency_mhz'] = freq_value
+                    details['band'] = _infer_frequency_band(freq_value)
+                return details
+    except FileNotFoundError:
+        logger.debug("iw utility not available for interface introspection")
+    except subprocess.TimeoutExpired:
+        logger.debug(f"iw dev {interface_name} link timed out")
+    except Exception as exc:
+        logger.debug(f"iw dev {interface_name} link failed: {exc}")
+
+    try:
+        result = subprocess.run(
+            ['iwgetid', '-i', interface_name, '-r'],
+            capture_output=True,
+            text=True,
+            timeout=3
+        )
+        if result.returncode == 0:
+            ssid = (result.stdout or '').strip()
+            if ssid:
+                details['ssid'] = ssid
+    except FileNotFoundError:
+        logger.debug("iwgetid utility not available")
+    except subprocess.TimeoutExpired:
+        logger.debug(f"iwgetid -i {interface_name} timed out")
+    except Exception as exc:
+        logger.debug(f"iwgetid -i {interface_name} failed: {exc}")
+
+    return details
+
+
 def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
     """Collect Wi-Fi interface metadata using nmcli + ip link fallbacks."""
     interfaces: Dict[str, Dict] = {}
@@ -136,6 +204,18 @@ def gather_wifi_interfaces(default_interface: str = 'wlan0') -> List[Dict]:
         }
 
     for iface in interfaces.values():
+        link_details = _get_interface_link_details(iface['name'])
+        if link_details.get('ssid'):
+            iface['connected_ssid'] = link_details['ssid']
+            iface['connection'] = link_details['ssid']
+            iface['connected'] = True
+            if not iface.get('state') or iface['state'] in ('UNKNOWN', 'DISCONNECTED', 'DOWN'):
+                iface['state'] = 'CONNECTED'
+        if link_details.get('frequency_mhz'):
+            iface['frequency_mhz'] = link_details['frequency_mhz']
+        if link_details.get('band'):
+            iface['band'] = link_details['band']
+
         ipv4 = _get_interface_ipv4_details(iface['name'])
         iface['ip_address'] = ipv4.get('ip')
         iface['cidr'] = ipv4.get('cidr')
