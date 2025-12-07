@@ -4641,6 +4641,7 @@ function renderDashboardMultiInterfaceSummary(state, statusData = {}) {
 
     if (!state || !Array.isArray(state.interfaces) || state.interfaces.length === 0) {
         container.innerHTML = '<div class="text-gray-500 text-[11px]">No additional adapters detected yet.</div>';
+        renderDashboardInterfaceSwitch(null);
         return;
     }
 
@@ -4673,6 +4674,7 @@ function renderDashboardMultiInterfaceSummary(state, statusData = {}) {
     const fallbackSsid = connectedEntry ? connectedEntry.connected_ssid : (statusData && statusData.current_ssid);
     const apMode = Boolean(statusData && statusData.ap_mode_active);
     updateConnectivityIndicator('wifi-status', anyConnected || Boolean(statusData && statusData.wifi_connected), fallbackSsid, apMode);
+    renderDashboardInterfaceSwitch(state);
 }
 
 function renderConnectTabMultiInterface(state) {
@@ -4864,6 +4866,64 @@ function updateWifiInterfaceSwitchActiveState(activeInterface) {
     });
 }
 
+function updateDashboardInterfaceSwitchActiveState(activeInterface) {
+    const buttonsContainer = document.getElementById('wifi-dashboard-interface-buttons');
+    if (!buttonsContainer) {
+        return;
+    }
+    buttonsContainer.querySelectorAll('button[data-interface]').forEach(button => {
+        const isActive = button.dataset.interface === activeInterface;
+        button.classList.remove('bg-Ragnar-500', 'text-white', 'border-Ragnar-400', 'shadow');
+        button.classList.remove('bg-slate-800', 'text-gray-300', 'border-slate-700');
+        if (isActive) {
+            button.classList.add('bg-Ragnar-500', 'text-white', 'border-Ragnar-400', 'shadow');
+        } else {
+            button.classList.add('bg-slate-800', 'text-gray-300', 'border-slate-700');
+        }
+    });
+}
+
+function renderDashboardInterfaceSwitch(state) {
+    const wrapper = document.getElementById('wifi-dashboard-interface-switch');
+    const buttonsContainer = document.getElementById('wifi-dashboard-interface-buttons');
+    if (!wrapper || !buttonsContainer) {
+        return;
+    }
+
+    const interfaces = state && Array.isArray(state.interfaces)
+        ? state.interfaces.filter(entry => entry && entry.name)
+        : [];
+    const eligible = interfaces.filter(entry => entry.connected && entry.connected_ssid);
+
+    buttonsContainer.innerHTML = '';
+    if (eligible.length <= 1) {
+        wrapper.classList.add('hidden');
+        return;
+    }
+
+    wrapper.classList.remove('hidden');
+    const activeInterface = getActiveWifiInterface();
+
+    eligible.forEach(entry => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.interface = entry.name;
+        button.className = 'px-2 py-1 rounded-full border text-[11px] transition-colors flex items-center gap-1';
+        button.innerHTML = `
+            <span class="font-semibold">${escapeHtml(entry.name)}</span>
+            <span class="text-emerald-300">${escapeHtml(entry.connected_ssid || '')}</span>
+        `;
+        button.addEventListener('click', () => {
+            if (entry.name !== getActiveWifiInterface()) {
+                setSelectedWifiInterface(entry.name);
+            }
+        });
+        buttonsContainer.appendChild(button);
+    });
+
+    updateDashboardInterfaceSwitchActiveState(activeInterface);
+}
+
 function renderWifiInterfaceSwitch(interfaces = []) {
     wifiInterfaceMetadata = Array.isArray(interfaces) ? interfaces : [];
     const switchContainer = document.getElementById('wifi-interface-switch');
@@ -4951,6 +5011,7 @@ function setSelectedWifiInterface(interfaceName, options = {}) {
     }
 
     updateWifiInterfaceSwitchActiveState(selectedWifiInterface);
+    updateDashboardInterfaceSwitchActiveState(selectedWifiInterface);
 
     if (!options.skipRefresh && hasChanged) {
         if (!displayCachedWifiNetworks(selectedWifiInterface)) {
