@@ -891,9 +891,9 @@ async function loadDashboardData() {
         });
         
         if (data) {
-            updateDashboardStats(data);
-            // Also update status since quick endpoint includes it
+            // Update status block immediately
             updateDashboardStatus(data);
+            await refreshDashboardStatsForCurrentSelection({ forceRefresh: true, fallbackData: data });
         }
         
         // Load AI insights if configured
@@ -4466,6 +4466,11 @@ async function refreshWifiStatus() {
         console.log('Wi-Fi status data received:', data);
         const multiState = data.multi_interface || null;
         wifiMultiInterfaceState = multiState;
+        if (multiState && Array.isArray(multiState.interfaces)) {
+            setWifiInterfaceMetadata(multiState.interfaces);
+        } else if (Array.isArray(data.interfaces)) {
+            setWifiInterfaceMetadata(data.interfaces);
+        }
         
         const statusIndicator = document.getElementById('wifi-status-indicator');
         const wifiInfo = document.getElementById('wifi-info');
@@ -4583,6 +4588,7 @@ async function refreshWifiStatus() {
             connectedList.classList.remove('hidden');
         }
         wifiMultiInterfaceState = null;
+    setWifiInterfaceMetadata([]);
         renderDashboardMultiInterfaceSummary(null);
         renderConnectTabMultiInterface(null);
     }
@@ -4606,6 +4612,126 @@ let wifiInterfaceMetadata = [];
 const WIFI_NETWORK_CACHE_KEY_DEFAULT = '__default__';
 const wifiNetworkResultCache = new Map();
 let wifiMultiInterfaceState = null;
+const DASHBOARD_STATS_CACHE_TTL = 4000;
+let dashboardStatsCache = { key: null, timestamp: 0, data: null };
+let dashboardStatsRequestState = null;
+
+function slugifyNetworkIdentifier(value) {
+    if (!value) {
+        return null;
+    }
+    let normalized = value;
+    if (typeof normalized.normalize === 'function') {
+        normalized = normalized.normalize('NFKD');
+    }
+    normalized = normalized.replace(/[\u0300-\u036f]/g, '');
+    normalized = normalized.replace(/[^A-Za-z0-9]+/g, '_');
+    normalized = normalized.replace(/^_+|_+$/g, '');
+    normalized = normalized.toLowerCase();
+    return normalized || null;
+}
+
+function normalizeInterfaceMetadata(entries) {
+    if (!Array.isArray(entries)) {
+        return [];
+    }
+    return entries.map(entry => {
+        if (!entry || typeof entry !== 'object') {
+            return entry;
+        }
+        if (entry.network_slug) {
+            return entry;
+        }
+        if (entry.connected_ssid) {
+            return {
+                ...entry,
+                network_slug: slugifyNetworkIdentifier(entry.connected_ssid)
+            };
+        }
+        return entry;
+    });
+}
+
+function setWifiInterfaceMetadata(entries) {
+    const previousList = wifiInterfaceMetadata || [];
+    let previousSlug = null;
+    if (selectedWifiInterface) {
+        const prevMeta = Array.isArray(previousList)
+            ? previousList.find(entry => entry && entry.name === selectedWifiInterface)
+            : null;
+        if (prevMeta) {
+            previousSlug = prevMeta.network_slug || (prevMeta.connected_ssid ? slugifyNetworkIdentifier(prevMeta.connected_ssid) : null);
+        }
+    }
+
+    wifiInterfaceMetadata = entries ? normalizeInterfaceMetadata(entries) : [];
+
+    if (selectedWifiInterface) {
+        const nextMeta = wifiInterfaceMetadata.find(entry => entry && entry.name === selectedWifiInterface);
+        const nextSlug = nextMeta ? (nextMeta.network_slug || (nextMeta.connected_ssid ? slugifyNetworkIdentifier(nextMeta.connected_ssid) : null)) : null;
+        if (previousSlug !== nextSlug) {
+            clearDashboardStatsCache();
+            refreshDashboardStatsForCurrentSelection({ forceRefresh: true }).catch(err => {
+                console.debug('Dashboard stats refresh failed after interface metadata update', err);
+            });
+        }
+    }
+}
+
+function clearDashboardStatsCache() {
+    dashboardStatsCache = { key: null, timestamp: 0, data: null };
+}
+
+async function fetchDashboardStatsForSelection(options = {}) {
+    const { forceRefresh = false } = options;
+    const { network } = getSelectedDashboardNetworkKey();
+    const cacheKey = network ? `network:${network}` : 'network:global';
+    const now = Date.now();
+
+    const cached = dashboardStatsCache;
+    if (!forceRefresh && cached.key === cacheKey && (now - cached.timestamp) < DASHBOARD_STATS_CACHE_TTL && cached.data) {
+        return cached.data;
+    }
+
+    if (!forceRefresh && dashboardStatsRequestState && dashboardStatsRequestState.key === cacheKey) {
+        return dashboardStatsRequestState.promise;
+    }
+
+    const query = network ? `/api/dashboard/stats?network=${encodeURIComponent(network)}` : '/api/dashboard/stats';
+    const requestPromise = (async () => {
+        try {
+            const payload = await fetchAPI(query);
+            dashboardStatsCache = { key: cacheKey, timestamp: Date.now(), data: payload };
+            return payload;
+        } finally {
+            if (dashboardStatsRequestState && dashboardStatsRequestState.key === cacheKey) {
+                dashboardStatsRequestState = null;
+            }
+        }
+    })();
+
+    dashboardStatsRequestState = { key: cacheKey, promise: requestPromise };
+    return requestPromise;
+}
+
+async function refreshDashboardStatsForCurrentSelection(options = {}) {
+    const { forceRefresh = false, fallbackData = null } = options;
+    try {
+        const stats = await fetchDashboardStatsForSelection({ forceRefresh });
+        if (stats) {
+            updateDashboardStats(stats);
+        } else if (fallbackData) {
+            updateDashboardStats(fallbackData);
+        }
+        return stats;
+    } catch (error) {
+        console.warn('Unable to refresh dashboard stats for selection', error);
+        if (fallbackData) {
+            updateDashboardStats(fallbackData);
+        }
+        throw error;
+    }
+}
 
 function formatInterfaceRole(role) {
     if (!role) {
@@ -4864,6 +4990,34 @@ function getActiveWifiInterface() {
     return null;
 }
 
+function getNetworkSlugForInterface(interfaceName) {
+    if (!interfaceName) {
+        return null;
+    }
+    const meta = Array.isArray(wifiInterfaceMetadata)
+        ? wifiInterfaceMetadata.find(entry => entry && entry.name === interfaceName)
+        : null;
+    if (!meta) {
+        return null;
+    }
+    if (meta.network_slug) {
+        return meta.network_slug;
+    }
+    if (meta.connected_ssid) {
+        return slugifyNetworkIdentifier(meta.connected_ssid);
+    }
+    return null;
+}
+
+function getSelectedDashboardNetworkKey() {
+    const iface = getActiveWifiInterface();
+    const slug = getNetworkSlugForInterface(iface);
+    if (slug) {
+        return { interface: iface, network: slug };
+    }
+    return { interface: iface, network: null };
+}
+
 function updateWifiInterfaceSwitchActiveState(activeInterface) {
     const buttonsContainer = document.getElementById('wifi-interface-switch-buttons');
     if (!buttonsContainer) return;
@@ -4938,7 +5092,7 @@ function renderDashboardInterfaceSwitch(state) {
 }
 
 function renderWifiInterfaceSwitch(interfaces = []) {
-    wifiInterfaceMetadata = Array.isArray(interfaces) ? interfaces : [];
+    setWifiInterfaceMetadata(interfaces);
     const switchContainer = document.getElementById('wifi-interface-switch');
     const buttonsContainer = document.getElementById('wifi-interface-switch-buttons');
     if (!switchContainer || !buttonsContainer) {
@@ -5026,6 +5180,13 @@ function setSelectedWifiInterface(interfaceName, options = {}) {
     updateWifiInterfaceSwitchActiveState(selectedWifiInterface);
     updateDashboardInterfaceSwitchActiveState(selectedWifiInterface);
 
+    if (hasChanged) {
+        clearDashboardStatsCache();
+        refreshDashboardStatsForCurrentSelection({ forceRefresh: true }).catch(err => {
+            console.debug('Dashboard stats refresh failed after interface change', err);
+        });
+    }
+
     if (!options.skipRefresh && hasChanged) {
         if (!displayCachedWifiNetworks(selectedWifiInterface)) {
             const networksList = document.getElementById('wifi-networks-list');
@@ -5057,7 +5218,7 @@ async function loadWifiInterfaces() {
         let defaultInterface = null;
         
         if (data && Array.isArray(data.interfaces) && data.interfaces.length > 0) {
-            wifiInterfaceMetadata = data.interfaces;
+            setWifiInterfaceMetadata(data.interfaces);
             interfaceSelect.innerHTML = '';
             data.interfaces.forEach(iface => {
                 const option = document.createElement('option');
@@ -5111,6 +5272,7 @@ async function loadWifiInterfaces() {
         if (interfaceSelect) {
             interfaceSelect.innerHTML = '<option value="wlan0">wlan0 (default)</option>';
         }
+        setWifiInterfaceMetadata([]);
         renderWifiInterfaceSwitch([]);
     }
 }
@@ -7148,29 +7310,16 @@ async function refreshDashboard() {
     try {
         const data = await fetchAPI('/api/status');
         updateDashboardStatus(data);
+        await refreshDashboardStatsForCurrentSelection({ forceRefresh: true, fallbackData: data });
     } catch (error) {
         console.error('Error refreshing dashboard:', error);
     }
 }
 
 function updateDashboardStatus(data) {
-    // If the WebSocket data has zero counts, fetch from our dashboard API instead
-    if ((data.target_count || 0) === 0 && (data.port_count || 0) === 0 &&
-        (data.vulnerability_count || 0) === 0 && (data.credential_count || 0) === 0) {
-
-        // Fetch proper dashboard stats
-        fetchAPI('/api/dashboard/stats')
-            .then(stats => {
-                updateDashboardStats(stats);
-            })
-            .catch(() => {
-                // Fallback to WebSocket data if API fails
-                updateDashboardStats(data);
-            });
-    } else {
-        // Use WebSocket data if it has non-zero values
+    refreshDashboardStatsForCurrentSelection({ fallbackData: data }).catch(() => {
         updateDashboardStats(data);
-    }
+    });
 
     // Update status - use the actual e-paper display text
     updateElement('Ragnar-status', data.ragnar_status || 'IDLE');

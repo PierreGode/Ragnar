@@ -28,7 +28,7 @@ import ipaddress
 import socket
 import traceback
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from email.utils import format_datetime
 from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response
 from flask_socketio import SocketIO, emit
@@ -55,7 +55,7 @@ from threat_intelligence import ThreatIntelligenceFusion
 from lynis_parser import parse_lynis_dat
 from actions.lynis_pentest_ssh import LynisPentestSSH
 from actions.connector_utils import CredentialChecker
-from db_manager import get_db
+from db_manager import get_db, DatabaseManager
 
 # Initialize logger
 logger = Logger(name="webapp_modern.py", level=logging.DEBUG)
@@ -1300,6 +1300,174 @@ def sync_all_counts():
             shared_data.last_sync_timestamp = last_sync_time
             duration = last_sync_time - start_time
             logger.debug(f"sync_all_counts() finished in {duration:.2f}s")
+
+
+def _get_network_context_snapshot(target_identifier: Optional[str]) -> Dict[str, str]:
+    """Return a storage context for the requested SSID/slug without mutating global state."""
+    manager = getattr(shared_data, 'storage_manager', None)
+    if not manager:
+        raise RuntimeError('Network storage manager unavailable')
+
+    identifier = (target_identifier or '').strip()
+    if not identifier or identifier.lower() in {'current', 'active'}:
+        return manager.get_context_snapshot(shared_data.active_network_ssid)
+    return manager.get_context_snapshot(identifier)
+
+
+def _split_port_field(port_field: Optional[str]) -> List[str]:
+    if not port_field:
+        return []
+    normalized = str(port_field).replace(';', ',')
+    ports = []
+    for token in normalized.split(','):
+        value = token.strip()
+        if not value or value == '0':
+            continue
+        if value.isdigit():
+            ports.append(value)
+        else:
+            match = re.match(r'^(\d+)', value)
+            if match:
+                ports.append(match.group(1))
+    return ports
+
+
+def _count_credentials_in_dir(directory: Optional[str]) -> int:
+    if not directory or not os.path.isdir(directory):
+        return 0
+    total = 0
+    for filename in os.listdir(directory):
+        if not filename.endswith('.csv') or filename.startswith('.'):
+            continue
+        filepath = os.path.join(directory, filename)
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as handle:
+                for index, line in enumerate(handle):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if index == 0 and ('mac' in line.lower() or 'user' in line.lower()):
+                        continue
+                    total += 1
+        except (OSError, IOError):
+            continue
+    return total
+
+
+def _load_intelligence_vulnerability_counts(intelligence_dir: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    if not intelligence_dir:
+        return None, None
+    findings_file = os.path.join(intelligence_dir, 'active_findings.json')
+    if not os.path.exists(findings_file):
+        return None, None
+    try:
+        with open(findings_file, 'r', encoding='utf-8') as handle:
+            payload = json.load(handle)
+        counts = payload.get('counts') or {}
+        vulnerabilities = safe_int(counts.get('vulnerabilities'), None)
+        affected = safe_int(counts.get('affected_hosts') or counts.get('hosts'), None)
+        return vulnerabilities, affected
+    except Exception as exc:
+        logger.debug(f"Unable to read network intelligence findings: {exc}")
+        return None, None
+
+
+def _calculate_dashboard_stats_from_context(context: Dict[str, str]) -> Dict:
+    network_dir = context.get('network_dir')
+    db_path = context.get('db_path')
+    credentials_dir = context.get('credentials_dir')
+    intelligence_dir = context.get('intelligence_dir')
+    stats = {
+        'network_ssid': context.get('ssid') or 'default',
+        'network_slug': context.get('slug'),
+        'target_count': 0,
+        'active_target_count': 0,
+        'inactive_target_count': 0,
+        'total_target_count': 0,
+        'new_target_count': 0,
+        'lost_target_count': 0,
+        'new_target_ips': [],
+        'lost_target_ips': [],
+        'port_count': 0,
+        'vulnerability_count': 0,
+        'vulnerable_hosts_count': 0,
+        'credential_count': 0,
+        'level': safe_int(shared_data.levelnbr),
+        'points': safe_int(shared_data.coinnbr),
+        'scanned_network_count': safe_int(getattr(shared_data, 'scanned_networks_count', shared_data._calculate_scanned_networks_count()), 0),
+        'last_sync_timestamp': None,
+        'last_sync_iso': None,
+        'last_sync_age_seconds': None,
+    }
+
+    hosts = []
+    if db_path and os.path.exists(db_path):
+        try:
+            temp_db = DatabaseManager(db_path=db_path, currentdir=shared_data.currentdir, data_root=network_dir)
+            hosts = temp_db.get_all_hosts()
+        except Exception as exc:
+            logger.error(f"Unable to read hosts for network context {context.get('slug')}: {exc}")
+
+    max_failed = safe_int(shared_data.config.get('network_max_failed_pings', 15), 15)
+    max_failed = max(1, max_failed)
+
+    vulnerable_hosts = set()
+    vuln_count_override, vuln_hosts_override = _load_intelligence_vulnerability_counts(intelligence_dir)
+
+    for host in hosts:
+        stats['total_target_count'] += 1
+        status = (host.get('status') or '').lower()
+        failed = safe_int(host.get('failed_ping_count'), 0)
+        is_active = status == 'alive' or failed < max_failed
+        if is_active:
+            stats['active_target_count'] += 1
+            stats['port_count'] += len(_split_port_field(host.get('ports')))
+        else:
+            stats['inactive_target_count'] += 1
+
+        vuln_field = host.get('vulnerabilities') or host.get('nmap_vuln_scanner') or host.get('scanner_status')
+        if vuln_field:
+            text = str(vuln_field).strip()
+            if text and text.lower() not in {'none', 'clean', 'ok', '0', '[]'}:
+                cves = re.findall(r'CVE-\d{4}-\d+', text)
+                stats['vulnerability_count'] += len(cves) if cves else 1
+                host_label = host.get('ip') or host.get('hostname') or host.get('mac')
+                if host_label:
+                    vulnerable_hosts.add(host_label)
+
+    if vuln_count_override is not None:
+        stats['vulnerability_count'] = vuln_count_override
+    if vuln_hosts_override is not None:
+        stats['vulnerable_hosts_count'] = vuln_hosts_override
+    else:
+        stats['vulnerable_hosts_count'] = len(vulnerable_hosts)
+
+    stats['credential_count'] = _count_credentials_in_dir(credentials_dir)
+    stats['target_count'] = stats['active_target_count']
+
+    # Derive timestamps from DB modification time when available
+    timestamp_source = None
+    if db_path and os.path.exists(db_path):
+        try:
+            timestamp_source = os.path.getmtime(db_path)
+        except OSError:
+            timestamp_source = None
+    if timestamp_source is None:
+        timestamp_source = time.time()
+    stats['last_sync_timestamp'] = timestamp_source
+    try:
+        stats['last_sync_iso'] = datetime.fromtimestamp(timestamp_source).isoformat()
+        stats['last_sync_age_seconds'] = max(time.time() - timestamp_source, 0)
+    except Exception:
+        stats['last_sync_iso'] = None
+        stats['last_sync_age_seconds'] = None
+
+    return stats
+
+
+def _collect_dashboard_stats_for_network(identifier: Optional[str]) -> Dict:
+    context = _get_network_context_snapshot(identifier)
+    return _calculate_dashboard_stats_from_context(context)
 
 
 def safe_int(value, default=0):
@@ -10294,66 +10462,10 @@ def get_dashboard_stats():
     """Get dashboard statistics using synchronized data from shared_data to ensure consistency.
     DEPRECATED: Use /api/dashboard/quick for faster loading."""
     try:
-        # OPTIMIZATION: Removed check_and_handle_network_switch() - not needed on every request
-        # Background thread handles this periodically
-        
-        # OPTIMIZATION: Removed ensure_recent_sync() - background thread keeps data fresh
-        # No need to block requests with sync operations
-        
-        # Use the synchronized data from shared_data instead of re-calculating
-        # This prevents inconsistencies between different counting methods
-        current_time = time.time()
-        last_sync_ts = getattr(shared_data, 'last_sync_timestamp', last_sync_time)
-        last_sync_iso = None
-        last_sync_age = None
-
-        if last_sync_ts:
-            try:
-                last_sync_iso = datetime.fromtimestamp(last_sync_ts).isoformat()
-                last_sync_age = max(current_time - last_sync_ts, 0.0)
-            except Exception:
-                last_sync_iso = None
-
-        # Use the already-synchronized counts from shared_data to ensure consistency
-        # across all endpoints (prevents the flickering between different counts)
-        active_target_count = safe_int(shared_data.targetnbr)
-        total_target_count = safe_int(shared_data.total_targetnbr)
-        inactive_target_count = safe_int(shared_data.inactive_targetnbr)
-        
-        # If we don't have proper total/inactive counts, calculate them from active count
-        if total_target_count == 0 and active_target_count > 0:
-            total_target_count = active_target_count
-            inactive_target_count = 0
-        elif inactive_target_count == 0 and total_target_count > active_target_count:
-            inactive_target_count = total_target_count - active_target_count
-
-        logger.debug(f"[DASHBOARD STATS] Using synchronized counts: active={active_target_count}, total={total_target_count}, inactive={inactive_target_count}")
-
-        stats = {
-            'target_count': active_target_count,
-            'active_target_count': active_target_count,
-            'inactive_target_count': inactive_target_count,
-            'total_target_count': total_target_count,
-            'new_target_count': safe_int(getattr(shared_data, 'new_targets', 0)),
-            'lost_target_count': safe_int(getattr(shared_data, 'lost_targets', 0)),
-            'new_target_ips': getattr(shared_data, 'new_target_ips', []),
-            'lost_target_ips': getattr(shared_data, 'lost_target_ips', []),
-            'port_count': safe_int(shared_data.portnbr),
-            'vulnerability_count': safe_int(shared_data.vulnnbr),
-            'vulnerable_hosts_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
-            'vulnerable_host_count': safe_int(getattr(shared_data, 'vulnerable_host_count', 0)),
-            'credential_count': safe_int(shared_data.crednbr),
-            'level': safe_int(shared_data.levelnbr),
-            'points': safe_int(shared_data.coinnbr),
-            'coins': safe_int(shared_data.coinnbr),
-            'scanned_network_count': safe_int(getattr(shared_data, 'scanned_networks_count', 0)),
-            'last_sync_timestamp': last_sync_ts,
-            'last_sync_iso': last_sync_iso,
-            'last_sync_age_seconds': last_sync_age
-        }
-
+        requested_network = request.args.get('network') or request.args.get('ssid') or request.args.get('slug')
+        identifier = requested_network if requested_network else None
+        stats = _collect_dashboard_stats_for_network(identifier)
         response = jsonify(stats)
-        # Cache for 3 seconds for better performance
         response.headers['Cache-Control'] = 'public, max-age=3'
         return response
     except Exception as e:
