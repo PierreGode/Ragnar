@@ -29,8 +29,9 @@ import socket
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List, Tuple
+from contextlib import contextmanager
 from email.utils import format_datetime
-from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response
+from flask import Flask, render_template, jsonify, request, send_from_directory, Response, make_response, g
 from flask_socketio import SocketIO, emit
 try:
     from flask_cors import CORS  # type: ignore
@@ -83,8 +84,8 @@ try:
     threat_intelligence = ThreatIntelligenceFusion(shared_data)
     shared_data.threat_intelligence = threat_intelligence  # type: ignore
     logger.info("Threat intelligence system initialized")
-except Exception as e:
-    logger.error(f"Failed to initialize threat intelligence: {e}")
+except Exception as exc:
+    logger.error(f"Failed to initialize threat intelligence: {exc}")
     threat_intelligence = None
     shared_data.threat_intelligence = None  # type: ignore
 
@@ -117,14 +118,11 @@ def _normalize_value(value, default='Unknown'):
     """Normalize a value, handling nan, None, empty strings, etc."""
     if value is None:
         return default
-    
-    # Convert to string
+
     str_value = str(value).strip()
-    
-    # Check for pandas nan or various empty representations
     if not str_value or str_value.lower() in ['nan', 'none', 'null', '']:
         return default
-    
+
     return str_value
 
 
@@ -206,6 +204,63 @@ def build_pseudo_mac_from_ip(ip):
     except Exception:
         pass
     return "00:00:00:00:00:00"
+
+
+def _extract_requested_network_identifier() -> Optional[str]:
+    """Read a requested network identifier from common query params."""
+    if not request:
+        return None
+    for key in ('network', 'ssid', 'slug'):
+        value = request.args.get(key)
+        if value:
+            value = value.strip()
+            if value:
+                return value
+    return None
+
+
+def _normalize_network_slug(identifier: Optional[str]) -> Optional[str]:
+    """Normalize a requested network identifier to a storage slug."""
+    if not identifier:
+        return None
+    candidate = identifier.strip()
+    if not candidate:
+        return None
+
+    manager = getattr(shared_data, 'storage_manager', None)
+    slugify = getattr(manager, '_slugify', None) if manager else None
+    if callable(slugify):
+        try:
+            return slugify(candidate)
+        except Exception as exc:
+            logger.debug(f"Failed to slugify network identifier '{candidate}': {exc}")
+
+    simplified = re.sub(r'[^a-z0-9]+', '_', candidate.lower()).strip('_')
+    return simplified or candidate.lower()
+
+
+@contextmanager
+def _network_context_from_request():
+    """Temporarily switch shared data to the network requested by the client."""
+    identifier = _extract_requested_network_identifier()
+    slug = _normalize_network_slug(identifier)
+    registry = getattr(shared_data, 'context_registry', None)
+
+    if slug and registry:
+        try:
+            with registry.activate(slug):
+                g.requested_network_slug = slug
+                yield slug
+                return
+        except Exception as exc:
+            logger.warning(f"Unable to activate network context '{slug}': {exc}")
+        finally:
+            try:
+                g.pop('requested_network_slug', None)
+            except Exception:
+                pass
+
+    yield None
 
 
 def run_targeted_arp_scan(ip, interface=DEFAULT_ARP_SCAN_INTERFACE):
@@ -2756,215 +2811,219 @@ def load_persistent_network_data():
 @app.route('/api/network/stable')
 def get_stable_network_data():
     """Get stable, aggregated network data for the Network tab from SQLite database"""
-    try:
-        db = get_db(currentdir=shared_data.currentdir)
+    with _network_context_from_request():
+        try:
+            db = get_db(currentdir=shared_data.currentdir)
         
-        # Get all hosts from SQLite database
-        hosts = db.get_all_hosts()
+            # Get all hosts from SQLite database
+            hosts = db.get_all_hosts()
         
-        # Also get any recent ARP scan cache data for real-time enrichment
-        recent_arp_data = network_scan_cache.get('arp_hosts', {})
+            # Also get any recent ARP scan cache data for real-time enrichment
+            recent_arp_data = network_scan_cache.get('arp_hosts', {})
         
-        logger.info(f"Loaded {len(hosts)} entries from SQLite database for stable API")
+            logger.info(f"Loaded {len(hosts)} entries from SQLite database for stable API")
         
-        # Merge and enrich the data
-        enriched_hosts = []
-        processed_ips = set()
+            # Merge and enrich the data
+            enriched_hosts = []
+            processed_ips = set()
         
-        # Process SQLite hosts
-        for host in hosts:
-            ip = host.get('ip', '').strip()
-            # Skip if empty, already processed, or is STANDALONE
-            if not ip or ip in processed_ips or ip == 'STANDALONE':
-                continue
+            # Process SQLite hosts
+            for host in hosts:
+                ip = host.get('ip', '').strip()
+                # Skip if empty, already processed, or is STANDALONE
+                if not ip or ip in processed_ips or ip == 'STANDALONE':
+                    continue
                 
-            processed_ips.add(ip)
+                processed_ips.add(ip)
             
-            # Parse ports from semicolon-separated string to list
-            ports_str = host.get('ports', '')
-            if ports_str:
-                ports = [p.strip() for p in ports_str.split(';') if p.strip()]
-            else:
-                ports = []
+                # Parse ports from semicolon-separated string to list
+                ports_str = host.get('ports', '')
+                if ports_str:
+                    ports = [p.strip() for p in ports_str.split(';') if p.strip()]
+                else:
+                    ports = []
             
-            # Determine status based on SQLite status field
-            status = host.get('status', 'unknown')
-            if status == 'alive':
-                host_status = 'up'
-            elif status == 'degraded':
-                host_status = 'degraded'
-            else:
-                host_status = 'unknown'
+                # Determine status based on SQLite status field
+                status = host.get('status', 'unknown')
+                if status == 'alive':
+                    host_status = 'up'
+                elif status == 'degraded':
+                    host_status = 'degraded'
+                else:
+                    host_status = 'unknown'
             
-            host_data = {
-                'ip': ip,
-                'hostname': _normalize_value(host.get('hostname'), 'Unknown'),
-                'mac': _normalize_value(host.get('mac'), 'Unknown'),
-                'status': host_status,
-                'ports': ';'.join(ports) if ports else 'Unknown',
-                'vulnerabilities': _normalize_value(host.get('nmap_vuln_scanner'), '0'),
-                'last_scan': _normalize_value(host.get('last_seen'), 'Never'),
-                'first_seen': _normalize_value(host.get('first_seen'), 'Unknown'),
-                'os': 'Unknown',  # TODO: Add OS detection to database
-                'services': 'Unknown',  # TODO: Add services to database
-                'failed_pings': host.get('failed_ping_count', 0),
-                'source': 'sqlite'
-            }
-            
-            # Enhance with recent ARP data if available
-            if ip in recent_arp_data:
-                arp_entry = recent_arp_data[ip]
-                if arp_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
-                    host_data['mac'] = arp_entry['mac']
-                if arp_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
-                    host_data['hostname'] = arp_entry['hostname']
-                if host_status != 'up':  # ARP means it's definitely up
-                    host_data['status'] = 'up'
-                host_data['source'] = 'sqlite+arp'
-            
-            enriched_hosts.append(host_data)
-        
-        # Add any new ARP discoveries not in database
-        for ip, arp_entry in recent_arp_data.items():
-            if ip not in processed_ips:
                 host_data = {
                     'ip': ip,
-                    'hostname': arp_entry.get('hostname', 'Unknown'),
-                    'mac': arp_entry.get('mac', 'Unknown'),
-                    'status': 'up',
-                    'ports': 'Scanning...',
-                    'vulnerabilities': '0',
-                    'last_scan': 'Recently discovered',
-                    'first_seen': 'Recent',
-                    'os': 'Unknown',
-                    'services': 'Unknown',
-                    'failed_pings': 0,
-                    'source': 'arp_discovery'
+                    'hostname': _normalize_value(host.get('hostname'), 'Unknown'),
+                    'mac': _normalize_value(host.get('mac'), 'Unknown'),
+                    'status': host_status,
+                    'ports': ';'.join(ports) if ports else 'Unknown',
+                    'vulnerabilities': _normalize_value(host.get('nmap_vuln_scanner'), '0'),
+                    'last_scan': _normalize_value(host.get('last_seen'), 'Never'),
+                    'first_seen': _normalize_value(host.get('first_seen'), 'Unknown'),
+                    'os': 'Unknown',  # TODO: Add OS detection to database
+                    'services': 'Unknown',  # TODO: Add services to database
+                    'failed_pings': host.get('failed_ping_count', 0),
+                    'source': 'sqlite'
                 }
+            
+                # Enhance with recent ARP data if available
+                if ip in recent_arp_data:
+                    arp_entry = recent_arp_data[ip]
+                    if arp_entry.get('mac') and host_data['mac'] in ['Unknown', '00:00:00:00:00:00', '']:
+                        host_data['mac'] = arp_entry['mac']
+                    if arp_entry.get('hostname') and host_data['hostname'] in ['Unknown', '']:
+                        host_data['hostname'] = arp_entry['hostname']
+                    if host_status != 'up':  # ARP means it's definitely up
+                        host_data['status'] = 'up'
+                    host_data['source'] = 'sqlite+arp'
+            
                 enriched_hosts.append(host_data)
         
-        logger.info(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
+            # Add any new ARP discoveries not in database
+            for ip, arp_entry in recent_arp_data.items():
+                if ip not in processed_ips:
+                    host_data = {
+                        'ip': ip,
+                        'hostname': arp_entry.get('hostname', 'Unknown'),
+                        'mac': arp_entry.get('mac', 'Unknown'),
+                        'status': 'up',
+                        'ports': 'Scanning...',
+                        'vulnerabilities': '0',
+                        'last_scan': 'Recently discovered',
+                        'first_seen': 'Recent',
+                        'os': 'Unknown',
+                        'services': 'Unknown',
+                        'failed_pings': 0,
+                        'source': 'arp_discovery'
+                    }
+                    enriched_hosts.append(host_data)
         
-        # Sort by IP address for consistent display
-        def safe_ip_sort_key(host):
-            ip = host.get('ip', '')
-            try:
-                # Try to parse as IP address
-                return (0, tuple(map(int, ip.split('.'))))
-            except (ValueError, AttributeError):
-                # Non-IP values sort to the end
-                return (1, ip)
+            logger.info(f"Returning {len(enriched_hosts)} enriched hosts from SQLite database")
         
-        enriched_hosts.sort(key=safe_ip_sort_key)
+            # Sort by IP address for consistent display
+            def safe_ip_sort_key(host):
+                ip = host.get('ip', '')
+                try:
+                    # Try to parse as IP address
+                    return (0, tuple(map(int, ip.split('.'))))
+                except (ValueError, AttributeError):
+                    # Non-IP values sort to the end
+                    return (1, ip)
         
-        response = jsonify({
-            'success': True,
-            'hosts': enriched_hosts,
-            'count': len(enriched_hosts),
-            'timestamp': datetime.now().isoformat(),
-            'source': 'sqlite_database'
-        })
-        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
-        return response
+            enriched_hosts.sort(key=safe_ip_sort_key)
         
-    except Exception as e:
-        logger.error(f"Error getting stable network data from SQLite: {e}")
-        traceback.print_exc()
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'hosts': [],
-            'count': 0
-        }), 500
+            response = jsonify({
+                'success': True,
+                'hosts': enriched_hosts,
+                'count': len(enriched_hosts),
+                'timestamp': datetime.now().isoformat(),
+                'source': 'sqlite_database'
+            })
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            return response
+        
+        except Exception as e:
+            logger.error(f"Error getting stable network data from SQLite: {e}")
+            traceback.print_exc()
+            return jsonify({
+                'success': False,
+                'error': str(e),
+                'hosts': [],
+                'count': 0
+            }), 500
 
 @app.route('/api/network')
 def get_network():
     """Get network scan data from SQLite database - returns ALL hosts (alive and degraded)."""
-    try:
-        # Get all hosts from SQLite database
-        hosts = shared_data.db.get_all_hosts()
+    with _network_context_from_request():
+        try:
+            # Get all hosts from SQLite database
+            hosts = shared_data.db.get_all_hosts()
         
-        logger.debug(f"[API /api/network] Retrieved {len(hosts)} total hosts from database")
+            logger.debug(f"[API /api/network] Retrieved {len(hosts)} total hosts from database")
         
-        # Convert to format expected by frontend
-        network_data = []
-        alive_count = 0
-        degraded_count = 0
+            # Convert to format expected by frontend
+            network_data = []
+            alive_count = 0
+            degraded_count = 0
         
-        for host in hosts:
-            # Parse ports from comma-separated string to list
-            ports_str = host.get('ports', '')
-            ports = [p.strip() for p in ports_str.split(',') if p.strip()] if ports_str else []
+            for host in hosts:
+                # Parse ports from comma-separated string to list
+                ports_str = host.get('ports', '')
+                ports = [p.strip() for p in ports_str.split(',') if p.strip()] if ports_str else []
             
-            status = host.get('status', 'unknown')
-            if status == 'alive':
-                alive_count += 1
-            elif status == 'degraded':
-                degraded_count += 1
+                status = host.get('status', 'unknown')
+                if status == 'alive':
+                    alive_count += 1
+                elif status == 'degraded':
+                    degraded_count += 1
             
-            network_data.append({
-                'mac': host.get('mac', ''),
-                'ip': host.get('ip', ''),
-                'hostname': host.get('hostname', ''),
-                'status': status,
-                'ports': ports,
-                'failed_pings': host.get('failed_ping_count', 0),
-                'last_seen': host.get('last_seen', ''),
-                # Action statuses
-                'scanner': host.get('scanner_status', ''),
-                'network_profile': host.get('network_profile', ''),
-                'ssh_connector': host.get('ssh_connector', ''),
-                'rdp_connector': host.get('rdp_connector', ''),
-                'ftp_connector': host.get('ftp_connector', ''),
-                'smb_connector': host.get('smb_connector', ''),
-                'telnet_connector': host.get('telnet_connector', ''),
-                'sql_connector': host.get('sql_connector', ''),
-                'steal_files_ssh': host.get('steal_files_ssh', ''),
-                'steal_files_rdp': host.get('steal_files_rdp', ''),
-                'steal_files_ftp': host.get('steal_files_ftp', ''),
-                'steal_files_smb': host.get('steal_files_smb', ''),
-                'steal_files_telnet': host.get('steal_files_telnet', ''),
-                'steal_data_sql': host.get('steal_data_sql', ''),
-                'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
-                'notes': host.get('notes', '')
-            })
+                network_data.append({
+                    'mac': host.get('mac', ''),
+                    'ip': host.get('ip', ''),
+                    'hostname': host.get('hostname', ''),
+                    'status': status,
+                    'ports': ports,
+                    'failed_pings': host.get('failed_ping_count', 0),
+                    'last_seen': host.get('last_seen', ''),
+                    # Action statuses
+                    'scanner': host.get('scanner_status', ''),
+                    'network_profile': host.get('network_profile', ''),
+                    'ssh_connector': host.get('ssh_connector', ''),
+                    'rdp_connector': host.get('rdp_connector', ''),
+                    'ftp_connector': host.get('ftp_connector', ''),
+                    'smb_connector': host.get('smb_connector', ''),
+                    'telnet_connector': host.get('telnet_connector', ''),
+                    'sql_connector': host.get('sql_connector', ''),
+                    'steal_files_ssh': host.get('steal_files_ssh', ''),
+                    'steal_files_rdp': host.get('steal_files_rdp', ''),
+                    'steal_files_ftp': host.get('steal_files_ftp', ''),
+                    'steal_files_smb': host.get('steal_files_smb', ''),
+                    'steal_files_telnet': host.get('steal_files_telnet', ''),
+                    'steal_data_sql': host.get('steal_data_sql', ''),
+                    'nmap_vuln_scanner': host.get('nmap_vuln_scanner', ''),
+                    'notes': host.get('notes', '')
+                })
         
-        logger.info(f"[API /api/network] Returning {len(network_data)} hosts (alive: {alive_count}, degraded: {degraded_count})")
+            logger.info(f"[API /api/network] Returning {len(network_data)} hosts (alive: {alive_count}, degraded: {degraded_count})")
         
-        response = jsonify(network_data)
-        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-        response.headers['Pragma'] = 'no-cache'
-        response.headers['Expires'] = '0'
-        return response
+            response = jsonify(network_data)
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+            return response
 
-    except Exception as e:
-        logger.error(f"Error getting network data from SQLite: {e}")
-        logger.debug(f"Traceback: {traceback.format_exc()}")
-        return jsonify({'error': str(e)}), 500
+        except Exception as e:
+            logger.error(f"Error getting network data from SQLite: {e}")
+            logger.debug(f"Traceback: {traceback.format_exc()}")
+            return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/credentials')
 def get_credentials():
     """Get discovered credentials"""
-    try:
-        credentials = web_utils.get_all_credentials()
-        return jsonify(credentials)
-    except Exception as e:
-        logger.error(f"Error getting credentials: {e}")
-        return jsonify({'error': str(e)}), 500
+    with _network_context_from_request():
+        try:
+            credentials = web_utils.get_all_credentials()
+            return jsonify(credentials)
+        except Exception as e:
+            logger.error(f"Error getting credentials: {e}")
+            return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/loot')
 def get_loot():
     """Get stolen data/loot"""
-    try:
-        loot = web_utils.get_loot_data()
-        return jsonify(loot)
-    except Exception as e:
-        logger.error(f"Error getting loot: {e}")
-        return jsonify({'error': str(e)}), 500
+    with _network_context_from_request():
+        try:
+            loot = web_utils.get_loot_data()
+            return jsonify(loot)
+        except Exception as e:
+            logger.error(f"Error getting loot: {e}")
+            return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/vulnerability-report/<path:filename>')
@@ -2991,368 +3050,369 @@ def download_vulnerability_report(filename):
 @app.route('/api/vulnerability-intel')
 def get_vulnerability_intel():
     """Get interesting intelligence from scan files (not vulnerabilities - those are in threat intel)"""
-    try:
-        vuln_dir = os.path.join('data', 'output', 'vulnerabilities')
-        
-        if not os.path.exists(vuln_dir):
-            return jsonify({
-                'scans': [],
-                'statistics': {
-                    'total_scanned': 0,
-                    'interesting_hosts': 0,
-                    'services_with_intel': 0,
-                    'script_outputs': 0
-                }
-            })
-        
-        scans = []
-        stats = {
-            'total_scanned': 0,
-            'interesting_hosts': 0,
-            'services_with_intel': 0,
-            'script_outputs': 0
-        }
+    with _network_context_from_request():
+        try:
+            vuln_dir = os.path.join('data', 'output', 'vulnerabilities')
 
-        def format_lynis_section(title, entries, limit=25):
-            entries = list(entries or [])
-            if not entries:
-                return None
-
-            lines = []
-            for entry in entries[:limit]:
-                parts = []
-                code = entry.get('code') or entry.get('package') or title.upper()
-                if code:
-                    parts.append(f"[{code}]")
-                message = entry.get('message') or entry.get('package') or entry.get('raw') or ''
-                if message:
-                    parts.append(message)
-                detail = entry.get('detail') or entry.get('version') or ''
-                if detail:
-                    parts.append(detail)
-                remediation = entry.get('remediation') or entry.get('reference') or ''
-                if remediation:
-                    parts.append(f"Fix: {remediation}")
-                line = ' | '.join(part for part in parts if part)
-                if line:
-                    lines.append(line)
-
-            if len(entries) > limit:
-                lines.append(f"...and {len(entries) - limit} more")
-
-            if not lines:
-                return None
-
-            return {
-                'name': title,
-                'output': '\n'.join(lines)
-            }
-        
-        vuln_files = os.listdir(vuln_dir)
-
-        # Process all scan files
-        for filename in vuln_files:
-            if filename.endswith('_vuln_scan.txt'):
-                file_path = os.path.join(vuln_dir, filename)
-                stats['total_scanned'] += 1
-                
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        content = f.read()
-                    
-                    # Extract host information
-                    parts = filename.split('_')
-                    ip = parts[1] if len(parts) > 1 else 'Unknown'
-                    
-                    hostname = 'Unknown'
-                    hostname_match = re.search(r'Nmap scan report for ([^\s]+)\s+\(([^\)]+)\)', content)
-                    if hostname_match:
-                        hostname = hostname_match.group(1)
-                        ip = hostname_match.group(2)
-                    else:
-                        hostname_match = re.search(r'Nmap scan report for ([^\s]+)', content)
-                        if hostname_match:
-                            potential_host = hostname_match.group(1)
-                            if not re.match(r'^\d+\.\d+\.\d+\.\d+$', potential_host):
-                                hostname = potential_host
-                    
-                    # Extract interesting service information
-                    services = []
-                    
-                    # Parse port/service lines with version info
-                    port_lines = re.findall(r'(\d+/tcp)\s+open\s+(\S+)(?:\s+(.+?))?(?=\n|$)', content)
-                    
-                    for port, service_name, version_info in port_lines:
-                        service_data = {
-                            'port': port,
-                            'service': service_name,
-                            'version': version_info.strip() if version_info else '',
-                            'scripts': []
-                        }
-                        
-                        # Look for script output after this port
-                        # Find the section between this port and the next port or end
-                        port_num = port.split('/')[0]
-                        pattern = rf'{re.escape(port)}.*?(?=\n\d+/tcp|\nService Info:|\nNmap done:|$)'
-                        port_section_match = re.search(pattern, content, re.DOTALL)
-                        
-                        if port_section_match:
-                            port_section = port_section_match.group(0)
-                            
-                            # Extract script outputs (lines starting with |)
-                            script_lines = re.findall(r'^\|(.+)$', port_section, re.MULTILINE)
-                            
-                            if script_lines:
-                                # Filter out lines with PACKETSTORM, vulners, CVE, exploit references
-                                filtered_lines = []
-                                for line in script_lines:
-                                    line_lower = line.lower()
-                                    # Skip lines containing vulnerability/exploit references
-                                    if any(keyword in line_lower for keyword in ['packetstorm', 'vulners.com', 'cve-', 'exploit', 'https://']):
-                                        continue
-                                    # Skip lines that look like vulnerability IDs or scores
-                                    if re.search(r'\d+\.\d+\s+https?://', line):
-                                        continue
-                                    # Skip nmap footer messages
-                                    if 'service detection performed' in line_lower:
-                                        continue
-                                    if 'please report any incorrect results' in line_lower:
-                                        continue
-                                    if 'nmap.org/submit' in line_lower:
-                                        continue
-                                    filtered_lines.append(line)
-                                
-                                script_lines = filtered_lines
-                                
-                                # Group script output by script name
-                                current_script = None
-                                script_content = []
-                                
-                                for line in script_lines:
-                                    line = line.strip()
-                                    
-                                    # Check if this is a script name line (ends with :)
-                                    if ':' in line and not line.startswith('_') and not line.startswith(' '):
-                                        # Save previous script if exists
-                                        if current_script and script_content:
-                                            service_data['scripts'].append({
-                                                'name': current_script,
-                                                'output': '\n'.join(script_content)
-                                            })
-                                            stats['script_outputs'] += 1
-                                        
-                                        # Start new script
-                                        script_name_match = re.match(r'^\s*(\S+?):\s*(.*)', line)
-                                        if script_name_match:
-                                            script_name = script_name_match.group(1)
-                                            # Skip vulnerability-related scripts
-                                            if script_name.lower() in ['vulners', 'vulns']:
-                                                current_script = None
-                                                script_content = []
-                                                continue
-                                            current_script = script_name
-                                            first_content = script_name_match.group(2)
-                                            script_content = [first_content] if first_content else []
-                                    else:
-                                        # Add to current script content
-                                        if current_script:
-                                            script_content.append(line)
-                                
-                                # Save last script
-                                if current_script and script_content:
-                                    service_data['scripts'].append({
-                                        'name': current_script,
-                                        'output': '\n'.join(script_content)
-                                    })
-                                    stats['script_outputs'] += 1
-                        
-                        # Only add service if it has interesting data (version info or script output)
-                        if service_data['version'] or service_data['scripts']:
-                            services.append(service_data)
-                            stats['services_with_intel'] += 1
-                    
-                    # Only include hosts with interesting intelligence (not basic scans)
-                    if services:
-                        mod_time = os.path.getmtime(file_path)
-                        scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
-                        
-                        scans.append({
-                            'ip': ip,
-                            'hostname': hostname,
-                            'scan_date': scan_date,
-                            'filename': filename,
-                            'download_url': f"/api/vulnerability-report/{filename}",
-                            'log_url': f"/api/vulnerability-report/{filename}",
-                            'services': services,
-                            'total_services': len(services)
-                        })
-                        
-                        stats['interesting_hosts'] += 1
-                    
-                except Exception as e:
-                    logger.error(f"Error parsing scan file {filename}: {e}")
-                    continue
-
-        # Process Lynis pentest reports
-        lynis_pattern = re.compile(r'^lynis_(?P<ip>[^_]+)_(?P<ts>\d{8}_\d{6})_pentest\.txt$')
-
-        for filename in vuln_files:
-            match = lynis_pattern.match(filename)
-            if not match:
-                continue
-
-            file_path = os.path.join(vuln_dir, filename)
-            stats['total_scanned'] += 1
-
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
-                    content = handle.read()
-
-                ip = match.group('ip')
-                timestamp_raw = match.group('ts')
-                hostname = f"{ip} (Lynis)"
-
-                mod_time = os.path.getmtime(file_path)
-                scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
-
-                dat_filename = filename.replace('_pentest.txt', '.dat')
-                dat_path = os.path.join(vuln_dir, dat_filename)
-                parsed_report = {}
-                if os.path.exists(dat_path):
-                    with open(dat_path, 'r', encoding='utf-8', errors='ignore') as dat_handle:
-                        parsed_report = parse_lynis_dat(dat_handle.read()) or {}
-
-                findings = []
-                for line in content.splitlines():
-                    stripped = line.strip()
-                    lowered = stripped.lower()
-                    if not stripped:
-                        continue
-                    if lowered.startswith('warning[') or lowered.startswith('suggestion['):
-                        findings.append(stripped)
-                    elif 'hardening index' in lowered:
-                        findings.append(stripped)
-
-                if not findings:
-                    snippet = content.strip().splitlines()[:40]
-                    findings = snippet if snippet else ['No explicit warnings captured; see full report for details.']
-
-                report_excerpt = '\n'.join(findings)
-                if len(report_excerpt) > 8000:
-                    report_excerpt = report_excerpt[:8000] + '\n...[truncated]'
-
-                scripts = [{
-                    'name': 'security_audit',
-                    'output': report_excerpt
-                }]
-
-                warnings_section = format_lynis_section('warnings', parsed_report.get('warnings', []))
-                if warnings_section:
-                    scripts.append(warnings_section)
-
-                suggestions_section = format_lynis_section('suggestions', parsed_report.get('suggestions', []))
-                if suggestions_section:
-                    scripts.append(suggestions_section)
-
-                packages_section = format_lynis_section('packages', parsed_report.get('vulnerable_packages', []))
-                if packages_section:
-                    scripts.append(packages_section)
-
-                hardening_index = None
-                metadata = parsed_report.get('metadata') if isinstance(parsed_report, dict) else {}
-                if isinstance(metadata, dict):
-                    hardening_index = metadata.get('hardening_index')
-
-                service_entry = {
-                    'port': 'system',
-                    'service': 'lynis pentest',
-                    'version': f"Hardening index: {hardening_index} @ {timestamp_raw}" if hardening_index else timestamp_raw,
-                    'scripts': scripts
-                }
-
-                stats['services_with_intel'] += 1
-                stats['script_outputs'] += len(scripts)
-                stats['interesting_hosts'] += 1
-
-                download_target = dat_filename if os.path.exists(dat_path) else filename
-
-                scans.append({
-                    'ip': ip,
-                    'hostname': hostname,
-                    'scan_date': scan_date,
-                    'filename': filename,
-                    'download_url': f"/api/vulnerability-report/{download_target}",
-                    'log_url': f"/api/vulnerability-report/{filename}",
-                    'services': [service_entry],
-                    'total_services': 1,
-                    'scan_type': 'lynis'
+            if not os.path.exists(vuln_dir):
+                return jsonify({
+                    'scans': [],
+                    'statistics': {
+                        'total_scanned': 0,
+                        'interesting_hosts': 0,
+                        'services_with_intel': 0,
+                        'script_outputs': 0
+                    }
                 })
 
-            except Exception as exc:
-                logger.error(f"Error parsing Lynis report {filename}: {exc}")
-                continue
-        
-        # Consolidate scans by IP address to prevent duplicates
-        consolidated_scans = {}
-        
-        for scan in scans:
-            ip = scan['ip']
-            
-            if ip not in consolidated_scans:
-                # First scan for this IP - use as base
-                consolidated_scans[ip] = scan.copy()
-            else:
-                # Merge services from additional scans for same IP
-                existing_scan = consolidated_scans[ip]
-                
-                # Merge services, avoiding duplicates
-                existing_services = {f"{svc['port']}_{svc['service']}": svc for svc in existing_scan['services']}
-                
-                for new_service in scan['services']:
-                    service_key = f"{new_service['port']}_{new_service['service']}"
-                    if service_key not in existing_services:
-                        existing_scan['services'].append(new_service)
-                    else:
-                        # Merge scripts if service already exists
-                        existing_service = existing_services[service_key]
-                        for script in new_service.get('scripts', []):
-                            if script not in existing_service.get('scripts', []):
-                                existing_service.setdefault('scripts', []).append(script)
-                
-                # Update totals
-                existing_scan['total_services'] = len(existing_scan['services'])
-                
-                # Use most recent scan date and filename
-                if scan['scan_date'] > existing_scan['scan_date']:
-                    existing_scan['scan_date'] = scan['scan_date']
-                    existing_scan['filename'] = scan['filename']
-                    existing_scan['download_url'] = scan['download_url']
-                    existing_scan['log_url'] = scan['log_url']
-                
-                # Combine scan types if different
-                if scan.get('scan_type') != existing_scan.get('scan_type'):
-                    existing_types = existing_scan.get('scan_type', 'nmap').split('+')
-                    new_type = scan.get('scan_type', 'nmap')
-                    if new_type not in existing_types:
-                        existing_types.append(new_type)
-                        existing_scan['scan_type'] = '+'.join(sorted(existing_types))
-        
-        # Convert back to list and sort by interesting content
-        final_scans = list(consolidated_scans.values())
-        final_scans.sort(key=lambda x: (
-            -x['total_services'],  # Most services first
-            -sum(len(svc.get('scripts', [])) for svc in x['services']),  # Most scripts first
-            x['scan_date']  # Then by date descending
-        ), reverse=False)  # reverse=False because we're using negative values
-        
-        return jsonify({
-            'scans': final_scans,
-            'statistics': stats
-        })
-        
-    except Exception as e:
-        logger.error(f"Error getting vulnerability intelligence: {e}")
-        return jsonify({'error': str(e)}), 500
+            scans = []
+            stats = {
+                'total_scanned': 0,
+                'interesting_hosts': 0,
+                'services_with_intel': 0,
+                'script_outputs': 0
+            }
+
+            def format_lynis_section(title, entries, limit=25):
+                entries = list(entries or [])
+                if not entries:
+                    return None
+
+                lines = []
+                for entry in entries[:limit]:
+                    parts = []
+                    code = entry.get('code') or entry.get('package') or title.upper()
+                    if code:
+                        parts.append(f"[{code}]")
+                    message = entry.get('message') or entry.get('package') or entry.get('raw') or ''
+                    if message:
+                        parts.append(message)
+                    detail = entry.get('detail') or entry.get('version') or ''
+                    if detail:
+                        parts.append(detail)
+                    remediation = entry.get('remediation') or entry.get('reference') or ''
+                    if remediation:
+                        parts.append(f"Fix: {remediation}")
+                    line = ' | '.join(part for part in parts if part)
+                    if line:
+                        lines.append(line)
+
+                if len(entries) > limit:
+                    lines.append(f"...and {len(entries) - limit} more")
+
+                if not lines:
+                    return None
+
+                return {
+                    'name': title,
+                    'output': '\n'.join(lines)
+                }
+
+            vuln_files = os.listdir(vuln_dir)
+
+            # Process all scan files
+            for filename in vuln_files:
+                if filename.endswith('_vuln_scan.txt'):
+                    file_path = os.path.join(vuln_dir, filename)
+                    stats['total_scanned'] += 1
+
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+
+                        # Extract host information
+                        parts = filename.split('_')
+                        ip = parts[1] if len(parts) > 1 else 'Unknown'
+
+                        hostname = 'Unknown'
+                        hostname_match = re.search(r'Nmap scan report for ([^\s]+)\s+\(([^\)]+)\)', content)
+                        if hostname_match:
+                            hostname = hostname_match.group(1)
+                            ip = hostname_match.group(2)
+                        else:
+                            hostname_match = re.search(r'Nmap scan report for ([^\s]+)', content)
+                            if hostname_match:
+                                potential_host = hostname_match.group(1)
+                                if not re.match(r'^\d+\.\d+\.\d+\.\d+$', potential_host):
+                                    hostname = potential_host
+
+                        # Extract interesting service information
+                        services = []
+
+                        # Parse port/service lines with version info
+                        port_lines = re.findall(r'(\d+/tcp)\s+open\s+(\S+)(?:\s+(.+?))?(?=\n|$)', content)
+
+                        for port, service_name, version_info in port_lines:
+                            service_data = {
+                                'port': port,
+                                'service': service_name,
+                                'version': version_info.strip() if version_info else '',
+                                'scripts': []
+                            }
+
+                            # Look for script output after this port
+                            # Find the section between this port and the next port or end
+                            port_num = port.split('/')[0]
+                            pattern = rf'{re.escape(port)}.*?(?=\n\d+/tcp|\nService Info:|\nNmap done:|$)'
+                            port_section_match = re.search(pattern, content, re.DOTALL)
+
+                            if port_section_match:
+                                port_section = port_section_match.group(0)
+
+                                # Extract script outputs (lines starting with |)
+                                script_lines = re.findall(r'^\|(.+)$', port_section, re.MULTILINE)
+
+                                if script_lines:
+                                    # Filter out lines with PACKETSTORM, vulners, CVE, exploit references
+                                    filtered_lines = []
+                                    for line in script_lines:
+                                        line_lower = line.lower()
+                                        # Skip lines containing vulnerability/exploit references
+                                        if any(keyword in line_lower for keyword in ['packetstorm', 'vulners.com', 'cve-', 'exploit', 'https://']):
+                                            continue
+                                        # Skip lines that look like vulnerability IDs or scores
+                                        if re.search(r'\d+\.\d+\s+https?://', line):
+                                            continue
+                                        # Skip nmap footer messages
+                                        if 'service detection performed' in line_lower:
+                                            continue
+                                        if 'please report any incorrect results' in line_lower:
+                                            continue
+                                        if 'nmap.org/submit' in line_lower:
+                                            continue
+                                        filtered_lines.append(line)
+
+                                    script_lines = filtered_lines
+
+                                    # Group script output by script name
+                                    current_script = None
+                                    script_content = []
+
+                                    for line in script_lines:
+                                        line = line.strip()
+
+                                        # Check if this is a script name line (ends with :)
+                                        if ':' in line and not line.startswith('_') and not line.startswith(' '):
+                                            # Save previous script if exists
+                                            if current_script and script_content:
+                                                service_data['scripts'].append({
+                                                    'name': current_script,
+                                                    'output': '\n'.join(script_content)
+                                                })
+                                                stats['script_outputs'] += 1
+
+                                            # Start new script
+                                            script_name_match = re.match(r'^\s*(\S+?):\s*(.*)', line)
+                                            if script_name_match:
+                                                script_name = script_name_match.group(1)
+                                                # Skip vulnerability-related scripts
+                                                if script_name.lower() in ['vulners', 'vulns']:
+                                                    current_script = None
+                                                    script_content = []
+                                                    continue
+                                                current_script = script_name
+                                                first_content = script_name_match.group(2)
+                                                script_content = [first_content] if first_content else []
+                                        else:
+                                            # Add to current script content
+                                            if current_script:
+                                                script_content.append(line)
+
+                                    # Save last script
+                                    if current_script and script_content:
+                                        service_data['scripts'].append({
+                                            'name': current_script,
+                                            'output': '\n'.join(script_content)
+                                        })
+                                        stats['script_outputs'] += 1
+
+                            # Only add service if it has interesting data (version info or script output)
+                            if service_data['version'] or service_data['scripts']:
+                                services.append(service_data)
+                                stats['services_with_intel'] += 1
+
+                        # Only include hosts with interesting intelligence (not basic scans)
+                        if services:
+                            mod_time = os.path.getmtime(file_path)
+                            scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+
+                            scans.append({
+                                'ip': ip,
+                                'hostname': hostname,
+                                'scan_date': scan_date,
+                                'filename': filename,
+                                'download_url': f"/api/vulnerability-report/{filename}",
+                                'log_url': f"/api/vulnerability-report/{filename}",
+                                'services': services,
+                                'total_services': len(services)
+                            })
+
+                            stats['interesting_hosts'] += 1
+
+                    except Exception as e:
+                        logger.error(f"Error parsing scan file {filename}: {e}")
+                        continue
+
+            # Process Lynis pentest reports
+            lynis_pattern = re.compile(r'^lynis_(?P<ip>[^_]+)_(?P<ts>\d{8}_\d{6})_pentest\.txt$')
+
+            for filename in vuln_files:
+                match = lynis_pattern.match(filename)
+                if not match:
+                    continue
+
+                file_path = os.path.join(vuln_dir, filename)
+                stats['total_scanned'] += 1
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as handle:
+                        content = handle.read()
+
+                    ip = match.group('ip')
+                    timestamp_raw = match.group('ts')
+                    hostname = f"{ip} (Lynis)"
+
+                    mod_time = os.path.getmtime(file_path)
+                    scan_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+
+                    dat_filename = filename.replace('_pentest.txt', '.dat')
+                    dat_path = os.path.join(vuln_dir, dat_filename)
+                    parsed_report = {}
+                    if os.path.exists(dat_path):
+                        with open(dat_path, 'r', encoding='utf-8', errors='ignore') as dat_handle:
+                            parsed_report = parse_lynis_dat(dat_handle.read()) or {}
+
+                    findings = []
+                    for line in content.splitlines():
+                        stripped = line.strip()
+                        lowered = stripped.lower()
+                        if not stripped:
+                            continue
+                        if lowered.startswith('warning[') or lowered.startswith('suggestion['):
+                            findings.append(stripped)
+                        elif 'hardening index' in lowered:
+                            findings.append(stripped)
+
+                    if not findings:
+                        snippet = content.strip().splitlines()[:40]
+                        findings = snippet if snippet else ['No explicit warnings captured; see full report for details.']
+
+                    report_excerpt = '\n'.join(findings)
+                    if len(report_excerpt) > 8000:
+                        report_excerpt = report_excerpt[:8000] + '\n...[truncated]'
+
+                    scripts = [{
+                        'name': 'security_audit',
+                        'output': report_excerpt
+                    }]
+
+                    warnings_section = format_lynis_section('warnings', parsed_report.get('warnings', []))
+                    if warnings_section:
+                        scripts.append(warnings_section)
+
+                    suggestions_section = format_lynis_section('suggestions', parsed_report.get('suggestions', []))
+                    if suggestions_section:
+                        scripts.append(suggestions_section)
+
+                    packages_section = format_lynis_section('packages', parsed_report.get('vulnerable_packages', []))
+                    if packages_section:
+                        scripts.append(packages_section)
+
+                    hardening_index = None
+                    metadata = parsed_report.get('metadata') if isinstance(parsed_report, dict) else {}
+                    if isinstance(metadata, dict):
+                        hardening_index = metadata.get('hardening_index')
+
+                    service_entry = {
+                        'port': 'system',
+                        'service': 'lynis pentest',
+                        'version': f"Hardening index: {hardening_index} @ {timestamp_raw}" if hardening_index else timestamp_raw,
+                        'scripts': scripts
+                    }
+
+                    stats['services_with_intel'] += 1
+                    stats['script_outputs'] += len(scripts)
+                    stats['interesting_hosts'] += 1
+
+                    download_target = dat_filename if os.path.exists(dat_path) else filename
+
+                    scans.append({
+                        'ip': ip,
+                        'hostname': hostname,
+                        'scan_date': scan_date,
+                        'filename': filename,
+                        'download_url': f"/api/vulnerability-report/{download_target}",
+                        'log_url': f"/api/vulnerability-report/{filename}",
+                        'services': [service_entry],
+                        'total_services': 1,
+                        'scan_type': 'lynis'
+                    })
+
+                except Exception as exc:
+                    logger.error(f"Error parsing Lynis report {filename}: {exc}")
+                    continue
+
+            # Consolidate scans by IP address to prevent duplicates
+            consolidated_scans = {}
+
+            for scan in scans:
+                ip = scan['ip']
+
+                if ip not in consolidated_scans:
+                    # First scan for this IP - use as base
+                    consolidated_scans[ip] = scan.copy()
+                else:
+                    # Merge services from additional scans for same IP
+                    existing_scan = consolidated_scans[ip]
+
+                    # Merge services, avoiding duplicates
+                    existing_services = {f"{svc['port']}_{svc['service']}": svc for svc in existing_scan['services']}
+
+                    for new_service in scan['services']:
+                        service_key = f"{new_service['port']}_{new_service['service']}"
+                        if service_key not in existing_services:
+                            existing_scan['services'].append(new_service)
+                        else:
+                            # Merge scripts if service already exists
+                            existing_service = existing_services[service_key]
+                            for script in new_service.get('scripts', []):
+                                if script not in existing_service.get('scripts', []):
+                                    existing_service.setdefault('scripts', []).append(script)
+
+                    # Update totals
+                    existing_scan['total_services'] = len(existing_scan['services'])
+
+                    # Use most recent scan date and filename
+                    if scan['scan_date'] > existing_scan['scan_date']:
+                        existing_scan['scan_date'] = scan['scan_date']
+                        existing_scan['filename'] = scan['filename']
+                        existing_scan['download_url'] = scan['download_url']
+                        existing_scan['log_url'] = scan['log_url']
+
+                    # Combine scan types if different
+                    if scan.get('scan_type') != existing_scan.get('scan_type'):
+                        existing_types = existing_scan.get('scan_type', 'nmap').split('+')
+                        new_type = scan.get('scan_type', 'nmap')
+                        if new_type not in existing_types:
+                            existing_types.append(new_type)
+                            existing_scan['scan_type'] = '+'.join(sorted(existing_types))
+
+            # Convert back to list and sort by interesting content
+            final_scans = list(consolidated_scans.values())
+            final_scans.sort(key=lambda x: (
+                -x['total_services'],  # Most services first
+                -sum(len(svc.get('scripts', [])) for svc in x['services']),  # Most scripts first
+                x['scan_date']  # Then by date descending
+            ), reverse=False)  # reverse=False because we're using negative values
+
+            return jsonify({
+                'scans': final_scans,
+                'statistics': stats
+            })
+
+        except Exception as e:
+            logger.error(f"Error getting vulnerability intelligence: {e}")
+            return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/logs')
@@ -4429,64 +4489,65 @@ def force_arp_scan():
 @app.route('/api/threat-intelligence/trigger-vuln-scan', methods=['POST'])
 def trigger_vulnerability_scan_for_threat_intel():
     """Trigger vulnerability scanning to generate data for threat intelligence enrichment"""
-    try:
-        # Get the request data
-        data = request.get_json() if request.is_json else {}
-        target = data.get('target', 'all')
-        
-        # Get discovered hosts count for feedback
-        network_data = read_wifi_network_data()
-        recent_arp_data = network_scan_cache.get('arp_hosts', {})
-        total_hosts = len(set([entry.get('IPs', '') for entry in network_data if entry.get('IPs')] + list(recent_arp_data.keys())))
-        
-        result = {
-            'timestamp': datetime.now().isoformat(),
-            'action': 'vulnerability_scan_triggered',
-            'target': target,
-            'discovered_hosts': total_hosts,
-            'message': f'Vulnerability scan initiated for {total_hosts} discovered hosts',
-            'next_steps': [
-                'Vulnerability scanning is running in the background',
-                'Results will appear in the Network tab when complete',
-                'Threat intelligence will enrich any discovered vulnerabilities',
-                'Check back in 2-5 minutes for results'
-            ]
-        }
-        
-        # Trigger the actual vulnerability scan by calling the existing endpoint
+    with _network_context_from_request():
         try:
-            from urllib.parse import urljoin
-            import requests
-            base_url = request.host_url
-            scan_url = urljoin(base_url, '/api/manual/scan/vulnerability')
+            # Get the request data
+            data = request.get_json() if request.is_json else {}
+            target = data.get('target', 'all')
             
-            scan_response = requests.post(
-                scan_url,
-                json={'target': target},
-                timeout=5
-            )
+            # Get discovered hosts count for feedback
+            network_data = read_wifi_network_data()
+            recent_arp_data = network_scan_cache.get('arp_hosts', {})
+            total_hosts = len(set([entry.get('IPs', '') for entry in network_data if entry.get('IPs')] + list(recent_arp_data.keys())))
             
-            if scan_response.status_code == 200:
-                result['scan_status'] = 'success'
-                result['scan_response'] = scan_response.json()
-            else:
-                result['scan_status'] = 'warning'
-                result['scan_response'] = f'Scan request returned status {scan_response.status_code}'
+            result = {
+                'timestamp': datetime.now().isoformat(),
+                'action': 'vulnerability_scan_triggered',
+                'target': target,
+                'discovered_hosts': total_hosts,
+                'message': f'Vulnerability scan initiated for {total_hosts} discovered hosts',
+                'next_steps': [
+                    'Vulnerability scanning is running in the background',
+                    'Results will appear in the Network tab when complete',
+                    'Threat intelligence will enrich any discovered vulnerabilities',
+                    'Check back in 2-5 minutes for results'
+                ]
+            }
+            
+            # Trigger the actual vulnerability scan by calling the existing endpoint
+            try:
+                from urllib.parse import urljoin
+                import requests
+                base_url = request.host_url
+                scan_url = urljoin(base_url, '/api/manual/scan/vulnerability')
                 
-        except Exception as scan_error:
-            result['scan_status'] = 'initiated'
-            result['scan_note'] = 'Vulnerability scan triggered via orchestrator'
-            logger.info(f"Vulnerability scan trigger: {str(scan_error)}")
+                scan_response = requests.post(
+                    scan_url,
+                    json={'target': target},
+                    timeout=5
+                )
+                
+                if scan_response.status_code == 200:
+                    result['scan_status'] = 'success'
+                    result['scan_response'] = scan_response.json()
+                else:
+                    result['scan_status'] = 'warning'
+                    result['scan_response'] = f'Scan request returned status {scan_response.status_code}'
+                    
+            except Exception as scan_error:
+                result['scan_status'] = 'initiated'
+                result['scan_note'] = 'Vulnerability scan triggered via orchestrator'
+                logger.info(f"Vulnerability scan trigger: {str(scan_error)}")
+                
+            return jsonify(result)
             
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Error triggering vulnerability scan for threat intel: {e}")
-        return jsonify({
-            'error': str(e),
-            'timestamp': datetime.now().isoformat(),
-            'suggestion': 'Try using the Manual mode to trigger vulnerability scans'
-        }), 500
+        except Exception as e:
+            logger.error(f"Error triggering vulnerability scan for threat intel: {e}")
+            return jsonify({
+                'error': str(e),
+                'timestamp': datetime.now().isoformat(),
+                'suggestion': 'Try using the Manual mode to trigger vulnerability scans'
+            }), 500
 
 @app.route('/api/vulnerability-scan/history', methods=['GET'])
 def get_vulnerability_scan_history():
@@ -7599,141 +7660,251 @@ def _serialize_enriched_finding(finding_id, enriched_finding, default_last_updat
 @app.route('/api/threat-intelligence/status')
 def get_threat_intelligence_status():
     """Get threat intelligence system status"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
 
-        summary = threat_intelligence.get_enriched_findings_summary() or {}
-        default_last_update = summary.get('last_intelligence_update')
+            summary = threat_intelligence.get_enriched_findings_summary() or {}
+            default_last_update = summary.get('last_intelligence_update')
 
-        serialized_findings = [
-            _serialize_enriched_finding(finding_id, enriched_finding, default_last_update)
-            for finding_id, enriched_finding in threat_intelligence.enriched_findings.items()
-        ]
+            serialized_findings = [
+                _serialize_enriched_finding(finding_id, enriched_finding, default_last_update)
+                for finding_id, enriched_finding in threat_intelligence.enriched_findings.items()
+            ]
 
-        risk_distribution = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
-        active_campaigns = set()
+            risk_distribution = {'critical': 0, 'high': 0, 'medium': 0, 'low': 0}
+            active_campaigns = set()
 
-        for enriched_finding in threat_intelligence.enriched_findings.values():
-            score = enriched_finding.dynamic_risk_score or 0.0
-            if score >= 9.0:
-                risk_distribution['critical'] += 1
-            elif score >= 7.0:
-                risk_distribution['high'] += 1
-            elif score >= 4.0:
-                risk_distribution['medium'] += 1
-            else:
-                risk_distribution['low'] += 1
+            for enriched_finding in threat_intelligence.enriched_findings.values():
+                score = enriched_finding.dynamic_risk_score or 0.0
+                if score >= 9.0:
+                    risk_distribution['critical'] += 1
+                elif score >= 7.0:
+                    risk_distribution['high'] += 1
+                elif score >= 4.0:
+                    risk_distribution['medium'] += 1
+                else:
+                    risk_distribution['low'] += 1
 
-            for campaign in enriched_finding.active_campaigns or []:
-                if campaign:
-                    active_campaigns.add(campaign)
+                for campaign in enriched_finding.active_campaigns or []:
+                    if campaign:
+                        active_campaigns.add(campaign)
 
-        type_to_status_key = {
-            'cisa': 'cisa_kev',
-            'nvd': 'nvd_cve',
-            'otx': 'alienvault_otx',
-            'mitre': 'mitre_attack'
-        }
+            type_to_status_key = {
+                'cisa': 'cisa_kev',
+                'nvd': 'nvd_cve',
+                'otx': 'alienvault_otx',
+                'mitre': 'mitre_attack'
+            }
 
-        source_status = {key: False for key in type_to_status_key.values()}
-        sources = []
-        for name, source in threat_intelligence.threat_sources.items():
-            sources.append({
-                'name': name,
-                'type': source.type,
-                'enabled': source.enabled,
-                'confidence_weight': source.confidence_weight,
-                'last_updated': source.last_updated
-            })
+            source_status = {key: False for key in type_to_status_key.values()}
+            sources = []
+            for name, source in threat_intelligence.threat_sources.items():
+                sources.append({
+                    'name': name,
+                    'type': source.type,
+                    'enabled': source.enabled,
+                    'confidence_weight': source.confidence_weight,
+                    'last_updated': source.last_updated
+                })
 
-            status_key = type_to_status_key.get(source.type)
-            if status_key:
-                source_status[status_key] = source_status.get(status_key, False) or source.enabled
+                status_key = type_to_status_key.get(source.type)
+                if status_key:
+                    source_status[status_key] = source_status.get(status_key, False) or source.enabled
 
-        top_threats = sorted(serialized_findings, key=lambda f: f['risk_score'], reverse=True)[:5]
+            top_threats = sorted(serialized_findings, key=lambda f: f['risk_score'], reverse=True)[:5]
 
-        total_enriched = summary.get('total_enriched_findings', len(serialized_findings))
-        high_risk_total = risk_distribution['critical'] + risk_distribution['high']
+            total_enriched = summary.get('total_enriched_findings', len(serialized_findings))
+            high_risk_total = risk_distribution['critical'] + risk_distribution['high']
 
-        status = {
-            'enabled': True,
-            'active_sources': summary.get('threat_sources_enabled', 0),
-            'enriched_findings_count': total_enriched,
-            'high_risk_count': high_risk_total,
-            'active_campaigns': len(active_campaigns),
-            'risk_distribution': risk_distribution,
-            'source_status': source_status,
-            'last_update': default_last_update,
-            'top_threats': top_threats,
-            'sources': sources,
-            'cache_entries': len(threat_intelligence.threat_cache),
-            'total_enriched_findings': total_enriched
-        }
+            status = {
+                'enabled': True,
+                'active_sources': summary.get('threat_sources_enabled', 0),
+                'enriched_findings_count': total_enriched,
+                'high_risk_count': high_risk_total,
+                'active_campaigns': len(active_campaigns),
+                'risk_distribution': risk_distribution,
+                'source_status': source_status,
+                'last_update': default_last_update,
+                'top_threats': top_threats,
+                'sources': sources,
+                'cache_entries': len(threat_intelligence.threat_cache),
+                'total_enriched_findings': total_enriched
+            }
 
-        return jsonify(status)
-    except Exception as e:
-        logger.error(f"Error getting threat intelligence status: {e}")
-        return jsonify({'error': str(e)}), 500
+            return jsonify(status)
+        except Exception as e:
+            logger.error(f"Error getting threat intelligence status: {e}")
+            return jsonify({'error': str(e)}), 500
 
 @app.route('/api/threat-intelligence/enriched-findings')
 def get_enriched_findings():
     """Get all enriched findings with threat intelligence"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
-        
-        summary = threat_intelligence.get_enriched_findings_summary() or {}
-        default_last_update = summary.get('last_intelligence_update')
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
+            
+            summary = threat_intelligence.get_enriched_findings_summary() or {}
+            default_last_update = summary.get('last_intelligence_update')
 
-        enriched_findings = [
-            _serialize_enriched_finding(finding_id, enriched_finding, default_last_update)
-            for finding_id, enriched_finding in threat_intelligence.enriched_findings.items()
-        ]
+            enriched_findings = [
+                _serialize_enriched_finding(finding_id, enriched_finding, default_last_update)
+                for finding_id, enriched_finding in threat_intelligence.enriched_findings.items()
+            ]
 
-        top_threats = sorted(enriched_findings, key=lambda f: f['risk_score'], reverse=True)[:5]
+            top_threats = sorted(enriched_findings, key=lambda f: f['risk_score'], reverse=True)[:5]
 
-        return jsonify({
-            'enriched_findings': enriched_findings,
-            'total_count': len(enriched_findings),
-            'summary': summary,
-            'top_threats': top_threats
-        })
+            return jsonify({
+                'enriched_findings': enriched_findings,
+                'total_count': len(enriched_findings),
+                'summary': summary,
+                'top_threats': top_threats
+            })
 
-    except Exception as e:
-        logger.error(f"Error getting enriched findings: {e}")
-        return jsonify({'error': str(e)}), 500
+        except Exception as e:
+            logger.error(f"Error getting enriched findings: {e}")
+            return jsonify({'error': str(e)}), 500
 
 @app.route('/api/threat-intelligence/enrich-finding', methods=['POST'])
 def enrich_finding_endpoint():
     """Manually enrich a finding with threat intelligence"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        # Extract finding data
-        finding = {
-            'id': data.get('id'),
-            'host': data.get('host'),
-            'port': data.get('port'),
-            'service': data.get('service'),
-            'vulnerability': data.get('vulnerability'),
-            'severity': data.get('severity', 'medium'),
-            'details': data.get('details', {})
-        }
-        
-        # Enrich the finding
-        import asyncio
-        enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
-        
-        return jsonify({
-            'success': True,
-            'enriched_finding': {
-                'id': finding['id'],
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
+            
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'No data provided'}), 400
+            
+            # Extract finding data
+            finding = {
+                'id': data.get('id'),
+                'host': data.get('host'),
+                'port': data.get('port'),
+                'service': data.get('service'),
+                'vulnerability': data.get('vulnerability'),
+                'severity': data.get('severity', 'medium'),
+                'details': data.get('details', {})
+            }
+            
+            # Enrich the finding
+            import asyncio
+            enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
+            
+            return jsonify({
+                'success': True,
+                'enriched_finding': {
+                    'id': finding['id'],
+                    'dynamic_risk_score': enriched_finding.dynamic_risk_score,
+                    'executive_summary': enriched_finding.executive_summary,
+                    'recommended_actions': enriched_finding.recommended_actions,
+                    'threat_contexts_count': len(enriched_finding.threat_contexts),
+                    'attribution': {
+                        'actor_name': enriched_finding.attribution.actor_name if enriched_finding.attribution else None,
+                        'confidence': enriched_finding.attribution.confidence if enriched_finding.attribution else 0.0
+                    }
+                }
+            })
+            
+        except Exception as e:
+            logger.error(f"Error enriching finding: {e}")
+            return jsonify({'error': str(e)}), 500
+
+@app.route('/api/threat-intelligence/enrich-target', methods=['POST'])
+def enrich_target_endpoint():
+    """Enrich a target (IP, domain, or hash) with threat intelligence"""
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
+            
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'No data provided'}), 400
+            
+            target = data.get('target', '').strip()
+            if not target:
+                return jsonify({'error': 'Target is required'}), 400
+            
+            # Look for actual vulnerability findings for this target
+            actual_findings = []
+            if hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence:
+                try:
+                    # Check active findings
+                    active_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
+                    
+                    # Check for vulnerabilities on this target
+                    for vuln_id, vuln_data in active_findings.get('vulnerabilities', {}).items():
+                        if vuln_data.get('host') == target:
+                            actual_findings.append(vuln_data)
+                    
+                    # Check for compromised credentials on this target  
+                    for cred_id, cred_data in active_findings.get('credentials', {}).items():
+                        if cred_data.get('host') == target:
+                            actual_findings.append(cred_data)
+                            
+                except AttributeError as e:
+                    logger.warning(f"Network intelligence method not available: {e}")
+                    # Fallback: check if we have scan data directly from files
+                    try:
+                        scan_results_dir = os.path.join(shared_data.datadir, 'output', 'scan_results')
+                        if os.path.exists(scan_results_dir):
+                            for filename in os.listdir(scan_results_dir):
+                                if filename.endswith('.csv') and target in filename:
+                                    # Found scan results for this target
+                                    actual_findings.append({
+                                        'host': target,
+                                        'vulnerability': 'Network scan findings available',
+                                        'source': 'scan_results',
+                                        'details': {'scan_file': filename}
+                                    })
+                                    break
+                    except Exception as scan_e:
+                        logger.warning(f"Could not check scan results: {scan_e}")
+                        
+                except Exception as e:
+                    logger.warning(f"Could not retrieve network intelligence findings: {e}")
+            
+            # If no findings but target looks like it might have vulnerabilities, create a placeholder
+            if not actual_findings:
+                # For demonstration/testing purposes, allow manual vulnerability analysis
+                # This should ideally be replaced with real vulnerability scanner integration
+                return jsonify({
+                    'error': f'No vulnerability findings detected for target: {target}',
+                    'message': 'Ragnar needs to discover vulnerabilities first through network scanning. Try running vulnerability scans on this target.',
+                    'target_type': 'no_findings',
+                    'suggestion': f'Run network scan on {target} first, then threat intelligence can enrich any discovered vulnerabilities'
+                }), 404
+
+            # Use the first real finding for enrichment (or combine multiple findings)
+            base_finding = actual_findings[0]
+            
+            # Create enriched finding object from actual scan data
+            finding = {
+                'id': base_finding.get('id', hashlib.md5(target.encode()).hexdigest()[:12]),
+                'host': target,
+                'vulnerability': base_finding.get('vulnerability', base_finding.get('service', 'Unknown')),
+                'severity': base_finding.get('severity', 'medium'),
+                'port': base_finding.get('port'),
+                'service': base_finding.get('service'),
+                'details': base_finding.get('details', {}),
+                'scan_timestamp': base_finding.get('timestamp', datetime.now().isoformat())
+            }
+            
+            # Enrich the finding
+            import asyncio
+            enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
+            
+            # Convert risk score from 0-10 scale to 0-100 scale for frontend
+            risk_score_100 = min(int(enriched_finding.dynamic_risk_score * 10), 100)
+            
+            return jsonify({
+                'success': True,
+                'target': target,
+                'risk_score': risk_score_100,
                 'dynamic_risk_score': enriched_finding.dynamic_risk_score,
                 'executive_summary': enriched_finding.executive_summary,
                 'recommended_actions': enriched_finding.recommended_actions,
@@ -7741,173 +7912,68 @@ def enrich_finding_endpoint():
                 'attribution': {
                     'actor_name': enriched_finding.attribution.actor_name if enriched_finding.attribution else None,
                     'confidence': enriched_finding.attribution.confidence if enriched_finding.attribution else 0.0
-                }
-            }
-        })
-        
-    except Exception as e:
-        logger.error(f"Error enriching finding: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/threat-intelligence/enrich-target', methods=['POST'])
-def enrich_target_endpoint():
-    """Enrich a target (IP, domain, or hash) with threat intelligence"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        target = data.get('target', '').strip()
-        if not target:
-            return jsonify({'error': 'Target is required'}), 400
-        
-        # Look for actual vulnerability findings for this target
-        actual_findings = []
-        if hasattr(shared_data, 'network_intelligence') and shared_data.network_intelligence:
-            try:
-                # Check active findings
-                active_findings = shared_data.network_intelligence.get_active_findings_for_dashboard()
-                
-                # Check for vulnerabilities on this target
-                for vuln_id, vuln_data in active_findings.get('vulnerabilities', {}).items():
-                    if vuln_data.get('host') == target:
-                        actual_findings.append(vuln_data)
-                
-                # Check for compromised credentials on this target  
-                for cred_id, cred_data in active_findings.get('credentials', {}).items():
-                    if cred_data.get('host') == target:
-                        actual_findings.append(cred_data)
-                        
-            except AttributeError as e:
-                logger.warning(f"Network intelligence method not available: {e}")
-                # Fallback: check if we have scan data directly from files
-                try:
-                    scan_results_dir = os.path.join(shared_data.datadir, 'output', 'scan_results')
-                    if os.path.exists(scan_results_dir):
-                        for filename in os.listdir(scan_results_dir):
-                            if filename.endswith('.csv') and target in filename:
-                                # Found scan results for this target
-                                actual_findings.append({
-                                    'host': target,
-                                    'vulnerability': 'Network scan findings available',
-                                    'source': 'scan_results',
-                                    'details': {'scan_file': filename}
-                                })
-                                break
-                except Exception as scan_e:
-                    logger.warning(f"Could not check scan results: {scan_e}")
-                    
-            except Exception as e:
-                logger.warning(f"Could not retrieve network intelligence findings: {e}")
-        
-        # If no findings but target looks like it might have vulnerabilities, create a placeholder
-        if not actual_findings:
-            # For demonstration/testing purposes, allow manual vulnerability analysis
-            # This should ideally be replaced with real vulnerability scanner integration
-            return jsonify({
-                'error': f'No vulnerability findings detected for target: {target}',
-                'message': 'Ragnar needs to discover vulnerabilities first through network scanning. Try running vulnerability scans on this target.',
-                'target_type': 'no_findings',
-                'suggestion': f'Run network scan on {target} first, then threat intelligence can enrich any discovered vulnerabilities'
-            }), 404
-
-        # Use the first real finding for enrichment (or combine multiple findings)
-        base_finding = actual_findings[0]
-        
-        # Create enriched finding object from actual scan data
-        finding = {
-            'id': base_finding.get('id', hashlib.md5(target.encode()).hexdigest()[:12]),
-            'host': target,
-            'vulnerability': base_finding.get('vulnerability', base_finding.get('service', 'Unknown')),
-            'severity': base_finding.get('severity', 'medium'),
-            'port': base_finding.get('port'),
-            'service': base_finding.get('service'),
-            'details': base_finding.get('details', {}),
-            'scan_timestamp': base_finding.get('timestamp', datetime.now().isoformat())
-        }
-        
-        # Enrich the finding
-        import asyncio
-        enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
-        
-        # Convert risk score from 0-10 scale to 0-100 scale for frontend
-        risk_score_100 = min(int(enriched_finding.dynamic_risk_score * 10), 100)
-        
-        return jsonify({
-            'success': True,
-            'target': target,
-            'risk_score': risk_score_100,
-            'dynamic_risk_score': enriched_finding.dynamic_risk_score,
-            'executive_summary': enriched_finding.executive_summary,
-            'recommended_actions': enriched_finding.recommended_actions,
-            'threat_contexts_count': len(enriched_finding.threat_contexts),
-            'attribution': {
-                'actor_name': enriched_finding.attribution.actor_name if enriched_finding.attribution else None,
-                'confidence': enriched_finding.attribution.confidence if enriched_finding.attribution else 0.0
-            },
-            'enriched_finding_id': finding['id']
-        })
-        
-    except Exception as e:
-        logger.error(f"Error enriching target: {e}")
-        return jsonify({'error': str(e)}), 500
+                },
+                'enriched_finding_id': finding['id']
+            })
+            
+        except Exception as e:
+            logger.error(f"Error enriching target: {e}")
+            return jsonify({'error': str(e)}), 500
 
 @app.route('/api/threat-intelligence/dashboard')
 def get_threat_intelligence_dashboard():
     """Get threat intelligence dashboard data"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
-        
-        dashboard_data = {
-            'summary': threat_intelligence.get_enriched_findings_summary(),
-            'recent_findings': [],
-            'risk_distribution': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0},
-            'threat_sources_status': []
-        }
-        
-        # Get recent enriched findings
-        recent_findings = []
-        for finding_id, enriched_finding in list(threat_intelligence.enriched_findings.items())[-10:]:
-            recent_findings.append({
-                'id': finding_id,
-                'host': enriched_finding.original_finding.get('host', 'Unknown'),
-                'vulnerability': enriched_finding.original_finding.get('vulnerability', 'Unknown'),
-                'risk_score': enriched_finding.dynamic_risk_score,
-                'executive_summary': enriched_finding.executive_summary[:200] + '...'
-            })
-        
-        dashboard_data['recent_findings'] = recent_findings
-        
-        # Calculate risk distribution
-        for enriched_finding in threat_intelligence.enriched_findings.values():
-            score = enriched_finding.dynamic_risk_score
-            if score >= 9.0:
-                dashboard_data['risk_distribution']['critical'] += 1
-            elif score >= 7.0:
-                dashboard_data['risk_distribution']['high'] += 1
-            elif score >= 5.0:
-                dashboard_data['risk_distribution']['medium'] += 1
-            else:
-                dashboard_data['risk_distribution']['low'] += 1
-        
-        # Threat sources status
-        for name, source in threat_intelligence.threat_sources.items():
-            dashboard_data['threat_sources_status'].append({
-                'name': name,
-                'type': source.type,
-                'enabled': source.enabled,
-                'last_updated': source.last_updated
-            })
-        
-        return jsonify(dashboard_data)
-        
-    except Exception as e:
-        logger.error(f"Error getting threat intelligence dashboard: {e}")
-        return jsonify({'error': str(e)}), 500
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
+            
+            dashboard_data = {
+                'summary': threat_intelligence.get_enriched_findings_summary(),
+                'recent_findings': [],
+                'risk_distribution': {'critical': 0, 'high': 0, 'medium': 0, 'low': 0},
+                'threat_sources_status': []
+            }
+            
+            # Get recent enriched findings
+            recent_findings = []
+            for finding_id, enriched_finding in list(threat_intelligence.enriched_findings.items())[-10:]:
+                recent_findings.append({
+                    'id': finding_id,
+                    'host': enriched_finding.original_finding.get('host', 'Unknown'),
+                    'vulnerability': enriched_finding.original_finding.get('vulnerability', 'Unknown'),
+                    'risk_score': enriched_finding.dynamic_risk_score,
+                    'executive_summary': enriched_finding.executive_summary[:200] + '...'
+                })
+            
+            dashboard_data['recent_findings'] = recent_findings
+            
+            # Calculate risk distribution
+            for enriched_finding in threat_intelligence.enriched_findings.values():
+                score = enriched_finding.dynamic_risk_score
+                if score >= 9.0:
+                    dashboard_data['risk_distribution']['critical'] += 1
+                elif score >= 7.0:
+                    dashboard_data['risk_distribution']['high'] += 1
+                elif score >= 5.0:
+                    dashboard_data['risk_distribution']['medium'] += 1
+                else:
+                    dashboard_data['risk_distribution']['low'] += 1
+            
+            # Threat sources status
+            for name, source in threat_intelligence.threat_sources.items():
+                dashboard_data['threat_sources_status'].append({
+                    'name': name,
+                    'type': source.type,
+                    'enabled': source.enabled,
+                    'last_updated': source.last_updated
+                })
+            
+            return jsonify(dashboard_data)
+            
+        except Exception as e:
+            logger.error(f"Error getting threat intelligence dashboard: {e}")
+            return jsonify({'error': str(e)}), 500
 
 def generate_threat_intelligence_report(target, enriched_finding):
     """Generate threat intelligence report content"""
@@ -8080,73 +8146,74 @@ For questions or additional analysis, contact your security team.
 @app.route('/api/threat-intelligence/download-report', methods=['POST'])
 def download_threat_intelligence_report():
     """Generate and download a comprehensive threat intelligence report"""
-    try:
-        if not threat_intelligence:
-            return jsonify({'error': 'Threat intelligence system not available'}), 503
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({'error': 'No data provided'}), 400
-        
-        target = data.get('target', '').strip()
-        if not target:
-            return jsonify({'error': 'Target is required'}), 400
-        
-        # Find enriched finding for the target
-        enriched_finding = None
-        for finding_id, finding in threat_intelligence.enriched_findings.items():
-            original_finding = finding.original_finding
-            if (original_finding.get('host') == target or 
-                original_finding.get('domain') == target or
-                original_finding.get('hash') == target or
-                original_finding.get('details', {}).get('target') == target):
-                enriched_finding = finding
-                break
-        
-        if not enriched_finding:
-            # Try to create a new enrichment for the target
-            finding = {
-                'id': hashlib.md5(target.encode()).hexdigest()[:12],
-                'host': target if _is_ip_address(target) else None,
-                'domain': target if '.' in target and not _is_ip_address(target) else None,
-                'hash': target if len(target) >= 32 and all(c in '0123456789abcdefABCDEF' for c in target) else None,
-                'vulnerability': f'Threat intelligence analysis for {target}',
-                'severity': 'medium',
-                'details': {'target': target}
-            }
+    with _network_context_from_request():
+        try:
+            if not threat_intelligence:
+                return jsonify({'error': 'Threat intelligence system not available'}), 503
             
-            import asyncio
-            enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
-        
-        # Generate report content
-        report_content = generate_threat_intelligence_report(target, enriched_finding)
-        
-        # Create text report
-        text_content = create_text_report(report_content)
-        
-        # Generate filename with current date
-        from datetime import datetime
-        now = datetime.now()
-        date_str = now.strftime("%Y%m%d_%H%M%S")
-        safe_target = "".join(c for c in target if c.isalnum() or c in '._-')
-        filename = f"Threat_Intelligence_Report_{safe_target}_{date_str}.txt"
-        
-        # Return text file as download
-        response = Response(
-            text_content,
-            mimetype='text/plain',
-            headers={
-                'Content-Disposition': f'attachment; filename="{filename}"',
-                'Content-Type': 'text/plain'
-            }
-        )
-        
-        logger.info(f"Generated threat intelligence report for target: {target}")
-        return response
-        
-    except Exception as e:
-        logger.error(f"Error generating threat intelligence report: {e}")
-        return jsonify({'error': str(e)}), 500
+            data = request.get_json()
+            if not data:
+                return jsonify({'error': 'No data provided'}), 400
+            
+            target = data.get('target', '').strip()
+            if not target:
+                return jsonify({'error': 'Target is required'}), 400
+            
+            # Find enriched finding for the target
+            enriched_finding = None
+            for finding_id, finding in threat_intelligence.enriched_findings.items():
+                original_finding = finding.original_finding
+                if (original_finding.get('host') == target or 
+                    original_finding.get('domain') == target or
+                    original_finding.get('hash') == target or
+                    original_finding.get('details', {}).get('target') == target):
+                    enriched_finding = finding
+                    break
+            
+            if not enriched_finding:
+                # Try to create a new enrichment for the target
+                finding = {
+                    'id': hashlib.md5(target.encode()).hexdigest()[:12],
+                    'host': target if _is_ip_address(target) else None,
+                    'domain': target if '.' in target and not _is_ip_address(target) else None,
+                    'hash': target if len(target) >= 32 and all(c in '0123456789abcdefABCDEF' for c in target) else None,
+                    'vulnerability': f'Threat intelligence analysis for {target}',
+                    'severity': 'medium',
+                    'details': {'target': target}
+                }
+                
+                import asyncio
+                enriched_finding = asyncio.run(threat_intelligence.enrich_finding_with_threat_intelligence(finding))
+            
+            # Generate report content
+            report_content = generate_threat_intelligence_report(target, enriched_finding)
+            
+            # Create text report
+            text_content = create_text_report(report_content)
+            
+            # Generate filename with current date
+            from datetime import datetime
+            now = datetime.now()
+            date_str = now.strftime("%Y%m%d_%H%M%S")
+            safe_target = "".join(c for c in target if c.isalnum() or c in '._-')
+            filename = f"Threat_Intelligence_Report_{safe_target}_{date_str}.txt"
+            
+            # Return text file as download
+            response = Response(
+                text_content,
+                mimetype='text/plain',
+                headers={
+                    'Content-Disposition': f'attachment; filename="{filename}"',
+                    'Content-Type': 'text/plain'
+                }
+            )
+            
+            logger.info(f"Generated threat intelligence report for target: {target}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error generating threat intelligence report: {e}")
+            return jsonify({'error': str(e)}), 500
 
 
 # ============================================================================

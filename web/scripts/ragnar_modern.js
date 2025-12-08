@@ -1333,7 +1333,7 @@ async function startRealtimeScan() {
         startBtn.disabled = true;
         startBtn.innerHTML = '⏳ Starting...';
         
-        const response = await fetch('/api/scan/start-realtime', {
+        const response = await networkAwareFetch('/api/scan/start-realtime', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -1581,7 +1581,7 @@ async function triggerDeepScan(ip, options = {}) {
         }
         console.log('   Request body:', JSON.stringify(requestBody));
         
-        const response = await fetch('/api/scan/deep', {
+        const response = await networkAwareFetch('/api/scan/deep', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -2404,7 +2404,7 @@ function updateHostInTable(hostData) {
 
 async function scanSingleHost(ip) {
     try {
-        const response = await fetch('/api/scan/host', {
+        const response = await networkAwareFetch('/api/scan/host', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -2472,7 +2472,7 @@ async function loadAttackLogs(options = {}) {
 
     attackLogsInFlight = (async () => {
         try {
-            const response = await fetch('/api/attack?limit=200&days=7', { headers });
+            const response = await networkAwareFetch('/api/attack?limit=200&days=7', { headers });
 
             if (response.status === 304) {
                 console.debug('Attack logs unchanged; skipping DOM update');
@@ -4194,7 +4194,7 @@ async function verifyServiceRestart() {
         
         try {
             // Try to fetch the stats endpoint as a health check
-            const response = await fetch('/api/stats', {
+            const response = await networkAwareFetch('/api/stats', {
                 method: 'GET',
                 headers: { 'Content-Type': 'application/json' },
                 timeout: 5000
@@ -7221,7 +7221,7 @@ async function runManualLynisPentest() {
     }
 
     try {
-        const response = await fetch('/api/manual/pentest/lynis', {
+        const response = await networkAwareFetch('/api/manual/pentest/lynis', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ip, username, password })
@@ -7270,9 +7270,68 @@ async function runManualLynisPentest() {
 // API HELPERS
 // ============================================================================
 
+const NETWORK_CONTEXT_PARAM = 'network';
+
+function resolveNetworkAwareEndpoint(endpoint) {
+    if (!endpoint || typeof endpoint !== 'string') {
+        return endpoint;
+    }
+
+    const trimmed = endpoint.trim();
+    if (!trimmed) {
+        return endpoint;
+    }
+
+    const { network } = getSelectedDashboardNetworkKey() || {};
+    if (!network) {
+        return endpoint;
+    }
+
+    const likelyApiPath = trimmed.startsWith('/api/') || trimmed.startsWith('api/');
+
+    try {
+        const url = new URL(trimmed, window.location.origin);
+        const sameOriginApi = url.origin === window.location.origin && url.pathname.startsWith('/api/');
+
+        if (!sameOriginApi) {
+            return endpoint;
+        }
+
+        if (!url.searchParams.has(NETWORK_CONTEXT_PARAM)) {
+            url.searchParams.set(NETWORK_CONTEXT_PARAM, network);
+        }
+
+        if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
+            return url.toString();
+        }
+
+        return `${url.pathname}${url.search}${url.hash}`;
+    } catch (error) {
+        if (!likelyApiPath) {
+            return endpoint;
+        }
+
+        console.warn('Unable to normalize endpoint for network context', endpoint, error);
+        const hasQuery = trimmed.includes('?');
+        const alreadyHasParam = trimmed.includes(`${NETWORK_CONTEXT_PARAM}=`);
+
+        if (alreadyHasParam) {
+            return endpoint;
+        }
+
+        const separator = hasQuery ? '&' : '?';
+        return `${trimmed}${separator}${NETWORK_CONTEXT_PARAM}=${encodeURIComponent(network)}`;
+    }
+}
+
+function networkAwareFetch(endpoint, options = {}) {
+    const resolvedEndpoint = resolveNetworkAwareEndpoint(endpoint);
+    return fetch(resolvedEndpoint, options);
+}
+
 async function fetchAPI(endpoint, options = {}) {
     try {
-        const response = await fetch(endpoint, options);
+        const response = await networkAwareFetch(endpoint, options);
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
@@ -7285,7 +7344,7 @@ async function fetchAPI(endpoint, options = {}) {
 
 async function postAPI(endpoint, data) {
     try {
-        const response = await fetch(endpoint, {
+        const response = await networkAwareFetch(endpoint, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -8375,7 +8434,7 @@ function loadFiles(path = '/', highlightFile = null) {
     if (fileOperationInProgress) return;
     const desiredHighlight = highlightFile || (pendingFileHighlight && pendingFileHighlight.directory === path ? pendingFileHighlight.file : null);
     
-    fetch(`/api/files/list?path=${encodeURIComponent(path)}`)
+    networkAwareFetch(`/api/files/list?path=${encodeURIComponent(path)}`)
         .then(response => response.json())
         .then(files => {
             const appliedHighlight = displayFiles(files, path, desiredHighlight);
@@ -8521,7 +8580,7 @@ function updateCurrentPath(path) {
 function downloadFile(filePath) {
     if (fileOperationInProgress) return;
     
-    const downloadUrl = `/api/files/download?path=${encodeURIComponent(filePath)}`;
+    const downloadUrl = resolveNetworkAwareEndpoint(`/api/files/download?path=${encodeURIComponent(filePath)}`);
     
     // Create a temporary link to trigger download
     const link = document.createElement('a');
@@ -8543,7 +8602,7 @@ function deleteFile(filePath) {
         `Are you sure you want to delete "${fileName}"? This action cannot be undone.`,
         () => {
             fileOperationInProgress = true;
-            fetch('/api/files/delete', {
+            networkAwareFetch('/api/files/delete', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -8593,7 +8652,7 @@ function uploadFile() {
         fileOperationInProgress = true;
         showFileLoading('Uploading files...');
         
-        fetch('/api/files/upload', {
+        networkAwareFetch('/api/files/upload', {
             method: 'POST',
             body: formData
         })
@@ -8641,7 +8700,7 @@ function clearFiles() {
             fileOperationInProgress = true;
             showFileLoading('Clearing files...');
             
-            fetch('/api/files/clear', {
+            networkAwareFetch('/api/files/clear', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -8774,7 +8833,7 @@ function loadSystemData() {
 }
 
 function fetchSystemStatus() {
-    fetch('/api/system/status')
+    networkAwareFetch('/api/system/status')
         .then(response => response.json())
         .then(data => {
             if (data.error) {
@@ -8793,7 +8852,7 @@ function fetchSystemStatus() {
 }
 
 function fetchNetworkStats() {
-    fetch('/api/system/network-stats')
+    networkAwareFetch('/api/system/network-stats')
         .then(response => response.json())
         .then(data => {
             if (data.error) {
@@ -9000,7 +9059,7 @@ function sortProcesses(sortBy) {
     });
     
     // Fetch processes with new sort order
-    fetch(`/api/system/processes?sort=${sortBy}`)
+    networkAwareFetch(`/api/system/processes?sort=${sortBy}`)
         .then(response => response.json())
         .then(processes => {
             updateProcessList(processes);
@@ -9036,7 +9095,7 @@ function loadNetkbData() {
 }
 
 function fetchNetkbData() {
-    fetch('/api/netkb/data')
+    networkAwareFetch('/api/netkb/data')
         .then(response => response.json())
         .then(data => {
             if (data.error) {
@@ -9452,13 +9511,13 @@ window.closeVulnerabilityModal = closeVulnerabilityModal;
 async function loadThreatIntelData() {
     try {
         // Load grouped vulnerabilities
-        const response = await fetch('/api/vulnerabilities/grouped');
+        const response = await networkAwareFetch('/api/vulnerabilities/grouped');
         if (response.ok) {
             const data = await response.json();
             displayGroupedVulnerabilities(data);
         } else {
             // Fallback to regular vulnerabilities endpoint
-            const fallbackResponse = await fetch('/api/vulnerabilities');
+            const fallbackResponse = await networkAwareFetch('/api/vulnerabilities');
             if (fallbackResponse.ok) {
                 const vulnData = await fallbackResponse.json();
                 displayFallbackVulnerabilities(vulnData);
@@ -10004,7 +10063,7 @@ async function enrichTarget() {
     try {
         showNotification(`Enriching target: ${target}...`, 'info');
         
-        const response = await fetch('/api/threat-intelligence/enrich-target', {
+        const response = await networkAwareFetch('/api/threat-intelligence/enrich-target', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -10034,7 +10093,7 @@ async function downloadThreatReport(target) {
     try {
         showNotification(`Analyzing ${target} for threat intelligence...`, 'info');
         
-        const response = await fetch('/api/threat-intelligence/download-report', {
+        const response = await networkAwareFetch('/api/threat-intelligence/download-report', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -10202,7 +10261,7 @@ async function loadAIInsights() {
         }
         
         // First check AI status
-        const statusResponse = await fetch('/api/ai/status');
+    const statusResponse = await networkAwareFetch('/api/ai/status');
         const status = await statusResponse.json();
         
         const aiSection = document.getElementById('ai-insights-section');
@@ -10230,7 +10289,7 @@ async function loadAIInsights() {
         
         // Load comprehensive insights
         console.log('Fetching fresh AI insights from server...');
-        const insightsResponse = await fetch('/api/ai/insights');
+    const insightsResponse = await networkAwareFetch('/api/ai/insights');
         const insights = await insightsResponse.json();
         
         // Cache the insights
@@ -10332,7 +10391,7 @@ async function refreshAIInsights() {
         aiInsightsCache.timestamp = null;
         
         // Clear server-side cache
-        await fetch('/api/ai/clear-cache', { method: 'POST' });
+    await networkAwareFetch('/api/ai/clear-cache', { method: 'POST' });
         
         // Show loading state
         const networkSummary = document.getElementById('ai-network-summary');
