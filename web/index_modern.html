@@ -2830,6 +2830,8 @@
                                         <option value="">None (Unauthenticated)</option>
                                         <option value="form">Form-based Login</option>
                                         <option value="http_basic">HTTP Basic Auth</option>
+                                        <option value="oauth2_bba">OAuth2 / Microsoft Login (BBA)</option>
+                                        <option value="script_auth">Script-Based Auth (Advanced)</option>
                                         <option value="bearer_token">Bearer Token (API)</option>
                                         <option value="api_key">API Key (Header)</option>
                                         <option value="cookie">Cookie Auth</option>
@@ -2874,6 +2876,40 @@
                                     <input type="text" id="zap-cookie-value" placeholder="session=abc123; token=xyz789"
                                            class="w-full px-2 py-1 bg-slate-600 border border-slate-500 rounded text-sm font-mono">
                                     <p class="text-xs text-gray-500 mt-1">Full cookie string (name=value; name2=value2)</p>
+                                </div>
+                                <!-- OAuth2/BBA Fields -->
+                                <div id="zap-oauth2-bba-container" class="hidden sm:col-span-2">
+                                    <div class="p-2 bg-blue-900 bg-opacity-30 border border-blue-700 rounded mb-2">
+                                        <p class="text-xs text-blue-300"><strong>OAuth2 / Microsoft Login (BBA)</strong></p>
+                                        <p class="text-xs text-blue-400 mt-1">Browser-Based Authentication drives a real browser to handle complex OAuth flows including Microsoft Online login sequences with multi-step screens (username, password, consent, "Stay signed in?").</p>
+                                    </div>
+                                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">Wait-for URL (Optional)</label>
+                                            <input type="text" id="zap-wait-for-url" placeholder="https://myapp.com/dashboard"
+                                                   class="w-full px-2 py-1 bg-slate-600 border border-slate-500 rounded text-sm">
+                                            <p class="text-xs text-gray-500 mt-1">URL pattern indicating successful login</p>
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs text-gray-400 mb-1">Login Page Wait (seconds)</label>
+                                            <input type="number" id="zap-login-page-wait" value="5" min="1" max="60"
+                                                   class="w-full px-2 py-1 bg-slate-600 border border-slate-500 rounded text-sm">
+                                            <p class="text-xs text-gray-500 mt-1">Time to wait for login page to load</p>
+                                        </div>
+                                    </div>
+                                </div>
+                                <!-- Script-Based Auth Fields -->
+                                <div id="zap-script-auth-container" class="hidden sm:col-span-2">
+                                    <div class="p-2 bg-purple-900 bg-opacity-30 border border-purple-700 rounded mb-2">
+                                        <p class="text-xs text-purple-300"><strong>Script-Based Authentication</strong></p>
+                                        <p class="text-xs text-purple-400 mt-1">For complex authentication flows that require custom scripts. If no script name is provided, falls back to browser-based authentication with extended wait times.</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs text-gray-400 mb-1">Script Name (Optional)</label>
+                                        <input type="text" id="zap-script-name" placeholder="custom-oauth-script"
+                                               class="w-full px-2 py-1 bg-slate-600 border border-slate-500 rounded text-sm">
+                                        <p class="text-xs text-gray-500 mt-1">Name of ZAP authentication script (leave empty for auto BBA)</p>
+                                    </div>
                                 </div>
                             </div>
                             <div id="zap-login-data-container" class="mt-3">
@@ -3180,6 +3216,8 @@
                                             class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg focus:ring-2 focus:ring-green-500">
                                         <option value="form">Form-based Login</option>
                                         <option value="http_basic">HTTP Basic Auth</option>
+                                        <option value="oauth2_bba">OAuth2 / Microsoft Login (BBA)</option>
+                                        <option value="script_auth">Script-Based Auth (Advanced)</option>
                                         <option value="bearer_token">Bearer Token (API)</option>
                                         <option value="api_key">API Key (Header)</option>
                                         <option value="cookie">Cookie Auth</option>

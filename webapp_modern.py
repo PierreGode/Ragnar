@@ -11704,7 +11704,7 @@ def zap_set_authentication():
         auth_params = data.get('auth_params', {})
 
         if not auth_type:
-            return jsonify({'success': False, 'error': 'auth_type required (form, http_basic)'}), 400
+            return jsonify({'success': False, 'error': 'auth_type required (form, http_basic, oauth2_bba, script_auth)'}), 400
 
         success, error_message = scanner.zap_set_authentication(context_name, auth_type, auth_params)
 

@@ -2127,8 +2127,209 @@ class AdvancedVulnScanner:
                 logger.info("ZAP HTTP Basic authentication configured")
                 return (True, None)
 
+            elif auth_type == 'oauth2_bba':
+                # OAuth2 / Microsoft Login using Browser-Based Authentication (BBA)
+                # ZAP's BBA mode drives a real browser to handle complex OAuth flows
+                # including Microsoft Online login sequences with multiple screens
+
+                login_url = auth_params.get('login_url', '').strip()
+                username = auth_params.get('username', '').strip()
+                password = auth_params.get('password', '')
+                wait_for_url = auth_params.get('wait_for_url', '').strip()  # URL pattern indicating successful login
+                login_page_wait = auth_params.get('login_page_wait', 5)  # Seconds to wait for login page
+
+                if not login_url:
+                    return (False, "Login URL is required for OAuth2/BBA authentication")
+                if not username:
+                    return (False, "Username is required for OAuth2/BBA authentication")
+                if not password:
+                    return (False, "Password is required for OAuth2/BBA authentication")
+
+                # Include the target URL's host in the context
+                try:
+                    parsed_url = urllib.parse.urlparse(login_url)
+                    include_regex = f"{parsed_url.scheme}://{parsed_url.netloc}.*"
+                    self._zap_api_call('JSON/context/action/includeInContext', {
+                        'contextName': context_name,
+                        'regex': include_regex
+                    })
+                    logger.info(f"Added {include_regex} to context {context_name}")
+
+                    # Also include Microsoft login domains if this appears to be MS OAuth
+                    if 'microsoft' in login_url.lower() or 'login.live' in login_url.lower() or 'microsoftonline' in login_url.lower():
+                        ms_domains = [
+                            'https://login.microsoftonline.com/.*',
+                            'https://login.live.com/.*',
+                            'https://login.microsoft.com/.*'
+                        ]
+                        for ms_domain in ms_domains:
+                            try:
+                                self._zap_api_call('JSON/context/action/includeInContext', {
+                                    'contextName': context_name,
+                                    'regex': ms_domain
+                                })
+                            except:
+                                pass  # Best effort to add MS domains
+                except Exception as e:
+                    logger.warning(f"Could not add URL to context: {e}")
+
+                # Configure Browser-Based Authentication
+                try:
+                    # Set authentication method to browser-based
+                    bba_config = {
+                        'loginPageUrl': login_url,
+                        'loginPageWait': str(login_page_wait),
+                    }
+
+                    # Add wait_for_url if specified (helps ZAP know when login is complete)
+                    if wait_for_url:
+                        bba_config['waitForUrl'] = wait_for_url
+
+                    self._zap_api_call('JSON/authentication/action/setAuthenticationMethod', {
+                        'contextId': context_id,
+                        'authMethodName': 'browserBasedAuthentication',
+                        'authMethodConfigParams': urllib.parse.urlencode(bba_config)
+                    })
+                    logger.info(f"Set browser-based authentication for context {context_id}")
+                except Exception as e:
+                    return (False, f"Failed to set BBA method: {str(e)}")
+
+                # Create user for BBA
+                try:
+                    user_resp = self._zap_api_call('JSON/users/action/newUser', {
+                        'contextId': context_id,
+                        'name': 'oauth_user'
+                    })
+                    user_id = user_resp.get('userId')
+                except Exception as e:
+                    return (False, f"Failed to create user for BBA: {str(e)}")
+
+                if not user_id:
+                    return (False, "Failed to create user - no user ID returned from ZAP")
+
+                # Set user credentials for BBA
+                try:
+                    self._zap_api_call('JSON/users/action/setAuthenticationCredentials', {
+                        'contextId': context_id,
+                        'userId': user_id,
+                        'authCredentialsConfigParams': urllib.parse.urlencode({
+                            'username': username,
+                            'password': password,
+                        })
+                    })
+                except Exception as e:
+                    return (False, f"Failed to set BBA credentials: {str(e)}")
+
+                # Enable user
+                try:
+                    self._zap_api_call('JSON/users/action/setUserEnabled', {
+                        'contextId': context_id,
+                        'userId': user_id,
+                        'enabled': 'true'
+                    })
+                except Exception as e:
+                    return (False, f"Failed to enable BBA user: {str(e)}")
+
+                logger.info(f"ZAP OAuth2/BBA authentication configured for context {context_name}")
+                return (True, None)
+
+            elif auth_type == 'script_auth':
+                # Script-Based Authentication for custom/complex flows
+                # This allows users to provide a custom authentication script
+
+                script_name = auth_params.get('script_name', '').strip()
+                login_url = auth_params.get('login_url', '').strip()
+                username = auth_params.get('username', '').strip()
+                password = auth_params.get('password', '')
+
+                if not login_url:
+                    return (False, "Login URL is required for script-based authentication")
+                if not username:
+                    return (False, "Username is required for script-based authentication")
+                if not password:
+                    return (False, "Password is required for script-based authentication")
+
+                # Include the target URL's host in the context
+                try:
+                    parsed_url = urllib.parse.urlparse(login_url)
+                    include_regex = f"{parsed_url.scheme}://{parsed_url.netloc}.*"
+                    self._zap_api_call('JSON/context/action/includeInContext', {
+                        'contextName': context_name,
+                        'regex': include_regex
+                    })
+                except Exception as e:
+                    logger.warning(f"Could not add URL to context: {e}")
+
+                # If a script name is provided, use script-based auth
+                # Otherwise fall back to form-based as a starting point
+                if script_name:
+                    try:
+                        self._zap_api_call('JSON/authentication/action/setAuthenticationMethod', {
+                            'contextId': context_id,
+                            'authMethodName': 'scriptBasedAuthentication',
+                            'authMethodConfigParams': urllib.parse.urlencode({
+                                'scriptName': script_name,
+                                'loginUrl': login_url,
+                            })
+                        })
+                    except Exception as e:
+                        return (False, f"Failed to set script-based authentication: {str(e)}")
+                else:
+                    # Use Client-Script Authentication (CSA) which is similar to BBA
+                    # but allows more control via JavaScript
+                    try:
+                        self._zap_api_call('JSON/authentication/action/setAuthenticationMethod', {
+                            'contextId': context_id,
+                            'authMethodName': 'browserBasedAuthentication',
+                            'authMethodConfigParams': urllib.parse.urlencode({
+                                'loginPageUrl': login_url,
+                                'loginPageWait': '10',  # Longer wait for complex flows
+                            })
+                        })
+                    except Exception as e:
+                        return (False, f"Failed to set CSA method: {str(e)}")
+
+                # Create and configure user
+                try:
+                    user_resp = self._zap_api_call('JSON/users/action/newUser', {
+                        'contextId': context_id,
+                        'name': 'script_user'
+                    })
+                    user_id = user_resp.get('userId')
+                except Exception as e:
+                    return (False, f"Failed to create user for script auth: {str(e)}")
+
+                if not user_id:
+                    return (False, "Failed to create user - no user ID returned")
+
+                # Set credentials
+                try:
+                    self._zap_api_call('JSON/users/action/setAuthenticationCredentials', {
+                        'contextId': context_id,
+                        'userId': user_id,
+                        'authCredentialsConfigParams': urllib.parse.urlencode({
+                            'username': username,
+                            'password': password,
+                        })
+                    })
+                except Exception as e:
+                    return (False, f"Failed to set script auth credentials: {str(e)}")
+
+                # Enable user
+                try:
+                    self._zap_api_call('JSON/users/action/setUserEnabled', {
+                        'contextId': context_id,
+                        'userId': user_id,
+                        'enabled': 'true'
+                    })
+                except Exception as e:
+                    return (False, f"Failed to enable script auth user: {str(e)}")
+
+                logger.info(f"ZAP script-based authentication configured for context {context_name}")
+                return (True, None)
+
             else:
-                return (False, f"Unsupported authentication type: '{auth_type}'. Supported types: 'form', 'http_basic'")
+                return (False, f"Unsupported authentication type: '{auth_type}'. Supported types: 'form', 'http_basic', 'oauth2_bba', 'script_auth'")
 
         except Exception as e:
             error_msg = str(e)

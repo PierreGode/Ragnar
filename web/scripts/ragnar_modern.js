@@ -13521,6 +13521,11 @@ async function zapSetAuthentication() {
     const apiKey = document.getElementById('zap-api-key')?.value.trim();
     const apiKeyHeader = document.getElementById('zap-api-key-header')?.value.trim() || 'X-API-Key';
     const cookieValue = document.getElementById('zap-cookie-value')?.value.trim();
+    // OAuth2/BBA fields
+    const waitForUrl = document.getElementById('zap-wait-for-url')?.value.trim();
+    const loginPageWait = document.getElementById('zap-login-page-wait')?.value || '5';
+    // Script auth fields
+    const scriptName = document.getElementById('zap-script-name')?.value.trim();
 
     if (!authType) {
         showNotification('Please select an authentication type', 'warning');
@@ -13558,6 +13563,35 @@ async function zapSetAuthentication() {
                 authParams.hostname = loginUrl;
             }
         }
+    } else if (authType === 'oauth2_bba') {
+        // OAuth2 / Microsoft Login (Browser-Based Authentication)
+        if (!username || !password) {
+            showNotification('Please enter username and password for OAuth2 login', 'warning');
+            return;
+        }
+        if (!loginUrl) {
+            showNotification('Login URL is required for OAuth2/BBA authentication', 'warning');
+            return;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.login_url = loginUrl;
+        authParams.wait_for_url = waitForUrl || '';
+        authParams.login_page_wait = parseInt(loginPageWait) || 5;
+    } else if (authType === 'script_auth') {
+        // Script-Based Authentication
+        if (!username || !password) {
+            showNotification('Please enter username and password for script authentication', 'warning');
+            return;
+        }
+        if (!loginUrl) {
+            showNotification('Login URL is required for script-based authentication', 'warning');
+            return;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.login_url = loginUrl;
+        authParams.script_name = scriptName || '';
     } else if (authType === 'bearer_token') {
         if (!bearerToken) {
             showNotification('Please enter a bearer token', 'warning');
@@ -13852,6 +13886,16 @@ function toggleCredentialFields() {
         if (realmContainer) realmContainer.classList.remove('hidden');
         if (usernameContainer) usernameContainer.classList.remove('hidden');
         if (passwordContainer) passwordContainer.classList.remove('hidden');
+    } else if (type === 'oauth2_bba') {
+        // OAuth2 / Microsoft Login (Browser-Based Authentication)
+        if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
+        if (usernameContainer) usernameContainer.classList.remove('hidden');
+        if (passwordContainer) passwordContainer.classList.remove('hidden');
+    } else if (type === 'script_auth') {
+        // Script-Based Authentication
+        if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
+        if (usernameContainer) usernameContainer.classList.remove('hidden');
+        if (passwordContainer) passwordContainer.classList.remove('hidden');
     } else if (type === 'bearer_token') {
         if (bearerTokenContainer) bearerTokenContainer.classList.remove('hidden');
     } else if (type === 'api_key') {
@@ -13876,6 +13920,8 @@ function toggleScanAuthFields() {
     const apiKeyContainer = document.getElementById('zap-api-key-container');
     const apiKeyHeaderContainer = document.getElementById('zap-api-key-header-container');
     const cookieContainer = document.getElementById('zap-cookie-container');
+    const oauth2BbaContainer = document.getElementById('zap-oauth2-bba-container');
+    const scriptAuthContainer = document.getElementById('zap-script-auth-container');
 
     if (!authType) return;
 
@@ -13890,6 +13936,8 @@ function toggleScanAuthFields() {
     if (apiKeyContainer) apiKeyContainer.classList.add('hidden');
     if (apiKeyHeaderContainer) apiKeyHeaderContainer.classList.add('hidden');
     if (cookieContainer) cookieContainer.classList.add('hidden');
+    if (oauth2BbaContainer) oauth2BbaContainer.classList.add('hidden');
+    if (scriptAuthContainer) scriptAuthContainer.classList.add('hidden');
 
     // Show relevant fields based on auth type
     if (type === 'form') {
@@ -13900,6 +13948,18 @@ function toggleScanAuthFields() {
     } else if (type === 'http_basic') {
         if (usernameContainer) usernameContainer.classList.remove('hidden');
         if (passwordContainer) passwordContainer.classList.remove('hidden');
+    } else if (type === 'oauth2_bba') {
+        // OAuth2 / Microsoft Login (Browser-Based Authentication)
+        if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
+        if (usernameContainer) usernameContainer.classList.remove('hidden');
+        if (passwordContainer) passwordContainer.classList.remove('hidden');
+        if (oauth2BbaContainer) oauth2BbaContainer.classList.remove('hidden');
+    } else if (type === 'script_auth') {
+        // Script-Based Authentication
+        if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
+        if (usernameContainer) usernameContainer.classList.remove('hidden');
+        if (passwordContainer) passwordContainer.classList.remove('hidden');
+        if (scriptAuthContainer) scriptAuthContainer.classList.remove('hidden');
     } else if (type === 'bearer_token') {
         if (bearerTokenContainer) bearerTokenContainer.classList.remove('hidden');
     } else if (type === 'api_key') {
@@ -13934,9 +13994,13 @@ async function saveTargetCredentials() {
     }
 
     // Validate required fields based on auth type
-    if (authType === 'form' || authType === 'http_basic') {
+    if (authType === 'form' || authType === 'http_basic' || authType === 'oauth2_bba' || authType === 'script_auth') {
         if (!username || !password) {
             showNotification('Username and password are required', 'warning');
+            return;
+        }
+        if ((authType === 'oauth2_bba' || authType === 'script_auth') && !loginUrl) {
+            showNotification('Login URL is required for OAuth2/BBA or Script-based authentication', 'warning');
             return;
         }
     } else if (authType === 'bearer_token') {
