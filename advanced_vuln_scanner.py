@@ -244,6 +244,10 @@ class AdvancedVulnScanner:
         # Recover any interrupted scans on startup
         self._recover_interrupted_scans()
 
+        # Auto-start ZAP daemon so it's always available
+        if self._tool_paths.get('zap'):
+            threading.Thread(target=self._auto_start_zap, daemon=True).start()
+
     def _init_database(self):
         """Initialize database connection for scan persistence"""
         try:
@@ -299,6 +303,20 @@ class AdvancedVulnScanner:
             logger.info(f"Recovered {len(interrupted)} interrupted scans")
         except Exception as e:
             logger.error(f"Error recovering interrupted scans: {e}")
+
+    def _auto_start_zap(self):
+        """Auto-start ZAP daemon in background so it's always available"""
+        try:
+            if not self._is_zap_running():
+                logger.info("Auto-starting ZAP daemon...")
+                if self.start_zap_daemon():
+                    logger.info("ZAP daemon auto-started successfully")
+                else:
+                    logger.warning("Failed to auto-start ZAP daemon")
+            else:
+                logger.info("ZAP daemon already running")
+        except Exception as e:
+            logger.warning(f"ZAP auto-start error: {e}")
 
     def _dict_to_finding(self, data: Dict) -> VulnerabilityFinding:
         """Convert a dictionary (from DB) back to VulnerabilityFinding"""
@@ -1660,8 +1678,8 @@ class AdvancedVulnScanner:
                     progress.progress_percent = 20 + int(scan_progress * 0.8)
                     progress.current_check = f"Active scanning... {scan_progress}%"
 
-                    # Update findings count
-                    alerts_resp = self._zap_api_call('JSON/core/view/numberOfAlerts', {'baseurl': target})
+                    # Update findings count (no baseurl filter for reliability)
+                    alerts_resp = self._zap_api_call('JSON/core/view/numberOfAlerts', {})
                     progress.findings_count = int(alerts_resp.get('numberOfAlerts', 0))
 
                     if scan_progress >= 100:
@@ -1870,9 +1888,9 @@ class AdvancedVulnScanner:
                 progress.progress_percent = 50 + int(scan_progress * 0.5)  # 50-100%
                 progress.current_check = f"Phase 3/3: Active scanning... {scan_progress}%"
 
-                # Update findings count
+                # Update findings count (fetch total without baseurl filter for reliability)
                 try:
-                    alerts_resp = self._zap_api_call('JSON/core/view/numberOfAlerts', {'baseurl': target})
+                    alerts_resp = self._zap_api_call('JSON/core/view/numberOfAlerts', {})
                     progress.findings_count = int(alerts_resp.get('numberOfAlerts', 0))
                 except Exception:
                     pass
@@ -1910,59 +1928,40 @@ class AdvancedVulnScanner:
             # Parse target to get host for flexible matching
             parsed_target = urllib.parse.urlparse(target)
             target_host = parsed_target.netloc or target
+            target_host_no_port = parsed_target.hostname or ''
+            target_no_slash = target.rstrip('/')
 
-            # Try fetching with baseurl first
-            logger.info(f"Fetching ZAP alerts for target: {target} (host: {target_host})")
+            # Always fetch ALL alerts - ZAP's baseurl filtering is unreliable
+            logger.info(f"Fetching all ZAP alerts (target: {target}, host: {target_host})")
             alerts_resp = self._zap_api_call('JSON/core/view/alerts', {
-                'baseurl': target,
                 'start': '0',
-                'count': '500'
+                'count': '5000'
             })
+            all_alerts = alerts_resp.get('alerts', [])
+            logger.info(f"Total alerts in ZAP: {len(all_alerts)}")
 
-            alerts = alerts_resp.get('alerts', [])
-            logger.info(f"ZAP alerts with baseurl '{target}': {len(alerts)} found")
+            # Filter alerts matching this target by host
+            alerts = []
+            for alert in all_alerts:
+                alert_url = alert.get('url', '')
+                if not alert_url:
+                    continue
+                parsed_alert = urllib.parse.urlparse(alert_url)
+                alert_host = parsed_alert.netloc or ''
+                alert_host_no_port = parsed_alert.hostname or ''
 
-            # If no alerts found, try without trailing slash or with different format
-            if not alerts:
-                target_no_slash = target.rstrip('/')
-                alerts_resp = self._zap_api_call('JSON/core/view/alerts', {
-                    'baseurl': target_no_slash,
-                    'start': '0',
-                    'count': '500'
-                })
-                alerts = alerts_resp.get('alerts', [])
-                logger.info(f"ZAP alerts with baseurl '{target_no_slash}': {len(alerts)} found")
+                # Match by: full netloc (host:port), hostname only, or URL substring
+                if (target_host == alert_host or
+                        target_host_no_port == alert_host_no_port or
+                        target_host in alert_url or
+                        alert_url.startswith(target_no_slash)):
+                    alerts.append(alert)
 
-            # If still no alerts, fetch all and filter by host
-            if not alerts:
-                logger.info(f"No alerts found for {target}, fetching all alerts and filtering by host {target_host}")
-                alerts_resp = self._zap_api_call('JSON/core/view/alerts', {
-                    'start': '0',
-                    'count': '1000'
-                })
-                all_alerts = alerts_resp.get('alerts', [])
-                logger.info(f"Total alerts in ZAP (unfiltered): {len(all_alerts)}")
+            if all_alerts and not alerts:
+                sample_urls = [a.get('url', 'N/A') for a in all_alerts[:5]]
+                logger.warning(f"Found {len(all_alerts)} total alerts but none matched host '{target_host}'. Sample alert URLs: {sample_urls}")
 
-                # Filter by target host - use flexible matching
-                target_host_no_port = parsed_target.hostname or ''
-                for alert in all_alerts:
-                    alert_url = alert.get('url', '')
-                    parsed_alert = urllib.parse.urlparse(alert_url)
-                    alert_host = parsed_alert.netloc or ''
-                    alert_host_no_port = parsed_alert.hostname or ''
-
-                    # Match by full netloc (host:port) or just hostname
-                    if (target_host in alert_url or
-                            target_host == alert_host or
-                            target_host_no_port == alert_host_no_port):
-                        alerts.append(alert)
-
-                if all_alerts and not alerts:
-                    # Log sample alert URLs for debugging
-                    sample_urls = [a.get('url', 'N/A') for a in all_alerts[:5]]
-                    logger.warning(f"Found {len(all_alerts)} total alerts but none matched host '{target_host}'. Sample alert URLs: {sample_urls}")
-
-            logger.info(f"Fetched {len(alerts)} alerts from ZAP for {target}")
+            logger.info(f"Matched {len(alerts)} of {len(all_alerts)} alerts for {target}")
 
             for alert in alerts:
                 finding = self._parse_zap_alert(alert, scan_id)

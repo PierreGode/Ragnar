@@ -3,7 +3,14 @@
     "allow": [
       "Bash(cd:*)",
       "Bash(grep:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:192.168.1.192)",
+      "Bash(curl:*)",
+      "Bash(timeout:*)",
+      "Bash(Start-Sleep -Seconds 15)",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 30; curl -s http://192.168.1.192:8000/api/vuln-advanced/scan/AVS-000001-1770398360\")",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 30; Invoke-RestMethod -Uri ''http://192.168.1.192:8000/api/vuln-advanced/scan/AVS-000001-1770398360'' | ConvertTo-Json -Depth 5\")",
+      "Bash(powershell -Command \"Start-Sleep -Seconds 120; Invoke-RestMethod -Uri ''http://192.168.1.192:8000/api/vuln-advanced/scan/AVS-000001-1770398360'' | ConvertTo-Json -Depth 5\")"
     ]
   }
 }
