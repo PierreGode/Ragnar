@@ -13685,12 +13685,8 @@ async function zapCheckAuthStatus() {
 
             clearBtn.classList.remove('hidden');
         } else {
-            // No auth - show info banner
-            banner.className = 'mt-4 p-3 rounded-lg border border-slate-600 bg-slate-700 bg-opacity-30';
-            icon.textContent = '🔓';
-            text.textContent = 'No authentication configured (unauthenticated scanning)';
-            text.className = 'text-sm text-gray-400';
-
+            // No auth - hide banner entirely
+            banner.classList.add('hidden');
             clearBtn.classList.add('hidden');
         }
 
