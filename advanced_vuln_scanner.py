@@ -1145,6 +1145,13 @@ class AdvancedVulnScanner:
             req = urllib.request.Request(url, method='GET')
             with urllib.request.urlopen(req, timeout=5) as response:
                 return response.status == 200
+        except urllib.error.HTTPError as e:
+            # ZAP is running but API key is wrong (401/403) - it's still running
+            if e.code in (401, 403):
+                logger.warning(f"ZAP is running but API key may be incorrect (HTTP {e.code}). "
+                              f"Try disabling the API key in ZAP or setting it to match.")
+                return True
+            return False
         except Exception:
             return False
 
@@ -1275,8 +1282,29 @@ class AdvancedVulnScanner:
     def start_zap_daemon(self, port: int = None) -> bool:
         """Start ZAP in daemon mode"""
         if self._is_zap_running():
-            logger.info("ZAP daemon already running")
-            return True
+            # Verify API key works by making a real API call
+            try:
+                self._zap_api_call('JSON/core/view/version')
+                logger.info("ZAP daemon already running and API key is valid")
+                return True
+            except Exception as e:
+                logger.warning(f"ZAP daemon is running but API key validation failed: {e}. "
+                              f"Will try to disable API key requirement or restart ZAP.")
+                # Try with no API key (ZAP may have been started without one)
+                try:
+                    url = f"{self._zap_base_url}/JSON/core/view/version/"
+                    req = urllib.request.Request(url, method='GET')
+                    with urllib.request.urlopen(req, timeout=5) as response:
+                        if response.status == 200:
+                            logger.info("ZAP is running without API key - disabling API key requirement")
+                            self._zap_api_key = ''
+                            return True
+                except Exception:
+                    pass
+                # ZAP is running with a different API key - cannot use it
+                logger.error("ZAP daemon is running with a different API key. "
+                            "Please stop ZAP and let Ragnar start it, or configure matching API keys.")
+                return False
 
         zap_path = self._tool_paths.get('zap')
         if not zap_path:
@@ -1707,10 +1735,18 @@ class AdvancedVulnScanner:
 
             # Final: Fetch all alerts (in case active scan completed normally)
             progress.current_check = "Fetching vulnerability alerts..."
-            self._fetch_zap_alerts(scan_id, target)
-            alerts_fetched = True
+            try:
+                self._fetch_zap_alerts(scan_id, target)
+                alerts_fetched = True
+            except Exception as fetch_err:
+                logger.error(f"Failed to fetch alerts after scan phases: {fetch_err}")
+                progress.error_message = f"Scan phases completed but alert fetching failed: {fetch_err}"
 
-            logger.info(f"ZAP full scan completed with {len(self.scan_results.get(scan_id, []))} findings")
+            findings_count = len(self.scan_results.get(scan_id, []))
+            logger.info(f"ZAP full scan completed with {findings_count} findings")
+
+            if findings_count == 0 and not alerts_fetched:
+                logger.warning(f"ZAP scan {scan_id} completed with 0 findings - alert fetching may have failed")
 
         except Exception as e:
             logger.error(f"ZAP full scan error: {e}")
@@ -1815,7 +1851,10 @@ class AdvancedVulnScanner:
         if not ascan_id:
             logger.warning("Failed to start active scan phase, fetching any existing alerts...")
             # Still try to fetch alerts from spider phase
-            self._fetch_zap_alerts(scan_id, target)
+            try:
+                self._fetch_zap_alerts(scan_id, target)
+            except Exception as fetch_err:
+                logger.warning(f"Failed to fetch alerts after spider phase: {fetch_err}")
             return
 
         # Active scan with timeout and stall detection
@@ -1847,7 +1886,10 @@ class AdvancedVulnScanner:
                     if stall_count >= 12:  # 60 seconds of no progress
                         logger.warning(f"Active scan phase stalled at {scan_progress}%, fetching alerts before stopping...")
                         # Fetch alerts before breaking - don't lose the findings!
-                        self._fetch_zap_alerts(scan_id, target)
+                        try:
+                            self._fetch_zap_alerts(scan_id, target)
+                        except Exception as fetch_err:
+                            logger.warning(f"Failed to fetch alerts on stall: {fetch_err}")
                         break
                 else:
                     stall_count = 0
@@ -1870,6 +1912,7 @@ class AdvancedVulnScanner:
             target_host = parsed_target.netloc or target
 
             # Try fetching with baseurl first
+            logger.info(f"Fetching ZAP alerts for target: {target} (host: {target_host})")
             alerts_resp = self._zap_api_call('JSON/core/view/alerts', {
                 'baseurl': target,
                 'start': '0',
@@ -1877,6 +1920,7 @@ class AdvancedVulnScanner:
             })
 
             alerts = alerts_resp.get('alerts', [])
+            logger.info(f"ZAP alerts with baseurl '{target}': {len(alerts)} found")
 
             # If no alerts found, try without trailing slash or with different format
             if not alerts:
@@ -1887,6 +1931,7 @@ class AdvancedVulnScanner:
                     'count': '500'
                 })
                 alerts = alerts_resp.get('alerts', [])
+                logger.info(f"ZAP alerts with baseurl '{target_no_slash}': {len(alerts)} found")
 
             # If still no alerts, fetch all and filter by host
             if not alerts:
@@ -1896,12 +1941,26 @@ class AdvancedVulnScanner:
                     'count': '1000'
                 })
                 all_alerts = alerts_resp.get('alerts', [])
+                logger.info(f"Total alerts in ZAP (unfiltered): {len(all_alerts)}")
 
-                # Filter by target host
+                # Filter by target host - use flexible matching
+                target_host_no_port = parsed_target.hostname or ''
                 for alert in all_alerts:
                     alert_url = alert.get('url', '')
-                    if target_host in alert_url:
+                    parsed_alert = urllib.parse.urlparse(alert_url)
+                    alert_host = parsed_alert.netloc or ''
+                    alert_host_no_port = parsed_alert.hostname or ''
+
+                    # Match by full netloc (host:port) or just hostname
+                    if (target_host in alert_url or
+                            target_host == alert_host or
+                            target_host_no_port == alert_host_no_port):
                         alerts.append(alert)
+
+                if all_alerts and not alerts:
+                    # Log sample alert URLs for debugging
+                    sample_urls = [a.get('url', 'N/A') for a in all_alerts[:5]]
+                    logger.warning(f"Found {len(all_alerts)} total alerts but none matched host '{target_host}'. Sample alert URLs: {sample_urls}")
 
             logger.info(f"Fetched {len(alerts)} alerts from ZAP for {target}")
 
@@ -1911,7 +1970,9 @@ class AdvancedVulnScanner:
                     self.scan_results[scan_id].append(finding)
 
         except Exception as e:
-            logger.error(f"Error fetching ZAP alerts: {e}")
+            logger.error(f"Error fetching ZAP alerts: {e}", exc_info=True)
+            # Propagate the error so callers know alert fetching failed
+            raise RuntimeError(f"Failed to fetch ZAP alerts: {e}") from e
 
     def _parse_zap_alert(self, alert: Dict, scan_id: str) -> Optional[VulnerabilityFinding]:
         """Parse a ZAP alert into VulnerabilityFinding"""

@@ -12326,6 +12326,9 @@ function updateActiveScans(scans) {
                         <button onclick="zapClearAuthentication()" class="underline hover:text-yellow-300">clear auth settings</button>.
                     </div>
                 ` : ''}
+                ${scan.status === 'completed' && scan.findings_count === 0 && !errorMessage ? `
+                    <div class="text-xs text-yellow-400 mt-1">0 findings - check server logs for details</div>
+                ` : ''}
                 ${scan.findings_count > 0 ? `<div class="text-xs text-cyan-400 mt-1">${scan.findings_count} findings</div>` : ''}
                 <div class="mt-2 flex gap-2 flex-wrap">
                     ${scan.status === 'running' ? `

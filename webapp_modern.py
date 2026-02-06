@@ -11049,12 +11049,29 @@ def get_advanced_vuln_debug():
         if not scanner:
             return jsonify({'error': 'Scanner not available'})
         
+        # ZAP diagnostic info
+        zap_info = {
+            'zap_base_url': scanner._zap_base_url,
+            'zap_port': scanner._zap_port,
+            'zap_api_key_set': bool(scanner._zap_api_key),
+            'zap_running': scanner._is_zap_running(),
+        }
+        # Try to get ZAP version
+        try:
+            version_resp = scanner._zap_api_call('JSON/core/view/version')
+            zap_info['zap_version'] = version_resp.get('version', 'unknown')
+            zap_info['zap_api_key_valid'] = True
+        except Exception as e:
+            zap_info['zap_api_key_valid'] = False
+            zap_info['zap_api_error'] = str(e)
+
         debug_info = {
             'tool_paths': scanner._tool_paths,
             'total_scans': len(scanner.scan_history),
             'active_scans': len(scanner.active_scans),
             'scan_results_keys': list(scanner.scan_results.keys()),
             'scan_results_counts': {k: len(v) for k, v in scanner.scan_results.items()},
+            'zap': zap_info,
             'scan_history': [
                 {
                     'scan_id': s.scan_id,
