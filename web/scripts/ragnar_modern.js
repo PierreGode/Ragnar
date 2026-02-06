@@ -13294,37 +13294,48 @@ Timestamp: ${f.timestamp || 'N/A'}
 async function startAdvancedScan() {
     const targetInput = document.getElementById('adv-vuln-target');
     const scannerSelect = document.getElementById('adv-vuln-scanner');
-    
+
     if (!targetInput || !scannerSelect) return;
-    
+
     const target = targetInput.value.trim();
     const scanType = scannerSelect.value;
-    
+
     if (!target) {
         showNotification('Please enter a target IP or URL', 'warning');
         return;
     }
-    
+
+    // If auth type is selected, configure authentication first
+    const authType = document.getElementById('zap-auth-type')?.value;
+    if (authType) {
+        try {
+            await zapSetAuthentication();
+        } catch (e) {
+            // zapSetAuthentication shows its own error notifications
+            return;
+        }
+    }
+
     try {
         const response = await fetch('/api/vuln-advanced/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target, scan_type: scanType })
         });
-        
+
         const data = await response.json();
-        
+
         if (data.success) {
             showNotification(`Started ${scanType} scan: ${data.scan_id}`, 'success');
             targetInput.value = '';
-            
+
             // Start polling for updates
             startAdvVulnPolling();
-            
+
         } else {
             showNotification(data.error || 'Failed to start scan', 'error');
         }
-        
+
     } catch (error) {
         console.error('Error starting advanced scan:', error);
         showNotification('Failed to start scan', 'error');
@@ -13915,6 +13926,7 @@ function toggleCredentialFields() {
  */
 function toggleScanAuthFields() {
     const authType = document.getElementById('zap-auth-type');
+    const authFieldsWrapper = document.getElementById('zap-auth-fields-wrapper');
     const loginUrlContainer = document.getElementById('zap-login-url-container');
     const usernameContainer = document.getElementById('zap-username-container');
     const passwordContainer = document.getElementById('zap-password-container');
@@ -13942,6 +13954,13 @@ function toggleScanAuthFields() {
     if (oauth2BbaContainer) oauth2BbaContainer.classList.add('hidden');
     if (scriptAuthContainer) scriptAuthContainer.classList.add('hidden');
 
+    // Hide/show the auth fields wrapper based on whether an auth type is selected
+    if (!type) {
+        if (authFieldsWrapper) authFieldsWrapper.classList.add('hidden');
+        return;
+    }
+    if (authFieldsWrapper) authFieldsWrapper.classList.remove('hidden');
+
     // Show relevant fields based on auth type
     if (type === 'form') {
         if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
@@ -13952,13 +13971,11 @@ function toggleScanAuthFields() {
         if (usernameContainer) usernameContainer.classList.remove('hidden');
         if (passwordContainer) passwordContainer.classList.remove('hidden');
     } else if (type === 'oauth2_bba') {
-        // OAuth2 / Microsoft Login (Browser-Based Authentication)
         if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
         if (usernameContainer) usernameContainer.classList.remove('hidden');
         if (passwordContainer) passwordContainer.classList.remove('hidden');
         if (oauth2BbaContainer) oauth2BbaContainer.classList.remove('hidden');
     } else if (type === 'script_auth') {
-        // Script-Based Authentication
         if (loginUrlContainer) loginUrlContainer.classList.remove('hidden');
         if (usernameContainer) usernameContainer.classList.remove('hidden');
         if (passwordContainer) passwordContainer.classList.remove('hidden');
@@ -13971,7 +13988,6 @@ function toggleScanAuthFields() {
     } else if (type === 'cookie') {
         if (cookieContainer) cookieContainer.classList.remove('hidden');
     }
-    // '' (none) - all fields stay hidden
 }
 
 /**
