@@ -13305,18 +13305,24 @@ async function startAdvancedScan() {
         return;
     }
 
-    // If auth type is selected, configure authentication first
+    // Collect auth params directly to send with the scan request
     const authType = document.getElementById('zap-auth-type')?.value;
+    const options = {};
+    
     if (authType) {
-        const authOk = await zapSetAuthentication();
-        if (!authOk) return;
+        const authParams = getAuthParams(authType);
+        if (authParams === null) return; // Validation failed
+        
+        // Pass auth params directly in options
+        options.auth_type = authType;
+        options.auth_params = authParams;
     }
 
     try {
         const response = await fetch('/api/vuln-advanced/scan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target, scan_type: scanType })
+            body: JSON.stringify({ target, scan_type: scanType, options })
         });
 
         const data = await response.json();
@@ -13336,6 +13342,97 @@ async function startAdvancedScan() {
         console.error('Error starting advanced scan:', error);
         showNotification('Failed to start scan', 'error');
     }
+}
+
+/**
+ * Collect and validate auth parameters based on auth type
+ * Returns auth params object or null if validation fails
+ */
+function getAuthParams(authType) {
+    const loginUrl = document.getElementById('zap-login-url')?.value.trim();
+    const username = document.getElementById('zap-username')?.value.trim();
+    const password = document.getElementById('zap-password')?.value.trim();
+    const loginData = document.getElementById('zap-login-data')?.value.trim();
+    const bearerToken = document.getElementById('zap-bearer-token')?.value.trim();
+    const apiKey = document.getElementById('zap-api-key')?.value.trim();
+    const apiKeyHeader = document.getElementById('zap-api-key-header')?.value.trim() || 'X-API-Key';
+    const cookieValue = document.getElementById('zap-cookie-value')?.value.trim();
+    const waitForUrl = document.getElementById('zap-wait-for-url')?.value.trim();
+    const loginPageWait = document.getElementById('zap-login-page-wait')?.value || '5';
+    const scriptName = document.getElementById('zap-script-name')?.value.trim();
+
+    const authParams = {};
+
+    if (authType === 'form') {
+        if (!username || !password) {
+            showNotification('Please enter username and password', 'warning');
+            return null;
+        }
+        if (!loginUrl) {
+            showNotification('Login URL is required for form authentication', 'warning');
+            return null;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.login_url = loginUrl;
+        authParams.login_request_data = loginData || `username={%username%}&password={%password%}`;
+    } else if (authType === 'http_basic') {
+        if (!username || !password) {
+            showNotification('Please enter username and password', 'warning');
+            return null;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.http_basic_auth = `${username}:${password}`;
+    } else if (authType === 'oauth2_bba') {
+        if (!username || !password) {
+            showNotification('Please enter username and password for OAuth2 login', 'warning');
+            return null;
+        }
+        if (!loginUrl) {
+            showNotification('Login URL is required for OAuth2/BBA authentication', 'warning');
+            return null;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.login_url = loginUrl;
+        authParams.wait_for_url = waitForUrl || '';
+        authParams.login_page_wait = parseInt(loginPageWait) || 5;
+    } else if (authType === 'script_auth') {
+        if (!username || !password) {
+            showNotification('Please enter username and password for script authentication', 'warning');
+            return null;
+        }
+        if (!loginUrl) {
+            showNotification('Login URL is required for script-based authentication', 'warning');
+            return null;
+        }
+        authParams.username = username;
+        authParams.password = password;
+        authParams.login_url = loginUrl;
+        authParams.script_name = scriptName || '';
+    } else if (authType === 'bearer_token') {
+        if (!bearerToken) {
+            showNotification('Please enter a bearer token', 'warning');
+            return null;
+        }
+        authParams.bearer_token = bearerToken;
+    } else if (authType === 'api_key') {
+        if (!apiKey) {
+            showNotification('Please enter an API key', 'warning');
+            return null;
+        }
+        authParams.api_key = apiKey;
+        authParams.api_key_header = apiKeyHeader;
+    } else if (authType === 'cookie') {
+        if (!cookieValue) {
+            showNotification('Please enter a cookie string', 'warning');
+            return null;
+        }
+        authParams.cookie_value = cookieValue;
+    }
+
+    return authParams;
 }
 
 function startAdvVulnPolling() {
@@ -13521,227 +13618,29 @@ async function zapImportOpenAPI() {
     }
 }
 
+// zapSetAuthentication is no longer used - auth is passed directly with each scan request
+// Keeping as a no-op for backwards compatibility
 async function zapSetAuthentication() {
-    const authType = document.getElementById('zap-auth-type')?.value;
-    const loginUrl = document.getElementById('zap-login-url')?.value.trim();
-    const username = document.getElementById('zap-username')?.value.trim();
-    const password = document.getElementById('zap-password')?.value.trim();
-    const loginData = document.getElementById('zap-login-data')?.value.trim();
-    const bearerToken = document.getElementById('zap-bearer-token')?.value.trim();
-    const apiKey = document.getElementById('zap-api-key')?.value.trim();
-    const apiKeyHeader = document.getElementById('zap-api-key-header')?.value.trim() || 'X-API-Key';
-    const cookieValue = document.getElementById('zap-cookie-value')?.value.trim();
-    // OAuth2/BBA fields
-    const waitForUrl = document.getElementById('zap-wait-for-url')?.value.trim();
-    const loginPageWait = document.getElementById('zap-login-page-wait')?.value || '5';
-    // Script auth fields
-    const scriptName = document.getElementById('zap-script-name')?.value.trim();
-
-    if (!authType) {
-        showNotification('Please select an authentication type', 'warning');
-        return false;
-    }
-
-    const authParams = {};
-
-    // Validate and collect fields based on auth type
-    if (authType === 'form') {
-        if (!username || !password) {
-            showNotification('Please enter username and password', 'warning');
-            return false;
-        }
-        if (!loginUrl) {
-            showNotification('Login URL is required for form authentication', 'warning');
-            return false;
-        }
-        authParams.username = username;
-        authParams.password = password;
-        authParams.login_url = loginUrl;
-        authParams.login_request_data = loginData || `username={%username%}&password={%password%}`;
-    } else if (authType === 'http_basic') {
-        if (!username || !password) {
-            showNotification('Please enter username and password', 'warning');
-            return false;
-        }
-        authParams.username = username;
-        authParams.password = password;
-        if (loginUrl) {
-            try {
-                const url = new URL(loginUrl);
-                authParams.hostname = url.hostname;
-            } catch (e) {
-                authParams.hostname = loginUrl;
-            }
-        }
-    } else if (authType === 'oauth2_bba') {
-        if (!username || !password) {
-            showNotification('Please enter username and password for OAuth2 login', 'warning');
-            return false;
-        }
-        if (!loginUrl) {
-            showNotification('Login URL is required for OAuth2/BBA authentication', 'warning');
-            return false;
-        }
-        authParams.username = username;
-        authParams.password = password;
-        authParams.login_url = loginUrl;
-        authParams.wait_for_url = waitForUrl || '';
-        authParams.login_page_wait = parseInt(loginPageWait) || 5;
-    } else if (authType === 'script_auth') {
-        if (!username || !password) {
-            showNotification('Please enter username and password for script authentication', 'warning');
-            return false;
-        }
-        if (!loginUrl) {
-            showNotification('Login URL is required for script-based authentication', 'warning');
-            return false;
-        }
-        authParams.username = username;
-        authParams.password = password;
-        authParams.login_url = loginUrl;
-        authParams.script_name = scriptName || '';
-    } else if (authType === 'bearer_token') {
-        if (!bearerToken) {
-            showNotification('Please enter a bearer token', 'warning');
-            return false;
-        }
-        authParams.bearer_token = bearerToken;
-    } else if (authType === 'api_key') {
-        if (!apiKey) {
-            showNotification('Please enter an API key', 'warning');
-            return false;
-        }
-        authParams.api_key = apiKey;
-        authParams.api_key_header = apiKeyHeader;
-    } else if (authType === 'cookie') {
-        if (!cookieValue) {
-            showNotification('Please enter a cookie string', 'warning');
-            return false;
-        }
-        authParams.cookie_value = cookieValue;
-    }
-
-    try {
-        const response = await fetch('/api/zap/set-auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                auth_type: authType,
-                auth_params: authParams
-            })
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            showNotification('Authentication configured successfully', 'success');
-            zapCheckAuthStatus();
-            return true;
-        } else {
-            showNotification(data.error || 'Failed to configure authentication', 'error');
-            return false;
-        }
-    } catch (error) {
-        console.error('Error setting ZAP authentication:', error);
-        showNotification('Failed to configure authentication', 'error');
-        return false;
-    }
+    return true;
 }
 
 /**
- * Check ZAP authentication status and update the status banner
+ * Check ZAP authentication status - simplified since auth is now per-scan
  */
 async function zapCheckAuthStatus() {
     const banner = document.getElementById('zap-auth-status-banner');
-    const icon = document.getElementById('zap-auth-status-icon');
-    const text = document.getElementById('zap-auth-status-text');
     const clearBtn = document.getElementById('zap-clear-auth-btn');
 
-    if (!banner) return;
-
-    try {
-        const response = await fetch('/api/zap/auth-status');
-        const data = await response.json();
-
-        // Set global flag for use by scan status display
-        window._zapAuthConfigured = data.has_auth || false;
-
-        banner.classList.remove('hidden');
-
-        if (data.error) {
-            banner.classList.remove('hidden');
-            banner.className = 'mb-3 p-3 rounded-lg border border-red-500 bg-red-900 bg-opacity-30';
-            icon.textContent = '❌';
-            text.textContent = `Auth status error: ${data.error}`;
-            text.className = 'text-sm text-red-300';
-            clearBtn.classList.add('hidden');
-            window._zapAuthConfigured = false;
-        } else if (data.has_auth) {
-            banner.classList.remove('hidden');
-            banner.className = 'mb-3 p-3 rounded-lg border border-yellow-500 bg-yellow-900 bg-opacity-30';
-            icon.textContent = '⚠️';
-
-            const authType = data.auth_type || 'Unknown';
-            const contextCount = data.contexts ? data.contexts.filter(c => c.auth_method && c.auth_method.toLowerCase() !== 'manual').length : 0;
-
-            text.textContent = `Authentication configured: ${authType} (${contextCount} context${contextCount !== 1 ? 's' : ''})`;
-            text.className = 'text-sm text-yellow-300';
-
-            clearBtn.classList.remove('hidden');
-        } else {
-            banner.classList.add('hidden');
-            clearBtn.classList.add('hidden');
-        }
-
-    } catch (error) {
-        console.error('Error checking ZAP auth status:', error);
-        // Hide banner on error
-        banner.classList.add('hidden');
-        window._zapAuthConfigured = false;
-    }
+    // Hide the auth banner - auth is now sent with each scan, not persisted
+    if (banner) banner.classList.add('hidden');
+    if (clearBtn) clearBtn.classList.add('hidden');
 }
 
 /**
- * Clear ZAP authentication configuration
+ * Clear ZAP authentication configuration - no longer needed but kept for compatibility
  */
 async function zapClearAuthentication() {
-    if (!confirm('Clear all saved authentication configurations? This will affect future scans.')) {
-        return;
-    }
-
-    try {
-        const response = await fetch('/api/zap/clear-auth', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        });
-
-        const data = await response.json();
-
-        if (data.success) {
-            showNotification(data.message || 'Authentication cleared successfully', 'success');
-
-            // Clear the form fields
-            const authType = document.getElementById('zap-auth-type');
-            const loginUrl = document.getElementById('zap-login-url');
-            const username = document.getElementById('zap-username');
-            const password = document.getElementById('zap-password');
-            const loginData = document.getElementById('zap-login-data');
-
-            if (authType) authType.value = '';
-            if (loginUrl) loginUrl.value = '';
-            if (username) username.value = '';
-            if (password) password.value = '';
-            if (loginData) loginData.value = '';
-
-            // Refresh auth status
-            zapCheckAuthStatus();
-        } else {
-            showNotification(data.error || 'Failed to clear authentication', 'error');
-        }
-    } catch (error) {
-        console.error('Error clearing ZAP authentication:', error);
-        showNotification('Failed to clear authentication', 'error');
-    }
+    showNotification('Auth is now per-scan - no persistent auth to clear', 'info');
 }
 
 // ============================================================================

@@ -11113,26 +11113,29 @@ def start_advanced_vuln_scan():
         if not target:
             return jsonify({'success': False, 'error': 'Target is required'}), 400
 
-        # Auto-inject stored credentials if not already provided in options
-        if not options.get('http_basic_auth') and not options.get('bearer_token') and not options.get('api_key') and not options.get('cookie_value'):
-            try:
-                from db_manager import get_db
-                db = get_db()
-                creds = db.get_zap_credentials_for_url(target)
-                if creds:
-                    auth_type = creds.get('auth_type')
-                    if auth_type == 'http_basic' and creds.get('username') and creds.get('password'):
-                        options['http_basic_auth'] = f"{creds['username']}:{creds['password']}"
-                    elif auth_type == 'bearer_token' and creds.get('bearer_token'):
-                        options['bearer_token'] = creds['bearer_token']
-                    elif auth_type == 'api_key' and creds.get('api_key'):
-                        options['api_key'] = creds['api_key']
-                        options['api_key_header'] = creds.get('api_key_header', 'X-API-Key')
-                    elif auth_type == 'cookie' and creds.get('cookie_value'):
-                        options['cookie_value'] = creds['cookie_value']
-                    logger.info(f"Using stored {auth_type} credentials for scan target: {target}")
-            except Exception as e:
-                logger.warning(f"Failed to fetch stored credentials for {target}: {e}")
+        # Extract auth from options.auth_params if provided (inline auth for this scan)
+        auth_type = options.get('auth_type')
+        auth_params = options.get('auth_params', {})
+        
+        if auth_type and auth_params:
+            # Map auth_params to options format expected by scanner
+            if auth_type == 'http_basic' and auth_params.get('http_basic_auth'):
+                options['http_basic_auth'] = auth_params['http_basic_auth']
+            elif auth_type == 'bearer_token' and auth_params.get('bearer_token'):
+                options['bearer_token'] = auth_params['bearer_token']
+            elif auth_type == 'api_key' and auth_params.get('api_key'):
+                options['api_key'] = auth_params['api_key']
+                options['api_key_header'] = auth_params.get('api_key_header', 'X-API-Key')
+            elif auth_type == 'cookie' and auth_params.get('cookie_value'):
+                options['cookie_value'] = auth_params['cookie_value']
+            elif auth_type == 'form' and auth_params.get('username'):
+                options['form_auth'] = auth_params
+            elif auth_type == 'oauth2_bba' and auth_params.get('username'):
+                options['oauth2_bba'] = auth_params
+            elif auth_type == 'script_auth' and auth_params.get('username'):
+                options['script_auth'] = auth_params
+            
+            logger.info(f"Using inline {auth_type} auth for scan target: {target}")
 
         # Map string to enum
         from advanced_vuln_scanner import ScanType

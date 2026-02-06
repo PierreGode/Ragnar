@@ -1776,6 +1776,114 @@ class AdvancedVulnScanner:
             logger.warning(f"Auth verification failed: {e}")
             return True  # Don't block scan on verification failure
 
+    def _apply_scan_auth(self, options: Dict) -> bool:
+        """Apply authentication for this scan using ZAP Replacer rules.
+        Returns True if auth was applied, False otherwise."""
+        auth_applied = False
+        
+        # Cookie auth
+        if options.get('cookie_value'):
+            try:
+                # Remove any existing cookie rule first
+                try:
+                    self._zap_api_call('JSON/replacer/action/removeRule', {'description': 'ScanAuth-Cookie'})
+                except Exception:
+                    pass
+                
+                self._zap_api_call('JSON/replacer/action/addRule', {
+                    'description': 'ScanAuth-Cookie',
+                    'enabled': 'true',
+                    'matchType': 'REQ_HEADER',
+                    'matchRegex': 'false',
+                    'matchString': 'Cookie',
+                    'replacement': options['cookie_value'],
+                    'initiators': ''
+                })
+                logger.info("Applied cookie auth for scan")
+                auth_applied = True
+            except Exception as e:
+                logger.error(f"Failed to apply cookie auth: {e}")
+        
+        # Bearer token auth
+        if options.get('bearer_token'):
+            try:
+                try:
+                    self._zap_api_call('JSON/replacer/action/removeRule', {'description': 'ScanAuth-Bearer'})
+                except Exception:
+                    pass
+                
+                self._zap_api_call('JSON/replacer/action/addRule', {
+                    'description': 'ScanAuth-Bearer',
+                    'enabled': 'true',
+                    'matchType': 'REQ_HEADER',
+                    'matchRegex': 'false',
+                    'matchString': 'Authorization',
+                    'replacement': f"Bearer {options['bearer_token']}",
+                    'initiators': ''
+                })
+                logger.info("Applied bearer token auth for scan")
+                auth_applied = True
+            except Exception as e:
+                logger.error(f"Failed to apply bearer token auth: {e}")
+        
+        # API key auth
+        if options.get('api_key'):
+            try:
+                try:
+                    self._zap_api_call('JSON/replacer/action/removeRule', {'description': 'ScanAuth-APIKey'})
+                except Exception:
+                    pass
+                
+                header_name = options.get('api_key_header', 'X-API-Key')
+                self._zap_api_call('JSON/replacer/action/addRule', {
+                    'description': 'ScanAuth-APIKey',
+                    'enabled': 'true',
+                    'matchType': 'REQ_HEADER',
+                    'matchRegex': 'false',
+                    'matchString': header_name,
+                    'replacement': options['api_key'],
+                    'initiators': ''
+                })
+                logger.info(f"Applied API key auth for scan ({header_name})")
+                auth_applied = True
+            except Exception as e:
+                logger.error(f"Failed to apply API key auth: {e}")
+        
+        # HTTP Basic auth
+        if options.get('http_basic_auth'):
+            try:
+                try:
+                    self._zap_api_call('JSON/replacer/action/removeRule', {'description': 'ScanAuth-Basic'})
+                except Exception:
+                    pass
+                
+                import base64
+                auth_string = base64.b64encode(options['http_basic_auth'].encode()).decode()
+                self._zap_api_call('JSON/replacer/action/addRule', {
+                    'description': 'ScanAuth-Basic',
+                    'enabled': 'true',
+                    'matchType': 'REQ_HEADER',
+                    'matchRegex': 'false',
+                    'matchString': 'Authorization',
+                    'replacement': f"Basic {auth_string}",
+                    'initiators': ''
+                })
+                logger.info("Applied HTTP Basic auth for scan")
+                auth_applied = True
+            except Exception as e:
+                logger.error(f"Failed to apply HTTP Basic auth: {e}")
+        
+        return auth_applied
+
+    def _clear_scan_auth(self):
+        """Clear all scan-specific auth rules from ZAP Replacer"""
+        rules_to_remove = ['ScanAuth-Cookie', 'ScanAuth-Bearer', 'ScanAuth-APIKey', 'ScanAuth-Basic']
+        for rule in rules_to_remove:
+            try:
+                self._zap_api_call('JSON/replacer/action/removeRule', {'description': rule})
+            except Exception:
+                pass  # Rule may not exist
+
     def _run_zap_full_scan(self, scan_id: str, target: str, options: Dict):
         """Run complete ZAP scan: spider + ajax spider + active scan"""
         if not self._is_zap_running():
@@ -1790,14 +1898,27 @@ class AdvancedVulnScanner:
         if not is_valid:
             raise RuntimeError(f"Target URL validation failed: {error_msg}")
 
-        # Get context ID if auth is configured
+        # Apply inline auth if provided in options (per-scan auth)
+        auth_applied = self._apply_scan_auth(options)
+        has_auth = auth_applied
+        
+        # Get or create context ID if auth is configured
         context_id = self._get_zap_context_id('default')
+        if has_auth and not context_id:
+            # Auth is configured - create 'default' context for the target URL
+            try:
+                self._zap_api_call('JSON/context/action/newContext', {'contextName': 'default'})
+                context_id = self._get_zap_context_id('default')
+                logger.info(f"Created 'default' context for authenticated scan (ID: {context_id})")
+            except Exception as e:
+                logger.warning(f"Could not create default context: {e}")
+        
         if context_id:
             options['_context_id'] = context_id
-            logger.info(f"Using ZAP context ID {context_id} for scan")
-
-        # Verify authentication if configured
-        self._verify_zap_auth(target, options, progress)
+            options['_has_auth'] = has_auth
+            logger.info(f"Using ZAP context ID {context_id} for scan (auth configured: {has_auth})")
+        elif has_auth:
+            options['_has_auth'] = has_auth
 
         alerts_fetched = False
 
@@ -1839,18 +1960,19 @@ class AdvancedVulnScanner:
                     self._fetch_zap_alerts(scan_id, target)
                 except Exception as fetch_error:
                     logger.error(f"Failed to fetch alerts after error: {fetch_error}")
-            # Add auth hint if auth is configured
-            error_msg = str(e)
-            auth_status = self.zap_get_auth_status()
-            if auth_status.get('has_auth'):
-                error_msg += " [Note: Authentication is configured. If target doesn't require auth, clear ZAP auth settings.]"
-            raise RuntimeError(error_msg)
+            raise RuntimeError(str(e))
+        finally:
+            # Clean up scan-specific auth rules
+            if auth_applied:
+                self._clear_scan_auth()
+                logger.info("Cleared scan auth rules")
 
     def _run_zap_spider_phase(self, scan_id: str, target: str, options: Dict, progress: ScanProgress):
         """Spider phase of full scan"""
         # If auth is configured, add target to the 'default' context where auth lives
         # Otherwise, create a new scope context
-        if options.get('_context_id'):
+        has_auth = options.get('_context_id') or options.get('_has_auth')
+        if has_auth:
             # Auth is configured - add target URL to the 'default' context
             try:
                 parsed_url = urllib.parse.urlparse(target)
@@ -1883,8 +2005,8 @@ class AdvancedVulnScanner:
             'recurse': 'true',
             'subtreeOnly': 'true'
         }
-        # Pass context ID if auth is configured
-        if options.get('_context_id'):
+        # Pass context name if auth is configured
+        if has_auth:
             spider_params['contextName'] = 'default'
         spider_resp = self._zap_api_call('JSON/spider/action/scan', spider_params)
         spider_id = spider_resp.get('scan')
@@ -1950,8 +2072,14 @@ class AdvancedVulnScanner:
             'inScopeOnly': 'true'
         }
         # Pass context ID if auth is configured
-        if options.get('_context_id'):
-            ascan_params['contextId'] = options['_context_id']
+        context_id = options.get('_context_id')
+        if context_id:
+            ascan_params['contextId'] = context_id
+        elif options.get('_has_auth'):
+            # Auth is configured but no context ID - try to get it
+            context_id = self._get_zap_context_id('default')
+            if context_id:
+                ascan_params['contextId'] = context_id
         scan_resp = self._zap_api_call('JSON/ascan/action/scan', ascan_params)
         ascan_id = scan_resp.get('scan')
 
