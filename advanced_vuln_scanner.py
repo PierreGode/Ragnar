@@ -1471,11 +1471,27 @@ class AdvancedVulnScanner:
                 'regex': url_pattern
             })
 
+            # Ensure the context is in scope so inScopeOnly scans work
+            self._zap_set_context_in_scope(context_name, True)
+
             logger.info(f"Added {target} to ZAP scope (context: {context_name})")
             return True
 
         except Exception as e:
             logger.error(f"Error adding target to ZAP scope: {e}")
+            return False
+
+    def _zap_set_context_in_scope(self, context_name: str, in_scope: bool = True) -> bool:
+        """Set a ZAP context as in-scope for scanning."""
+        try:
+            self._zap_api_call('JSON/context/action/setContextInScope', {
+                'contextName': context_name,
+                'booleanInScope': str(bool(in_scope)).lower()
+            })
+            logger.info(f"Set context '{context_name}' in-scope={in_scope}")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to set context '{context_name}' in-scope={in_scope}: {e}")
             return False
 
     def _run_zap_spider(self, scan_id: str, target: str, options: Dict):
@@ -2052,6 +2068,7 @@ class AdvancedVulnScanner:
                     'contextName': 'default',
                     'regex': include_regex
                 })
+                self._zap_set_context_in_scope('default', True)
                 logger.info(f"Added {include_regex} to auth context 'default'")
             except Exception as e:
                 logger.warning(f"Could not add target to auth context: {e}")
