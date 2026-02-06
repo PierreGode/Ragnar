@@ -1848,7 +1848,24 @@ class AdvancedVulnScanner:
 
     def _run_zap_spider_phase(self, scan_id: str, target: str, options: Dict, progress: ScanProgress):
         """Spider phase of full scan"""
-        self._zap_add_to_scope(target)
+        # If auth is configured, add target to the 'default' context where auth lives
+        # Otherwise, create a new scope context
+        if options.get('_context_id'):
+            # Auth is configured - add target URL to the 'default' context
+            try:
+                parsed_url = urllib.parse.urlparse(target)
+                include_regex = f"{parsed_url.scheme}://{parsed_url.netloc}.*"
+                self._zap_api_call('JSON/context/action/includeInContext', {
+                    'contextName': 'default',
+                    'regex': include_regex
+                })
+                logger.info(f"Added {include_regex} to auth context 'default'")
+            except Exception as e:
+                logger.warning(f"Could not add target to auth context: {e}")
+                # Fall back to creating new scope
+                self._zap_add_to_scope(target)
+        else:
+            self._zap_add_to_scope(target)
 
         # Access target with better error handling
         try:
