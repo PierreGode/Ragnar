@@ -447,6 +447,37 @@ function initializeSocket() {
         handleScanProgress(data);
     });
 
+    socket.on('scan_update', function(payload) {
+        if (!payload) {
+            return;
+        }
+        const eventType = payload.type || payload.event || '';
+        const eventData = payload.data || {};
+
+        switch (eventType) {
+            case 'scan_started':
+                handleScanStarted(eventData);
+                break;
+            case 'scan_progress':
+                handleScanProgress(eventData);
+                break;
+            case 'scan_completed':
+                handleScanCompleted(eventData);
+                break;
+            case 'scan_error':
+                handleScanError(eventData);
+                break;
+            case 'host_updated':
+                handleScanHostUpdate(eventData);
+                break;
+            default:
+                if (eventType) {
+                    addConsoleMessage(`Scan update: ${eventType}`, 'info');
+                }
+                break;
+        }
+    });
+
     socket.on('scan_host_update', function(data) {
         handleScanHostUpdate(data);
     });
@@ -1427,8 +1458,13 @@ function handleScanStarted(data) {
 }
 
 function handleScanProgress(data) {
-    currentScanState.scannedHosts = data.completed || 0;
-    currentScanState.currentTarget = data.current_target || '';
+    const scannedHosts = Number.isFinite(data.scanned) ? data.scanned : data.completed;
+    const totalHosts = Number.isFinite(data.total_hosts) ? data.total_hosts : data.total;
+    const currentTarget = data.current_target || data.current_ip || data.current_host || '';
+
+    currentScanState.scannedHosts = scannedHosts || 0;
+    currentScanState.totalHosts = totalHosts || currentScanState.totalHosts || 0;
+    currentScanState.currentTarget = currentTarget;
     
     updateScanProgress();
 }
