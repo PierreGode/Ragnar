@@ -13308,12 +13308,8 @@ async function startAdvancedScan() {
     // If auth type is selected, configure authentication first
     const authType = document.getElementById('zap-auth-type')?.value;
     if (authType) {
-        try {
-            await zapSetAuthentication();
-        } catch (e) {
-            // zapSetAuthentication shows its own error notifications
-            return;
-        }
+        const authOk = await zapSetAuthentication();
+        if (!authOk) return;
     }
 
     try {
@@ -13529,7 +13525,7 @@ async function zapSetAuthentication() {
     const authType = document.getElementById('zap-auth-type')?.value;
     const loginUrl = document.getElementById('zap-login-url')?.value.trim();
     const username = document.getElementById('zap-username')?.value.trim();
-    const password = document.getElementById('zap-password')?.value;
+    const password = document.getElementById('zap-password')?.value.trim();
     const loginData = document.getElementById('zap-login-data')?.value.trim();
     const bearerToken = document.getElementById('zap-bearer-token')?.value.trim();
     const apiKey = document.getElementById('zap-api-key')?.value.trim();
@@ -13543,7 +13539,7 @@ async function zapSetAuthentication() {
 
     if (!authType) {
         showNotification('Please select an authentication type', 'warning');
-        return;
+        return false;
     }
 
     const authParams = {};
@@ -13552,11 +13548,11 @@ async function zapSetAuthentication() {
     if (authType === 'form') {
         if (!username || !password) {
             showNotification('Please enter username and password', 'warning');
-            return;
+            return false;
         }
         if (!loginUrl) {
             showNotification('Login URL is required for form authentication', 'warning');
-            return;
+            return false;
         }
         authParams.username = username;
         authParams.password = password;
@@ -13565,7 +13561,7 @@ async function zapSetAuthentication() {
     } else if (authType === 'http_basic') {
         if (!username || !password) {
             showNotification('Please enter username and password', 'warning');
-            return;
+            return false;
         }
         authParams.username = username;
         authParams.password = password;
@@ -13578,14 +13574,13 @@ async function zapSetAuthentication() {
             }
         }
     } else if (authType === 'oauth2_bba') {
-        // OAuth2 / Microsoft Login (Browser-Based Authentication)
         if (!username || !password) {
             showNotification('Please enter username and password for OAuth2 login', 'warning');
-            return;
+            return false;
         }
         if (!loginUrl) {
             showNotification('Login URL is required for OAuth2/BBA authentication', 'warning');
-            return;
+            return false;
         }
         authParams.username = username;
         authParams.password = password;
@@ -13593,14 +13588,13 @@ async function zapSetAuthentication() {
         authParams.wait_for_url = waitForUrl || '';
         authParams.login_page_wait = parseInt(loginPageWait) || 5;
     } else if (authType === 'script_auth') {
-        // Script-Based Authentication
         if (!username || !password) {
             showNotification('Please enter username and password for script authentication', 'warning');
-            return;
+            return false;
         }
         if (!loginUrl) {
             showNotification('Login URL is required for script-based authentication', 'warning');
-            return;
+            return false;
         }
         authParams.username = username;
         authParams.password = password;
@@ -13609,20 +13603,20 @@ async function zapSetAuthentication() {
     } else if (authType === 'bearer_token') {
         if (!bearerToken) {
             showNotification('Please enter a bearer token', 'warning');
-            return;
+            return false;
         }
         authParams.bearer_token = bearerToken;
     } else if (authType === 'api_key') {
         if (!apiKey) {
             showNotification('Please enter an API key', 'warning');
-            return;
+            return false;
         }
         authParams.api_key = apiKey;
         authParams.api_key_header = apiKeyHeader;
     } else if (authType === 'cookie') {
         if (!cookieValue) {
             showNotification('Please enter a cookie string', 'warning');
-            return;
+            return false;
         }
         authParams.cookie_value = cookieValue;
     }
@@ -13641,14 +13635,16 @@ async function zapSetAuthentication() {
 
         if (data.success) {
             showNotification('Authentication configured successfully', 'success');
-            // Refresh auth status to show the new configuration
             zapCheckAuthStatus();
+            return true;
         } else {
             showNotification(data.error || 'Failed to configure authentication', 'error');
+            return false;
         }
     } catch (error) {
         console.error('Error setting ZAP authentication:', error);
         showNotification('Failed to configure authentication', 'error');
+        return false;
     }
 }
 
@@ -13672,9 +13668,17 @@ async function zapCheckAuthStatus() {
 
         banner.classList.remove('hidden');
 
-        if (data.has_auth) {
-            // Auth is configured - show warning banner
-            banner.className = 'mt-4 p-3 rounded-lg border border-yellow-500 bg-yellow-900 bg-opacity-30';
+        if (data.error) {
+            banner.classList.remove('hidden');
+            banner.className = 'mb-3 p-3 rounded-lg border border-red-500 bg-red-900 bg-opacity-30';
+            icon.textContent = '❌';
+            text.textContent = `Auth status error: ${data.error}`;
+            text.className = 'text-sm text-red-300';
+            clearBtn.classList.add('hidden');
+            window._zapAuthConfigured = false;
+        } else if (data.has_auth) {
+            banner.classList.remove('hidden');
+            banner.className = 'mb-3 p-3 rounded-lg border border-yellow-500 bg-yellow-900 bg-opacity-30';
             icon.textContent = '⚠️';
 
             const authType = data.auth_type || 'Unknown';
@@ -13685,17 +13689,8 @@ async function zapCheckAuthStatus() {
 
             clearBtn.classList.remove('hidden');
         } else {
-            // No auth - hide banner entirely
             banner.classList.add('hidden');
             clearBtn.classList.add('hidden');
-        }
-
-        if (data.error) {
-            banner.className = 'mt-4 p-3 rounded-lg border border-red-500 bg-red-900 bg-opacity-30';
-            icon.textContent = '❌';
-            text.textContent = `Auth status error: ${data.error}`;
-            text.className = 'text-sm text-red-300';
-            window._zapAuthConfigured = false;
         }
 
     } catch (error) {

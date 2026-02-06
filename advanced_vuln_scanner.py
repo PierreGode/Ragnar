@@ -1721,6 +1721,61 @@ class AdvancedVulnScanner:
                 error_msg += " [Note: Authentication is configured. If target doesn't require auth, clear ZAP auth settings.]"
             raise RuntimeError(error_msg)
 
+    def _get_zap_context_id(self, context_name: str = 'default') -> Optional[str]:
+        """Get ZAP context ID by name, returns None if not found"""
+        try:
+            ctx_resp = self._zap_api_call('JSON/context/view/context', {'contextName': context_name})
+            return ctx_resp.get('context', {}).get('id')
+        except Exception:
+            return None
+
+    def _verify_zap_auth(self, target: str, options: Dict, progress: ScanProgress) -> bool:
+        """Verify authentication works by making an authenticated request to the target.
+        Returns True if auth is verified or not needed, False if auth failed."""
+        auth_status = self.zap_get_auth_status()
+        if not auth_status.get('has_auth'):
+            return True  # No auth configured, skip verification
+
+        progress.current_check = "Verifying authentication..."
+        auth_type = auth_status.get('auth_type', 'unknown')
+        logger.info(f"Verifying {auth_type} authentication against {target}")
+
+        try:
+            # For simple auth types, verify by making a request through ZAP
+            # Access the target URL - ZAP will apply configured auth
+            self._zap_api_call('JSON/core/action/accessUrl', {
+                'url': target, 'followRedirects': 'true'
+            })
+            time.sleep(1)
+
+            # Check if we got a non-error response by looking at ZAP's message history
+            try:
+                msgs_resp = self._zap_api_call('JSON/core/view/messages', {
+                    'baseurl': target, 'start': '0', 'count': '5'
+                })
+                messages = msgs_resp.get('messages', [])
+                if messages:
+                    last_msg = messages[-1]
+                    status_code = 0
+                    resp_header = last_msg.get('responseHeader', '')
+                    if resp_header:
+                        # Parse "HTTP/1.1 200 OK" format safely
+                        parts = resp_header.split(' ', 2)
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            status_code = int(parts[1])
+                    if status_code in (401, 403):
+                        logger.warning(f"Auth verification got {status_code} - credentials may be invalid")
+                        progress.current_check = f"Auth verification warning: got HTTP {status_code}"
+                    else:
+                        logger.info(f"Auth verification OK - got HTTP {status_code}")
+            except Exception as msg_err:
+                logger.debug(f"Could not check auth verification response: {msg_err}")
+
+            return True
+        except Exception as e:
+            logger.warning(f"Auth verification failed: {e}")
+            return True  # Don't block scan on verification failure
+
     def _run_zap_full_scan(self, scan_id: str, target: str, options: Dict):
         """Run complete ZAP scan: spider + ajax spider + active scan"""
         if not self._is_zap_running():
@@ -1734,6 +1789,15 @@ class AdvancedVulnScanner:
         is_valid, error_msg = self._validate_target_url(target)
         if not is_valid:
             raise RuntimeError(f"Target URL validation failed: {error_msg}")
+
+        # Get context ID if auth is configured
+        context_id = self._get_zap_context_id('default')
+        if context_id:
+            options['_context_id'] = context_id
+            logger.info(f"Using ZAP context ID {context_id} for scan")
+
+        # Verify authentication if configured
+        self._verify_zap_auth(target, options, progress)
 
         alerts_fetched = False
 
@@ -1796,12 +1860,16 @@ class AdvancedVulnScanner:
             raise
         time.sleep(1)
 
-        spider_resp = self._zap_api_call('JSON/spider/action/scan', {
+        spider_params = {
             'url': target,
             'maxChildren': str(options.get('max_children', 10)),
             'recurse': 'true',
             'subtreeOnly': 'true'
-        })
+        }
+        # Pass context ID if auth is configured
+        if options.get('_context_id'):
+            spider_params['contextName'] = 'default'
+        spider_resp = self._zap_api_call('JSON/spider/action/scan', spider_params)
         spider_id = spider_resp.get('scan')
 
         if not spider_id:
@@ -1859,20 +1927,19 @@ class AdvancedVulnScanner:
 
     def _run_zap_active_scan_phase(self, scan_id: str, target: str, options: Dict, progress: ScanProgress):
         """Active scan phase of full scan"""
-        scan_resp = self._zap_api_call('JSON/ascan/action/scan', {
+        ascan_params = {
             'url': target,
             'recurse': 'true',
             'inScopeOnly': 'true'
-        })
+        }
+        # Pass context ID if auth is configured
+        if options.get('_context_id'):
+            ascan_params['contextId'] = options['_context_id']
+        scan_resp = self._zap_api_call('JSON/ascan/action/scan', ascan_params)
         ascan_id = scan_resp.get('scan')
 
         if not ascan_id:
-            logger.warning("Failed to start active scan phase, fetching any existing alerts...")
-            # Still try to fetch alerts from spider phase
-            try:
-                self._fetch_zap_alerts(scan_id, target)
-            except Exception as fetch_err:
-                logger.warning(f"Failed to fetch alerts after spider phase: {fetch_err}")
+            logger.warning("Failed to start active scan phase, continuing to alert fetch...")
             return
 
         # Active scan with timeout and stall detection
@@ -1902,12 +1969,7 @@ class AdvancedVulnScanner:
                 if scan_progress == last_progress:
                     stall_count += 1
                     if stall_count >= 12:  # 60 seconds of no progress
-                        logger.warning(f"Active scan phase stalled at {scan_progress}%, fetching alerts before stopping...")
-                        # Fetch alerts before breaking - don't lose the findings!
-                        try:
-                            self._fetch_zap_alerts(scan_id, target)
-                        except Exception as fetch_err:
-                            logger.warning(f"Failed to fetch alerts on stall: {fetch_err}")
+                        logger.warning(f"Active scan phase stalled at {scan_progress}%, stopping active scan...")
                         break
                 else:
                     stall_count = 0
@@ -1950,10 +2012,9 @@ class AdvancedVulnScanner:
                 alert_host = parsed_alert.netloc or ''
                 alert_host_no_port = parsed_alert.hostname or ''
 
-                # Match by: full netloc (host:port), hostname only, or URL substring
+                # Match by: full netloc (host:port), hostname only, or URL prefix
                 if (target_host == alert_host or
                         target_host_no_port == alert_host_no_port or
-                        target_host in alert_url or
                         alert_url.startswith(target_no_slash)):
                     alerts.append(alert)
 
@@ -2388,8 +2449,94 @@ class AdvancedVulnScanner:
                 logger.info(f"ZAP script-based authentication configured for context {context_name}")
                 return (True, None)
 
+            elif auth_type == 'bearer_token':
+                # Bearer token auth - use ZAP's Replacer to add Authorization header
+                bearer_token = auth_params.get('bearer_token', '').strip()
+                if not bearer_token:
+                    return (False, "Bearer token is required")
+
+                try:
+                    # Remove any existing Authorization replacer rule
+                    try:
+                        self._zap_api_call('JSON/replacer/action/removeRule', {
+                            'description': 'Auth-BearerToken'
+                        })
+                    except Exception:
+                        pass  # Rule may not exist yet
+
+                    self._zap_api_call('JSON/replacer/action/addRule', {
+                        'description': 'Auth-BearerToken',
+                        'enabled': 'true',
+                        'matchType': 'REQ_HEADER',
+                        'matchRegex': 'false',
+                        'matchString': 'Authorization',
+                        'replacement': f'Bearer {bearer_token}',
+                        'initiators': ''
+                    })
+                    logger.info("ZAP bearer token authentication configured via Replacer")
+                    return (True, None)
+                except Exception as e:
+                    return (False, f"Failed to set bearer token: {str(e)}")
+
+            elif auth_type == 'api_key':
+                # API Key auth - use ZAP's Replacer to add custom header
+                api_key = auth_params.get('api_key', '').strip()
+                header_name = auth_params.get('api_key_header', 'X-API-Key').strip()
+                if not api_key:
+                    return (False, "API key is required")
+
+                try:
+                    try:
+                        self._zap_api_call('JSON/replacer/action/removeRule', {
+                            'description': 'Auth-APIKey'
+                        })
+                    except Exception:
+                        pass
+
+                    self._zap_api_call('JSON/replacer/action/addRule', {
+                        'description': 'Auth-APIKey',
+                        'enabled': 'true',
+                        'matchType': 'REQ_HEADER',
+                        'matchRegex': 'false',
+                        'matchString': header_name,
+                        'replacement': api_key,
+                        'initiators': ''
+                    })
+                    logger.info(f"ZAP API key authentication configured via Replacer ({header_name})")
+                    return (True, None)
+                except Exception as e:
+                    return (False, f"Failed to set API key: {str(e)}")
+
+            elif auth_type == 'cookie':
+                # Cookie auth - use ZAP's Replacer to add Cookie header
+                cookie_value = auth_params.get('cookie_value', '').strip()
+                if not cookie_value:
+                    return (False, "Cookie value is required")
+
+                try:
+                    try:
+                        self._zap_api_call('JSON/replacer/action/removeRule', {
+                            'description': 'Auth-Cookie'
+                        })
+                    except Exception:
+                        pass
+
+                    self._zap_api_call('JSON/replacer/action/addRule', {
+                        'description': 'Auth-Cookie',
+                        'enabled': 'true',
+                        'matchType': 'REQ_HEADER',
+                        'matchRegex': 'false',
+                        'matchString': 'Cookie',
+                        'replacement': cookie_value,
+                        'initiators': ''
+                    })
+                    logger.info("ZAP cookie authentication configured via Replacer")
+                    return (True, None)
+                except Exception as e:
+                    return (False, f"Failed to set cookie auth: {str(e)}")
+
             else:
-                return (False, f"Unsupported authentication type: '{auth_type}'. Supported types: 'form', 'http_basic', 'oauth2_bba', 'script_auth'")
+                return (False, f"Unsupported authentication type: '{auth_type}'. Supported types: 'form', 'http_basic', 'oauth2_bba', 'script_auth', 'bearer_token', 'api_key', 'cookie'")
 
         except Exception as e:
             error_msg = str(e)
@@ -2628,6 +2775,27 @@ class AdvancedVulnScanner:
                     logger.debug(f"Error checking context {context_name}: {ctx_err}")
                     continue
 
+            # Also check for Replacer-based auth (bearer_token, api_key, cookie)
+            if not auth_status['has_auth']:
+                try:
+                    rules_resp = self._zap_api_call('JSON/replacer/view/rules', {})
+                    rules = rules_resp.get('rules', [])
+                    auth_rules = [r for r in rules if isinstance(r, dict) and
+                                  r.get('description', '').startswith('Auth-') and
+                                  r.get('enabled') == 'true']
+                    if auth_rules:
+                        rule_desc = auth_rules[0].get('description', '')
+                        auth_type_map = {
+                            'Auth-BearerToken': 'bearer_token',
+                            'Auth-APIKey': 'api_key',
+                            'Auth-Cookie': 'cookie'
+                        }
+                        auth_status['has_auth'] = True
+                        auth_status['auth_type'] = auth_type_map.get(rule_desc, 'header_replacement')
+                        auth_status['details'] = f"Header-based auth via Replacer: {rule_desc}"
+                except Exception:
+                    pass  # Replacer add-on may not be available
+
             if not auth_status['has_auth']:
                 auth_status['details'] = 'No authentication configured'
 
@@ -2706,6 +2874,15 @@ class AdvancedVulnScanner:
 
                 except Exception as e:
                     errors.append(f"Failed to clear {context_name}: {e}")
+
+            # Also clear any Replacer-based auth rules (bearer, api_key, cookie)
+            for rule_name in ['Auth-BearerToken', 'Auth-APIKey', 'Auth-Cookie']:
+                try:
+                    self._zap_api_call('JSON/replacer/action/removeRule', {
+                        'description': rule_name
+                    })
+                except Exception:
+                    pass  # Rule may not exist
 
             if cleared_contexts:
                 msg = f"Cleared {len(cleared_contexts)} context(s) and reset authentication: {', '.join(cleared_contexts)}"

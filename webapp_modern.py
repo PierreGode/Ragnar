@@ -11580,6 +11580,7 @@ def start_zap_scan():
                 if saved_creds and saved_creds.get('auth_type') != 'none':
                     # Apply saved credentials to ZAP
                     logger.info(f"Found saved credentials for {target}, applying to ZAP...")
+                    cred_auth_type = saved_creds.get('auth_type')
 
                     auth_params = {
                         'login_url': saved_creds.get('login_url') or target,
@@ -11590,9 +11591,16 @@ def start_zap_scan():
                         'password_field': saved_creds.get('password_field', 'password'),
                     }
 
-                    if saved_creds.get('auth_type') == 'http_basic':
+                    if cred_auth_type == 'http_basic':
                         auth_params['hostname'] = saved_creds.get('target_host')
                         auth_params['realm'] = saved_creds.get('http_realm')
+                    elif cred_auth_type == 'bearer_token':
+                        auth_params['bearer_token'] = saved_creds.get('bearer_token', '')
+                    elif cred_auth_type == 'api_key':
+                        auth_params['api_key'] = saved_creds.get('api_key', '')
+                        auth_params['api_key_header'] = saved_creds.get('api_key_header', 'X-API-Key')
+                    elif cred_auth_type == 'cookie':
+                        auth_params['cookie_value'] = saved_creds.get('cookie_value', '')
 
                     success, error = scanner.zap_set_authentication(
                         'default',
@@ -11721,7 +11729,7 @@ def zap_set_authentication():
         auth_params = data.get('auth_params', {})
 
         if not auth_type:
-            return jsonify({'success': False, 'error': 'auth_type required (form, http_basic, oauth2_bba, script_auth)'}), 400
+            return jsonify({'success': False, 'error': 'auth_type required (form, http_basic, oauth2_bba, script_auth, bearer_token, api_key, cookie)'}), 400
 
         success, error_message = scanner.zap_set_authentication(context_name, auth_type, auth_params)
 
