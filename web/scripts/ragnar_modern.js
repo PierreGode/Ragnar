@@ -12280,10 +12280,6 @@ function updateActiveScans(scans) {
         'cancelled': '<svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path></svg>'
     };
 
-    // Check if ZAP auth is configured for failed scan warnings
-    const hasZapAuth = window._zapAuthConfigured || false;
-    const isZapScan = (scanType) => ['zap_spider', 'zap_active', 'zap_full'].includes(scanType);
-
     container.innerHTML = scans.map(scan => {
         const colorClass = statusColors[scan.status] || 'border-gray-500 bg-gray-800';
         const icon = statusIcons[scan.status] || '';
@@ -12291,9 +12287,10 @@ function updateActiveScans(scans) {
         const progress = scan.progress_percent || scan.progress || 0;
         const currentPhase = scan.current_check || scan.current_phase || 'Processing...';
         const errorMessage = scan.error_message || '';
-
-        // Check if this is a failed ZAP scan with auth configured
-        const showAuthWarning = scan.status === 'failed' && isZapScan(scan.scan_type) && hasZapAuth;
+        
+        // Auth info from scan
+        const authType = scan.auth_type || '';
+        const authStatus = scan.auth_status || '';
 
         return `
             <div class="p-3 ${colorClass} bg-opacity-30 border-l-4 rounded-lg">
@@ -12308,6 +12305,17 @@ function updateActiveScans(scans) {
                     <span class="truncate">${escapeHtml(scan.target)}</span>
                     ${scan.duration_seconds ? `<span class="text-gray-500 ml-2">${formatDuration(scan.duration_seconds)}</span>` : ''}
                 </div>
+                ${authType ? `
+                    <div class="flex items-center gap-1 text-xs mt-1">
+                        <span class="px-1.5 py-0.5 rounded ${
+                            authStatus.startsWith('verified') ? 'bg-green-900 text-green-400' : 
+                            authStatus.startsWith('failed') ? 'bg-red-900 text-red-400' : 
+                            'bg-yellow-900 text-yellow-400'
+                        }">
+                            ${authStatus.startsWith('verified') ? '✓' : authStatus.startsWith('failed') ? '✗' : '🔐'} ${escapeHtml(authType)} ${authStatus ? `- ${escapeHtml(authStatus)}` : ''}
+                        </span>
+                    </div>
+                ` : ''}
                 ${scan.status === 'running' ? `
                     <div class="mt-2">
                         <div class="flex justify-between text-xs text-gray-400 mb-1">
@@ -12320,12 +12328,6 @@ function updateActiveScans(scans) {
                     </div>
                 ` : ''}
                 ${errorMessage ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(errorMessage)}</div>` : ''}
-                ${showAuthWarning ? `
-                    <div class="text-xs text-yellow-400 mt-1 p-2 bg-yellow-900 bg-opacity-30 rounded">
-                        ⚠️ Authentication is configured. If target doesn't require auth,
-                        <button onclick="zapClearAuthentication()" class="underline hover:text-yellow-300">clear auth settings</button>.
-                    </div>
-                ` : ''}
                 ${scan.status === 'completed' && scan.findings_count === 0 && !errorMessage ? `
                     <div class="text-xs text-yellow-400 mt-1">0 findings - check server logs for details</div>
                 ` : ''}

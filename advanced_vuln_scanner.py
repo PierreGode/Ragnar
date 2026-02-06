@@ -130,6 +130,8 @@ class ScanProgress:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: str = ""
+    auth_type: str = ""  # Auth type used for this scan (cookie, bearer_token, etc.)
+    auth_status: str = ""  # Auth validation status (applied, verified, failed)
     
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -143,6 +145,8 @@ class ScanProgress:
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'error_message': self.error_message,
+            'auth_type': self.auth_type,
+            'auth_status': self.auth_status,
             'duration_seconds': (
                 (self.completed_at or datetime.now()) - self.started_at
             ).total_seconds() if self.started_at else 0
@@ -1776,10 +1780,10 @@ class AdvancedVulnScanner:
             logger.warning(f"Auth verification failed: {e}")
             return True  # Don't block scan on verification failure
 
-    def _apply_scan_auth(self, options: Dict) -> bool:
+    def _apply_scan_auth(self, options: Dict) -> Tuple[bool, str]:
         """Apply authentication for this scan using ZAP Replacer rules.
-        Returns True if auth was applied, False otherwise."""
-        auth_applied = False
+        Returns (auth_applied: bool, auth_type: str)."""
+        auth_type = ""
         
         # Cookie auth
         if options.get('cookie_value'):
@@ -1800,9 +1804,10 @@ class AdvancedVulnScanner:
                     'initiators': ''
                 })
                 logger.info("Applied cookie auth for scan")
-                auth_applied = True
+                auth_type = "cookie"
             except Exception as e:
                 logger.error(f"Failed to apply cookie auth: {e}")
+                return (False, "cookie (failed)")
         
         # Bearer token auth
         if options.get('bearer_token'):
@@ -1822,9 +1827,10 @@ class AdvancedVulnScanner:
                     'initiators': ''
                 })
                 logger.info("Applied bearer token auth for scan")
-                auth_applied = True
+                auth_type = "bearer_token"
             except Exception as e:
                 logger.error(f"Failed to apply bearer token auth: {e}")
+                return (False, "bearer_token (failed)")
         
         # API key auth
         if options.get('api_key'):
@@ -1845,9 +1851,10 @@ class AdvancedVulnScanner:
                     'initiators': ''
                 })
                 logger.info(f"Applied API key auth for scan ({header_name})")
-                auth_applied = True
+                auth_type = f"api_key ({header_name})"
             except Exception as e:
                 logger.error(f"Failed to apply API key auth: {e}")
+                return (False, "api_key (failed)")
         
         # HTTP Basic auth
         if options.get('http_basic_auth'):
@@ -1869,11 +1876,12 @@ class AdvancedVulnScanner:
                     'initiators': ''
                 })
                 logger.info("Applied HTTP Basic auth for scan")
-                auth_applied = True
+                auth_type = "http_basic"
             except Exception as e:
                 logger.error(f"Failed to apply HTTP Basic auth: {e}")
+                return (False, "http_basic (failed)")
         
-        return auth_applied
+        return (bool(auth_type), auth_type)
 
     def _clear_scan_auth(self):
         """Clear all scan-specific auth rules from ZAP Replacer"""
@@ -1883,6 +1891,52 @@ class AdvancedVulnScanner:
                 self._zap_api_call('JSON/replacer/action/removeRule', {'description': rule})
             except Exception:
                 pass  # Rule may not exist
+
+    def _verify_auth_request(self, target: str) -> Tuple[bool, int]:
+        """
+        Make a test request to verify auth is working.
+        Returns (verified: bool, http_status: int)
+        - verified=True if status is 2xx or 3xx (success/redirect)
+        - verified=False if status is 401/403 (auth failed) or other error
+        """
+        try:
+            # Access the target URL via ZAP to test auth
+            self._zap_api_call('JSON/core/action/accessUrl', {
+                'url': target,
+                'followRedirects': 'true'
+            })
+            
+            # Give ZAP a moment to process the request
+            time.sleep(1)
+            
+            # Get the most recent message from the history
+            messages = self._zap_api_call('JSON/core/view/messages', {
+                'baseurl': target,
+                'start': '0',
+                'count': '5'
+            })
+            
+            if messages and 'messages' in messages and len(messages['messages']) > 0:
+                # Get the most recent message
+                latest_msg = messages['messages'][-1]
+                status_code = int(latest_msg.get('responseHeader', '').split(' ')[1]) if 'responseHeader' in latest_msg else 0
+                
+                if status_code == 0:
+                    # Try to extract from responseStatusCode if available
+                    status_code = int(latest_msg.get('statusCode', 0) or 0)
+                
+                if 200 <= status_code < 400:
+                    return (True, status_code)
+                else:
+                    return (False, status_code)
+            
+            # If we can't get messages, return unknown status
+            logger.warning("Could not retrieve response to verify auth")
+            return (True, 0)  # Assume applied if we can't verify
+            
+        except Exception as e:
+            logger.error(f"Error verifying auth request: {e}")
+            return (True, 0)  # Assume applied if we can't verify
 
     def _run_zap_full_scan(self, scan_id: str, target: str, options: Dict):
         """Run complete ZAP scan: spider + ajax spider + active scan"""
@@ -1899,8 +1953,25 @@ class AdvancedVulnScanner:
             raise RuntimeError(f"Target URL validation failed: {error_msg}")
 
         # Apply inline auth if provided in options (per-scan auth)
-        auth_applied = self._apply_scan_auth(options)
+        auth_applied, auth_type = self._apply_scan_auth(options)
         has_auth = auth_applied
+        
+        # Update progress with auth info and verify auth
+        if auth_type:
+            progress.auth_type = auth_type
+            progress.auth_status = "applied"
+            progress.current_check = f"Verifying {auth_type} auth..."
+            
+            # Verify auth by making a test request
+            auth_verified, http_status = self._verify_auth_request(target)
+            if auth_verified:
+                progress.auth_status = f"verified (HTTP {http_status})"
+                progress.current_check = f"Auth verified: {auth_type} (HTTP {http_status})"
+                logger.info(f"Auth verification successful: HTTP {http_status}")
+            else:
+                progress.auth_status = f"failed (HTTP {http_status})"
+                progress.current_check = f"Auth may have failed: {auth_type} (HTTP {http_status})"
+                logger.warning(f"Auth verification warning: HTTP {http_status}")
         
         # Get or create context ID if auth is configured
         context_id = self._get_zap_context_id('default')
