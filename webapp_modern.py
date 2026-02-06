@@ -57,6 +57,7 @@ from lynis_parser import parse_lynis_dat
 from actions.lynis_pentest_ssh import LynisPentestSSH
 from actions.connector_utils import CredentialChecker
 from db_manager import get_db, DatabaseManager
+from zap_daemon import ZapDaemonManager
 
 # Initialize logger
 logger = Logger(name="webapp_modern.py", level=logging.DEBUG)
@@ -112,6 +113,43 @@ PWN_SWITCH_STALE_SECONDS = 60  # Consider switch stuck after 60 seconds
 RELEASE_GATE_DEFAULT_MESSAGE = (
     "A controlled release is rolling out. Proceeding with a manual update may cause instability."
 )
+ZAP_MONITOR_INTERVAL_SECONDS = 30
+
+zap_daemon_manager = None
+zap_daemon_thread = None
+
+
+def start_zap_daemon_monitor() -> None:
+    """Start a background monitor to keep the ZAP daemon running."""
+    global zap_daemon_manager, zap_daemon_thread
+
+    enabled = os.getenv("RAGNAR_ZAP_DAEMON_ENABLED", "1").lower() not in {"0", "false", "no"}
+    if not enabled:
+        logger.info("ZAP daemon monitor disabled via RAGNAR_ZAP_DAEMON_ENABLED.")
+        return
+
+    zap_host = os.getenv("RAGNAR_ZAP_HOST", "127.0.0.1")
+    try:
+        zap_port = int(os.getenv("RAGNAR_ZAP_PORT", "8090"))
+    except ValueError:
+        zap_port = 8090
+    zap_api_key = os.getenv("RAGNAR_ZAP_API_KEY")
+
+    zap_daemon_manager = ZapDaemonManager(
+        logger=logger,
+        host=zap_host,
+        port=zap_port,
+        api_key=zap_api_key,
+        monitor_interval=ZAP_MONITOR_INTERVAL_SECONDS,
+    )
+
+    zap_daemon_thread = threading.Thread(
+        target=zap_daemon_manager.monitor_loop,
+        name="ZapDaemonMonitor",
+        daemon=True,
+    )
+    zap_daemon_thread.start()
+    logger.info(f"ZAP daemon monitor started (host={zap_host}, port={zap_port}).")
 
 
 def _normalize_value(value, default='Unknown'):
@@ -11471,6 +11509,9 @@ def handle_exit(signum, frame):
     """Handle exit signals with proper cleanup"""
     logger.info("Shutting down web server...")
     shared_data.webapp_should_exit = True
+
+    if zap_daemon_manager:
+        zap_daemon_manager.stop()
     
     # Stop all background tasks first
     try:
@@ -11529,6 +11570,9 @@ def run_server(host='0.0.0.0', port=8000):
 
         # Prime synchronized data before clients connect
         sync_all_counts()
+
+        # Start ZAP daemon watchdog (optional)
+        start_zap_daemon_monitor()
 
         # Start background status broadcaster
         socketio.start_background_task(broadcast_status_updates)
