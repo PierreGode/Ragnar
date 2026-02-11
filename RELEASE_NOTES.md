@@ -5,7 +5,7 @@
 This release brings comprehensive multi-platform support and intelligent automatic installation of advanced security tools based on hardware capabilities.
 
 ## 🆕 Major Features
-
+# no cdn
 ### 1. **Full Debian-Based System Support**
 - ✅ **AMD64/x86_64 Architecture**: Native support for standard x86-64 servers and workstations
 - ✅ **ARM64/AArch64 Architecture**: Full support for ARM-based servers and high-performance SBCs
