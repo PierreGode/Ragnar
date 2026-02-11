@@ -8,12 +8,37 @@ import paramiko
 import socket
 import threading
 import logging
+import netifaces
 from queue import Queue, Empty
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, SpinnerColumn
 from shared import SharedData
 from logger import Logger
 from actions.connector_utils import CredentialChecker
+
+
+def _get_local_ips():
+    """Return a set of all IP addresses assigned to this machine."""
+    local_ips = {'127.0.0.1', '::1'}
+    try:
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            for family in (netifaces.AF_INET, netifaces.AF_INET6):
+                for addr_info in addrs.get(family, []):
+                    ip = addr_info.get('addr', '')
+                    if ip:
+                        local_ips.add(ip.split('%')[0])  # strip IPv6 zone id
+    except Exception:
+        pass
+    # Fallback: outbound socket trick
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ips.add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+    return local_ips
 
 # Configure the logger
 logger = Logger(name="ssh_connector.py", level=logging.DEBUG)
@@ -46,6 +71,13 @@ class SSHBruteforce:
         Execute the brute force attack and update status.
         Optimization: Skip bruteforce if valid credentials already exist for this host.
         """
+        # Skip bruteforcing our own IP — it overwhelms the local SSH daemon
+        # and will never yield useful credentials
+        local_ips = _get_local_ips()
+        if ip in local_ips:
+            logger.info(f"Skipping SSH bruteforce on {ip}:{port} — this is our own IP")
+            return 'skipped'
+
         logger.info(f"Executing SSHBruteforce on {ip}:{port}...")
         
         # Check if we already have valid credentials for this host
@@ -102,6 +134,12 @@ class SSHConnector:
 
         self.users = open(shared_data.usersfile, "r").read().splitlines()
         self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
+
+        # Filter out empty lines from dictionary files
+        self.users = [u for u in self.users if u.strip()]
+        self.passwords = [p for p in self.passwords if p.strip()]
+
+        logger.info(f"SSH dictionary loaded: {len(self.users)} users {self.users}, {len(self.passwords)} passwords from {shared_data.usersfile}")
 
         self.lock = threading.Lock()
         self.sshfile = shared_data.sshfile

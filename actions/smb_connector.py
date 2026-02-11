@@ -99,6 +99,12 @@ class SMBConnector:
         self.users = open(shared_data.usersfile, "r").read().splitlines()
         self.passwords = open(shared_data.passwordsfile, "r").read().splitlines()
 
+        # Filter out empty lines from dictionary files
+        self.users = [u for u in self.users if u.strip()]
+        self.passwords = [p for p in self.passwords if p.strip()]
+
+        logger.info(f"SMB dictionary loaded: {len(self.users)} users {self.users}, {len(self.passwords)} passwords from {shared_data.usersfile}")
+
         self.lock = threading.Lock()
         self.smbfile = shared_data.smbfile
         # If the file doesn't exist, it will be created
