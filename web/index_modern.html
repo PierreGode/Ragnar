@@ -6,39 +6,11 @@
     <title>Ragnar Cyberviking - Modern Dashboard</title>
     <link rel="icon" href="/web/images/ragnar.ico" type="image/x-icon">
     
-    <!-- Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    
+    <!-- Tailwind CSS (local build) -->
+    <link rel="stylesheet" href="/css/tailwind.css">
+
     <!-- Socket.IO Client -->
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    
-    <!-- Custom Tailwind Config -->
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        Ragnar: {
-                            50: '#f0f9ff',
-                            100: '#e0f2fe',
-                            200: '#bae6fd',
-                            300: '#7dd3fc',
-                            400: '#38bdf8',
-                            500: '#0ea5e9',
-                            600: '#0284c7',
-                            700: '#0369a1',
-                            800: '#075985',
-                            900: '#0c4a6e',
-                        }
-                    },
-                    screens: {
-                        'nav': '1280px',
-                    }
-                }
-            }
-        }
-    </script>
     
     <style>
         @keyframes pulse-glow {
