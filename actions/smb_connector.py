@@ -220,7 +220,7 @@ class SMBConnector:
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TextColumn("[progress.percentage]{task.percentage:>3.0f}%")) as progress:
             task_id = progress.add_task("[cyan]Bruteforcing SMB...", total=total_tasks)
             
-            for _ in range(40):  # Adjust the number of threads based on the RPi Zero's capabilities
+            for _ in range(10):  # Reduced from 40 to prevent rate-limiting by targets
                 t = threading.Thread(target=self.worker, args=(progress, task_id, success_flag))
                 t.start()
                 threads.append(t)

