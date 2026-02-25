@@ -1963,9 +1963,8 @@ class AdvancedVulnScanner:
             '-config', 'connection.timeoutInSecs=120',
         ]
 
-        # Pass JVM memory limit via ZAP's -J flag (forwarded to java -Xmx)
-        cmd.insert(2, f'-J-Xmx{jvm_xmx}')
-
+        # Note: zap.sh already sets -Xmx to 25% of system RAM automatically.
+        # Passing -J-Xmx to ZAP 2.17.0 causes 'Unsupported option' error.
         logger.info(f"[ZAP-START] Command: {' '.join(cmd)}")
 
         # Detect ARM/Raspberry Pi - ZAP needs much longer startup on ARM

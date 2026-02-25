@@ -12255,6 +12255,7 @@ def start_zap_scan():
                 logger.warning(f"Error checking/applying saved credentials: {auth_err}")
 
         # Determine scan type
+        from advanced_vuln_scanner import ScanType
         scan_type_str = data.get('scan_type', 'zap_full')
         scan_type_map = {
             'spider': ScanType.ZAP_SPIDER,
@@ -12265,7 +12266,6 @@ def start_zap_scan():
             'zap_full': ScanType.ZAP_FULL,
         }
 
-        from advanced_vuln_scanner import ScanType
         scan_type = scan_type_map.get(scan_type_str, ScanType.ZAP_FULL)
 
         options = {
