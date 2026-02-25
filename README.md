@@ -30,13 +30,13 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
-For detailed information see the [Install Guide](INSTALL.md).
+For detailed information see the [Install Guide](docs/INSTALL.md).
 
 ---
 
 ## 🌐 Web Interface
 
-Access Ragnar's dashboard at `http://<ragnar-ip>:8000` — [screenshots](WEB.md)
+Access Ragnar's dashboard at `http://<ragnar-ip>:8000`
 
 - Real-time network discovery and vulnerability scanning
 - Multi-source threat intelligence dashboard
@@ -60,7 +60,7 @@ The portal supports network scanning with signal strength, manual entry for hidd
 - **Network Scanning** — Identifies live hosts and open ports
 - **Vulnerability Assessment** — Scans using Nmap and other tools
 - **Multi-Source Threat Intelligence** — Real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE ATT&CK
-- **AI-Powered Analysis** — GPT-5 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](AI_INTEGRATION.md)
+- **AI-Powered Analysis** — GPT-5 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
 - **System Attacks** — Brute-force attacks on FTP, SSH, SMB, RDP, Telnet, SQL
 - **File Stealing** — Extracts data from vulnerable services
 - **Advanced Server Features (8GB+ RAM)** — Real-time traffic analysis, advanced vulnerability scanning with Nuclei/Nikto/SQLMap/ZAP, parallel scanning, and CVE correlation. See [Server Mode](#-server-mode-advanced-features-8gb-ram)
@@ -68,9 +68,9 @@ The portal supports network scanning with signal strength, manual entry for hidd
 - **Smart WiFi Management** — Auto-connects to known networks, falls back to AP mode, captive portal for configuration
 - **E-Paper Display** — Real-time status showing targets, vulnerabilities, credentials, and network info
 - **WiFi Pineapple Pager** — Full-color LCD display with button controls, LED indicators, and auto-dim. See [Pager section](#-wifi-pineapple-pager)
-- **Hardware-Bound Authentication** — Optional login with full database encryption at rest. See [Security & Authentication](SECURITY.md)
+- **Hardware-Bound Authentication** — Optional login with full database encryption at rest. See [Security & Authentication](docs/SECURITY.md)
 - **PiSugar 3 Button** — Physical button to swap between Ragnar and Pwnagotchi modes
-- **Kill Switch** — Built-in endpoint (`/api/kill`) to wipe all databases, logs, and data. See [Kill Switch](KILL_SWITCH.md)
+- **Kill Switch** — Built-in endpoint (`/api/kill`) to wipe all databases, logs, and data. See [Kill Switch](docs/KILL_SWITCH.md)
 - **Comprehensive Logging** — All nmap commands and results logged to `data/logs/nmap.log`
 
 <p align="center">
@@ -119,7 +119,7 @@ The installer auto-detects your platform and configures everything:
 - **Smart resource management** — Pi Zero W/W2 automatically skip resource-intensive tools
 - **ARM optimizations** — Uses PiWheels on ARM, retries mirrors, skips Pi-only steps on other hardware
 
-For the full installation walkthrough see [Install Guide](INSTALL.md).
+For the full installation walkthrough see [Install Guide](docs/INSTALL.md).
 
 ---
 
@@ -132,7 +132,7 @@ When deployed on systems with 8GB+ RAM, Ragnar automatically unlocks advanced se
 > **Existing installs:** Run the advanced tools installer separately:
 > ```bash
 > cd /home/ragnar/Ragnar
-> sudo ./install_advanced_tools.sh
+> sudo ./scripts/install_advanced_tools.sh
 > sudo systemctl restart ragnar
 > ```
 
@@ -240,7 +240,7 @@ sudo ./install_ragnar.sh
 
 Option B — Direct deployment:
 ```bash
-./install_pineapple_pager.sh [pager-ip]
+./scripts/install_pineapple_pager.sh [pager-ip]
 ```
 
 **Usage:**
@@ -256,7 +256,7 @@ Option B — Direct deployment:
 
 The project welcomes contributions in new attack modules, bug fixes, documentation, and feature improvements.
 
-See [Contributing Docs](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and [Development Guide](DEVELOPMENT.md).
+See [Contributing Docs](docs/CONTRIBUTING.md) and [Code of Conduct](docs/CODE_OF_CONDUCT.md).
 
 ## 📫 Contact
 

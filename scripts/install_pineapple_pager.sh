@@ -230,7 +230,6 @@ CORE_FILES=(
     # Web interface
     "webapp_modern.py"
     "server_capabilities.py"
-    "routes.json"
     
     # Resource monitor
     "resource_monitor.py"

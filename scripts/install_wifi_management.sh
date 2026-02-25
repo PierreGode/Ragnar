@@ -97,8 +97,9 @@ setup_permissions() {
     print_status "Setting up permissions..."
     
     # Make scripts executable
-    chmod +x ragnar_wifi_setup.sh
-    chmod +x wifi_manager_service.sh
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    chmod +x "$SCRIPT_DIR/ragnar_wifi_setup.sh"
+    chmod +x "$SCRIPT_DIR/wifi_manager_service.sh"
     
     # Create ragnar user if it doesn't exist
     if ! id "ragnar" &>/dev/null; then

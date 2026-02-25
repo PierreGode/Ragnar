@@ -23,8 +23,8 @@ parser.add_argument('--verbose', '-v', action='store_true', help='Show all mock 
 args, _ = parser.parse_known_args()
 VERBOSE = args.verbose
 
-# Add current directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add project root to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 
 class MockPagerInput:
@@ -602,7 +602,7 @@ def run_tests():
     
     # ========== TEST 7: Required files exist ==========
     print("[TEST 7] Checking required files...")
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
     required_files = [
         'pager_menu.py',
         'pager_display.py',
@@ -652,7 +652,7 @@ def run_tests():
         print("SUCCESS: All tests passed!")
         print()
         print("The Pager code is ready for deployment.")
-        print("Run: ./install_pineapple_pager.sh <pager-ip>")
+        print("Run: ./scripts/install_pineapple_pager.sh <pager-ip>")
         return 0
 
 

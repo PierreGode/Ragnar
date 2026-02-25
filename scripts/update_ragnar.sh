@@ -89,7 +89,7 @@ rm -rf "$BACKUP_DIR"
 echo -e "${GREEN}Local runtime data restored.${NC}"
 
 echo -e "${BLUE}Step 5.6: Initializing data files from templates...${NC}"
-bash "$ragnar_PATH/init_data_files.sh"
+bash "$ragnar_PATH/scripts/init_data_files.sh"
 
 echo -e "${BLUE}Step 6: Setting correct permissions...${NC}"
 chown -R ragnar:ragnar "$ragnar_PATH"
@@ -97,7 +97,7 @@ chmod +x "$ragnar_PATH"/*.sh 2>/dev/null || true
 
 # Ensure specific critical scripts are executable
 chmod +x "$ragnar_PATH/kill_port_8000.sh" 2>/dev/null || true
-chmod +x "$ragnar_PATH/update_ragnar.sh" 2>/dev/null || true
+chmod +x "$ragnar_PATH/scripts/update_ragnar.sh" 2>/dev/null || true
 chmod +x "$ragnar_PATH/scripts/"*.sh 2>/dev/null || true
 
 echo -e "${BLUE}Step 6.5: Validating actions.json configuration...${NC}"

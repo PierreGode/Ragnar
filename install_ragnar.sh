@@ -798,23 +798,22 @@ setup_ragnar() {
     chmod -R 755 /home/$ragnar_USER/Ragnar
     
     # Make utility scripts executable with proper ownership
-    chmod +x $ragnar_PATH/switch_webapp.sh 2>/dev/null || true
     chmod +x $ragnar_PATH/kill_port_8000.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/update_ragnar.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/quick_update.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/uninstall_ragnar.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/wifi_fix.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/install_modern_webapp.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/init_data_files.sh 2>/dev/null || true
-    chmod +x $ragnar_PATH/preserve_local_data.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/update_ragnar.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/quick_update.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/uninstall_ragnar.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/wifi_fix.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/init_data_files.sh 2>/dev/null || true
+    chmod +x $ragnar_PATH/scripts/preserve_local_data.sh 2>/dev/null || true
     chmod +x $ragnar_PATH/wipe_epd.py 2>/dev/null || true
-    
+
     # Ensure ragnar user owns all script files
     chown $ragnar_USER:$ragnar_USER $ragnar_PATH/*.sh 2>/dev/null || true
-    
+    chown $ragnar_USER:$ragnar_USER $ragnar_PATH/scripts/*.sh 2>/dev/null || true
+
     # Initialize data files from templates
     log "INFO" "Initializing data files from templates..."
-    bash $ragnar_PATH/init_data_files.sh
+    bash $ragnar_PATH/scripts/init_data_files.sh
     chown -R $ragnar_USER:$ragnar_USER $ragnar_PATH/data
     
     # Create missing directories and files that are needed for proper operation
@@ -1327,15 +1326,15 @@ main() {
                 pager_ip="${pager_ip:-172.16.42.1}"
 
                 pager_exit_code=0
-                if [ -f "$ragnar_PATH/install_pineapple_pager.sh" ]; then
-                    chmod +x "$ragnar_PATH/install_pineapple_pager.sh"
-                    bash "$ragnar_PATH/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
-                elif [ -f "$(dirname "$0")/install_pineapple_pager.sh" ]; then
-                    chmod +x "$(dirname "$0")/install_pineapple_pager.sh"
-                    bash "$(dirname "$0")/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
+                if [ -f "$ragnar_PATH/scripts/install_pineapple_pager.sh" ]; then
+                    chmod +x "$ragnar_PATH/scripts/install_pineapple_pager.sh"
+                    bash "$ragnar_PATH/scripts/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
+                elif [ -f "$(dirname "$0")/scripts/install_pineapple_pager.sh" ]; then
+                    chmod +x "$(dirname "$0")/scripts/install_pineapple_pager.sh"
+                    bash "$(dirname "$0")/scripts/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
                 else
                     log "ERROR" "install_pineapple_pager.sh not found"
-                    log "INFO" "Run it directly: ./install_pineapple_pager.sh $pager_ip"
+                    log "INFO" "Run it directly: ./scripts/install_pineapple_pager.sh $pager_ip"
                     pager_exit_code=1
                 fi
                 clean_exit $pager_exit_code
@@ -1370,9 +1369,9 @@ main() {
                 pager_ip="${pager_ip:-172.16.42.1}"
 
                 pager_exit_code=0
-                if [ -f "$(dirname "$0")/install_pineapple_pager.sh" ]; then
-                    chmod +x "$(dirname "$0")/install_pineapple_pager.sh"
-                    bash "$(dirname "$0")/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
+                if [ -f "$(dirname "$0")/scripts/install_pineapple_pager.sh" ]; then
+                    chmod +x "$(dirname "$0")/scripts/install_pineapple_pager.sh"
+                    bash "$(dirname "$0")/scripts/install_pineapple_pager.sh" "$pager_ip" || pager_exit_code=$?
                 else
                     log "ERROR" "install_pineapple_pager.sh not found"
                     pager_exit_code=1
@@ -1582,22 +1581,22 @@ except:
         echo -e "${BLUE}Running advanced tools installer...${NC}"
         
         # Check if install_advanced_tools.sh exists
-        if [ -f "$ragnar_PATH/install_advanced_tools.sh" ]; then
-            chmod +x "$ragnar_PATH/install_advanced_tools.sh"
+        if [ -f "$ragnar_PATH/scripts/install_advanced_tools.sh" ]; then
+            chmod +x "$ragnar_PATH/scripts/install_advanced_tools.sh"
             cd "$ragnar_PATH"
-            
+
             # Run the advanced tools installer
-            if bash "$ragnar_PATH/install_advanced_tools.sh"; then
+            if bash "$ragnar_PATH/scripts/install_advanced_tools.sh"; then
                 log "SUCCESS" "Advanced security tools installed successfully"
                 echo -e "${GREEN}✓ Advanced security tools installed${NC}"
             else
                 log "WARNING" "Advanced tools installation encountered issues"
                 echo -e "${YELLOW}⚠ Some advanced tools may not have installed correctly${NC}"
                 echo -e "${YELLOW}  You can run the installer manually later:${NC}"
-                echo -e "${YELLOW}  cd /home/ragnar/Ragnar && sudo ./install_advanced_tools.sh${NC}"
+                echo -e "${YELLOW}  cd /home/ragnar/Ragnar && sudo ./scripts/install_advanced_tools.sh${NC}"
             fi
         else
-            log "ERROR" "install_advanced_tools.sh not found at $ragnar_PATH"
+            log "ERROR" "install_advanced_tools.sh not found at $ragnar_PATH/scripts"
             echo -e "${RED}Advanced tools installer script not found${NC}"
             echo -e "${YELLOW}You can install advanced tools manually later if needed${NC}"
         fi

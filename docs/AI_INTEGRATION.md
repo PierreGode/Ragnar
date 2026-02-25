@@ -266,7 +266,7 @@ Planned improvements:
 
 For issues or questions:
 1. Check the [GitHub Issues](https://github.com/PierreGode/Ragnar/issues)
-2. Review the main [README](README.md)
+2. Review the main [README](../README.md)
 3. Submit a bug report with:
    - AI configuration (redact API token)
    - Error messages

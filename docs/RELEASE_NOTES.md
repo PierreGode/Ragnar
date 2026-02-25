@@ -98,7 +98,7 @@ Hardware Requirements Check:
 
 ### Installation Behavior Clarity
 - **Fresh Installations**: Fully automatic, no prompts for advanced tools on qualifying hardware
-- **Existing Installations**: Manual upgrade via `./install_advanced_tools.sh`
+- **Existing Installations**: Manual upgrade via `./scripts/install_advanced_tools.sh`
 - **Resource-Constrained**: Clear messages explaining why tools are skipped
 
 ## 🚀 Usage Examples
@@ -114,7 +114,7 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 ### Existing Installation Upgrade
 ```bash
 cd /home/ragnar/Ragnar
-sudo ./install_advanced_tools.sh
+sudo ./scripts/install_advanced_tools.sh
 sudo systemctl restart ragnar
 ```
 
@@ -160,7 +160,7 @@ None. All changes are backward compatible.
 ```bash
 cd /home/ragnar/Ragnar
 git pull  # Get latest code
-sudo ./install_advanced_tools.sh
+sudo ./scripts/install_advanced_tools.sh
 sudo systemctl restart ragnar
 ```
 
@@ -212,7 +212,7 @@ We welcome contributions! Areas of interest:
 
 - **Issues**: [GitHub Issues](https://github.com/PierreGode/Ragnar/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/PierreGode/Ragnar/discussions)
-- **Documentation**: [README.md](README.md) | [INSTALL.md](INSTALL.md)
+- **Documentation**: [README.md](../README.md) | [INSTALL.md](INSTALL.md)
 
 ## 🙏 Acknowledgments
 
