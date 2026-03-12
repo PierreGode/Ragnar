@@ -14903,6 +14903,120 @@ def test_pushover():
 
 
 # ============================================================================
+# AIRSNITCH – Wi-Fi Client Isolation Testing
+# ============================================================================
+
+def _get_airsnitch_instance():
+    """Return (or lazily create) a shared AirSnitch instance."""
+    if not hasattr(shared_data, '_airsnitch'):
+        from actions.airsnitch import AirSnitch
+        shared_data._airsnitch = AirSnitch(shared_data)
+    return shared_data._airsnitch
+
+
+@app.route('/api/airsnitch/status', methods=['GET'])
+def airsnitch_status():
+    """Return AirSnitch installation status and latest results."""
+    try:
+        airsnitch = _get_airsnitch_instance()
+        installed = airsnitch.runner.is_installed()
+        latest = airsnitch.get_latest_results()
+        return jsonify({
+            'success': True,
+            'installed': installed,
+            'latest_results': latest,
+        })
+    except Exception as exc:
+        logger.error(f"airsnitch_status error: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/airsnitch/run', methods=['POST'])
+def airsnitch_run():
+    """
+    Trigger an AirSnitch client isolation test.
+
+    Optional JSON body:
+      iface_victim   (str)   – victim wireless interface   (default: wlan1)
+      iface_attacker (str)   – attacker wireless interface (default: wlan2)
+      tests          (list)  – subset of ["gtk","gateway","port_steal_down","port_steal_up"]
+      same_bss       (bool)  – test same-BSS scenario      (default: false)
+      server         (str)   – pingable server for port-steal tests (default: "8.8.8.8")
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+
+        # Temporarily override config values for this run
+        cfg_overrides = {k: v for k, v in {
+            'airsnitch_iface_victim':   data.get('iface_victim'),
+            'airsnitch_iface_attacker': data.get('iface_attacker'),
+            'airsnitch_tests':          data.get('tests'),
+            'airsnitch_same_bss':       data.get('same_bss'),
+            'airsnitch_server':         data.get('server'),
+        }.items() if v is not None}
+
+        original_cfg = {}
+        cfg = getattr(shared_data, 'config', {})
+        for k, v in cfg_overrides.items():
+            original_cfg[k] = cfg.get(k)
+            cfg[k] = v
+
+        airsnitch = _get_airsnitch_instance()
+
+        def run_in_background():
+            try:
+                airsnitch.execute()
+            finally:
+                for k, v in original_cfg.items():
+                    if v is None:
+                        cfg.pop(k, None)
+                    else:
+                        cfg[k] = v
+
+        thread = threading.Thread(target=run_in_background, daemon=True, name="airsnitch-run")
+        thread.start()
+
+        return jsonify({'success': True, 'message': 'AirSnitch test started in background'})
+
+    except Exception as exc:
+        logger.error(f"airsnitch_run error: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/airsnitch/results', methods=['GET'])
+def airsnitch_results():
+    """Return the most recent AirSnitch test results."""
+    try:
+        airsnitch = _get_airsnitch_instance()
+        results = airsnitch.get_latest_results()
+        if results is None:
+            return jsonify({'success': True, 'results': None, 'message': 'No results yet'})
+        return jsonify({'success': True, 'results': results})
+    except Exception as exc:
+        logger.error(f"airsnitch_results error: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/airsnitch/install', methods=['POST'])
+def airsnitch_install():
+    """Install AirSnitch from GitHub (runs in background)."""
+    try:
+        airsnitch = _get_airsnitch_instance()
+        if airsnitch.runner.is_installed():
+            return jsonify({'success': True, 'message': 'AirSnitch is already installed'})
+
+        def do_install():
+            airsnitch.runner.install()
+
+        thread = threading.Thread(target=do_install, daemon=True, name="airsnitch-install")
+        thread.start()
+        return jsonify({'success': True, 'message': 'AirSnitch installation started in background'})
+    except Exception as exc:
+        logger.error(f"airsnitch_install error: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+# ============================================================================
 # SIGNAL HANDLERS
 # ============================================================================
 

@@ -1,5 +1,12 @@
 [
     {
+        "b_module": "airsnitch",
+        "b_class": "AirSnitch",
+        "b_port": null,
+        "b_status": "airsnitch_scan",
+        "b_parent": null
+    },
+    {
         "b_module": "ble",
         "b_class": "BLE",
         "b_port": null,
