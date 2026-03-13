@@ -1035,6 +1035,8 @@ async function loadTabData(tabName) {
         case 'pentest':
             if (manualModeActive) {
                 await loadPentestData();
+                checkAirSnitchInstalled();
+                refreshAirSnitchResults();
             } else {
                 addConsoleMessage('Enable Pentest Mode to access the Pentest tab', 'warning');
                 showTab('dashboard');
@@ -7857,7 +7859,12 @@ function updatePentestSummary(testType, data) {
         const count = pentestResults.movement_tracking.data.readings?.length || 0;
         summaryLines.push(`Movement Tracking: ${count} readings collected`);
     }
-    
+    if (pentestResults.airsnitch) {
+        const d = pentestResults.airsnitch.data;
+        const state = d.network_isolated ? 'Isolated ✓' : `${d.vulnerable_count}/${d.total_tests} failed ✗`;
+        summaryLines.push(`AirSnitch: ${state}`);
+    }
+
     contentDiv.innerHTML = summaryLines.map(line => `<div>• ${line}</div>`).join('');
 }
 
@@ -7883,6 +7890,125 @@ async function downloadPentestReport() {
     } catch (error) {
         console.error('Report download error:', error);
         addConsoleMessage(`Failed to download report: ${error.message}`, 'error');
+    }
+}
+
+// ============================================================================
+// AIRSNITCH – Wi-Fi Client Isolation Testing
+// ============================================================================
+
+async function checkAirSnitchInstalled() {
+    try {
+        const data = await fetchAPI('/api/airsnitch/status');
+        const notice = document.getElementById('airsnitch-install-notice');
+        if (notice) {
+            notice.classList.toggle('hidden', data.installed !== false);
+        }
+        return data.installed;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function installAirSnitch() {
+    const btn = document.getElementById('airsnitch-install-btn');
+    const statusDiv = document.getElementById('airsnitch-status');
+    if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+    if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = 'Installing AirSnitch from GitHub…'; }
+    try {
+        const data = await postAPI('/api/airsnitch/install', {});
+        if (statusDiv) statusDiv.textContent = data.message || 'Installation started.';
+        addConsoleMessage('AirSnitch installation started in background', 'info');
+    } catch (e) {
+        if (statusDiv) statusDiv.textContent = `Install failed: ${e.message}`;
+        addConsoleMessage(`AirSnitch install failed: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Install from GitHub'; }
+    }
+}
+
+async function runAirSnitch() {
+    const btn = document.getElementById('airsnitch-run-btn');
+    const statusDiv = document.getElementById('airsnitch-status');
+
+    const ifaceVictim   = document.getElementById('airsnitch-iface-victim')?.value.trim()   || 'wlan1';
+    const ifaceAttacker = document.getElementById('airsnitch-iface-attacker')?.value.trim() || 'wlan2';
+    const server        = document.getElementById('airsnitch-server')?.value.trim()          || '8.8.8.8';
+    const sameBss       = document.getElementById('airsnitch-same-bss')?.checked             || false;
+    const tests         = [...document.querySelectorAll('.airsnitch-test-check:checked')].map(cb => cb.value);
+
+    if (tests.length === 0) {
+        if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = 'Select at least one test.'; }
+        return;
+    }
+
+    const originalText = btn?.textContent || 'Run AirSnitch';
+    if (btn) { btn.disabled = true; btn.textContent = 'Running…'; }
+    if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = 'Tests running in background…'; }
+
+    try {
+        const data = await postAPI('/api/airsnitch/run', {
+            iface_victim: ifaceVictim,
+            iface_attacker: ifaceAttacker,
+            server: server,
+            same_bss: sameBss,
+            tests: tests,
+        });
+        if (statusDiv) statusDiv.textContent = data.message || 'Started.';
+        addConsoleMessage('AirSnitch tests started', 'info');
+
+        // Poll for results after a short delay
+        setTimeout(refreshAirSnitchResults, 10000);
+    } catch (e) {
+        if (statusDiv) statusDiv.textContent = `Error: ${e.message}`;
+        addConsoleMessage(`AirSnitch failed: ${e.message}`, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = originalText; }
+    }
+}
+
+async function refreshAirSnitchResults() {
+    try {
+        const data = await fetchAPI('/api/airsnitch/results');
+        const resultsDiv   = document.getElementById('airsnitch-results');
+        const contentDiv   = document.getElementById('airsnitch-results-content');
+        if (!resultsDiv || !contentDiv) return;
+
+        if (!data.results) {
+            return; // No results yet – keep panel hidden
+        }
+
+        resultsDiv.classList.remove('hidden');
+        const r = data.results;
+        const summary = r.summary || {};
+        const lines = [];
+
+        lines.push(`<div class="text-gray-400">⏱ ${r.timestamp || ''}</div>`);
+        lines.push(`<div>Interfaces: victim=<span class="text-cyan-400">${r.iface_victim}</span> attacker=<span class="text-cyan-400">${r.iface_attacker}</span></div>`);
+
+        if (summary.network_isolated === true) {
+            lines.push(`<div class="text-green-400 font-bold">✓ Network PASSES client isolation (${summary.total_tests} tests)</div>`);
+        } else if (summary.vulnerable_count > 0) {
+            lines.push(`<div class="text-red-400 font-bold">✗ Network FAILS client isolation – ${summary.vulnerable_count}/${summary.total_tests} test(s) vulnerable</div>`);
+        }
+
+        for (const [name, result] of Object.entries(r.tests || {})) {
+            const icon  = result.vulnerable ? '✗' : '✓';
+            const color = result.vulnerable ? 'text-red-400' : 'text-green-400';
+            const label = name.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+            lines.push(`<div class="${color}">${icon} ${label}</div>`);
+        }
+
+        contentDiv.innerHTML = lines.join('');
+
+        // Feed into pentest summary
+        updatePentestSummary('airsnitch', {
+            vulnerable_count: summary.vulnerable_count || 0,
+            total_tests: summary.total_tests || 0,
+            network_isolated: summary.network_isolated,
+        });
+    } catch (e) {
+        console.error('AirSnitch results error:', e);
     }
 }
 
