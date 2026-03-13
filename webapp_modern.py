@@ -14999,20 +14999,43 @@ def airsnitch_results():
 
 @app.route('/api/airsnitch/install', methods=['POST'])
 def airsnitch_install():
-    """Install AirSnitch from GitHub (runs in background)."""
+    """Install AirSnitch from GitHub (runs in background, streams output to install log)."""
     try:
         airsnitch = _get_airsnitch_instance()
         if airsnitch.runner.is_installed():
-            return jsonify({'success': True, 'message': 'AirSnitch is already installed'})
+            return jsonify({'success': True, 'message': 'AirSnitch is already installed', 'installing': False})
+
+        if airsnitch.is_installing():
+            return jsonify({'success': True, 'message': 'Installation already in progress', 'installing': True})
 
         def do_install():
-            airsnitch.runner.install()
+            airsnitch._installing = True
+            try:
+                airsnitch.runner.install()
+            finally:
+                airsnitch._installing = False
 
         thread = threading.Thread(target=do_install, daemon=True, name="airsnitch-install")
         thread.start()
-        return jsonify({'success': True, 'message': 'AirSnitch installation started in background'})
+        return jsonify({'success': True, 'message': 'AirSnitch installation started', 'installing': True})
     except Exception as exc:
         logger.error(f"airsnitch_install error: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/airsnitch/install-log', methods=['GET'])
+def airsnitch_install_log():
+    """Return the live install log and current install state."""
+    try:
+        airsnitch = _get_airsnitch_instance()
+        return jsonify({
+            'success': True,
+            'log': airsnitch.get_install_log(),
+            'installing': airsnitch.is_installing(),
+            'installed': airsnitch.runner.is_installed(),
+        })
+    except Exception as exc:
+        logger.error(f"airsnitch_install_log error: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
 
 

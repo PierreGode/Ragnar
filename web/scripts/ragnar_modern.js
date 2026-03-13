@@ -7911,20 +7911,62 @@ async function checkAirSnitchInstalled() {
 }
 
 async function installAirSnitch() {
-    const btn = document.getElementById('airsnitch-install-btn');
+    const btn       = document.getElementById('airsnitch-install-btn');
     const statusDiv = document.getElementById('airsnitch-status');
-    if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
-    if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = 'Installing AirSnitch from GitHub…'; }
+    const logDiv    = document.getElementById('airsnitch-install-log');
+
+    if (btn)    { btn.disabled = true; btn.textContent = 'Installing…'; }
+    if (logDiv) { logDiv.classList.remove('hidden'); logDiv.textContent = ''; }
+    if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = 'Starting installation…'; }
+
     try {
         const data = await postAPI('/api/airsnitch/install', {});
-        if (statusDiv) statusDiv.textContent = data.message || 'Installation started.';
-        addConsoleMessage('AirSnitch installation started in background', 'info');
+        if (!data.success) throw new Error(data.error || 'Install request failed');
+        if (statusDiv) statusDiv.textContent = data.message || 'Installation running…';
+        addConsoleMessage('AirSnitch installation started', 'info');
+
+        // Poll the install log every 2 seconds until done
+        await _pollAirSnitchInstallLog(btn, statusDiv, logDiv);
     } catch (e) {
-        if (statusDiv) statusDiv.textContent = `Install failed: ${e.message}`;
+        if (statusDiv) { statusDiv.classList.remove('hidden'); statusDiv.textContent = `Install failed: ${e.message}`; }
+        if (logDiv)    { logDiv.textContent += `\nERROR: ${e.message}`; }
         addConsoleMessage(`AirSnitch install failed: ${e.message}`, 'error');
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = 'Install from GitHub'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Retry Install'; }
     }
+}
+
+async function _pollAirSnitchInstallLog(btn, statusDiv, logDiv) {
+    return new Promise((resolve) => {
+        const interval = setInterval(async () => {
+            try {
+                const data = await fetchAPI('/api/airsnitch/install-log');
+                if (logDiv && data.log !== undefined) {
+                    logDiv.textContent = data.log;
+                    logDiv.scrollTop = logDiv.scrollHeight;
+                }
+                if (!data.installing) {
+                    clearInterval(interval);
+                    if (data.installed) {
+                        if (statusDiv) statusDiv.textContent = 'Installation complete.';
+                        if (btn) { btn.disabled = false; btn.textContent = 'Installed ✓'; }
+                        // Hide the install notice since it's now installed
+                        const notice = document.getElementById('airsnitch-install-notice');
+                        if (notice) notice.classList.add('hidden');
+                        addConsoleMessage('AirSnitch installed successfully', 'success');
+                    } else {
+                        if (statusDiv) statusDiv.textContent = 'Installation failed – see log above.';
+                        if (btn) { btn.disabled = false; btn.textContent = 'Retry Install'; }
+                        addConsoleMessage('AirSnitch installation failed', 'error');
+                    }
+                    resolve();
+                }
+            } catch (e) {
+                clearInterval(interval);
+                if (btn) { btn.disabled = false; btn.textContent = 'Retry Install'; }
+                resolve();
+            }
+        }, 2000);
+    });
 }
 
 async function runAirSnitch() {

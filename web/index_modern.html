@@ -1360,6 +1360,98 @@
                 <div id="lynis-audit-status" class="text-sm text-gray-400 mt-2 hidden"></div>
             </div>
 
+            <!-- AirSnitch Wi-Fi Client Isolation Testing -->
+            <div class="mb-8">
+                <div class="glass rounded-xl p-6">
+                    <h3 class="text-xl font-semibold mb-1 text-green-400 flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path>
+                        </svg>
+                        AirSnitch – Wi-Fi Client Isolation Testing
+                    </h3>
+                    <p class="text-xs text-gray-400 mb-4">Tests whether the Wi-Fi network enforces client isolation. Requires two wireless interfaces. Only run on networks you own or have explicit permission to test.</p>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+                        <!-- Config card -->
+                        <div class="bg-slate-800 rounded p-3">
+                            <h5 class="font-medium text-sm mb-2 text-green-300">Configuration</h5>
+                            <div class="space-y-2">
+                                <div class="flex gap-2">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400">Victim interface</label>
+                                        <input type="text" id="airsnitch-iface-victim" value="wlan1" placeholder="wlan1"
+                                            class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
+                                    </div>
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400">Attacker interface</label>
+                                        <input type="text" id="airsnitch-iface-attacker" value="wlan2" placeholder="wlan2"
+                                            class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
+                                    </div>
+                                </div>
+                                <div class="flex gap-2">
+                                    <div class="flex-1">
+                                        <label class="text-xs text-gray-400">Server IP (port-steal)</label>
+                                        <input type="text" id="airsnitch-server" value="8.8.8.8" placeholder="8.8.8.8"
+                                            class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
+                                    </div>
+                                    <div class="flex-1 flex items-end">
+                                        <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 cursor-pointer">
+                                            <input type="checkbox" id="airsnitch-same-bss" class="rounded">
+                                            Same BSS scenario
+                                        </label>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="text-xs text-gray-400 block mb-1">Tests to run</label>
+                                    <div class="flex flex-wrap gap-2">
+                                        <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+                                            <input type="checkbox" class="airsnitch-test-check" value="gtk" checked> GTK Abuse
+                                        </label>
+                                        <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+                                            <input type="checkbox" class="airsnitch-test-check" value="gateway" checked> Gateway Bouncing
+                                        </label>
+                                        <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+                                            <input type="checkbox" class="airsnitch-test-check" value="port_steal_down" checked> Port Steal ↓
+                                        </label>
+                                        <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+                                            <input type="checkbox" class="airsnitch-test-check" value="port_steal_up" checked> Port Steal ↑
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Run + install card -->
+                        <div class="bg-slate-800 rounded p-3 flex flex-col gap-2">
+                            <h5 class="font-medium text-sm text-green-300">Run Tests</h5>
+                            <div class="flex gap-2">
+                                <button onclick="runAirSnitch()" id="airsnitch-run-btn"
+                                    class="flex-1 bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded text-sm transition-colors">
+                                    Run AirSnitch
+                                </button>
+                                <button onclick="refreshAirSnitchResults()" id="airsnitch-refresh-btn"
+                                    class="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded text-sm transition-colors" title="Refresh results">↺</button>
+                            </div>
+                            <div id="airsnitch-status" class="text-xs text-gray-400 hidden"></div>
+                            <!-- Install notice (shown when not installed) -->
+                            <div id="airsnitch-install-notice" class="hidden border border-yellow-700 rounded p-2">
+                                <p class="text-xs text-yellow-400 mb-2">AirSnitch is not installed.</p>
+                                <button onclick="installAirSnitch()" id="airsnitch-install-btn"
+                                    class="w-full bg-yellow-700 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs transition-colors">
+                                    Install from GitHub
+                                </button>
+                                <!-- Install log output -->
+                                <div id="airsnitch-install-log" class="hidden mt-2 bg-slate-900 rounded p-2 text-xs font-mono text-gray-300 max-h-32 overflow-y-auto whitespace-pre-wrap"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <!-- Test results panel -->
+                    <div id="airsnitch-results" class="hidden">
+                        <h5 class="font-medium text-sm mb-2 text-green-300">Results</h5>
+                        <div id="airsnitch-results-content" class="bg-slate-900 rounded p-3 text-xs text-gray-300 space-y-1 font-mono overflow-x-auto max-h-48 overflow-y-auto"></div>
+                    </div>
+                </div>
+            </div>
+
             <div class="mb-8">
                 <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Operations</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -1492,96 +1584,6 @@
                             <div id="track-results" class="mt-2 text-xs text-gray-400 hidden"></div>
                         </div>
                     </div>
-                    <!-- AirSnitch Wi-Fi Client Isolation Testing -->
-                    <div class="mt-6">
-                        <h4 class="font-medium text-sm mb-3 text-green-400 flex items-center">
-                            <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.111 16.404a5.5 5.5 0 017.778 0M12 20h.01m-7.08-7.071c3.904-3.905 10.236-3.905 14.141 0M1.394 9.393c5.857-5.857 15.355-5.857 21.213 0"></path>
-                            </svg>
-                            AirSnitch – Wi-Fi Client Isolation Testing
-                        </h4>
-                        <p class="text-xs text-gray-400 mb-3">Tests whether the current Wi-Fi network enforces client isolation. Requires two wireless interfaces. Only run on networks you own or have explicit permission to test.</p>
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                            <!-- Config card -->
-                            <div class="bg-slate-800 rounded p-3">
-                                <h5 class="font-medium text-sm mb-2 text-green-300">Configuration</h5>
-                                <div class="space-y-2">
-                                    <div class="flex gap-2">
-                                        <div class="flex-1">
-                                            <label class="text-xs text-gray-400">Victim interface</label>
-                                            <input type="text" id="airsnitch-iface-victim" value="wlan1" placeholder="wlan1"
-                                                class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
-                                        </div>
-                                        <div class="flex-1">
-                                            <label class="text-xs text-gray-400">Attacker interface</label>
-                                            <input type="text" id="airsnitch-iface-attacker" value="wlan2" placeholder="wlan2"
-                                                class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
-                                        </div>
-                                    </div>
-                                    <div class="flex gap-2">
-                                        <div class="flex-1">
-                                            <label class="text-xs text-gray-400">Server IP (port-steal)</label>
-                                            <input type="text" id="airsnitch-server" value="8.8.8.8" placeholder="8.8.8.8"
-                                                class="w-full bg-slate-700 text-white text-xs px-2 py-1 rounded border border-slate-600 focus:outline-none focus:border-green-500 mt-1">
-                                        </div>
-                                        <div class="flex-1 flex items-end">
-                                            <label class="flex items-center gap-1 text-xs text-gray-400 mb-1 cursor-pointer">
-                                                <input type="checkbox" id="airsnitch-same-bss" class="rounded">
-                                                Same BSS scenario
-                                            </label>
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label class="text-xs text-gray-400 block mb-1">Tests to run</label>
-                                        <div class="flex flex-wrap gap-2">
-                                            <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-                                                <input type="checkbox" class="airsnitch-test-check" value="gtk" checked> GTK Abuse
-                                            </label>
-                                            <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-                                                <input type="checkbox" class="airsnitch-test-check" value="gateway" checked> Gateway Bouncing
-                                            </label>
-                                            <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-                                                <input type="checkbox" class="airsnitch-test-check" value="port_steal_down" checked> Port Steal ↓
-                                            </label>
-                                            <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
-                                                <input type="checkbox" class="airsnitch-test-check" value="port_steal_up" checked> Port Steal ↑
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                            <!-- Run + status card -->
-                            <div class="bg-slate-800 rounded p-3 flex flex-col justify-between">
-                                <div>
-                                    <h5 class="font-medium text-sm mb-2 text-green-300">Run Tests</h5>
-                                    <div class="flex gap-2 mb-2">
-                                        <button onclick="runAirSnitch()" id="airsnitch-run-btn"
-                                            class="flex-1 bg-green-700 hover:bg-green-600 text-white px-3 py-1.5 rounded text-sm transition-colors">
-                                            Run AirSnitch
-                                        </button>
-                                        <button onclick="refreshAirSnitchResults()" id="airsnitch-refresh-btn"
-                                            class="bg-slate-600 hover:bg-slate-500 text-white px-3 py-1.5 rounded text-sm transition-colors" title="Refresh results">
-                                            ↺
-                                        </button>
-                                    </div>
-                                    <div id="airsnitch-status" class="text-xs text-gray-400 mb-2 hidden"></div>
-                                </div>
-                                <div id="airsnitch-install-notice" class="hidden">
-                                    <p class="text-xs text-yellow-400 mb-1">AirSnitch not installed.</p>
-                                    <button onclick="installAirSnitch()" id="airsnitch-install-btn"
-                                        class="w-full bg-yellow-700 hover:bg-yellow-600 text-white px-3 py-1 rounded text-xs transition-colors">
-                                        Install from GitHub
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        <!-- Results panel -->
-                        <div id="airsnitch-results" class="mt-3 hidden">
-                            <h5 class="font-medium text-sm mb-2 text-green-300">Results</h5>
-                            <div id="airsnitch-results-content" class="bg-slate-900 rounded p-3 text-xs text-gray-300 space-y-1 font-mono overflow-x-auto max-h-48 overflow-y-auto"></div>
-                        </div>
-                    </div>
-
                     <div id="pentest-summary" class="mt-4 p-3 bg-slate-800 rounded hidden">
                         <h5 class="font-medium text-sm mb-2">Pentest Results</h5>
                         <div id="pentest-summary-content" class="text-xs text-gray-400 space-y-1"></div>

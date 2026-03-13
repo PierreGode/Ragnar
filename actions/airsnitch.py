@@ -15,6 +15,7 @@ WARNING: Only run against networks you own or have explicit written permission t
 import os
 import json
 import logging
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -37,10 +38,11 @@ class AirSnitchRunner:
     Handles installation, configuration, and execution.
     """
 
-    def __init__(self, install_dir: str, logger: logging.Logger):
+    def __init__(self, install_dir: str, logger: logging.Logger, log_file: Optional[Path] = None):
         self.install_dir = Path(install_dir)
         self.logger = logger
         self.script = self.install_dir / "airsnitch.py"
+        self.install_log_file = log_file  # Path to write live install output
 
     # ------------------------------------------------------------------
     # Installation helpers
@@ -49,33 +51,90 @@ class AirSnitchRunner:
     def is_installed(self) -> bool:
         return self.script.exists()
 
-    def install(self) -> bool:
-        """Clone and set up the AirSnitch repository."""
+    def _log(self, msg: str) -> None:
+        """Write a message to both the Python logger and the live install log file."""
+        self.logger.info(msg)
+        if self.install_log_file:
+            try:
+                with open(self.install_log_file, "a") as fh:
+                    fh.write(msg + "\n")
+            except Exception:
+                pass
+
+    def _run_logged(self, cmd: list, cwd: Optional[str] = None, timeout: int = 300) -> subprocess.CompletedProcess:
+        """Run a command and stream its output line-by-line to the install log."""
+        self._log(f"$ {' '.join(cmd)}")
+        proc = subprocess.Popen(
+            cmd, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        output_lines = []
         try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                output_lines.append(line)
+                self._log(line)
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self._log("ERROR: command timed out")
+        return subprocess.CompletedProcess(cmd, proc.returncode, "\n".join(output_lines), "")
+
+    def install(self) -> bool:
+        """Clone and set up the AirSnitch repository, streaming output to the install log."""
+        if self.install_log_file:
+            # Start fresh log for this install attempt
+            try:
+                Path(self.install_log_file).write_text("")
+            except Exception:
+                pass
+
+        try:
+            # If dir exists but is incomplete (no airsnitch.py), wipe and re-clone
+            if self.install_dir.exists() and not self.script.exists():
+                self._log(f"Incomplete install detected at {self.install_dir} – removing and re-cloning …")
+                shutil.rmtree(str(self.install_dir), ignore_errors=True)
+
             if not self.install_dir.exists():
-                self.logger.info(f"Cloning AirSnitch into {self.install_dir} …")
-                result = subprocess.run(
+                self._log(f"Cloning AirSnitch into {self.install_dir} …")
+                result = self._run_logged(
                     ["git", "clone", "--depth", "1", AIRSNITCH_REPO, str(self.install_dir)],
-                    capture_output=True, text=True, timeout=120,
+                    timeout=120,
                 )
                 if result.returncode != 0:
-                    self.logger.error(f"git clone failed: {result.stderr.strip()}")
+                    self._log(f"ERROR: git clone failed (exit {result.returncode})")
                     return False
+            else:
+                self._log("Repository already present – skipping clone.")
 
             setup = self.install_dir / "setup.sh"
             if setup.exists():
-                self.logger.info("Running AirSnitch setup.sh …")
-                result = subprocess.run(
+                self._log("Running setup.sh …")
+                result = self._run_logged(
                     ["bash", str(setup)],
                     cwd=str(self.install_dir),
-                    capture_output=True, text=True, timeout=300,
+                    timeout=600,
                 )
                 if result.returncode != 0:
-                    self.logger.warning(f"setup.sh exited {result.returncode}: {result.stderr[:500]}")
+                    self._log(f"WARNING: setup.sh exited {result.returncode} – continuing anyway")
+            else:
+                self._log("No setup.sh found – installing Python dependencies directly …")
+                req = self.install_dir / "requirements.txt"
+                if req.exists():
+                    self._run_logged(
+                        ["pip3", "install", "-r", str(req)],
+                        cwd=str(self.install_dir),
+                        timeout=300,
+                    )
+
+            if not self.script.exists():
+                self._log("ERROR: airsnitch.py not found after install")
+                return False
 
             # Make the script executable
             self.script.chmod(self.script.stat().st_mode | 0o111)
-            self.logger.info("AirSnitch installed successfully.")
+            self._log("AirSnitch installed successfully.")
             return True
 
         except Exception as exc:
@@ -239,11 +298,12 @@ class AirSnitch:
             getattr(shared_data, "currentdir", "/opt/ragnar"),
             "tools", "airsnitch",
         )
-        self.runner = AirSnitchRunner(install_dir, self.logger)
         self.results_dir = Path(
             getattr(shared_data, "logsdir", "/tmp/ragnar_logs"), "airsnitch"
         )
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.install_log_path = self.results_dir / "install.log"
+        self.runner = AirSnitchRunner(install_dir, self.logger, log_file=self.install_log_path)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -357,3 +417,14 @@ class AirSnitch:
             return json.loads(files[0].read_text())
         except Exception:
             return None
+
+    def get_install_log(self) -> str:
+        """Return the current contents of the install log (empty string if none)."""
+        try:
+            return self.install_log_path.read_text()
+        except Exception:
+            return ""
+
+    def is_installing(self) -> bool:
+        """True while an install thread is running."""
+        return getattr(self, "_installing", False)
