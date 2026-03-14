@@ -57,6 +57,7 @@ The portal supports network scanning with signal strength, manual entry for hidd
 
 ## 🌟 Features
 
+- **Wi-Fi Client Isolation Testing** — AirSnitch tests whether a network properly isolates clients using GTK abuse, gateway bouncing, and port stealing attacks. See [AirSnitch Guide](docs/airsnitch.md)
 - **Network Scanning** — Identifies live hosts and open ports
 - **Vulnerability Assessment** — Scans using Nmap and other tools
 - **Multi-Source Threat Intelligence** — Real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE ATT&CK
