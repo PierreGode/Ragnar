@@ -81,6 +81,28 @@ class AirSnitchRunner:
             self._log("ERROR: command timed out")
         return subprocess.CompletedProcess(cmd, proc.returncode, "\n".join(output_lines), "")
 
+    def _install_system_deps(self) -> bool:
+        """Ensure build dependencies for hostapd/wpa_supplicant are present."""
+        # Packages required to build hostapd (used by AirSnitch's setup.sh)
+        pkgs = [
+            "libnl-3-dev",
+            "libnl-genl-3-dev",
+            "libnl-route-3-dev",
+            "libssl-dev",
+            "libdbus-1-dev",
+            "build-essential",
+            "git",
+        ]
+        self._log("Installing system build dependencies …")
+        result = self._run_logged(
+            ["apt-get", "install", "-y", "--no-install-recommends"] + pkgs,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            self._log(f"WARNING: apt-get install exited {result.returncode} – build may still fail")
+            return False
+        return True
+
     def install(self) -> bool:
         """Clone and set up the AirSnitch repository, streaming output to the install log."""
         if self.install_log_file:
@@ -91,6 +113,9 @@ class AirSnitchRunner:
                 pass
 
         try:
+            # Install libnl / openssl / build-essential before attempting compilation
+            self._install_system_deps()
+
             # If dir exists but is incomplete (no airsnitch.py), wipe and re-clone
             if self.install_dir.exists() and not self.script.exists():
                 self._log(f"Incomplete install detected at {self.install_dir} – removing and re-cloning …")
@@ -114,7 +139,7 @@ class AirSnitchRunner:
                 result = self._run_logged(
                     ["bash", str(setup)],
                     cwd=str(self.install_dir),
-                    timeout=600,
+                    timeout=900,
                 )
                 if result.returncode != 0:
                     self._log(f"WARNING: setup.sh exited {result.returncode} – continuing anyway")
