@@ -187,3 +187,15 @@ POST /api/airsnitch/run
 | Port Steal vulnerable | TCP sessions can be hijacked by another client on the same network |
 
 Even WPA2/WPA3 protected networks can fail client isolation — encryption protects traffic from outsiders but not necessarily from other authenticated clients on the same network.
+
+---
+
+## Credits & Source
+
+The underlying test tool is **AirSnitch**, developed by **Mathy Vanhoef** and collaborators as part of academic research into Wi-Fi client isolation vulnerabilities.
+
+- **Source repository**: [https://github.com/vanhoefm/airsnitch](https://github.com/vanhoefm/airsnitch)
+- **Author**: [Mathy Vanhoef](https://github.com/vanhoefm) — researcher at KU Leuven, known for discovering KRACK, FragAttacks, and other Wi-Fi protocol vulnerabilities
+- **Research context**: The attacks implemented in AirSnitch were documented and disclosed responsibly as part of ongoing Wi-Fi security research
+
+The Ragnar integration wraps the AirSnitch CLI, automates installation, and surfaces results through the Ragnar web dashboard. All credit for the underlying attack implementations belongs to the original authors.
