@@ -41,7 +41,9 @@ class AirSnitchRunner:
     def __init__(self, install_dir: str, logger: logging.Logger, log_file: Optional[Path] = None):
         self.install_dir = Path(install_dir)
         self.logger = logger
-        self.script = self.install_dir / "airsnitch.py"
+        # The main script lives in the research/ subdirectory of the modified hostap tree
+        self.script = self.install_dir / "airsnitch" / "research" / "airsnitch.py"
+        self.research_dir = self.script.parent
         self.install_log_file = log_file  # Path to write live install output
 
     # ------------------------------------------------------------------
@@ -124,8 +126,9 @@ class AirSnitchRunner:
             if not self.install_dir.exists():
                 self._log(f"Cloning AirSnitch into {self.install_dir} …")
                 result = self._run_logged(
-                    ["git", "clone", "--depth", "1", AIRSNITCH_REPO, str(self.install_dir)],
-                    timeout=120,
+                    ["git", "clone", "--depth", "1", "--recurse-submodules",
+                     AIRSNITCH_REPO, str(self.install_dir)],
+                    timeout=180,
                 )
                 if result.returncode != 0:
                     self._log(f"ERROR: git clone failed (exit {result.returncode})")
@@ -209,7 +212,7 @@ class AirSnitchRunner:
         try:
             result = subprocess.run(
                 cmd,
-                cwd=str(self.install_dir),
+                cwd=str(self.research_dir),  # script references client.conf etc. relatively
                 capture_output=True,
                 text=True,
                 timeout=timeout,
