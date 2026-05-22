@@ -1293,7 +1293,7 @@ class WardrivingEngine:
         self._current_esp_mode = 'wifi'
         self._esp_ble_count = 0
         self._esp_stations = []
-        self._companion_name = ''  # 'Huginn' or 'Piglet'
+        self._companion_name = ''  # 'Huginn', 'Piglet', or 'RagnarBridge'
         self._mesh_node_count = 0  # Piglet Core mesh node count
         # Queue of `set ...\r\n` byte-strings for the listener thread to write
         # to Huginn. Webapp thread enqueues; listener owns the serial handle.
@@ -1302,6 +1302,8 @@ class WardrivingEngine:
         # Reset by the listener on every reconnect so a late-promoted Huginn
         # (detected via [BOOT] line after the handshake window) still gets it.
         self._huginn_handshake_pushed = False
+        # ESP-Now coordinator (Piglet Core mode) — created when bridge detected
+        self._coordinator = None
 
     def start(self, interfaces=None, gps_port=None, device_name=None):
         """Start a wardriving session."""
@@ -1801,6 +1803,7 @@ class WardrivingEngine:
             'serial_networks': self.serial_networks,
             'companion_name': self._companion_name,
             'mesh_node_count': self._mesh_node_count,
+            'coordinator': self._coordinator.get_status() if self._coordinator else None,
             'esp_mode': getattr(self, '_current_esp_mode', ''),
             'esp_ble_count': getattr(self, '_esp_ble_count', 0),
             'esp_alerts': getattr(self, '_esp_alerts', [])[-5:],  # Last 5 alerts
@@ -2860,6 +2863,7 @@ class WardrivingEngine:
                 self._huginn_handshake_pushed = False
                 try:
                     boot_buf = ''
+                    boot_raw = bytearray()
                     deadline = time.time() + 3.0
                     while time.time() < deadline:
                         try:
@@ -2868,15 +2872,29 @@ class WardrivingEngine:
                             avail = 0
                         if avail:
                             try:
-                                boot_buf += ser.read(avail).decode('utf-8', errors='replace')
+                                chunk = ser.read(avail)
+                                boot_raw += chunk
+                                boot_buf += chunk.decode('utf-8', errors='replace')
                             except Exception:
                                 pass
-                            if 'HuginnESP' in boot_buf or '[CORE]' in boot_buf or 'Piglet' in boot_buf:
+                            if ('HuginnESP' in boot_buf or '[CORE]' in boot_buf
+                                    or 'Piglet' in boot_buf
+                                    or 'RagnarBridge' in boot_buf
+                                    or (len(boot_raw) >= 3
+                                        and boot_raw[0] == 0xAB
+                                        and boot_raw[1] == 0xCD
+                                        and boot_raw[2] == 0x03)):
                                 break
                         time.sleep(0.1)
 
                     if 'HuginnESP' in boot_buf or 'huginn' in boot_buf.lower():
                         self._companion_name = 'Huginn'
+                    elif 'RagnarBridge' in boot_buf or (
+                            len(boot_raw) >= 3
+                            and boot_raw[0] == 0xAB
+                            and boot_raw[1] == 0xCD
+                            and boot_raw[2] == 0x03):
+                        self._companion_name = 'RagnarBridge'
                     elif 'Piglet' in boot_buf or '[CORE]' in boot_buf:
                         self._companion_name = 'Piglet'
                     else:
@@ -2913,6 +2931,11 @@ class WardrivingEngine:
                     for line in self._huginn_initial_push_lines():
                         self._huginn_config_queue.put(line)
                     self._huginn_handshake_pushed = True
+
+                if self._companion_name == 'RagnarBridge':
+                    self._run_coordinator_loop(ser)
+                    ser.close()
+                    continue
 
                 if self._companion_name == 'Huginn':
                     self._run_huginn_wardrive_loop(ser)
@@ -2980,6 +3003,61 @@ class WardrivingEngine:
 
         self.serial_connected = False
         logger.info("Serial ESP32 listener stopped")
+
+    def _run_coordinator_loop(self, ser):
+        """Drive the ESP-Now coordinator while the RagnarBridge is connected."""
+        from espnow_coordinator import EspNowCoordinator
+
+        _AUTH_MAP = {
+            'OPEN': '[ESS]',
+            'WEP':  '[WEP][ESS]',
+            'WPA':  '[WPA-PSK-TKIP][ESS]',
+            'WPA2': '[WPA2-PSK-CCMP][ESS]',
+            'WPA3': '[WPA3][ESS]',
+        }
+
+        def _on_network(bssid, ssid, auth, channel, rssi, node_mac):
+            pos      = self._gps.get_position() if self._gps else None
+            gps_lat  = pos['lat']     if pos else None
+            gps_lon  = pos['lon']     if pos else None
+            gps_alt  = pos.get('alt') if pos else None
+            auth_str = auth.upper() if auth else ''
+            auth_wigle = _AUTH_MAP.get(auth_str, f'[{auth}][ESS]' if auth else '[ESS]')
+            freq = (2407 + channel * 5) if channel <= 14 else (5000 + channel * 5)
+            is_new = self.session.upsert_network(
+                bssid=bssid, ssid=ssid, security=auth_wigle,
+                channel=channel, frequency=freq, rssi=rssi,
+                lat=gps_lat, lon=gps_lon, alt=gps_alt,
+                speed=None, hdop=None,
+                interface='esp32-serial',
+            )
+            if is_new:
+                self.serial_networks += 1
+
+        coord = EspNowCoordinator(on_network=_on_network)
+        coord.set_send_callback(lambda data: ser.write(data))
+        coord.start()
+        self._coordinator = coord
+
+        node_mac_str = lambda mac: ':'.join(f'{b:02X}' for b in mac)
+        logger.info("Coordinator loop running — waiting for Piglet nodes")
+
+        try:
+            while self._running:
+                try:
+                    avail = ser.in_waiting or 1
+                    data  = ser.read(avail)
+                    if data:
+                        coord.feed(data)
+                        # Update mesh node count for UI
+                        self._mesh_node_count = coord.node_count
+                except Exception as e:
+                    logger.debug(f"Coordinator serial read error: {e}")
+                    break
+        finally:
+            coord.stop()
+            self._coordinator = None
+            logger.info("Coordinator loop exited")
 
     def _run_huginn_wardrive_loop(self, ser):
         self._current_esp_mode = 'wardrive'

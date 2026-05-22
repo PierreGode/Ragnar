@@ -746,6 +746,8 @@ class SharedData:
             "wardriving_auto_export": True,
             "wardriving_device_name": "",
             "wardriving_on_boot": False,
+            "piglet_core_mode": False,
+            "piglet_core_max_nodes": 4,
 
             "__title_kiosk__": "On-screen Display (Kiosk)",
             "kiosk_enabled": False,
