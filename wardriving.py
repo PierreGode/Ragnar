@@ -3041,6 +3041,7 @@ class WardrivingEngine:
 
         node_mac_str = lambda mac: ':'.join(f'{b:02X}' for b in mac)
         logger.info("Coordinator loop running — waiting for Piglet nodes")
+        _last_gps_push = 0.0
 
         try:
             while self._running:
@@ -3049,11 +3050,17 @@ class WardrivingEngine:
                     data  = ser.read(avail)
                     if data:
                         coord.feed(data)
-                        # Update mesh node count for UI
                         self._mesh_node_count = coord.node_count
                 except Exception as e:
                     logger.debug(f"Coordinator serial read error: {e}")
                     break
+
+                # Push GPS fix status to bridge every 5 s
+                now = time.time()
+                if now - _last_gps_push >= 5.0:
+                    _last_gps_push = now
+                    pos = self._gps.get_position() if self._gps else None
+                    coord.set_gps_fix(bool(pos and pos.get('fix', 0) > 0))
         finally:
             coord.stop()
             self._coordinator = None

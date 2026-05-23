@@ -18,11 +18,19 @@
 #
 # Bridge frame format (host <-> ESP32, both directions):
 #   SYNC  [2]  = 0xAB 0xCD
-#   CMD   [1]  = 0x01 RX (ESP32→Pi)  0x02 TX (Pi→ESP32)  0x03 HELLO
+#   CMD   [1]  = 0x01 RX (ESP32→Pi)  0x02 TX (Pi→ESP32)
+#               0x03 HELLO            0x05 STATS (Pi→ESP32 stat push)
 #   MAC   [6]  = source MAC (RX) / destination MAC (TX) / bridge MAC (HELLO)
+#              = 0x00*6 for STATS
 #   LEN   [2]  = payload length, little-endian
 #   PAYLOAD[N]
 #   CRC   [1]  = XOR of CMD + MAC[0..5] + LEN_lo + LEN_hi + PAYLOAD bytes
+#
+# CMD_STATS payload (6 bytes):
+#   nodes   [1]  active node count
+#   gps_fix [1]  1 = GPS fix, 0 = no fix
+#   net24   [2]  2.4 GHz network count, little-endian
+#   net50   [2]  5 GHz network count, little-endian
 
 import time
 import struct
@@ -55,8 +63,9 @@ _CH_50 = [36, 40, 44, 48, 52, 56, 60, 64,
 CHANNEL_TABLE = _CH_24 + _CH_50
 
 # ── Bridge frame ───────────────────────────────────────────────────────────────
-SYNC_A, SYNC_B    = 0xAB, 0xCD
-CMD_RX, CMD_TX, CMD_HELLO = 0x01, 0x02, 0x03
+SYNC_A, SYNC_B                = 0xAB, 0xCD
+CMD_RX, CMD_TX, CMD_HELLO     = 0x01, 0x02, 0x03
+CMD_STATS                     = 0x05   # host → bridge: stat push for LCD
 _BCAST_MAC        = bytes([0xFF] * 6)
 
 # Maximum ESP-Now payload (ESP-IDF cap is 250 bytes)
@@ -122,11 +131,20 @@ class EspNowCoordinator:
         self.records_rx  = 0
         self.node_count  = 0
 
+        # Band-split counters (for LCD STATS push)
+        self.networks_24 = 0   # channels 1-14
+        self.networks_50 = 0   # channels 36+
+        self._gps_fix    = False
+
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def set_send_callback(self, cb: Callable[[bytes], None]):
         """Register the function that writes bytes to the ESP32 bridge."""
         self._send_cb = cb
+
+    def set_gps_fix(self, fix: bool):
+        """Called by WardrivingEngine to report current GPS fix status."""
+        self._gps_fix = fix
 
     def feed(self, data: bytes):
         """Feed raw bytes received from the serial bridge."""
@@ -334,6 +352,12 @@ class EspNowCoordinator:
             return
         if len(bssid) < 11:
             return
+        # Track band counts for LCD display
+        if 1 <= channel <= 14:
+            self.networks_24 = min(self.networks_24 + 1, 65535)
+        elif channel >= 36:
+            self.networks_50 = min(self.networks_50 + 1, 65535)
+
         if self._on_network:
             try:
                 self._on_network(bssid, ssid, auth, channel, rssi, src_mac)
@@ -363,6 +387,25 @@ class EspNowCoordinator:
     def _send_heartbeat(self, dest_mac: bytes):
         payload = JCMK_MAGIC + struct.pack('<BIH', MSG_HEARTBEAT, 0, 0)
         self._tx(dest_mac, payload)
+
+    def _send_stats(self):
+        """Push LCD status update to the ESP32-C6 bridge (CMD_STATS)."""
+        if not self._send_cb:
+            return
+        n24  = min(self.networks_24, 0xFFFF)
+        n50  = min(self.networks_50, 0xFFFF)
+        with self._lock:
+            nodes = len(self._nodes)
+        payload = struct.pack('<BBHH',
+                              nodes,
+                              1 if self._gps_fix else 0,
+                              n24, n50)
+        null_mac = bytes(6)
+        frame = self._build_frame(CMD_STATS, null_mac, payload)
+        try:
+            self._send_cb(frame)
+        except Exception as e:
+            logger.debug(f"STATS send error: {e}")
 
     # ── Bridge TX helper ───────────────────────────────────────────────────────
 
@@ -426,6 +469,8 @@ class EspNowCoordinator:
 
             for node in active:
                 self._send_heartbeat(node.mac)
+
+            self._send_stats()
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
