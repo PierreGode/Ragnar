@@ -16390,6 +16390,20 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
     } catch (e) { /* no-op */ }
 })();
 
+// Auto-switch to wardriving tab when navigated to /#wardriving (non-kiosk mode).
+// In kiosk mode the initKioskModeBootstrap above handles the hash instead.
+(function initWardrivingHashNav() {
+    if (window.location.hash !== '#wardriving') return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('kiosk') === '1') return;
+    const doSwitch = () => { if (typeof showTab === 'function') showTab('wardriving'); };
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', doSwitch, { once: true });
+    } else {
+        doSwitch();
+    }
+})();
+
 function _fmtCoord(v, suffixes) {
     if (v === null || v === undefined || isNaN(v)) return '—';
     const abs = Math.abs(v);

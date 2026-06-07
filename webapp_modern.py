@@ -109,6 +109,15 @@ def check_authentication():
     if request.remote_addr in ('127.0.0.1', '::1') and shared_data.config.get('kiosk_enabled'):
         return
 
+    # Wardriving AP portal bypass: AP clients (192.168.4.x) can view the
+    # wardriving monitor and its API without logging in when the wardriving
+    # portal mode is active (set by KEY3 hardware button press).
+    if getattr(shared_data, 'wardriving_ap_portal', False):
+        client_ip = request.environ.get('REMOTE_ADDR', '')
+        if client_ip.startswith('192.168.4.') and client_ip != '192.168.4.1':
+            if path.startswith('/wardriving-monitor') or path.startswith('/api/wardriving/'):
+                return
+
     # Check if user is authenticated via Flask session
     if not session.get('authenticated'):
         if path.startswith('/api/'):
@@ -3177,11 +3186,10 @@ def auth_regenerate_recovery():
 def index():
     """Serve the main dashboard page or captive portal for AP clients"""
     if is_ap_client_request():
-        # Serve captive portal for AP clients
+        if getattr(shared_data, 'wardriving_ap_portal', False):
+            return redirect('/wardriving-monitor?kiosk=1#wardriving')
         return send_from_directory('web', 'captive_portal.html')
-    else:
-        # Serve main dashboard for regular users
-        return send_from_directory('web', 'index_modern.html')
+    return send_from_directory('web', 'index_modern.html')
 
 
 # Add explicit captive portal route
@@ -3189,6 +3197,12 @@ def index():
 def captive_portal():
     """Explicit captive portal route"""
     return send_from_directory('web', 'captive_portal.html')
+
+
+@app.route('/wardriving-monitor')
+def wardriving_monitor():
+    """Wardriving live monitor — served to AP clients when wardriving portal mode is active."""
+    return send_from_directory('web', 'index_modern.html')
 
 # WiFi configuration page route
 @app.route('/wifi-config')
@@ -3213,11 +3227,10 @@ def wifi_config_alt():
 def captive_portal_detection():
     """Handle captive portal detection requests from mobile devices"""
     if is_ap_client_request():
-        # Redirect to captive portal for AP clients
+        if getattr(shared_data, 'wardriving_ap_portal', False):
+            return redirect('/wardriving-monitor?kiosk=1#wardriving')
         return '''<html><head><meta http-equiv="refresh" content="0; url=/portal"></head><body><a href="/portal">Click here for WiFi setup</a></body></html>''', 302
-    else:
-        # Return success for non-AP clients
-        return "Success", 204
+    return "Success", 204
 
 
 @app.route('/<path:filename>')
