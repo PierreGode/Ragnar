@@ -140,11 +140,16 @@ class Display:
         # y_stretch is no longer needed — scale_factor_y handles vertical spacing
         self.y_stretch = 1.0
 
-        # Hardware button support (2.7" HAT has KEY1-KEY4)
+        # Hardware button support (2.7" e-Paper HAT has KEY1-KEY4 physical buttons).
+        # Use epd_type as the primary signal so buttons start even when the EPD
+        # driver returns fallback dimensions (scale_factor_x == 1.0).
         self.button_listener = None
-        if self.is_wide and EPDButtonListener is not None:
+        _epd_type = shared_data.config.get('epd_type', '')
+        _has_hat_buttons = self.is_wide or _epd_type.startswith('epd2in7')
+        if _has_hat_buttons and EPDButtonListener is not None:
             self.button_listener = EPDButtonListener(shared_data)
             self.button_listener.start()
+            logger.info(f"EPD button listener started (epd_type={_epd_type}, is_wide={self.is_wide})")
 
     def get_frise_position(self):
         """Get the frise position based on the display type."""
