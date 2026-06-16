@@ -17302,16 +17302,18 @@ def clear_ai_cache():
 
 @app.route('/api/ai/token', methods=['GET'])
 def get_ai_token():
-    """Get OpenAI API token status (without revealing the actual token)"""
+    """Get OpenAI API token status and custom endpoint (without revealing the actual token)"""
     try:
         from env_manager import EnvManager
         env_manager = EnvManager()
         
         token = env_manager.get_token()
+        endpoint = env_manager.get_env_key('RAGNAR_OPENAI_API_BASE')
         
         return jsonify({
-            'configured': bool(token),
-            'token_preview': f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None
+            'configured': bool(token) or bool(endpoint),
+            'token_preview': f"{token[:8]}...{token[-4:]}" if token and len(token) > 12 else None,
+            'endpoint': endpoint or ''
         })
         
     except Exception as e:
@@ -17321,22 +17323,26 @@ def get_ai_token():
 
 @app.route('/api/ai/token', methods=['POST'])
 def save_ai_token():
-    """Save OpenAI API token to .env file"""
+    """Save OpenAI API token and custom endpoint to .env file"""
     try:
         from env_manager import EnvManager
         env_manager = EnvManager()
         
         data = request.get_json()
-        if not data or 'token' not in data:
-            return jsonify({'error': 'No token provided'}), 400
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
         
-        token = data['token'].strip()
+        token = data.get('token', '').strip()
+        endpoint = data.get('endpoint', '').strip()
+        
+        if not token and not endpoint:
+            return jsonify({'error': 'No token or endpoint provided'}), 400
         
         # Log save attempt
-        logger.info(f"Attempting to save AI token to {env_manager.env_file_path}")
+        logger.info(f"Attempting to save AI configuration to {env_manager.env_file_path}")
         
-        # Save token to .env file
-        result = env_manager.save_token(token)
+        # Save token and endpoint to .env file
+        result = env_manager.save_token(token, endpoint)
         
         if result['success']:
             auto_enabled = False
@@ -17346,34 +17352,34 @@ def save_ai_token():
                 shared_data.save_config()
                 socketio.emit('config_updated', shared_data.config)
                 auto_enabled = True
-                logger.info("AI Insights automatically enabled after saving API token")
+                logger.info("AI Insights automatically enabled after saving settings")
             
-            # Reinitialize AI service with new token
+            # Reinitialize AI service with new config
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
                 if ai_service.reload_token():
-                    logger.info("AI service reloaded with new token")
+                    logger.info("AI service reloaded with new settings")
                 else:
-                    logger.warning("AI service failed to reload with new token")
+                    logger.warning("AI service failed to reload with new settings")
             
             return jsonify({
                 'success': True,
                 'message': result['message'],
-                'configured': True,
+                'configured': bool(token) or bool(endpoint),
                 'ai_enabled': shared_data.config.get('ai_enabled', False),
                 'auto_enabled': auto_enabled,
                 'env_file': str(env_manager.env_file_path)
             })
         else:
-            logger.error(f"Failed to save token to {env_manager.env_file_path}")
+            logger.error(f"Failed to save settings to {env_manager.env_file_path}")
             return jsonify({
                 'success': False,
-                'message': result.get('message', 'Failed to save token. Check server logs for details.'),
+                'message': result.get('message', 'Failed to save settings. Check server logs for details.'),
                 'env_file': str(env_manager.env_file_path)
             }), 500
         
     except Exception as e:
-        logger.error(f"Error saving AI token: {e}")
+        logger.error(f"Error saving AI configuration: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return jsonify({'error': str(e)}), 500
@@ -17381,34 +17387,36 @@ def save_ai_token():
 
 @app.route('/api/ai/token', methods=['DELETE'])
 def remove_ai_token():
-    """Remove OpenAI API token from .env file"""
+    """Remove OpenAI API token and custom endpoint from .env file"""
     try:
         from env_manager import EnvManager
         import os
         env_manager = EnvManager()
         
-        # Remove the .env file
+        # Safe deletion from .env
         if os.path.exists(env_manager.env_file_path):
-            os.remove(env_manager.env_file_path)
+            env_manager.delete_env_key('RAGNAR_OPENAI_API_KEY')
+            env_manager.delete_env_key('RAGNAR_OPENAI_API_BASE')
             
             # Disable AI service
             ai_service = getattr(shared_data, 'ai_service', None)
             if ai_service:
                 ai_service.api_token = ''
+                ai_service.api_base_url = ''
                 ai_service.enabled = False
             
             return jsonify({
                 'success': True,
-                'message': 'Token removed from .env successfully'
+                'message': 'AI configuration removed from .env successfully'
             })
         else:
             return jsonify({
                 'success': False,
-                'message': 'No token file found'
+                'message': 'No environment configuration file found'
             }), 404
         
     except Exception as e:
-        logger.error(f"Error removing AI token: {e}")
+        logger.error(f"Error removing AI configuration: {e}")
         return jsonify({'error': str(e)}), 500
 
 

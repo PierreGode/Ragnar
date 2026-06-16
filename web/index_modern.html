@@ -4822,18 +4822,28 @@
                                         </label>
                                         <p class="text-xs text-gray-500 ml-0 sm:ml-8 mt-1">Activate AI-powered vulnerability analysis and network intelligence</p>
                                     </div>
-                                    <div>
-                                        <label for="openai-api-token" class="block text-sm font-medium text-gray-300 mb-2">OpenAI API Token</label>
-                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                    <div class="space-y-4">
+                                        <div>
+                                            <label for="openai-api-token" class="block text-sm font-medium text-gray-300 mb-1">OpenAI API Token / Key</label>
                                             <input type="password" id="openai-api-token" autocomplete="off" placeholder="sk-..."
-                                                   class="flex-1 w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
-                                            <button onclick="saveAIToken()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
-                                                Save Token
-                                            </button>
+                                                   class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <p class="text-xs text-gray-500 mt-1">
+                                                Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a> (or use a dummy key for local endpoints).
+                                            </p>
                                         </div>
-                                        <p class="text-xs text-gray-500 mt-1">
-                                            Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a>
-                                        </p>
+                                        <div>
+                                            <label for="ai-endpoint-address" class="block text-sm font-medium text-gray-300 mb-1">AI Endpoint Address (Optional)</label>
+                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                <input type="text" id="ai-endpoint-address" autocomplete="off" placeholder="e.g., http://localhost:11434/v1"
+                                                       class="flex-1 w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                                <button onclick="saveAIToken()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                    Save Settings
+                                                </button>
+                                            </div>
+                                            <p class="text-xs text-gray-500 mt-1">
+                                                For Ollama use <code>http://localhost:11434/v1</code>. For LM Studio use <code>http://localhost:1234/v1</code>. Leave blank for default OpenAI.
+                                            </p>
+                                        </div>
                                     </div>
                                     <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
                                         <span id="ai-config-status-message"></span>

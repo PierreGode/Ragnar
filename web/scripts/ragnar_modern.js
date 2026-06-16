@@ -11353,7 +11353,7 @@ async function loadAIConfiguration(config) {
         aiEnabledCheckbox.checked = aiEnabled;
     }
     
-    // Fetch token status from environment variable
+    // Fetch token status and endpoint from environment variables
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
         const apiTokenInput = document.getElementById('openai-api-token');
@@ -11367,8 +11367,13 @@ async function loadAIConfiguration(config) {
                 apiTokenInput.placeholder = 'sk-...';
             }
         }
+        
+        const apiEndpointInput = document.getElementById('ai-endpoint-address');
+        if (apiEndpointInput) {
+            apiEndpointInput.value = tokenStatus.endpoint || '';
+        }
     } catch (error) {
-        console.error('Failed to fetch AI token status:', error);
+        console.error('Failed to fetch AI token/endpoint status:', error);
     }
 }
 
@@ -11421,32 +11426,35 @@ async function toggleAIEnabled() {
 
 async function saveAIToken() {
     const tokenInput = document.getElementById('openai-api-token');
+    const endpointInput = document.getElementById('ai-endpoint-address');
     const statusDiv = document.getElementById('ai-config-status');
     const statusMessage = document.getElementById('ai-config-status-message');
-    const token = tokenInput.value.trim();
     
-    if (!token) {
+    const token = tokenInput.value.trim();
+    const endpoint = endpointInput ? endpointInput.value.trim() : '';
+    
+    if (!token && !endpoint) {
         statusDiv.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 border border-yellow-700';
-        statusMessage.textContent = '⚠ Please enter an API token.';
+        statusMessage.textContent = '⚠ Please enter an API token or a custom endpoint address.';
         statusDiv.classList.remove('hidden');
         setTimeout(() => statusDiv.classList.add('hidden'), 3000);
         return;
     }
     
     try {
-        // Save token to .bashrc as environment variable
-        const result = await postAPI('/api/ai/token', { token: token });
+        // Save settings as environment variables
+        const result = await postAPI('/api/ai/token', { token: token, endpoint: endpoint });
         
         if (result.success) {
             statusDiv.className = 'p-3 rounded-lg text-sm bg-green-900/30 border border-green-700';
-            let message = result.message || '✓ API token saved to .bashrc successfully. AI features are now ready to use.';
+            let message = result.message || '✓ AI settings saved successfully. AI features are now ready to use.';
             if (result.user) {
                 message += ` (User: ${result.user})`;
             }
             statusMessage.textContent = message;
             statusDiv.classList.remove('hidden');
             
-            addConsoleMessage('OpenAI API token saved to environment variable', 'success');
+            addConsoleMessage('AI settings saved successfully', 'success');
             
             // Reload AI configuration to show token preview
             const config = await fetchAPI('/api/config');
@@ -11462,13 +11470,13 @@ async function saveAIToken() {
                 setTimeout(() => refreshDashboard(), 500);
             }
         } else {
-            throw new Error(result.message || 'Failed to save token');
+            throw new Error(result.message || 'Failed to save settings');
         }
         
     } catch (error) {
-        console.error('Failed to save AI token:', error);
+        console.error('Failed to save AI configuration:', error);
         statusDiv.className = 'p-3 rounded-lg text-sm bg-red-900/30 border border-red-700';
-        statusMessage.textContent = `✗ Failed to save API token: ${error.message || 'Please try again.'}`;
+        statusMessage.textContent = `✗ Failed to save AI settings: ${error.message || 'Please try again.'}`;
         statusDiv.classList.remove('hidden');
     }
 }

@@ -48,6 +48,7 @@ class AIService:
         self.network_insights = cfg.get("ai_network_insights", True)
 
         self.api_token = self.env_manager.get_token()
+        self.api_base_url = self.env_manager.get_env_key("RAGNAR_OPENAI_API_BASE")
 
         # Cache
         self.cache = {}
@@ -68,15 +69,25 @@ class AIService:
         if not self.enabled:
             return
 
-        if not self.api_token:
-            self.initialization_error = "No OpenAI API key found."
+        token = self.api_token
+        if not token and self.api_base_url:
+            token = "ollama"
+
+        if not token:
+            self.initialization_error = "No OpenAI API key or custom endpoint configured."
             self.logger.warning(self.initialization_error)
             return
 
         try:
-            self.client = OpenAI(api_key=self.api_token)
+            kwargs = {"api_key": token}
+            if self.api_base_url:
+                kwargs["base_url"] = self.api_base_url.strip()
+            self.client = OpenAI(**kwargs)
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
+            self.logger.info(
+                f"AI Service initialized using model: {self.model}"
+                + (f" and endpoint: {self.api_base_url}" if self.api_base_url else "")
+            )
         except Exception as exc:
             self.client = None
             self.initialization_error = f"OpenAI client initialization failed: {exc}"
@@ -84,13 +95,14 @@ class AIService:
 
 
     def reload_token(self) -> bool:
-        """Refresh the API token from disk and reinitialize the OpenAI client."""
+        """Refresh the API token and base URL from disk and reinitialize the OpenAI client."""
 
         # Keep enabled flag synced with latest config intent
         if hasattr(self.shared_data, "config"):
             self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
 
         self.api_token = self.env_manager.get_token()
+        self.api_base_url = self.env_manager.get_env_key("RAGNAR_OPENAI_API_BASE")
         self.client = None
         self.initialization_error = None
 
@@ -98,23 +110,27 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
-            self.logger.warning("AI token reload requested but no token present in environment.")
-            self.initialization_error = "No OpenAI API key found."
+        token = self.api_token
+        if not token and self.api_base_url:
+            token = "ollama"
+
+        if not token:
+            self.logger.warning("AI token reload requested but no token or endpoint present in environment.")
+            self.initialization_error = "No OpenAI API key or custom endpoint configured."
             return False
 
         self._initialize_client()
         success = self.client is not None and self.initialization_error is None
 
         if success:
-            self.logger.info("AI service reloaded with updated token.")
+            self.logger.info("AI service reloaded with updated token/endpoint.")
         else:
             if self.initialization_error:
                 self.logger.error(
-                    f"AI service failed to reinitialize after token reload: {self.initialization_error}"
+                    f"AI service failed to reinitialize after reload: {self.initialization_error}"
                 )
             else:
-                self.logger.error("AI service failed to reinitialize after token reload.")
+                self.logger.error("AI service failed to reinitialize after reload.")
 
         return success
 
@@ -141,18 +157,23 @@ class AIService:
         if self.client is not None and self.initialization_error is None:
             return True
 
-        # Don't keep retrying when we've already recorded a permanent failure
-        # But allow retry if token was added after initial failure
-        if self.initialization_error and self.api_token:
-            # Clear error and retry if we have a token now
-            self.initialization_error = None
-
-        # Refresh token from disk if we don't have one yet
+        # Refresh token and base URL from disk if we don't have one yet
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
+        if not self.api_base_url:
+            self.api_base_url = self.env_manager.get_env_key("RAGNAR_OPENAI_API_BASE")
 
-        if not self.api_token:
-            self.initialization_error = "No OpenAI API key found."
+        # Don't keep retrying when we've already recorded a permanent failure
+        # But allow retry if token or endpoint was added/changed after initial failure
+        if self.initialization_error and (self.api_token or self.api_base_url):
+            self.initialization_error = None
+
+        token = self.api_token
+        if not token and self.api_base_url:
+            token = "ollama"
+
+        if not token:
+            self.initialization_error = "No OpenAI API key or custom endpoint configured."
             self.logger.warning(self.initialization_error)
             return False
 

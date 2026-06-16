@@ -103,22 +103,27 @@ class EnvManager:
         logger.info("RAGNAR_OPENAI_API_KEY not found in .env file.")
         return None
 
-    def save_token(self, token):
+    def save_token(self, token, endpoint=None):
         """
-        Saves the token to the .env file. This will create or overwrite the file.
+        Saves the token and endpoint to the .env file safely.
         """
         try:
-            with open(self.env_file_path, 'w') as f:
-                f.write(f'RAGNAR_OPENAI_API_KEY={token}\n')
+            if token.strip():
+                self.set_env_key('RAGNAR_OPENAI_API_KEY', token.strip())
+            else:
+                self.delete_env_key('RAGNAR_OPENAI_API_KEY')
+
+            if endpoint is not None:
+                if endpoint.strip():
+                    self.set_env_key('RAGNAR_OPENAI_API_BASE', endpoint.strip())
+                else:
+                    self.delete_env_key('RAGNAR_OPENAI_API_BASE')
             
-            # Also set it in the current running process's environment for immediate use
-            os.environ['RAGNAR_OPENAI_API_KEY'] = token
-            
-            logger.info(f"Token saved to {self.env_file_path}")
-            return {"success": True, "message": "✓ API token saved. Please restart the Ragnar service to apply the changes."}
+            logger.info(f"AI settings saved to {self.env_file_path}")
+            return {"success": True, "message": "✓ AI settings saved successfully."}
         except Exception as e:
-            logger.error(f"Failed to save token to .env file: {e}", exc_info=True)
-            return {"success": False, "message": f"✗ Failed to save token to .env file: {e}"}
+            logger.error(f"Failed to save AI settings to .env file: {e}", exc_info=True)
+            return {"success": False, "message": f"✗ Failed to save AI settings to .env file: {e}"}
 
     def get_token_status(self):
         """
