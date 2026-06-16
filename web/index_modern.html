@@ -4832,6 +4832,23 @@
                                             </p>
                                         </div>
                                         <div>
+                                            <label for="ai-model" class="block text-sm font-medium text-gray-300 mb-1">AI Model Name</label>
+                                            <input type="text" id="ai-model" list="ai-models-list" placeholder="e.g., gpt-5-nano"
+                                                   class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <datalist id="ai-models-list">
+                                                <option value="gpt-5-nano"></option>
+                                                <option value="gpt-4o"></option>
+                                                <option value="gpt-4"></option>
+                                                <option value="gpt-3.5-turbo"></option>
+                                                <option value="llama3"></option>
+                                                <option value="mistral"></option>
+                                                <option value="phi3"></option>
+                                            </datalist>
+                                            <p class="text-xs text-gray-500 mt-1">
+                                                Select a common model or enter your custom local model name.
+                                            </p>
+                                        </div>
+                                        <div>
                                             <label for="ai-endpoint-address" class="block text-sm font-medium text-gray-300 mb-1">AI Endpoint Address (Optional)</label>
                                             <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
                                                 <input type="text" id="ai-endpoint-address" autocomplete="off" placeholder="e.g., http://localhost:11434/v1"

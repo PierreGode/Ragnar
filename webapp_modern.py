@@ -3393,12 +3393,13 @@ def update_config():
         shared_data.screen_reversed = normalize_rotation(shared_data.config.get('screen_reversed', 0))
         shared_data.web_screen_reversed = normalize_rotation(shared_data.config.get('web_screen_reversed', 0))
         
-        # Reload AI service if ai_enabled was changed
-        if 'ai_enabled' in data:
+        # Reload AI service if ai_enabled or ai_model was changed
+        if 'ai_enabled' in data or 'ai_model' in data:
             ai_service = getattr(shared_data, 'ai_service', None)
+            ai_enabled = data.get('ai_enabled', shared_data.config.get('ai_enabled', False))
             
             # If AI service doesn't exist and user enabled it, try to initialize
-            if not ai_service and data['ai_enabled']:
+            if not ai_service and ai_enabled:
                 try:
                     shared_data.initialize_ai_service()
                     ai_service = shared_data.ai_service
@@ -3412,7 +3413,7 @@ def update_config():
                     ai_reload_error = str(e)
             # If AI service exists, reload or disable it
             elif ai_service:
-                if data['ai_enabled']:
+                if ai_enabled:
                     ai_reload_success = ai_service.reload_token()
                     if not ai_reload_success:
                         ai_reload_error = getattr(ai_service, 'initialization_error', None)

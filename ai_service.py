@@ -97,9 +97,10 @@ class AIService:
     def reload_token(self) -> bool:
         """Refresh the API token and base URL from disk and reinitialize the OpenAI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep enabled flag and model synced with latest config intent
         if hasattr(self.shared_data, "config"):
             self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            self.model = self.shared_data.config.get("ai_model", self.model)
 
         self.api_token = self.env_manager.get_token()
         self.api_base_url = self.env_manager.get_env_key("RAGNAR_OPENAI_API_BASE")
@@ -146,9 +147,10 @@ class AIService:
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
-        # Sync enabled state with config in case it changed
+        # Sync enabled state and model with config in case it changed
         if hasattr(self.shared_data, "config"):
             self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            self.model = self.shared_data.config.get("ai_model", self.model)
         
         if not self.enabled:
             return False

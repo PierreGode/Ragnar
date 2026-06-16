@@ -11372,6 +11372,11 @@ async function loadAIConfiguration(config) {
         if (apiEndpointInput) {
             apiEndpointInput.value = tokenStatus.endpoint || '';
         }
+        
+        const apiModelInput = document.getElementById('ai-model');
+        if (apiModelInput && config && config.ai_model) {
+            apiModelInput.value = config.ai_model;
+        }
     } catch (error) {
         console.error('Failed to fetch AI token/endpoint status:', error);
     }
@@ -11427,11 +11432,13 @@ async function toggleAIEnabled() {
 async function saveAIToken() {
     const tokenInput = document.getElementById('openai-api-token');
     const endpointInput = document.getElementById('ai-endpoint-address');
+    const modelInput = document.getElementById('ai-model');
     const statusDiv = document.getElementById('ai-config-status');
     const statusMessage = document.getElementById('ai-config-status-message');
     
     const token = tokenInput.value.trim();
     const endpoint = endpointInput ? endpointInput.value.trim() : '';
+    const model = modelInput ? modelInput.value.trim() : '';
     
     if (!token && !endpoint) {
         statusDiv.className = 'p-3 rounded-lg text-sm bg-yellow-900/30 border border-yellow-700';
@@ -11442,6 +11449,11 @@ async function saveAIToken() {
     }
     
     try {
+        // Save model name to general config
+        if (model) {
+            await postAPI('/api/config', { ai_model: model });
+        }
+
         // Save settings as environment variables
         const result = await postAPI('/api/ai/token', { token: token, endpoint: endpoint });
         
