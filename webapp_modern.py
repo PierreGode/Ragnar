@@ -1813,6 +1813,31 @@ def incidents_status():
             summary = eng.summary()
     except Exception as exc:
         logger.debug(f"[incident] status failed: {exc}")
+    # Attribute any *public* IP in an incident: country, ASN/owner, abuse
+    # contact. Done at serve time (not during correlation, which stays offline
+    # and fast) and served from ip_intel's cache, so repeat views cost nothing.
+    if cfg.get('ip_intel_enrich_incidents', True) and incidents:
+        try:
+            import ip_intel
+            allow_net = bool(cfg.get('ip_intel_allow_network', True))
+            for inc in incidents:
+                attrib = {}
+                for ip in (inc.get('entities') or {}).get('ip', [])[:4]:
+                    if ip_intel.ip_scope(ip)[0] != 'public':
+                        continue          # private/link-local has no registry owner
+                    rec = ip_intel.lookup(ip, allow_network=allow_net)
+                    if rec.get('asn') or rec.get('country'):
+                        attrib[ip] = {
+                            'country': rec.get('country'),
+                            'asn': rec.get('asn'), 'as_org': rec.get('as_org'),
+                            'abuse_email': rec.get('abuse_email'),
+                            'classification': rec.get('classification'),
+                            'attribution_note': rec.get('attribution_note'),
+                        }
+                if attrib:
+                    inc['ip_attribution'] = attrib
+        except Exception as exc:
+            logger.debug(f"[incident] ip enrichment skipped: {exc}")
     return jsonify({
         'success': True,
         'enabled': bool(cfg.get('incident_correlation_enabled', True)),

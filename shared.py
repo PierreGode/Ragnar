@@ -751,6 +751,13 @@ class SharedData:
             "incident_correlation_enabled": True,
             "incident_window_s": 600,                # entity-correlation sliding window
             "incident_notify_min_confidence": 50,    # page a named incident at/above this %
+            # IP attribution (ip_intel.py): country/ASN/owner/abuse contact for a
+            # hostile IP. Registry-derived (RDAP + Team Cymru); never a street
+            # address. Set ip_intel_allow_network false to stay fully offline
+            # (cache + local scope classification only — no lookup leaks the fact
+            # that you looked, which can matter for a security sensor).
+            "ip_intel_allow_network": True,
+            "ip_intel_enrich_incidents": True,       # attribute public IPs in incidents
             # Browser terminal (interactive shell over the web UI). OFF by
             # default — it exposes a shell on the Pi (as the 'ragnar' user),
             # gated by login. Enable in Settings only if you want it.

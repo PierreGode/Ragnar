@@ -1414,6 +1414,17 @@
                         </div>
                         <div id="mtr-results" class="hidden mt-3 overflow-x-auto"></div>
                     </div>
+                    <!-- IP Attribution -->
+                    <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                        <h3 class="text-lg font-semibold mb-1">IP Attribution</h3>
+                        <p class="text-xs text-amber-300/90 mb-2">Who owns a hostile IP — country, ASN, network operator, and the <strong>abuse contact to report it to</strong>. Registry-derived (RDAP + Team Cymru), so ownership is authoritative.</p>
+                        <p class="text-sm text-gray-400 mb-3">No street address is reported, by design: per-IP "addresses" are the ISP's corporate registration or a database centroid, not a user's location. VPN / Tor / hosting addresses are flagged — for those the location describes the <em>server</em>, not the operator.</p>
+                        <div class="flex flex-col sm:flex-row gap-2">
+                            <input id="ipintel-target" type="text" inputmode="url" autocomplete="off" placeholder="IP address (or hostname)" class="w-full flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runIpIntel()">
+                            <button onclick="runIpIntel()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Attribute</button>
+                        </div>
+                        <div id="ipintel-results" class="hidden mt-3 text-sm"></div>
+                    </div>
                     <!-- Whois -->
                     <div class="glass rounded-xl p-4 sm:p-6">
                         <h3 class="text-lg font-semibold mb-1">Whois</h3>
@@ -6663,7 +6674,7 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.js?v=20260718-wids-pivot2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260718-ipintel"></script>
 
 </body>
 </html>
