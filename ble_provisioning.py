@@ -297,6 +297,13 @@ class BleProvisioningServer:
             except Exception:
                 pass
         self._running = False
+        # Wait for the loop thread to finish its teardown (unregister + free the
+        # D-Bus object paths) so a subsequent start() on a new adapter doesn't
+        # collide with lingering handlers. Never join ourselves (on_error calls
+        # stop() from inside the loop thread).
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=4)
 
     def status(self) -> dict:
         return {
@@ -321,9 +328,17 @@ class BleProvisioningServer:
             adapter_path = f'/org/bluez/{self.providers.hci}'
             adapter_obj = bus.get_object(BLUEZ, adapter_path)
 
-            # Powered on, and discoverable so a phone can find it by name too.
+            # Power the adapter on and mark it discoverable. The app finds the
+            # box by scanning for the service UUID (advertising alone is
+            # enough for that), but Discoverable also lets a phone's own
+            # Bluetooth menu list the box by name.
             props = dbus.Interface(adapter_obj, DBUS_PROPS)
             props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(True))
+            try:
+                props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(True))
+                props.Set(ADAPTER_IFACE, 'DiscoverableTimeout', dbus.UInt32(0))
+            except Exception:
+                pass  # non-fatal; BLE advertising still works without it
 
             self._gatt_manager = dbus.Interface(adapter_obj, GATT_MANAGER)
             self._adv_manager = dbus.Interface(adapter_obj, LE_ADV_MANAGER)
@@ -363,6 +378,23 @@ class BleProvisioningServer:
             try:
                 self._adv_manager.UnregisterAdvertisement(self._adv_path)
                 self._gatt_manager.UnregisterApplication(self._app_path)
+            except Exception:
+                pass
+            # Free the local D-Bus object paths, or a restart on a new adapter
+            # hits "there is already a handler for '/one/gode/ragnar/ble'".
+            try:
+                for svc in app.services:
+                    for ch in svc.characteristics:
+                        try:
+                            ch.remove_from_connection()
+                        except Exception:
+                            pass
+                    try:
+                        svc.remove_from_connection()
+                    except Exception:
+                        pass
+                app.remove_from_connection()
+                adv.remove_from_connection()
             except Exception:
                 pass
 
@@ -596,17 +628,50 @@ def list_adapters() -> list[str]:
     return re.findall(r'^(hci\d+):', out, re.MULTILINE)
 
 
+def _adapter_bus(hci: str) -> str:
+    """Bus a controller sits on, e.g. 'UART' (built-in) or 'USB' (dongle)."""
+    out = _run(['hciconfig', hci])
+    m = re.search(r'Bus:\s*(\S+)', out)
+    return m.group(1).upper() if m else ''
+
+
+def list_controllers() -> list[dict]:
+    """Every Bluetooth controller with its bus and whether it is built-in.
+
+    The Pi's onboard radio sits on the UART bus; USB dongles (e.g. an Alfa)
+    enumerate on USB. Provisioning prefers the built-in one so an Alfa stays
+    free for scanning.
+    """
+    out = []
+    for hci in list_adapters():
+        bus = _adapter_bus(hci)
+        out.append({
+            'hci': hci,
+            'address': _adapter_address(hci),
+            'bus': bus,
+            'builtin': bus in ('UART', 'SDIO') or (bus and bus != 'USB'),
+        })
+    return out
+
+
 def choose_adapter(preferred: Optional[str] = None) -> Optional[str]:
     """Pick an adapter to advertise on.
 
-    Preference order: an explicit choice, else the first adapter. When more
-    than one is present we still take the first — the caller (or config) can
-    pin a dedicated one to keep the scanner and the peripheral apart.
+    Preference order: an explicit choice, else the built-in (UART) controller,
+    else the first adapter. Preferring the built-in one keeps a USB dongle
+    (Alfa) free for the active scanners (bt_scanner, WIDS), even if the dongle
+    happened to enumerate as hci0.
     """
-    adapters = list_adapters()
-    if preferred and preferred in adapters:
+    controllers = list_controllers()
+    if not controllers:
+        return None
+    names = [c['hci'] for c in controllers]
+    if preferred and preferred in names:
         return preferred
-    return adapters[0] if adapters else None
+    for c in controllers:
+        if c['builtin']:
+            return c['hci']
+    return names[0]
 
 
 # ===========================================================================

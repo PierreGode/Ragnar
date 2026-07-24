@@ -11312,6 +11312,9 @@ async function loadConfigData() {
         // Load wardriving on-boot toggle state (card is in config page)
         loadWardrivingOnBootState();
 
+        // Load Bluetooth provisioning toggle + adapter picker state
+        loadBleProvisioning();
+
         // Load GPS-backfill opt-in state (gates the map Backfill GPS button)
         loadWardrivingBackfillState();
 
@@ -24073,6 +24076,70 @@ async function loadWardrivingOnBootState() {
         const cb = document.getElementById('wardriving-on-boot');
         if (cb) cb.checked = !!data.wardriving_on_boot;
     } catch (e) { /* silent */ }
+}
+
+// ---- Bluetooth provisioning (mobile-app discovery) ----
+// Advertises a BLE GATT service so the Ragnar mobile app can find this box and
+// read its IP. Off by default (shares the adapter with the BLE overlay
+// scanner). See ble_provisioning.py + docs/ble_provisioning.md.
+function _bleProvStatusText(d) {
+    if (!d.enabled) return 'Disabled.';
+    if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
+    return d.error ? ('Enabled, but not advertising: ' + d.error) : 'Enabling…';
+}
+
+async function loadBleProvisioning() {
+    try {
+        const res = await fetch('/api/ble/provisioning');
+        const d = await res.json();
+        const cb = document.getElementById('ble-provisioning-enabled');
+        if (cb) cb.checked = !!d.enabled;
+        const sel = document.getElementById('ble-provisioning-adapter');
+        if (sel) {
+            // Rebuild options: Auto + each controller, tagging the built-in one.
+            const current = d.adapter || '';
+            sel.innerHTML = '<option value="">Auto — prefer built-in radio</option>';
+            (d.adapters || []).forEach(a => {
+                const o = document.createElement('option');
+                o.value = a.hci;
+                o.textContent = a.hci + (a.builtin ? ' (built-in)' : (a.bus ? ' (' + a.bus + ')' : '')) + (a.address ? ' — ' + a.address : '');
+                sel.appendChild(o);
+            });
+            sel.value = current;
+        }
+        const st = document.getElementById('ble-provisioning-status');
+        if (st) st.textContent = _bleProvStatusText(d);
+    } catch (e) { /* silent */ }
+}
+
+async function toggleBleProvisioning(checkbox) {
+    const enabled = !!checkbox.checked;
+    const st = document.getElementById('ble-provisioning-status');
+    if (st) st.textContent = enabled ? 'Enabling…' : 'Disabling…';
+    try {
+        const res = await postAPI('/api/ble/provisioning/toggle', { enabled });
+        addConsoleMessage('Bluetooth provisioning ' + (enabled ? 'enabled' : 'disabled'), 'success');
+        if (res && st) st.textContent = _bleProvStatusText(res);
+        // Re-read for the active adapter / advertised name once settled.
+        setTimeout(loadBleProvisioning, 600);
+    } catch (e) {
+        console.error('[BLE] provisioning toggle error:', e);
+        addConsoleMessage('Failed to update Bluetooth provisioning', 'error');
+        checkbox.checked = !enabled;
+        if (st) st.textContent = 'Failed to update.';
+    }
+}
+
+async function setBleProvisioningAdapter(sel) {
+    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+    try {
+        await postAPI('/api/ble/provisioning/toggle', { enabled, adapter: sel.value });
+        addConsoleMessage('Bluetooth adapter set to ' + (sel.value || 'auto'), 'success');
+        setTimeout(loadBleProvisioning, 600);
+    } catch (e) {
+        console.error('[BLE] adapter set error:', e);
+        addConsoleMessage('Failed to set Bluetooth adapter', 'error');
+    }
 }
 
 // GPS backfill is gated: the map "Backfill GPS" button stays hidden until the

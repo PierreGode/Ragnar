@@ -5793,6 +5793,32 @@
                     </div>
                 </div>
 
+                <!-- Bluetooth Provisioning Section -->
+                <div id="ble-provisioning-section" class="mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Provisioning</h3>
+
+                    <div class="glass rounded-lg p-4 mb-4">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium">Discoverable over Bluetooth</h4>
+                                <p class="text-xs text-gray-500 mt-1">Lets the Ragnar mobile app find this box and read its IP over Bluetooth. Provisioning only — all real traffic stays on Wi-Fi.</p>
+                            </div>
+                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="ble-provisioning-enabled" class="sr-only peer" onchange="toggleBleProvisioning(this)">
+                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                            </label>
+                        </div>
+                        <div class="mt-4">
+                            <label class="block text-sm text-gray-400 mb-1">Bluetooth adapter</label>
+                            <select id="ble-provisioning-adapter" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" onchange="setBleProvisioningAdapter(this)">
+                                <option value="">Auto — prefer built-in radio</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle (e.g. Alfa) free for scanning. It shares the adapter with the BLE overlay scanner, so pick a dedicated one when you have two.</p>
+                        </div>
+                        <p id="ble-provisioning-status" class="text-xs mt-3 text-gray-500">—</p>
+                    </div>
+                </div>
+
                 <!-- Wardriving Section -->
                 <div id="wardriving-config-section" class="mb-8">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Wardriving</h3>

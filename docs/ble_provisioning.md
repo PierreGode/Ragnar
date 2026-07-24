@@ -28,6 +28,21 @@ controller, run the BLE overlay scans and the provisioning peripheral at
 different times; with two controllers, pin the peripheral to one with
 `ble_provisioning_adapter`.
 
+**Adapter choice.** Linux/BlueZ runs multiple controllers at once (unlike
+Windows, which allows one Bluetooth radio). The Pi's onboard radio sits on the
+UART bus; a USB dongle (e.g. an Alfa) enumerates on USB. With no explicit
+`ble_provisioning_adapter`, the peripheral prefers the **built-in** controller
+so the dongle stays free for the active scanners — even if the dongle happened
+to enumerate as `hci0`.
+
+## Web config
+
+The Ragnar web UI → **Config → Bluetooth Provisioning** has an enable toggle
+and an adapter picker (each controller is listed, the built-in one tagged).
+These write `ble_provisioning_enabled` and `ble_provisioning_adapter`;
+switching the adapter restarts the peripheral on the new one. The mobile app's
+Settings tab exposes the same enable toggle.
+
 ## Enabling it
 
 Once — over IP, from the mobile app's **Box** tab, or directly:
