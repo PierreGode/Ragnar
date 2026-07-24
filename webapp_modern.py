@@ -102,6 +102,25 @@ except Exception as _nd_err:  # pragma: no cover - defensive
     logger.error(f"Failed to register network diagnostics routes: {_nd_err}")
 
 # ============================================================================
+# PROVENANCE / ORIGIN VERIFICATION
+# Reports authorship and whether this checkout is the official repository or a
+# fork. The mobile app reads this on connect. It is an attribution signal, not
+# a security control — a fork can edit it — but it keeps forks honest.
+# ============================================================================
+
+@app.route('/api/provenance')
+def api_provenance():
+    try:
+        import provenance
+        return jsonify(provenance.verify(os.path.dirname(os.path.abspath(__file__))))
+    except Exception as _prov_err:  # pragma: no cover - defensive
+        return jsonify({
+            'canonical_repo': 'https://github.com/PierreGode/Ragnar.git',
+            'official': False,
+            'error': str(_prov_err),
+        })
+
+# ============================================================================
 # AUTHENTICATION MIDDLEWARE
 # ============================================================================
 
@@ -113,7 +132,7 @@ def check_authentication():
 
     # Whitelist: paths that must be accessible without authentication
     path = request.path
-    whitelist_prefixes = ['/login', '/api/auth/', '/api/kill']
+    whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
         return
 

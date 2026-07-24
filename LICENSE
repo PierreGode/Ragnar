@@ -1,4 +1,14 @@
-MIT License
+Ragnar License
+==============
+
+Ragnar is a derivative work of Bjorn (https://github.com/infinition/Bjorn),
+which is distributed under the MIT License. Ragnar therefore carries two sets
+of terms: the original MIT License for the Bjorn-derived portions, and
+Supplemental Terms from Pierre Gode covering Ragnar's own contributions.
+
+
+PART A — MIT License (original Bjorn portions)
+----------------------------------------------
 
 Copyright (c) 2024 infinition
 
@@ -19,3 +29,44 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+PART B — Supplemental Terms (Ragnar contributions)
+--------------------------------------------------
+
+Copyright (c) 2024-2026 Pierre Gode <pierre@gode.one>
+
+These Supplemental Terms apply to all original Ragnar code, assets, branding,
+and documentation authored by Pierre Gode and contributors (the "Ragnar
+Contributions") — that is, everything in this repository that is not part of
+the original Bjorn work covered by Part A.
+
+Permission is granted, free of charge, to use, copy, modify, and share the
+Ragnar Contributions for personal, educational, research, and internal
+non-commercial purposes, subject to all of the following conditions:
+
+  1. Attribution. The name "Pierre Gode", the "Ragnar" name and Viking mark,
+     this LICENSE, and the provenance markers in the source (including
+     provenance.py) must be retained in all copies and derivative works.
+
+  2. No sale as a product. The Ragnar Contributions, whether alone or as part
+     of a larger work, may NOT be sold, resold, licensed for a fee, offered as
+     a paid product or paid service, or otherwise commercially exploited,
+     without the prior written permission of Pierre Gode.
+
+  3. No unauthorized redistribution or forks presented as official. You may
+     fork this repository for personal use and to submit contributions
+     upstream. You may NOT distribute a fork, rebrand, or hosted instance in a
+     way that presents it as the official Ragnar, removes attribution, or
+     circumvents the provenance verification. The canonical source is
+     https://github.com/PierreGode/Ragnar.git
+
+  4. As-is. The Ragnar Contributions are provided "AS IS", without warranty of
+     any kind, and are for authorized testing and educational use only. The
+     author is not liable for any use of this software.
+
+For commercial licensing or any use not permitted above, contact
+Pierre Gode <pierre@gode.one>.
+
+Where Part A (MIT) and Part B conflict for the Bjorn-derived portions, Part A
+governs those portions; Part B governs the Ragnar Contributions.
