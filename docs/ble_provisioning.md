@@ -43,6 +43,21 @@ These write `ble_provisioning_enabled` and `ble_provisioning_adapter`;
 switching the adapter restarts the peripheral on the new one. The mobile app's
 Settings tab exposes the same enable toggle.
 
+## Auto-stop after provisioning
+
+`ble_provisioning_autostop` (a checkbox on the same card) makes the peripheral
+**free the adapter once a phone has provisioned**. When a central reads the
+network-status or AP-credentials characteristic, a short grace timer
+(`AUTOSTOP_GRACE_MS`, 15 s, reset on each read) arms; when it expires the
+peripheral stops advertising and releases the controller for Ragnar's other
+Bluetooth work (`bt_scanner`, WIDS).
+
+This is for **single-radio** boxes. The trade-off: once stopped, the app can no
+longer rediscover the box over Bluetooth until it advertises again — use the
+**Re-advertise** button (shown once auto-stopped) or re-toggle enable. With two
+controllers you don't need this: leave provisioning always-on on the built-in
+radio and let the USB dongle scan.
+
 ## Enabling it
 
 Once — over IP, from the mobile app's **Box** tab, or directly:

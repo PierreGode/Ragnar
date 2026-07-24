@@ -5815,6 +5815,17 @@
                             </select>
                             <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle (e.g. Alfa) free for scanning. It shares the adapter with the BLE overlay scanner, so pick a dedicated one when you have two.</p>
                         </div>
+                        <div class="mt-4 flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-sm">Auto-stop after provisioning</h4>
+                                <p class="text-xs text-gray-500 mt-1">Free the radio once a phone has read the box's address. For single-radio boxes — the app must re-enable discovery to find the box again.</p>
+                            </div>
+                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="ble-provisioning-autostop" class="sr-only peer" onchange="setBleProvisioningAutostop(this)">
+                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                            </label>
+                        </div>
+                        <button id="ble-provisioning-readvertise" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="readvertiseBle()">Re-advertise</button>
                         <p id="ble-provisioning-status" class="text-xs mt-3 text-gray-500">—</p>
                     </div>
                 </div>

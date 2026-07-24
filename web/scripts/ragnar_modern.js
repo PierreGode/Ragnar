@@ -24084,6 +24084,7 @@ async function loadWardrivingOnBootState() {
 // scanner). See ble_provisioning.py + docs/ble_provisioning.md.
 function _bleProvStatusText(d) {
     if (!d.enabled) return 'Disabled.';
+    if (d.autostopped) return 'Provisioned — advertising stopped to free the radio. Tap Re-advertise for another device.';
     if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
     return d.error ? ('Enabled, but not advertising: ' + d.error) : 'Enabling…';
 }
@@ -24094,6 +24095,8 @@ async function loadBleProvisioning() {
         const d = await res.json();
         const cb = document.getElementById('ble-provisioning-enabled');
         if (cb) cb.checked = !!d.enabled;
+        const asCb = document.getElementById('ble-provisioning-autostop');
+        if (asCb) asCb.checked = !!d.autostop;
         const sel = document.getElementById('ble-provisioning-adapter');
         if (sel) {
             // Rebuild options: Auto + each controller, tagging the built-in one.
@@ -24107,9 +24110,36 @@ async function loadBleProvisioning() {
             });
             sel.value = current;
         }
+        // Show the Re-advertise button only once it has auto-stopped.
+        const rebtn = document.getElementById('ble-provisioning-readvertise');
+        if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
         const st = document.getElementById('ble-provisioning-status');
         if (st) st.textContent = _bleProvStatusText(d);
     } catch (e) { /* silent */ }
+}
+
+async function setBleProvisioningAutostop(cb) {
+    const enabled = !!(document.getElementById('ble-provisioning-enabled') || {}).checked;
+    try {
+        await postAPI('/api/ble/provisioning/toggle', { enabled, autostop: !!cb.checked });
+        addConsoleMessage('Auto-stop after provisioning ' + (cb.checked ? 'on' : 'off'), 'success');
+        setTimeout(loadBleProvisioning, 600);
+    } catch (e) {
+        console.error('[BLE] autostop set error:', e);
+        addConsoleMessage('Failed to set auto-stop', 'error');
+        cb.checked = !cb.checked;
+    }
+}
+
+async function readvertiseBle() {
+    try {
+        await postAPI('/api/ble/provisioning/toggle', { enabled: true });
+        addConsoleMessage('Re-advertising over Bluetooth', 'success');
+        setTimeout(loadBleProvisioning, 600);
+    } catch (e) {
+        console.error('[BLE] re-advertise error:', e);
+        addConsoleMessage('Failed to re-advertise', 'error');
+    }
 }
 
 async function toggleBleProvisioning(checkbox) {
