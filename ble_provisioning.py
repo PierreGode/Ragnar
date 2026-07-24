@@ -31,6 +31,7 @@ link.
 
 Standalone use
 --------------
+    python3 ble_provisioning.py doctor       # check prerequisites + try to advertise
     python3 ble_provisioning.py run          # register + advertise until Ctrl-C
     python3 ble_provisioning.py selftest     # register, verify, unregister
     python3 ble_provisioning.py info         # print the payloads, no Bluetooth
@@ -815,6 +816,73 @@ def _cli_selftest(base_dir: str) -> int:
     return 0 if ok else 1
 
 
+def _cli_doctor(base_dir: str) -> int:
+    """Check every prerequisite and actually try to advertise, printing a
+    pass/fail checklist. This is the 'why do I get nothing?' tool."""
+    ok = True
+
+    def check(label, passed, hint=''):
+        nonlocal ok
+        mark = 'PASS' if passed else 'FAIL'
+        if not passed:
+            ok = False
+        print(f'  [{mark}] {label}' + (f'  -> {hint}' if (hint and not passed) else ''))
+        return passed
+
+    print('Ragnar BLE provisioning — doctor\n')
+
+    # 1. Python deps (the usual culprit).
+    have_dbus = have_gi = False
+    try:
+        import dbus  # noqa: F401
+        have_dbus = True
+    except Exception:
+        pass
+    try:
+        import gi  # noqa: F401
+        have_gi = True
+    except Exception:
+        pass
+    check('python3-dbus importable', have_dbus, 'sudo apt install -y python3-dbus')
+    check('python3-gi importable', have_gi, 'sudo apt install -y python3-gi')
+
+    # 2. BlueZ present.
+    check('bluetoothctl present', bool(_run(['which', 'bluetoothctl']).strip()),
+          'sudo apt install -y bluez')
+
+    # 3. Controllers.
+    controllers = list_controllers()
+    check(f'Bluetooth controller found ({len(controllers)})', bool(controllers),
+          'no adapter — check hardware / rfkill unblock all')
+    for c in controllers:
+        print(f'        - {c["hci"]} {c.get("address") or ""} '
+              f'{"(built-in)" if c["builtin"] else "(" + (c.get("bus") or "?") + ")"}')
+
+    # 4. rfkill not blocking.
+    rf = _run(['rfkill', 'list', 'bluetooth'])
+    blocked = 'yes' in rf.lower().split('blocked:', 1)[-1][:40] if 'blocked' in rf.lower() else False
+    check('Bluetooth not rfkill-blocked', not blocked, 'sudo rfkill unblock all')
+
+    # 5. Actually advertise for a few seconds.
+    if have_gi and have_dbus and controllers:
+        server = build_server(base_dir, lambda: {})
+        started = server.start(timeout=10) if server else False
+        st = server.status() if server else {}
+        check('Advertising starts', started, st.get('error') or 'see error above')
+        if started:
+            print(f'        advertising as "{st.get("name")}" on {st.get("adapter")}')
+        if server:
+            server.stop()
+    else:
+        check('Advertising starts', False, 'fix the failures above first')
+
+    print('\n' + ('ALL GOOD — the box is advertising. Scan for the name above '
+                  'with a BLE app (e.g. nRF Connect) to confirm over the air.'
+                  if ok else 'Fix the FAIL lines above, then re-run: '
+                  'sudo python3 ble_provisioning.py doctor'))
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     import sys
 
@@ -828,6 +896,8 @@ def main(argv=None) -> int:
         return _cli_run(base_dir, secs)
     if cmd == 'selftest':
         return _cli_selftest(base_dir)
+    if cmd == 'doctor':
+        return _cli_doctor(base_dir)
     print(__doc__)
     return 2
 
