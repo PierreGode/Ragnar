@@ -168,28 +168,74 @@ def _stop_ble_provisioning():
             _ble_server = None
 
 
+def _ble_adapters():
+    """Available Bluetooth controllers for the config picker. Never raises."""
+    try:
+        import ble_provisioning
+        return ble_provisioning.list_controllers()
+    except Exception:
+        return []
+
+
 @app.route('/api/ble/provisioning', methods=['GET'])
 def ble_provisioning_status():
     enabled = bool(shared_data.config.get('ble_provisioning_enabled', False))
     running = False
     error = None
     name = None
+    adapter = None
+    autostopped = False
     with _ble_lock:
         if _ble_server is not None:
             st = _ble_server.status()
             running = bool(st.get('running'))
             error = st.get('error')
             name = st.get('name')
-    return jsonify({'enabled': enabled, 'running': running, 'error': error, 'name': name})
+            adapter = st.get('adapter')
+            autostopped = bool(st.get('autostopped'))
+    return jsonify({
+        'enabled': enabled,
+        'running': running,
+        'error': error,
+        'name': name,
+        # Configured preference ('' = auto: prefer the built-in controller).
+        'adapter': shared_data.config.get('ble_provisioning_adapter', ''),
+        'active_adapter': adapter,
+        'adapters': _ble_adapters(),
+        'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
+        # True once a phone provisioned and the peripheral freed the adapter.
+        'autostopped': autostopped,
+    })
 
 
 @app.route('/api/ble/provisioning/toggle', methods=['POST'])
 def ble_provisioning_toggle():
     payload = request.get_json(silent=True) or {}
     enable = bool(payload.get('enabled', not shared_data.config.get('ble_provisioning_enabled', False)))
+
+    # An adapter or auto-stop change: persist it and, if running, restart so
+    # the new setting takes effect (both are read at server-construction time).
+    needs_restart = False
+    if 'adapter' in payload:
+        new_adapter = (payload.get('adapter') or '').strip()
+        if new_adapter != shared_data.config.get('ble_provisioning_adapter', ''):
+            shared_data.config['ble_provisioning_adapter'] = new_adapter
+            needs_restart = True
+    if 'autostop' in payload:
+        new_autostop = bool(payload.get('autostop'))
+        if new_autostop != bool(shared_data.config.get('ble_provisioning_autostop', False)):
+            shared_data.config['ble_provisioning_autostop'] = new_autostop
+            needs_restart = True
+
     shared_data.config['ble_provisioning_enabled'] = enable
     shared_data.save_config()
+
     if enable:
+        # Restart when a setting changed, or when re-arming after an auto-stop.
+        with _ble_lock:
+            stopped = _ble_server is not None and not _ble_server.status().get('running')
+        if needs_restart or stopped:
+            _stop_ble_provisioning()
         ok = _start_ble_provisioning()
         if not ok:
             with _ble_lock:

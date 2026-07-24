@@ -62,6 +62,11 @@ CHAR_AP_CONTROL = 'b8a58eb8-6d03-4cb9-a94e-b4ce7f2f9b2d'
 # oversized value is caught here, not silently truncated on the wire.
 MAX_ATTR_BYTES = 512
 
+# Grace period after a provisioning read before auto-stop frees the adapter.
+# Long enough for the phone to also read the AP credentials / retry, short
+# enough that the radio comes back quickly. Each read resets the timer.
+AUTOSTOP_GRACE_MS = 15000
+
 BLUEZ = 'org.bluez'
 DBUS_OM = 'org.freedesktop.DBus.ObjectManager'
 DBUS_PROPS = 'org.freedesktop.DBus.Properties'
@@ -253,11 +258,17 @@ def _encode(payload: dict, what: str) -> bytes:
 class BleProvisioningServer:
     """Runs the GATT peripheral in a private GLib main loop thread."""
 
-    def __init__(self, providers: DataProviders, logger=None):
+    def __init__(self, providers: DataProviders, logger=None, auto_stop: bool = False):
         self.providers = providers
         self.logger = logger
+        # When True, stop advertising a short grace period after a phone reads
+        # the provisioning data, freeing the adapter for Ragnar's other BT work.
+        self.auto_stop = auto_stop
         self._thread: Optional[threading.Thread] = None
         self._mainloop = None
+        self._glib = None
+        self._stop_timer = None
+        self._autostopped = False
         self._error: Optional[str] = None
         self._running = False
         self._ready = threading.Event()
@@ -297,6 +308,13 @@ class BleProvisioningServer:
             except Exception:
                 pass
         self._running = False
+        # Wait for the loop thread to finish its teardown (unregister + free the
+        # D-Bus object paths) so a subsequent start() on a new adapter doesn't
+        # collide with lingering handlers. Never join ourselves (on_error calls
+        # stop() from inside the loop thread).
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=4)
 
     def status(self) -> dict:
         return {
@@ -305,7 +323,31 @@ class BleProvisioningServer:
             'adapter': self.providers.hci,
             'name': self.providers.local_name,
             'service_uuid': SERVICE_UUID,
+            'auto_stop': self.auto_stop,
+            'autostopped': self._autostopped,
         }
+
+    # -- auto-stop (frees the adapter once a phone has provisioned) ---------
+    def _on_provisioned(self) -> None:
+        """A phone read the network status / AP creds. Arm (or re-arm) the
+        auto-stop timer. Runs on the loop thread (D-Bus dispatch), so it can
+        touch GLib directly."""
+        if not self.auto_stop or self._glib is None:
+            return
+        if self._stop_timer is not None:
+            try:
+                self._glib.source_remove(self._stop_timer)
+            except Exception:
+                pass
+        self._stop_timer = self._glib.timeout_add(AUTOSTOP_GRACE_MS, self._autostop_fire)
+
+    def _autostop_fire(self):
+        self._stop_timer = None
+        self._autostopped = True
+        self._log('provisioned — auto-stopping to free the adapter')
+        if self._mainloop is not None:
+            self._mainloop.quit()
+        return False  # one-shot
 
     # -- loop thread -------------------------------------------------------
     def _run_loop(self) -> None:
@@ -315,20 +357,29 @@ class BleProvisioningServer:
             from gi.repository import GLib
 
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            self._glib = GLib
             bus = dbus.SystemBus()
             self._bus = bus
 
             adapter_path = f'/org/bluez/{self.providers.hci}'
             adapter_obj = bus.get_object(BLUEZ, adapter_path)
 
-            # Powered on, and discoverable so a phone can find it by name too.
+            # Power the adapter on and mark it discoverable. The app finds the
+            # box by scanning for the service UUID (advertising alone is
+            # enough for that), but Discoverable also lets a phone's own
+            # Bluetooth menu list the box by name.
             props = dbus.Interface(adapter_obj, DBUS_PROPS)
             props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(True))
+            try:
+                props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(True))
+                props.Set(ADAPTER_IFACE, 'DiscoverableTimeout', dbus.UInt32(0))
+            except Exception:
+                pass  # non-fatal; BLE advertising still works without it
 
             self._gatt_manager = dbus.Interface(adapter_obj, GATT_MANAGER)
             self._adv_manager = dbus.Interface(adapter_obj, LE_ADV_MANAGER)
 
-            app = _Application(bus, self.providers)
+            app = _Application(bus, self.providers, self._on_provisioned)
             self._app_path = app.path
             adv = _Advertisement(bus, 0, self.providers)
             self._adv_path = adv.get_path()
@@ -365,6 +416,23 @@ class BleProvisioningServer:
                 self._gatt_manager.UnregisterApplication(self._app_path)
             except Exception:
                 pass
+            # Free the local D-Bus object paths, or a restart on a new adapter
+            # hits "there is already a handler for '/one/gode/ragnar/ble'".
+            try:
+                for svc in app.services:
+                    for ch in svc.characteristics:
+                        try:
+                            ch.remove_from_connection()
+                        except Exception:
+                            pass
+                    try:
+                        svc.remove_from_connection()
+                    except Exception:
+                        pass
+                app.remove_from_connection()
+                adv.remove_from_connection()
+            except Exception:
+                pass
 
         except Exception as e:  # pragma: no cover - hardware/D-Bus dependent
             self._error = str(e)
@@ -393,11 +461,11 @@ def _build_dbus_classes():
         _dbus_error_name = 'org.bluez.Error.Failed'
 
     class Application(dbus.service.Object):
-        def __init__(self, bus, providers):
+        def __init__(self, bus, providers, on_provisioned=None):
             self.path = '/one/gode/ragnar/ble'
             self.services = []
             super().__init__(bus, self.path)
-            self.services.append(ProvisioningService(bus, 0, providers))
+            self.services.append(ProvisioningService(bus, 0, providers, on_provisioned))
 
         @dbus.service.method(DBUS_OM, out_signature='a{oa{sa{sv}}}')
         def GetManagedObjects(self):
@@ -411,19 +479,24 @@ def _build_dbus_classes():
     class ProvisioningService(dbus.service.Object):
         PATH_BASE = '/one/gode/ragnar/ble/service'
 
-        def __init__(self, bus, index, providers):
+        def __init__(self, bus, index, providers, on_provisioned=None):
             self.path = f'{self.PATH_BASE}{index}'
             self.bus = bus
             self.characteristics = []
             super().__init__(bus, self.path)
 
+            # Reading the network status (the box's IP) or the AP credentials is
+            # what "provisioned" means — fire the callback so the server can
+            # auto-stop and free the adapter if configured to.
             self.characteristics = [
                 Characteristic(bus, 0, self, CHAR_DEVICE_INFO, ['read'],
                                lambda: _encode(providers.device_info(), 'device info')),
                 Characteristic(bus, 1, self, CHAR_NET_STATUS, ['read', 'notify'],
-                               lambda: _encode(providers.net_status(), 'network status')),
+                               lambda: _encode(providers.net_status(), 'network status'),
+                               on_read=on_provisioned),
                 Characteristic(bus, 2, self, CHAR_AP_CREDS, ['encrypt-read'],
-                               lambda: _encode(providers.ap_creds(), 'AP credentials')),
+                               lambda: _encode(providers.ap_creds(), 'AP credentials'),
+                               on_read=on_provisioned),
                 ApControlCharacteristic(bus, 3, self, providers),
             ]
 
@@ -442,13 +515,14 @@ def _build_dbus_classes():
             }
 
     class Characteristic(dbus.service.Object):
-        def __init__(self, bus, index, service, uuid, flags, reader):
+        def __init__(self, bus, index, service, uuid, flags, reader, on_read=None):
             self.path = f'{service.path}/char{index}'
             self.bus = bus
             self.uuid = uuid
             self.flags = flags
             self.service = service
             self.reader = reader
+            self.on_read = on_read
             self.notifying = False
             super().__init__(bus, self.path)
 
@@ -476,6 +550,11 @@ def _build_dbus_classes():
                 data = self.reader()
             except Exception as e:
                 raise Failed(str(e))
+            if self.on_read is not None:
+                try:
+                    self.on_read()
+                except Exception:
+                    pass
             return dbus.Array([dbus.Byte(b) for b in data], signature='y')
 
         @dbus.service.method(GATT_CHRC, in_signature='aya{sv}')
@@ -596,17 +675,50 @@ def list_adapters() -> list[str]:
     return re.findall(r'^(hci\d+):', out, re.MULTILINE)
 
 
+def _adapter_bus(hci: str) -> str:
+    """Bus a controller sits on, e.g. 'UART' (built-in) or 'USB' (dongle)."""
+    out = _run(['hciconfig', hci])
+    m = re.search(r'Bus:\s*(\S+)', out)
+    return m.group(1).upper() if m else ''
+
+
+def list_controllers() -> list[dict]:
+    """Every Bluetooth controller with its bus and whether it is built-in.
+
+    The Pi's onboard radio sits on the UART bus; USB dongles (e.g. an Alfa)
+    enumerate on USB. Provisioning prefers the built-in one so an Alfa stays
+    free for scanning.
+    """
+    out = []
+    for hci in list_adapters():
+        bus = _adapter_bus(hci)
+        out.append({
+            'hci': hci,
+            'address': _adapter_address(hci),
+            'bus': bus,
+            'builtin': bus in ('UART', 'SDIO') or (bus and bus != 'USB'),
+        })
+    return out
+
+
 def choose_adapter(preferred: Optional[str] = None) -> Optional[str]:
     """Pick an adapter to advertise on.
 
-    Preference order: an explicit choice, else the first adapter. When more
-    than one is present we still take the first — the caller (or config) can
-    pin a dedicated one to keep the scanner and the peripheral apart.
+    Preference order: an explicit choice, else the built-in (UART) controller,
+    else the first adapter. Preferring the built-in one keeps a USB dongle
+    (Alfa) free for the active scanners (bt_scanner, WIDS), even if the dongle
+    happened to enumerate as hci0.
     """
-    adapters = list_adapters()
-    if preferred and preferred in adapters:
+    controllers = list_controllers()
+    if not controllers:
+        return None
+    names = [c['hci'] for c in controllers]
+    if preferred and preferred in names:
         return preferred
-    return adapters[0] if adapters else None
+    for c in controllers:
+        if c['builtin']:
+            return c['hci']
+    return names[0]
 
 
 # ===========================================================================
@@ -628,7 +740,10 @@ def build_server(base_dir, get_config, get_ap_state=None, set_ap=None,
             logger.warning('[ble-prov] no Bluetooth adapter available')
         return None
     providers = DataProviders(base_dir, hci, get_config, get_ap_state, set_ap)
-    return BleProvisioningServer(providers, logger=logger)
+    return BleProvisioningServer(
+        providers, logger=logger,
+        auto_stop=bool(cfg.get('ble_provisioning_autostop', False)),
+    )
 
 
 # ===========================================================================
