@@ -352,9 +352,17 @@ class BleProvisioningServer:
     # -- loop thread -------------------------------------------------------
     def _run_loop(self) -> None:
         try:
-            import dbus
-            import dbus.mainloop.glib
-            from gi.repository import GLib
+            try:
+                import dbus
+                import dbus.mainloop.glib
+                from gi.repository import GLib
+            except ImportError as _imp:
+                # These are system apt packages, not pip installable. A box set
+                # up before BLE provisioning shipped won't have python3-gi.
+                raise RuntimeError(
+                    f"{_imp} — BLE provisioning needs python3-gi and python3-dbus. "
+                    "Run update_ragnar.sh, or: sudo apt install -y python3-gi python3-dbus"
+                )
 
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
             self._glib = GLib
@@ -364,17 +372,20 @@ class BleProvisioningServer:
             adapter_path = f'/org/bluez/{self.providers.hci}'
             adapter_obj = bus.get_object(BLUEZ, adapter_path)
 
-            # Power the adapter on and mark it discoverable. The app finds the
-            # box by scanning for the service UUID (advertising alone is
-            # enough for that), but Discoverable also lets a phone's own
-            # Bluetooth menu list the box by name.
+            # Power the adapter on, and explicitly turn Classic discoverability
+            # OFF. The app finds the box purely by scanning for the BLE service
+            # UUID, and the LE advertisement carries the LocalName (Ragnar-<id>).
+            # Being Classic-discoverable would also broadcast the box's *hostname*
+            # over Bluetooth — an exposure — and make a scanner flap between the
+            # hostname and Ragnar-<id>. Setting it False here also undoes the
+            # earlier builds that (wrongly) forced Discoverable on permanently.
             props = dbus.Interface(adapter_obj, DBUS_PROPS)
             props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(True))
             try:
-                props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(True))
-                props.Set(ADAPTER_IFACE, 'DiscoverableTimeout', dbus.UInt32(0))
+                props.Set(ADAPTER_IFACE, 'DiscoverableTimeout', dbus.UInt32(180))
+                props.Set(ADAPTER_IFACE, 'Discoverable', dbus.Boolean(False))
             except Exception:
-                pass  # non-fatal; BLE advertising still works without it
+                pass  # non-fatal; LE advertising is independent of this
 
             self._gatt_manager = dbus.Interface(adapter_obj, GATT_MANAGER)
             self._adv_manager = dbus.Interface(adapter_obj, LE_ADV_MANAGER)
