@@ -196,6 +196,20 @@ def _ble_adapters():
         return []
 
 
+def _ble_power():
+    """Pi power/under-voltage health. Running BLE + a USB radio on an
+    under-volting Pi can reset the whole board — surface it so the user knows
+    that a 'crash' is the PSU, not the software. Never raises."""
+    try:
+        import resource_monitor
+        p = resource_monitor.resource_monitor.get_power_status()
+        if p.get('supported') and p.get('status') in ('warning', 'critical'):
+            return {'status': p['status'], 'message': p['message']}
+    except Exception:
+        pass
+    return None
+
+
 @app.route('/api/ble/provisioning', methods=['GET'])
 def ble_provisioning_status():
     enabled = bool(shared_data.config.get('ble_provisioning_enabled', False))
@@ -224,6 +238,9 @@ def ble_provisioning_status():
         'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
         # True once a phone provisioned and the peripheral freed the adapter.
         'autostopped': autostopped,
+        # Power warning (under-voltage) — running BLE + a USB radio on a weak
+        # PSU can reset the Pi; None when healthy.
+        'power': _ble_power(),
     })
 
 

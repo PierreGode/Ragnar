@@ -24113,6 +24113,17 @@ async function loadBleProvisioning() {
         // Show the Re-advertise button only once it has auto-stopped.
         const rebtn = document.getElementById('ble-provisioning-readvertise');
         if (rebtn) rebtn.classList.toggle('hidden', !(d.enabled && d.autostopped));
+        // Under-voltage warning: running BLE + a USB radio on a weak PSU can
+        // reset the whole Pi. Surface it so a "crash" reads as power, not code.
+        const pw = document.getElementById('ble-provisioning-power');
+        if (pw) {
+            if (d.power && d.power.message) {
+                pw.textContent = '⚠ ' + d.power.message;
+                pw.classList.remove('hidden');
+            } else {
+                pw.classList.add('hidden');
+            }
+        }
         const st = document.getElementById('ble-provisioning-status');
         if (st) st.textContent = _bleProvStatusText(d);
     } catch (e) { /* silent */ }
