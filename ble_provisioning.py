@@ -352,9 +352,17 @@ class BleProvisioningServer:
     # -- loop thread -------------------------------------------------------
     def _run_loop(self) -> None:
         try:
-            import dbus
-            import dbus.mainloop.glib
-            from gi.repository import GLib
+            try:
+                import dbus
+                import dbus.mainloop.glib
+                from gi.repository import GLib
+            except ImportError as _imp:
+                # These are system apt packages, not pip installable. A box set
+                # up before BLE provisioning shipped won't have python3-gi.
+                raise RuntimeError(
+                    f"{_imp} — BLE provisioning needs python3-gi and python3-dbus. "
+                    "Run update_ragnar.sh, or: sudo apt install -y python3-gi python3-dbus"
+                )
 
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
             self._glib = GLib
