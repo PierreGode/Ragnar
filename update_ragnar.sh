@@ -122,10 +122,12 @@ fi
 
 echo -e "${BLUE}Step 5.2: Ensuring Bluetooth overlay dependencies...${NC}"
 # The WiFi-analyzer Bluetooth/BLE 2.4 GHz overlay (bt_scanner.py) talks to BlueZ
-# over D-Bus via python3-dbus, and needs bluez/bluetoothctl. These ship in the
-# installer; ensure them here too so update-only boxes get the overlay. Guarded
-# and idempotent — only apt-installs a package that is actually missing.
-for _btpkg in python3-dbus bluez; do
+# over D-Bus via python3-dbus, and needs bluez/bluetoothctl. The BLE
+# provisioning peripheral (ble_provisioning.py) additionally needs python3-gi
+# for its GLib main loop. These ship in the installer; ensure them here too so
+# update-only boxes get both. Guarded and idempotent — only apt-installs a
+# package that is actually missing.
+for _btpkg in python3-dbus python3-gi bluez; do
     if ! dpkg -s "$_btpkg" >/dev/null 2>&1; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_btpkg" >/dev/null 2>&1 \
             && echo -e "  ${GREEN}✓${NC} Installed $_btpkg (Bluetooth overlay)" \
