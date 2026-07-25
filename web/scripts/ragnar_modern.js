@@ -14021,6 +14021,22 @@ function handleReleaseGateDecision(allowUpdate) {
     }
 }
 
+// The update card. Its one job when something goes wrong is to say what went
+// wrong: the backend classifies every git failure and returns a `code` plus a
+// `hint` sentence, and all of it is shown here rather than collapsing into
+// "Update failed. Fix issues and retry."
+function reportUpdateProblem(prefix, payload) {
+    const message = (payload && (payload.error || payload.message)) || 'Unknown error';
+    addConsoleMessage(`${prefix}: ${message}`, 'error');
+    if (payload && payload.hint) {
+        addConsoleMessage(payload.hint, 'warning');
+    }
+    if (payload && Array.isArray(payload.warnings)) {
+        payload.warnings.forEach(w => addConsoleMessage(w, 'warning'));
+    }
+    return message;
+}
+
 async function checkForUpdates() {
     try {
         const updateBtn = document.getElementById('update-btn');
@@ -14039,17 +14055,47 @@ async function checkForUpdates() {
         }
         updateElement('update-info', 'Checking for updates...');
         addConsoleMessage('Checking for system updates...', 'info');
-        
+
         const data = await fetchAPI('/api/system/check-updates');
         const gitStatus = data.git_status || {};
-        
-        // Debug logging
+
         console.log('Update check response:', data);
-        addConsoleMessage(`Debug: Repo path: ${data.repo_path}`, 'info');
-        addConsoleMessage(`Debug: Current commit: ${data.current_commit}`, 'info');
-        addConsoleMessage(`Debug: Latest commit: ${data.latest_commit}`, 'info');
-        addConsoleMessage(`Debug: Commits behind: ${data.commits_behind}`, 'info');
-        
+        addConsoleMessage(`Branch ${data.branch || 'unknown'} at ${data.current_commit || 'unknown commit'}`, 'info');
+        if (Array.isArray(data.warnings)) {
+            data.warnings.forEach(w => addConsoleMessage(w, 'warning'));
+        }
+
+        // The check reached the box but could not finish (offline, no git, no
+        // repository metadata). Say which, and keep the button usable when the
+        // updater can repair the problem itself.
+        if (data.code) {
+            const repairable = data.code === 'not_a_repo' || data.code === 'ownership' ||
+                               data.code === 'locked' || data.code === 'no_remote';
+            reportUpdateProblem('Update check', data);
+            updateElement('update-status', data.code === 'offline' ? 'Offline' : 'Needs attention');
+            if (updateStatusEl) {
+                updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-orange-700 text-orange-200';
+            }
+            updateElement('update-info', data.hint || data.error || 'Update check failed');
+            if (updateBtn && repairable) {
+                updateBtn.disabled = false;
+                updateBtn.onclick = performUpdate;
+                updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
+                updateElement('update-btn-text', 'Repair and Update');
+            }
+            return;
+        }
+
+        if (data.update_in_progress) {
+            updateElement('update-status', 'Updating');
+            if (updateStatusEl) {
+                updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-blue-700 text-blue-200';
+            }
+            updateElement('update-info', 'An update is already running on this box.');
+            addConsoleMessage('An update is already running - waiting for it to finish.', 'info');
+            return;
+        }
+
         let infoMessage = '';
         if (data.updates_available && data.commits_behind > 0) {
             infoMessage = `${data.commits_behind} commits behind. Latest: ${data.latest_commit || 'Unknown'}`;
@@ -14075,67 +14121,56 @@ async function checkForUpdates() {
             addConsoleMessage('System is up to date', 'success');
         }
 
-        const localStateMessages = [];
         const modifiedCount = Array.isArray(gitStatus.modified_files) ? gitStatus.modified_files.length : 0;
-
-        if (gitStatus.has_conflicts) {
-            localStateMessages.push('Local merge conflicts detected');
-        } else if (gitStatus.is_dirty) {
-            localStateMessages.push(`${modifiedCount} local change${modifiedCount === 1 ? '' : 's'}`);
-        }
-
         if (gitStatus.status_error) {
-            localStateMessages.push(`git status error: ${gitStatus.status_error}`);
+            addConsoleMessage(`git status: ${gitStatus.status_error}`, 'warning');
+        }
+        if (data.commits_ahead > 0) {
+            addConsoleMessage(`This box has ${data.commits_ahead} local commit(s); updating will sync it to the released version.`, 'warning');
         }
 
         updateElement('update-info', infoMessage);
 
-        if (gitStatus.has_conflicts) {
-            if (updateBtn) {
-                updateBtn.disabled = false;
-                updateBtn.onclick = resolveGitConflicts;
-                updateBtn.className = 'w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors';
-                updateElement('update-btn-text', 'Resolve Git Conflicts');
+        // A conflicted or dirty tree is no longer a separate, riskier button:
+        // the updater stashes and force-syncs whatever it finds. Say what will
+        // happen to the user's edits, then use the same update path.
+        if (data.updates_available && data.commits_behind > 0 && updateBtn) {
+            updateBtn.onclick = performUpdate;
+            updateElement('update-btn-text', 'Update System');
+            if (gitStatus.has_conflicts) {
+                addConsoleMessage('Local merge conflicts detected - the update will clear them and save your edits to a git stash.', 'warning');
+            } else if (gitStatus.is_dirty) {
+                addConsoleMessage(`${modifiedCount} local change${modifiedCount === 1 ? '' : 's'} detected - they will be saved and replayed after the update.`, 'info');
             }
+        } else if (gitStatus.has_conflicts && updateBtn) {
+            // Nothing to pull, but the tree is in a bad state - offer the repair.
+            updateBtn.disabled = false;
+            updateBtn.onclick = resolveGitConflicts;
+            updateBtn.className = 'w-full bg-red-600 hover:bg-red-700 text-white py-2 px-4 rounded transition-colors';
+            updateElement('update-btn-text', 'Repair Git State');
             updateElement('update-status', 'Local Conflict');
             if (updateStatusEl) {
                 updateStatusEl.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-200';
             }
-            addConsoleMessage('Local git conflicts detected. Click "Resolve Git Conflicts" to reset and update.', 'warning');
-            return;
         }
 
-        if (data.updates_available && data.commits_behind > 0 && updateBtn) {
-            if (gitStatus.is_dirty) {
-                updateBtn.onclick = autoStashAndUpdate;
-                updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-                updateElement('update-btn-text', 'Update System');
-                addConsoleMessage('Local edits detected. Ragnar will handle them automatically during the update.', 'info');
-            } else {
-                updateBtn.onclick = performUpdate;
-                updateElement('update-btn-text', 'Update System');
-            }
-        }
-        
     } catch (error) {
         console.error('Error checking for updates:', error);
         updateElement('update-status', 'Error');
-        document.getElementById('update-status').className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
-        
-        // Check if it's a git safe directory error
-        if (error.message && error.message.includes('safe.directory')) {
-            updateElement('update-info', 'Git safe directory issue detected');
-            addConsoleMessage('Git safe directory error detected. Click the Fix Git button.', 'error');
-            
-            // Show fix git button
-            const updateBtn = document.getElementById('update-btn');
-            updateBtn.textContent = 'Fix Git Config';
+        const statusEl = document.getElementById('update-status');
+        if (statusEl) {
+            statusEl.className = 'text-sm px-2 py-1 rounded bg-red-700 text-red-300';
+        }
+        updateElement('update-info', 'Failed to check for updates');
+        addConsoleMessage(`Failed to check for updates: ${error.message}`, 'error');
+        // The check endpoint answers even when git is unhappy, so a thrown error
+        // means the web app itself is unreachable - retrying is all we can do.
+        const updateBtn = document.getElementById('update-btn');
+        if (updateBtn) {
             updateBtn.disabled = false;
-            updateBtn.className = 'w-full bg-yellow-600 hover:bg-yellow-700 text-white py-2 px-4 rounded transition-colors';
-            updateBtn.onclick = fixGitConfig;
-        } else {
-            updateElement('update-info', 'Failed to check for updates');
-            addConsoleMessage(`Failed to check for updates: ${error.message}`, 'error');
+            updateBtn.onclick = checkForUpdates;
+            updateBtn.className = 'w-full bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded transition-colors';
+            updateElement('update-btn-text', 'Retry Check');
         }
     }
 }
@@ -14145,31 +14180,27 @@ async function fixGitConfig() {
         updateElement('update-btn-text', 'Fixing...');
         const updateBtn = document.getElementById('update-btn');
         updateBtn.disabled = true;
-        
+
         addConsoleMessage('Fixing git configuration...', 'info');
-        
+
         const result = await postAPI('/api/system/fix-git', {});
-        
+
         if (result.success) {
             addConsoleMessage('Git configuration fixed successfully', 'success');
-            
-            // Reset button and retry update check
-            updateBtn.textContent = 'Update System';
             updateBtn.onclick = performUpdate;
-            
-            // Retry update check
+            updateElement('update-btn-text', 'Update System');
             setTimeout(() => {
                 checkForUpdates();
             }, 1000);
         } else {
-            addConsoleMessage(`Failed to fix git configuration: ${result.error}`, 'error');
+            reportUpdateProblem('Failed to fix git configuration', result);
             updateBtn.disabled = false;
             updateElement('update-btn-text', 'Fix Git Config');
         }
-        
+
     } catch (error) {
         console.error('Error fixing git config:', error);
-        addConsoleMessage('Failed to fix git configuration', 'error');
+        addConsoleMessage(`Failed to fix git configuration: ${error.message}`, 'error');
         const updateBtn = document.getElementById('update-btn');
         updateBtn.disabled = false;
         updateElement('update-btn-text', 'Fix Git Config');
@@ -14177,31 +14208,8 @@ async function fixGitConfig() {
 }
 
 async function resolveGitConflicts() {
-    const updateBtn = document.getElementById('update-btn');
-    try {
-        updateBtn.disabled = true;
-        updateElement('update-btn-text', 'Resolving...');
-        addConsoleMessage('Resolving git conflicts and pulling latest update...', 'info');
-
-        const result = await postAPI('/api/system/resolve-conflicts', {});
-
-        if (result.success) {
-            addConsoleMessage('Conflicts resolved and update applied. Restarting...', 'success');
-            if (result.warnings && result.warnings.length) {
-                result.warnings.forEach(w => addConsoleMessage(w, 'warning'));
-            }
-            updateElement('update-btn-text', 'Done');
-        } else {
-            addConsoleMessage(`Failed to resolve conflicts: ${result.error}`, 'error');
-            updateBtn.disabled = false;
-            updateElement('update-btn-text', 'Resolve Git Conflicts');
-        }
-    } catch (error) {
-        console.error('Error resolving git conflicts:', error);
-        addConsoleMessage('Failed to resolve git conflicts', 'error');
-        updateBtn.disabled = false;
-        updateElement('update-btn-text', 'Resolve Git Conflicts');
-    }
+    return runUpdate('/api/system/resolve-conflicts', 'Repair Git State',
+                     'Clearing the conflicted state and updating...');
 }
 
 async function performUpdate() {
@@ -14214,64 +14222,19 @@ async function performUpdate() {
     if (!confirm('This will update the system and restart the service. Continue?')) {
         return;
     }
-    
-    try {
-        updateElement('update-btn-text', 'Update now');
-        const updateBtn = document.getElementById('update-btn');
-        updateBtn.disabled = true;
-        updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
-        
-        addConsoleMessage('Starting system update...', 'info');
-        
-        const data = await postAPI('/api/system/update', {});
-        
-        if (data.success) {
-            addConsoleMessage('Update completed successfully', 'success');
-            addConsoleMessage('System will restart automatically...', 'info');
-            updateElement('update-info', 'Update completed. System restarting...');
-            
-            // Wait for service restart and verify it's back up
-            setTimeout(async () => {
-                await verifyServiceRestart();
-            }, 10000); // Start checking after 10 seconds
-        } else {
-            addConsoleMessage(`Update failed: ${data.error || 'Unknown error'}`, 'error');
-            updateElement('update-btn-text', 'Update System');
-            updateBtn.disabled = false;
-            updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-        }
-        
-    } catch (error) {
-        console.error('Error performing update:', error);
-        if (isLikelyNetworkError(error)) {
-            // The service may have restarted before the response reached us —
-            // verify the outcome instead of declaring failure.
-            addConsoleMessage('Connection dropped while updating — verifying whether the update completed...', 'info');
-            updateElement('update-info', 'Connection dropped. Verifying update...');
-            setTimeout(async () => {
-                await verifyServiceRestart();
-            }, 5000);
-            return;
-        }
-        addConsoleMessage(`Update failed: ${error.message}`, 'error');
-        updateElement('update-btn-text', 'Update System');
-        const updateBtn = document.getElementById('update-btn');
-        updateBtn.disabled = false;
-        updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-    }
+
+    return runUpdate('/api/system/update', 'Update System', 'Starting system update...');
 }
 
+// Kept for older callers/bookmarks: dirty checkouts no longer need their own
+// endpoint, the update path handles them.
 async function autoStashAndUpdate() {
-    const gateApproved = await ensureReleaseGateAcknowledged();
-    if (!gateApproved) {
-        addConsoleMessage('Update postponed until the release window opens.', 'info');
-        return;
-    }
+    return performUpdate();
+}
 
-    if (!confirm('This will update the system and restart the service. Continue?')) {
-        return;
-    }
-
+// One implementation behind every button that updates the box, so the progress
+// reporting and the failure reporting cannot drift apart between them.
+async function runUpdate(endpoint, idleLabel, startMessage) {
     const updateBtn = document.getElementById('update-btn');
 
     const setButtonState = (busy, label) => {
@@ -14287,107 +14250,150 @@ async function autoStashAndUpdate() {
 
     try {
         setButtonState(true, 'Updating...');
-        addConsoleMessage('Applying update...', 'info');
+        addConsoleMessage(startMessage, 'info');
+        updateElement('update-info', 'Updating...');
 
-        const response = await postAPI('/api/system/stash-update', {});
+        const data = await postAPI(endpoint, {});
 
-        if (response.success) {
-            addConsoleMessage('Update completed successfully.', 'success');
-            addConsoleMessage('System will restart automatically...', 'info');
-            updateElement('update-info', 'Update applied. System restarting...');
-
-            if (updateBtn) {
-                updateBtn.className = 'w-full bg-gray-600 text-white py-2 px-4 rounded cursor-not-allowed';
-                updateElement('update-btn-text', 'Updating...');
-            }
-
-            setTimeout(async () => {
-                await verifyServiceRestart();
-            }, 10000);
-        } else {
-            throw new Error(response.error || 'Update failed');
+        if (!data.success) {
+            throw Object.assign(new Error(data.error || 'Update failed'), { payload: data });
         }
+
+        if (Array.isArray(data.warnings)) {
+            data.warnings.forEach(w => addConsoleMessage(w, 'warning'));
+        }
+        addConsoleMessage(data.output || 'Update applied.', 'success');
+        if (data.requirements_changed) {
+            addConsoleMessage('This update changes Python dependencies - installing them before the restart. This can take a few minutes.', 'info');
+        }
+        if (data.local_changes_preserved && !data.local_changes_restored) {
+            addConsoleMessage("Your local edits are saved in a git stash ('git stash list' to recover them).", 'warning');
+        }
+        addConsoleMessage('System will restart automatically...', 'info');
+        updateElement('update-info', 'Update applied. Restarting...');
+        setButtonState(true, 'Restarting...');
+
+        setTimeout(() => {
+            verifyServiceRestart(data.to_commit || '');
+        }, 5000);
+
     } catch (error) {
-        console.error('Auto update error:', error);
+        console.error('Update error:', error);
         if (isLikelyNetworkError(error)) {
-            // The service may have restarted before the response reached us —
+            // The service may have restarted before the response reached us -
             // verify the outcome instead of declaring failure.
-            addConsoleMessage('Connection dropped while updating — verifying whether the update completed...', 'info');
+            addConsoleMessage('Connection dropped while updating - verifying whether the update completed...', 'info');
             updateElement('update-info', 'Connection dropped. Verifying update...');
             setButtonState(true, 'Verifying...');
-            setTimeout(async () => {
-                await verifyServiceRestart();
+            setTimeout(() => {
+                verifyServiceRestart('');
             }, 5000);
             return;
         }
-        addConsoleMessage(`Update failed: ${error.message}`, 'error');
-        setButtonState(false, 'Update System');
-        updateElement('update-info', 'Update failed. Fix issues and retry.');
+        const payload = error.payload || { error: error.message };
+        if (payload.code === 'busy') {
+            // Two tabs, two clicks. The other one is doing the work - follow it
+            // rather than reporting a failure that did not happen.
+            addConsoleMessage('An update is already running on this box - watching it instead.', 'info');
+            setButtonState(true, 'Updating...');
+            verifyServiceRestart('');
+            return;
+        }
+        const message = reportUpdateProblem('Update failed', payload);
+        setButtonState(false, idleLabel);
+        updateElement('update-info', payload.hint || `Update failed: ${message}`);
     }
 }
 
-async function verifyServiceRestart() {
+// Watch the box through the restart. Ragnar hands the tail of an update
+// (dependency installs, provisioning) to a transient systemd unit that restarts
+// the service when it is done, so "the API answers" is not the same as "the
+// update finished" - the commit the box reports has to change too.
+async function verifyServiceRestart(expectedCommit) {
     let attempts = 0;
-    const maxAttempts = 12; // Try for up to 2 minutes (12 attempts * 10 seconds)
-    
-    addConsoleMessage('Verifying service is back online...', 'info');
-    updateElement('update-info', 'Verifying service restart...');
-    
+    const maxAttempts = 60;          // up to 5 minutes; dependency installs are slow
+    let sawRestart = false;
+    let lastStep = '';
+    // The service reports when this process started. A change in that value is
+    // proof the restart happened, which is more reliable than hoping to catch
+    // the box unreachable between two five-second polls.
+    let startedAt = null;
+
+    addConsoleMessage('Verifying the update landed and the service is back...', 'info');
+    updateElement('update-info', 'Verifying update...');
+
+    const finish = (message, level, info) => {
+        addConsoleMessage(message, level);
+        updateElement('update-info', info);
+        const updateBtn = document.getElementById('update-btn');
+        if (updateBtn) {
+            updateBtn.disabled = false;
+            updateBtn.onclick = performUpdate;
+            updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
+            updateElement('update-btn-text', 'Update System');
+        }
+        setTimeout(() => checkForUpdates(), 3000);
+    };
+
     const checkService = async () => {
         attempts++;
-        
         try {
-            // Try to fetch the stats endpoint as a health check
-            const response = await networkAwareFetch('/api/stats', {
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' },
-                timeout: 5000
-            });
-            
-            if (response.ok) {
-                // Service is back up
-                addConsoleMessage('✅ Service verified online after update', 'success');
-                updateElement('update-info', 'Update completed successfully. Service is online.');
-                
-                // Reset the update button
-                const updateBtn = document.getElementById('update-btn');
-                updateElement('update-btn-text', 'Update System');
-                updateBtn.disabled = false;
-                updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-                
-                // Check for updates to refresh status
-                setTimeout(() => {
-                    checkForUpdates();
-                }, 5000);
-                
-                return; // Success, exit the checking loop
-            } else {
+            const response = await networkAwareFetch('/api/system/update-status', { method: 'GET' });
+            if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
-        } catch (error) {
-            console.log(`Service check attempt ${attempts}/${maxAttempts} failed:`, error.message);
-            
-            if (attempts >= maxAttempts) {
-                // Max attempts reached, service might not have restarted properly
-                addConsoleMessage('⚠️ Service restart verification timeout. Manual check may be needed.', 'warning');
-                updateElement('update-info', 'Update completed, but service verification timed out.');
-                
-                // Reset the update button
-                const updateBtn = document.getElementById('update-btn');
-                updateElement('update-btn-text', 'Update System');
-                updateBtn.disabled = false;
-                updateBtn.className = 'w-full bg-green-600 hover:bg-green-700 text-white py-2 px-4 rounded transition-colors';
-                
-                return; // Exit the checking loop
+            const status = await response.json();
+            const post = status.post_update || {};
+
+            if (startedAt === null) {
+                startedAt = status.service_started || 0;
+            } else if (status.service_started && status.service_started !== startedAt) {
+                sawRestart = true;
             }
-            
-            // Continue checking
-            addConsoleMessage(`Service check ${attempts}/${maxAttempts} - waiting for restart...`, 'info');
-            setTimeout(checkService, 10000); // Check again in 10 seconds
+
+            if (post.step && post.step !== lastStep) {
+                lastStep = post.step;
+                addConsoleMessage(`Post-update: ${post.step}`, 'info');
+                updateElement('update-info', `Finishing update: ${post.step}...`);
+            }
+
+            const commitMatches = !expectedCommit ||
+                (status.commit && status.commit.startsWith(expectedCommit.slice(0, 8)));
+            const postDone = !post.state || post.state === 'finished';
+
+            if (commitMatches && postDone && sawRestart) {
+                if (post.outcome === 'failed') {
+                    finish(`⚠️ Update applied, but some post-update steps failed: ${post.failures || 'see data/logs/post_update.log'}`,
+                           'warning', 'Update applied with warnings. Check the log.');
+                } else {
+                    finish('✅ Update verified - the box is running the new version.', 'success',
+                           'Update completed successfully. Service is online.');
+                }
+                return;
+            }
+            if (commitMatches && postDone && !sawRestart && attempts > 3) {
+                // Already on the target commit and nothing pending: either the
+                // restart happened between polls or none was needed.
+                finish('✅ Update verified - the box is running the new version.', 'success',
+                       'Update completed successfully. Service is online.');
+                return;
+            }
+        } catch (error) {
+            // Unreachable means the restart is in progress - that is progress.
+            if (!sawRestart) {
+                sawRestart = true;
+                addConsoleMessage('Service is restarting...', 'info');
+            }
         }
+
+        if (attempts >= maxAttempts) {
+            finish('⚠️ Could not confirm the update within 5 minutes. Check data/logs/post_update.log.',
+                   'warning', 'Update applied, but verification timed out.');
+            return;
+        }
+        setTimeout(checkService, 5000);
     };
-    
-    // Start the checking process after 10s
+
     checkService();
 }
 
@@ -18173,18 +18179,28 @@ function networkAwareFetch(endpoint, options = {}) {
     return fetch(resolvedEndpoint, options);
 }
 
-// Pull the server's own error message out of a failed response so the UI can
-// show the real reason instead of a bare status code.
-async function extractErrorDetail(response) {
+// Pull the server's own error body out of a failed response so the UI can show
+// the real reason instead of a bare status code. The whole body is kept, not
+// just the message: endpoints that classify their failures also return a `code`
+// and a `hint`, and dropping those is what left users staring at "error".
+async function extractErrorBody(response) {
     try {
-        const body = await response.json();
-        if (body && typeof body.error === 'string' && body.error) {
-            return body.error;
-        }
+        return await response.json();
     } catch (parseError) {
-        // Non-JSON error body; fall through to the status code
+        return null;   // non-JSON error body; the caller falls back to the status
     }
-    return '';
+}
+
+function errorFromResponse(response, body) {
+    const detail = body && typeof body.error === 'string' && body.error
+        ? body.error
+        : `HTTP error! status: ${response.status}`;
+    const error = new Error(detail);
+    if (body) {
+        error.payload = body;
+    }
+    error.status = response.status;
+    return error;
 }
 
 // True when fetch itself failed (connection dropped/reset) as opposed to the
@@ -18203,8 +18219,7 @@ async function fetchAPI(endpoint, options = {}) {
             throw new Error('Authentication required');
         }
         if (!response.ok) {
-            const detail = await extractErrorDetail(response);
-            throw new Error(detail || `HTTP error! status: ${response.status}`);
+            throw errorFromResponse(response, await extractErrorBody(response));
         }
         return await response.json();
     } catch (error) {
@@ -18227,8 +18242,7 @@ async function postAPI(endpoint, data) {
             throw new Error('Authentication required');
         }
         if (!response.ok) {
-            const detail = await extractErrorDetail(response);
-            throw new Error(detail || `HTTP error! status: ${response.status}`);
+            throw errorFromResponse(response, await extractErrorBody(response));
         }
         return await response.json();
     } catch (error) {

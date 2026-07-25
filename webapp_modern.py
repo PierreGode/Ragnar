@@ -52,6 +52,7 @@ try:
 except ImportError:
     pandas_available = False
 from init_shared import shared_data
+import git_updater
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
 from logger import Logger
@@ -10341,356 +10342,129 @@ def deep_scan_host():
 # SYSTEM MANAGEMENT UTILITIES & ENDPOINTS
 # ============================================================================
 
-# Git config for update commands that may create commits (stash, pull-merge).
-# The service typically runs as root with no git identity configured, and
-# newer git also aborts a divergent pull unless a reconcile strategy is set
-# — either would fail the in-app update on user devices.
-_GIT_UPDATE_ID = [
-    '-c', 'user.name=Ragnar Updater',
-    '-c', 'user.email=ragnar-updater@localhost',
-    '-c', 'pull.rebase=false',
-]
+# The self-update git logic lives in git_updater.py. Everything there is
+# non-interactive and time-bounded, and every failure carries a machine-readable
+# code plus one sentence the user can act on - see that module's docstring for
+# the failure modes it exists to close.
+RAGNAR_REPO_PATH = git_updater.repo_root()
 
-# Serializes every git operation the webapp runs against the checkout. The
-# dashboard polls /api/system/check-updates every 5 minutes (per open tab) and
-# that check runs `git fetch` + a lock sweep — when it overlapped with a
-# user-clicked update, the pull failed on held ref locks (or had its live
-# index.lock deleted from under it) and the UI showed "Update failed. Fix
-# issues and retry." even though clicking again worked. Updates take this
-# blocking; the background check skips its fetch when an update holds it.
-_GIT_MUTEX = threading.Lock()
-
-# Locks younger than this are considered live (held by a running git process),
-# older ones are debris from an interrupted run and safe to sweep.
-_GIT_LOCK_STALE_SECONDS = 120
+# Lets the browser tell "the service is back up" from "the service never went
+# down": after an update it waits for this value to change, not just for the API
+# to answer.
+_PROCESS_START_TIME = time.time()
 
 
-def _ensure_git_safe_dir(repo_path: str) -> None:
-    """Whitelist the checkout in the running user's global git config so root
-    operating on a 'ragnar'-owned tree doesn't hit 'detected dubious ownership'.
-    --add only when missing so repeated updates don't pile up duplicates."""
-    try:
-        existing = subprocess.run(
-            ['git', 'config', '--global', '--get-all', 'safe.directory'],
-            capture_output=True, text=True, check=False
-        ).stdout.splitlines()
-        if repo_path not in existing:
-            subprocess.run(
-                ['git', 'config', '--global', '--add', 'safe.directory', repo_path],
-                capture_output=True, text=True, check=False
-            )
-    except Exception:
-        pass
+def _post_update_status() -> dict:
+    """Read the transcript scripts/post_update.sh leaves behind.
 
-
-def _clear_git_locks(repo_path: str, warnings: list, min_age_seconds: int = 0) -> None:
-    """Remove EVERY stale *.lock under .git — not just the old hardcoded short
-    list (index.lock/HEAD.lock/shallow.lock/refs/heads/main.lock).
-
-    The locks that actually got stuck and forced users to stop the service and
-    delete files by hand were the ones NOT on that list: refs/remotes/origin/
-    <branch>.lock, packed-refs.lock, config.lock, and ref locks for non-'main'
-    branches. Sweeping all of them means a lock left by an interrupted run is
-    auto-cleared on the next check/update — the service (root) can delete a lock
-    regardless of which user owns it, so this never needs a manual stop.
-
-    min_age_seconds > 0 restricts the sweep to locks at least that old, so a
-    routine pass (background update check, update preflight) never deletes the
-    live lock of a git process that is still running."""
-    git_dir = os.path.join(repo_path, '.git')
-    if not os.path.isdir(git_dir):
-        return
-    # Primary: one find pass deletes nested ref locks too (coreutils always present).
-    try:
-        find_cmd = ['sudo', 'find', git_dir, '-name', '*.lock', '-type', 'f']
-        if min_age_seconds > 0:
-            find_cmd.extend(['-mmin', f'+{max(1, min_age_seconds // 60)}'])
-        find_cmd.append('-delete')
-        subprocess.run(
-            find_cmd,
-            capture_output=True, text=True, check=False, timeout=20
-        )
-    except Exception as e:
-        logger.debug(f"find-based lock sweep failed (continuing): {e}")
-
-    def _old_enough(path: str) -> bool:
-        if min_age_seconds <= 0:
-            return True
-        try:
-            return (time.time() - os.path.getmtime(path)) >= min_age_seconds
-        except OSError:
-            return False
-
-    # Fallback for no-sudo / no-find edge cases: top-level locks + the refs/
-    # tree only (never the huge objects/ dir).
-    removed = []
-    try:
-        for name in os.listdir(git_dir):
-            if name.endswith('.lock'):
-                lp = os.path.join(git_dir, name)
-                if not _old_enough(lp):
-                    continue
-                try:
-                    os.remove(lp)
-                    removed.append(name)
-                except OSError:
-                    pass
-        refs_dir = os.path.join(git_dir, 'refs')
-        for root_dir, _dirs, files in os.walk(refs_dir):
-            for name in files:
-                if name.endswith('.lock'):
-                    lp = os.path.join(root_dir, name)
-                    if not _old_enough(lp):
-                        continue
-                    try:
-                        os.remove(lp)
-                        removed.append(os.path.relpath(lp, git_dir))
-                    except OSError:
-                        pass
-    except Exception:
-        pass
-    if removed:
-        msg = f"Cleared stale git lock(s): {', '.join(removed[:8])}"
-        logger.warning(msg)
-        warnings.append(msg)
-
-
-def _prepare_git_repo(repo_path: str, warnings: list) -> None:
-    """Make the checkout usable BEFORE the first git command runs.
-
-    Fresh user devices hit three pre-conditions that fail the first git
-    command (and with it the whole update): mixed pi/ragnar/root file
-    ownership, stale lock files from interrupted runs, and git's "dubious
-    ownership" refusal because the service runs as root while the checkout
-    belongs to user 'ragnar'.
+    Lets the UI keep reporting progress across the service restart that script
+    performs: the browser polls this while the web app itself is down and back.
     """
-    # Fix permissions ahead of git to avoid ownership issues on devices
+    path = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.json')
     try:
-        logger.info("Correcting file permissions before git update...")
-        subprocess.run(
-            ['sudo', 'chown', '-R', 'ragnar:ragnar', repo_path],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        warning = f"Permission correction failed (continuing): {e.stderr.strip() or e.stdout.strip()}"
-        logger.warning(warning)
-        warnings.append(warning)
-    except Exception as e:
-        warning = f"Permission correction error (continuing): {e}"
-        logger.warning(warning)
-        warnings.append(warning)
-
-    # Remove stale lock files (the common reason the first update attempt
-    # fails but a retry succeeds — and the ref/remote locks that used to need a
-    # manual service stop). Age-gated so a live lock held by a still-running
-    # git process (e.g. a background update check's fetch) survives.
-    _clear_git_locks(repo_path, warnings, min_age_seconds=_GIT_LOCK_STALE_SECONDS)
-
-    # Whitelist the checkout for the current user (safe.directory must live in
-    # the global config; git ignores it from plain -c).
-    _ensure_git_safe_dir(repo_path)
+        with open(path, 'r') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
 
 
-def _execute_git_update(repo_path: str, prepared: bool = False) -> dict:
-    """Run the git pull sequence Ragnar uses, returning status metadata."""
-    result = {
-        'success': False,
-        'output': '',
-        'error': '',
-        'warnings': []
-    }
+def _launch_post_update(install_deps: bool, warnings: list) -> str:
+    """Hand the rest of the update to scripts/post_update.sh and let it restart us.
 
-    if not prepared:
-        _prepare_git_repo(repo_path, result['warnings'])
-    git_dir = os.path.join(repo_path, '.git')
+    Returns 'systemd' (running in a transient unit, will survive the restart),
+    'detached' (started, but may be killed by the restart) or 'failed'.
 
-    # Resolve which branch to update. A detached HEAD would make plain
-    # `git pull` fail, and naming the branch explicitly also covers
-    # checkouts that have no upstream tracking configured.
-    try:
-        branch = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            cwd=repo_path, capture_output=True, text=True, check=True
-        ).stdout.strip() or 'main'
-    except Exception:
-        branch = 'main'
-    if branch == 'HEAD':
-        subprocess.run(
-            ['git', 'checkout', 'main'],
-            cwd=repo_path, capture_output=True, text=True, check=False
-        )
-        branch = 'main'
-        result['warnings'].append("Checkout was detached; switched back to main")
+    Dependency installs can take minutes on a Pi, far longer than an HTTP
+    request should live, and they must finish *before* the service comes back or
+    it restarts into modules it cannot import.
 
-    # Perform git pull with one automatic retry on failure
-    max_attempts = 2
-    for attempt in range(1, max_attempts + 1):
-        try:
-            pull_proc = subprocess.run(
-                ['git'] + _GIT_UPDATE_ID + ['pull', 'origin', branch],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            result['output'] = pull_proc.stdout.strip()
-            logger.info(f"Git pull completed: {result['output']}")
-            break  # success
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git pull attempt {attempt}/{max_attempts} failed: {error_msg}")
+    systemd-run is preferred because anything this process spawns stays in the
+    ragnar.service cgroup and is killed the instant the service restarts -
+    including the restart command itself. A transient unit escapes that.
+    """
+    script = os.path.join(RAGNAR_REPO_PATH, 'scripts', 'post_update.sh')
+    if not os.path.isfile(script):
+        warnings.append('scripts/post_update.sh is missing; falling back to a plain restart')
+        return 'failed'
 
-            if attempt >= max_attempts:
-                # Last resort: make the checkout match origin/<branch>
-                # exactly. Callers stash local changes beforehand (and the
-                # retry path already resets the tree), so this only discards
-                # merge debris, never user work.
-                try:
-                    subprocess.run(
-                        ['git', 'fetch', 'origin', branch],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    subprocess.run(
-                        ['git', 'reset', '--hard', f'origin/{branch}'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['output'] = f"Forced checkout to origin/{branch} after pull failures"
-                    result['warnings'].append(
-                        f"git pull kept failing ({error_msg}); forced the checkout to match origin/{branch}")
-                    break
-                except Exception:
-                    result['error'] = f"Git pull failed: {error_msg}"
-                    return result
+    args = ['bash', script, '--repo', RAGNAR_REPO_PATH]
+    if install_deps:
+        args.append('--deps')
 
-            # Auto-recover before retrying
-            recovered = False
-            err_lower = error_msg.lower()
-
-            # Transient network trouble reaching origin — nothing to repair
-            # locally, just wait and retry.
-            if any(tok in err_lower for tok in (
-                    'could not resolve host', 'unable to access',
-                    'connection timed out', 'could not read from remote',
-                    'connection reset', 'early eof')):
-                result['warnings'].append("Transient network error contacting origin; retrying")
-                recovered = True
-
-            # Lock file appeared during pull — likely another git process (a
-            # background update check) still running. Wait for it to finish,
-            # then clear whatever lock remains and retry.
-            if 'lock' in err_lower or 'another git process' in err_lower:
-                time.sleep(3)
-                _clear_git_locks(repo_path, result['warnings'])
-                recovered = True
-
-            # Merge conflict or dirty state
-            if 'conflict' in err_lower or 'merge' in err_lower or 'overwritten by merge' in err_lower:
-                try:
-                    subprocess.run(
-                        ['git', 'reset', '--hard', 'HEAD'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    recovered = True
-                    result['warnings'].append("Reset working tree to resolve conflicts and retrying pull")
-                except Exception:
-                    pass
-
-            # Diverged history
-            if 'diverge' in err_lower or 'need to specify' in err_lower:
-                try:
-                    subprocess.run(
-                        ['git'] + _GIT_UPDATE_ID + ['pull', '--rebase'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['output'] = 'Pulled with rebase after divergence'
-                    result['warnings'].append("Branches had diverged; resolved with rebase")
-                    recovered = True
-                    break  # rebase pull already succeeded
-                except Exception:
-                    pass
-
-            if not recovered:
-                # Generic recovery: reset and retry
-                try:
-                    subprocess.run(
-                        ['git', 'reset', '--hard', 'HEAD'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['warnings'].append(f"Auto-recovery: reset working tree and retrying (was: {error_msg})")
-                except Exception:
-                    result['error'] = f"Git pull failed: {error_msg}"
-                    return result
-
-            # Brief pause so a transient condition (network blip, concurrent
-            # git process winding down) has a chance to clear before the retry.
-            time.sleep(2)
-            logger.info(f"Auto-recovery applied, retrying git pull...")
-
-    # Ensure executable bits remain in place after pull
-    try:
-        logger.info("Making scripts executable after git pull...")
-        # chmod does not expand globs when invoked without a shell, so the
-        # wildcard passes go through find instead.
-        chmod_commands = [
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/Ragnar.py'],
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/kill_port_8000.sh'],
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/webapp_modern.py'],
-            ['sudo', 'find', '/home/ragnar/Ragnar', '-name', '*.sh', '-exec', 'chmod', '+x', '{}', ';'],
-            ['sudo', 'find', '/home/ragnar/Ragnar', '-maxdepth', '1', '-name', '*.py', '-exec', 'chmod', '+x', '{}', ';']
+    if shutil.which('systemd-run'):
+        launchers = [
+            ['sudo', '-n', 'systemd-run', '--unit=ragnar-post-update', '--collect',
+             '--no-block', '--description=Ragnar post-update tasks'] + args,
+            ['systemd-run', '--unit=ragnar-post-update', '--collect', '--no-block',
+             '--description=Ragnar post-update tasks'] + args,
         ]
-
-        for cmd in chmod_commands:
+        for launcher in launchers:
             try:
-                subprocess.run(cmd, capture_output=True, text=True, check=False)
-            except Exception as chmod_error:
-                logger.debug(f"Chmod command failed (continuing): {cmd} - {chmod_error}")
+                proc = subprocess.run(launcher, capture_output=True, text=True, timeout=30)
+                if proc.returncode == 0:
+                    logger.info("Post-update tasks handed to transient unit ragnar-post-update")
+                    return 'systemd'
+                logger.warning(f"systemd-run launch failed: {proc.stderr.strip()}")
+            except Exception as e:
+                logger.warning(f"systemd-run launch error: {e}")
 
-        logger.info("Executable permissions refreshed")
-    except subprocess.CalledProcessError as e:
-        warning = f"Chmod failed (continuing): {e.stderr.strip() or e.stdout.strip()}"
-        logger.warning(warning)
-        result['warnings'].append(warning)
+    # No systemd-run (or it refused): detach as best we can. It still performs
+    # its own restart at the end, so the caller must not add a second one.
+    try:
+        log_path = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.log')
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_fh = open(log_path, 'ab')
+        command = args if os.geteuid() == 0 else ['sudo', '-n'] + args
+        subprocess.Popen(command, stdout=log_fh, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        warnings.append('Post-update tasks started without systemd-run; if the restart cuts them '
+                        'short, run: sudo bash scripts/post_update.sh')
+        return 'detached'
     except Exception as e:
-        warning = f"Chmod error (continuing): {e}"
-        logger.warning(warning)
-        result['warnings'].append(warning)
+        warnings.append(f"Could not start post-update tasks: {e}")
+        return 'failed'
 
-    # Provision radios (rfkill) + network diagnostic tools + lldpd, the same way
-    # the CLI updater does. Without this, updating from the Settings tab only
-    # pulled code and a device would be left missing traceroute/mtr/lldpd/etc.
-    # The shared script is idempotent and never fails the update on a single
-    # missing tool, so provisioning problems become warnings, not hard errors.
-    provision_script = os.path.join(repo_path, 'scripts', 'provision_network_tools.sh')
-    if os.path.isfile(provision_script):
-        try:
-            logger.info("Launching network tool provisioning in background...")
-            log_path = os.path.join(repo_path, 'data', 'logs', 'provision_network_tools.log')
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            log_fh = open(log_path, 'ab')
-            # Detach (start_new_session) and fire-and-forget so slow apt installs
-            # never delay the update response or the service restart the caller
-            # schedules right after this returns. Progress lands in the log file.
-            subprocess.Popen(
-                ['sudo', 'bash', provision_script],
-                stdout=log_fh, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, start_new_session=True
-            )
-            result['warnings'].append(
-                "Network tools are being provisioned in the background "
-                "(see data/logs/provision_network_tools.log)")
-        except Exception as e:
-            warning = f"Could not start network tool provisioning (continuing): {e}"
-            logger.warning(warning)
-            result['warnings'].append(warning)
-    else:
-        warning = "provision_network_tools.sh not found - network tools not provisioned"
-        logger.warning(warning)
-        result['warnings'].append(warning)
 
-    result['success'] = True
-    return result
+def _finalize_update(update_result: dict) -> None:
+    """Kick off dependency install + provisioning + restart after a good pull."""
+    warnings = update_result.setdefault('warnings', [])
+    outcome = _launch_post_update(update_result.get('requirements_changed', False), warnings)
+    update_result['post_update_started'] = outcome != 'failed'
+    update_result['restart_pending'] = True
+    if outcome == 'failed':
+        # Nothing else will restart the service, so do it here: the new code is
+        # on disk and running it is better than leaving the old one loaded.
+        _schedule_service_restart()
+
+
+def _update_response(update_result: dict):
+    """Turn a git_updater result into the JSON shape the dashboard expects."""
+    payload = {
+        'success': bool(update_result.get('ok')),
+        'warnings': update_result.get('warnings', []),
+        'output': update_result.get('output', ''),
+        'update_output': update_result.get('output', ''),
+        'branch': update_result.get('branch', ''),
+        'from_commit': update_result.get('from_commit', ''),
+        'to_commit': update_result.get('to_commit', ''),
+        'forced': update_result.get('forced', False),
+        'local_changes_preserved': bool(update_result.get('stash_ref')),
+        'local_changes_restored': bool(update_result.get('stash_ref'))
+                                  and not update_result.get('stash_kept'),
+        'requirements_changed': update_result.get('requirements_changed', False),
+        'post_update_started': update_result.get('post_update_started', False),
+        'restart_pending': update_result.get('restart_pending', False),
+    }
+    if payload['success']:
+        payload['message'] = 'Update applied successfully.'
+        return jsonify(payload)
+
+    payload['error'] = update_result.get('error') or 'Unknown error during update'
+    payload['code'] = update_result.get('code', '')
+    payload['hint'] = update_result.get('hint', '')
+    payload['steps'] = update_result.get('steps', [])
+    # 'busy' is not a failure - another update is simply already running.
+    return jsonify(payload), 409 if payload['code'] == 'busy' else 500
 
 
 def _execute_pwn_git_update(repo_path: str) -> dict:
@@ -10844,310 +10618,99 @@ def _schedule_service_restart(delay_seconds: int = 2) -> None:
 
 @app.route('/api/system/check-updates')
 def check_updates():
-    """Check for system updates using git"""
+    """Report whether an update is available, and the state of the checkout.
+
+    Every open dashboard tab polls this on a timer, so it is bounded, never
+    raises, and never takes the update lock away from a user who is trying to
+    update - when an update is running it answers from the refs already on disk.
+    """
     try:
-        import subprocess
-        import os
-        
-        # Get current working directory (should be the repo root)
-        # Use the directory where the webapp is running from, not the file location
-        repo_path = os.getcwd()
-        
-        logger.info(f"Checking for updates in repository: {repo_path}")
-
-        # Self-heal before any git command so a check never dead-ends on a stale
-        # lock or a dubious-ownership error (same guards the update path uses).
-        _ensure_git_safe_dir(repo_path)
-
-        # Fetch latest changes from remote — but never while an update holds
-        # the git mutex: a background check's fetch racing the update's pull
-        # (and the unconditional lock sweep that ran with it) is exactly what
-        # made first-click updates fail intermittently. If an update is in
-        # flight, answer from the refs we already have.
-        if _GIT_MUTEX.acquire(blocking=False):
-            try:
-                _clear_git_locks(repo_path, [], min_age_seconds=_GIT_LOCK_STALE_SECONDS)
-                try:
-                    fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
-                    logger.info(f"Git fetch completed: {fetch_result.stdout}")
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Git fetch failed: {e.stderr}")
-                    # Try to fix git safe directory issue and retry
-                    try:
-                        subprocess.run(['git', 'config', '--global', '--add', 'safe.directory', repo_path],
-                                     cwd=repo_path, check=True, capture_output=True)
-                        logger.info(f"Added {repo_path} to git safe directories")
-                        # Retry fetch
-                        fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
-                        logger.info(f"Git fetch completed after fixing safe directory: {fetch_result.stdout}")
-                    except subprocess.CalledProcessError as e2:
-                        logger.error(f"Git fetch still failed after fixing safe directory: {e2.stderr}")
-                        return jsonify({
-                            'error': 'Failed to fetch from remote repository. Git safe directory issue detected.',
-                            'fix_command': f'git config --global --add safe.directory {repo_path}',
-                            'detailed_error': str(e2.stderr)
-                        }), 500
-            finally:
-                _GIT_MUTEX.release()
-        else:
-            logger.info("Update in progress; skipping git fetch for this update check")
-        
-        # Get the current branch name
-        try:
-            branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=repo_path, check=True, capture_output=True, text=True)
-            current_branch = branch_result.stdout.strip()
-        except subprocess.CalledProcessError:
-            current_branch = 'main' # Fallback
-        
-        logger.info(f"Current git branch is: {current_branch}")
-        remote_branch = f'origin/{current_branch}'
-
-        # Check if local branch is behind remote
-        try:
-            result = subprocess.run(
-                ['git', 'rev-list', '--count', f'HEAD..{remote_branch}'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            commits_behind = int(result.stdout.strip())
-            logger.info(f"Commits behind '{remote_branch}': {commits_behind}")
-        except (subprocess.CalledProcessError, ValueError) as e:
-            logger.error(f"Error checking commits behind '{remote_branch}': {e}")
-            commits_behind = 0
-        
-        # Get current HEAD commit
-        try:
-            current_result = subprocess.run(
-                ['git', 'log', 'HEAD', '--oneline', '-1'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            current_commit = current_result.stdout.strip()
-        except:
-            current_commit = "Unable to fetch current commit"
-        
-        # Get latest commit info
-        try:
-            result = subprocess.run(
-                ['git', 'log', remote_branch, '--oneline', '-1'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            latest_commit = result.stdout.strip()
-        except:
-            latest_commit = "Unable to fetch latest commit"
-
-        # Collect local working tree state so the UI can warn about conflicts/stashes
-        git_status = {
-            'is_dirty': False,
-            'has_conflicts': False,
-            'has_stash': False,
-            'stash_entries': 0,
-            'modified_files': [],
-            'conflicted_files': [],
-            'status_error': ''
-        }
-
-        try:
-            status_result = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            status_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
-            git_status['is_dirty'] = bool(status_lines)
-
-            conflict_codes = {'AA', 'DD', 'AU', 'UA', 'DU', 'UD', 'UU'}
-            for raw_line in status_lines:
-                code = raw_line[:2]
-                path_fragment = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
-                entry = {'code': code, 'path': path_fragment}
-                git_status['modified_files'].append(entry)
-                if code in conflict_codes or 'U' in code:
-                    git_status['conflicted_files'].append(entry)
-
-            git_status['has_conflicts'] = bool(git_status['conflicted_files'])
-        except subprocess.CalledProcessError as status_error:
-            git_status['status_error'] = status_error.stderr.strip() or str(status_error)
-            logger.warning(f"git status failed during update check: {git_status['status_error']}")
-
-        try:
-            stash_result = subprocess.run(
-                ['git', 'stash', 'list'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            stash_lines = [line for line in stash_result.stdout.splitlines() if line.strip()]
-            git_status['stash_entries'] = len(stash_lines)
-            git_status['has_stash'] = git_status['stash_entries'] > 0
-        except subprocess.CalledProcessError as stash_error:
-            stash_msg = stash_error.stderr.strip() or str(stash_error)
-            git_status['status_error'] = git_status['status_error'] or stash_msg
-            logger.warning(f"git stash list failed during update check: {stash_msg}")
-        
-        logger.info(f"Update check result - Behind: {commits_behind}, Current: {current_commit}, Latest: {latest_commit}")
-        
-        return jsonify({
-            'updates_available': commits_behind > 0,
-            'commits_behind': commits_behind,
-            'current_commit': current_commit,
-            'latest_commit': latest_commit,
-            'repo_path': repo_path,
-            'git_status': git_status
-        })
-        
-    except Exception as e:
+        status = git_updater.check(RAGNAR_REPO_PATH)
+    except Exception as e:  # the engine catches its own errors; this is belt-and-braces
         logger.error(f"Error checking for updates: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'code': 'git_error'}), 500
+
+    payload = {
+        'updates_available': status['updates_available'],
+        'commits_behind': status['commits_behind'],
+        'commits_ahead': status['commits_ahead'],
+        'current_commit': status['current_commit'],
+        'latest_commit': status['latest_commit'],
+        'branch': status['branch'],
+        'detached': status['detached'],
+        'repo_path': status['repo_path'],
+        'update_in_progress': status['update_in_progress'],
+        'warnings': status['warnings'],
+        'git_status': status['git_status'],
+    }
+    if not status['ok']:
+        # Still a 200: the counts above are real and the dashboard should render
+        # them. 'code' and 'hint' tell the UI what to say about the problem.
+        payload['error'] = status['error']
+        payload['code'] = status['code']
+        payload['hint'] = status['hint']
+    return jsonify(payload)
+
+
+@app.route('/api/system/update-status')
+def update_status():
+    """Lightweight progress endpoint for the update the browser is watching.
+
+    Deliberately does no network work: it is polled every few seconds while the
+    service is restarting, and its whole job is to answer "is the box running
+    the commit I asked for yet?".
+    """
+    head = git_updater.run_git(['rev-parse', 'HEAD'], RAGNAR_REPO_PATH,
+                               timeout=git_updater.GIT_QUICK_TIMEOUT)
+    state = git_updater.update_state()
+    return jsonify({
+        'commit': head.out if head.ok else '',
+        'branch': git_updater.current_branch(RAGNAR_REPO_PATH) or '',
+        'update_in_progress': state.get('running', False),
+        'step': state.get('step', ''),
+        'post_update': _post_update_status(),
+        'service_started': _PROCESS_START_TIME,
+    })
+
 
 @app.route('/api/system/update', methods=['POST'])
 def perform_update():
-    """Perform system update using git pull"""
+    """Update the box to the latest upstream commit."""
+    logger.info(f"Update requested for repository: {RAGNAR_REPO_PATH}")
     try:
-        repo_path = os.getcwd()
-        logger.info(f"Performing update in repository: {repo_path}")
-        with _GIT_MUTEX:
-            update_result = _execute_git_update(repo_path)
-
-        if not update_result['success']:
-            return jsonify({
-                'success': False,
-                'error': update_result['error'] or 'Unknown error during git pull',
-                'warnings': update_result['warnings'],
-                'suggestion': 'Please check repository status and resolve any conflicts'
-            }), 500
-
-        _schedule_service_restart()
-
-        return jsonify({
-            'success': True,
-            'message': 'Update completed successfully',
-            'output': update_result['output'],
-            'warnings': update_result['warnings']
-        })
-        
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
     except Exception as e:
         logger.error(f"Error performing update: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
+
+    if not update_result['ok']:
+        return _update_response(update_result)
+
+    _finalize_update(update_result)
+    return _update_response(update_result)
 
 
 @app.route('/api/system/stash-update', methods=['POST'])
 def stash_and_update():
-    """Automatically stash local changes, pull updates, and drop the temporary stash."""
-    repo_path = os.getcwd()
-    payload = request.get_json(silent=True) or {}
-    stash_message = payload.get('message') or f"Ragnar auto stash {datetime.utcnow().isoformat()}"
-    include_untracked = payload.get('include_untracked', True)
+    """Update a checkout that has local edits.
 
-    stash_cmd = ['git'] + _GIT_UPDATE_ID + ['stash', 'push']
-    if include_untracked:
-        stash_cmd.append('-u')
-    stash_cmd.extend(['-m', stash_message])
+    Kept as its own route for the dashboard's benefit, but it is the same call:
+    the engine stashes local changes whenever it finds them and replays them
+    afterwards, so there is no longer a separate, more fragile code path for
+    dirty trees.
+    """
+    logger.info("Update (with local changes) requested via UI")
+    try:
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
+    except Exception as e:
+        logger.error(f"Error performing update: {e}")
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
 
-    logger.info("Auto stash + update requested via UI")
+    if not update_result['ok']:
+        return _update_response(update_result)
 
-    # The whole stash → pull → pop sequence runs under the git mutex so a
-    # background update check's `git fetch` can never race it — that overlap
-    # was a root cause of "works on the second click".
-    with _GIT_MUTEX:
-        # Prepare the repo BEFORE the stash — on a fresh install the stash is
-        # the first git command this service ever runs, and it dies on dubious
-        # ownership / stale locks / root-owned files unless those are fixed
-        # first. This was exactly the "Update failed. Fix issues and retry."
-        # dead end users hit from the Settings tab.
-        preflight_warnings = []
-        _prepare_git_repo(repo_path, preflight_warnings)
-
-        try:
-            stash_proc = subprocess.run(
-                stash_cmd,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git stash failed: {error_msg}")
-            return jsonify({
-                'success': False,
-                'error': f'Git stash failed: {error_msg}',
-                'warnings': preflight_warnings
-            }), 500
-
-        stash_stdout = stash_proc.stdout.strip() or stash_proc.stderr.strip() or ''
-        stash_created = 'No local changes to save' not in stash_stdout
-        stash_ref = 'stash@{0}' if stash_created else None
-
-        if stash_created:
-            logger.info(f"Local changes stashed as {stash_ref}")
-        else:
-            logger.info("Auto stash requested but no local changes were found")
-
-        update_result = _execute_git_update(repo_path, prepared=True)
-        update_result['warnings'] = preflight_warnings + update_result['warnings']
-        if not update_result['success']:
-            # Put the tree back the way we found it so a failed update doesn't
-            # silently hide local changes in a stash (which also made the retry
-            # "work" for the wrong reason). If the pop itself fails, the stash
-            # stays preserved for manual recovery.
-            restored = False
-            if stash_created and stash_ref:
-                pop_back = subprocess.run(
-                    ['git', 'stash', 'pop', stash_ref],
-                    cwd=repo_path, capture_output=True, text=True, check=False
-                )
-                restored = pop_back.returncode == 0
-                if restored:
-                    logger.info("Update failed; local changes restored from auto stash")
-                else:
-                    logger.error("Auto stash update failed and stash could not be re-applied; stash preserved for manual recovery")
-            return jsonify({
-                'success': False,
-                'error': update_result['error'] or 'Unknown error during git pull',
-                'warnings': update_result['warnings'],
-                'local_changes_preserved': stash_created,
-                'local_changes_restored': restored
-            }), 500
-
-        if stash_created and stash_ref:
-            try:
-                pop_proc = subprocess.run(
-                    ['git', 'stash', 'pop', stash_ref],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                pop_msg = pop_proc.stdout.strip() or pop_proc.stderr.strip() or ''
-                if pop_msg:
-                    logger.debug(f"Stash pop output: {pop_msg}")
-                logger.info(f"Reapplied local changes from {stash_ref}")
-            except subprocess.CalledProcessError as e:
-                stash_pop_warning = e.stderr.strip() or e.stdout.strip() or str(e)
-                logger.warning(f"Failed to reapply stash {stash_ref}: {stash_pop_warning}")
-                update_result['warnings'].append(
-                    "Local changes were saved but could not be re-applied automatically. Resolve conflicts and run 'git stash pop' manually."
-                )
-
-    _schedule_service_restart()
-
-    return jsonify({
-        'success': True,
-        'message': 'Update applied successfully.',
-        'warnings': update_result['warnings'],
-        'update_output': update_result['output']
-    })
+    _finalize_update(update_result)
+    return _update_response(update_result)
 
 @app.route('/api/pwn/check-updates')
 def pwn_check_updates():
@@ -11418,39 +10981,28 @@ def pwn_stash_and_update():
 
 @app.route('/api/system/resolve-conflicts', methods=['POST'])
 def resolve_git_conflicts():
-    """Resolve git merge conflicts by resetting to HEAD then pulling latest."""
-    repo_path = os.getcwd()
-    with _GIT_MUTEX:
-        try:
-            # Hard reset clears both the index (staged conflicts) and working tree
-            subprocess.run(
-                ['git', 'reset', '--hard', 'HEAD'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            logger.info("Git reset --hard HEAD completed")
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git reset failed: {error_msg}")
-            return jsonify({'success': False, 'error': f'Git reset failed: {error_msg}'}), 500
+    """Clear a conflicted working tree, then update.
 
-        update_result = _execute_git_update(repo_path)
-    if not update_result['success']:
-        return jsonify({
-            'success': False,
-            'error': update_result['error'] or 'Git pull failed after reset',
-            'warnings': update_result['warnings']
-        }), 500
+    The update engine already stashes and force-syncs whatever it finds, so the
+    only thing this route still adds is discarding a half-finished merge left in
+    the index before starting - and telling the user that is what happened.
+    """
+    logger.info("Conflict resolution + update requested via UI")
+    warnings = []
+    git_updater.abort_in_progress_operation(RAGNAR_REPO_PATH, warnings)
+    try:
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
+    except Exception as e:
+        logger.error(f"Error resolving conflicts: {e}")
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
 
-    _schedule_service_restart()
-    return jsonify({
-        'success': True,
-        'message': 'Conflicts resolved and update applied successfully.',
-        'output': update_result['output'],
-        'warnings': update_result['warnings']
-    })
+    update_result.setdefault('warnings', [])[:0] = warnings
+    if not update_result['ok']:
+        return _update_response(update_result)
+
+    _finalize_update(update_result)
+    response = _update_response(update_result)
+    return response
 
 
 @app.route('/api/system/fix-git', methods=['POST'])
