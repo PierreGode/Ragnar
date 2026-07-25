@@ -70,6 +70,22 @@ never block the install if unavailable.
 
 ## Troubleshooting
 
+**"Kiosk state did not settle"** in the web UI means the poll gave up: no
+background job was running, nothing reported an error, and the state never
+reached `active`/`installed`. Two things it is *not*:
+
+- **A slow first install is no longer this.** Enabling the kiosk for the first
+  time runs the installer, which apt-installs chromium — minutes on a Pi Zero
+  2 W. The UI now shows `Installing the kiosk (fetching chromium)…` with an
+  elapsed counter and waits, instead of timing out at ~25 s on a healthy job.
+- **An installer failure is no longer this either.** It now reports the actual
+  error (e.g. `Installer failed: E: Unable to locate package chromium`). Note
+  that this failure never reaches `journalctl -u ragnar-kiosk` — the unit does
+  not exist yet — so look in the **Ragnar log** for lines tagged `[kiosk]`.
+
+If you still see it, the service exists but is stuck part-way (usually
+`activating`). Check both logs below.
+
 **Logs (on the Pi):**
 - Wrapper log: `/var/log/ragnar/kiosk-wrapper.log` — board, RAM, the
   `input: touchscreen=… keyboard=… osk=…` line, which OSK launched, target URL.

@@ -24415,6 +24415,32 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
             })();
             const isStableFailure = data.service_state === 'failed';
 
+            // A background install/teardown is still running. On a slow board
+            // the installer apt-installs chromium and takes minutes, so the
+            // attempt budget must not burn down while it works — otherwise a
+            // healthy install reports "did not stabilize" at ~25s.
+            if (data.busy) {
+                const label = {
+                    installing: 'Installing the kiosk (fetching chromium) — this can take several minutes…',
+                    removing: 'Removing the kiosk…',
+                    restarting: 'Restarting the kiosk…',
+                    starting: 'Starting the kiosk…'
+                }[data.phase] || 'Working…';
+                const secs = data.elapsed ? ' (' + Math.round(data.elapsed) + 's)' : '';
+                _setKioskMessage(label + secs, 'info');
+                attempts = 0;                       // don't time out a live job
+                _kioskPollTimer = setTimeout(tick, 2000);
+                return;
+            }
+
+            // The job finished and reported why it failed. This is the case the
+            // journal cannot answer: an installer failure means the unit was
+            // never created, so `journalctl -u ragnar-kiosk` is empty.
+            if (data.task_error) {
+                _setKioskMessage(data.task_error, 'error');
+                return;
+            }
+
             if (isStableSuccess) {
                 let msg;
                 if (!expectEnabled) {
@@ -24441,7 +24467,14 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
         if (attempts < maxAttempts) {
             _kioskPollTimer = setTimeout(tick, 2000);
         } else {
-            _setKioskMessage('Kiosk state did not stabilize — check the Pi journal.', 'error');
+            // Genuinely stuck: no background job running, no reported error,
+            // and the state never settled. Name both places worth looking,
+            // since which one has the answer depends on how far it got.
+            _setKioskMessage(
+                'Kiosk state did not settle. Check `journalctl -u ragnar-kiosk` on the Pi, '
+                + 'and the Ragnar log for lines tagged [kiosk].',
+                'error'
+            );
         }
     };
     _kioskPollTimer = setTimeout(tick, 1500);

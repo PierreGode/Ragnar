@@ -3527,6 +3527,26 @@ def _kiosk_autostart_paths() -> list[str]:
     return paths
 
 
+# Kiosk install/teardown runs on a background thread and can take many minutes
+# on a slow board — the installer apt-installs chromium. The UI polls
+# /api/kiosk/status while that happens, so the task's progress and any failure
+# have to be visible there. Without it the API reported 'not_installed' for the
+# whole install, which is indistinguishable from "nothing happened", and the UI
+# gave up after ~25s on a job that was running fine.
+_kiosk_task = {'busy': False, 'phase': 'idle', 'error': None, 'started': 0.0}
+_kiosk_task_lock = threading.Lock()
+
+
+def _kiosk_task_set(**kw) -> None:
+    with _kiosk_task_lock:
+        _kiosk_task.update(kw)
+
+
+def _kiosk_task_get() -> dict:
+    with _kiosk_task_lock:
+        return dict(_kiosk_task)
+
+
 def _kiosk_mode() -> str:
     """Return 'service', 'autostart', or 'not_installed' based on what's on disk."""
     if _kiosk_autostart_paths():
@@ -3605,23 +3625,36 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
     """Background worker: install/start/stop the kiosk to match config.
     Handles both modes (autostart .desktop entry on Pi OS Desktop, systemd
     unit on Pi OS Lite) — the installer picks the right one."""
+    _kiosk_task_set(busy=True, phase='starting', error=None, started=time.time())
     try:
         if new_enabled and not prev_enabled:
             if not _kiosk_installed():
                 logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
+                # Installing chromium: minutes on a Pi Zero 2 W. The UI shows
+                # this phase instead of timing the poll out.
+                _kiosk_task_set(phase='installing')
                 proc = subprocess.run(
                     ['sudo', 'bash', KIOSK_INSTALL_SCRIPT],
                     capture_output=True, text=True, timeout=600, check=False
                 )
                 if proc.returncode != 0:
+                    detail = (proc.stderr.strip() or proc.stdout.strip() or '').splitlines()
+                    detail = detail[-1] if detail else f'exit code {proc.returncode}'
                     logger.error(f"[kiosk] install failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
+                    # Surface it. This failure never reaches the systemd journal
+                    # — the unit does not exist yet — so telling the user to
+                    # check journalctl sent them somewhere with nothing in it.
+                    _kiosk_task_set(phase='failed', error=f'Installer failed: {detail}')
                     return
                 logger.info("[kiosk] install completed")
             mode = _kiosk_mode()
+            _kiosk_task_set(phase='starting')
             if mode == 'service':
                 enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
                 if enable_proc.returncode != 0:
-                    logger.error(f"[kiosk] enable --now failed: {enable_proc.stderr.strip() or enable_proc.stdout.strip()}")
+                    err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
+                    logger.error(f"[kiosk] enable --now failed: {err}")
+                    _kiosk_task_set(phase='failed', error=f'Could not start the kiosk service: {err}')
                 else:
                     logger.info("[kiosk] systemd service enabled and started")
             else:
@@ -3629,6 +3662,7 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
                 if not _kiosk_running():
                     _spawn_kiosk_in_session()
         elif prev_enabled and not new_enabled:
+            _kiosk_task_set(phase='removing')
             # Kill any running kiosk chromium first (autostart mode)
             subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
                            capture_output=True, timeout=10, check=False)
@@ -3640,6 +3674,7 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
             )
             logger.info("[kiosk] kiosk removed")
         elif new_enabled and settings_changed:
+            _kiosk_task_set(phase='restarting')
             mode = _kiosk_mode()
             if mode == 'service':
                 restart_proc = _run_systemctl(['restart', KIOSK_SERVICE])
@@ -3656,8 +3691,18 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
                 _spawn_kiosk_in_session()
     except subprocess.TimeoutExpired:
         logger.error("[kiosk] dispatch timed out")
+        _kiosk_task_set(phase='failed', error='Kiosk install/teardown timed out.')
     except Exception as exc:
         logger.error(f"[kiosk] dispatch error: {exc}")
+        _kiosk_task_set(phase='failed', error=str(exc))
+    finally:
+        # Always clear busy, or a crashed dispatch would leave the UI polling
+        # forever. 'failed' is left in place so the reason survives for the
+        # next status read; any later dispatch resets it.
+        with _kiosk_task_lock:
+            _kiosk_task['busy'] = False
+            if _kiosk_task.get('phase') != 'failed':
+                _kiosk_task['phase'] = 'idle'
 
 
 def _deferred_self_stop(delay: int = 1) -> None:
@@ -5874,11 +5919,20 @@ def kiosk_status():
             state = 'active' if _kiosk_running() else 'inactive'
         else:
             state = 'not_installed'
+        task = _kiosk_task_get()
         return jsonify({
             'installed': mode != 'not_installed',
             'mode': mode,
             'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
             'service_state': state,
+            # Background install/teardown progress. 'busy' tells the UI to keep
+            # waiting instead of declaring a timeout; 'task_error' carries the
+            # real reason a job failed, which for an installer failure never
+            # reaches the systemd journal because the unit does not exist yet.
+            'busy': bool(task.get('busy')),
+            'phase': task.get('phase') or 'idle',
+            'task_error': task.get('error'),
+            'elapsed': round(max(0.0, time.time() - task['started']), 1) if task.get('started') else 0,
             'url': shared_data.config.get('kiosk_url', 'http://localhost:8000'),
             'rotation': shared_data.config.get('kiosk_rotation', 0),
             'hide_cursor': bool(shared_data.config.get('kiosk_hide_cursor', True)),
