@@ -90,6 +90,12 @@ GIT_TRANSFER_GUARDS = [
 _UPDATE_LOCK = threading.Lock()
 _UPDATE_STATE = {'running': False, 'started': None, 'step': ''}
 
+# A missing .git is repaired by the update check itself rather than reported as
+# a problem, but the repair needs the network. When it fails (box still
+# offline), back off instead of retrying on every dashboard poll.
+REATTACH_RETRY_SECONDS = 600
+_LAST_REATTACH_ATTEMPT = [0.0]
+
 
 class GitResult:
     """Outcome of one git invocation. Never raises - callers branch on .ok."""
@@ -497,6 +503,22 @@ def ensure_remote(repo_path, warnings=None):
     return True, ''
 
 
+def _reattach_branch_candidates(repo_path):
+    """Branches to try when rebuilding metadata, upstream's own default first."""
+    candidates = []
+    res = run_git(['ls-remote', '--symref', 'origin', 'HEAD'], repo_path,
+                  timeout=GIT_QUICK_TIMEOUT, network=True)
+    if res.ok:
+        for line in res.out.splitlines():
+            if line.startswith('ref: ') and 'refs/heads/' in line:
+                candidates.append(line.split('refs/heads/', 1)[1].split()[0])
+                break
+    for fallback in FALLBACK_BRANCHES:
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
 def reattach_repository(repo_path, warnings=None):
     """Rebuild .git in place for a tarball install, keeping every file on disk.
 
@@ -510,24 +532,37 @@ def reattach_repository(repo_path, warnings=None):
     if os.path.isdir(git_dir):
         return True, ''
     logger.warning("No .git found - reattaching this tarball install to upstream")
-    steps = [
+    for args, timeout, network in (
         (['init', '-q', repo_path], GIT_LOCAL_TIMEOUT, False),
         (['remote', 'add', 'origin', DEFAULT_REMOTE_URL], GIT_QUICK_TIMEOUT, False),
-        (['fetch', '--depth=1', 'origin', 'main'], GIT_NETWORK_TIMEOUT, True),
-    ]
-    for args, timeout, network in steps:
+    ):
         res = run_git(args, repo_path, timeout=timeout, network=network)
         if not res.ok:
             shutil.rmtree(git_dir, ignore_errors=True)
             return False, res.message
-    # Point main at upstream WITHOUT touching the working tree: files already on
-    # disk survive, and anything that differs from upstream simply shows up as
-    # a normal local modification that the update path then handles.
+
+    # Ask upstream which branch it publishes rather than assuming 'main': a
+    # wrong guess fails with "couldn't find remote ref", which reads to the user
+    # as "the repair does not work" on a box that is perfectly fine.
+    fetch_err = ''
+    for branch in _reattach_branch_candidates(repo_path):
+        res = run_git(['fetch', '--depth=1', 'origin', branch], repo_path,
+                      timeout=GIT_NETWORK_TIMEOUT, network=True)
+        if res.ok:
+            break
+        fetch_err = res.message
+    else:
+        shutil.rmtree(git_dir, ignore_errors=True)
+        return False, fetch_err or 'no upstream branch could be fetched'
+
+    # Point the branch at upstream WITHOUT touching the working tree: files
+    # already on disk survive, and anything that differs from upstream simply
+    # shows up as a normal local modification that the update path then handles.
     for args in (
         ['reset', '-q', '--mixed', 'FETCH_HEAD'],
-        ['branch', '-q', '-f', 'main', 'FETCH_HEAD'],
-        ['symbolic-ref', 'HEAD', 'refs/heads/main'],
-        ['branch', '-q', '--set-upstream-to=origin/main', 'main'],
+        ['branch', '-q', '-f', branch, 'FETCH_HEAD'],
+        ['symbolic-ref', 'HEAD', f'refs/heads/{branch}'],
+        ['branch', '-q', f'--set-upstream-to=origin/{branch}', branch],
     ):
         run_git(args, repo_path, timeout=GIT_LOCAL_TIMEOUT, identity=True)
     # Restore only files upstream has that the tree is missing (a tarball can be
@@ -688,6 +723,28 @@ def _working_tree_status(repo_path):
     return status
 
 
+def _reattach_for_check(repo_path, warnings):
+    """Rebuild missing repository metadata from inside the update check.
+
+    Bounded on both sides: it never runs while an update holds the lock, and a
+    failure (offline box) backs off instead of re-downloading on every
+    dashboard poll - every open tab polls this endpoint.
+    """
+    now = time.time()
+    if now - _LAST_REATTACH_ATTEMPT[0] < REATTACH_RETRY_SECONDS:
+        return False
+    if not _UPDATE_LOCK.acquire(blocking=False):
+        return False
+    try:
+        _LAST_REATTACH_ATTEMPT[0] = now
+        ok, err = reattach_repository(repo_path, warnings)
+        if not ok:
+            logger.warning(f"Automatic reattach during update check failed: {err}")
+        return ok
+    finally:
+        _UPDATE_LOCK.release()
+
+
 def check(repo_path=None, allow_fetch=True):
     """Report whether an update is available. Bounded, and never raises.
 
@@ -723,14 +780,20 @@ def check(repo_path=None, allow_fetch=True):
                        'hint': _HINTS['git_missing']})
         return result
 
-    if not os.path.isdir(os.path.join(repo_path, '.git')):
-        result.update({'ok': False, 'code': 'not_a_repo',
-                       'error': 'This install has no git metadata (installed from a tarball).',
-                       'hint': 'Click Update anyway - Ragnar will reattach it to the upstream '
-                               'repository automatically.'})
-        return result
-
     ensure_safe_directory(repo_path)
+
+    if not os.path.isdir(os.path.join(repo_path, '.git')):
+        # A tarball install is not broken and it is not behind: the installer
+        # unpacked the current release, it just left no metadata to compare
+        # against. Rebuilding that is cheap and needs no user decision, so do it
+        # here rather than parking a freshly installed box on "Needs attention"
+        # and asking the user to click Repair on an install that is up to date.
+        if not _reattach_for_check(repo_path, warnings):
+            result.update({'ok': False, 'code': 'not_a_repo',
+                           'error': 'This install has no git metadata (installed from a tarball).',
+                           'hint': 'Ragnar could not rebuild it - check the box\'s internet '
+                                   'connection. Clicking Update retries the repair.'})
+            return result
 
     # Only fetch when no update holds the lock. A background check's fetch
     # racing a user-clicked pull is exactly what made first-click updates fail.
