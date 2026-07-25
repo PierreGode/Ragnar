@@ -837,6 +837,35 @@ setup_ragnar() {
     if [ -d "Ragnar/.git" ] || [ -d "Ragnar/actions" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"
+        # A tree with actions/ but no .git is a tarball install (what this
+        # script produces when git is unusable at install time). It counts as
+        # "existing" above, so re-running the installer would skip the clone and
+        # leave it un-updatable forever — the one thing a user re-runs the
+        # installer to fix. Reattach it here instead. Deliberately NOT a
+        # re-clone: the else branch below does rm -rf, which would take the
+        # user's data/ with it.
+        if [ ! -d "Ragnar/.git" ] && [ "$GIT_WORKS" = true ]; then
+            log "WARNING" "Existing install has no .git (tarball install) — reattaching to upstream"
+            echo -e "${YELLOW}Reattaching this install to the git repository (your files are kept)...${NC}"
+            if git init -q Ragnar 2>/dev/null \
+               && git -C Ragnar remote add origin https://github.com/PierreGode/Ragnar.git 2>/dev/null \
+               && git -C Ragnar fetch --depth=1 origin main 2>/dev/null; then
+                # Mixed reset only: the working tree on disk is left untouched,
+                # so local edits and data files survive as ordinary changes.
+                git -C Ragnar reset -q --mixed FETCH_HEAD 2>/dev/null || true
+                git -C Ragnar branch -q -f main FETCH_HEAD 2>/dev/null || true
+                git -C Ragnar symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+                git -C Ragnar branch -q --set-upstream-to=origin/main main 2>/dev/null || true
+                # Restore only files upstream has that the tarball lacked.
+                git -C Ragnar ls-files -d -z 2>/dev/null \
+                    | xargs -0 -r git -C Ragnar checkout -- 2>/dev/null || true
+                log "SUCCESS" "Reattached existing install to the git repository"
+                echo -e "${GREEN}Reattached — future updates will work.${NC}"
+            else
+                rm -rf Ragnar/.git
+                log "WARNING" "Could not reattach to upstream (network?) — install continues, but updates will not work"
+            fi
+        fi
     else
         # Remove empty/invalid directory if it exists
         if [ -d "Ragnar" ]; then

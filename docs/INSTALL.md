@@ -86,9 +86,15 @@ This has a knock-on effect worth knowing about. The installer checks git up
 front, and when it is unusable it downloads a release tarball instead of
 cloning. That produces a complete, working Ragnar — but with **no `.git`
 directory**, so every later update has no repository to update. If your box was
-installed that way, `update_ragnar.sh` now reattaches it to the upstream
-repository in place, keeping every file on disk, and continues with the update.
-Nothing needs to be reinstalled; just fix git and re-run the update.
+installed that way, both `update_ragnar.sh` and re-running `install_ragnar.sh`
+now reattach it to the upstream repository in place, keeping every file on disk.
+Nothing needs to be reinstalled; just fix git and re-run either one.
+
+Re-running the installer used to be a no-op here: it treats a directory
+containing `actions/` as an existing install and skips the clone, so a tarball
+tree stayed permanently without `.git`. Note that the installer never re-clones
+over an existing directory — the path that would `rm -rf` it would take your
+`data/` with it — so reattaching in place is the only safe repair.
 
 #### Ragnar installed to the wrong directory
 
