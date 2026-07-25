@@ -125,6 +125,31 @@ than the router.
 > Ragnar's AP uses `192.168.4.0/24`. If your own router uses that range too —
 > eero does by default — see the portal note below.
 
+#### Adding a USB Wi-Fi dongle
+
+With a second Wi-Fi adapter (`wlan1`) the two jobs split across radios and the
+setup experience gets noticeably better:
+
+| Radio | Role |
+|---|---|
+| `wlan0` (built-in) | hosts the `Ragnar` access point |
+| `wlan1` (dongle) | client connection + background scanning |
+
+The AP stays on the **built-in** radio deliberately. Not every USB dongle's
+driver supports AP mode, whereas the Pi's on-board chip reliably does, and
+2.4 GHz is the band every phone can find.
+
+Two things this buys you:
+
+- **A failed join no longer costs you the AP.** With one radio, Ragnar must
+  drop the AP to attempt a connection and put it back if that fails. With a
+  dongle it simply joins on `wlan1` while hostapd keeps running on `wlan0`.
+- **5 GHz networks become reachable on a Pi Zero 2 W**, whose built-in radio is
+  2.4 GHz only. Without a dongle, a 5 GHz-only network cannot be joined at all.
+
+Once connected, the setup AP shuts down — the box is reachable through the
+dashboard, and the default AP key is public.
+
 #### The Wi-Fi setup portal keeps appearing instead of the dashboard
 
 If `http://<box>:8000` shows the **Wi-Fi Configuration Portal** asking you to

@@ -137,6 +137,10 @@ class WiFiManager:
         self.ap_ssid = shared_data.config.get('wifi_ap_ssid', 'Ragnar')
         self.ap_password = shared_data.config.get('wifi_ap_password', 'ragnarconnect')
         self.ap_interface = self.default_wifi_interface
+        # Resolved lazily by _client_wifi_interface(); the built-in hosts the
+        # AP and a dongle, when present, carries the client connection.
+        self._client_iface_cache = None
+        self._client_iface_cache_ts = 0.0
         self.ap_ip = "192.168.4.1"
         self.ap_subnet = "192.168.4.0/24"
         # Wardriving AP (KEY1 on the e-paper) — brought up on a spare/borrowed
@@ -182,6 +186,39 @@ class WiFiManager:
             if candidate:
                 return candidate
         return self.default_wifi_interface
+
+    def _client_wifi_interface(self):
+        """The radio that should carry the Wi-Fi *client* connection.
+
+        With a USB dongle present the two jobs split across radios, and the
+        assignment is deliberate:
+
+          - the **AP stays on the built-in** radio. Not every USB dongle's
+            driver supports AP mode at all, while the Pi's on-board chip
+            reliably does, and 2.4 GHz is the band every phone can find.
+          - the **client connection moves to the dongle**, which on a Pi Zero
+            2 W is the only way to reach a 5 GHz network — the built-in radio
+            is 2.4 GHz only.
+
+        The payoff is that the AP never has to come down: hostapd keeps the
+        built-in radio while the dongle joins, scans and roams independently.
+        On a single-radio box this returns the same interface as the AP, and
+        behaviour is unchanged.
+        """
+        # Cached briefly: this is consulted on every connection check, and the
+        # underlying lookup shells out to nmcli.
+        now = time.time()
+        if self._client_iface_cache and (now - self._client_iface_cache_ts) < 10.0:
+            return self._client_iface_cache
+        iface = self._find_secondary_wifi_interface() or self.default_wifi_interface
+        self._client_iface_cache = iface
+        self._client_iface_cache_ts = now
+        return iface
+
+    def _has_dedicated_client_radio(self):
+        """True when the client connection has a radio of its own, so bringing
+        Wi-Fi up does not require tearing the AP down."""
+        return self._client_wifi_interface() != self.ap_interface
 
     def _find_secondary_wifi_interface(self):
         """Find a WiFi interface that is NOT being used for AP mode.
@@ -771,12 +808,19 @@ class WiFiManager:
         self.logger.info("Endless Loop: Enabling WiFi mode - system will auto-reconnect to known networks")
         
         try:
-            # Return interface to NetworkManager control (if it was in AP mode)
-            subprocess.run(['sudo', 'nmcli', 'dev', 'set', self.ap_interface, 'managed', 'yes'], 
+            # Hand the CLIENT radio to NetworkManager. On a single-radio box
+            # that is the AP interface being taken back out of AP mode; with a
+            # dongle it is the dongle, and the AP interface is deliberately left
+            # alone so hostapd keeps running on the built-in radio throughout.
+            client_iface = self._client_wifi_interface()
+            subprocess.run(['sudo', 'nmcli', 'dev', 'set', client_iface, 'managed', 'yes'],
                          capture_output=True, text=True, timeout=10)
-            
+            if client_iface != self.ap_interface:
+                self.logger.info(
+                    f"Endless Loop: connecting on {client_iface}; AP stays up on {self.ap_interface}")
+
             # Enable WiFi radio (equivalent to user toggling WiFi on)
-            subprocess.run(['sudo', 'nmcli', 'radio', 'wifi', 'on'], 
+            subprocess.run(['sudo', 'nmcli', 'radio', 'wifi', 'on'],
                          capture_output=True, text=True, timeout=10)
             
             self.logger.info("Endless Loop: WiFi enabled - waiting up to 60 seconds for auto-connection")
@@ -1101,15 +1145,37 @@ class WiFiManager:
             self.logger.info("Endless Loop: No AP clients — checking for known WiFi networks to rejoin...")
             if self._check_known_networks_available():
                 self.logger.info("Endless Loop: Known WiFi network detected! Attempting to connect...")
-                self.stop_ap_mode()
-                time.sleep(2)  # Brief pause for clean transition
+                # With a dongle the client has its own radio, so the AP never
+                # has to be interrupted — hostapd keeps the built-in while the
+                # dongle joins. Only a single-radio box has to give the AP up,
+                # because one chip cannot be a station and an AP at once.
+                dedicated = self._has_dedicated_client_radio()
+                if not dedicated:
+                    self.stop_ap_mode()
+                    time.sleep(2)  # Brief pause for clean transition
                 if self._endless_loop_wifi_search():
                     self.logger.info("Endless Loop: Successfully reconnected to known WiFi from AP mode")
+                    if dedicated:
+                        # Connected, so the setup AP has done its job. Take it
+                        # down rather than leave it broadcasting: the default
+                        # key is published in the docs, and a box that is on the
+                        # network is reachable through the dashboard instead.
+                        self.logger.info(
+                            "Endless Loop: connected on %s — stopping the setup AP on %s",
+                            self._client_wifi_interface(), self.ap_interface)
+                        self.stop_ap_mode()
                     return
-                else:
-                    # If reconnection fails, restart AP mode
+                elif not dedicated:
+                    # Single radio: the AP was taken down to try, so put it back.
                     self.logger.warning("Endless Loop: Failed to reconnect to WiFi, restarting AP mode")
                     self._endless_loop_start_ap_mode()
+                    return
+                else:
+                    # Dual radio: nothing was torn down, so there is nothing to
+                    # restore — just keep the AP up and try again next cycle.
+                    self.logger.warning(
+                        "Endless Loop: Failed to join known network on %s; AP still up",
+                        self._client_wifi_interface())
                     return
         
         # Handle user-connected AP mode
@@ -1398,28 +1464,34 @@ class WiFiManager:
                         if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
                             return True
             
+            # Methods 2 and 3 name an interface, so they must name the one
+            # actually carrying the connection. With a dongle that is wlan1,
+            # while the built-in is busy hosting the AP — checking the built-in
+            # would report "not connected" for a perfectly good uplink.
+            client_iface = self._client_wifi_interface()
+
             # Method 2: Check using iwconfig (if available)
             try:
-                result = subprocess.run(['iwconfig', self.default_wifi_interface], 
+                result = subprocess.run(['iwconfig', client_iface],
                                       capture_output=True, text=True, timeout=5)
                 if result.returncode == 0 and 'ESSID:' in result.stdout and 'Not-Associated' not in result.stdout:
                     # Verify we have an IP address
-                    ip_result = subprocess.run(['ip', 'addr', 'show', self.default_wifi_interface], 
+                    ip_result = subprocess.run(['ip', 'addr', 'show', client_iface],
                                              capture_output=True, text=True, timeout=5)
                     if ip_result.returncode == 0 and 'inet ' in ip_result.stdout:
                         return True
             except FileNotFoundError:
                 pass  # iwconfig not available
-            
+
             # Method 3: Check if we can reach the internet (but be quick about it)
             try:
-                result = subprocess.run(['ping', '-c', '1', '-W', '2', '1.1.1.1'], 
+                result = subprocess.run(['ping', '-c', '1', '-W', '2', '1.1.1.1'],
                                       capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
-                    # Ensure it's going through wlan0
-                    route_result = subprocess.run(['ip', 'route', 'get', '1.1.1.1'], 
+                    # Ensure it's going through the client radio
+                    route_result = subprocess.run(['ip', 'route', 'get', '1.1.1.1'],
                                                 capture_output=True, text=True, timeout=3)
-                    if route_result.returncode == 0 and f'dev {self.default_wifi_interface}' in route_result.stdout:
+                    if route_result.returncode == 0 and f'dev {client_iface}' in route_result.stdout:
                         return True
             except Exception:
                 pass  # Network unreachable, that's fine
@@ -1521,8 +1593,10 @@ class WiFiManager:
     def get_current_ssid(self):
         """Get the current connected SSID"""
         try:
-            # Method 1: Get SSID from active connection on wlan0 device
-            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', self.default_wifi_interface], 
+            # Method 1: SSID from the active connection on the CLIENT radio —
+            # the dongle when one is fitted, since the built-in may be hosting
+            # the AP and would report the AP's own name instead.
+            result = subprocess.run(['nmcli', '-t', '-f', 'GENERAL.CONNECTION', 'dev', 'show', self._client_wifi_interface()],
                                   capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 # Extract connection name (which is usually the SSID for WiFi)
