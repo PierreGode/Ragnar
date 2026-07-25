@@ -261,6 +261,40 @@ def test_hint_prioritises_the_raw_hci_scan_over_the_mgmt_status():
     assert 'btmon' in hint
 
 
+def test_hint_for_invalid_parameters_points_at_radio_not_content():
+    hint = bp.adv_failure_hint('Invalid Parameters (0x0d)',
+                               {'roles': ['central', 'peripheral']}, 'hci0')
+    assert 'built-in' in hint
+    assert 'Experimental = true' in hint
+    assert 'dmesg' in hint
+
+
+# --- BlueZ's own advertiser: the "is it us or the controller?" tie-breaker --
+
+def test_bluez_can_advertise_true_on_registered(monkeypatch):
+    monkeypatch.setattr(bp, '_run', lambda cmd, **k: (
+        'bluetoothctl' if cmd[:1] == ['which'] else 'Advertising object registered\n'))
+    assert bp.bluez_can_advertise() is True
+
+
+def test_bluez_can_advertise_false_on_refusal(monkeypatch):
+    monkeypatch.setattr(bp, '_run', lambda cmd, **k: (
+        'bluetoothctl' if cmd[:1] == ['which']
+        else 'Failed to register advertisement: Invalid Parameters\n'))
+    assert bp.bluez_can_advertise() is False
+
+
+def test_bluez_can_advertise_none_without_bluetoothctl(monkeypatch):
+    monkeypatch.setattr(bp, '_run', lambda cmd, **k: '')  # `which` finds nothing
+    assert bp.bluez_can_advertise() is None
+
+
+def test_bluez_can_advertise_none_on_unparseable_output(monkeypatch):
+    monkeypatch.setattr(bp, '_run', lambda cmd, **k: (
+        'bluetoothctl' if cmd[:1] == ['which'] else 'Agent registered\n'))
+    assert bp.bluez_can_advertise() is None
+
+
 def test_caps_summary_lists_raw_hci_tools():
     summary = bp._caps_summary('hci0', {
         'known': False,
