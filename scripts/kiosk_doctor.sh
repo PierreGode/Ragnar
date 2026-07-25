@@ -176,13 +176,22 @@ fi
 # ---------------------------------------------------------------------------
 section "7. Xorg log (service mode)"
 # ---------------------------------------------------------------------------
-if [ -f "$LOG_DIR/kiosk-Xorg.log" ]; then
-    echo "  errors from $LOG_DIR/kiosk-Xorg.log:"
-    grep -E '\(EE\)|\(WW\).*fail|no screens found' "$LOG_DIR/kiosk-Xorg.log" | tail -20 | sed 's/^/  /' \
+# Xorg refuses -logfile under the setuid wrapper, so a non-root kiosk leaves its
+# log in the user's own directory instead. Check both, or a real X failure looks
+# like "X never started".
+XORG_LOGS="$LOG_DIR/kiosk-Xorg.log"
+for home in /home/* /root; do
+    [ -f "$home/.local/share/xorg/Xorg.0.log" ] && XORG_LOGS="$XORG_LOGS $home/.local/share/xorg/Xorg.0.log"
+done
+FOUND_XORG_LOG=0
+for xlog in $XORG_LOGS; do
+    [ -f "$xlog" ] || continue
+    FOUND_XORG_LOG=1
+    echo "  errors from $xlog:"
+    grep -E '\(EE\)|\(WW\).*fail|no screens found|elevated privileges' "$xlog" | tail -20 | sed 's/^/  /' \
         || echo "  (no (EE) lines — X did not report an error)"
-else
-    echo "  (no Xorg log — either autostart mode, or X never started)"
-fi
+done
+[ "$FOUND_XORG_LOG" -eq 0 ] && echo "  (no Xorg log — either autostart mode, or X never started)"
 
 # ---------------------------------------------------------------------------
 section "8. Display / session context"

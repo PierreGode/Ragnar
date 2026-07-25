@@ -240,6 +240,8 @@ fi
 
 XORG_LOG="$LOG_DIR/kiosk-Xorg.log"
 mkdir -p "$HOME/.local/share/xorg" 2>/dev/null || true
+# Where Xorg puts its log when we are NOT allowed to name one (see below).
+XORG_OWN_LOG="$HOME/.local/share/xorg/Xorg.0.log"
 rm -f /tmp/.X0-lock 2>/dev/null || true
 rm -f /tmp/.X11-unix/X0 2>/dev/null || true
 
@@ -333,13 +335,32 @@ if pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1; then
     exit 1
 fi
 
-xinit "$SESSION_SCRIPT" -- /usr/bin/X :0 vt7 -nolisten tcp \
-      -auth "$XAUTHORITY" -logfile "$XORG_LOG" -keeptty &
+# -logfile is REFUSED when Xorg runs with elevated privileges, and that is
+# precisely how this path runs it: the service runs as a non-root user, so X
+# only starts at all through the setuid Xorg.wrap that the installer puts there
+# (xserver-xorg-legacy + needs_root_rights=yes). Under that wrapper Xorg aborts
+# on sight of the flag —
+#     Invalid argument -logfile with elevated privileges
+# — before it opens anything, so the service died instantly with a bare
+# status=1/FAILURE, no Xorg log was ever written to point at, and the restart
+# loop then tripped the start limit. Let Xorg write its own log and copy that
+# where the doctor expects it afterwards.
+XORG_ARGS=(:0 vt7 -nolisten tcp -auth "$XAUTHORITY" -keeptty)
+if [[ "$(id -u)" -eq 0 ]]; then
+    # Genuine root: privileges are not "elevated", so naming the log is allowed.
+    XORG_ARGS+=(-logfile "$XORG_LOG")
+fi
+xinit "$SESSION_SCRIPT" -- /usr/bin/X "${XORG_ARGS[@]}" &
 XINIT_PID=$!
 if wait "$XINIT_PID"; then rc=0; else rc=$?; fi
+# Keep /var/log/ragnar/kiosk-Xorg.log as the one place to look, whichever log
+# Xorg was actually allowed to write.
+if [[ ! -s "$XORG_LOG" && -s "$XORG_OWN_LOG" ]]; then
+    cp -f "$XORG_OWN_LOG" "$XORG_LOG" 2>/dev/null || true
+fi
 if [[ "$rc" -ne 0 && "$rc" -ne 143 && "$rc" -ne 130 ]]; then
     echo "[kiosk-run] X/xinit exited with code $rc — last Xorg log lines:" >&2
-    tail -n 25 "$XORG_LOG" 2>/dev/null >&2 || true
+    { tail -n 25 "$XORG_LOG" 2>/dev/null || tail -n 25 "$XORG_OWN_LOG" 2>/dev/null; } >&2 || true
     echo "[kiosk-run] full detail: $XORG_LOG and $WRAPPER_LOG" >&2
 fi
 exit "$rc"

@@ -3685,6 +3685,38 @@ def _spawn_kiosk_in_session() -> bool:
     return False
 
 
+def _kiosk_failure_detail(max_chars: int = 400) -> str:
+    """The most specific line available about why the kiosk service died.
+
+    Prefers the wrapper's own error output over the unit journal: the journal
+    line people paste is almost always "Main process exited, status=1/FAILURE",
+    which names no cause at all, while the wrapper says things like "an X server
+    is already running" or dumps the Xorg error that actually killed it.
+    """
+    candidates = []
+    try:
+        journal = subprocess.run(
+            ['journalctl', '-u', KIOSK_SERVICE, '-n', '40', '--no-pager', '-o', 'cat'],
+            capture_output=True, text=True, timeout=15, check=False).stdout
+        candidates += [l.strip() for l in journal.splitlines()
+                       if 'kiosk-run' in l or '(EE)' in l or 'ERROR' in l]
+    except Exception:
+        pass
+    try:
+        with open('/var/log/ragnar/kiosk-wrapper.log', 'r', errors='replace') as fh:
+            tail = fh.readlines()[-40:]
+        candidates += [l.strip() for l in tail
+                       if 'ERROR' in l or 'WARN' in l or '(EE)' in l]
+    except OSError:
+        pass
+    if not candidates:
+        return ' Click Diagnose for the full picture.'
+    detail = ' '.join(candidates[-3:])
+    if len(detail) > max_chars:
+        detail = detail[:max_chars].rstrip() + '…'
+    return f' Last error: {detail} — click Diagnose for the full picture.'
+
+
 def _kiosk_install_and_start() -> bool:
     """Do exactly what `sudo bash scripts/install_kiosk.sh` + `systemctl enable
     --now ragnar-kiosk` do by hand, and report why if it does not take.
@@ -3720,11 +3752,32 @@ def _kiosk_install_and_start() -> bool:
     mode = _kiosk_mode()
     _kiosk_task_set(phase='starting')
     if mode == 'service':
+        # Clear a tripped start limit first. The unit gives up after 5 failures
+        # in 2 minutes and then refuses every later start with "start request
+        # repeated too quickly" until it is reset - so once a box has failed a
+        # few times, enabling it fails for a reason that has nothing to do with
+        # whatever is actually wrong, and the real error never gets a chance to
+        # reappear. This is the same `systemctl reset-failed` the kiosk doctor
+        # tells people to run by hand.
+        _run_systemctl(['reset-failed', KIOSK_SERVICE])
         enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
         if enable_proc.returncode != 0:
             err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
             logger.error(f"[kiosk] enable --now failed: {err}")
-            _kiosk_task_set(phase='failed', error=f'Could not start the kiosk service: {err}')
+            _kiosk_task_set(phase='failed',
+                            error=f'Could not start the kiosk service: {err}{_kiosk_failure_detail()}')
+            return False
+        # `enable --now` returns as soon as the process is spawned, so a kiosk
+        # that dies a second later reported success and left the UI waiting on a
+        # service that was already gone. Give it a moment and say so instead.
+        time.sleep(5)
+        state = _systemctl_state_label('ragnar-kiosk')
+        if state not in ('active', 'activating'):
+            logger.error(f"[kiosk] service did not stay up (state={state})")
+            _kiosk_task_set(
+                phase='failed',
+                error=f'The kiosk service started and then stopped ({state}).'
+                      f'{_kiosk_failure_detail()}')
             return False
         logger.info("[kiosk] systemd service enabled and started")
         return True

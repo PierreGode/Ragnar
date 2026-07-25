@@ -133,6 +133,25 @@ wrapper and Xorg logs. Output is saved to `/tmp/kiosk_doctor_<timestamp>.log`
 > `journalctl -u ragnar-kiosk` is legitimately empty; those failures are logged
 > by Ragnar itself under `[kiosk]`.
 
+**Service starts and immediately fails with `status=1/FAILURE`, and there is no
+Xorg log at all.** This was Ragnar's own bug, fixed — the wrapper passed
+`-logfile` to Xorg, and Xorg *refuses* that flag whenever it runs with elevated
+privileges:
+
+```
+Invalid argument -logfile with elevated privileges
+```
+
+Elevated privileges is exactly how service mode runs it: the unit runs as a
+non-root user, so X can only start through the setuid `Xorg.wrap` the installer
+installs (`xserver-xorg-legacy` + `needs_root_rights=yes`). X therefore aborted
+while still parsing its arguments — before opening any log — which is why the
+journal showed a bare exit code with nothing to go on and the restart loop
+tripped the start limit. The wrapper no longer passes the flag; X writes to
+`~/.local/share/xorg/Xorg.0.log` and the wrapper copies that to
+`/var/log/ragnar/kiosk-Xorg.log`, so both paths keep working. Update and click
+**Reinstall**.
+
 **"Cannot establish any listening sockets — Make sure an X server isn't already
 running"** means service mode is trying to start its own X on `:0` while a
 desktop session already owns it. The kiosk has two modes and this box was set
