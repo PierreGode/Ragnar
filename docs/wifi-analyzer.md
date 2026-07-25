@@ -314,6 +314,13 @@ while the onboard radio is **UART**, so the scanner prefers the USB controller
 time-share the RF front-end, so the overlay is best-effort and duty-cycled —
 running BT discovery and Wi-Fi monitor capture flat-out can cost frames on both.
 
+The scan always runs on the controller it selected: a just-plugged USB dongle
+shows up in `hciconfig` a moment before `bluetoothd` registers it on D-Bus, so
+the scanner waits briefly for the chosen adapter to appear rather than falling
+back onto the onboard radio. That fallback used to make the *first* overlay
+scan run on the onboard `hci0` (slow, and mislabelled) before settling on the
+dongle — subsequent scans were always fast on the right controller.
+
 ## Zigbee / 802.15.4 overlay (via Huginn)
 
 Tick **🐝 Zigbee** to overlay nearby **Zigbee / Thread / 802.15.4** activity onto

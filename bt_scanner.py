@@ -69,6 +69,11 @@ if not os.path.exists(_BTCTL):
 _DEFAULT_DURATION = 12       # seconds of discovery per scan
 _MAX_DURATION = 30
 _INFO_TIMEOUT = 6            # per-device `info` enrichment
+# Cold-start grace: hciconfig lists a freshly-powered USB controller (an Alfa
+# just plugged/unblocked) a moment before bluetoothd exports its D-Bus object.
+# Wait this long for the *chosen* adapter to appear rather than scanning a
+# different radio — see _discover_dbus.
+_DBUS_ADAPTER_WAIT = 4.0
 _STRONG_RSSI = -70          # dBm; at/above this a device is "close" and hurts more
 
 # BLE advertising channels: the three fixed 2 MHz channels every advertiser
@@ -491,6 +496,20 @@ def _dbus_int(v):
         return None
 
 
+def _adapter_present(objs, adapter_path):
+    """The requested adapter's object path if BlueZ exposes it, else None.
+
+    Strict: it matches the chosen adapter only — never substitutes a different
+    controller — so a scan can't silently run on the wrong (e.g. onboard) radio
+    while the intended one is still registering. ``objs`` is
+    ObjectManager.GetManagedObjects().
+    """
+    ifaces = objs.get(adapter_path)
+    if ifaces and "org.bluez.Adapter1" in ifaces:
+        return adapter_path
+    return None
+
+
 def _discover_dbus(hci, duration):
     """Primary capture: drive a BlueZ discovery over D-Bus and snapshot every
     in-range device with RSSI + address type + class + company ID.
@@ -510,14 +529,25 @@ def _discover_dbus(hci, duration):
         bus = dbus.SystemBus()
         mgr = dbus.Interface(bus.get_object("org.bluez", "/"),
                              "org.freedesktop.DBus.ObjectManager")
+        # Resolve strictly to the adapter we were asked to use. Earlier this
+        # silently fell back to the *first* adapter BlueZ exposed when the
+        # chosen one wasn't on D-Bus yet — so the very first overlay scan after
+        # a USB controller powered up would run on the onboard hci0 (slow, and
+        # on a flaky board mislabelled as hci1) until bluetoothd caught up.
+        # Instead wait briefly for the chosen adapter, since hciconfig sees a
+        # fresh controller before its D-Bus object is exported.
         adapter_path = "/org/bluez/%s" % hci
         objs = mgr.GetManagedObjects()
-        if adapter_path not in objs:
-            # Fall back to the first adapter BlueZ actually exposes.
-            adapter_path = next((p for p, i in objs.items()
-                                 if "org.bluez.Adapter1" in i), None)
+        waited = 0.0
+        while _adapter_present(objs, adapter_path) is None and waited < _DBUS_ADAPTER_WAIT:
+            time.sleep(0.25)
+            waited += 0.25
+            objs = mgr.GetManagedObjects()
+        adapter_path = _adapter_present(objs, adapter_path)
         if not adapter_path:
-            return None, "no org.bluez adapter on D-Bus"
+            # Don't scan a different radio than the caller chose; let do_scan
+            # fall back to the bluetoothctl path (which targets this hci too).
+            return None, "%s not on D-Bus yet (bluetoothd still registering it)" % hci
         adapter = dbus.Interface(bus.get_object("org.bluez", adapter_path),
                                  "org.bluez.Adapter1")
         try:
