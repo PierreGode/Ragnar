@@ -201,6 +201,36 @@ if [ ${#_missing_optional[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
 fi
 
+echo -e "${BLUE}Step 5.3: Ensuring recon engine dependencies...${NC}"
+# sslyze (TLS audit), dnspython (DNS recon) and tldextract (domain parsing) back
+# three independent recon_engine features. They are deliberately NOT in
+# requirements.txt — sslyze pulls nassl, a compiled extension with no wheel for
+# every Pi platform, and a failure there must not abort the whole requirements
+# install. So they are ensured here, one at a time, preferring apt for the two
+# pure-Python ones. Idempotent: an importable module is left alone.
+_recon_missing=()
+_ensure_recon() {   # <import name> <apt package|-> <pip package> <feature>
+    python3 -c "import $1" 2>/dev/null && return 0
+    if [ "$2" != "-" ] && ! dpkg -s "$2" >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$2" >/dev/null 2>&1
+    fi
+    python3 -c "import $1" 2>/dev/null && { echo -e "  ${GREEN}✓${NC} Installed $3 (apt)"; return 0; }
+    # Confirm the import, not just pip's exit code — a "successful" install that
+    # still cannot be imported must be reported as missing, not as installed.
+    if pip3 install --break-system-packages "$3" >/dev/null 2>&1 \
+       && python3 -c "import $1" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} Installed $3 (pip)"; return 0
+    fi
+    _recon_missing+=("$3 → $4")
+    return 1
+}
+_ensure_recon "dns.resolver" python3-dnspython  dnspython  "DNS recon"
+_ensure_recon "tldextract"   python3-tldextract tldextract "domain parsing"
+_ensure_recon "sslyze"       -                  sslyze     "TLS audit scans"
+if [ ${#_recon_missing[@]} -gt 0 ]; then
+    echo -e "  ${YELLOW}⚠${NC} Recon features unavailable: ${_recon_missing[*]}"
+fi
+
 echo -e "${BLUE}Step 5.5: Restoring local runtime data...${NC}"
 for file in "${PRESERVE_FILES[@]}"; do
     backup_file="$BACKUP_DIR/$(basename $file)"

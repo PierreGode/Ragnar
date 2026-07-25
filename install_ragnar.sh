@@ -260,7 +260,11 @@ package_candidates() {
         network-manager) echo "network-manager NetworkManager networkmanager" ;;
         iproute2) echo "iproute2 iproute" ;;
         iputils-ping) echo "iputils-ping iputils" ;;
-        libatlas-base-dev) echo "libatlas-base-dev atlas-devel" ;;
+        # ATLAS was dropped from Debian Trixie, so libatlas-base-dev resolves to
+        # nothing there and warned on every install. OpenBLAS is its replacement
+        # and is already a required package, so it is normally "already present"
+        # and this becomes a silent no-op instead of a scary double warning.
+        libatlas-base-dev) echo "libatlas-base-dev atlas-devel libopenblas-dev openblas-devel" ;;
         arp-scan) echo "arp-scan arpscan" ;;
         mtr-tiny) echo "mtr-tiny mtr" ;;
         whois) echo "whois jwhois" ;;
@@ -538,11 +542,54 @@ install_dependencies() {
     # Update nmap scripts (may fail with SIGILL on some ARM builds)
     nmap --script-updatedb >/dev/null 2>&1 || log "WARNING" "nmap --script-updatedb failed — vulnerability scripts may be stale"
 
-    # Recon engine Python deps (TLS audit + DNS recon)
+    # Recon engine Python deps (TLS audit + DNS recon). Installed one at a time
+    # and never as a single pip command: they back independent features, and
+    # sslyze is the only one that can realistically fail — it pulls nassl, a
+    # compiled extension with no wheel for every Pi platform. Bundled together,
+    # a failed sslyze build also took out dnspython and tldextract, which are
+    # pure Python and ship in apt. Prefer apt for those two (no build at all),
+    # fall back to pip, and report per-package so the log says which feature is
+    # actually degraded.
     log "INFO" "Installing recon engine Python dependencies..."
-    pip3 install --break-system-packages sslyze dnspython tldextract >/dev/null 2>&1 \
-        || pip3 install sslyze dnspython tldextract >/dev/null 2>&1 \
-        || log "WARNING" "Failed to install sslyze/dnspython/tldextract — recon engine will report errors per scan"
+    _recon_missing=()
+
+    # dnspython — DNS recon (recon_engine.py resolves via dns.resolver)
+    if python3 -c "import dns.resolver" 2>/dev/null; then
+        log "INFO" "dnspython already available"
+    elif install_package python3-dnspython 2>/dev/null && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (apt)"
+    elif pip3 install --break-system-packages dnspython >/dev/null 2>&1 && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (pip)"
+    else
+        _recon_missing+=("dnspython → DNS recon")
+    fi
+
+    # tldextract — domain parsing for the recon engine
+    if python3 -c "import tldextract" 2>/dev/null; then
+        log "INFO" "tldextract already available"
+    elif install_package python3-tldextract 2>/dev/null && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (apt)"
+    elif pip3 install --break-system-packages tldextract >/dev/null 2>&1 && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (pip)"
+    else
+        _recon_missing+=("tldextract → domain parsing")
+    fi
+
+    # sslyze — TLS audit. No apt package; needs to build nassl on some platforms.
+    if python3 -c "import sslyze" 2>/dev/null; then
+        log "INFO" "sslyze already available"
+    elif pip3 install --break-system-packages sslyze >/dev/null 2>&1 && python3 -c "import sslyze" 2>/dev/null; then
+        log "SUCCESS" "Installed sslyze (pip)"
+    else
+        _recon_missing+=("sslyze → TLS audit scans")
+    fi
+
+    if [ ${#_recon_missing[@]} -gt 0 ]; then
+        log "WARNING" "Recon engine features unavailable: ${_recon_missing[*]}"
+        log "WARNING" "The rest of Ragnar is unaffected; retry later with: sudo pip3 install --break-system-packages <name>"
+    else
+        log "SUCCESS" "Recon engine dependencies installed"
+    fi
 
     # Recon engine wordlist for content discovery
     local wordlist_dir="/opt/ragnar/wordlists"
