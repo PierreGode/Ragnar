@@ -86,12 +86,22 @@ reached `active`/`installed`. Two things it is *not*:
 If you still see it, the service exists but is stuck part-way (usually
 `activating`). Check both logs below.
 
-**Start here — `scripts/kiosk_doctor.sh`.** One command that collects every
-answer in the right order, so you are not guessing which log to read:
+**Start here — the Diagnose button.** In **Config → On-screen Display** it runs
+`scripts/kiosk_doctor.sh` on the box and prints the whole report in the card, so
+a blank screen can be diagnosed without an ssh session. Same thing from a
+terminal:
 
 ```bash
 sudo ./scripts/kiosk_doctor.sh
 ```
+
+> `sudo journalctl -u ragnar-kiosk` returning **`-- No entries --`** is the most
+> common dead end, and it is usually not a fault: that unit only exists in
+> *service* mode. On a desktop image the kiosk runs as an autostart entry inside
+> your session and there is no unit at all — and if the installer failed, there
+> is no unit either. The web UI now says which of those applies instead of
+> naming a journal that cannot exist. Use Diagnose, or
+> `sudo journalctl -u ragnar | grep '\[kiosk\]'`.
 
 It reports install mode, browser, the whole X stack (including the suid
 `Xorg.wrap` that causes most Pi 5 crash loops), service state and restart
@@ -117,7 +127,9 @@ detects this and says so instead of crash-looping until the start limit trips.
 - Wrapper log: `/var/log/ragnar/kiosk-wrapper.log` — board, RAM, the
   `input: touchscreen=… keyboard=… osk=…` line, which OSK launched, target URL.
 - Xorg log (service mode): `/var/log/ragnar/kiosk-Xorg.log`.
-- Service state: `journalctl -u ragnar-kiosk`.
+- Service state: `journalctl -u ragnar-kiosk` — **service mode only**; empty by
+  design in autostart mode.
+- Install/enable failures, either mode: `journalctl -u ragnar | grep '\[kiosk\]'`.
 
 **Crash loop** (`status=1/FAILURE`, restart counter climbing) in service mode is
 almost always X failing to start. The service now stops itself after 5 failures

@@ -3599,6 +3599,36 @@ def _kiosk_running() -> bool:
         return False
 
 
+def _x11_display_for(uid: int) -> str:
+    """The DISPLAY of this user's X session, via loginctl. '' when there is none.
+
+    Pi OS Desktop is Wayland now, but plenty of boxes still run X11 — the user
+    switched it in raspi-config, or the image predates labwc. Those sessions have
+    no wayland-* socket at all, which is the only thing the spawn used to look
+    for, so enabling the kiosk from the web UI appeared to do nothing until the
+    person at the screen logged out and back in.
+    """
+    try:
+        listing = subprocess.run(['loginctl', 'list-sessions', '--no-legend'],
+                                 capture_output=True, text=True, timeout=5, check=False)
+        for line in listing.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            sid = parts[0]
+            props = subprocess.run(
+                ['loginctl', 'show-session', sid, '-p', 'User', '-p', 'Type', '-p', 'Display'],
+                capture_output=True, text=True, timeout=5, check=False).stdout
+            values = dict(
+                line.split('=', 1) for line in props.splitlines() if '=' in line)
+            if values.get('Type') != 'x11' or values.get('User') != str(uid):
+                continue
+            return values.get('Display', '') or ':0'
+    except Exception as exc:
+        logger.debug(f"[kiosk] could not query X11 sessions: {exc}")
+    return ''
+
+
 def _spawn_kiosk_in_session() -> bool:
     """Find a user with an active wayland/X session and launch the kiosk
     wrapper into it. Returns True if we managed to dispatch a spawn — not a
@@ -3619,16 +3649,26 @@ def _spawn_kiosk_in_session() -> bool:
             ]
         except OSError:
             socket_names = []
-        if not socket_names:
-            continue
-        wl = sorted(socket_names)[0]
+
+        env_extra = []
+        if socket_names:
+            wl = sorted(socket_names)[0]
+            session_label = f"wayland ({wl})"
+            env_extra = [f"WAYLAND_DISPLAY={wl}", "DISPLAY=:0"]
+        else:
+            display = _x11_display_for(entry.pw_uid)
+            if not display:
+                continue
+            session_label = f"x11 ({display})"
+            env_extra = [f"DISPLAY={display}",
+                         f"XAUTHORITY={os.path.join(entry.pw_dir, '.Xauthority')}"]
+
         cmd = [
             'sudo', '-u', entry.pw_name, '-n',
             'env',
             f"HOME={entry.pw_dir}",
             f"XDG_RUNTIME_DIR={runtime_dir}",
-            f"WAYLAND_DISPLAY={wl}",
-            "DISPLAY=:0",
+        ] + env_extra + [
             f"RAGNAR_REPO={os.path.dirname(os.path.abspath(__file__))}",
             '/usr/local/bin/ragnar-kiosk-run',
         ]
@@ -3640,11 +3680,12 @@ def _spawn_kiosk_in_session() -> bool:
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {wl}")
+            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {session_label}")
             return True
         except Exception as exc:
             logger.error(f"[kiosk] failed to spawn into {entry.pw_name}'s session: {exc}")
-    logger.warning("[kiosk] no active wayland session — will launch on next login")
+    logger.warning("[kiosk] no active desktop session (wayland or X11) — "
+                   "will launch on next login")
     return False
 
 
@@ -5991,6 +6032,11 @@ def kiosk_status():
         return jsonify({
             'installed': mode != 'not_installed',
             'mode': mode,
+            # Whether `journalctl -u ragnar-kiosk` can possibly have anything in
+            # it. In autostart mode, and whenever the install failed, no unit is
+            # ever created - pointing people at that journal sent them to "-- No
+            # entries --" and a dead end.
+            'unit_exists': os.path.exists(KIOSK_SERVICE_FILE),
             'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
             'service_state': state,
             # Background install/teardown progress. 'busy' tells the UI to keep
@@ -6008,6 +6054,43 @@ def kiosk_status():
     except Exception as exc:
         logger.error(f"Error getting kiosk status: {exc}")
         return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/kiosk/diagnose', methods=['POST'])
+def kiosk_diagnose():
+    """Run scripts/kiosk_doctor.sh and hand back its report.
+
+    "The kiosk shows nothing" has a dozen causes and the systemd journal answers
+    almost none of them: in autostart mode there is no unit, and when the
+    installer itself fails there is no unit either - so the first thing everyone
+    tries, `journalctl -u ragnar-kiosk`, prints "-- No entries --" and the trail
+    ends. The doctor checks the browser, the X stack, the session, the display
+    hardware and the configured URL, and reads the wrapper and Xorg logs where
+    the real detail lives. Exposing it here means a user can get that report
+    without an ssh session.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'scripts', 'kiosk_doctor.sh')
+    if not os.path.isfile(script):
+        return jsonify({'success': False,
+                        'error': 'scripts/kiosk_doctor.sh is missing - update Ragnar and retry'}), 404
+    try:
+        proc = subprocess.run(['sudo', '-n', 'bash', script],
+                              capture_output=True, text=True, timeout=180, check=False)
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False,
+                        'error': 'The kiosk doctor took longer than 3 minutes and was cancelled.'}), 500
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'Could not run the kiosk doctor: {exc}'}), 500
+
+    report = (proc.stdout or '') + (proc.stderr or '')
+    if not report.strip():
+        return jsonify({'success': False,
+                        'error': f'The kiosk doctor produced no output (exit {proc.returncode}).'}), 500
+    # The doctor counts its own failures and prints them; the exit code is 0
+    # either way, so success here means "the report was produced".
+    return jsonify({'success': True, 'report': report,
+                    'failed_checks': report.count('[FAIL]')})
 
 
 @app.route('/api/config/scan-intensity', methods=['GET', 'POST'])
