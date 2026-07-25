@@ -1,6 +1,5 @@
 ## Ragnar     <img width="105" height="150" alt="image" src="https://github.com/user-attachments/assets/463d32c7-f6ca-447c-b62b-f18f2429b2b2" />
 
-
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/J3J2EARPK)
 ![GitHub stars](https://img.shields.io/github/stars/PierreGode/Ragnar)
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
