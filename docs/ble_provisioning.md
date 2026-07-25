@@ -109,6 +109,18 @@ That is reported as `starting`, distinct from a failure, and the web UI keeps
 polling until it settles — a peripheral in this state is usually a second or
 two from advertising. If it stays there for more than ~20 s, run `doctor`.
 
+**`RegisterApplication: org.bluez.Error.AlreadyExists`.** The GATT application
+and advertisement use fixed D-Bus object paths (`/one/gode/ragnar/ble`), so a
+registration left behind by an earlier run blocks every later start — and it
+used to persist until the whole Ragnar process restarted. Two faults caused it,
+both fixed: teardown ran the advertisement and application unregisters in one
+`try`, so the routine failure of the first (BlueZ releases the advertisement
+itself on **auto-stop**) skipped the second; and restarting the peripheral
+replaced the server object without stopping the old one, orphaning its
+registration. A start that still meets `AlreadyExists` now reclaims the path and
+retries once, so a box already stuck heals itself on the next enable. If you see
+this on an older build, restarting Ragnar clears it.
+
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
 each prerequisite in turn — `python3-dbus` and `python3-gi` importable,
 `bluetoothctl` present, at least one controller found, Bluetooth not

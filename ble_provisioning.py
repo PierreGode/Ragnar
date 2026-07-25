@@ -418,7 +418,51 @@ class BleProvisioningServer:
                 self._ready.set()
                 self._log(f'advertising as {self.providers.local_name} on {self.providers.hci}')
 
+            # One reclaim attempt per object path, so a retry that also fails
+            # reports the error instead of looping.
+            reclaimed = {'app': False, 'adv': False}
+
             def on_error(err, what):
+                # A stale registration left behind by an earlier run keeps the
+                # fixed object path claimed inside BlueZ, and every start then
+                # fails with AlreadyExists until the process restarts. Reclaim
+                # the path once and retry rather than staying broken. This also
+                # heals a box already stuck from the teardown bug above.
+                if 'AlreadyExists' in str(err):
+                    if what == 'RegisterApplication' and not reclaimed['app']:
+                        reclaimed['app'] = True
+                        self._log('GATT application path still registered — '
+                                  'reclaiming it and retrying', 'warning')
+                        try:
+                            self._gatt_manager.UnregisterApplication(app.path)
+                        except Exception:
+                            pass
+                        try:
+                            self._gatt_manager.RegisterApplication(
+                                app.path, {},
+                                reply_handler=lambda: None,
+                                error_handler=lambda e: on_error(e, 'RegisterApplication'),
+                            )
+                            return
+                        except Exception:
+                            pass
+                    elif what == 'RegisterAdvertisement' and not reclaimed['adv']:
+                        reclaimed['adv'] = True
+                        self._log('Advertisement path still registered — '
+                                  'reclaiming it and retrying', 'warning')
+                        try:
+                            self._adv_manager.UnregisterAdvertisement(adv.get_path())
+                        except Exception:
+                            pass
+                        try:
+                            self._adv_manager.RegisterAdvertisement(
+                                adv.get_path(), {},
+                                reply_handler=on_registered,
+                                error_handler=lambda e: on_error(e, 'RegisterAdvertisement'),
+                            )
+                            return
+                        except Exception:
+                            pass
                 self._error = f'{what}: {err}'
                 self._log(self._error, 'error')
                 self._ready.set()
@@ -437,12 +481,24 @@ class BleProvisioningServer:
 
             self._mainloop.run()
 
-            # Clean unregister on the way out.
+            # Clean unregister on the way out — each in its OWN try block.
+            # Sharing one meant a throwing UnregisterAdvertisement skipped
+            # UnregisterApplication entirely, and that throws routinely: BlueZ
+            # releases the advertisement itself on auto-stop, and it was never
+            # registered at all when advertising failed. The GATT application
+            # then stayed registered on the fixed path /one/gode/ragnar/ble, so
+            # every later start failed with
+            #   RegisterApplication: org.bluez.Error.AlreadyExists
+            # until the whole Ragnar process restarted and dropped the D-Bus
+            # connection. Re-advertise after an auto-stop hit this every time.
             try:
                 self._adv_manager.UnregisterAdvertisement(self._adv_path)
+            except Exception as _e:
+                self._log(f'UnregisterAdvertisement: {_e}', 'debug')
+            try:
                 self._gatt_manager.UnregisterApplication(self._app_path)
-            except Exception:
-                pass
+            except Exception as _e:
+                self._log(f'UnregisterApplication: {_e}', 'debug')
             # Free the local D-Bus object paths, or a restart on a new adapter
             # hits "there is already a handler for '/one/gode/ragnar/ble'".
             try:
