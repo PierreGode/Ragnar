@@ -97,6 +97,26 @@ If the install log ends with `These display types will NOT work until fixed:`,
 that names the dependency that failed — a screen of that type will stay blank
 until it is installed.
 
+#### The Wi-Fi setup portal keeps appearing instead of the dashboard
+
+If `http://<box>:8000` shows the **Wi-Fi Configuration Portal** asking you to
+join a network — while the box is plainly already connected — your router hands
+out addresses in **192.168.4.0/24**. That is the same range Ragnar uses for its
+own access point, and Ragnar used to treat *any* client in it as an AP client
+and serve the captive portal. **eero mesh systems default to this subnet**, so
+they hit it consistently; it is not a fault in the router.
+
+Ragnar now also requires that the box itself holds the AP gateway address
+`192.168.4.1` before treating a request as an AP client, so an ordinary client
+on a 192.168.4.0/24 LAN gets the dashboard. Update and restart:
+
+```bash
+sudo ./update_ragnar.sh && sudo systemctl restart ragnar
+```
+
+Note also that Ragnar listens on **port 8000 only** — plain `http://<box>` with
+no port will not open anything. Always include `:8000`.
+
 #### "dpkg was interrupted" — nothing installs
 
 ```

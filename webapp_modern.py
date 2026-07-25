@@ -5436,13 +5436,54 @@ def read_wifi_network_data():
         return []
 
 
+# Ragnar's own access point (wifi_manager.py: ap_ip / ap_subnet).
+_AP_GATEWAY_IP = '192.168.4.1'
+_AP_SUBNET_PREFIX = '192.168.4.'
+_ap_gateway_cache = {'ts': 0.0, 'owned': False}
+_AP_GATEWAY_TTL = 5.0  # seconds; this runs on every request
+
+
+def _ragnar_owns_ap_gateway() -> bool:
+    """Is Ragnar's own access point up — i.e. does THIS box hold 192.168.4.1?
+
+    The AP subnet alone is not evidence of an AP client. 192.168.4.0/24 is also
+    a common home LAN range — notably eero's default — and when the router owns
+    it, every ordinary client looks like an AP client. Holding the gateway
+    address ourselves is what actually distinguishes "we are the AP" from "we
+    are a guest on someone else's 192.168.4.0/24".
+    """
+    now = time.time()
+    if now - _ap_gateway_cache['ts'] < _AP_GATEWAY_TTL:
+        return _ap_gateway_cache['owned']
+    owned = False
+    try:
+        out = subprocess.run(
+            ['ip', '-4', '-o', 'addr'],
+            capture_output=True, text=True, timeout=3, check=False
+        ).stdout
+        # Trailing '/' so 192.168.4.1 does not also match 192.168.4.1{0..9}.
+        owned = f' inet {_AP_GATEWAY_IP}/' in out
+    except Exception:
+        owned = False
+    _ap_gateway_cache.update(ts=now, owned=owned)
+    return owned
+
+
 def is_ap_client_request():
-    """Check if the request is coming from an AP client (192.168.4.x)"""
+    """Is this request from a client of Ragnar's own access point?
+
+    Decides whether to serve the captive portal instead of the dashboard, so a
+    false positive hides Ragnar entirely. This used to test the client IP
+    against 192.168.4.0/24 and nothing else, which meant any home network using
+    that range — eero picks it by default — got the Wi-Fi setup portal on
+    :8000 forever, even with the box happily connected and no AP running.
+    """
     try:
         client_ip = request.environ.get('REMOTE_ADDR', '')
-        # Check if request is from AP network (192.168.4.x)
-        return client_ip.startswith('192.168.4.') and client_ip != '192.168.4.1'
-    except:
+        if not client_ip.startswith(_AP_SUBNET_PREFIX) or client_ip == _AP_GATEWAY_IP:
+            return False
+        return _ragnar_owns_ap_gateway()
+    except Exception:
         return False
 
 
