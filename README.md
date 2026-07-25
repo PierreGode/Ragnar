@@ -31,7 +31,7 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
-For detailed information see the [Install Guide](docs/INSTALL.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new.
+For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new.
 
 ---
 
