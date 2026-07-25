@@ -1089,9 +1089,15 @@ _ADV_STATUS_HINTS = {
         'scanning (bt_scanner / WIDS overlay) and try again.'
     ),
     'invalid parameters': (
-        'The controller refused these advertising parameters even at minimum '
-        'size, which usually means a driver/firmware quirk. Check: '
-        'dmesg | grep -i bluetooth   (look for a failed firmware load)'
+        'The controller refused the advertisement even at minimum size, which '
+        'points at the radio/firmware, not the advertisement content. In order: '
+        '(1) if this is a USB dongle, switch provisioning to the built-in radio '
+        '(Config -> Bluetooth Provisioning) — it is the known-good one; '
+        '(2) enable BlueZ experimental support: add "Experimental = true" under '
+        '[General] in /etc/bluetooth/main.conf and "sudo systemctl restart '
+        'bluetooth" (some controllers only advertise via the newer kernel path); '
+        '(3) check for a failed firmware load: dmesg | grep -i bluetooth. '
+        'The doctor confirms whether BlueZ can advertise on this radio at all.'
     ),
     'no resources': (
         'The controller has no advertising slot left. Stop other advertisers '
@@ -1120,6 +1126,35 @@ def bluetoothd_adv_failure(since: str = '-2 min') -> str:
         out = _run(['tail', '-n', '400', '/var/log/syslog'], timeout=4.0)
     hits = [m.group(1) for m in (pat.search(ln) for ln in out.splitlines()) if m]
     return hits[-1] if hits else ''
+
+
+def bluez_can_advertise(hci: Optional[str] = None) -> Optional[bool]:
+    """Whether BlueZ's *own* minimal advertiser is accepted on this radio.
+
+    ``bluetoothctl advertise on`` registers an advertisement BlueZ builds
+    itself — flags only, no 128-bit service UUID, no name — so it is the
+    cleanest split between "this controller cannot advertise via BlueZ at all"
+    and "it refuses *our* advertisement (the service UUID / connectable type)".
+    Prints ``Advertising object registered`` on success, ``Failed to register
+    advertisement`` on a controller-level refusal.
+
+    Returns True (BlueZ advertised), False (refused), or None if the check
+    could not run (no bluetoothctl, timed out). ``--timeout`` makes
+    bluetoothctl exit and release the advertisement on its own. Never raises.
+    """
+    if not _run(['which', 'bluetoothctl']).strip():
+        return None
+    # bluetoothctl acts on its default (last-seen) controller; on a one-radio
+    # box that is the one we care about. Multi-controller boxes would need an
+    # interactive `select <address>`, which isn't worth scripting here — the
+    # probe is a best-effort tie-breaker, not a gate.
+    out = _run(['bluetoothctl', '--timeout', '3', 'advertise', 'on'], timeout=8.0)
+    low = out.lower()
+    if 'advertising object registered' in low and 'failed to register' not in low:
+        return True
+    if 'failed to register advertisement' in low or 'not registered' in low:
+        return False
+    return None
 
 
 def _raw_hci_note(raw: list) -> str:
@@ -1448,6 +1483,21 @@ def _cli_doctor(base_dir: str) -> int:
                 else:
                     print('        This controller refuses every advertisement, '
                           'connectable or not.')
+            # Whose fault: the controller, or our advertisement content?
+            # bluetoothctl registers BlueZ's OWN advertisement (flags only, no
+            # service UUID) — the cleanest tie-breaker there is.
+            own = bluez_can_advertise(st.get('adapter'))
+            if own is False:
+                print("        CONFIRMED: BlueZ's own advertiser "
+                      '(bluetoothctl advertise on) is refused here too — so '
+                      'this is the controller/firmware, NOT Ragnar. Use a '
+                      'different adapter (the built-in radio if this is a USB '
+                      'dongle).')
+            elif own is True:
+                print("        NOTE: BlueZ's own minimal advertiser WAS "
+                      'accepted, but ours (which carries the 128-bit service '
+                      'UUID) was not — please report this, including the block '
+                      'above.')
             # The reason BlueZ hides behind "Failed to register advertisement".
             reason = bluetoothd_adv_failure()
             if reason:
@@ -1470,6 +1520,18 @@ def _cli_doctor(base_dir: str) -> int:
                   if 'luetooth' in ln and ('fail' in ln.lower() or 'error' in ln.lower())]
             for ln in fw[-3:]:
                 print(f'        dmesg: {ln.strip()[-120:]}')
+            # If the failing radio is a dongle and a built-in one exists, point
+            # at it — the onboard Pi controller is the known-good path.
+            failing = st.get('adapter')
+            builtins_ = [c for c in controllers
+                         if c['builtin'] and c['hci'] != failing]
+            if builtins_ and not any(c['hci'] == failing and c['builtin']
+                                     for c in controllers):
+                b = builtins_[0]
+                print(f'        TRY: switch provisioning to the built-in radio '
+                      f'{b["hci"]} ({b.get("address") or "?"}) in Config -> '
+                      f'Bluetooth Provisioning — {failing} looks like a dongle '
+                      f'and the onboard controller is the known-good one.')
     else:
         check('Advertising starts', False, 'fix the failures above first')
 

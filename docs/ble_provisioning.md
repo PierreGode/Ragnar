@@ -182,7 +182,7 @@ produces the same D-Bus text, but a different mgmt status:
 | --- | --- | --- |
 | `Rejected (0x0b)` | LE is disabled on the controller | remove `ControllerMode = bredr` from `/etc/bluetooth/main.conf`, then `sudo btmgmt --index hci0 le on` |
 | `Not Supported (0x0c)` | the radio has no LE advertising | use a BT 4.0+ adapter |
-| `Invalid Parameters (0x0d)` | refused even at minimum size — driver/firmware quirk | `dmesg \| grep -i bluetooth` — look for a failed firmware load |
+| `Invalid Parameters (0x0d)` | refused even at minimum size — the radio/firmware, not the advertisement | (1) if it's a USB dongle, switch to the **built-in** radio; (2) add `Experimental = true` under `[General]` in `/etc/bluetooth/main.conf` and restart bluetooth; (3) `dmesg \| grep -i bluetooth` for a failed firmware load |
 | `Busy (0x0a)` | the controller is mid-operation | stop the scanners (bt_scanner / WIDS overlay) |
 | `No Resources` | no advertising slot left | `bluetoothctl advertise off`, or another controller |
 | `Not Powered` | radio off / rfkill | `sudo rfkill unblock all && bluetoothctl power on` |
@@ -193,6 +193,22 @@ run the doctor with `sudo`, or read it directly:
 ```bash
 journalctl -u bluetooth -n 50 | grep -i advertis
 ```
+
+**Is it Ragnar or the controller?** When the advertise test fails, the doctor
+also runs BlueZ's *own* advertiser (`bluetoothctl advertise on`) — a bare,
+flags-only advertisement with no service UUID. If **that** is refused too, the
+controller cannot advertise via BlueZ at all and it is not Ragnar's
+advertisement content:
+
+```
+CONFIRMED: BlueZ's own advertiser (bluetoothctl advertise on) is refused here
+too — so this is the controller/firmware, NOT Ragnar. Use a different adapter.
+```
+
+An `Invalid Parameters (0x0d)` with that confirmation is a controller that
+simply won't advertise on this firmware/driver — the reliable fix is to
+provision on the **built-in** radio (the doctor names it) and leave the dongle
+for scanning.
 
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
 each prerequisite in turn — `python3-dbus` and `python3-gi` importable,
