@@ -87,9 +87,27 @@ if command -v apt-get >/dev/null 2>&1; then
     for entry in "${net_tools[@]}"; do
         command -v "${entry%%:*}" >/dev/null 2>&1 || { need_net_install=true; break; }
     done
+    # ...but not on every single update. Some of these tools are simply not
+    # packaged for every suite (speedtest-cli is the usual one), so "something is
+    # missing" can be permanently true - and that turned a minutes-long
+    # apt-get update into a fixed cost of every update on those boxes, with the
+    # update card sitting on "Finishing update: network tools..." each time.
+    # Refresh at most once every six hours; a genuinely missing package is still
+    # retried immediately against the index already on disk.
+    APT_STAMP=/var/lib/ragnar/apt-index-refreshed
     if [ "$need_net_install" = true ]; then
-        echo -e "  Refreshing package index..."
-        DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+        stamp_age=999999
+        if [ -f "$APT_STAMP" ]; then
+            stamp_age=$(( $(date +%s) - $(stat -c %Y "$APT_STAMP" 2>/dev/null || echo 0) ))
+        fi
+        if [ "$stamp_age" -gt 21600 ]; then
+            echo -e "  Refreshing package index..."
+            DEBIAN_FRONTEND=noninteractive apt-get update -y >/dev/null 2>&1 || true
+            mkdir -p "$(dirname "$APT_STAMP")" 2>/dev/null || true
+            touch "$APT_STAMP" 2>/dev/null || true
+        else
+            echo -e "  Package index refreshed $((stamp_age / 60))m ago - reusing it"
+        fi
     fi
     for entry in "${net_tools[@]}"; do
         bin="${entry%%:*}"; pkgs="${entry#*:}"

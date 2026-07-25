@@ -10354,18 +10354,60 @@ RAGNAR_REPO_PATH = git_updater.repo_root()
 _PROCESS_START_TIME = time.time()
 
 
+_POST_UPDATE_STATUS_PATH = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.json')
+
+# A post-update run writes its status on every step change. The slowest step
+# (network tools, which may apt-get update) can be quiet for minutes on a Pi, so
+# the file is only distrusted well past that.
+_POST_UPDATE_STALE_SECONDS = 30 * 60
+
+
 def _post_update_status() -> dict:
     """Read the transcript scripts/post_update.sh leaves behind.
 
     Lets the UI keep reporting progress across the service restart that script
     performs: the browser polls this while the web app itself is down and back.
+
+    A run that never reached its end - power cut mid-provision, an apt call that
+    hung, the transient unit killed - leaves 'running' in the file forever.
+    Reported as-is that pinned the update card on a step from an update that
+    finished days ago ("Finishing update: network tools...") and made every later
+    verification wait for a step that would never complete. Past the staleness
+    window the file is treated as the debris it is.
     """
-    path = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.json')
     try:
-        with open(path, 'r') as fh:
-            return json.load(fh)
+        with open(_POST_UPDATE_STATUS_PATH, 'r') as fh:
+            status = json.load(fh)
     except (OSError, ValueError):
         return {}
+    if not isinstance(status, dict):
+        return {}
+
+    if status.get('state') == 'running':
+        try:
+            age = time.time() - os.path.getmtime(_POST_UPDATE_STATUS_PATH)
+        except OSError:
+            age = 0
+        if age > _POST_UPDATE_STALE_SECONDS:
+            logger.warning("Ignoring post-update status stuck at "
+                           f"'{status.get('step', '?')}' for {int(age // 60)} minutes")
+            return {'state': 'finished', 'outcome': 'unknown', 'step': status.get('step', ''),
+                    'stale': True,
+                    'failures': 'the previous post-update run never finished; '
+                                'see data/logs/post_update.log'}
+    return status
+
+
+def _reset_post_update_status() -> None:
+    """Drop the previous run's status before starting a new one.
+
+    Without this the first polls of a new update report the *last* update's
+    step, because post_update.sh cannot write its own until it has started.
+    """
+    try:
+        os.remove(_POST_UPDATE_STATUS_PATH)
+    except OSError:
+        pass
 
 
 def _launch_post_update(install_deps: bool, warnings: list) -> str:
@@ -10390,6 +10432,8 @@ def _launch_post_update(install_deps: bool, warnings: list) -> str:
     args = ['bash', script, '--repo', RAGNAR_REPO_PATH]
     if install_deps:
         args.append('--deps')
+
+    _reset_post_update_status()
 
     if shutil.which('systemd-run'):
         launchers = [
