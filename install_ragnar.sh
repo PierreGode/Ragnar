@@ -290,12 +290,18 @@ install_package() {
         fi
     done
 
+    # Only announce a fallback when there actually is one — a single-candidate
+    # package was otherwise logged as "trying next fallback" with nothing left
+    # to try, which reads as a broken installer rather than a missing package.
+    local remaining
+    remaining=$(echo "$candidates" | wc -w)
     for candidate in $candidates; do
         if eval "$INSTALL_CMD $candidate" >/dev/null 2>&1; then
             log "SUCCESS" "Installed ${candidate}"
             return 0
         fi
-        log "WARNING" "Failed to install ${candidate}, trying next fallback"
+        remaining=$((remaining - 1))
+        [ "$remaining" -gt 0 ] && log "INFO" "${candidate} unavailable, trying next fallback"
     done
 
     log "WARNING" "Could not install package ${pkg} on ${PKG_MGR}"
@@ -436,7 +442,6 @@ install_dependencies() {
         "bluez-tools"
         "python3-dbus"
         "python3-gi"
-        "hackrf"
         "bridge-utils"
         "python3-pil"
         "libjpeg-dev"
@@ -470,25 +475,50 @@ install_dependencies() {
         "lldpd"
         "ethtool"
         "speedtest-cli"
-        "nikto"
-        "sqlmap"
-        "whatweb"
-        "ffuf"
     )
 
     if [ "$IS_ARM" = true ]; then
         packages+=("libgpiod-dev" "libi2c-dev" "dhcpcd5")
     fi
 
-    optional_packages=("libatlas-base-dev")
+    # Nice-to-have, never required. Ragnar resolves each of these at runtime and
+    # simply disables the feature that uses it (server_capabilities.py marks the
+    # scanners 'critical': False; recon_engine looks ffuf up in _tool_paths; the
+    # Waterfall button stays greyed without hackrf). Several are also genuinely
+    # absent from some suites — ffuf only entered Debian in trixie, and the
+    # 32-bit Raspbian builds for a Pi Zero 2 W carry a smaller set than arm64 —
+    # so a miss here must not read as a broken install.
+    optional_packages=(
+        "libatlas-base-dev"
+        "hackrf"
+        "nikto"
+        "sqlmap"
+        "whatweb"
+        "ffuf"
+    )
+
+    # Collect misses instead of letting them scroll past in a 2000-line log, so
+    # the end of the install answers "which packages didn't make it?" directly.
+    local failed_required=()
+    local failed_optional=()
 
     for package in "${packages[@]}"; do
-        install_package "$package"
+        install_package "$package" || failed_required+=("$package")
     done
 
     for package in "${optional_packages[@]}"; do
-        install_package "$package" || log "WARNING" "Optional package $package unavailable on ${PKG_MGR}"
+        install_package "$package" || failed_optional+=("$package")
     done
+
+    if [ ${#failed_optional[@]} -gt 0 ]; then
+        log "INFO" "Optional packages unavailable on ${PKG_MGR} (features that use them stay disabled): ${failed_optional[*]}"
+    fi
+    if [ ${#failed_required[@]} -gt 0 ]; then
+        log "WARNING" "These required packages did not install: ${failed_required[*]}"
+        log "WARNING" "Install continues, but fix them with: sudo ${INSTALL_CMD#DEBIAN_FRONTEND=noninteractive } ${failed_required[*]}"
+    else
+        log "SUCCESS" "All required system packages installed"
+    fi
 
     # Ensure vulners.nse script is available for vulnerability scanning
     local vulners_path="/usr/share/nmap/scripts/vulners.nse"
@@ -784,8 +814,26 @@ setup_ragnar() {
         check_success "Created ragnar user"
     fi
 
+    # The home directory must exist before anything below can land in it. This
+    # cd used to be unguarded, and every path after it is relative ("Ragnar"),
+    # so a failure here silently installed the whole tree into whatever
+    # directory the installer happened to be run from — e.g. /home/Ragnar when
+    # started from /home. Fail loudly instead of scattering files.
+    if [ ! -d "/home/$ragnar_USER" ]; then
+        log "WARNING" "/home/$ragnar_USER does not exist — creating it"
+        mkdir -p "/home/$ragnar_USER" || {
+            log "ERROR" "Cannot create /home/$ragnar_USER — installation cannot continue"
+            clean_exit 1
+        }
+        chown "$ragnar_USER:$ragnar_USER" "/home/$ragnar_USER" 2>/dev/null || true
+    fi
+    cd "/home/$ragnar_USER" || {
+        log "ERROR" "Cannot enter /home/$ragnar_USER — installation cannot continue"
+        log "ERROR" "Refusing to continue, as Ragnar would be installed into $(pwd) instead"
+        clean_exit 1
+    }
+
     # Check for existing ragnar directory with a valid git clone
-    cd /home/$ragnar_USER
     if [ -d "Ragnar/.git" ] || [ -d "Ragnar/actions" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"

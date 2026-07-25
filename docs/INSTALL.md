@@ -48,6 +48,63 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
 ```
 
+#### "Some packages won't install"
+
+Not every package is required. The installer splits them in two, and prints a
+summary of both when the dependency step ends:
+
+- **Required** — a miss here is a real `WARNING`, and the summary repeats the
+  exact `apt-get install` line to fix it. The install continues regardless.
+- **Optional** — `hackrf`, `nikto`, `sqlmap`, `whatweb`, `ffuf`,
+  `libatlas-base-dev`. These back single features (SDR Waterfall, the recon and
+  vulnerability scanners) that look their binary up at runtime and stay disabled
+  without it. Not every Debian suite carries all of them — `ffuf` only arrived in
+  trixie — so seeing these listed as unavailable is expected, not a failed
+  install.
+
+Two steps in the install are also slow and silent, which can look like a hang on
+a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
+`nmap --script-updatedb`. Give them time before interrupting.
+
+#### "No git command works" / updates fail
+
+Check this first:
+
+```bash
+git --version
+```
+
+If that prints **Illegal instruction** (or nothing), git itself is broken — not
+Ragnar. Debian Trixie arm64 can ship a git built with ARMv8.1+ atomics that
+crashes on a Cortex-A53, which is the Pi Zero 2 W's core. Reinstall it:
+
+```bash
+sudo apt update && sudo apt install --reinstall git
+```
+
+This has a knock-on effect worth knowing about. The installer checks git up
+front, and when it is unusable it downloads a release tarball instead of
+cloning. That produces a complete, working Ragnar — but with **no `.git`
+directory**, so every later update has no repository to update. If your box was
+installed that way, `update_ragnar.sh` now reattaches it to the upstream
+repository in place, keeping every file on disk, and continues with the update.
+Nothing needs to be reinstalled; just fix git and re-run the update.
+
+#### Ragnar installed to the wrong directory
+
+Ragnar always installs to `/home/ragnar/Ragnar`, and the `ragnar` user is
+created if missing. If you find the tree somewhere else — `/home/Ragnar`, or
+wherever you ran the installer from — you hit a bug in installers before this
+fix, where a failure to enter `/home/ragnar` was ignored and the relative clone
+landed in the current directory instead. Move it into place and re-run:
+
+```bash
+sudo systemctl stop ragnar.service
+sudo mv /home/Ragnar /home/ragnar/Ragnar        # adjust the source path
+sudo chown -R ragnar:ragnar /home/ragnar/Ragnar
+sudo /home/ragnar/Ragnar/update_ragnar.sh
+```
+
 ### 🧰 Manual Install
 
 #### Step 1: Activate SPI & I2C
