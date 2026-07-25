@@ -98,6 +98,7 @@ def _advertisement(includes, include_name):
     adv.providers = _P()
     adv.includes = list(includes)
     adv.include_name = include_name
+    adv.adv_type = 'peripheral'
     return adv.get_properties()[bp.LE_ADVERTISEMENT]
 
 
@@ -120,6 +121,52 @@ def test_full_rung_carries_name_and_txpower():
     props = _advertisement(['tx-power'], True)
     assert str(props['LocalName']) == 'Ragnar-b4e2'
     assert [str(i) for i in props['Includes']] == ['tx-power']
+
+
+def test_every_rung_stays_connectable():
+    # 'broadcast' is diagnostic only: a phone cannot connect to it, so GATT
+    # provisioning would be impossible. Degrading must never reach for it.
+    for includes, with_name in bp.adv_ladder(['tx-power']):
+        assert str(_advertisement(includes, with_name)['Type']) == 'peripheral'
+
+
+# --- the reason bluetoothd logs behind the opaque D-Bus error ---------------
+
+def test_hint_calls_out_a_controller_with_no_peripheral_role():
+    hint = bp.adv_failure_hint('', {'roles': ['central']}, 'hci1')
+    assert 'peripheral role' in hint
+    assert 'hci1' in hint
+
+
+def test_hint_maps_the_mgmt_status_to_a_cause():
+    caps = {'roles': ['central', 'peripheral']}
+    assert 'ControllerMode' in bp.adv_failure_hint('Rejected (0x0b)', caps, 'hci0')
+    assert 'btmgmt --index hci0 le on' in bp.adv_failure_hint('Rejected (0x0b)', caps, 'hci0')
+    assert 'BT 4.0+' in bp.adv_failure_hint('Not Supported (0x0c)', caps, 'hci0')
+    assert 'dmesg' in bp.adv_failure_hint('Invalid Parameters (0x0d)', caps, 'hci0')
+    assert 'scanning' in bp.adv_failure_hint('Busy (0x0a)', caps, 'hci0')
+
+
+def test_hint_falls_back_when_nothing_is_known():
+    hint = bp.adv_failure_hint('', {}, 'hci0')
+    assert 'doctor' in hint
+
+
+def test_bluetoothd_adv_failure_parses_the_logged_status(monkeypatch):
+    log = (
+        'Jul 25 15:06:58 pi bluetoothd[763]: src/advertising.c:add_client_complete() '
+        'Failed to add advertisement: Rejected (0x0b)\n'
+        'Jul 25 15:06:59 pi bluetoothd[763]: src/advertising.c:add_client_complete() '
+        'Failed to add advertisement: Invalid Parameters (0x0d)\n'
+    )
+    monkeypatch.setattr(bp, '_run', lambda *a, **k: log)
+    # The *last* failure is ours; earlier ones may be from another client.
+    assert bp.bluetoothd_adv_failure() == 'Invalid Parameters (0x0d)'
+
+
+def test_bluetoothd_adv_failure_is_quiet_without_a_journal(monkeypatch):
+    monkeypatch.setattr(bp, '_run', lambda *a, **k: '')
+    assert bp.bluetoothd_adv_failure() == ''
 
 
 # --- diagnostics carried in the failure message -----------------------------
