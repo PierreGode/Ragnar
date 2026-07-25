@@ -63,6 +63,12 @@ class WiFiManager:
         self.wifi_validation_interval = 180  # 3 minutes between WiFi validations
         self.wifi_validation_retries = 5  # 5 validation attempts (changed from 3)
         self.wifi_validation_retry_interval = 10  # 10 seconds between validation retries
+        # While parked in AP mode, how often to look for a known network again.
+        # Tracked as "seconds since the last check" rather than by testing the
+        # uptime against a multiple — the monitoring loop ticks on a ~10s sleep
+        # plus however long the checks took, so it never lands on exact seconds.
+        self.ap_reconnect_check_interval = 30
+        self.last_ap_reconnect_check = 0.0
         self.last_wifi_validation = None
         self.wifi_validation_failures = 0
         self.consecutive_validation_cycles_failed = 0  # Track consecutive full validation cycle failures
@@ -807,11 +813,25 @@ class WiFiManager:
 
     def _endless_loop_start_ap_mode(self):
         """Start AP mode as part of endless loop.
-        Skipped when wardriving is enabled — wardriving needs wlan0 for scanning
-        and AP mode (hostapd) would take over the interface.
+
+        Skipped for the two modes that own the radio themselves:
+
+        - **Wardriving** needs wlan0 for scanning, and AP mode (hostapd) would
+          take over the interface. Wardriving has its own phone-access AP,
+          started deliberately with KEY1.
+        - **On-Screen Network Diagnostic Mode** is a field test of the network
+          the box is actually on. Silently converting the radio into an access
+          point mid-test invalidates every reading on the screen.
+
+        WiFi search itself is NOT suppressed by either — the box should keep
+        trying to rejoin a known network. Only the AP fallback is skipped.
         """
         if self.shared_data.config.get('wardriving_enabled', False):
             self.logger.info("Endless Loop: AP mode skipped — wardriving is enabled")
+            return
+
+        if self.shared_data.config.get('network_diagnostic_mode', False):
+            self.logger.info("Endless Loop: AP mode skipped — On-Screen Network Diagnostic Mode is active")
             return
 
         self.logger.info("Endless Loop: Starting AP mode (3 minutes)")
@@ -1041,10 +1061,20 @@ class WiFiManager:
             self.ap_user_connection_time = current_time
             self.logger.info("Endless Loop: User connected to AP - monitoring user activity")
         
-        # Periodically check for known WiFi networks while in AP mode (every 30 seconds)
-        # BUT only after the initial 3-minute grace period to give user time to connect
-        # This allows recovery even when no user is connected, but not too aggressively
-        if ap_uptime >= 180 and int(ap_uptime) % 30 == 0:  # Start checking after 3 minutes
+        # Periodically check for known WiFi networks while in AP mode, but only
+        # after the initial 3-minute grace period so the user has time to
+        # connect. This is what lets the box leave AP mode on its own once the
+        # home network is back.
+        #
+        # This used to read `int(ap_uptime) % 30 == 0`, which required a tick to
+        # land on an exact multiple of 30. The loop sleeps ~10s and then does
+        # real work (client counts, scans), so ap_uptime drifts and int() lands
+        # on 181, 191, 202… — measured over a simulated 2 hours, that fired 24
+        # times instead of 235, i.e. ~90% of recovery attempts were skipped and
+        # the box sat in AP mode long after WiFi returned.
+        due = (current_time - self.last_ap_reconnect_check) >= self.ap_reconnect_check_interval
+        if ap_uptime >= 180 and due:
+            self.last_ap_reconnect_check = current_time
             self.logger.info("Endless Loop: Checking for available known WiFi networks while in AP mode (after 3-min grace period)...")
             if self._check_known_networks_available():
                 self.logger.info("Endless Loop: Known WiFi network detected! Attempting to connect...")
