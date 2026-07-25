@@ -5930,6 +5930,9 @@
                             <div class="flex items-center justify-between mt-3 pt-2 border-t border-gray-700/50">
                                 <span class="text-xs text-gray-500">Service</span>
                                 <div class="flex items-center gap-2">
+                                    <button id="kiosk-repair-btn" onclick="repairKiosk()"
+                                            class="px-2 py-0.5 rounded bg-amber-700 hover:bg-amber-600 text-white text-xs"
+                                            title="Re-run the kiosk installer and start it, whatever state it is in">Reinstall</button>
                                     <button id="kiosk-diagnose-btn" onclick="runKioskDoctor()"
                                             class="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white text-xs">Diagnose</button>
                                     <span id="kiosk-service-badge" class="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">unknown</span>

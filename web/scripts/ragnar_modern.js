@@ -25111,6 +25111,26 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
     _kioskPollTimer = setTimeout(tick, 1500);
 }
 
+// Re-run the kiosk installer and start it, whatever state the box is in — the
+// same thing as `sudo bash scripts/install_kiosk.sh` followed by
+// `systemctl enable --now ragnar-kiosk`. The toggle only reacts to a *change*,
+// so this is the way back for a box whose config already says enabled.
+async function repairKiosk() {
+    const btn = document.getElementById('kiosk-repair-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Reinstalling…'; }
+    try {
+        const data = await postAPI('/api/kiosk/repair', {});
+        _setKioskMessage(data.message || 'Reinstalling the kiosk…', 'info');
+        const cb = document.getElementById('kiosk-enabled');
+        if (cb) cb.checked = true;
+        _pollKioskStatusUntilStable(true);
+    } catch (e) {
+        _setKioskMessage('Could not start the kiosk reinstall: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Reinstall'; }
+    }
+}
+
 // Run scripts/kiosk_doctor.sh on the box and show its report here, so "the
 // screen is blank" can be diagnosed without an ssh session.
 async function runKioskDoctor() {

@@ -86,6 +86,23 @@ reached `active`/`installed`. Two things it is *not*:
 If you still see it, the service exists but is stuck part-way (usually
 `activating`). Check both logs below.
 
+**"Nothing happened when I turned it on."** Use **Reinstall** in
+**Config → On-screen Display**. It runs the installer and the enable step for
+you — the same two commands people were resorting to by hand:
+
+```bash
+sudo bash scripts/install_kiosk.sh
+sudo systemctl enable --now ragnar-kiosk.service   # service mode only
+```
+
+Why it was needed: the toggle only acts on a *change*, and it used to skip the
+installer whenever anything already looked installed. An attempt that got as far
+as writing the unit file, or left an autostart entry behind, therefore counted as
+"installed" — so flipping the switch never re-ran the installer and never fixed
+what was missing, while running the script by hand did. The installer is
+idempotent, so it is now run on every enable, and **Reinstall** gives a box whose
+config already says enabled a way back without toggling off and on.
+
 **Start here — the Diagnose button.** In **Config → On-screen Display** it runs
 `scripts/kiosk_doctor.sh` on the box and prints the whole report in the card, so
 a blank screen can be diagnosed without an ssh session. Same thing from a
