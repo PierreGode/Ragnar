@@ -241,6 +241,7 @@ def ble_provisioning_status():
     running = False
     starting = False
     error = None
+    hint = None
     name = None
     adapter = None
     autostopped = False
@@ -250,6 +251,7 @@ def ble_provisioning_status():
             running = bool(st.get('running'))
             starting = bool(st.get('starting'))
             error = st.get('error')
+            hint = st.get('hint')
             name = st.get('name')
             adapter = st.get('adapter')
             autostopped = bool(st.get('autostopped'))
@@ -261,6 +263,10 @@ def ble_provisioning_status():
         # so the UI must keep polling rather than declare it broken.
         'starting': starting,
         'error': error,
+        # Plain-language next step when the controller refused to advertise —
+        # the raw BlueZ text ("Failed to register advertisement") says nothing
+        # about what to do about it.
+        'hint': hint,
         'name': name,
         # Configured preference ('' = auto: prefer the built-in controller).
         'adapter': shared_data.config.get('ble_provisioning_adapter', ''),

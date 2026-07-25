@@ -121,12 +121,45 @@ registration. A start that still meets `AlreadyExists` now reclaims the path and
 retries once, so a box already stuck heals itself on the next enable. If you see
 this on an older build, restarting Ragnar clears it.
 
+**`RegisterAdvertisement: org.bluez.Error.Failed: Failed to register
+advertisement`** — shown in the UI as *"Enabled, but not advertising"*. This is
+**not** a Ragnar-side rejection: BlueZ is relaying that the *controller* refused
+the advertisement, which is why the same build advertises on one box and not on
+another. The causes, in the order they turn up:
+
+- **The controller does not support an advertising include we asked for.**
+  `tx-power` is the one that bites: a radio that cannot report its LE
+  advertising TX power does not list it in `SupportedIncludes`, and asking for
+  it anyway gets the *whole* advertisement refused. The peripheral now reads
+  the controller's `SupportedIncludes` first and only asks for what is there.
+- **No advertising slot free.** Something else is already advertising and the
+  controller supports only so many instances (`ActiveInstances` /
+  `SupportedInstances`) — often a leftover `bluetoothctl advertise on`.
+- **A scan is running on the same radio.** Some controllers will not advertise
+  while `bt_scanner` / WIDS holds a discovery. Pin the peripheral to another
+  adapter, or run them at different times.
+- **The controller was still settling** right after power-on, and refused the
+  first registration only.
+
+A refused advertisement is retried down a ladder of progressively smaller ones
+— the same advertisement once more, then without `tx-power`, then the bare
+service UUID — because a box findable by service UUID alone still provisions
+(the app scans filtered by that UUID). Only if every rung is refused does it
+report a failure, and the message then carries the controller's own
+capabilities so a screenshot is enough to tell which cause it was:
+
+```
+RegisterAdvertisement: org.bluez.Error.Failed: Failed to register advertisement
+[hci0; instances 1/1; includes local-name; max adv len 31]
+```
+
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
 each prerequisite in turn — `python3-dbus` and `python3-gi` importable,
 `bluetoothctl` present, at least one controller found, Bluetooth not
-rfkill-blocked — then actually registers an advertisement for a few seconds and
-reports what BlueZ said. Every FAIL line carries the command that fixes it, and
-the controller list shows which radios it can see and which one is built-in:
+rfkill-blocked, then what that controller can actually advertise — and finally
+registers an advertisement for a few seconds and reports what BlueZ said. Every
+FAIL line carries the command that fixes it; WARN lines are conditions that
+only matter if the advertise test below them fails:
 
 ```
   [PASS] python3-dbus importable
@@ -135,9 +168,19 @@ the controller list shows which radios it can see and which one is built-in:
   [PASS] Bluetooth controller found (1)
         - hci0 DC:A6:32:00:B4:E2 (built-in)
   [PASS] Bluetooth not rfkill-blocked
+        BlueZ 5.82
+  [PASS] hci0 exposes LEAdvertisingManager1
+        includes:  tx-power, appearance, local-name
+        instances: 0/4 in use
+        max adv len: 31
+  [PASS] An advertising slot is free
+  [PASS] No scan running on this adapter
   [PASS] Advertising starts
         advertising as "Ragnar-b4e2" on hci0
 ```
+
+Those three middle lines are the ones to paste in a bug report: they are what
+differs between a box that advertises and one that does not.
 
 A pass here means the box is on the air — if the phone still can't see it, scan
 for that name with a generic BLE app (nRF Connect) to split "box isn't
