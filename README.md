@@ -335,4 +335,4 @@ Ragnar is built on the shoulders of great work by others:
 
 ## 📜 License
 
-2025 - Ragnar is distributed under the MIT License. See the [LICENSE](LICENSE) file for details.
+2025- - Ragnar is distributed under the MIT License. See the [LICENSE](LICENSE) file for details.
