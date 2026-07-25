@@ -667,4 +667,4 @@ Set the static IP address on your Windows PC:
 
 ## 📜 License
 
-2024 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2025 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
