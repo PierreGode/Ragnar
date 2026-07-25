@@ -260,7 +260,11 @@ package_candidates() {
         network-manager) echo "network-manager NetworkManager networkmanager" ;;
         iproute2) echo "iproute2 iproute" ;;
         iputils-ping) echo "iputils-ping iputils" ;;
-        libatlas-base-dev) echo "libatlas-base-dev atlas-devel" ;;
+        # ATLAS was dropped from Debian Trixie, so libatlas-base-dev resolves to
+        # nothing there and warned on every install. OpenBLAS is its replacement
+        # and is already a required package, so it is normally "already present"
+        # and this becomes a silent no-op instead of a scary double warning.
+        libatlas-base-dev) echo "libatlas-base-dev atlas-devel libopenblas-dev openblas-devel" ;;
         arp-scan) echo "arp-scan arpscan" ;;
         mtr-tiny) echo "mtr-tiny mtr" ;;
         whois) echo "whois jwhois" ;;
@@ -275,6 +279,36 @@ package_candidates() {
         bridge-utils) echo "bridge-utils" ;;
         *) echo "$pkg" ;;
     esac
+}
+
+# Repair an interrupted dpkg transaction before touching apt.
+#
+# apt refuses every operation while a previous dpkg run is unfinished:
+#   "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"
+# A low-memory Pi reaches that state easily — an install killed by the OOM
+# killer, a power loss, or a Ctrl-C during one of the long silent steps — and
+# from then on nothing installs, including re-running this script or the
+# Pwnagotchi installer. Repairing is idempotent and a no-op when healthy, so it
+# runs unconditionally rather than making the user find the command themselves.
+ensure_dpkg_healthy() {
+    [ "$PKG_MGR" = "apt" ] || return 0
+    local interrupted=false
+    # Files here mean a transaction was cut off mid-write; --audit catches
+    # packages left half-installed or half-configured.
+    [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] && interrupted=true
+    [ -n "$(dpkg --audit 2>/dev/null)" ] && interrupted=true
+    [ "$interrupted" = false ] && return 0
+
+    log "WARNING" "dpkg is in an interrupted state — repairing before installing"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+        log "WARNING" "dpkg still reports problems — package installs may fail"
+        log "WARNING" "Inspect manually with: sudo dpkg --audit && sudo dpkg --configure -a"
+    else
+        log "SUCCESS" "dpkg state repaired"
+    fi
 }
 
 # Install a package using detected package manager with fallbacks
@@ -426,6 +460,9 @@ install_dependencies() {
 
     [ -z "$PKG_MGR" ] && detect_platform
 
+    # Must run before the first apt command, or every install below fails.
+    ensure_dpkg_healthy
+
     eval "$UPDATE_CMD"
     check_success "Package index updated via ${PKG_MGR}"
 
@@ -538,11 +575,54 @@ install_dependencies() {
     # Update nmap scripts (may fail with SIGILL on some ARM builds)
     nmap --script-updatedb >/dev/null 2>&1 || log "WARNING" "nmap --script-updatedb failed — vulnerability scripts may be stale"
 
-    # Recon engine Python deps (TLS audit + DNS recon)
+    # Recon engine Python deps (TLS audit + DNS recon). Installed one at a time
+    # and never as a single pip command: they back independent features, and
+    # sslyze is the only one that can realistically fail — it pulls nassl, a
+    # compiled extension with no wheel for every Pi platform. Bundled together,
+    # a failed sslyze build also took out dnspython and tldextract, which are
+    # pure Python and ship in apt. Prefer apt for those two (no build at all),
+    # fall back to pip, and report per-package so the log says which feature is
+    # actually degraded.
     log "INFO" "Installing recon engine Python dependencies..."
-    pip3 install --break-system-packages sslyze dnspython tldextract >/dev/null 2>&1 \
-        || pip3 install sslyze dnspython tldextract >/dev/null 2>&1 \
-        || log "WARNING" "Failed to install sslyze/dnspython/tldextract — recon engine will report errors per scan"
+    _recon_missing=()
+
+    # dnspython — DNS recon (recon_engine.py resolves via dns.resolver)
+    if python3 -c "import dns.resolver" 2>/dev/null; then
+        log "INFO" "dnspython already available"
+    elif install_package python3-dnspython 2>/dev/null && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (apt)"
+    elif pip3 install --break-system-packages dnspython >/dev/null 2>&1 && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (pip)"
+    else
+        _recon_missing+=("dnspython → DNS recon")
+    fi
+
+    # tldextract — domain parsing for the recon engine
+    if python3 -c "import tldextract" 2>/dev/null; then
+        log "INFO" "tldextract already available"
+    elif install_package python3-tldextract 2>/dev/null && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (apt)"
+    elif pip3 install --break-system-packages tldextract >/dev/null 2>&1 && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (pip)"
+    else
+        _recon_missing+=("tldextract → domain parsing")
+    fi
+
+    # sslyze — TLS audit. No apt package; needs to build nassl on some platforms.
+    if python3 -c "import sslyze" 2>/dev/null; then
+        log "INFO" "sslyze already available"
+    elif pip3 install --break-system-packages sslyze >/dev/null 2>&1 && python3 -c "import sslyze" 2>/dev/null; then
+        log "SUCCESS" "Installed sslyze (pip)"
+    else
+        _recon_missing+=("sslyze → TLS audit scans")
+    fi
+
+    if [ ${#_recon_missing[@]} -gt 0 ]; then
+        log "WARNING" "Recon engine features unavailable: ${_recon_missing[*]}"
+        log "WARNING" "The rest of Ragnar is unaffected; retry later with: sudo pip3 install --break-system-packages <name>"
+    else
+        log "SUCCESS" "Recon engine dependencies installed"
+    fi
 
     # Recon engine wordlist for content discovery
     local wordlist_dir="/opt/ragnar/wordlists"
@@ -1029,63 +1109,61 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         log "WARNING" "You can install it manually later with: sudo pip3 install --break-system-packages cryptography>=41.0.0"
     }
 
-    # Verify display driver availability
-    if [ "$HEADLESS_MODE" = true ] || [ -z "${EPD_VERSION:-}" ]; then
-        log "INFO" "Headless mode or unknown display version detected - skipping driver verification"
-    elif [ "$EPD_VERSION" = "gc9a01" ]; then
-        # TFT drivers ship with Ragnar in resources/waveshare_epd/, verify the file exists
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/gc9a01.py" ]; then
-            log "SUCCESS" "GC9A01 TFT driver verified (resources/waveshare_epd/gc9a01.py)"
-        else
-            log "ERROR" "GC9A01 TFT driver not found at $ragnar_PATH/resources/waveshare_epd/gc9a01.py"
-        fi
-        # Ensure spidev is installed for TFT SPI communication
-        pip3 install spidev --break-system-packages >/dev/null 2>&1
-        log "INFO" "SPI dependencies installed for TFT display"
-    elif [ "$EPD_VERSION" = "whisplay" ]; then
-        # TFT drivers ship with Ragnar in resources/waveshare_epd/, verify the file exists
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/whisplay.py" ]; then
-            log "SUCCESS" "Whisplay TFT driver verified (resources/waveshare_epd/whisplay.py)"
-        else
-            log "ERROR" "Whisplay TFT driver not found at $ragnar_PATH/resources/waveshare_epd/whisplay.py"
-        fi
-        # Ensure spidev is installed for TFT SPI communication
-        pip3 install spidev --break-system-packages >/dev/null 2>&1
-        log "INFO" "SPI dependencies installed for TFT display"
-    elif [ "$EPD_VERSION" = "ssd1306" ]; then
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/ssd1306.py" ]; then
-            log "SUCCESS" "SSD1306 OLED driver verified (resources/waveshare_epd/ssd1306.py)"
-        else
-            log "ERROR" "SSD1306 OLED driver not found at $ragnar_PATH/resources/waveshare_epd/ssd1306.py"
-        fi
-        # Install smbus2 for I2C communication
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1
-        # Enable I2C interface
-        raspi-config nonint do_i2c 0 2>/dev/null || true
-        log "INFO" "I2C interface enabled for SSD1306"
-    elif [ "$EPD_VERSION" = "lcd1602" ]; then
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/lcd1602.py" ]; then
-            log "SUCCESS" "LCD1602 driver verified (resources/waveshare_epd/lcd1602.py)"
-        else
-            log "ERROR" "LCD1602 driver not found at $ragnar_PATH/resources/waveshare_epd/lcd1602.py"
-        fi
-        # Install smbus2 for I2C communication
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1
-        # Enable I2C interface
-        raspi-config nonint do_i2c 0 2>/dev/null || true
-        log "INFO" "I2C interface enabled for LCD1602"
+    # Display drivers — install support for EVERY screen, not just the one
+    # picked during install. Config → Display in the web UI can switch to any
+    # profile in shared.py's DISPLAY_PROFILES at any time, and that switch has
+    # to just work. Previously this was an if/elif chain that installed only the
+    # selected driver's dependency, so picking e-Paper at install and later
+    # selecting the SSD1306 OLED in the web UI gave a dead screen (no smbus2),
+    # and vice versa (no Waveshare library). SPI and I2C are already enabled by
+    # configure_interfaces. Every dependency is small; installing all of them
+    # costs far less than a reinstall to change screens.
+    if [ "$HEADLESS_MODE" = true ]; then
+        log "INFO" "Headless mode - skipping display driver installation"
     else
-        log "INFO" "Verifying Waveshare e-Paper library installation for $EPD_VERSION..."
-        cd /home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python
-        pip3 install . --break-system-packages
-        
-        python3 -c "from waveshare_epd import ${EPD_VERSION}; print('EPD module OK')" \
-            && log "SUCCESS" "$EPD_VERSION driver verified successfully" \
-            || log "ERROR" "EPD driver $EPD_VERSION failed to import"
-    fi
+        log "INFO" "Installing display driver support for all screen types..."
 
-    if [[ "$EPD_VERSION" == max7219* ]]; then
-        sudo pip3 install --break-system-packages luma.led_matrix luma.core 2>/dev/null || pip3 install --break-system-packages luma.led_matrix luma.core 2>/dev/null || true
+        # SPI transport: e-Paper, GC9A01 / ST7735S / Whisplay TFT, MAX7219.
+        pip3 install spidev --break-system-packages >/dev/null 2>&1 \
+            && log "SUCCESS" "spidev installed (SPI displays)" \
+            || log "WARNING" "spidev failed to install — SPI displays will not work"
+
+        # I2C transport: SSD1306 OLED, LCD1602 character LCD.
+        pip3 install smbus2 --break-system-packages >/dev/null 2>&1 \
+            && log "SUCCESS" "smbus2 installed (I2C displays)" \
+            || log "WARNING" "smbus2 failed to install — I2C displays will not work"
+
+        # MAX7219 LED matrix panels.
+        pip3 install --break-system-packages luma.led_matrix luma.core >/dev/null 2>&1 \
+            && log "SUCCESS" "luma.led_matrix installed (MAX7219 LED matrix)" \
+            || log "WARNING" "luma.led_matrix failed to install — MAX7219 panels will not work"
+
+        # Waveshare library — backs every epd* profile.
+        if [ -d "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" ]; then
+            (cd "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" \
+                && pip3 install . --break-system-packages >/dev/null 2>&1) \
+                && log "SUCCESS" "Waveshare e-Paper library installed (all e-Paper models)" \
+                || log "WARNING" "Waveshare e-Paper library failed to install — e-Paper screens will not work"
+        else
+            log "WARNING" "Waveshare e-Paper source not found — e-Paper screens will not work"
+        fi
+
+        # Report what is actually usable, so a bad screen choice later is easy
+        # to trace back to a missing dependency rather than a wiring fault.
+        local unusable=()
+        python3 -c "import spidev" 2>/dev/null || unusable+=("SPI displays (spidev)")
+        python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
+        python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
+        python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
+        for drv in gc9a01 st7735s whisplay ssd1306 lcd1602 max7219; do
+            [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
+                || unusable+=("${drv} (driver file missing)")
+        done
+        if [ ${#unusable[@]} -eq 0 ]; then
+            log "SUCCESS" "All display types supported — any screen can be selected in Config → Display"
+        else
+            log "WARNING" "These display types will NOT work until fixed: ${unusable[*]}"
+        fi
     fi
 
     check_success "Installed Python requirements"
@@ -1833,24 +1911,30 @@ main() {
 
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
-            echo "2. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
-            echo "3. SSD1306     (0.96\" OLED 128x64)"
-            echo "4. LCD1602     (16x2 I2C Character LCD)"
-            echo "5. No display  (headless install)"
+            echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
+            echo "3. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
+            echo "4. SSD1306     (0.96\" OLED 128x64)"
+            echo "5. LCD1602     (16x2 I2C Character LCD)"
+            echo "6. No display  (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # ST7735S was missing here, so the 1.44" LCD HAT could not be
+            # selected on the TFT install path at all.
             while true; do
-                read -p "Enter your choice (1-5): " tft_choice
+                read -p "Enter your choice (1-6): " tft_choice
                 case $tft_choice in
                     1) EPD_VERSION="gc9a01"; break;;
-                    2) EPD_VERSION="whisplay"; break;;
-                    3) EPD_VERSION="ssd1306"; break;;
-                    4) EPD_VERSION="lcd1602"; break;;
-                    5)
+                    2) EPD_VERSION="st7735s"; break;;
+                    3) EPD_VERSION="whisplay"; break;;
+                    4) EPD_VERSION="ssd1306"; break;;
+                    5) EPD_VERSION="lcd1602"; break;;
+                    6)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-5.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-6.${NC}";;
                 esac
             done
 
@@ -1920,7 +2004,10 @@ main() {
             log "INFO" "Attempting to auto-detect E-Paper display"
             
             EPD_VERSION=""
-            EPD_VERSIONS=("epd2in13b_V4", "epd2in13_V4" "epd2in13_V3" "epd2in13_V2" "epd2in7_V2" "epd2in7" "epd2in13" "epd2in9_V2" "epd3in7" "epd4in26")
+            # No commas — a stray one made the first element "epd2in13b_V4,",
+            # so that model could never be auto-detected (the import always
+            # failed on the trailing comma).
+            EPD_VERSIONS=("epd2in13b_V4" "epd2in13_V4" "epd2in13_V3" "epd2in13_V2" "epd2in7_V2" "epd2in7" "epd2in13" "epd2in9_V2" "epd3in7" "epd4in26")
             
             for version in "${EPD_VERSIONS[@]}"; do
                 echo -e "${BLUE}Testing ${version}...${NC}"
@@ -2004,21 +2091,28 @@ except:
             echo ""
             echo -e "${CYAN}  TFT LCD displays:${NC}"
             echo "11. GC9A01       (1.28\" Round 240x240)"
+            echo "12. ST7735S      (1.44\" LCD HAT + joystick 128x128)"
+            echo "13. Whisplay     (1.69\" ST7789 240x280, PiSugar HAT)"
             echo ""
             echo -e "${CYAN}  OLED displays:${NC}"
-            echo "12. SSD1306      (0.96\" OLED 128x64)"
+            echo "14. SSD1306      (0.96\" OLED 128x64)"
             echo ""
             echo -e "${CYAN}  Character LCD:${NC}"
-            echo "13. LCD1602      (16x2 I2C Character LCD)"
+            echo "15. LCD1602      (16x2 I2C Character LCD)"
             echo ""
             echo -e "${CYAN}  LED Matrix displays:${NC}"
-            echo "14. MAX7219  (8 panels 64×8 LED matrix)"
-            echo "15. MAX7219  (4 panels 32×8 LED matrix)"
+            echo "16. MAX7219  (8 panels 64×8 LED matrix)"
+            echo "17. MAX7219  (4 panels 32×8 LED matrix)"
             echo ""
-            echo "16. No display (headless install)"
+            echo "18. No display (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # Every profile in shared.py's DISPLAY_PROFILES is offered here.
+            # ST7735S and Whisplay used to be missing, so owners of those two
+            # screens had no way to pick them during install.
             while true; do
-                read -p "Enter your choice (1-15): " epd_choice
+                read -p "Enter your choice (1-18): " epd_choice
                 case $epd_choice in
                     1) EPD_VERSION="epd2in13"; break;;
                     2) EPD_VERSION="epd2in13_V2"; break;;
@@ -2031,16 +2125,18 @@ except:
                     9) EPD_VERSION="epd3in7"; break;;
                     10) EPD_VERSION="epd4in26"; break;;
                     11) EPD_VERSION="gc9a01"; break;;
-                    12) EPD_VERSION="ssd1306"; break;;
-                    13) EPD_VERSION="lcd1602"; break;;
-                    14) EPD_VERSION="max7219_8panel"; break;;
-                    15) EPD_VERSION="max7219_4panel"; break;;
-                    16)
+                    12) EPD_VERSION="st7735s"; break;;
+                    13) EPD_VERSION="whisplay"; break;;
+                    14) EPD_VERSION="ssd1306"; break;;
+                    15) EPD_VERSION="lcd1602"; break;;
+                    16) EPD_VERSION="max7219_8panel"; break;;
+                    17) EPD_VERSION="max7219_4panel"; break;;
+                    18)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-15.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-18.${NC}";;
                 esac
             done
 

@@ -24086,7 +24086,31 @@ function _bleProvStatusText(d) {
     if (!d.enabled) return 'Disabled.';
     if (d.autostopped) return 'Provisioned — advertising stopped to free the radio. Tap Re-advertise for another device.';
     if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
-    return d.error ? ('Enabled, but not advertising: ' + d.error) : 'Enabling…';
+    if (d.error) return 'Enabled, but not advertising: ' + d.error;
+    // Still registering with BlueZ — slow boards can take a while. Anything
+    // else with no error is a state we have not heard back about yet.
+    if (d.starting) return 'Starting — registering with BlueZ…';
+    return 'Enabling…';
+}
+
+// Poll until the peripheral settles. Registration on a slow board (Pi Zero 2 W)
+// can outlast the request that started it, and a single follow-up read then
+// caught it mid-start and left "Enabling…" on screen permanently.
+function _bleProvPollUntilSettled(tries) {
+    tries = (typeof tries === 'number') ? tries : 8;
+    if (tries <= 0) return;
+    setTimeout(async () => {
+        let d = null;
+        try {
+            const res = await fetch('/api/ble/provisioning');
+            d = await res.json();
+        } catch (e) { /* transient; keep trying */ }
+        await loadBleProvisioning();
+        // Keep going only while it is still coming up.
+        if (d && d.enabled && !d.running && !d.error) {
+            _bleProvPollUntilSettled(tries - 1);
+        }
+    }, 1500);
 }
 
 async function loadBleProvisioning() {
@@ -24160,9 +24184,11 @@ async function toggleBleProvisioning(checkbox) {
     try {
         const res = await postAPI('/api/ble/provisioning/toggle', { enabled });
         addConsoleMessage('Bluetooth provisioning ' + (enabled ? 'enabled' : 'disabled'), 'success');
-        if (res && st) st.textContent = _bleProvStatusText(res);
+        if (res && st) st.textContent = _bleProvStatusText(Object.assign({ enabled: enabled }, res));
         // Re-read for the active adapter / advertised name once settled.
         setTimeout(loadBleProvisioning, 600);
+        // Keep watching while it is still registering.
+        if (enabled && res && !res.running) _bleProvPollUntilSettled();
     } catch (e) {
         console.error('[BLE] provisioning toggle error:', e);
         addConsoleMessage('Failed to update Bluetooth provisioning', 'error');

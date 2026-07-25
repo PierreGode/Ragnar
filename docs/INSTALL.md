@@ -66,6 +66,61 @@ Two steps in the install are also slow and silent, which can look like a hang on
 a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
 `nmap --script-updatedb`. Give them time before interrupting.
 
+#### Changing your screen
+
+The installer asks which screen you have, but that is only a starting value —
+**support for every screen is installed regardless of what you pick.** All the
+backing dependencies go on (`spidev`, `smbus2`, `luma.led_matrix`, the Waveshare
+e-Paper library), and SPI and I2C are both enabled.
+
+So you can change screens at any time in the web UI under **Config → Display**
+without reinstalling. The choice is written to `config/shared_config.json`, which
+is gitignored — it survives both reboots and `update_ragnar.sh`, so the screen
+you select stays selected.
+
+All 17 profiles are offered in both places:
+
+| Type | Screens |
+|---|---|
+| e-Paper | `epd2in13`, `_V2`, `_V3`, `_V4`, `epd2in13b_V4`, `epd2in7`, `epd2in7_V2`, `epd2in9_V2`, `epd3in7`, `epd4in26` |
+| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `whisplay` (1.69" PiSugar) |
+| OLED | `ssd1306` (0.96") |
+| Character LCD | `lcd1602` (16×2 I2C) |
+| LED matrix | `max7219_8panel`, `max7219_4panel` |
+
+In the web selector the e-Paper models are grouped by size (2.13", 2.7", …). If
+your current driver already matches the size you pick, the exact variant is
+kept — selecting "2.13"" on a box running `epd2in13_V4` leaves it on `_V4`
+rather than resetting it.
+
+If the install log ends with `These display types will NOT work until fixed:`,
+that names the dependency that failed — a screen of that type will stay blank
+until it is installed.
+
+#### "dpkg was interrupted" — nothing installs
+
+```
+E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a'
+```
+
+This is a **system** state, not a Ragnar one, and it blocks *every* apt
+operation until cleared — the main install, updates, and the Pwnagotchi
+installer alike. Fix it with:
+
+```bash
+sudo dpkg --configure -a
+sudo apt-get install -f -y
+```
+
+A Pi reaches this state when a package install is cut off part-way: the OOM
+killer on a 512 MB board, a power loss, or Ctrl-C during one of the long silent
+steps. It often surfaces later than it happened — the Pwnagotchi installer
+failing is a common first symptom of a state broken during the main install.
+
+`install_ragnar.sh`, `update_ragnar.sh` and `scripts/install_pwnagotchi.sh` all
+detect and repair this automatically before their first apt call, so it should
+no longer need doing by hand.
+
 #### "No git command works" / updates fail
 
 Check this first:
