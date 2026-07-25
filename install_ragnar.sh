@@ -1831,24 +1831,30 @@ main() {
 
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
-            echo "2. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
-            echo "3. SSD1306     (0.96\" OLED 128x64)"
-            echo "4. LCD1602     (16x2 I2C Character LCD)"
-            echo "5. No display  (headless install)"
+            echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
+            echo "3. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
+            echo "4. SSD1306     (0.96\" OLED 128x64)"
+            echo "5. LCD1602     (16x2 I2C Character LCD)"
+            echo "6. No display  (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # ST7735S was missing here, so the 1.44" LCD HAT could not be
+            # selected on the TFT install path at all.
             while true; do
-                read -p "Enter your choice (1-5): " tft_choice
+                read -p "Enter your choice (1-6): " tft_choice
                 case $tft_choice in
                     1) EPD_VERSION="gc9a01"; break;;
-                    2) EPD_VERSION="whisplay"; break;;
-                    3) EPD_VERSION="ssd1306"; break;;
-                    4) EPD_VERSION="lcd1602"; break;;
-                    5)
+                    2) EPD_VERSION="st7735s"; break;;
+                    3) EPD_VERSION="whisplay"; break;;
+                    4) EPD_VERSION="ssd1306"; break;;
+                    5) EPD_VERSION="lcd1602"; break;;
+                    6)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-5.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-6.${NC}";;
                 esac
             done
 
@@ -2005,21 +2011,28 @@ except:
             echo ""
             echo -e "${CYAN}  TFT LCD displays:${NC}"
             echo "11. GC9A01       (1.28\" Round 240x240)"
+            echo "12. ST7735S      (1.44\" LCD HAT + joystick 128x128)"
+            echo "13. Whisplay     (1.69\" ST7789 240x280, PiSugar HAT)"
             echo ""
             echo -e "${CYAN}  OLED displays:${NC}"
-            echo "12. SSD1306      (0.96\" OLED 128x64)"
+            echo "14. SSD1306      (0.96\" OLED 128x64)"
             echo ""
             echo -e "${CYAN}  Character LCD:${NC}"
-            echo "13. LCD1602      (16x2 I2C Character LCD)"
+            echo "15. LCD1602      (16x2 I2C Character LCD)"
             echo ""
             echo -e "${CYAN}  LED Matrix displays:${NC}"
-            echo "14. MAX7219  (8 panels 64×8 LED matrix)"
-            echo "15. MAX7219  (4 panels 32×8 LED matrix)"
+            echo "16. MAX7219  (8 panels 64×8 LED matrix)"
+            echo "17. MAX7219  (4 panels 32×8 LED matrix)"
             echo ""
-            echo "16. No display (headless install)"
+            echo "18. No display (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # Every profile in shared.py's DISPLAY_PROFILES is offered here.
+            # ST7735S and Whisplay used to be missing, so owners of those two
+            # screens had no way to pick them during install.
             while true; do
-                read -p "Enter your choice (1-15): " epd_choice
+                read -p "Enter your choice (1-18): " epd_choice
                 case $epd_choice in
                     1) EPD_VERSION="epd2in13"; break;;
                     2) EPD_VERSION="epd2in13_V2"; break;;
@@ -2032,16 +2045,18 @@ except:
                     9) EPD_VERSION="epd3in7"; break;;
                     10) EPD_VERSION="epd4in26"; break;;
                     11) EPD_VERSION="gc9a01"; break;;
-                    12) EPD_VERSION="ssd1306"; break;;
-                    13) EPD_VERSION="lcd1602"; break;;
-                    14) EPD_VERSION="max7219_8panel"; break;;
-                    15) EPD_VERSION="max7219_4panel"; break;;
-                    16)
+                    12) EPD_VERSION="st7735s"; break;;
+                    13) EPD_VERSION="whisplay"; break;;
+                    14) EPD_VERSION="ssd1306"; break;;
+                    15) EPD_VERSION="lcd1602"; break;;
+                    16) EPD_VERSION="max7219_8panel"; break;;
+                    17) EPD_VERSION="max7219_4panel"; break;;
+                    18)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-15.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-18.${NC}";;
                 esac
             done
 
