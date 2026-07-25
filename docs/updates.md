@@ -107,6 +107,29 @@ An update is only reported as successful once the box reports **the commit that
 was pulled** and the post-update tasks have finished. Progress steps appear in
 the console panel as they happen, including across the restart.
 
+### "Finishing update: … " — what each step is
+
+That line is `scripts/post_update.sh` reporting where it is. In order:
+
+| Step | What it does | Why it can be slow |
+|---|---|---|
+| `python dependencies` | `pip install -r requirements.txt` | Only runs when `requirements.txt` changed in the pull; a source build (`cryptography`, `sslyze`) takes minutes on a Pi |
+| `data file templates` | `init_data_files.sh` | Fast |
+| `network tools` | `scripts/provision_network_tools.sh` — rfkill, traceroute/mtr/lldpd/arp-scan, lldpd config | Fast when everything is already installed. When something is missing it refreshes the apt index first, which is the slowest thing in an update |
+| `permissions` | exec bits and ownership | Fast |
+| `restart` | `systemctl restart ragnar` | The web UI is briefly unreachable here — expected |
+
+Each step is safe to re-run and skips work already done, so a normal update
+passes through all of them in seconds. `network tools` is the one that can sit
+there: a package that is simply not in your Debian suite (`speedtest-cli` is the
+usual one) counts as "missing" forever, so it used to trigger a full
+`apt-get update` on *every* update. The index refresh is now reused for six
+hours, and a missing package is still retried against the index already on disk.
+
+If the card sits on a step, `data/logs/post_update.log` says what is happening.
+A run that never finishes — power cut, a hung apt — is ignored after 30 minutes
+rather than pinning the card on a step from an update that ended days ago.
+
 Transcripts live on the box:
 
 ```

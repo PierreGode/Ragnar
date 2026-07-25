@@ -14311,7 +14311,13 @@ async function runUpdate(endpoint, idleLabel, startMessage) {
 // update finished" - the commit the box reports has to change too.
 async function verifyServiceRestart(expectedCommit) {
     let attempts = 0;
-    const maxAttempts = 60;          // up to 5 minutes; dependency installs are slow
+    // 5 minutes of silence is the giving-up point, but post-update work that is
+    // demonstrably still running extends it: a dependency install or an
+    // apt-get update on a Pi routinely outlasts five minutes, and reporting
+    // "could not confirm the update" over a step that is plainly making
+    // progress is a false alarm about a box that is perfectly fine.
+    let maxAttempts = 60;
+    const hardCeiling = 360;         // 30 minutes, even with progress
     let sawRestart = false;
     let lastStep = '';
     // The service reports when this process started. A change in that value is
@@ -14355,6 +14361,12 @@ async function verifyServiceRestart(expectedCommit) {
                 lastStep = post.step;
                 addConsoleMessage(`Post-update: ${post.step}`, 'info');
                 updateElement('update-info', `Finishing update: ${post.step}...`);
+                // Real progress buys more time, up to the hard ceiling.
+                maxAttempts = Math.min(hardCeiling, attempts + 60);
+            }
+            if (post.stale) {
+                addConsoleMessage('A previous post-update run never finished - ignoring its status. '
+                                  + 'See data/logs/post_update.log.', 'warning');
             }
 
             const commitMatches = !expectedCommit ||
@@ -14387,7 +14399,9 @@ async function verifyServiceRestart(expectedCommit) {
         }
 
         if (attempts >= maxAttempts) {
-            finish('⚠️ Could not confirm the update within 5 minutes. Check data/logs/post_update.log.',
+            const minutes = Math.round((attempts * 5) / 60);
+            finish(`⚠️ Could not confirm the update within ${minutes} minutes. `
+                   + 'Check data/logs/post_update.log.',
                    'warning', 'Update applied, but verification timed out.');
             return;
         }
