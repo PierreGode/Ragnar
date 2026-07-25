@@ -69,6 +69,11 @@ class WiFiManager:
         # plus however long the checks took, so it never lands on exact seconds.
         self.ap_reconnect_check_interval = 30
         self.last_ap_reconnect_check = 0.0
+        # Settling time before an unattended box starts looking for its network
+        # again. Short, because "unattended" is the whole precondition — the
+        # case that needs protecting is a client connected to the AP, and that
+        # is handled by its own check rather than by waiting out a clock.
+        self.ap_recovery_grace = 30
         self.last_wifi_validation = None
         self.wifi_validation_failures = 0
         self.consecutive_validation_cycles_failed = 0  # Track consecutive full validation cycle failures
@@ -1061,21 +1066,30 @@ class WiFiManager:
             self.ap_user_connection_time = current_time
             self.logger.info("Endless Loop: User connected to AP - monitoring user activity")
         
-        # Periodically check for known WiFi networks while in AP mode, but only
-        # after the initial 3-minute grace period so the user has time to
-        # connect. This is what lets the box leave AP mode on its own once the
-        # home network is back.
+        # Look for a known network again so an unattended box can leave AP mode
+        # on its own once its network is back.
         #
-        # This used to read `int(ap_uptime) % 30 == 0`, which required a tick to
-        # land on an exact multiple of 30. The loop sleeps ~10s and then does
-        # real work (client counts, scans), so ap_uptime drifts and int() lands
-        # on 181, 191, 202… — measured over a simulated 2 hours, that fired 24
-        # times instead of 235, i.e. ~90% of recovery attempts were skipped and
-        # the box sat in AP mode long after WiFi returned.
+        # Gated on nobody being connected to the AP. Somebody connected is
+        # somebody configuring the box, and this block used to tear the AP down
+        # underneath them: the fixed 3-minute grace expired and from then on
+        # every scan that saw the home SSID called stop_ap_mode() mid-setup —
+        # and that SSID is essentially always visible, since being in range of
+        # it is why the user is standing there. The user-connected branch below
+        # owns that case and holds the AP for as long as they stay attached.
+        # With that condition explicit, the wait before recovering no longer
+        # has to protect anyone, so it drops from 3 minutes to a short settle.
+        #
+        # The cadence is measured as elapsed time since the last check. It used
+        # to read `int(ap_uptime) % 30 == 0`, which required a tick to land on
+        # an exact multiple of 30 — but the loop sleeps ~10s and then does real
+        # work (client counts, scans), so ap_uptime drifts and int() lands on
+        # 181, 191, 202… Simulated over two hours that fired 24 times instead
+        # of 235: ~90% of recovery attempts skipped, leaving the box in AP mode
+        # long after WiFi returned, at a rate that got worse the slower the board.
         due = (current_time - self.last_ap_reconnect_check) >= self.ap_reconnect_check_interval
-        if ap_uptime >= 180 and due:
+        if current_client_count == 0 and ap_uptime >= self.ap_recovery_grace and due:
             self.last_ap_reconnect_check = current_time
-            self.logger.info("Endless Loop: Checking for available known WiFi networks while in AP mode (after 3-min grace period)...")
+            self.logger.info("Endless Loop: No AP clients — checking for known WiFi networks to rejoin...")
             if self._check_known_networks_available():
                 self.logger.info("Endless Loop: Known WiFi network detected! Attempting to connect...")
                 self.stop_ap_mode()
