@@ -1285,6 +1285,7 @@ function showNetworkSubtab(name) {
 // ============================================================================
 const _wifiState = { iface: '', band: 'all', view: 'bar', data: null, selected: null, auto: null, inited: false, bt: null, btOn: false, btBusy: false, btSelected: null,
     zb: null, zbOn: false, zbBusy: false, zbSelected: null, zbAvailable: false,
+    hoverBssid: null, radius: null, fs: { open: false, wired: false, native: false },
     sdr: { available: false, running: false, band: '2.4', bandMhz: null, floor: -120, seq: 0, rows: [], maxhold: null, poll: null, statusPoll: null, error: null } };
 
 const _WIFI_BAND_COLOR = { '2.4': '#f59e0b', '5': '#38bdf8', '6': '#a78bfa' };
@@ -1312,42 +1313,14 @@ function wifiInit() {
         _wifiState.inited = true;
         // Band selector
         document.querySelectorAll('#wifi-band-group .wifi-band').forEach(btn => {
-            btn.addEventListener('click', () => {
-                _wifiState.band = btn.dataset.band;
-                document.querySelectorAll('#wifi-band-group .wifi-band').forEach(b => {
-                    const on = b === btn;
-                    b.classList.toggle('bg-Ragnar-600', on); b.classList.toggle('text-white', on);
-                    b.classList.toggle('text-slate-300', !on);
-                });
-                // In the live waterfall, a band change retunes the HackRF sweep;
-                // otherwise it re-runs the passive Wi-Fi scan.
-                if (_wifiState.view === 'waterfall') { _wifiSdrStop(); _wifiSdrStart(); }
-                else wifiScan();
-            });
+            btn.addEventListener('click', () => wifiSetBand(btn.dataset.band));
         });
-        // View toggle
-        const setView = (v) => {
-            const prev = _wifiState.view;
-            _wifiState.view = v;
-            const bar = document.getElementById('wifi-view-bar'), dome = document.getElementById('wifi-view-dome'),
-                wf = document.getElementById('wifi-view-wf');
-            [['bar', bar], ['dome', dome], ['waterfall', wf]].forEach(([name, el]) => {
-                if (!el) return;
-                const on = name === v;
-                el.classList.toggle('bg-Ragnar-600', on); el.classList.toggle('text-white', on);
-                el.classList.toggle('text-slate-300', !on && !el.disabled);
-            });
-            // Enter/leave the live SDR waterfall (a separate capture pipeline).
-            if (v === 'waterfall' && prev !== 'waterfall') _wifiSdrStart();
-            else if (v !== 'waterfall' && prev === 'waterfall') _wifiSdrStop();
-            if (v === 'waterfall') _wifiDrawWaterfall();
-            else if (_wifiState.data) _wifiDrawSpectrum();
-        };
-        _wifiState._setView = setView;
-        document.getElementById('wifi-view-bar').addEventListener('click', () => setView('bar'));
-        document.getElementById('wifi-view-dome').addEventListener('click', () => setView('dome'));
+        _wifiState._setView = wifiSetView;   // kept: older call sites use it
+        document.getElementById('wifi-view-bar').addEventListener('click', () => wifiSetView('bar'));
+        document.getElementById('wifi-view-dome').addEventListener('click', () => wifiSetView('dome'));
         const wfBtn = document.getElementById('wifi-view-wf');
-        if (wfBtn) wfBtn.addEventListener('click', () => { if (!wfBtn.disabled) setView('waterfall'); });
+        if (wfBtn) wfBtn.addEventListener('click', () => { if (!wfBtn.disabled) wifiSetView('waterfall'); });
+        _wifiWireCanvas(document.getElementById('wifi-spectrum'), 'wifi-tip', null);
         // Auto-refresh — refreshes the Wi-Fi survey and, when their overlays are
         // enabled, re-runs the Bluetooth and Zigbee scans too (each self-guards
         // against overlapping runs, so a slow sniff is simply skipped this tick).
@@ -1378,7 +1351,10 @@ function wifiInit() {
             const el = document.getElementById(id);
             if (el) el.addEventListener('change', () => { if (_wifiState.selected) wifiSelectAp(_wifiState.selected); });
         });
-        window.addEventListener('resize', () => { if (_wifiState.data) _wifiDrawSpectrum(); });
+        window.addEventListener('resize', () => {
+            if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
+            else if (_wifiState.data) _wifiDrawSpectrum();
+        });
     }
     wifiHeatmapInit();
     wifiHeatmapLoad();
@@ -1388,6 +1364,144 @@ function wifiInit() {
     if (!_wifiState.sdr.statusPoll)
         _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
+}
+
+// Band + view are driven from two places now (the in-page toolbar and the
+// full-screen bar), so both live here and repaint every control set.
+function wifiSetBand(band) {
+    _wifiState.band = band;
+    _wifiSyncBandButtons();
+    // In the live waterfall, a band change retunes the HackRF sweep; otherwise
+    // it re-runs the passive Wi-Fi scan.
+    if (_wifiState.view === 'waterfall') { _wifiSdrStop(); _wifiSdrStart(); }
+    else wifiScan();
+}
+
+function _wifiSyncBandButtons() {
+    document.querySelectorAll('#wifi-band-group .wifi-band').forEach(b => {
+        const on = b.dataset.band === _wifiState.band;
+        b.classList.toggle('bg-Ragnar-600', on); b.classList.toggle('text-white', on);
+        b.classList.toggle('text-slate-300', !on);
+    });
+    document.querySelectorAll('#wifi-fs-band button').forEach(b => {
+        const on = b.dataset.band === _wifiState.band;
+        b.classList.toggle('wifi-hm-seg-on', on); b.classList.toggle('wifi-hm-seg-off', !on);
+    });
+}
+
+function wifiSetView(v) {
+    const prev = _wifiState.view;
+    _wifiState.view = v;
+    const bar = document.getElementById('wifi-view-bar'), dome = document.getElementById('wifi-view-dome'),
+        wf = document.getElementById('wifi-view-wf');
+    [['bar', bar], ['dome', dome], ['waterfall', wf]].forEach(([name, el]) => {
+        if (!el) return;
+        const on = name === v;
+        el.classList.toggle('bg-Ragnar-600', on); el.classList.toggle('text-white', on);
+        el.classList.toggle('text-slate-300', !on && !el.disabled);
+    });
+    document.querySelectorAll('#wifi-fs-view button').forEach(el => {
+        const on = el.dataset.view === v;
+        el.classList.toggle('wifi-hm-seg-on', on); el.classList.toggle('wifi-hm-seg-off', !on);
+    });
+    // Enter/leave the live SDR waterfall (a separate capture pipeline).
+    if (v === 'waterfall' && prev !== 'waterfall') _wifiSdrStart();
+    else if (v !== 'waterfall' && prev === 'waterfall') _wifiSdrStop();
+    if (v === 'waterfall') _wifiDrawWaterfall();
+    else if (_wifiState.data) _wifiDrawSpectrum();
+}
+
+// ---- Canvas interaction: hover to identify, click to inspect ---------------
+// Both spectrum surfaces are hit-tested against the boxes recorded during the
+// draw, so a pixel maps back to the AP that is drawn there.
+function _wifiWireCanvas(canvas, tipId, readoutId) {
+    if (!canvas || canvas._wifiWired) return;
+    canvas._wifiWired = true;
+    const tip = tipId ? document.getElementById(tipId) : null;
+    const readout = readoutId ? document.getElementById(readoutId) : null;
+    const at = (e) => {
+        const r = canvas.getBoundingClientRect();
+        return { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    canvas.addEventListener('mousemove', (e) => {
+        const p = at(e);
+        const hit = _wifiHitTest(canvas, p.x, p.y);
+        const ap = hit && (_wifiState.data.aps || []).find(a => a.bssid === hit.bssid);
+        canvas.style.cursor = ap ? 'pointer' : 'crosshair';
+        if (readout) {
+            readout.textContent = _wifiCursorReadout(canvas, p.x, p.y);
+            readout.style.visibility = readout.textContent ? 'visible' : 'hidden';
+        }
+        if (tip) {
+            if (ap) {
+                tip.innerHTML = _wifiTipHtml(ap);
+                tip.classList.remove('hidden');
+                // Keep the tip inside the canvas box (the tip is positioned in
+                // the canvas's own coordinate space, scroll included).
+                const w = tip.offsetWidth, h = tip.offsetHeight;
+                const maxX = canvas.clientWidth - w - 6;
+                tip.style.left = Math.max(4, Math.min(maxX, p.x + 14)) + 'px';
+                tip.style.top = Math.max(4, p.y - h - 12) + 'px';
+            } else tip.classList.add('hidden');
+        }
+        if ((ap ? ap.bssid : null) !== _wifiState.hoverBssid) {
+            _wifiState.hoverBssid = ap ? ap.bssid : null;
+            if (_wifiState.view !== 'waterfall' && _wifiState.data) _wifiDrawSpectrum();
+        }
+    });
+    canvas.addEventListener('mouseleave', () => {
+        if (tip) tip.classList.add('hidden');
+        if (readout) { readout.textContent = ''; readout.style.visibility = 'hidden'; }
+        if (_wifiState.hoverBssid) {
+            _wifiState.hoverBssid = null;
+            if (_wifiState.view !== 'waterfall' && _wifiState.data) _wifiDrawSpectrum();
+        }
+    });
+    canvas.addEventListener('click', (e) => {
+        const p = at(e);
+        const hit = _wifiHitTest(canvas, p.x, p.y);
+        if (hit) wifiSelectAp(hit.bssid);
+        else if (_wifiState.selected) { _wifiState.selected = null; wifiRender(); }
+    });
+}
+
+function _wifiHitTest(canvas, x, y) {
+    const hits = (canvas && canvas._wifiHits) || [];
+    if (!_wifiState.data) return null;
+    // Reverse: hits are pushed weakest-first, so the last match is the one
+    // drawn on top at this pixel.
+    for (let i = hits.length - 1; i >= 0; i--) {
+        const h = hits[i];
+        if (x >= h.x0 && x <= h.x1 && y >= h.y0 && y <= h.y1) return h;
+    }
+    return null;
+}
+
+// "ch 6.4 · 2437 MHz · −72 dBm" for the cursor position — a spectrum-analyzer
+// style marker readout.
+function _wifiCursorReadout(canvas, x, y) {
+    const g = canvas && canvas._wifiGeom;
+    if (!g || x < g.padL || x > g.W - g.padR || y < g.padT || y > g.H - g.padB) return '';
+    const band = g.bands.find(b => x >= g.ranges[b].x0 && x <= g.ranges[b].x1);
+    const dbm = Math.round(g.dbmFor(y));
+    if (!band) return `${dbm} dBm`;
+    const ch = g.chFor(band, x);
+    const mhz = band === '2.4' ? Math.round(2407 + ch * 5)
+        : band === '6' ? Math.round(5950 + ch * 5) : Math.round(5000 + ch * 5);
+    return `${band} GHz · ch ${ch.toFixed(1)} · ${mhz} MHz · ${dbm} dBm`;
+}
+
+function _wifiTipHtml(a) {
+    const col = _wifiSignalColor(a.signal);
+    const issue = (a.security_findings || []).length;
+    return `<div><b>${_esc(a.ssid) || '<i>hidden</i>'}</b>${_wifiGenBadge(a.standard)}</div>
+        <div class="k" style="font-family:ui-monospace,monospace">${_esc(a.bssid)}</div>
+        <div><span class="k">${_esc(a.vendor) || 'unknown vendor'}</span></div>
+        <div><b style="color:${col}">${a.signal} dBm</b>${a.snr != null ? ' <span class="k">SNR ' + a.snr + ' dB</span>' : ''}
+             · ${a.band} GHz ch ${a.channel} · ${a.width} MHz${a.dfs ? ' <span style="color:#a78bfa">◆DFS</span>' : ''}</div>
+        <div><span class="k">${_esc(a.security)}</span>${a.channel_util != null ? ' <span class="k">· util ' + a.channel_util + '%</span>' : ''}</div>
+        ${issue ? `<div style="color:#fbbf24">⚠ ${_esc(a.security_findings.join('; '))}</div>` : ''}
+        <div class="k" style="margin-top:3px">click to inspect</div>`;
 }
 
 function _wifiFillIfaces() {
@@ -1409,17 +1523,18 @@ function _wifiFillIfaces() {
 function wifiScan() {
     const iface = _wifiState.iface || document.getElementById('wifi-iface').value;
     if (!iface) return;
-    const st = document.getElementById('wifi-status');
     const btn = document.getElementById('wifi-scan-btn');
-    st.textContent = 'Scanning (passive)…'; if (btn) btn.disabled = true;
+    const fsBtn = document.getElementById('wifi-fs-scan');
+    const busy = (on) => { if (btn) btn.disabled = on; if (fsBtn) fsBtn.disabled = on; };
+    _wifiSetStatus('Scanning (passive)…'); busy(true);
     fetch(`/api/net/wifi/scan?interface=${encodeURIComponent(iface)}&band=${_wifiState.band}`)
         .then(r => r.json()).then(d => {
-            if (btn) btn.disabled = false;
-            if (d.error) { st.textContent = '⚠ ' + d.error; return; }
+            busy(false);
+            if (d.error) { _wifiSetStatus('⚠ ' + d.error); return; }
             _wifiState.data = d;
-            st.textContent = `${d.ap_count} AP(s) · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`;
+            _wifiSetStatus(`${d.ap_count} AP(s) · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`);
             wifiRender();
-        }).catch(e => { if (btn) btn.disabled = false; st.textContent = 'Scan failed'; });
+        }).catch(e => { busy(false); _wifiSetStatus('Scan failed'); });
 }
 
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
@@ -1452,6 +1567,7 @@ function wifiBtScan() {
             if (st) st.textContent = `${d.device_count} BT/BLE · ${d.controller || '?'}` +
                 (d.capture === 'bluetoothctl' ? ' (fallback)' : '');
             _wifiBtRender();
+            _wifiFsRenderSide();
             if (_wifiState.data) _wifiDrawSpectrum();
         }).catch(() => { _wifiState.btBusy = false; if (st) st.textContent = 'BT scan failed'; });
 }
@@ -1497,6 +1613,7 @@ function _wifiBtRender() {
 // the same row is clicked again). Mirrors the Wi-Fi AP select behaviour.
 function wifiBtSelect(mac) {
     _wifiState.btSelected = (_wifiState.btSelected === mac) ? null : mac;
+    _wifiFsRenderSide();
     _wifiBtRender();
     if (_wifiState.data) _wifiDrawSpectrum();
 }
@@ -1517,6 +1634,7 @@ function _wifiZbCheck() {
             lab.title = ok ? 'Sniff Zigbee / 802.15.4 with the connected HuginnESP'
                 : (st && st.error ? st.error : 'Connect a HuginnESP (ESP32-C5) companion to sniff Zigbee');
         }
+        _wifiFsSyncGates();
     }).catch(() => {});
 }
 
@@ -1534,6 +1652,7 @@ function wifiZbScan() {
         const i = d.interference || {};
         if (st) st.textContent = `${d.device_count} device(s) · ${i.channel_count || 0} ch` + (d.warning ? ' ⚠' : '');
         _wifiZbRender();
+        _wifiFsRenderSide();
         if (_wifiState.data) _wifiDrawSpectrum();
     }).catch(() => { _wifiState.zbBusy = false; if (st) st.textContent = 'Zigbee scan failed'; });
 }
@@ -1575,6 +1694,7 @@ function _wifiZbRender() {
 
 function wifiZbSelect(id) {
     _wifiState.zbSelected = (_wifiState.zbSelected === id) ? null : id;
+    _wifiFsRenderSide();
     _wifiZbRender();
     if (_wifiState.data) _wifiDrawSpectrum();
 }
@@ -1599,6 +1719,7 @@ function _wifiSdrCheck() {
         btn.title = det.available
             ? `HackRF ready${det.board ? ' (' + det.board + ')' : ''} — true-RF waterfall`
             : (det.error || 'Connect a HackRF SDR to enable true-RF waterfall');
+        _wifiFsSyncGates();
     }).catch(() => {});
 }
 
@@ -1653,16 +1774,28 @@ function _wifiSdrColor(dbm, floor) {
 // The live-RF view: a spectrum line (current + max-hold) above a scrolling
 // time × frequency × power waterfall, with Wi-Fi channel + BT markers overlaid.
 function _wifiDrawWaterfall() {
-    const canvas = document.getElementById('wifi-spectrum'); if (!canvas) return;
+    _wifiDrawWaterfallInto(document.getElementById('wifi-spectrum'), 360);
+    if (_wifiState.fs.open) {
+        const c = document.getElementById('wifi-spectrum-fs');
+        if (c) _wifiDrawWaterfallInto(c, c.clientHeight);
+    }
+}
+
+function _wifiDrawWaterfallInto(canvas, height) {
+    if (!canvas) return;
     const s = _wifiState.sdr;
     const dpr = window.devicePixelRatio || 1;
-    const W = canvas.clientWidth, H = 360;
+    const W = canvas.clientWidth, H = Math.round(height || canvas.clientHeight || 360);
+    if (W < 20 || H < 20) return;
+    canvas._wifiHits = []; canvas._wifiGeom = null;   // no AP hit-testing in this view
     canvas.width = W * dpr; canvas.height = H * dpr;
     const ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
     const padL = 44, padR = 12, padT = 14, padB = 26;
     const plotW = W - padL - padR;
-    const specH = 96, gap = 8;                      // top spectrum-line panel
+    // Top spectrum-line panel — grows with the canvas so the full-screen
+    // console doesn't leave it a thin sliver over a huge waterfall.
+    const specH = Math.max(96, Math.min(240, Math.round(H * 0.28))), gap = 8;
     const wfTop = padT + specH + gap, wfH = H - padB - wfTop;
     const lo = s.bandMhz ? s.bandMhz[0] : (s.band === '5' ? 5150 : 2400);
     const hi = s.bandMhz ? s.bandMhz[1] : (s.band === '5' ? 5895 : 2500);
@@ -1774,9 +1907,9 @@ function _wifiSecBadges(a) {
     return b;
 }
 
-function _wifiSparkline(hist) {
+function _wifiSparkline(hist, width, height) {
     if (!hist || hist.length < 2) return '';
-    const w = 46, h = 12, n = hist.length;
+    const w = width || 46, h = height || 12, n = hist.length;
     let lo = Math.min(...hist), hi = Math.max(...hist);
     if (hi - lo < 1) { lo -= 1; hi += 1; }
     const pts = hist.map((v, i) => {
@@ -1820,25 +1953,34 @@ function wifiSort(key) {
     if (_wifiState.sortKey === key) _wifiState.sortDir *= -1;
     else { _wifiState.sortKey = key; _wifiState.sortDir = (key === 'ssid' || key === 'vendor') ? 1 : -1; }
     wifiRenderTable();
+    _wifiFsRenderList();
 }
 
-function wifiRenderTable() {
-    const d = _wifiState.data; if (!d) return;
-    if (_wifiState.apView === 'nets') return wifiRenderNets();
-    const q = (document.getElementById('wifi-ap-search').value || '').toLowerCase();
-    const issuesOnly = document.getElementById('wifi-ap-issues').checked;
-    const std = (document.getElementById('wifi-ap-std') || {}).value || '';
-    let aps = d.aps.filter(a =>
+// Filter + sort the survey the same way for every list that shows it (the
+// in-page table and the full-screen console).
+function _wifiFilterAps(q, std, issuesOnly) {
+    const d = _wifiState.data; if (!d) return [];
+    q = (q || '').toLowerCase();
+    const aps = d.aps.filter(a =>
         (!q || (a.ssid || '').toLowerCase().includes(q) || (a.vendor || '').toLowerCase().includes(q) || a.bssid.includes(q))
         && (!issuesOnly || (a.security_findings && a.security_findings.length))
         && (!std || a.standard === std));
-    const k = _wifiState.sortKey, dir = _wifiState.sortDir;
-    aps = aps.slice().sort((x, y) => {
+    const k = _wifiState.sortKey || 'signal', dir = _wifiState.sortDir || -1;
+    return aps.slice().sort((x, y) => {
         let a = x[k], b = y[k];
         if (a == null) a = (typeof b === 'number') ? -9999 : '';
         if (b == null) b = (typeof a === 'number') ? -9999 : '';
         return (a < b ? -1 : a > b ? 1 : 0) * dir;
     });
+}
+
+function wifiRenderTable() {
+    const d = _wifiState.data; if (!d) return;
+    if (_wifiState.apView === 'nets') return wifiRenderNets();
+    const aps = _wifiFilterAps(
+        document.getElementById('wifi-ap-search').value,
+        (document.getElementById('wifi-ap-std') || {}).value || '',
+        document.getElementById('wifi-ap-issues').checked);
     const tb = document.getElementById('wifi-ap-tbody');
     document.getElementById('wifi-ap-count').textContent = `(${aps.length}/${d.ap_count})`;
     if (!aps.length) { tb.innerHTML = '<tr><td colspan="9" class="py-4 text-center text-gray-500">No APs match.</td></tr>'; return; }
@@ -2015,6 +2157,7 @@ function wifiRender() {
     if (!html) html = '<span class="text-green-400">No significant co-/adjacent-channel interference.</span>';
     ip.innerHTML = html;
     _wifiDrawSpectrum();
+    _wifiFsRender();
     if (_wifiHm.mesh) wifiHeatmapPopulateSsids(); else wifiHeatmapPopulateAps();
     // WIDS pivot: once the flagged BSSID shows up in a survey, select it
     // (applied guards recursion — wifiSelectAp() re-enters wifiRender()).
@@ -2027,58 +2170,102 @@ function wifiRender() {
     }
 }
 
+// Redraw every visible spectrum surface: the in-page chart and, when it's open,
+// the full-screen console.
 function _wifiDrawSpectrum() {
-    const d = _wifiState.data; if (!d) return;
-    const canvas = document.getElementById('wifi-spectrum'); if (!canvas) return;
+    _wifiDrawSpectrumInto(document.getElementById('wifi-spectrum'), { height: 360 });
+    if (_wifiState.fs.open) {
+        const c = document.getElementById('wifi-spectrum-fs');
+        if (c) _wifiDrawSpectrumInto(c, { height: c.clientHeight, big: true });
+    }
+}
+
+// Draw the passive survey into one canvas. The in-page chart and the
+// full-screen console differ only in scale, so they share this — `big` bumps
+// type and padding for the large surface. Every AP's plotted box is recorded on
+// the canvas (`_wifiHits`) together with the plot geometry (`_wifiGeom`), which
+// is what lets hover and click map a pixel back to a BSSID.
+function _wifiDrawSpectrumInto(canvas, opts) {
+    const d = _wifiState.data; if (!d || !canvas) return;
+    const o = opts || {};
+    const K = o.big ? 1.3 : 1;                    // type / padding scale
     const dpr = window.devicePixelRatio || 1;
-    const W = canvas.clientWidth, H = 360;
+    const W = canvas.clientWidth, H = Math.round(o.height || canvas.clientHeight || 360);
+    if (W < 20 || H < 20) return;
     canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas._wifiHits = [];
     const ctx = canvas.getContext('2d'); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, W, H);
-    const padL = 40, padR = 12, padT = 16, padB = 34;
+    const padL = Math.round(40 * K), padR = Math.round(12 * K),
+        padT = Math.round(16 * K), padB = Math.round(34 * K);
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const yTop = -30, yBot = -95;
     const yFor = (dbm) => padT + (yTop - Math.max(yBot, Math.min(yTop, dbm))) / (yTop - yBot) * plotH;
+    const dbmFor = (y) => yTop - (y - padT) / plotH * (yTop - yBot);
     // Y gridlines
-    ctx.strokeStyle = '#1e293b'; ctx.fillStyle = '#64748b'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    ctx.strokeStyle = '#1e293b'; ctx.fillStyle = '#64748b'; ctx.font = `${10 * K}px sans-serif`; ctx.textAlign = 'right';
     for (let v = yTop; v >= yBot; v -= 10) {
         const y = yFor(v); ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
         ctx.fillText(v + '', padL - 4, y + 3);
     }
+    if (o.big) {
+        ctx.save(); ctx.translate(12, padT + plotH / 2); ctx.rotate(-Math.PI / 2);
+        ctx.textAlign = 'center'; ctx.fillStyle = '#475569'; ctx.font = '11px sans-serif';
+        ctx.fillText('RSSI (dBm)', 0, 0); ctx.restore();
+    }
     // Which bands to show
     let bands = _wifiState.band === 'all' ? Object.keys(d.spectrum).sort() : [_wifiState.band];
     bands = bands.filter(b => d.aps.some(a => a.band === b));
-    if (!bands.length) { ctx.fillStyle = '#64748b'; ctx.textAlign = 'center'; ctx.fillText('No APs on selected band', W / 2, H / 2); return; }
+    if (!bands.length) {
+        ctx.fillStyle = '#64748b'; ctx.textAlign = 'center'; ctx.font = `${11 * K}px sans-serif`;
+        ctx.fillText('No APs on selected band', W / 2, H / 2);
+        canvas._wifiGeom = null;
+        return;
+    }
     // Per-band channel range + x segment
-    const gap = 14, segW = (plotW - gap * (bands.length - 1)) / bands.length;
+    const gap = Math.round(14 * K), segW = (plotW - gap * (bands.length - 1)) / bands.length;
     const ranges = {};
     bands.forEach((b, i) => {
-        const chs = d.aps.filter(a => a.band === b).map(a => a.channel);
-        let lo = Math.min(...chs), hi = Math.max(...chs);
-        if (b === '2.4') { lo = 1; hi = 13; }
-        const padCh = b === '2.4' ? 0.5 : 6;
+        // The range has to cover the channels an AP actually *occupies*, not
+        // just its centre — otherwise a 160 MHz BSS draws off the end of its
+        // band segment and over the neighbouring one.
+        const list = d.aps.filter(a => a.band === b);
+        const edges = [];
+        list.forEach(a => {
+            const c = a.center_freq ? _wifiFreqToChannel(a.center_freq) : a.channel;
+            const half = (a.width || 20) / 10;
+            edges.push(a.channel, c - half, c + half);
+        });
+        let lo = Math.min(...edges), hi = Math.max(...edges);
+        if (b === '2.4') { lo = Math.min(lo, 1); hi = Math.max(hi, 13); }
+        const padCh = b === '2.4' ? 0.5 : 2;
         lo -= padCh; hi += padCh; if (hi - lo < 4) { hi += 2; lo -= 2; }
         const x0 = padL + i * (segW + gap);
         ranges[b] = { lo, hi, x0, x1: x0 + segW };
     });
     const xFor = (band, ch) => { const r = ranges[band]; return r.x0 + (ch - r.lo) / (r.hi - r.lo) * (r.x1 - r.x0); };
+    const chFor = (band, x) => { const r = ranges[band]; return r.lo + (x - r.x0) / (r.x1 - r.x0) * (r.hi - r.lo); };
     // Band labels + channel ticks + DFS shading
     ctx.textAlign = 'center';
     bands.forEach(b => {
         const r = ranges[b];
-        ctx.fillStyle = _WIFI_BAND_COLOR[b]; ctx.font = 'bold 11px sans-serif';
+        ctx.fillStyle = _WIFI_BAND_COLOR[b]; ctx.font = `bold ${11 * K}px sans-serif`;
         ctx.fillText(b + ' GHz', (r.x0 + r.x1) / 2, padT - 4);
         // DFS channel shading
         (d.radar_channels[b] || []).forEach(ch => {
             if (ch < r.lo || ch > r.hi) return;
             const cx = xFor(b, ch);
             ctx.fillStyle = 'rgba(167,139,250,0.08)';
-            ctx.fillRect(cx - 3, padT, 6, plotH);
+            ctx.fillRect(cx - 3 * K, padT, 6 * K, plotH);
         });
         // Channel ticks (channels present)
-        ctx.fillStyle = '#64748b'; ctx.font = '9px sans-serif';
+        ctx.fillStyle = '#64748b'; ctx.font = `${9 * K}px sans-serif`;
         const present = [...new Set(d.aps.filter(a => a.band === b).map(a => a.channel))].sort((x, y) => x - y);
-        present.forEach(ch => ctx.fillText(ch + '', xFor(b, ch), H - padB + 12));
+        present.forEach(ch => ctx.fillText(ch + '', xFor(b, ch), H - padB + 12 * K));
+        if (o.big) {
+            ctx.fillStyle = '#475569'; ctx.font = '10px sans-serif';
+            ctx.fillText('channel', (r.x0 + r.x1) / 2, H - padB + 28);
+        }
         if (bands.length > 1) { ctx.strokeStyle = '#334155'; ctx.beginPath(); ctx.moveTo(r.x1 + gap / 2, padT); ctx.lineTo(r.x1 + gap / 2, H - padB); ctx.stroke(); }
     });
     // Baseline
@@ -2088,14 +2275,20 @@ function _wifiDrawSpectrum() {
     aps.forEach(a => {
         const centerCh = a.center_freq ? _wifiFreqToChannel(a.center_freq) : a.channel;
         const half = a.width / 10;               // channel-number half-width
-        const xC = xFor(a.band, centerCh);
-        const xL = xFor(a.band, centerCh - half), xR = xFor(a.band, centerCh + half);
+        const seg = ranges[a.band];
+        const clamp = (x) => Math.max(seg.x0, Math.min(seg.x1, x));
+        const xC = clamp(xFor(a.band, centerCh));
+        const xL = clamp(xFor(a.band, centerCh - half)), xR = clamp(xFor(a.band, centerCh + half));
         const y = yFor(a.signal); const col = _wifiSignalColor(a.signal);
         const sel = _wifiState.selected === a.bssid;
+        const hov = _wifiState.hoverBssid === a.bssid;
+        // Pixel box → BSSID, for hover/click. Recorded in draw order, so a
+        // reverse scan finds whatever is visually on top.
+        canvas._wifiHits.push({ bssid: a.bssid, x0: Math.min(xL, xC - 2), x1: Math.max(xR, xC + 2), y0: y - 12, y1: H - padB });
         if (_wifiState.view === 'bar') {
-            ctx.fillStyle = col + (sel ? 'ff' : 'cc');
+            ctx.fillStyle = col + (sel ? 'ff' : hov ? 'ee' : 'cc');
             ctx.fillRect(xL, y, Math.max(3, xR - xL), (H - padB) - y);
-            ctx.strokeStyle = sel ? '#fff' : col; ctx.lineWidth = sel ? 2 : 1;
+            ctx.strokeStyle = sel || hov ? '#fff' : col; ctx.lineWidth = sel ? 2 : hov ? 1.5 : 1;
             ctx.strokeRect(xL, y, Math.max(3, xR - xL), (H - padB) - y);
         } else {
             // Dome: bell curve centred on channel, spanning its width
@@ -2109,9 +2302,9 @@ function _wifiDrawSpectrum() {
             }
             ctx.lineTo(xR, H - padB); ctx.closePath();
             const grad = ctx.createLinearGradient(0, y, 0, H - padB);
-            grad.addColorStop(0, col + (sel ? 'cc' : '66')); grad.addColorStop(1, col + '08');
+            grad.addColorStop(0, col + (sel ? 'cc' : hov ? '99' : '66')); grad.addColorStop(1, col + '08');
             ctx.fillStyle = grad; ctx.fill();
-            ctx.strokeStyle = sel ? '#fff' : col; ctx.lineWidth = sel ? 2.5 : 1.5; ctx.stroke();
+            ctx.strokeStyle = sel || hov ? '#fff' : col; ctx.lineWidth = sel ? 2.5 : hov ? 2 : 1.5; ctx.stroke();
         }
         // WIDS-flagged AP: red dashed locator line + outline so it stands out
         // even in a crowded band (highlight persists until dismissed).
@@ -2122,14 +2315,22 @@ function _wifiDrawSpectrum() {
             ctx.lineWidth = 2; ctx.setLineDash([4, 3]);
             ctx.strokeRect(xL - 2, y - 2, Math.max(3, xR - xL) + 4, (H - padB) - y + 2);
             ctx.restore();
-            ctx.fillStyle = '#f87171'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText('⚠ WIDS', xC, y - 16);
+            ctx.fillStyle = '#f87171'; ctx.font = `bold ${10 * K}px sans-serif`; ctx.textAlign = 'center';
+            ctx.fillText('⚠ WIDS', xC, y - 16 * K);
         }
-        // Label the SSID at the peak
+        // Label the SSID at the peak — with the level and channel alongside it
+        // on the big surface, where there's room to read them.
         const label = a.ssid || 'hidden';
-        ctx.fillStyle = sel ? '#fff' : '#cbd5e1'; ctx.font = (sel ? 'bold ' : '') + '10px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(label.length > 14 ? label.slice(0, 13) + '…' : label, xC, y - 4);
+        const cap = o.big ? 22 : 14;
+        ctx.fillStyle = sel || hov ? '#fff' : '#cbd5e1';
+        ctx.font = (sel || hov ? 'bold ' : '') + (10 * K) + 'px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText(label.length > cap ? label.slice(0, cap - 1) + '…' : label, xC, y - 4 * K);
+        if (o.big) {
+            ctx.fillStyle = col; ctx.font = '10px sans-serif';
+            ctx.fillText(`${a.signal} dBm · ch${a.channel}/${a.width}`, xC, y - 17);
+        }
     });
+    canvas._wifiGeom = { bands, ranges, padL, padR, padT, padB, W, H, K, chFor, dbmFor };
     // Bluetooth / BLE overlay on the 2.4 GHz segment (device-activity estimate)
     if (_wifiState.btOn && _wifiState.bt && ranges['2.4']) {
         _wifiDrawBtOverlay(ctx, ranges['2.4'], xFor, { padT, padB, H, plotH, yFor });
@@ -2268,6 +2469,392 @@ function _wifiDrawBtOverlay(ctx, r24, xFor, g) {
     }
 }
 
+// ============================================================================
+// Full-screen spectrum console
+// ----------------------------------------------------------------------------
+// The same survey, the same _wifiState — but the whole viewport: a large
+// hit-testable spectrum, the AP list underneath it, and an inspector that
+// shows every field the scan produced for whatever is selected.
+// ============================================================================
+
+function wifiToggleFullscreen() {
+    const el = document.getElementById('wifi-fs'); if (!el) return;
+    if (el.classList.contains('hidden')) _wifiFsOpen(el); else _wifiFsClose(el);
+}
+
+function _wifiFsOpen(el) {
+    _wifiFsWire();
+    el.classList.remove('hidden');
+    el.setAttribute('aria-hidden', 'false');
+    document.body.classList.add('wifi-fs-open');
+    _wifiState.fs.open = true;
+    document.addEventListener('keydown', _wifiFsKey);
+    // Ask for real fullscreen as well — if the browser refuses, the fixed
+    // overlay alone still fills the viewport.
+    if (el.requestFullscreen && !document.fullscreenElement) {
+        el.requestFullscreen().then(() => { _wifiState.fs.native = true; }).catch(() => {});
+    }
+    _wifiSyncBandButtons();
+    wifiSetView(_wifiState.view);
+    ['wifi-auto', 'wifi-bt', 'wifi-zb'].forEach(id => {
+        const m = document.getElementById(id), f = document.getElementById(id.replace('wifi-', 'wifi-fs-'));
+        if (m && f) f.checked = m.checked;
+    });
+    _wifiFsRender();
+    // The canvas only gets a size once the overlay is laid out.
+    requestAnimationFrame(() => {
+        if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
+        else _wifiDrawSpectrum();
+    });
+    if (!_wifiState.data) wifiScan();
+}
+
+function _wifiFsClose(el) {
+    el.classList.add('hidden');
+    el.setAttribute('aria-hidden', 'true');
+    document.body.classList.remove('wifi-fs-open');
+    _wifiState.fs.open = false;
+    _wifiState.hoverBssid = null;
+    document.removeEventListener('keydown', _wifiFsKey);
+    if (document.fullscreenElement && _wifiState.fs.native) document.exitFullscreen().catch(() => {});
+    _wifiState.fs.native = false;
+    if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
+    else if (_wifiState.data) _wifiDrawSpectrum();
+}
+
+function _wifiFsWire() {
+    if (_wifiState.fs.wired) return;
+    _wifiState.fs.wired = true;
+    document.querySelectorAll('#wifi-fs-band button').forEach(b =>
+        b.addEventListener('click', () => wifiSetBand(b.dataset.band)));
+    document.querySelectorAll('#wifi-fs-view button').forEach(b =>
+        b.addEventListener('click', () => { if (!b.disabled) wifiSetView(b.dataset.view); }));
+    // Overlay toggles mirror the in-page checkboxes, so the existing change
+    // handlers stay the single implementation.
+    [['wifi-auto', 'wifi-fs-auto'], ['wifi-bt', 'wifi-fs-bt'], ['wifi-zb', 'wifi-fs-zb']].forEach(([mainId, fsId]) => {
+        const m = document.getElementById(mainId), f = document.getElementById(fsId);
+        if (!m || !f) return;
+        f.addEventListener('change', () => {
+            if (f.disabled) { f.checked = false; return; }
+            m.checked = f.checked;
+            m.dispatchEvent(new Event('change'));
+        });
+        m.addEventListener('change', () => { f.checked = m.checked; });
+    });
+    const canvas = document.getElementById('wifi-spectrum-fs');
+    _wifiWireCanvas(canvas, 'wifi-fs-tip', 'wifi-fs-readout');
+    if (canvas && window.ResizeObserver) {
+        new ResizeObserver(() => {
+            if (!_wifiState.fs.open) return;
+            if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
+            else if (_wifiState.data) _wifiDrawSpectrum();
+        }).observe(canvas.parentElement || canvas);
+    }
+    // Leaving native fullscreen (browser Esc / F11) should close the overlay too.
+    document.addEventListener('fullscreenchange', () => {
+        if (_wifiState.fs.open && _wifiState.fs.native && !document.fullscreenElement) {
+            _wifiState.fs.native = false;
+            _wifiFsClose(document.getElementById('wifi-fs'));
+        }
+    });
+}
+
+function _wifiFsKey(e) {
+    if (!_wifiState.fs.open) return;
+    const tag = (e.target && e.target.tagName || '').toLowerCase();
+    const typing = tag === 'input' || tag === 'select' || tag === 'textarea';
+    if (e.key === 'Escape') { e.preventDefault(); wifiToggleFullscreen(); return; }
+    if (typing) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); _wifiFsStep(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); _wifiFsStep(-1); }
+    else if (e.key === 's' || e.key === 'S') wifiScan();
+    else if (e.key === 'b' || e.key === 'B') wifiSetView('bar');
+    else if (e.key === 'd' || e.key === 'D') wifiSetView('dome');
+    else if (e.key === 'a' || e.key === 'A') wifiSetBand('all');
+    else if (e.key === '2') wifiSetBand('2.4');
+    else if (e.key === '5') wifiSetBand('5');
+    else if (e.key === '6') wifiSetBand('6');
+}
+
+// Walk the currently-filtered list with the arrow keys.
+function _wifiFsStep(delta) {
+    const aps = _wifiFsAps();
+    if (!aps.length) return;
+    const i = aps.findIndex(a => a.bssid === _wifiState.selected);
+    const next = aps[Math.max(0, Math.min(aps.length - 1, i < 0 ? 0 : i + delta))];
+    if (next) {
+        wifiSelectAp(next.bssid);
+        const row = document.querySelector(`#wifi-fs-list tr[data-b="${next.bssid}"]`);
+        if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+    }
+}
+
+function _wifiFsAps() {
+    const g = id => (document.getElementById(id) || {});
+    return _wifiFilterAps(g('wifi-fs-search').value, g('wifi-fs-std').value || '', !!g('wifi-fs-issues').checked);
+}
+
+function _wifiSetStatus(text) {
+    const st = document.getElementById('wifi-status');
+    if (st) st.textContent = text;
+    const fs = document.getElementById('wifi-fs-status');
+    if (fs) fs.textContent = text;
+}
+
+// Mirror the hardware gates (HackRF present? Huginn present?) onto the
+// full-screen controls — the in-page buttons are the source of truth.
+function _wifiFsSyncGates() {
+    const zb = document.getElementById('wifi-fs-zb'), zbl = document.getElementById('wifi-fs-zb-label');
+    const zbMain = document.getElementById('wifi-zb');
+    if (zb && zbMain) {
+        zb.disabled = zbMain.disabled;
+        if (zbl) { zbl.style.opacity = zbMain.disabled ? '.4' : '1'; zbl.style.cursor = zbMain.disabled ? 'not-allowed' : 'pointer'; }
+    }
+    const wf = document.getElementById('wifi-fs-view-wf'), wfMain = document.getElementById('wifi-view-wf');
+    if (wf && wfMain) {
+        wf.disabled = wfMain.disabled;
+        wf.style.opacity = wfMain.disabled ? '.4' : '1';
+        wf.style.cursor = wfMain.disabled ? 'not-allowed' : 'pointer';
+        wf.title = wfMain.title;
+    }
+}
+
+// Repaint everything the console owns (called after each render/scan).
+function _wifiFsRender() {
+    if (!_wifiState.fs.open) return;
+    const d = _wifiState.data;
+    const iface = document.getElementById('wifi-fs-iface');
+    if (iface) iface.textContent = _wifiState.iface ? `· ${_wifiState.iface}` : '';
+    const st = document.getElementById('wifi-fs-status'), main = document.getElementById('wifi-status');
+    if (st && main) st.textContent = main.textContent;
+    _wifiFsSyncGates();
+    // Band chips — clicking one filters the spectrum to that band.
+    const summ = document.getElementById('wifi-fs-summary');
+    if (summ) {
+        const ratingColor = { clear: '#22c55e', moderate: '#eab308', congested: '#ef4444' };
+        let chips = '';
+        if (d) chips = Object.keys(d.spectrum).sort().map(b => {
+            const s = d.spectrum[b];
+            const on = _wifiState.band === b;
+            const wa = s.width_advice ? ` · <span title="${_esc(s.width_advice.reason)}">→ ${s.width_advice.mhz}MHz</span>` : '';
+            return `<button onclick="wifiSetBand('${on ? 'all' : b}')" title="${on ? 'Show all bands' : 'Show only this band'}"
+                style="background:${_WIFI_BAND_COLOR[b]}${on ? '33' : '18'};border:1px solid ${_WIFI_BAND_COLOR[b]}${on ? 'cc' : '55'};border-radius:6px;padding:3px 8px;cursor:pointer">
+                <b style="color:${_WIFI_BAND_COLOR[b]}">${b} GHz</b> · ${s.ap_count} AP ·
+                <span style="color:${ratingColor[s.rating]}">${s.rating}</span> · best ch ${s.recommend.join(', ')}${wa}</button>`;
+        }).join('');
+        if (d && d.noise_floor != null) chips += `<span class="wifi-fs-tag" style="padding:3px 8px">noise floor ${d.noise_floor} dBm</span>`;
+        summ.innerHTML = chips || '<span class="wifi-fs-meta">No APs heard yet — hit Scan.</span>';
+    }
+    const leg = document.getElementById('wifi-fs-legend');
+    if (leg) leg.innerHTML = '<span>Signal:</span>' +
+        [['#22c55e', 'strong ≥−55'], ['#84cc16', 'good ≥−67'], ['#eab308', 'fair ≥−75'], ['#f97316', 'weak ≥−85'], ['#ef4444', 'v.weak']]
+            .map(([c, l]) => `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:10px;height:10px;background:${c};border-radius:2px;display:inline-block"></span>${l}</span>`).join('') +
+        '<span style="color:#a78bfa">◆ DFS/radar</span><span style="color:#fbbf24">⚠ security issue</span>' +
+        '<span class="wifi-fs-meta">keys: ↑↓ select · s scan · b/d view · a/2/5/6 band · Esc exit</span>';
+    _wifiFsRenderList();
+    _wifiFsRenderSide();
+}
+
+function _wifiFsRenderList() {
+    const box = document.getElementById('wifi-fs-list');
+    if (!box || !_wifiState.fs.open) return;
+    const d = _wifiState.data;
+    const cnt = document.getElementById('wifi-fs-count');
+    if (!d) { box.innerHTML = '<div class="wifi-fs-empty">Run a scan to populate the survey.</div>'; if (cnt) cnt.textContent = ''; return; }
+    const aps = _wifiFsAps();
+    if (cnt) cnt.textContent = `(${aps.length}/${d.ap_count})`;
+    const cols = [['ssid', 'SSID'], ['vendor', 'Vendor'], ['band', 'Band'], ['channel', 'Ch'], ['width', 'W'],
+        ['max_phy_mbps', 'Rate'], ['signal', 'Signal'], ['snr', 'SNR'], ['security', 'Security'],
+        ['channel_util', 'Util'], ['stations', 'Sta']];
+    const arrow = k => _wifiState.sortKey === k ? (_wifiState.sortDir > 0 ? ' ▲' : ' ▼') : '';
+    const head = cols.map(([k, l]) => `<th onclick="wifiSort('${k}')">${l}${arrow(k)}</th>`).join('');
+    if (!aps.length) { box.innerHTML = `<table><thead><tr>${head}</tr></thead></table><div class="wifi-fs-empty">No APs match this filter.</div>`; return; }
+    const rows = aps.map(a => {
+        const sel = _wifiState.selected === a.bssid;
+        const issue = (a.security_findings || []).length;
+        const flagged = _wifiState.flagged && _wifiState.flagged.bssid === a.bssid;
+        const bar = a.signal == null ? 0 : Math.max(4, Math.min(50, (a.signal + 100) / 70 * 50));
+        const rate = a.max_phy_mbps ? (a.max_phy_mbps >= 1000 ? (a.max_phy_mbps / 1000).toFixed(1) + 'G' : a.max_phy_mbps + 'M') : '—';
+        return `<tr data-b="${a.bssid}" class="${sel ? 'sel' : ''}" onclick="wifiSelectAp('${a.bssid}')"
+            onmouseenter="_wifiFsHoverRow('${a.bssid}')" onmouseleave="_wifiFsHoverRow(null)">
+            <td>${issue ? '<span style="color:#fbbf24" title="' + _esc(a.security_findings.join('; ')) + '">⚠</span> ' : ''}${flagged ? '<span style="color:#f87171" title="flagged by WiFi Defense">🛡</span> ' : ''}${_esc(a.ssid) || '<i style="color:#64748b">hidden</i>'}${_wifiGenBadge(a.standard)}${a.is_new ? ' <span class="wifi-fs-tag" style="color:#6ee7b7;border-color:#065f46">NEW</span>' : ''}
+                <div style="font-family:ui-monospace,monospace;font-size:10px;color:#475569">${_esc(a.bssid)}</div></td>
+            <td style="color:#94a3b8">${_esc(a.vendor) || '—'}</td>
+            <td style="color:${_WIFI_BAND_COLOR[a.band]}">${a.band}</td>
+            <td>${a.channel}${a.dfs ? ' <span style="color:#a78bfa" title="DFS/radar">◆</span>' : ''}</td>
+            <td>${a.width}M</td>
+            <td>${rate}</td>
+            <td style="color:${_wifiSignalColor(a.signal)}">${a.signal}<span style="display:inline-block;height:6px;width:${bar}px;background:${_wifiSignalColor(a.signal)};border-radius:2px;margin-left:5px"></span>${_wifiSparkline(a.rssi_history)}</td>
+            <td>${a.snr == null ? '—' : a.snr}</td>
+            <td style="color:${a.security === 'Open' ? '#f87171' : '#cbd5e1'}">${_esc(a.security)}${_wifiSecBadges(a)}</td>
+            <td>${a.channel_util == null ? '—' : a.channel_util + '%'}</td>
+            <td>${a.stations == null ? '—' : a.stations}</td>
+        </tr>`;
+    }).join('');
+    box.innerHTML = `<table><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+// Hovering a list row highlights the same AP in the spectrum above it.
+function _wifiFsHoverRow(bssid) {
+    if (_wifiState.hoverBssid === bssid) return;
+    _wifiState.hoverBssid = bssid;
+    if (_wifiState.view !== 'waterfall' && _wifiState.data) _wifiDrawSpectrum();
+}
+
+function _wifiFsRenderSide() {
+    const side = document.getElementById('wifi-fs-side');
+    if (!side || !_wifiState.fs.open) return;
+    const d = _wifiState.data;
+    const ap = (d && _wifiState.selected) ? d.aps.find(a => a.bssid === _wifiState.selected) : null;
+    let html = ap ? _wifiApDetailHtml(ap)
+        : '<div class="wifi-fs-card"><h4>Inspector</h4><div class="wifi-fs-empty">Click a signal in the spectrum — or a row in the list — to see everything this survey knows about it.</div></div>';
+    if (d) {
+        // Interference
+        const inf = d.interference || {};
+        let ih = '';
+        (inf.co_channel || []).slice(0, 8).forEach(g =>
+            ih += `<div>• <b style="color:#fbbf24">${g.band} GHz ch ${g.channel}</b> — ${g.count} APs sharing <span style="color:#64748b">${_esc(g.ssids.slice(0, 3).join(', '))}</span></div>`);
+        if ((inf.adjacent_overlap || []).length)
+            ih += `<div style="margin-top:4px;color:#fb923c">${inf.adjacent_overlap.length} overlapping 2.4 GHz pair(s) — use only ch 1/6/11.</div>`;
+        if (!ih) ih = '<div style="color:#4ade80">No significant co-/adjacent-channel interference.</div>';
+        html += `<div class="wifi-fs-card"><h4>Interference</h4><div style="font-size:12px;line-height:1.6">${ih}</div></div>`;
+        // Since last scan
+        const c = d.changes || {};
+        const ch = [].concat(
+            (c.new_aps || []).map(a => `<div style="color:#6ee7b7">＋ ${_esc(a.ssid) || 'hidden'} <span style="color:#64748b">${a.band}G ch${a.channel} ${a.signal}dBm</span></div>`),
+            (c.weakened || []).map(a => `<div style="color:#fbbf24">▼ ${_esc(a.ssid) || 'hidden'} <span style="color:#64748b">${a.signal}dBm (−${a.drop})</span></div>`),
+            (c.gone_aps || []).map(a => `<div style="color:#94a3b8">－ ${_esc(a.ssid) || 'hidden'} gone</div>`));
+        if (ch.length) html += `<div class="wifi-fs-card"><h4>Since last scan</h4><div style="font-size:12px;line-height:1.6">${ch.join('')}</div></div>`;
+    }
+    // Live 2.4 GHz neighbours from the overlays, clickable like the AP list.
+    if (_wifiState.btOn && _wifiState.bt) {
+        const devs = (_wifiState.bt.devices || []).slice(0, 40);
+        const i = _wifiState.bt.interference || {};
+        html += `<div class="wifi-fs-card"><h4>📶 Bluetooth / BLE (${_wifiState.bt.device_count || devs.length})</h4>
+            <div style="font-size:11px;color:#64748b;margin-bottom:5px">hopping pressure ${i.hopping_pressure == null ? '—' : i.hopping_pressure + '%'}</div>
+            ${devs.map(v => `<div class="wifi-fs-devrow ${_wifiState.btSelected === v.mac ? 'sel' : ''}" onclick="wifiBtSelect('${v.mac}')">
+                <span>${_esc(v.name || v.vendor || v.mac)}</span>
+                <span style="color:${_wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`).join('')
+                || '<div class="wifi-fs-empty">No devices heard.</div>'}</div>`;
+    }
+    if (_wifiState.zbOn && _wifiState.zb) {
+        const devs = (_wifiState.zb.devices || []).slice(0, 40);
+        html += `<div class="wifi-fs-card"><h4>🐝 Zigbee / 802.15.4 (${_wifiState.zb.device_count || devs.length})</h4>
+            ${devs.map(v => { const id = v.addr || v.short_addr;
+                return `<div class="wifi-fs-devrow ${_wifiState.zbSelected === id ? 'sel' : ''}" onclick="wifiZbSelect('${id}')">
+                    <span>${_esc(v.vendor || id)} <span style="color:#64748b">ch${v.channel}</span></span>
+                    <span style="color:${_wifiSignalColor(v.rssi)}">${v.rssi == null ? '—' : v.rssi}</span></div>`; }).join('')
+                || '<div class="wifi-fs-empty">No devices heard.</div>'}</div>`;
+    }
+    side.innerHTML = html;
+}
+
+// Everything the passive survey produced for one AP. Fields the scan didn't
+// yield are shown as "—" rather than hidden, so an empty column reads as
+// "the beacon didn't say", not "we forgot to look".
+function _wifiApDetailHtml(a) {
+    const col = _wifiSignalColor(a.signal);
+    const quality = a.signal == null ? 'unknown' : a.signal >= -55 ? 'excellent' : a.signal >= -67 ? 'good'
+        : a.signal >= -75 ? 'fair' : a.signal >= -85 ? 'weak' : 'very weak';
+    const kv = rows => '<dl class="wifi-fs-kv">' + rows.filter(Boolean)
+        .map(([k, v]) => `<dt>${k}</dt><dd>${v == null || v === '' ? '—' : v}</dd>`).join('') + '</dl>';
+    const yn = (v, on, off) => v == null ? '—' : (v ? (on || 'yes') : (off || 'no'));
+    const r = a.roaming || {};
+    const roam = ['k', 'v', 'r'].filter(x => r[x]).map(x => '802.11' + x).join(', ') || 'none advertised';
+    const findings = (a.security_findings || []);
+    const util = a.channel_util;
+    const utilBar = util == null ? '' :
+        `<div style="height:6px;border-radius:3px;background:#1e293b;margin-top:4px">
+            <div style="height:6px;border-radius:3px;width:${Math.min(100, util)}%;background:${util > 60 ? '#ef4444' : util > 30 ? '#eab308' : '#22c55e'}"></div></div>`;
+    // Coverage model, when the radius endpoint has answered for this BSSID.
+    const rad = (_wifiState.radius && _wifiState.radius.bssid === a.bssid) ? _wifiState.radius : null;
+    const radHtml = rad ? `<div class="wifi-fs-card"><h4>Modelled coverage</h4>
+        <div style="font-size:12px">You are ~<b>${rad.current_distance_m} m</b> away.</div>
+        ${(rad.rings || []).map(x => `<div style="font-size:12px">• <b>${x.radius_m} m</b> — ${_esc(x.label)} <span style="color:#64748b">(≤${x.threshold_dbm} dBm)</span></div>`).join('')}
+        <div style="font-size:10px;color:#64748b;margin-top:4px">Tx ${rad.assumptions.tx_dbm} dBm (${_esc(rad.assumptions.tx_source)}), n=${rad.assumptions.path_loss_exponent}, ref ${rad.assumptions.rssi_at_1m} dBm@1m. Estimate only.</div></div>` : '';
+    return `
+    <div class="wifi-fs-card">
+        <h4>Selected AP</h4>
+        <div style="font-size:16px;font-weight:600">${_esc(a.ssid) || '<i style="color:#64748b">hidden SSID</i>'}${_wifiGenBadge(a.standard)}</div>
+        <div style="font-family:ui-monospace,monospace;font-size:11px;color:#64748b">${_esc(a.bssid)}</div>
+        <div style="font-size:11px;color:#94a3b8;margin-bottom:8px">${_esc(a.vendor) || 'unknown vendor'}</div>
+        <div style="display:flex;align-items:flex-end;gap:10px">
+            <span class="wifi-fs-big" style="color:${col}">${a.signal == null ? '—' : a.signal}<span style="font-size:12px;font-weight:400"> dBm</span></span>
+            <span style="font-size:11px;color:#94a3b8;padding-bottom:4px">${quality}${a.snr != null ? ' · SNR ' + a.snr + ' dB' : ''}</span>
+        </div>
+        ${_wifiSparkline(a.rssi_history, 330, 40) || '<div style="font-size:11px;color:#475569;margin-top:4px">RSSI history builds up over repeat scans.</div>'}
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+            <button class="wifi-hm-btn" onclick="wifiFsCopy('${a.bssid}')">⧉ Copy BSSID</button>
+            <button class="wifi-hm-btn" onclick="wifiFsSurveyAp('${a.bssid}')" title="Make this the target of the coverage heatmap">🗺 Survey this AP</button>
+            <button class="wifi-hm-btn" onclick="wifiFsFilterSsid('${encodeURIComponent(a.ssid || '')}')" title="Filter the list to this SSID">⌕ Same SSID</button>
+            <button class="wifi-hm-btn" onclick="wifiFsClearSelection()">✕ Clear</button>
+        </div>
+    </div>
+    <div class="wifi-fs-card"><h4>Radio</h4>${kv([
+        ['Band', `<span style="color:${_WIFI_BAND_COLOR[a.band]}">${a.band} GHz</span>`],
+        ['Channel', `${a.channel}${a.dfs ? ' <span style="color:#a78bfa">◆ DFS / radar</span>' : ''}`],
+        ['Width', a.width + ' MHz'],
+        ['Frequency', a.freq ? a.freq + ' MHz' : null],
+        ['Centre freq', a.center_freq ? a.center_freq + ' MHz' : null],
+        ['Generation', a.standard],
+        ['PHY mode', a.phy_mode],
+        ['Spatial streams', a.nss ? a.nss + '×' : null],
+        ['Max PHY rate', a.max_phy_mbps ? (a.max_phy_mbps >= 1000 ? (a.max_phy_mbps / 1000).toFixed(1) + ' Gbps' : a.max_phy_mbps + ' Mbps') : null],
+        ['Tx power', a.tx_power_dbm != null ? a.tx_power_dbm + ' dBm (advertised)' : null],
+        ['Country', a.country],
+    ])}</div>
+    <div class="wifi-fs-card"><h4>Load &amp; timing</h4>${kv([
+        ['Ch. utilisation', util == null ? null : util + '%' + utilBar],
+        ['Stations', a.stations],
+        ['Beacon int.', a.beacon_interval != null ? a.beacon_interval + ' TU' : null],
+        ['DTIM', a.dtim],
+        ['Last beacon', a.last_seen_ms != null ? (a.last_seen_ms / 1000).toFixed(1) + ' s ago' : null],
+        ['Seen', a.seen_count ? a.seen_count + '× this session' : null],
+        ['First seen', a.is_new ? 'this scan' : 'earlier session'],
+        ['RSSI samples', (a.rssi_history || []).length || null],
+    ])}</div>
+    <div class="wifi-fs-card"><h4>Security</h4>${kv([
+        ['Suite', `<span style="color:${a.security === 'Open' ? '#f87171' : '#e2e8f0'}">${_esc(a.security)}</span>`],
+        ['PMF (802.11w)', a.pmf ? _esc(a.pmf) : null],
+        ['802.1X', yn(a.enterprise, 'enterprise', 'personal/none')],
+        ['WPS', yn(a.wps, '<span style="color:#f87171">enabled</span>', 'off')],
+        ['Roaming', roam],
+        ['Hidden SSID', yn(a.hidden)],
+    ])}
+    ${findings.length
+        ? '<div style="margin-top:7px;font-size:12px;color:#fbbf24">' + findings.map(f => `<div>⚠ ${_esc(f)}</div>`).join('') + '</div>'
+        : '<div style="margin-top:7px;font-size:12px;color:#4ade80">No security findings.</div>'}
+    </div>
+    ${radHtml}`;
+}
+
+function wifiFsCopy(bssid) {
+    if (navigator.clipboard) navigator.clipboard.writeText(bssid).catch(() => {});
+    _wifiSetStatus('copied ' + bssid);
+}
+
+function wifiFsClearSelection() {
+    _wifiState.selected = null;
+    _wifiState.radius = null;
+    wifiRender();
+}
+
+function wifiFsFilterSsid(ssidEnc) {
+    const s = decodeURIComponent(ssidEnc || '');
+    const box = document.getElementById('wifi-fs-search');
+    if (box) { box.value = s; _wifiFsRenderList(); }
+}
+
+// Hand the AP to the coverage heatmap and drop back to the page, where the
+// walk-around survey lives.
+function wifiFsSurveyAp(bssid) {
+    const sel = document.getElementById('wifi-hm-ap');
+    if (sel && [...sel.options].some(o => o.value === bssid)) sel.value = bssid;
+    if (_wifiState.fs.open) wifiToggleFullscreen();
+    const card = document.getElementById('wifi-heatmap');
+    if (card && card.scrollIntoView) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 // ---- WiFi Defense → Analyzer pivot -----------------------------------------
 // WIDS detections link here: jump to the Spectrum Analyzer, select the
 // offending BSSID and keep it highlighted (red, ⚠ WIDS) until dismissed.
@@ -2318,6 +2905,7 @@ function _wifiFlagBanner() {
 }
 
 function wifiSelectAp(bssid) {
+    if (_wifiState.selected !== bssid) _wifiState.radius = null;
     _wifiState.selected = bssid;
     wifiRender();
     const iface = _wifiState.iface;
@@ -2356,7 +2944,14 @@ function wifiSelectAp(bssid) {
     document.getElementById('wifi-cal-details').style.display = 'block';
     fetch(`/api/net/wifi/radius?interface=${encodeURIComponent(iface)}&bssid=${encodeURIComponent(bssid)}&tx=${tx}&ple=${ple}&rssi_offset=${rssiOffset}&antenna_gain=${antGain}&cable_loss=${cableLoss}${rssi0}${known}`)
         .then(r => r.json()).then(d => {
-            if (d.error) { document.getElementById('wifi-radius-info').innerHTML = '<span class="text-amber-400">' + d.error + '</span>'; return; }
+            if (d.error) {
+                document.getElementById('wifi-radius-info').innerHTML = '<span class="text-amber-400">' + d.error + '</span>';
+                _wifiState.radius = null; _wifiFsRenderSide();
+                return;
+            }
+            // Kept for the full-screen inspector, which shows the same model.
+            _wifiState.radius = d;
+            _wifiFsRenderSide();
             _wifiDrawRadius(d);
             document.getElementById('wifi-radius-target').textContent = '· ' + (d.ssid || bssid);
             const srcMap = { measured: '<span class="text-green-400">measured</span>', calibrated: '<span class="text-cyan-400">calibrated</span>' };

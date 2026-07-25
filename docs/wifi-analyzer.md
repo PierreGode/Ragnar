@@ -5,6 +5,9 @@ A passive, tri-band Wi-Fi RF troubleshooter built into Ragnar's web UI —
 software [Ekahau Sidekick 2](https://www.ekahau.com/products/sidekick/): the
 same survey-and-heatmap workflow a wireless engineer expects, on a Raspberry Pi
 Zero 2 W with an off-the-shelf Wi-Fi 6E dongle instead of a $4,000 instrument.
+The spectrum graph is interactive (hover to identify, click to inspect), and
+**⛶ Full screen** gives the whole viewport to a survey console with a full-record
+inspector — see [Full-screen console](#-full-screen-console).
 
 > **Strictly passive.** The analyzer only ever runs `iw dev <iface> scan -u
 > passive`, which *listens for beacons* and **never transmits a probe request**
@@ -97,6 +100,50 @@ shaded. Toggle between:
 - **◗ Cone/Dome** — the classic Wi-Fi-analyzer filled **bell curve** per AP,
   centred on its operating channel and spanning its channel width, peak = RSSI.
   This is the view that makes channel overlap and crowding obvious at a glance.
+
+Each band segment is scaled to the channels its APs actually *occupy*, so a
+160 MHz Wi-Fi 6E/7 BSS is drawn at its true span instead of running off the end
+of the band.
+
+**The graph is interactive.** Hover any bar/dome to identify it — a tooltip
+gives SSID, BSSID, vendor, RSSI + SNR, band/channel/width, security and any
+security findings — and a marker readout in the corner tracks the cursor's
+**channel · frequency · level**. Click a signal to select that AP (the same
+selection the AP table and Signal Radius use); click empty space to clear it.
+
+---
+
+## ⛶ Full-screen console
+
+**Full screen** (next to *Scan*, or `Esc` to leave) hands the whole viewport to
+the analyzer, Sidekick-style:
+
+- a **large hit-testable spectrum** — same Bar / Dome / Waterfall views, with the
+  hover tooltip, cursor readout, and per-signal `RSSI · ch/width` captions that
+  the in-page chart hasn't room for;
+- an **inspector** down the right side showing *everything* the survey holds for
+  the selected AP — identity (SSID/BSSID/vendor), a large RSSI reading with its
+  quality band, SNR and a full-width **RSSI history** trace, radio detail
+  (band, channel, width, frequency + centre frequency, generation, PHY mode,
+  spatial streams, max PHY rate, advertised Tx power, country, DFS), load &
+  timing (channel utilisation with a bar, associated stations, beacon interval,
+  DTIM, last beacon, times seen), the full **security** picture (suite, PMF,
+  802.1X, WPS, 802.11k/v/r roaming, hidden-SSID) and every security finding,
+  plus the **modelled coverage rings** when a radius estimate has been made.
+  Below it: interference, what changed since the last scan, and the live
+  Bluetooth / Zigbee device lists when those overlays are on (clickable, same as
+  their panels);
+- the **AP list** underneath the graph — sortable, filterable (text, generation,
+  issues-only), CSV/report export, and hovering a row highlights that AP in the
+  spectrum above it;
+- **band chips** that filter the view when clicked, mirrored band/view/overlay
+  controls, and keyboard shortcuts: `↑`/`↓` walk the list, `s` scan, `b`/`d`
+  switch Bar/Dome, `a`/`2`/`5`/`6` pick a band, `Esc` exits.
+
+Selection, scans and overlays are shared with the in-page analyzer, so entering
+or leaving full screen never loses your place. Actions in the inspector can
+**copy the BSSID**, **filter the list to the same SSID**, or send the AP
+straight to the coverage heatmap as its survey target.
 
 **WIDS pivot:** clicking a BSSID in a **WiFi Defense** detection (or a row of
 its AP table) lands here with that AP pre-selected and marked by a red dashed
