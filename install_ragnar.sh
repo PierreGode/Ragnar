@@ -119,6 +119,50 @@ check_git() {
     fi
 }
 
+# Re-probe git immediately before a clone, installing it when it is merely
+# absent. check_git runs early (it has to: the display menu clones the e-Paper
+# repo before the dependency step), so by the time Ragnar itself is cloned its
+# verdict can be stale in the one way that matters — a stock Raspberry Pi OS
+# Lite / Debian image ships without git, so GIT_WORKS was latched to false, the
+# clone fell back to a tarball, and the resulting install had no .git at all.
+# That install works fine but can never update itself, and the Updates card on a
+# brand-new box reported "Needs attention" instead of "Up to Date".
+#
+# A git that is installed but crashes (SIGILL on Cortex-A53, Debian Trixie
+# arm64) is left alone — reinstalling the same broken binary does not help, and
+# the tarball fallback exists precisely for it.
+ensure_git() {
+    if git --version >/dev/null 2>&1; then
+        GIT_WORKS=true
+        return 0
+    fi
+    if command -v git >/dev/null 2>&1; then
+        GIT_WORKS=false
+        return 1
+    fi
+
+    log "INFO" "git is not installed — installing it so this install stays a real clone"
+    [ -z "$PKG_MGR" ] && detect_platform
+    install_package git >/dev/null 2>&1 || true
+
+    # A never-updated package index is the usual reason that first attempt
+    # fails on a freshly imaged box. Refresh once and retry before giving up on
+    # a real clone.
+    if ! git --version >/dev/null 2>&1 && [ -n "$UPDATE_CMD" ]; then
+        eval "$UPDATE_CMD" >/dev/null 2>&1 || true
+        install_package git >/dev/null 2>&1 || true
+    fi
+
+    if git --version >/dev/null 2>&1; then
+        GIT_WORKS=true
+        log "SUCCESS" "git installed — cloning instead of downloading a tarball"
+        return 0
+    fi
+    GIT_WORKS=false
+    log "WARNING" "git still unavailable — falling back to tarball download"
+    return 1
+}
+
 # Clone a repository, falling back to a wget tarball download when git is broken.
 # Usage: clone_or_download <repo_url> [target_dir] [branch]
 # repo_url must be a GitHub https URL (https://github.com/owner/repo.git or without .git).
@@ -132,7 +176,8 @@ clone_or_download() {
         target_dir=$(basename "${repo_url%.git}")
     fi
 
-    # Try git first
+    # Try git first, re-probing rather than trusting the early check_git verdict.
+    ensure_git
     if [ "$GIT_WORKS" = true ]; then
         if git clone "$repo_url" "$target_dir" 2>/dev/null; then
             return 0
@@ -924,7 +969,7 @@ setup_ragnar() {
         # installer to fix. Reattach it here instead. Deliberately NOT a
         # re-clone: the else branch below does rm -rf, which would take the
         # user's data/ with it.
-        if [ ! -d "Ragnar/.git" ] && [ "$GIT_WORKS" = true ]; then
+        if [ ! -d "Ragnar/.git" ] && ensure_git; then
             log "WARNING" "Existing install has no .git (tarball install) — reattaching to upstream"
             echo -e "${YELLOW}Reattaching this install to the git repository (your files are kept)...${NC}"
             if git init -q Ragnar 2>/dev/null \
@@ -1952,7 +1997,7 @@ main() {
         if [ ! -d "e-Paper" ]; then
             local epd_cloned=false
             # Try git sparse-checkout first (smallest download)
-            if [ "$GIT_WORKS" = true ]; then
+            if ensure_git; then
                 if git clone --depth=1 --filter=blob:none --sparse https://github.com/waveshareteam/e-Paper.git 2>/dev/null \
                    && cd e-Paper \
                    && git sparse-checkout set RaspberryPi_JetsonNano 2>/dev/null; then

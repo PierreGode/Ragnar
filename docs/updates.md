@@ -74,7 +74,7 @@ in the card and in the console panel underneath it.
 | `timeout` | A git command stopped responding and was cancelled | Usually a slow or dropped link; retry when back online |
 | `auth` | `origin` asked for credentials | Point it at the public URL: `git remote set-url origin https://github.com/PierreGode/Ragnar.git` |
 | `disk_full` | Not enough space to pull | Free space — `data/logs` and old captures first |
-| `not_a_repo` | No `.git` (tarball install) | Click **Repair and Update**; Ragnar reattaches it upstream in place |
+| `not_a_repo` | No `.git` (tarball install) **and** upstream unreachable | Check the box's internet connection; the check repairs this by itself once it can reach github.com |
 | `branch_missing` | The tracked branch is gone upstream | Nothing — the updater falls back to the default branch automatically |
 | `ownership` | Git refused the checkout's file ownership | Usually self-repairing; else `sudo chown -R ragnar:ragnar /home/ragnar/Ragnar` |
 | `locked` | Another git process holds the repository | Wait a moment and retry; stale locks are swept automatically |
@@ -143,8 +143,12 @@ sudo apt update && sudo apt install --reinstall git
 ```
 
 Because the installer falls back to a release tarball when git is unusable, such
-a box has no `.git` at all. Both the web updater and `update_ragnar.sh` rebuild
-it in place, keeping every file on disk — nothing needs reinstalling.
+a box has no `.git` at all. Nothing needs reinstalling: the update check rebuilds
+it in place on its own, keeping every file on disk, and `update_ragnar.sh` does
+the same. A box in that state is not "behind" — it is running the release it was
+installed from — so once the metadata is back the card simply reads **Up to
+Date**. Only a box that cannot reach github.com at all reports `not_a_repo`, and
+the repair is retried at most every 10 minutes until it succeeds.
 
 ### The service did not come back after an update
 

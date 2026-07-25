@@ -199,9 +199,17 @@ This has a knock-on effect worth knowing about. The installer checks git up
 front, and when it is unusable it downloads a release tarball instead of
 cloning. That produces a complete, working Ragnar — but with **no `.git`
 directory**, so every later update has no repository to update. If your box was
-installed that way, both `update_ragnar.sh` and re-running `install_ragnar.sh`
-now reattach it to the upstream repository in place, keeping every file on disk.
-Nothing needs to be reinstalled; just fix git and re-run either one.
+installed that way, nothing needs reinstalling: the web update check rebuilds the
+metadata in place the first time it runs, and `update_ragnar.sh` or re-running
+`install_ragnar.sh` do the same, keeping every file on disk.
+
+Note that the up-front check only ever *stood in* for "git is broken". A stock
+Raspberry Pi OS Lite or Debian image simply ships without git, and the installer
+apt-installs it a few steps later — but the verdict had already been latched, so
+those perfectly healthy boxes took the tarball path too and ended up unable to
+update themselves. The installer now re-checks immediately before each clone and
+installs git if it is merely missing, so only a genuinely crashing git (the
+SIGILL case above) still falls back to a tarball.
 
 Re-running the installer used to be a no-op here: it treats a directory
 containing `actions/` as an existing install and skips the clone, so a tarball

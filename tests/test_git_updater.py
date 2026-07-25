@@ -353,12 +353,69 @@ def test_check_reports_local_modifications(box):
     assert status['git_status']['has_conflicts'] is False
 
 
-def test_check_on_a_tarball_install_says_what_to_do(box):
+def test_freshly_installed_box_without_git_metadata_reports_up_to_date(box, upstream, monkeypatch):
+    # A tarball install carries the current release; it just has no metadata to
+    # compare against. Reported as "Needs attention", a brand-new box asked its
+    # owner to click Repair on an install that was already up to date - so the
+    # check rebuilds the metadata itself and then answers the real question.
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    monkeypatch.setattr(gu, '_LAST_REATTACH_ATTEMPT', [0.0])
     subprocess.run(['rm', '-rf', str(box / '.git')], check=True)
+
+    status = gu.check(str(box))
+    assert status['ok'], status
+    assert status['code'] == ''
+    assert status['updates_available'] is False
+    assert status['commits_behind'] == 0
+    assert os.path.isdir(str(box / '.git'))
+    assert _private_data_intact(box)
+    assert any('rebuilt' in w for w in status['warnings'])
+
+
+def test_reattached_box_then_sees_the_next_release(box, upstream, monkeypatch):
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream))
+    monkeypatch.setattr(gu, '_LAST_REATTACH_ATTEMPT', [0.0])
+    subprocess.run(['rm', '-rf', str(box / '.git')], check=True)
+    gu.check(str(box))
+
+    target = _publish(upstream)
+    status = gu.check(str(box))
+    assert status['updates_available'] is True
+    assert status['commits_behind'] == 1
+
+    assert gu.update(str(box))['ok']
+    assert _head(box) == target
+
+
+def test_tarball_install_that_cannot_reach_upstream_says_what_to_do(box, upstream, monkeypatch):
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream / 'nope.git'))
+    monkeypatch.setattr(gu, '_LAST_REATTACH_ATTEMPT', [0.0])
+    subprocess.run(['rm', '-rf', str(box / '.git')], check=True)
+
     status = gu.check(str(box))
     assert status['ok'] is False
     assert status['code'] == 'not_a_repo'
     assert 'Update' in status['hint']          # actionable, not just "error"
+    # A half-built repository would be worse than none at all.
+    assert not os.path.exists(str(box / '.git'))
+
+
+def test_a_failing_reattach_is_not_retried_on_every_dashboard_poll(box, upstream, monkeypatch):
+    # Every open tab polls the check on a timer; a repair that needs the network
+    # must not be re-attempted each time.
+    monkeypatch.setattr(gu, 'DEFAULT_REMOTE_URL', str(upstream / 'nope.git'))
+    monkeypatch.setattr(gu, '_LAST_REATTACH_ATTEMPT', [0.0])
+    subprocess.run(['rm', '-rf', str(box / '.git')], check=True)
+
+    attempts = []
+    real = gu.reattach_repository
+    monkeypatch.setattr(gu, 'reattach_repository',
+                        lambda *a, **k: (attempts.append(1), real(*a, **k))[1])
+
+    gu.check(str(box))
+    gu.check(str(box))
+    gu.check(str(box))
+    assert len(attempts) == 1
 
 
 # --- error classification ---------------------------------------------------
