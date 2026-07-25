@@ -148,6 +148,17 @@ another. The causes, in the order they turn up:
 - **The radio is wedged**, typically left advertising by a raw-HCI tool
   (`hciconfig hciX leadv`) so every `Add Advertising` comes back refused until
   it is reset.
+- **A raw-HCI scan is holding the radio.** The BLE **scan / pentest** path
+  (`actions/ble.py`, `actions/ble_pentest.py`) drives the controller with
+  `hcitool lescan`, `hcidump`, `btmon`, `l2ping` — *underneath* BlueZ. A scan
+  they start does **not** set `Adapter1.Discovering`, so the "is a scan
+  running?" check reads clean while the controller is in fact busy and refuses
+  to advertise. This is the most likely reason a box that used to advertise
+  suddenly won't. Ragnar detects these directly from the process list and calls
+  them out; stop the scan/pentest (or use a second controller) and re-enable
+  provisioning. `hcitool lescan` in particular often leaves the radio wedged
+  when killed, so a `hciconfig hciX reset` (or `bluetoothctl power off/on`) may
+  be needed after — which is what the automatic power-cycle retry does.
 
 A refused advertisement is retried down a ladder of progressively smaller ones
 — the same advertisement once more, then without `tx-power`, then the bare
@@ -207,9 +218,14 @@ only matter if the advertise test below them fails:
   [PASS] Controller can act as an LE peripheral
   [PASS] An advertising slot is free
   [PASS] No scan running on this adapter
+  [PASS] No raw-HCI tool holding the radio
   [PASS] Advertising starts
         advertising as "Ragnar-b4e2" on hci0
 ```
+
+The **raw-HCI** line is the one the plain scan check misses: it names any
+`hcitool`/`hcidump`/`btmon`/`l2ping` (the BLE scan/pentest tools) that is on
+the radio below BlueZ, with its PID, so you can stop exactly that process.
 
 Those middle lines are the ones to paste in a bug report: they are what differs
 between a box that advertises and one that does not.

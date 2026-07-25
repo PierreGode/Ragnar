@@ -442,6 +442,12 @@ class BleProvisioningServer:
                 self._log(f'a Bluetooth scan is running on {self.providers.hci}; '
                           'some controllers refuse to advertise while scanning',
                           'warning')
+            if caps.get('raw_hci'):
+                names = '/'.join(sorted({r['name'] for r in caps['raw_hci']}))
+                self._log(f'{names} is driving the radio over raw HCI (BLE '
+                          'scan/pentest) — BlueZ cannot see this scan and the '
+                          'controller may refuse to advertise; stop it if the '
+                          'registration below fails', 'warning')
             if caps.get('roles') and 'peripheral' not in caps['roles']:
                 # Decisive: no amount of trimming makes a central-only radio
                 # advertise connectably. Say so before BlueZ says "Failed".
@@ -931,6 +937,67 @@ def choose_adapter(preferred: Optional[str] = None) -> Optional[str]:
     return names[0]
 
 
+# Tools that drive a controller over *raw HCI*, underneath BlueZ. A scan or
+# capture they start does not set BlueZ's Adapter1.Discovering — so the plain
+# "is a scan running?" check reads clean while the radio is in fact busy, and
+# many controllers then refuse Add Advertising. This is the Ragnar BLE
+# pentest / scan path (actions/ble.py, actions/ble_pentest.py: hcitool lescan,
+# hcidump, btmon, l2ping), and the single most likely reason a box that used to
+# advertise suddenly will not. Matched on the program name; the argv is kept so
+# the report can name it and, where the tool took -i hciN, tie it to a radio.
+_RAW_HCI_TOOLS = ('hcitool', 'hcidump', 'btmon', 'l2ping', 'gatttool')
+
+
+def raw_hci_scanners(hci: Optional[str] = None) -> list:
+    """Processes holding a controller over raw HCI (below BlueZ).
+
+    Returns ``[{pid, name, cmd, hci}]`` — ``hci`` is the adapter the tool named
+    with ``-i hciN`` if any, else None (affects whatever radio it opened). When
+    ``hci`` is given, entries are limited to that adapter plus the un-pinned
+    ones (a bare ``hcitool lescan`` uses the first/only controller). Reads
+    ``/proc`` directly, so it needs no external tool and never raises.
+    """
+    found = []
+    try:
+        my_pid = str(os.getpid())
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit() or entry == my_pid:
+                continue
+            try:
+                with open(f'/proc/{entry}/cmdline', 'rb') as f:
+                    argv = f.read().split(b'\x00')
+            except Exception:
+                continue
+            args = [a.decode('utf-8', 'replace') for a in argv if a]
+            if not args:
+                continue
+            # Match on the program actually running (argv[0]). A `timeout 1
+            # hcitool lescan` wrapper (how actions/ble.py runs it) execs
+            # hcitool as its own child, which is caught on its own pass — so
+            # the wrapper process itself is skipped rather than double-counted.
+            name = os.path.basename(args[0])
+            if name not in _RAW_HCI_TOOLS:
+                continue
+            # Which radio, if the tool pinned one (-i hci1).
+            pinned = None
+            for i, tok in enumerate(args):
+                if tok in ('-i', '--device') and i + 1 < len(args):
+                    pinned = args[i + 1]
+                elif tok.startswith('hci') and tok[3:].isdigit():
+                    pinned = tok
+            if hci is not None and pinned is not None and pinned != hci:
+                continue
+            found.append({
+                'pid': int(entry),
+                'name': name,
+                'cmd': ' '.join(args)[:200],
+                'hci': pinned,
+            })
+    except Exception:
+        pass
+    return found
+
+
 def adapter_capabilities(hci: str, bus=None) -> dict:
     """What this controller can actually advertise, straight from BlueZ.
 
@@ -956,6 +1023,10 @@ def adapter_capabilities(hci: str, bus=None) -> dict:
         # advertise connectably no matter how small the advertisement is.
         'roles': [],
         'powered': None,
+        # Raw-HCI tools (BLE pentest/scan) holding the radio below BlueZ, which
+        # Adapter1.Discovering is blind to. Populated even when BlueZ is
+        # unreachable, since it comes from /proc, not D-Bus.
+        'raw_hci': raw_hci_scanners(hci),
     }
     try:
         import dbus
@@ -1051,8 +1122,25 @@ def bluetoothd_adv_failure(since: str = '-2 min') -> str:
     return hits[-1] if hits else ''
 
 
+def _raw_hci_note(raw: list) -> str:
+    """One-line 'this tool is holding the radio' note, or '' if none."""
+    if not raw:
+        return ''
+    names = sorted({r['name'] for r in raw})
+    pids = ', '.join(f'{r["name"]} (pid {r["pid"]})' for r in raw[:3])
+    return (f'A raw-HCI tool is using the radio underneath BlueZ: {pids}. '
+            f'This is usually the Ragnar BLE scan/pentest path — stop it '
+            f'(the {"/".join(names)} process) and re-enable provisioning. '
+            f'Because it bypasses BlueZ, the adapter reports no scan running.')
+
+
 def adv_failure_hint(reason: str, caps: dict, hci: str) -> str:
     """Plain-language next step for a refused advertisement."""
+    # A raw-HCI scan/capture is both the likeliest cause and invisible to the
+    # Discovering flag, so it is checked first.
+    note = _raw_hci_note(caps.get('raw_hci') or [])
+    if note:
+        return note
     roles = caps.get('roles') or []
     if roles and 'peripheral' not in roles:
         return (f'{hci} does not offer the LE peripheral role ({", ".join(roles)} '
@@ -1125,6 +1213,9 @@ def _caps_summary(hci: str, caps: dict) -> str:
         bits.append('NOT powered')
     if caps.get('discovering'):
         bits.append('a scan is running on this adapter')
+    raw = caps.get('raw_hci') or []
+    if raw:
+        bits.append('raw-HCI: ' + ','.join(sorted({r['name'] for r in raw})))
     return '; '.join(bits)
 
 
@@ -1309,6 +1400,14 @@ def _cli_doctor(base_dir: str) -> int:
              'a Bluetooth discovery is running (bt_scanner / WIDS); some '
              'controllers refuse to advertise while scanning — if the advertise '
              'test below fails, stop the scan and re-run')
+        # The scan BlueZ can't see: a raw-HCI tool from the BLE scan/pentest
+        # path. This is the one that hides behind a clean 'no scan running'.
+        raw = caps.get('raw_hci') or []
+        warn('No raw-HCI tool holding the radio', not raw,
+             'a BLE scan/pentest tool is on the radio below BlueZ ('
+             + ', '.join(f'{r["name"]} pid {r["pid"]}' for r in raw)
+             + ') — it does not show as a scan but blocks advertising; '
+               'stop it and re-run')
 
     # 6. Actually advertise for a few seconds.
     if have_gi and have_dbus and controllers:

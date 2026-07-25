@@ -17,6 +17,9 @@ leaving the box silent. The service UUID must survive every rung — the mobile
 app scans filtered by it, so an advertisement without it is useless.
 """
 
+import io
+import re
+
 import pytest
 
 import ble_provisioning as bp
@@ -167,6 +170,103 @@ def test_bluetoothd_adv_failure_parses_the_logged_status(monkeypatch):
 def test_bluetoothd_adv_failure_is_quiet_without_a_journal(monkeypatch):
     monkeypatch.setattr(bp, '_run', lambda *a, **k: '')
     assert bp.bluetoothd_adv_failure() == ''
+
+
+# --- the scan BlueZ can't see: raw-HCI tools from the BLE pentest path -------
+
+def _fake_proc(monkeypatch, procs):
+    """Stub /proc so raw_hci_scanners sees exactly `procs` ({pid: [argv]})."""
+    monkeypatch.setattr(bp.os, 'getpid', lambda: 1)
+    monkeypatch.setattr(bp.os, 'listdir',
+                        lambda p: [str(pid) for pid in procs] if p == '/proc' else [])
+
+    import builtins
+    real_open = builtins.open
+
+    def fake_open(path, *a, **k):
+        m = re.match(r'/proc/(\d+)/cmdline$', str(path))
+        if m and int(m.group(1)) in procs:
+            argv = procs[int(m.group(1))]
+            return io.BytesIO(b'\x00'.join(s.encode() for s in argv) + b'\x00')
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(builtins, 'open', fake_open)
+
+
+def test_detects_hcitool_lescan_below_bluez(monkeypatch):
+    _fake_proc(monkeypatch, {100: ['/usr/bin/hcitool', 'lescan']})
+    found = bp.raw_hci_scanners()
+    assert len(found) == 1
+    assert found[0]['name'] == 'hcitool'
+    assert found[0]['pid'] == 100
+    assert found[0]['hci'] is None
+
+
+def test_reads_the_pinned_adapter_from_dash_i(monkeypatch):
+    _fake_proc(monkeypatch, {101: ['hcidump', '-i', 'hci1', '--raw']})
+    assert bp.raw_hci_scanners()[0]['hci'] == 'hci1'
+
+
+def test_pinned_tool_on_another_adapter_is_filtered_out(monkeypatch):
+    _fake_proc(monkeypatch, {102: ['btmon', '-i', 'hci1']})
+    assert bp.raw_hci_scanners('hci0') == []          # not our radio
+    assert len(bp.raw_hci_scanners('hci1')) == 1      # is our radio
+
+
+def test_unpinned_tool_counts_against_any_adapter(monkeypatch):
+    # A bare `hcitool lescan` uses whatever controller it opened, so it must
+    # not be filtered away when we ask about a specific hci.
+    _fake_proc(monkeypatch, {103: ['hcitool', 'lescan']})
+    assert len(bp.raw_hci_scanners('hci0')) == 1
+
+
+def test_the_timeout_wrapper_process_is_not_double_counted(monkeypatch):
+    # actions/ble.py runs `timeout 1 hcitool lescan`: two processes exist, the
+    # timeout wrapper and the real hcitool child. Only the child (argv[0] =
+    # hcitool) counts; the wrapper (argv[0] = timeout) is ignored.
+    _fake_proc(monkeypatch, {
+        200: ['timeout', '1', 'hcitool', 'lescan'],
+        201: ['hcitool', 'lescan'],
+    })
+    found = bp.raw_hci_scanners()
+    assert [f['pid'] for f in found] == [201]
+
+
+def test_unrelated_processes_are_ignored(monkeypatch):
+    _fake_proc(monkeypatch, {
+        300: ['/usr/bin/python3', 'webapp_modern.py'],
+        301: ['bluetoothd'],
+    })
+    assert bp.raw_hci_scanners() == []
+
+
+def test_raw_hci_note_names_the_tool_and_the_fix():
+    note = bp._raw_hci_note([{'name': 'hcitool', 'pid': 42, 'cmd': 'hcitool lescan',
+                              'hci': None}])
+    assert 'hcitool' in note
+    assert 'BlueZ' in note
+    assert 'pentest' in note.lower() or 'scan' in note.lower()
+
+
+def test_raw_hci_note_empty_when_nothing_holds_the_radio():
+    assert bp._raw_hci_note([]) == ''
+
+
+def test_hint_prioritises_the_raw_hci_scan_over_the_mgmt_status():
+    # Even with a mgmt status present, a raw-HCI holder is the actionable
+    # cause and the hint must name it.
+    caps = {'roles': ['central', 'peripheral'],
+            'raw_hci': [{'name': 'btmon', 'pid': 7, 'cmd': 'btmon', 'hci': None}]}
+    hint = bp.adv_failure_hint('Busy (0x0a)', caps, 'hci0')
+    assert 'btmon' in hint
+
+
+def test_caps_summary_lists_raw_hci_tools():
+    summary = bp._caps_summary('hci0', {
+        'known': False,
+        'raw_hci': [{'name': 'hcidump', 'pid': 9, 'cmd': 'hcidump', 'hci': None}],
+    })
+    assert 'raw-HCI: hcidump' in summary
 
 
 # --- diagnostics carried in the failure message -----------------------------
