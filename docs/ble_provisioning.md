@@ -96,10 +96,33 @@ Ragnar's net-diag does: wired, then USB ethernet, then `wlan1`, then `wlan0`.
 ## CLI / troubleshooting
 
 ```bash
-python3 ble_provisioning.py info       # print the payloads, no Bluetooth
-python3 ble_provisioning.py selftest   # register with BlueZ, verify, unregister
-python3 ble_provisioning.py run        # advertise until Ctrl-C
+sudo python3 ble_provisioning.py doctor   # why isn't it advertising?
+python3 ble_provisioning.py info          # print the payloads, no Bluetooth
+python3 ble_provisioning.py selftest      # register with BlueZ, verify, unregister
+python3 ble_provisioning.py run           # advertise until Ctrl-C
 ```
+
+**Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
+each prerequisite in turn — `python3-dbus` and `python3-gi` importable,
+`bluetoothctl` present, at least one controller found, Bluetooth not
+rfkill-blocked — then actually registers an advertisement for a few seconds and
+reports what BlueZ said. Every FAIL line carries the command that fixes it, and
+the controller list shows which radios it can see and which one is built-in:
+
+```
+  [PASS] python3-dbus importable
+  [PASS] python3-gi importable
+  [PASS] bluetoothctl present
+  [PASS] Bluetooth controller found (1)
+        - hci0 DC:A6:32:00:B4:E2 (built-in)
+  [PASS] Bluetooth not rfkill-blocked
+  [PASS] Advertising starts
+        advertising as "Ragnar-b4e2" on hci0
+```
+
+A pass here means the box is on the air — if the phone still can't see it, scan
+for that name with a generic BLE app (nRF Connect) to split "box isn't
+advertising" from "app isn't finding it".
 
 Confirm it is really advertising while running:
 

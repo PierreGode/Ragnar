@@ -48,6 +48,24 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
 ```
 
+#### "Some packages won't install"
+
+Not every package is required. The installer splits them in two, and prints a
+summary of both when the dependency step ends:
+
+- **Required** — a miss here is a real `WARNING`, and the summary repeats the
+  exact `apt-get install` line to fix it. The install continues regardless.
+- **Optional** — `hackrf`, `nikto`, `sqlmap`, `whatweb`, `ffuf`,
+  `libatlas-base-dev`. These back single features (SDR Waterfall, the recon and
+  vulnerability scanners) that look their binary up at runtime and stay disabled
+  without it. Not every Debian suite carries all of them — `ffuf` only arrived in
+  trixie — so seeing these listed as unavailable is expected, not a failed
+  install.
+
+Two steps in the install are also slow and silent, which can look like a hang on
+a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
+`nmap --script-updatedb`. Give them time before interrupting.
+
 ### 🧰 Manual Install
 
 #### Step 1: Activate SPI & I2C

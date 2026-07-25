@@ -134,12 +134,24 @@ for _btpkg in python3-dbus python3-gi bluez; do
             || echo -e "  ${YELLOW}⚠${NC} Could not install $_btpkg — the overlay falls back to bluetoothctl text mode"
     fi
 done
-# HackRF tools for the true-RF Waterfall view (sdr_spectrum.py). Optional — the
-# Waterfall button stays greyed out until both the tools and a board are present.
-if ! dpkg -s hackrf >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends hackrf >/dev/null 2>&1 \
-        && echo -e "  ${GREEN}✓${NC} Installed hackrf (true-RF Waterfall)" \
-        || echo -e "  ${YELLOW}⚠${NC} Could not install hackrf — Waterfall stays disabled until installed"
+# Optional tooling. Each backs one feature that resolves the binary at runtime
+# and disables itself when it is missing (hackrf → the true-RF Waterfall view in
+# sdr_spectrum.py; the rest → the recon/vuln scanners, which server_capabilities
+# already marks 'critical': False). Not every suite ships all of them — ffuf only
+# entered Debian in trixie — so a miss is reported and skipped, never fatal.
+_missing_optional=()
+for _opt in hackrf:"true-RF Waterfall" nikto:"vuln scanner" sqlmap:"vuln scanner" \
+            whatweb:"vuln scanner" ffuf:"content discovery"; do
+    _pkg="${_opt%%:*}"; _why="${_opt#*:}"
+    dpkg -s "$_pkg" >/dev/null 2>&1 && continue
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_pkg" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed $_pkg ($_why)"
+    else
+        _missing_optional+=("$_pkg")
+    fi
+done
+if [ ${#_missing_optional[@]} -gt 0 ]; then
+    echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
 fi
 
 echo -e "${BLUE}Step 5.5: Restoring local runtime data...${NC}"
