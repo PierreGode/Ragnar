@@ -74,6 +74,15 @@ class WiFiManager:
         # case that needs protecting is a client connected to the AP, and that
         # is handled by its own check rather than by waiting out a clock.
         self.ap_recovery_grace = 30
+        # Set by _check_known_networks_available: how many networks we could
+        # rejoin at all, and when a non-disruptive scan last actually returned
+        # results. Together they decide whether dropping the AP to hunt for a
+        # network could ever pay off — see _handle_ap_mode_monitoring.
+        self.known_networks_count = 0
+        self.last_successful_scan = 0.0
+        # How stale the last working scan must be before we stop trusting the
+        # non-disruptive path and fall back to tearing the AP down to search.
+        self.scan_trust_window = 300
         self.last_wifi_validation = None
         self.wifi_validation_failures = 0
         self.consecutive_validation_cycles_failed = 0  # Track consecutive full validation cycle failures
@@ -1126,11 +1135,36 @@ class WiFiManager:
                     self._endless_loop_wifi_search()
                     return
         
-        # Handle AP timeout when no user connected
+        # Nobody connected. The AP used to be torn down here every 3 minutes to
+        # go hunting for a network, then brought back ~60s later — so the
+        # "Ragnar" SSID vanished for a minute out of every four. That is exactly
+        # when someone is looking for it: unboxing a new Ragnar, or arriving at
+        # a summer house and reaching for their phone. Keep the AP up and let
+        # the non-disruptive scan above do the hunting; it hands over cleanly
+        # within ~30s of a known network appearing, without the SSID flapping.
+        #
+        # Two cases still justify dropping it, because leaving it up would mean
+        # never rejoining anything:
+        #   - scanning is not working on this hardware (no scan has returned
+        #     results recently), so the quiet path cannot spot a network; and
+        #   - there is at least one known network to go back to. With none
+        #     saved — a fresh install — there is nothing to search for, and the
+        #     AP is the entire point, so it stays up indefinitely.
         elif not self.user_connected_to_ap and ap_uptime >= self.ap_mode_timeout:
-            self.logger.info("Endless Loop: AP mode timeout (3 minutes) - no users connected, switching to WiFi search")
-            self.stop_ap_mode()
-            self._endless_loop_wifi_search()
+            scan_working = (current_time - self.last_successful_scan) < self.scan_trust_window
+            if self.known_networks_count and not scan_working:
+                self.logger.info(
+                    "Endless Loop: AP up %ds with no clients and no working scan — "
+                    "dropping it to search for a known network", int(ap_uptime))
+                self.stop_ap_mode()
+                self._endless_loop_wifi_search()
+            elif not self.known_networks_count:
+                self.logger.debug(
+                    "Endless Loop: keeping AP up — no saved networks to rejoin")
+            else:
+                self.logger.debug(
+                    "Endless Loop: keeping AP up — scan is working, will hand over "
+                    "when a known network appears")
 
     def get_system_wifi_profiles(self):
         """Get all WiFi connection profiles from NetworkManager (system-wide)"""
@@ -1161,6 +1195,9 @@ class WiFiManager:
             system_profiles = self.get_system_wifi_profiles()
             all_known = list(set(ragnar_known + system_profiles))  # Combine and deduplicate
 
+            # Recorded so AP monitoring can tell "nothing to rejoin" apart from
+            # "something to rejoin, just not in range right now".
+            self.known_networks_count = len(all_known)
             if not all_known:
                 return False
 
@@ -1182,6 +1219,10 @@ class WiFiManager:
                             line.strip() for line in result.stdout.strip().split('\n')
                             if line.strip()
                         ]
+                        # Any result at all proves the scan path works here, so
+                        # "found nothing" can be trusted as genuinely nothing.
+                        if available_ssids:
+                            self.last_successful_scan = time.time()
                         for known_ssid in all_known:
                             if known_ssid in available_ssids:
                                 self.logger.info(f"Known network '{known_ssid}' detected via secondary adapter {secondary}")
@@ -1200,6 +1241,9 @@ class WiFiManager:
                             ssid = line.split('ESSID:')[1].strip('"')
                             if ssid and ssid != '<hidden>':
                                 available_ssids.append(ssid)
+
+                    if available_ssids:
+                        self.last_successful_scan = time.time()
 
                     # Check if any known networks (Ragnar or system) are available
                     for known_ssid in all_known:

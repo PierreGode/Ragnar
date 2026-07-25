@@ -97,6 +97,34 @@ If the install log ends with `These display types will NOT work until fixed:`,
 that names the dependency that failed — a screen of that type will stay blank
 until it is installed.
 
+### 📶 Connecting Ragnar to a network
+
+Ragnar looks for a saved network for about a minute at boot. If it cannot join
+one, it starts its own access point:
+
+| | |
+|---|---|
+| Network | `Ragnar` (`wifi_ap_ssid`) |
+| Password | `ragnarconnect` (`wifi_ap_password`) |
+| Setup page | `http://192.168.4.1:8000` |
+
+Join it from a phone or laptop and enter the credentials for the network you
+want. **The access point stays up until you use it** — it does not time out, so
+it is still there whether you look after ten seconds or an hour.
+
+This is also how you move a box between places. Take a Ragnar to a summer house
+or an office, power it on, and it will fail to find your home network, raise the
+`Ragnar` AP, and wait. Add the new network and it switches over.
+
+Once at least one network is saved, the box keeps watching for it in the
+background while the AP is up, and hands over on its own within about half a
+minute of that network coming back in range — no reboot, and nothing to press.
+That covers the everyday case of a router rebooting or the box booting faster
+than the router.
+
+> Ragnar's AP uses `192.168.4.0/24`. If your own router uses that range too —
+> eero does by default — see the portal note below.
+
 #### The Wi-Fi setup portal keeps appearing instead of the dashboard
 
 If `http://<box>:8000` shows the **Wi-Fi Configuration Portal** asking you to
