@@ -23,18 +23,65 @@ if [ ! -d "$ragnar_PATH" ]; then
     exit 1
 fi
 
-if [ ! -d "$ragnar_PATH/.git" ]; then
-    echo -e "${RED}Error: This is not a git repository. Cannot update.${NC}"
-    echo -e "${YELLOW}Please reinstall ragnar using the installation script.${NC}"
-    exit 1
-fi
-
 cd "$ragnar_PATH"
 
 # Check if script is run as root
 if [ "$(id -u)" -ne 0 ]; then
     echo -e "${RED}This script must be run as root. Please use 'sudo'.${NC}"
     exit 1
+fi
+
+# A working git is a hard prerequisite, and on some boards it is exactly what is
+# broken: Debian Trixie arm64 can ship a git built with ARMv8.1+ atomics that
+# dies with SIGILL on a Cortex-A53 (Pi Zero 2 W). The installer detects this and
+# falls back to tarball downloads, so a box can be running Ragnar perfectly well
+# with no usable git at all. Say so plainly rather than failing on a git command.
+if ! git --version >/dev/null 2>&1; then
+    echo -e "${RED}Error: git does not run on this system.${NC}"
+    echo -e "${YELLOW}If this is a Pi Zero 2 W (or another Cortex-A53 board), the packaged"
+    echo -e "git may be built for a newer ARM revision and crash with 'Illegal"
+    echo -e "instruction'. Confirm with:${NC}"
+    echo -e "    git --version"
+    echo -e "${YELLOW}Then try reinstalling it:${NC}"
+    echo -e "    sudo apt update && sudo apt install --reinstall git"
+    echo -e "${YELLOW}Ragnar itself keeps running — only updates need git.${NC}"
+    exit 1
+fi
+
+# Repair a tarball install. When git was unusable at install time the installer
+# unpacks a release tarball instead of cloning, which leaves a complete, working
+# tree with no .git in it — and every update from then on had nothing to work
+# with. If git runs now, rebuild the repository metadata in place rather than
+# dead-ending the user into a full reinstall. The working tree is left alone;
+# only .git is created, so local data files are untouched.
+if [ ! -d "$ragnar_PATH/.git" ]; then
+    echo -e "${YELLOW}No .git found — this box was installed from a tarball.${NC}"
+    echo -e "${BLUE}Reattaching it to the upstream repository (your files are kept)...${NC}"
+    if git init -q "$ragnar_PATH" 2>/dev/null \
+       && git -C "$ragnar_PATH" remote add origin https://github.com/PierreGode/Ragnar.git 2>/dev/null \
+       && git -C "$ragnar_PATH" fetch --depth=1 origin main 2>/dev/null; then
+        # Point main at upstream WITHOUT touching the working tree, so the files
+        # already on disk (including local data) survive. Anything that differs
+        # from upstream simply shows up as a normal local modification, which
+        # the stash step below then handles like any other update.
+        git -C "$ragnar_PATH" reset -q --mixed FETCH_HEAD 2>/dev/null || true
+        git -C "$ragnar_PATH" branch -q -f main FETCH_HEAD 2>/dev/null || true
+        git -C "$ragnar_PATH" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+        git -C "$ragnar_PATH" branch -q --set-upstream-to=origin/main main 2>/dev/null || true
+        # Restore only files upstream has that the tree is missing. A tarball
+        # can be short of files (.github, dotfiles) that would otherwise look
+        # like deliberate local deletions and get stashed by the step below.
+        # Deleted-only: modified files are left alone so real local edits still
+        # reach the stash/merge path intact.
+        git -C "$ragnar_PATH" ls-files -d -z 2>/dev/null \
+            | xargs -0 -r git -C "$ragnar_PATH" checkout -- 2>/dev/null || true
+        echo -e "${GREEN}Repository metadata rebuilt — continuing with the update.${NC}"
+    else
+        rm -rf "$ragnar_PATH/.git"
+        echo -e "${RED}Error: could not reattach to the upstream repository.${NC}"
+        echo -e "${YELLOW}Check network access to github.com, then re-run this script.${NC}"
+        exit 1
+    fi
 fi
 
 echo -e "\n${BLUE}Step 1: Stopping ragnar service...${NC}"

@@ -814,8 +814,26 @@ setup_ragnar() {
         check_success "Created ragnar user"
     fi
 
+    # The home directory must exist before anything below can land in it. This
+    # cd used to be unguarded, and every path after it is relative ("Ragnar"),
+    # so a failure here silently installed the whole tree into whatever
+    # directory the installer happened to be run from — e.g. /home/Ragnar when
+    # started from /home. Fail loudly instead of scattering files.
+    if [ ! -d "/home/$ragnar_USER" ]; then
+        log "WARNING" "/home/$ragnar_USER does not exist — creating it"
+        mkdir -p "/home/$ragnar_USER" || {
+            log "ERROR" "Cannot create /home/$ragnar_USER — installation cannot continue"
+            clean_exit 1
+        }
+        chown "$ragnar_USER:$ragnar_USER" "/home/$ragnar_USER" 2>/dev/null || true
+    fi
+    cd "/home/$ragnar_USER" || {
+        log "ERROR" "Cannot enter /home/$ragnar_USER — installation cannot continue"
+        log "ERROR" "Refusing to continue, as Ragnar would be installed into $(pwd) instead"
+        clean_exit 1
+    }
+
     # Check for existing ragnar directory with a valid git clone
-    cd /home/$ragnar_USER
     if [ -d "Ragnar/.git" ] || [ -d "Ragnar/actions" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"

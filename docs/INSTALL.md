@@ -66,6 +66,45 @@ Two steps in the install are also slow and silent, which can look like a hang on
 a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
 `nmap --script-updatedb`. Give them time before interrupting.
 
+#### "No git command works" / updates fail
+
+Check this first:
+
+```bash
+git --version
+```
+
+If that prints **Illegal instruction** (or nothing), git itself is broken — not
+Ragnar. Debian Trixie arm64 can ship a git built with ARMv8.1+ atomics that
+crashes on a Cortex-A53, which is the Pi Zero 2 W's core. Reinstall it:
+
+```bash
+sudo apt update && sudo apt install --reinstall git
+```
+
+This has a knock-on effect worth knowing about. The installer checks git up
+front, and when it is unusable it downloads a release tarball instead of
+cloning. That produces a complete, working Ragnar — but with **no `.git`
+directory**, so every later update has no repository to update. If your box was
+installed that way, `update_ragnar.sh` now reattaches it to the upstream
+repository in place, keeping every file on disk, and continues with the update.
+Nothing needs to be reinstalled; just fix git and re-run the update.
+
+#### Ragnar installed to the wrong directory
+
+Ragnar always installs to `/home/ragnar/Ragnar`, and the `ragnar` user is
+created if missing. If you find the tree somewhere else — `/home/Ragnar`, or
+wherever you ran the installer from — you hit a bug in installers before this
+fix, where a failure to enter `/home/ragnar` was ignored and the relative clone
+landed in the current directory instead. Move it into place and re-run:
+
+```bash
+sudo systemctl stop ragnar.service
+sudo mv /home/Ragnar /home/ragnar/Ragnar        # adjust the source path
+sudo chown -R ragnar:ragnar /home/ragnar/Ragnar
+sudo /home/ragnar/Ragnar/update_ragnar.sh
+```
+
 ### 🧰 Manual Install
 
 #### Step 1: Activate SPI & I2C
