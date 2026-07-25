@@ -86,6 +86,33 @@ reached `active`/`installed`. Two things it is *not*:
 If you still see it, the service exists but is stuck part-way (usually
 `activating`). Check both logs below.
 
+**Start here — `scripts/kiosk_doctor.sh`.** One command that collects every
+answer in the right order, so you are not guessing which log to read:
+
+```bash
+sudo ./scripts/kiosk_doctor.sh
+```
+
+It reports install mode, browser, the whole X stack (including the suid
+`Xorg.wrap` that causes most Pi 5 crash loops), service state and restart
+count, the kiosk unit's journal **filtered to that unit**, and the tail of the
+wrapper and Xorg logs. Output is saved to `/tmp/kiosk_doctor_<timestamp>.log`
+— paste that when reporting a problem.
+
+> Reading the *whole* journal instead is the common wrong turn. `journalctl`
+> without `-u ragnar-kiosk` returns unrelated boot chatter — cloud-init lines
+> like `Completed socket interaction for boot stage final` are not the kiosk.
+> And when the **installer** fails there is no unit at all, so
+> `journalctl -u ragnar-kiosk` is legitimately empty; those failures are logged
+> by Ragnar itself under `[kiosk]`.
+
+**"Cannot establish any listening sockets — Make sure an X server isn't already
+running"** means service mode is trying to start its own X on `:0` while a
+desktop session already owns it. The kiosk has two modes and this box was set
+up in the wrong one: disable the kiosk, then re-enable it **from inside the
+desktop session** so the installer picks autostart mode. The wrapper now
+detects this and says so instead of crash-looping until the start limit trips.
+
 **Logs (on the Pi):**
 - Wrapper log: `/var/log/ragnar/kiosk-wrapper.log` — board, RAM, the
   `input: touchscreen=… keyboard=… osk=…` line, which OSK launched, target URL.
