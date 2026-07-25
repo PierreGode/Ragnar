@@ -141,16 +141,57 @@ another. The causes, in the order they turn up:
 - **The controller was still settling** right after power-on, and refused the
   first registration only.
 
+- **The controller cannot be an LE peripheral at all.** A central-only radio
+  (`Roles: central`, no `peripheral`) will not advertise connectably however
+  small the advertisement is — and connectable is the point, since the phone
+  has to connect to read the GATT characteristics.
+- **The radio is wedged**, typically left advertising by a raw-HCI tool
+  (`hciconfig hciX leadv`) so every `Add Advertising` comes back refused until
+  it is reset.
+- **A raw-HCI scan is holding the radio.** The BLE **scan / pentest** path
+  (`actions/ble.py`, `actions/ble_pentest.py`) drives the controller with
+  `hcitool lescan`, `hcidump`, `btmon`, `l2ping` — *underneath* BlueZ. A scan
+  they start does **not** set `Adapter1.Discovering`, so the "is a scan
+  running?" check reads clean while the controller is in fact busy and refuses
+  to advertise. This is the most likely reason a box that used to advertise
+  suddenly won't. Ragnar detects these directly from the process list and calls
+  them out; stop the scan/pentest (or use a second controller) and re-enable
+  provisioning. `hcitool lescan` in particular often leaves the radio wedged
+  when killed, so a `hciconfig hciX reset` (or `bluetoothctl power off/on`) may
+  be needed after — which is what the automatic power-cycle retry does.
+
 A refused advertisement is retried down a ladder of progressively smaller ones
 — the same advertisement once more, then without `tx-power`, then the bare
 service UUID — because a box findable by service UUID alone still provisions
-(the app scans filtered by that UUID). Only if every rung is refused does it
-report a failure, and the message then carries the controller's own
-capabilities so a screenshot is enough to tell which cause it was:
+(the app scans filtered by that UUID). If every rung is refused, the controller
+is **power-cycled once** and the whole ladder retried, which clears the wedged
+case. Only then is it reported as a failure — and the message carries the
+controller's own capabilities plus **the mgmt status bluetoothd logged**, which
+is the actual reason BlueZ hides behind that one opaque string:
 
 ```
 RegisterAdvertisement: org.bluez.Error.Failed: Failed to register advertisement
-[hci0; instances 1/1; includes local-name; max adv len 31]
+[hci0; instances 0/5; includes tx-power,appearance,local-name; max adv len 31;
+ roles central,peripheral] [bluetoothd: Rejected (0x0b)]
+```
+
+The `[bluetoothd: …]` part is the one that decides it — every cause above
+produces the same D-Bus text, but a different mgmt status:
+
+| bluetoothd says | What it means | Fix |
+| --- | --- | --- |
+| `Rejected (0x0b)` | LE is disabled on the controller | remove `ControllerMode = bredr` from `/etc/bluetooth/main.conf`, then `sudo btmgmt --index hci0 le on` |
+| `Not Supported (0x0c)` | the radio has no LE advertising | use a BT 4.0+ adapter |
+| `Invalid Parameters (0x0d)` | refused even at minimum size — driver/firmware quirk | `dmesg \| grep -i bluetooth` — look for a failed firmware load |
+| `Busy (0x0a)` | the controller is mid-operation | stop the scanners (bt_scanner / WIDS overlay) |
+| `No Resources` | no advertising slot left | `bluetoothctl advertise off`, or another controller |
+| `Not Powered` | radio off / rfkill | `sudo rfkill unblock all && bluetoothctl power on` |
+
+If the journal is unreadable (not root, no systemd) the line is simply absent —
+run the doctor with `sudo`, or read it directly:
+
+```bash
+journalctl -u bluetooth -n 50 | grep -i advertis
 ```
 
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
@@ -173,14 +214,36 @@ only matter if the advertise test below them fails:
         includes:  tx-power, appearance, local-name
         instances: 0/4 in use
         max adv len: 31
+        roles:     central, peripheral
+  [PASS] Controller can act as an LE peripheral
   [PASS] An advertising slot is free
   [PASS] No scan running on this adapter
+  [PASS] No raw-HCI tool holding the radio
   [PASS] Advertising starts
         advertising as "Ragnar-b4e2" on hci0
 ```
 
-Those three middle lines are the ones to paste in a bug report: they are what
-differs between a box that advertises and one that does not.
+The **raw-HCI** line is the one the plain scan check misses: it names any
+`hcitool`/`hcidump`/`btmon`/`l2ping` (the BLE scan/pentest tools) that is on
+the radio below BlueZ, with its PID, so you can stop exactly that process.
+
+Those middle lines are the ones to paste in a bug report: they are what differs
+between a box that advertises and one that does not.
+
+When the advertise test fails, the doctor keeps digging instead of stopping at
+the error — it registers a **non-connectable (broadcast)** advertisement to
+tell "this radio will not advertise at all" apart from "it will not advertise
+*connectably*", prints the mgmt status from bluetoothd, flags a
+`ControllerMode = bredr` in `main.conf`, and tails any Bluetooth firmware
+errors out of `dmesg`:
+
+```
+  [FAIL] Advertising starts  -> RegisterAdvertisement: org.bluez.Error.Failed: ...
+        Bluetooth LE is off on this controller. Check /etc/bluetooth/main.conf ...
+        NOTE: a non-connectable (broadcast) advertisement WAS accepted — this
+        controller will not advertise connectably, so it cannot serve GATT.
+        bluetoothd says: Rejected (0x0b)
+```
 
 A pass here means the box is on the air — if the phone still can't see it, scan
 for that name with a generic BLE app (nRF Connect) to split "box isn't

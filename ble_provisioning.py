@@ -259,9 +259,14 @@ def _encode(payload: dict, what: str) -> bytes:
 class BleProvisioningServer:
     """Runs the GATT peripheral in a private GLib main loop thread."""
 
-    def __init__(self, providers: DataProviders, logger=None, auto_stop: bool = False):
+    def __init__(self, providers: DataProviders, logger=None, auto_stop: bool = False,
+                 adv_type: str = 'peripheral'):
         self.providers = providers
         self.logger = logger
+        # 'broadcast' (non-connectable) is a diagnostic mode only — the doctor
+        # uses it to prove whether a controller that refuses our connectable
+        # advertisement can advertise at all.
+        self.adv_type = adv_type
         # When True, stop advertising a short grace period after a phone reads
         # the provisioning data, freeing the adapter for Ragnar's other BT work.
         self.auto_stop = auto_stop
@@ -437,10 +442,24 @@ class BleProvisioningServer:
                 self._log(f'a Bluetooth scan is running on {self.providers.hci}; '
                           'some controllers refuse to advertise while scanning',
                           'warning')
+            if caps.get('raw_hci'):
+                names = '/'.join(sorted({r['name'] for r in caps['raw_hci']}))
+                self._log(f'{names} is driving the radio over raw HCI (BLE '
+                          'scan/pentest) — BlueZ cannot see this scan and the '
+                          'controller may refuse to advertise; stop it if the '
+                          'registration below fails', 'warning')
+            if caps.get('roles') and 'peripheral' not in caps['roles']:
+                # Decisive: no amount of trimming makes a central-only radio
+                # advertise connectably. Say so before BlueZ says "Failed".
+                self._log(f'{self.providers.hci} has no LE peripheral role '
+                          f'({", ".join(caps["roles"])} only) — it cannot serve '
+                          'GATT; expect the registration below to be refused',
+                          'warning')
 
             app = _Application(bus, self.providers, self._on_provisioned)
             self._app_path = app.path
-            adv = _Advertisement(bus, 0, self.providers, includes=includes)
+            adv = _Advertisement(bus, 0, self.providers, includes=includes,
+                                 adv_type=self.adv_type)
             self._adv_path = adv.get_path()
 
             ladder = adv_ladder(includes)
@@ -464,8 +483,46 @@ class BleProvisioningServer:
                           f'{self.providers.hci} ({describe_adv(ladder[stage["i"]])})')
 
             # One reclaim attempt per object path, so a retry that also fails
-            # reports the error instead of looping.
-            reclaimed = {'app': False, 'adv': False}
+            # reports the error instead of looping. 'power' is the same idea
+            # for the controller itself: one power cycle, then give up.
+            reclaimed = {'app': False, 'adv': False, 'power': False}
+
+            def retry_adv(delay_ms=1200):
+                def fire():
+                    try:
+                        register_adv()
+                    except Exception as _e:
+                        on_error(_e, 'RegisterAdvertisement')
+                    return False  # one-shot
+                GLib.timeout_add(delay_ms, fire)
+
+            def power_cycle_and_retry():
+                """Last resort before reporting failure: bounce the radio.
+
+                A controller left advertising by a raw-HCI tool (hciconfig
+                leadv), or simply wedged, refuses every Add Advertising until
+                it is reset — and then takes the very same advertisement.
+                Only reached once the whole ladder has been refused, so the
+                peripheral is already dead in the water; the cost is that
+                other Bluetooth work on this radio blinks.
+                """
+                self._log(f'every advertisement was refused — power-cycling '
+                          f'{self.providers.hci} and trying once more', 'warning')
+                try:
+                    props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(False))
+                except Exception as _e:
+                    self._log(f'power off failed: {_e}', 'debug')
+
+                def power_on():
+                    try:
+                        props.Set(ADAPTER_IFACE, 'Powered', dbus.Boolean(True))
+                    except Exception as _e:
+                        self._log(f'power on failed: {_e}', 'debug')
+                    stage['i'] = 0
+                    retry_adv(1500)
+                    return False  # one-shot
+
+                GLib.timeout_add(1500, power_on)
 
             def on_error(err, what):
                 # A stale registration left behind by an earlier run keeps the
@@ -511,28 +568,24 @@ class BleProvisioningServer:
                     stage['i'] += 1
                     self._log(f'{err} — retrying as {describe_adv(ladder[stage["i"]])}',
                               'warning')
-
-                    def retry():
-                        try:
-                            register_adv()
-                        except Exception as _e:
-                            on_error(_e, 'RegisterAdvertisement')
-                        return False  # one-shot
-
-                    GLib.timeout_add(1200, retry)
+                    retry_adv()
+                    return
+                elif what == 'RegisterAdvertisement' and not reclaimed['power']:
+                    reclaimed['power'] = True
+                    power_cycle_and_retry()
                     return
                 self._error = f'{what}: {err}'
                 if what == 'RegisterAdvertisement':
                     # The bare BlueZ text ("Failed to register advertisement")
                     # says nothing about which box-specific cause it was, so
-                    # carry the controller's own capabilities in the message.
+                    # carry the controller's own capabilities — and the mgmt
+                    # status bluetoothd logged, which is the actual reason.
                     self._error += f' [{_caps_summary(self.providers.hci, self._caps)}]'
-                    self._hint = (
-                        'The controller refused the advertisement. Free the radio '
-                        '(stop Bluetooth scanning / other advertisers), or pick a '
-                        'different adapter, then run: '
-                        'sudo python3 ble_provisioning.py doctor'
-                    )
+                    reason = bluetoothd_adv_failure()
+                    if reason:
+                        self._error += f' [bluetoothd: {reason}]'
+                    self._hint = adv_failure_hint(reason, self._caps,
+                                                  self.providers.hci)
                 self._log(self._error, 'error')
                 self._ready.set()
                 self.stop()
@@ -755,9 +808,13 @@ def _build_dbus_classes():
         PATH_BASE = '/one/gode/ragnar/ble/adv'
 
         def __init__(self, bus, index, providers, includes=('tx-power',),
-                     include_name=True):
+                     include_name=True, adv_type='peripheral'):
             self.path = f'{self.PATH_BASE}{index}'
             self.providers = providers
+            # 'peripheral' is connectable — what provisioning needs. The
+            # doctor registers a 'broadcast' one to tell "this radio cannot
+            # advertise at all" apart from "it cannot advertise connectably".
+            self.adv_type = adv_type
             # Mutable so a rejected registration can be retried with a smaller
             # advertisement on the same object path — BlueZ re-reads GetAll on
             # every RegisterAdvertisement call.
@@ -770,7 +827,7 @@ def _build_dbus_classes():
 
         def get_properties(self):
             props = {
-                'Type': 'peripheral',
+                'Type': self.adv_type,
                 # The 128-bit service UUID must be in the advertisement so
                 # the app (which scans filtered by it) and iOS background
                 # scanning can discover the box. This one is never dropped.
@@ -880,6 +937,67 @@ def choose_adapter(preferred: Optional[str] = None) -> Optional[str]:
     return names[0]
 
 
+# Tools that drive a controller over *raw HCI*, underneath BlueZ. A scan or
+# capture they start does not set BlueZ's Adapter1.Discovering — so the plain
+# "is a scan running?" check reads clean while the radio is in fact busy, and
+# many controllers then refuse Add Advertising. This is the Ragnar BLE
+# pentest / scan path (actions/ble.py, actions/ble_pentest.py: hcitool lescan,
+# hcidump, btmon, l2ping), and the single most likely reason a box that used to
+# advertise suddenly will not. Matched on the program name; the argv is kept so
+# the report can name it and, where the tool took -i hciN, tie it to a radio.
+_RAW_HCI_TOOLS = ('hcitool', 'hcidump', 'btmon', 'l2ping', 'gatttool')
+
+
+def raw_hci_scanners(hci: Optional[str] = None) -> list:
+    """Processes holding a controller over raw HCI (below BlueZ).
+
+    Returns ``[{pid, name, cmd, hci}]`` — ``hci`` is the adapter the tool named
+    with ``-i hciN`` if any, else None (affects whatever radio it opened). When
+    ``hci`` is given, entries are limited to that adapter plus the un-pinned
+    ones (a bare ``hcitool lescan`` uses the first/only controller). Reads
+    ``/proc`` directly, so it needs no external tool and never raises.
+    """
+    found = []
+    try:
+        my_pid = str(os.getpid())
+        for entry in os.listdir('/proc'):
+            if not entry.isdigit() or entry == my_pid:
+                continue
+            try:
+                with open(f'/proc/{entry}/cmdline', 'rb') as f:
+                    argv = f.read().split(b'\x00')
+            except Exception:
+                continue
+            args = [a.decode('utf-8', 'replace') for a in argv if a]
+            if not args:
+                continue
+            # Match on the program actually running (argv[0]). A `timeout 1
+            # hcitool lescan` wrapper (how actions/ble.py runs it) execs
+            # hcitool as its own child, which is caught on its own pass — so
+            # the wrapper process itself is skipped rather than double-counted.
+            name = os.path.basename(args[0])
+            if name not in _RAW_HCI_TOOLS:
+                continue
+            # Which radio, if the tool pinned one (-i hci1).
+            pinned = None
+            for i, tok in enumerate(args):
+                if tok in ('-i', '--device') and i + 1 < len(args):
+                    pinned = args[i + 1]
+                elif tok.startswith('hci') and tok[3:].isdigit():
+                    pinned = tok
+            if hci is not None and pinned is not None and pinned != hci:
+                continue
+            found.append({
+                'pid': int(entry),
+                'name': name,
+                'cmd': ' '.join(args)[:200],
+                'hci': pinned,
+            })
+    except Exception:
+        pass
+    return found
+
+
 def adapter_capabilities(hci: str, bus=None) -> dict:
     """What this controller can actually advertise, straight from BlueZ.
 
@@ -901,6 +1019,14 @@ def adapter_capabilities(hci: str, bus=None) -> dict:
         'active_instances': None,
         'max_adv_len': None,
         'discovering': None,
+        # Roles the controller can play. A radio without 'peripheral' cannot
+        # advertise connectably no matter how small the advertisement is.
+        'roles': [],
+        'powered': None,
+        # Raw-HCI tools (BLE pentest/scan) holding the radio below BlueZ, which
+        # Adapter1.Discovering is blind to. Populated even when BlueZ is
+        # unreachable, since it comes from /proc, not D-Bus.
+        'raw_hci': raw_hci_scanners(hci),
     }
     try:
         import dbus
@@ -929,12 +1055,104 @@ def adapter_capabilities(hci: str, bus=None) -> dict:
         except Exception:
             pass
         try:
-            caps['discovering'] = bool(props.Get(ADAPTER_IFACE, 'Discovering'))
+            ad = props.GetAll(ADAPTER_IFACE)
+            caps['discovering'] = bool(ad.get('Discovering'))
+            caps['roles'] = [str(r) for r in ad.get('Roles', [])]
+            if 'Powered' in ad:
+                caps['powered'] = bool(ad['Powered'])
         except Exception:
             pass
     except Exception:
         pass
     return caps
+
+
+# mgmt status codes bluetoothd logs behind "Failed to register advertisement",
+# mapped to what to do about them. The D-Bus error is the same string for every
+# one of these, so this line is the difference between guessing and knowing.
+_ADV_STATUS_HINTS = {
+    'rejected': (
+        'The controller rejected the advertisement outright — Bluetooth LE is '
+        'usually off. Check that /etc/bluetooth/main.conf has no '
+        '"ControllerMode = bredr", then: sudo btmgmt --index {hci} le on'
+    ),
+    'not supported': (
+        'This controller does not support LE advertising. Use a BT 4.0+ '
+        'adapter, or pick another controller in Config → Bluetooth Provisioning.'
+    ),
+    'not powered': (
+        'The controller is not powered. Try: sudo rfkill unblock all && '
+        'bluetoothctl power on'
+    ),
+    'busy': (
+        'The controller is busy with another operation — stop Bluetooth '
+        'scanning (bt_scanner / WIDS overlay) and try again.'
+    ),
+    'invalid parameters': (
+        'The controller refused these advertising parameters even at minimum '
+        'size, which usually means a driver/firmware quirk. Check: '
+        'dmesg | grep -i bluetooth   (look for a failed firmware load)'
+    ),
+    'no resources': (
+        'The controller has no advertising slot left. Stop other advertisers '
+        '(bluetoothctl advertise off) or use another controller.'
+    ),
+}
+
+
+def bluetoothd_adv_failure(since: str = '-2 min') -> str:
+    """The mgmt status bluetoothd logged for the last failed advertisement.
+
+    BlueZ collapses every controller-level refusal into one opaque D-Bus
+    string, but bluetoothd logs the real reason:
+
+        src/advertising.c:add_client_complete() Failed to add advertisement:
+        Invalid Parameters (0x0d)
+
+    Returns e.g. 'Invalid Parameters (0x0d)', or '' if nothing is readable
+    (no journal, not root, a box without systemd). Never raises.
+    """
+    pat = re.compile(r'Failed to add advertisement:\s*(.+?)\s*$')
+    out = _run(['journalctl', '-u', 'bluetooth', '--since', since,
+                '--no-pager', '-n', '80'], timeout=4.0)
+    if not out:
+        # Boxes that log to syslog instead of (or as well as) the journal.
+        out = _run(['tail', '-n', '400', '/var/log/syslog'], timeout=4.0)
+    hits = [m.group(1) for m in (pat.search(ln) for ln in out.splitlines()) if m]
+    return hits[-1] if hits else ''
+
+
+def _raw_hci_note(raw: list) -> str:
+    """One-line 'this tool is holding the radio' note, or '' if none."""
+    if not raw:
+        return ''
+    names = sorted({r['name'] for r in raw})
+    pids = ', '.join(f'{r["name"]} (pid {r["pid"]})' for r in raw[:3])
+    return (f'A raw-HCI tool is using the radio underneath BlueZ: {pids}. '
+            f'This is usually the Ragnar BLE scan/pentest path — stop it '
+            f'(the {"/".join(names)} process) and re-enable provisioning. '
+            f'Because it bypasses BlueZ, the adapter reports no scan running.')
+
+
+def adv_failure_hint(reason: str, caps: dict, hci: str) -> str:
+    """Plain-language next step for a refused advertisement."""
+    # A raw-HCI scan/capture is both the likeliest cause and invisible to the
+    # Discovering flag, so it is checked first.
+    note = _raw_hci_note(caps.get('raw_hci') or [])
+    if note:
+        return note
+    roles = caps.get('roles') or []
+    if roles and 'peripheral' not in roles:
+        return (f'{hci} does not offer the LE peripheral role ({", ".join(roles)} '
+                'only), so it cannot advertise as a GATT peripheral at all. '
+                'Use another controller.')
+    low = (reason or '').lower()
+    for key, hint in _ADV_STATUS_HINTS.items():
+        if key in low:
+            return hint.format(hci=hci)
+    return ('The controller refused the advertisement. Free the radio (stop '
+            'Bluetooth scanning / other advertisers), or pick a different '
+            'adapter, then run: sudo python3 ble_provisioning.py doctor')
 
 
 def wanted_includes(caps: dict) -> list:
@@ -989,8 +1207,15 @@ def _caps_summary(hci: str, caps: dict) -> str:
         bits.append('includes ' + (','.join(caps['includes']) or 'none'))
         if caps.get('max_adv_len') is not None:
             bits.append(f'max adv len {caps["max_adv_len"]}')
+    if caps.get('roles'):
+        bits.append('roles ' + ','.join(caps['roles']))
+    if caps.get('powered') is False:
+        bits.append('NOT powered')
     if caps.get('discovering'):
         bits.append('a scan is running on this adapter')
+    raw = caps.get('raw_hci') or []
+    if raw:
+        bits.append('raw-HCI: ' + ','.join(sorted({r['name'] for r in raw})))
     return '; '.join(bits)
 
 
@@ -1160,6 +1385,11 @@ def _cli_doctor(base_dir: str) -> int:
                      else '   (no tx-power — it is left out of the advertisement)'))
             print(f'        instances: {caps["active_instances"]}/{caps["supported_instances"]} in use')
             print(f'        max adv len: {caps["max_adv_len"]}')
+            print(f'        roles:     {", ".join(caps["roles"]) or "unknown"}')
+        check('Controller can act as an LE peripheral',
+              not caps['roles'] or 'peripheral' in caps['roles'],
+              'this radio is central-only — it cannot advertise connectably or '
+              'serve GATT; use another adapter')
         free = not (caps.get('supported_instances') is not None
                     and caps.get('active_instances') is not None
                     and caps['active_instances'] >= caps['supported_instances'])
@@ -1170,19 +1400,76 @@ def _cli_doctor(base_dir: str) -> int:
              'a Bluetooth discovery is running (bt_scanner / WIDS); some '
              'controllers refuse to advertise while scanning — if the advertise '
              'test below fails, stop the scan and re-run')
+        # The scan BlueZ can't see: a raw-HCI tool from the BLE scan/pentest
+        # path. This is the one that hides behind a clean 'no scan running'.
+        raw = caps.get('raw_hci') or []
+        warn('No raw-HCI tool holding the radio', not raw,
+             'a BLE scan/pentest tool is on the radio below BlueZ ('
+             + ', '.join(f'{r["name"]} pid {r["pid"]}' for r in raw)
+             + ') — it does not show as a scan but blocks advertising; '
+               'stop it and re-run')
 
     # 6. Actually advertise for a few seconds.
     if have_gi and have_dbus and controllers:
         server = build_server(base_dir, lambda: {})
         started = server.start(timeout=10) if server else False
         st = server.status() if server else {}
+        # The ladder (and a power cycle) can outlast start()'s wait, so let it
+        # settle before judging — otherwise the checklist reports a bare
+        # "see error above" for a peripheral still working through its retries.
+        waited = 0.0
+        while st.get('starting') and waited < 25.0:
+            time.sleep(0.5)
+            waited += 0.5
+            st = server.status()
+        started = bool(st.get('running'))
         check('Advertising starts', started, st.get('error') or 'see error above')
         if started:
             print(f'        advertising as "{st.get("name")}" on {st.get("adapter")}')
-        elif st.get('hint'):
-            print(f'        {st["hint"]}')
         if server:
             server.stop()
+        if not started:
+            if st.get('hint'):
+                print(f'        {st["hint"]}')
+            # Split "this radio will not advertise at all" from "it will not
+            # advertise *connectably*": a non-connectable advertisement uses a
+            # different path in the controller, and one that takes it while
+            # refusing ours cannot serve GATT no matter what we send.
+            probe = build_server(base_dir, lambda: {})
+            if probe is not None:
+                probe.adv_type = 'broadcast'
+                bcast = probe.start(timeout=12)
+                probe.stop()
+                if bcast:
+                    print('        NOTE: a non-connectable (broadcast) '
+                          'advertisement WAS accepted — this controller will '
+                          'not advertise connectably, so it cannot serve GATT. '
+                          'Use another adapter.')
+                else:
+                    print('        This controller refuses every advertisement, '
+                          'connectable or not.')
+            # The reason BlueZ hides behind "Failed to register advertisement".
+            reason = bluetoothd_adv_failure()
+            if reason:
+                print(f'        bluetoothd says: {reason}')
+            else:
+                print('        (no bluetoothd log line found — run as root, or '
+                      'check: journalctl -u bluetooth -n 50)')
+            mode = ''
+            try:
+                with open('/etc/bluetooth/main.conf') as f:
+                    m = re.search(r'^\s*ControllerMode\s*=\s*(\S+)', f.read(), re.M)
+                    mode = m.group(1) if m else ''
+            except Exception:
+                pass
+            if mode and mode.lower() == 'bredr':
+                print('        /etc/bluetooth/main.conf sets ControllerMode = '
+                      'bredr — that disables LE entirely. Remove it and restart '
+                      'bluetooth.')
+            fw = [ln for ln in _run(['dmesg']).splitlines()
+                  if 'luetooth' in ln and ('fail' in ln.lower() or 'error' in ln.lower())]
+            for ln in fw[-3:]:
+                print(f'        dmesg: {ln.strip()[-120:]}')
     else:
         check('Advertising starts', False, 'fix the failures above first')
 
