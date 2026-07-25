@@ -14,6 +14,17 @@ NC='\033[0m'
 
 ragnar_PATH="/home/ragnar/Ragnar"
 
+# Never let git stop and wait for a human. A checkout whose origin wants
+# credentials, or an ssh remote with an unknown host key, otherwise parks on a
+# prompt - and when this script is driven from a service or a cron job there is
+# nobody to answer it, so the update hangs instead of failing. Same guards the
+# in-app updater (git_updater.py) applies.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=echo
+export SSH_ASKPASS=echo
+export SSH_ASKPASS_REQUIRE=never
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new -oConnectTimeout=15"
+
 echo -e "${BLUE}ragnar Update Script${NC}"
 echo -e "${YELLOW}This will update ragnar while preserving your data and configurations.${NC}"
 
@@ -132,6 +143,16 @@ if [ "$CURRENT_BRANCH" = "HEAD" ]; then
     echo -e "${YELLOW}Detached checkout detected - switching back to main.${NC}"
     git checkout main 2>/dev/null || git checkout -B main origin/main
     CURRENT_BRANCH="main"
+fi
+# A branch that upstream no longer has (a leftover test branch, a rename) makes
+# every pull below fail with "couldn't find remote ref" and nothing recovers
+# from it. Fall back to whatever origin's default branch is.
+if ! git rev-parse --verify --quiet "refs/remotes/origin/$CURRENT_BRANCH" >/dev/null; then
+    DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+    [ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=main
+    echo -e "${YELLOW}Branch '$CURRENT_BRANCH' does not exist on origin - updating from '$DEFAULT_BRANCH' instead.${NC}"
+    git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" 2>/dev/null || true
+    CURRENT_BRANCH="$DEFAULT_BRANCH"
 fi
 if git "${GIT_ID[@]}" pull origin "$CURRENT_BRANCH"; then
     echo -e "${GREEN}Update completed successfully!${NC}"

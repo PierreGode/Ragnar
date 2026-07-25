@@ -31,7 +31,7 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
-For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new.
+For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new. Keeping a box current — from the web UI or the terminal, and what to do when an update complains — is covered in [Updating Ragnar](docs/updates.md).
 
 ---
 
@@ -156,7 +156,7 @@ The installer auto-detects your platform and configures everything:
 - **Smart resource management** — Pi Zero W/W2 automatically skip resource-intensive tools
 - **ARM optimizations** — Uses PiWheels on ARM, retries mirrors, skips Pi-only steps on other hardware
 
-For the full installation walkthrough see [Install Guide](docs/INSTALL.md).
+For the full installation walkthrough see [Install Guide](docs/INSTALL.md). For updating an existing box, see [Updating Ragnar](docs/updates.md).
 
 ---
 

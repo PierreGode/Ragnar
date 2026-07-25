@@ -173,6 +173,12 @@ failing is a common first symptom of a state broken during the main install.
 detect and repair this automatically before their first apt call, so it should
 no longer need doing by hand.
 
+#### Updates in general
+
+How updating works — from the web UI and the terminal — what happens to local
+changes, what each error code on the update card means, and how to recover a box
+by hand: **[Updating Ragnar](updates.md)**.
+
 #### "No git command works" / updates fail
 
 Check this first:
