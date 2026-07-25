@@ -102,6 +102,13 @@ python3 ble_provisioning.py selftest      # register with BlueZ, verify, unregis
 python3 ble_provisioning.py run           # advertise until Ctrl-C
 ```
 
+**"Starting — registering with BlueZ…" that never finishes.** Registering the
+GATT application and advertisement takes noticeably longer on a slow board (a
+Pi Zero 2 W), and can outlast the wait inside the API call that started it.
+That is reported as `starting`, distinct from a failure, and the web UI keeps
+polling until it settles — a peripheral in this state is usually a second or
+two from advertising. If it stays there for more than ~20 s, run `doctor`.
+
 **Start with `doctor`.** It is the "the toggle does nothing" tool: it checks
 each prerequisite in turn — `python3-dbus` and `python3-gi` importable,
 `bluetoothctl` present, at least one controller found, Bluetooth not

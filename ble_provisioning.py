@@ -318,8 +318,23 @@ class BleProvisioningServer:
             t.join(timeout=4)
 
     def status(self) -> dict:
+        # 'starting' separates "still registering with BlueZ" from "failed".
+        # start() gives up waiting after a timeout but does NOT stop the loop
+        # thread, which often goes on to register successfully a moment later —
+        # slow boards (a Pi Zero 2 W) routinely need longer than the wait. Both
+        # cases used to look identical to a caller (running=False, error=None),
+        # so the web UI showed "Enabling…" forever for a peripheral that was
+        # either about to come up or already had.
+        t = self._thread
+        starting = bool(
+            not self._running
+            and self._error is None
+            and t is not None
+            and t.is_alive()
+        )
         return {
             'running': self._running,
+            'starting': starting,
             'error': self._error,
             'adapter': self.providers.hci,
             'name': self.providers.local_name,
@@ -787,8 +802,19 @@ def _cli_run(base_dir: str, seconds: Optional[float] = None) -> int:
         print('No Bluetooth adapter — cannot run.')
         return 1
     if not server.start():
-        print(f'Failed to start: {server.status().get("error")}')
-        return 1
+        # Registration can outlast the start() wait on a slow board without
+        # having failed. Give it longer before calling it a failure, or this
+        # printed "Failed to start: None" for a peripheral that was coming up.
+        st = server.status()
+        waited = 0.0
+        while st.get('starting') and waited < 20.0:
+            time.sleep(0.5)
+            waited += 0.5
+            st = server.status()
+        if not st.get('running'):
+            print(f'Failed to start: {st.get("error") or "timed out registering with BlueZ"}')
+            server.stop()
+            return 1
     print(f'Advertising as {server.providers.local_name}. Ctrl-C to stop.')
     try:
         if seconds:

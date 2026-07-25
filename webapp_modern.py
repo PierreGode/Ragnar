@@ -173,7 +173,12 @@ def _start_ble_provisioning():
             )
             if _ble_server is None:
                 return False
-            return _ble_server.start()
+            server = _ble_server
+        # start() blocks until BlueZ registers or the wait times out. Do that
+        # OUTSIDE the lock: GET /api/ble/provisioning takes the same lock, so
+        # holding it here made the status the UI polls hang for the full wait —
+        # exactly while the user is watching for it to come up.
+        return server.start()
     except Exception as e:  # pragma: no cover - hardware/D-Bus dependent
         logger.error(f"BLE provisioning failed to start: {e}")
         return False
@@ -214,6 +219,7 @@ def _ble_power():
 def ble_provisioning_status():
     enabled = bool(shared_data.config.get('ble_provisioning_enabled', False))
     running = False
+    starting = False
     error = None
     name = None
     adapter = None
@@ -222,6 +228,7 @@ def ble_provisioning_status():
         if _ble_server is not None:
             st = _ble_server.status()
             running = bool(st.get('running'))
+            starting = bool(st.get('starting'))
             error = st.get('error')
             name = st.get('name')
             adapter = st.get('adapter')
@@ -229,6 +236,10 @@ def ble_provisioning_status():
     return jsonify({
         'enabled': enabled,
         'running': running,
+        # Still registering with BlueZ. Distinct from failed: on a slow board
+        # registration can outlast the start() wait and succeed shortly after,
+        # so the UI must keep polling rather than declare it broken.
+        'starting': starting,
         'error': error,
         'name': name,
         # Configured preference ('' = auto: prefer the built-in controller).
@@ -268,16 +279,29 @@ def ble_provisioning_toggle():
 
     if enable:
         # Restart when a setting changed, or when re-arming after an auto-stop.
+        # A peripheral that is merely still registering is NOT stopped — tearing
+        # it down here would abort a start that was about to succeed.
         with _ble_lock:
-            stopped = _ble_server is not None and not _ble_server.status().get('running')
+            if _ble_server is None:
+                stopped = False
+            else:
+                _st = _ble_server.status()
+                stopped = not _st.get('running') and not _st.get('starting')
         if needs_restart or stopped:
             _stop_ble_provisioning()
         ok = _start_ble_provisioning()
         if not ok:
             with _ble_lock:
-                err = _ble_server.status().get('error') if _ble_server else 'no Bluetooth adapter'
-            return jsonify({'enabled': True, 'running': False, 'error': err}), 200
-        return jsonify({'enabled': True, 'running': True})
+                st = _ble_server.status() if _ble_server else {}
+            if st.get('starting'):
+                # Registration outlasted the wait but is still in progress; the
+                # UI keeps polling instead of reporting a failure.
+                return jsonify({'enabled': True, 'running': False,
+                                'starting': True, 'error': None}), 200
+            err = st.get('error') or 'no Bluetooth adapter'
+            return jsonify({'enabled': True, 'running': False,
+                            'starting': False, 'error': err}), 200
+        return jsonify({'enabled': True, 'running': True, 'starting': False})
     _stop_ble_provisioning()
     return jsonify({'enabled': False, 'running': False})
 
