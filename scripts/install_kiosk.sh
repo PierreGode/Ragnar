@@ -290,7 +290,10 @@ StandardError=journal
 Environment=HOME=$KIOSK_HOME
 Environment=RAGNAR_REPO=$REPO_ROOT
 Environment=RAGNAR_BROWSER=$BROWSER_BIN
-ExecStartPre=+/bin/sh -c 'rm -f /tmp/.X0-lock; rm -rf /tmp/.X11-unix/X0'
+# Clear a STALE X lock only. Guarded on no X running, because deleting the lock
+# and socket of a live desktop session would disrupt that session while still
+# leaving our own X unable to bind :0.
+ExecStartPre=+/bin/sh -c 'pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1 || { rm -f /tmp/.X0-lock; rm -rf /tmp/.X11-unix/X0; }'
 ExecStart=$WRAPPER_DST
 Restart=on-failure
 # 10s (not 5) so a dying Xorg releases the VT/DRM master before the next start.

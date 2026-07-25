@@ -310,6 +310,29 @@ chmod +x "$SESSION_SCRIPT"
 # undebuggable remotely — here we tail the Xorg log on any non-signal exit.
 _kiosk_term() { [[ -n "${XINIT_PID:-}" ]] && kill -TERM "$XINIT_PID" 2>/dev/null || true; }
 trap _kiosk_term TERM INT
+
+# Do not fight an X server that is already running.
+#
+# MODE A above only triggers when DISPLAY / WAYLAND_DISPLAY are set in the
+# environment, and the systemd unit sets neither — so a service-mode run always
+# reaches here and starts its own X on :0. On a box that has a desktop session
+# (installed in service mode, then a desktop added; or session detection failed
+# at install time) that display is already taken, and X dies with
+#   (EE) Cannot establish any listening sockets -
+#        Make sure an X server isn't already running
+# on every restart until the start limit trips. That message never names the
+# actual conflict, so the failure is undebuggable from the journal alone.
+if pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1; then
+    echo "[kiosk-run] ERROR: an X server is already running on this box, so the" >&2
+    echo "[kiosk-run] kiosk cannot start its own on :0. This box wants AUTOSTART" >&2
+    echo "[kiosk-run] mode (launch into the existing session), not service mode." >&2
+    echo "[kiosk-run] Fix: disable the kiosk in Config -> Kiosk, then re-enable it" >&2
+    echo "[kiosk-run] from inside the desktop session so the installer picks" >&2
+    echo "[kiosk-run] autostart mode. Running X processes:" >&2
+    pgrep -ax Xorg >&2 2>/dev/null || pgrep -ax X >&2 2>/dev/null || true
+    exit 1
+fi
+
 xinit "$SESSION_SCRIPT" -- /usr/bin/X :0 vt7 -nolisten tcp \
       -auth "$XAUTHORITY" -logfile "$XORG_LOG" -keeptty &
 XINIT_PID=$!
