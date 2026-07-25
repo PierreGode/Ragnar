@@ -271,6 +271,11 @@ class BleProvisioningServer:
         self._stop_timer = None
         self._autostopped = False
         self._error: Optional[str] = None
+        # Plain-language next step for an error the user can act on.
+        self._hint: Optional[str] = None
+        # Advertising capabilities of the chosen controller (see
+        # adapter_capabilities); empty until the loop thread probes them.
+        self._caps: dict = {}
         self._running = False
         self._ready = threading.Event()
         # Populated on the loop thread once registered, for clean teardown.
@@ -293,6 +298,7 @@ class BleProvisioningServer:
         if self._running:
             return True
         self._error = None
+        self._hint = None
         self._ready.clear()
         self._thread = threading.Thread(
             target=self._run_loop, name='ble-provisioning', daemon=True
@@ -336,6 +342,10 @@ class BleProvisioningServer:
             'running': self._running,
             'starting': starting,
             'error': self._error,
+            # What to do about the error, when there is something to do.
+            'hint': self._hint,
+            # Controller advertising capabilities, for the UI / bug reports.
+            'caps': self._caps,
             'adapter': self.providers.hci,
             'name': self.providers.local_name,
             'service_uuid': SERVICE_UUID,
@@ -406,17 +416,52 @@ class BleProvisioningServer:
             self._gatt_manager = dbus.Interface(adapter_obj, GATT_MANAGER)
             self._adv_manager = dbus.Interface(adapter_obj, LE_ADV_MANAGER)
 
+            # What this particular controller will accept. Asking for an
+            # include it does not support is refused wholesale, with the same
+            # opaque "Failed to register advertisement" as every other
+            # controller-level rejection — so ask for tx-power only where it is
+            # offered. (A radio that cannot report its LE advertising TX power
+            # does not offer it; a BT 5.0 Pi always does, which is why this
+            # only ever bites some boxes.)
+            caps = adapter_capabilities(self.providers.hci, bus)
+            self._caps = caps
+            includes = wanted_includes(caps)
+            if not includes:
+                self._log(f'{self.providers.hci} does not support the tx-power '
+                          'advertising include — leaving it out', 'warning')
+            si, ai = caps.get('supported_instances'), caps.get('active_instances')
+            if si is not None and ai is not None and ai >= si:
+                self._log(f'{self.providers.hci} already has {ai}/{si} advertising '
+                          'slots in use — registration may be refused', 'warning')
+            if caps.get('discovering'):
+                self._log(f'a Bluetooth scan is running on {self.providers.hci}; '
+                          'some controllers refuse to advertise while scanning',
+                          'warning')
+
             app = _Application(bus, self.providers, self._on_provisioned)
             self._app_path = app.path
-            adv = _Advertisement(bus, 0, self.providers)
+            adv = _Advertisement(bus, 0, self.providers, includes=includes)
             self._adv_path = adv.get_path()
+
+            ladder = adv_ladder(includes)
+            stage = {'i': 0}
+
+            def register_adv():
+                inc, with_name = ladder[stage['i']]
+                adv.includes, adv.include_name = list(inc), with_name
+                self._adv_manager.RegisterAdvertisement(
+                    adv.get_path(), {},
+                    reply_handler=on_registered,
+                    error_handler=lambda e: on_error(e, 'RegisterAdvertisement'),
+                )
 
             self._mainloop = GLib.MainLoop()
 
             def on_registered():
                 self._running = True
                 self._ready.set()
-                self._log(f'advertising as {self.providers.local_name} on {self.providers.hci}')
+                self._log(f'advertising as {self.providers.local_name} on '
+                          f'{self.providers.hci} ({describe_adv(ladder[stage["i"]])})')
 
             # One reclaim attempt per object path, so a retry that also fails
             # reports the error instead of looping.
@@ -455,15 +500,39 @@ class BleProvisioningServer:
                         except Exception:
                             pass
                         try:
-                            self._adv_manager.RegisterAdvertisement(
-                                adv.get_path(), {},
-                                reply_handler=on_registered,
-                                error_handler=lambda e: on_error(e, 'RegisterAdvertisement'),
-                            )
+                            register_adv()
                             return
                         except Exception:
                             pass
+                elif what == 'RegisterAdvertisement' and stage['i'] + 1 < len(ladder):
+                    # The controller refused this advertisement. Step down the
+                    # ladder and try a smaller one rather than leaving the box
+                    # silent — a phone can still find it by service UUID alone.
+                    stage['i'] += 1
+                    self._log(f'{err} — retrying as {describe_adv(ladder[stage["i"]])}',
+                              'warning')
+
+                    def retry():
+                        try:
+                            register_adv()
+                        except Exception as _e:
+                            on_error(_e, 'RegisterAdvertisement')
+                        return False  # one-shot
+
+                    GLib.timeout_add(1200, retry)
+                    return
                 self._error = f'{what}: {err}'
+                if what == 'RegisterAdvertisement':
+                    # The bare BlueZ text ("Failed to register advertisement")
+                    # says nothing about which box-specific cause it was, so
+                    # carry the controller's own capabilities in the message.
+                    self._error += f' [{_caps_summary(self.providers.hci, self._caps)}]'
+                    self._hint = (
+                        'The controller refused the advertisement. Free the radio '
+                        '(stop Bluetooth scanning / other advertisers), or pick a '
+                        'different adapter, then run: '
+                        'sudo python3 ble_provisioning.py doctor'
+                    )
                 self._log(self._error, 'error')
                 self._ready.set()
                 self.stop()
@@ -685,26 +754,33 @@ def _build_dbus_classes():
     class Advertisement(dbus.service.Object):
         PATH_BASE = '/one/gode/ragnar/ble/adv'
 
-        def __init__(self, bus, index, providers):
+        def __init__(self, bus, index, providers, includes=('tx-power',),
+                     include_name=True):
             self.path = f'{self.PATH_BASE}{index}'
             self.providers = providers
+            # Mutable so a rejected registration can be retried with a smaller
+            # advertisement on the same object path — BlueZ re-reads GetAll on
+            # every RegisterAdvertisement call.
+            self.includes = list(includes)
+            self.include_name = include_name
             super().__init__(bus, self.path)
 
         def get_path(self):
             return dbus.ObjectPath(self.path)
 
         def get_properties(self):
-            return {
-                LE_ADVERTISEMENT: {
-                    'Type': 'peripheral',
-                    # The 128-bit service UUID must be in the advertisement so
-                    # the app (which scans filtered by it) and iOS background
-                    # scanning can discover the box.
-                    'ServiceUUIDs': dbus.Array([SERVICE_UUID], signature='s'),
-                    'LocalName': dbus.String(self.providers.local_name),
-                    'Includes': dbus.Array(['tx-power'], signature='s'),
-                }
+            props = {
+                'Type': 'peripheral',
+                # The 128-bit service UUID must be in the advertisement so
+                # the app (which scans filtered by it) and iOS background
+                # scanning can discover the box. This one is never dropped.
+                'ServiceUUIDs': dbus.Array([SERVICE_UUID], signature='s'),
             }
+            if self.include_name:
+                props['LocalName'] = dbus.String(self.providers.local_name)
+            if self.includes:
+                props['Includes'] = dbus.Array(self.includes, signature='s')
+            return {LE_ADVERTISEMENT: props}
 
         @dbus.service.method(DBUS_PROPS, in_signature='s', out_signature='a{sv}')
         def GetAll(self, interface):
@@ -802,6 +878,120 @@ def choose_adapter(preferred: Optional[str] = None) -> Optional[str]:
         if c['builtin']:
             return c['hci']
     return names[0]
+
+
+def adapter_capabilities(hci: str, bus=None) -> dict:
+    """What this controller can actually advertise, straight from BlueZ.
+
+    ``org.bluez.Error.Failed: Failed to register advertisement`` is BlueZ
+    relaying a *controller-level* rejection of the advertisement, and it is
+    hardware-specific — the same code advertises fine on a BT 5.0 Pi and is
+    refused on an older radio. The two things that differ between boxes are
+    here: ``SupportedIncludes`` (a controller that cannot report its LE TX
+    power does not offer ``tx-power``, and asking for it anyway is rejected)
+    and the advertising-instance count. ``Discovering`` catches the other
+    case — bt_scanner holding an active scan on the same radio.
+
+    Never raises; unknown fields stay None and ``known`` stays False.
+    """
+    caps = {
+        'known': False,
+        'includes': [],
+        'supported_instances': None,
+        'active_instances': None,
+        'max_adv_len': None,
+        'discovering': None,
+    }
+    try:
+        import dbus
+        if bus is None:
+            # dbus-python hands out a *cached* system bus, and a connection
+            # created before the GLib main loop is the default one cannot do
+            # async calls later. Install the main loop first so a caller that
+            # probes capabilities and then starts the peripheral still works.
+            import dbus.mainloop.glib
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            bus = dbus.SystemBus()
+        props = dbus.Interface(
+            bus.get_object(BLUEZ, f'/org/bluez/{hci}'), DBUS_PROPS
+        )
+        try:
+            adv = props.GetAll(LE_ADV_MANAGER)
+            caps['includes'] = [str(x) for x in adv.get('SupportedIncludes', [])]
+            if 'SupportedInstances' in adv:
+                caps['supported_instances'] = int(adv['SupportedInstances'])
+            if 'ActiveInstances' in adv:
+                caps['active_instances'] = int(adv['ActiveInstances'])
+            sc = adv.get('SupportedCapabilities') or {}
+            if 'MaxAdvLen' in sc:
+                caps['max_adv_len'] = int(sc['MaxAdvLen'])
+            caps['known'] = True
+        except Exception:
+            pass
+        try:
+            caps['discovering'] = bool(props.Get(ADAPTER_IFACE, 'Discovering'))
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return caps
+
+
+def wanted_includes(caps: dict) -> list:
+    """Advertising includes to ask for on a controller with these capabilities.
+
+    tx-power is nice to have (it lets a phone estimate range) but a controller
+    that does not offer it rejects the whole advertisement, so only ask where
+    BlueZ says it is supported. With capabilities unknown, keep the historical
+    behaviour and ask — the ladder below recovers if it is refused.
+    """
+    if caps.get('known') and 'tx-power' not in (caps.get('includes') or []):
+        return []
+    return ['tx-power']
+
+
+def adv_ladder(includes) -> list:
+    """Advertisements to try, in order, as ``(includes, include_local_name)``.
+
+    The 128-bit service UUID is in every rung — the app scans filtered by it,
+    so an advertisement without it is useless — but the extras are negotiable:
+    better a plain advertisement a phone can still find than a silent box.
+    The first rung appears twice on purpose: a controller that has just been
+    powered on can refuse the first Add Advertising and accept an identical
+    one a second later.
+    """
+    includes = list(includes)
+    ladder = [(includes, True), (includes, True)]
+    if includes:
+        ladder.append(([], True))       # drop tx-power
+    ladder.append(([], False))          # bare service UUID
+    return ladder
+
+
+def describe_adv(entry) -> str:
+    """Human name for a ladder rung, for logs and the doctor."""
+    includes, with_name = entry
+    bits = ['service UUID']
+    if with_name:
+        bits.append('name')
+    bits.extend(includes)
+    return ' + '.join(bits)
+
+
+def _caps_summary(hci: str, caps: dict) -> str:
+    """One-line controller context, appended to a registration failure so a
+    user's screenshot is enough to tell which of the causes above it was."""
+    bits = [hci]
+    if caps.get('known'):
+        si, ai = caps.get('supported_instances'), caps.get('active_instances')
+        if si is not None:
+            bits.append(f'instances {ai if ai is not None else "?"}/{si}')
+        bits.append('includes ' + (','.join(caps['includes']) or 'none'))
+        if caps.get('max_adv_len') is not None:
+            bits.append(f'max adv len {caps["max_adv_len"]}')
+    if caps.get('discovering'):
+        bits.append('a scan is running on this adapter')
+    return '; '.join(bits)
 
 
 # ===========================================================================
@@ -911,6 +1101,13 @@ def _cli_doctor(base_dir: str) -> int:
         print(f'  [{mark}] {label}' + (f'  -> {hint}' if (hint and not passed) else ''))
         return passed
 
+    def warn(label, clean, note=''):
+        """A condition worth reporting that does not by itself mean broken —
+        plenty of controllers advertise happily while scanning."""
+        print(f'  [{"PASS" if clean else "WARN"}] {label}'
+              + (f'  -> {note}' if (note and not clean) else ''))
+        return clean
+
     print('Ragnar BLE provisioning — doctor\n')
 
     # 1. Python deps (the usual culprit).
@@ -945,7 +1142,36 @@ def _cli_doctor(base_dir: str) -> int:
     blocked = 'yes' in rf.lower().split('blocked:', 1)[-1][:40] if 'blocked' in rf.lower() else False
     check('Bluetooth not rfkill-blocked', not blocked, 'sudo rfkill unblock all')
 
-    # 5. Actually advertise for a few seconds.
+    # 5. Advertising capabilities — the box-specific part. "Failed to register
+    #    advertisement" is a controller rejection, and this is what differs
+    #    between a box where it works and one where it doesn't.
+    ver = (_run(['bluetoothctl', '--version']).strip()
+           or _run(['bluetoothd', '--version']).strip())
+    if ver:
+        print(f'        BlueZ {ver.split()[-1]}')
+    target = choose_adapter() if controllers else None
+    if have_dbus and have_gi and target:
+        caps = adapter_capabilities(target)
+        check(f'{target} exposes LEAdvertisingManager1', caps['known'],
+              'no LE advertising on this controller — is it BLE capable / powered?')
+        if caps['known']:
+            print(f'        includes:  {", ".join(caps["includes"]) or "none"}'
+                  + ('' if 'tx-power' in caps['includes']
+                     else '   (no tx-power — it is left out of the advertisement)'))
+            print(f'        instances: {caps["active_instances"]}/{caps["supported_instances"]} in use')
+            print(f'        max adv len: {caps["max_adv_len"]}')
+        free = not (caps.get('supported_instances') is not None
+                    and caps.get('active_instances') is not None
+                    and caps['active_instances'] >= caps['supported_instances'])
+        check('An advertising slot is free', free,
+              'every slot is in use — stop the other advertiser '
+              '(bluetoothctl advertise off) or use another adapter')
+        warn('No scan running on this adapter', not caps.get('discovering'),
+             'a Bluetooth discovery is running (bt_scanner / WIDS); some '
+             'controllers refuse to advertise while scanning — if the advertise '
+             'test below fails, stop the scan and re-run')
+
+    # 6. Actually advertise for a few seconds.
     if have_gi and have_dbus and controllers:
         server = build_server(base_dir, lambda: {})
         started = server.start(timeout=10) if server else False
@@ -953,6 +1179,8 @@ def _cli_doctor(base_dir: str) -> int:
         check('Advertising starts', started, st.get('error') or 'see error above')
         if started:
             print(f'        advertising as "{st.get("name")}" on {st.get("adapter")}')
+        elif st.get('hint'):
+            print(f'        {st["hint"]}')
         if server:
             server.stop()
     else:

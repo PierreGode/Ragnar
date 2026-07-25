@@ -24086,7 +24086,7 @@ function _bleProvStatusText(d) {
     if (!d.enabled) return 'Disabled.';
     if (d.autostopped) return 'Provisioned — advertising stopped to free the radio. Tap Re-advertise for another device.';
     if (d.running) return 'Advertising as ' + (d.name || 'Ragnar') + (d.active_adapter ? ' on ' + d.active_adapter : '') + '.';
-    if (d.error) return 'Enabled, but not advertising: ' + d.error;
+    if (d.error) return 'Enabled, but not advertising: ' + d.error + (d.hint ? ' — ' + d.hint : '');
     // Still registering with BlueZ — slow boards can take a while. Anything
     // else with no error is a state we have not heard back about yet.
     if (d.starting) return 'Starting — registering with BlueZ…';
