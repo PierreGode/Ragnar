@@ -160,10 +160,30 @@ def _start_ble_provisioning():
         if not shared_data.config.get('ble_provisioning_enabled', False):
             return False
         import ble_provisioning
+        # Retire any previous peripheral BEFORE building a new one. Overwriting
+        # the reference used to drop a still-registered server on the floor —
+        # its GLib thread and, worse, its BlueZ registration of the fixed path
+        # /one/gode/ragnar/ble survived, so the new server's
+        # RegisterApplication came back org.bluez.Error.AlreadyExists.
+        old = None
         with _ble_lock:
+            if _ble_server is not None:
+                if _ble_server.status().get('running'):
+                    return True
+                old, _ble_server = _ble_server, None
+        if old is not None:
+            # Outside the lock: stop() joins the loop thread and would otherwise
+            # stall the status endpoint the UI polls.
+            try:
+                old.stop()
+            except Exception:
+                pass
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        with _ble_lock:
+            # Another caller may have started one while we were stopping.
             if _ble_server is not None and _ble_server.status().get('running'):
                 return True
-            base_dir = os.path.dirname(os.path.abspath(__file__))
             _ble_server = ble_provisioning.build_server(
                 base_dir,
                 get_config=lambda: shared_data.config,
