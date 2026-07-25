@@ -167,6 +167,23 @@ if ! pip3 install --break-system-packages --upgrade -r requirements.txt; then
     done < requirements.txt
 fi
 
+echo -e "${BLUE}Step 5.1: Checking package system health...${NC}"
+# apt refuses every operation while a previous dpkg run is unfinished
+# ("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'").
+# A low-memory Pi reaches that state easily — an OOM kill, power loss, or a
+# Ctrl-C mid-install — and it then blocks every apt call below. Idempotent and
+# a no-op on a healthy system.
+if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+    echo -e "  ${YELLOW}⚠${NC} dpkg is in an interrupted state — repairing"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+        echo -e "  ${YELLOW}⚠${NC} dpkg still reports problems — run: sudo dpkg --configure -a"
+    else
+        echo -e "  ${GREEN}✓${NC} dpkg state repaired"
+    fi
+fi
+
 echo -e "${BLUE}Step 5.2: Ensuring Bluetooth overlay dependencies...${NC}"
 # The WiFi-analyzer Bluetooth/BLE 2.4 GHz overlay (bt_scanner.py) talks to BlueZ
 # over D-Bus via python3-dbus, and needs bluez/bluetoothctl. The BLE

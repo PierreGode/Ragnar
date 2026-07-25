@@ -281,6 +281,36 @@ package_candidates() {
     esac
 }
 
+# Repair an interrupted dpkg transaction before touching apt.
+#
+# apt refuses every operation while a previous dpkg run is unfinished:
+#   "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"
+# A low-memory Pi reaches that state easily — an install killed by the OOM
+# killer, a power loss, or a Ctrl-C during one of the long silent steps — and
+# from then on nothing installs, including re-running this script or the
+# Pwnagotchi installer. Repairing is idempotent and a no-op when healthy, so it
+# runs unconditionally rather than making the user find the command themselves.
+ensure_dpkg_healthy() {
+    [ "$PKG_MGR" = "apt" ] || return 0
+    local interrupted=false
+    # Files here mean a transaction was cut off mid-write; --audit catches
+    # packages left half-installed or half-configured.
+    [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] && interrupted=true
+    [ -n "$(dpkg --audit 2>/dev/null)" ] && interrupted=true
+    [ "$interrupted" = false ] && return 0
+
+    log "WARNING" "dpkg is in an interrupted state — repairing before installing"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+        log "WARNING" "dpkg still reports problems — package installs may fail"
+        log "WARNING" "Inspect manually with: sudo dpkg --audit && sudo dpkg --configure -a"
+    else
+        log "SUCCESS" "dpkg state repaired"
+    fi
+}
+
 # Install a package using detected package manager with fallbacks
 install_package() {
     local pkg=$1
@@ -429,6 +459,9 @@ install_dependencies() {
     log "INFO" "Installing system dependencies..."
 
     [ -z "$PKG_MGR" ] && detect_platform
+
+    # Must run before the first apt command, or every install below fails.
+    ensure_dpkg_healthy
 
     eval "$UPDATE_CMD"
     check_success "Package index updated via ${PKG_MGR}"

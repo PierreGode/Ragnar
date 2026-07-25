@@ -148,6 +148,33 @@ all_packages_installed() {
     return 0
 }
 
+# Repair an interrupted dpkg transaction before touching apt.
+#
+# apt refuses everything while a previous dpkg run is unfinished:
+#   "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"
+# This installer runs long after the main Ragnar install, so it is often where
+# a state left broken earlier (OOM kill, power loss, Ctrl-C) first surfaces —
+# and the failure looks like "Pwnagotchi won't install" rather than a system
+# problem. Idempotent and a no-op when healthy.
+ensure_dpkg_healthy() {
+    local interrupted=false
+    [[ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ]] && interrupted=true
+    [[ -n "$(dpkg --audit 2>/dev/null)" ]] && interrupted=true
+    [[ "$interrupted" == false ]] && return 0
+
+    echo "[WARN] dpkg is in an interrupted state — repairing before installing"
+    write_status "installing" "Repairing interrupted package state" "apt_repair"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+
+    if [[ -n "$(dpkg --audit 2>/dev/null)" ]]; then
+        echo "[WARN] dpkg still reports problems — package installs may fail"
+        echo "[WARN] Inspect with: sudo dpkg --audit && sudo dpkg --configure -a"
+    else
+        echo "[INFO] dpkg state repaired"
+    fi
+}
+
 trap 'write_status "error" "Installation failed (line ${LINENO}). Check ${LOG_FILE}." "error"' ERR
 
 # -------------------------------------------------------------------
@@ -205,6 +232,7 @@ if all_packages_installed "${packages[@]}"; then
 else
     write_status "installing" "Installing required system packages" "apt_required"
     echo "[INFO] Updating apt and installing required packages..."
+    ensure_dpkg_healthy
     apt-get update -qq
     apt-get install -y --no-upgrade "${packages[@]}"
 fi

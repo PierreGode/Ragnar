@@ -97,6 +97,30 @@ If the install log ends with `These display types will NOT work until fixed:`,
 that names the dependency that failed — a screen of that type will stay blank
 until it is installed.
 
+#### "dpkg was interrupted" — nothing installs
+
+```
+E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a'
+```
+
+This is a **system** state, not a Ragnar one, and it blocks *every* apt
+operation until cleared — the main install, updates, and the Pwnagotchi
+installer alike. Fix it with:
+
+```bash
+sudo dpkg --configure -a
+sudo apt-get install -f -y
+```
+
+A Pi reaches this state when a package install is cut off part-way: the OOM
+killer on a 512 MB board, a power loss, or Ctrl-C during one of the long silent
+steps. It often surfaces later than it happened — the Pwnagotchi installer
+failing is a common first symptom of a state broken during the main install.
+
+`install_ragnar.sh`, `update_ragnar.sh` and `scripts/install_pwnagotchi.sh` all
+detect and repair this automatically before their first apt call, so it should
+no longer need doing by hand.
+
 #### "No git command works" / updates fail
 
 Check this first:
