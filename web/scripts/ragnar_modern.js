@@ -29197,24 +29197,38 @@ function renderPiConnect(pc) {
     const el = document.getElementById('mesh-piconnect');
     if (!el) return;
 
+    // Which login user Connect actually belongs to. Connect is a per-user
+    // service, so the commands must run as that user, not root — naming it here
+    // stops the operator running them in the wrong session (the bug that made a
+    // signed-in box look signed out to Ragnar).
+    const asUser = pc.user ? ` as <code class="text-gray-400">${escapeHtml(pc.user)}</code>` : '';
     let dot, headline, detail;
     if (!pc.installed) {
         dot = 'bg-gray-500';
         headline = 'Not installed';
         detail = 'Install with <code class="text-gray-400">sudo apt install rpi-connect</code>, ' +
                  'then <code class="text-gray-400">rpi-connect on</code> and sign in.';
-    } else if (pc.signed_in || pc.running) {
+    } else if (pc.signed_in) {
         dot = 'bg-green-400';
-        headline = 'Active';
+        headline = 'Active' + (pc.user ? ` (${escapeHtml(pc.user)})` : '');
         detail = 'A second way in is available at ' +
                  '<a href="https://connect.raspberrypi.com" target="_blank" rel="noopener" ' +
                  'class="text-Ragnar-400 hover:underline">connect.raspberrypi.com</a>, ' +
                  'independent of Tailscale.';
+    } else if (pc.running) {
+        // Running but not signed in — the service is up but you cannot remote in
+        // yet, so it is NOT a usable fallback. Distinct from "off".
+        dot = 'bg-amber-400';
+        headline = 'Running, not signed in';
+        detail = `The service is on but no account is linked, so you can't reach this unit ` +
+                 `through it yet. Run <code class="text-gray-400">rpi-connect signin</code>${asUser} ` +
+                 `and open the link it prints to finish. Until then it is not a usable fallback.`;
     } else {
         dot = 'bg-amber-400';
-        headline = 'Installed but not signed in';
-        detail = 'Run <code class="text-gray-400">rpi-connect on</code> on this unit and ' +
-                 'complete the browser sign-in. Until then it is not a usable fallback.';
+        headline = 'Installed but off';
+        detail = `Run <code class="text-gray-400">rpi-connect on</code>${asUser} on this unit, then ` +
+                 `<code class="text-gray-400">rpi-connect signin</code> and open the link it prints. ` +
+                 `Until then it is not a usable fallback.`;
     }
 
     el.innerHTML = `<div class="flex items-start justify-between gap-3">

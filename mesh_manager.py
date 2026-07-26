@@ -159,33 +159,117 @@ def derive_viking_name(seed=None):
 # `rpi-connect` requires an interactive browser sign-in that cannot be automated
 # from here anyway.
 
+def _parse_pi_connect(out):
+    """Parse `rpi-connect status` text into running/signed_in flags.
+
+    Real formats (rpi-connect 2.x):
+      * off:                 "✗ Raspberry Pi Connect is not running, run rpi-connect on"
+      * running, signed out: "Signed in: no\\nTo sign in, run rpi-connect signin"
+      * running, signed in:  "Signed in: yes" plus screen-sharing / remote-shell lines
+
+    Note the trap that bit the first cut: "Signed in: no" *contains* the
+    substring "signed in", so a naive check reports a signed-out box as signed
+    in. Key off the explicit yes/no instead.
+    """
+    low = out.lower()
+    detail = out.splitlines()[0].strip() if out else 'No status reported.'
+    if not out or 'not running' in low:
+        return {'running': False, 'signed_in': False, 'detail': detail}
+    signed_in = ('signed in: yes' in low or 'signed in as' in low
+                 or 'signed-in: yes' in low)
+    return {'running': True, 'signed_in': signed_in, 'detail': detail}
+
+
+def _pi_connect_login_uids():
+    """UIDs that have a live user-session runtime dir.
+
+    rpi-connect is a *per-user* systemd service, so it can only be running in a
+    session that has a `/run/user/<uid>`. A lingering or logged-in human user
+    has one; root (Ragnar's own uid) does not have the *user's* session. Scanning
+    here is what lets a root-run Ragnar see the login user's Connect state
+    instead of its own empty one.
+    """
+    uids = []
+    try:
+        for name in os.listdir('/run/user'):
+            if name.isdigit() and int(name) >= 1000:
+                uids.append(int(name))
+    except OSError:
+        pass
+    return sorted(uids)
+
+
+def _read_pi_connect(exe, uid, timeout=8):
+    """Run `rpi-connect status` in one login user's session (uid=None = ours).
+
+    Root can step into any user's session; a non-root Ragnar can only read its
+    own. Env is passed via `env` after `sudo` because sudo scrubs the
+    environment, and the per-user D-Bus/runtime dir is what the tool needs.
+    """
+    if uid is not None and os.geteuid() == 0:
+        runtime = f'/run/user/{uid}'
+        cmd = ['sudo', '-n', f'-u#{uid}', 'env',
+               f'XDG_RUNTIME_DIR={runtime}',
+               f'DBUS_SESSION_BUS_ADDRESS=unix:path={runtime}/bus',
+               exe, 'status']
+    else:
+        cmd = [exe, 'status']
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return ((proc.stdout or '') + (proc.stderr or '')).strip()
+    except (subprocess.TimeoutExpired, OSError):
+        return ''
+
+
 def pi_connect_status():
     """Report whether Raspberry Pi Connect is available as a backup way in.
 
-    Returns {'installed', 'running', 'signed_in', 'detail'}. Never raises: this
-    is a nice-to-have on non-Pi hardware where the tool does not exist.
+    Returns {'installed', 'running', 'signed_in', 'user', 'detail'}. Never
+    raises: this is a nice-to-have on non-Pi hardware where the tool is absent.
+
+    The important subtlety: Connect is a per-user service, and Ragnar usually
+    runs as root. Querying our own session would report "not signed in" on a box
+    that is perfectly signed in as its login user — so we probe each login user's
+    session and keep the best result.
     """
     result = {'installed': False, 'running': False, 'signed_in': False,
-              'detail': 'Raspberry Pi Connect is not installed.'}
+              'user': '', 'detail': 'Raspberry Pi Connect is not installed.'}
     exe = shutil.which('rpi-connect')
     if not exe:
         return result
     result['installed'] = True
 
-    try:
-        proc = subprocess.run([exe, 'status'], capture_output=True, text=True,
-                              timeout=8)
-        out = ((proc.stdout or '') + (proc.stderr or '')).strip()
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        result['detail'] = f'Installed, but status could not be read ({exc}).'
+    candidates = _pi_connect_login_uids()
+    # Always also try our own session — covers a non-root Ragnar, or a box with
+    # no /run/user entries where we are nonetheless the right context.
+    candidates = candidates + [None]
+
+    best = None
+    for uid in candidates:
+        out = _read_pi_connect(exe, uid)
+        if not out:
+            continue
+        parsed = _parse_pi_connect(out)
+        parsed['uid'] = uid
+        if parsed['signed_in']:
+            best = parsed          # signed in is the definitive win — stop here
+            break
+        if best is None or (parsed['running'] and not best['running']):
+            best = parsed
+
+    if best is None:
+        result['detail'] = 'Installed, but status could not be read for any login user.'
         return result
 
-    lowered = out.lower()
-    result['detail'] = out.splitlines()[0].strip() if out else 'No status reported.'
-    if 'not running' in lowered or 'not signed in' in lowered:
-        return result
-    result['running'] = 'running' in lowered or 'signed in' in lowered
-    result['signed_in'] = 'signed in' in lowered and 'not signed in' not in lowered
+    result['running'] = best['running']
+    result['signed_in'] = best['signed_in']
+    result['detail'] = best['detail']
+    if best.get('uid'):
+        try:
+            import pwd
+            result['user'] = pwd.getpwuid(best['uid']).pw_name
+        except (KeyError, ImportError):
+            result['user'] = f'uid {best["uid"]}'
     return result
 
 # `tailscale status` is cheap but not free, and the UI polls. 5s is short enough
@@ -1062,7 +1146,7 @@ def _self_test():
     print('pi connect')
     pc = pi_connect_status()
     check('status is always structured', set(pc) ==
-          {'installed', 'running', 'signed_in', 'detail'})
+          {'installed', 'running', 'signed_in', 'user', 'detail'})
     check('never raises on any host', isinstance(pc['installed'], bool))
 
     print('caller_is_mesh_peer fails closed')

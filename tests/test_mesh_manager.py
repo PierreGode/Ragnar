@@ -198,6 +198,57 @@ def test_join_rejects_a_bad_auth_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Raspberry Pi Connect status parsing
+# ---------------------------------------------------------------------------
+# Connect is a per-user service, and Ragnar runs as root — so a signed-in box
+# looks signed-out unless queried in the login user's session. The parser must
+# also read the real `rpi-connect status` text, where "Signed in: no" contains
+# the substring "signed in" and trapped the first implementation.
+
+def test_pi_connect_parse_off():
+    p = mesh_manager._parse_pi_connect(
+        '✗ Raspberry Pi Connect is not running, run rpi-connect on')
+    assert p['running'] is False and p['signed_in'] is False
+
+
+def test_pi_connect_parse_running_but_signed_out():
+    """The exact string that made a signed-out box read as signed in."""
+    p = mesh_manager._parse_pi_connect('Signed in: no\nTo sign in, run rpi-connect signin')
+    assert p['running'] is True
+    assert p['signed_in'] is False
+
+
+def test_pi_connect_parse_signed_in():
+    p = mesh_manager._parse_pi_connect(
+        'Signed in: yes\nScreen sharing: allowed\nRemote shell: allowed')
+    assert p['running'] is True
+    assert p['signed_in'] is True
+
+
+def test_pi_connect_parse_legacy_signed_in_as():
+    p = mesh_manager._parse_pi_connect('Signed in as: someone@example.com')
+    assert p['signed_in'] is True
+
+
+def test_pi_connect_parse_empty():
+    p = mesh_manager._parse_pi_connect('')
+    assert p['running'] is False and p['signed_in'] is False
+
+
+def test_pi_connect_login_uids_are_human(monkeypatch):
+    """Only real login UIDs (>=1000) with a runtime dir are probed, never root."""
+    monkeypatch.setattr(mesh_manager.os, 'listdir',
+                        lambda p: ['0', '1000', '1001', 'not-a-uid'])
+    assert mesh_manager._pi_connect_login_uids() == [1000, 1001]
+
+
+def test_pi_connect_status_is_structured():
+    s = mesh_manager.pi_connect_status()
+    assert set(s) == {'installed', 'running', 'signed_in', 'user', 'detail'}
+    assert isinstance(s['installed'], bool)
+
+
+# ---------------------------------------------------------------------------
 # diagnose_peer — turning "Ragnar's API did not answer" into the real cause
 # ---------------------------------------------------------------------------
 # A red "did not answer" card spans four causes with four different fixes.

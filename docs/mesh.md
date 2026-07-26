@@ -299,15 +299,26 @@ actually usable — but never enables it. Signing in requires an interactive
 browser flow that cannot be automated from the unit, and enabling a second
 remote-access path is an operator's decision, not a program's.
 
+Run these **as your login user (e.g. `pi`), not as root** — Connect is a
+per-user service:
+
 ```sh
 sudo apt install rpi-connect
-rpi-connect on          # then complete the browser sign-in
+rpi-connect on          # starts the per-user service
+rpi-connect signin      # open the link it prints to link your account
 rpi-connect status
 ```
 
-The Mesh tab distinguishes **installed** from **signed in** on purpose: an
-installed-but-not-signed-in Pi Connect is not a fallback, and discovering that
-during an outage is the wrong time.
+The Mesh tab reports three distinct states — **Active** (signed in, a real
+fallback), **Running, not signed in** (service up but no account linked, *not*
+yet usable), and **Installed but off** — and names the login user the commands
+belong to.
+
+> **Root vs the login user.** Ragnar runs as root, but Connect runs under your
+> login user's session. Ragnar queries that session (not root's), so a box
+> signed in as `pi` shows **Active** even though the web service is root. If you
+> run `rpi-connect` commands, run them as that same user or they act on the
+> wrong (empty) session.
 
 > **Set this up before you ship the hardware.** Every one of these paths is
 > trivial to establish with the box on your desk and impossible to establish
