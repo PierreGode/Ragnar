@@ -98,13 +98,23 @@ def ip_scope(ip):
 # Parsers (pure — the network functions below are thin wrappers)
 # --------------------------------------------------------------------------
 
-def _vcard_email(vcard_array):
-    """Pull the email out of an RDAP jCard (['vcard', [[name,{},type,value],...]])."""
+def _vcard_address(vcard_array):
+    """Pull a postal address out of an RDAP jCard, if present."""
     try:
         for entry in vcard_array[1]:
-            if entry[0] == 'email' and len(entry) >= 4 and entry[3]:
-                return str(entry[3]).strip()
-    except (IndexError, TypeError):
+            if entry[0] != 'adr' or len(entry) < 4:
+                continue
+            # Prefer the human-readable label if the registry provided one
+            params = entry[1] if isinstance(entry[1], dict) else {}
+            label = (params.get('label') or '').strip()
+            if label:
+                return ' '.join(label.split())
+            # Otherwise join the structured components that are non-empty
+            parts = entry[3] if isinstance(entry[3], (list, tuple)) else []
+            text = ', '.join(str(p).strip() for p in parts if p and str(p).strip())
+            if text:
+                return text
+    except (IndexError, TypeError, AttributeError):
         pass
     return None
 
@@ -156,9 +166,30 @@ def parse_rdap(obj):
     if m:
         out['registry'] = m.group(1).upper()
     emails = []
+    addresses = []
     _walk_entities(obj.get('entities'), 'abuse', emails)
+    # Prefer abuse contact address; fall back to registrant
+    def _collect_addr(entities, want_role, out):
+        if not isinstance(entities, list):
+            return
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            roles = [str(r).lower() for r in (ent.get('roles') or [])]
+            if want_role in roles:
+                addr = _vcard_address(ent.get('vcardArray') or [])
+                if addr:
+                    out.append(addr)
+            _collect_addr(ent.get('entities'), want_role, out)
+
+    _collect_addr(obj.get('entities'), 'abuse', addresses)
+    if not addresses:
+        _collect_addr(obj.get('entities'), 'registrant', addresses)
+
     if emails:
         out['abuse_email'] = emails[0]
+    if addresses:
+        out['org_address'] = addresses[0]
     return out
 
 
