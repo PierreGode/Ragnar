@@ -29006,10 +29006,23 @@ function renderMesh(data) {
     if (!pill) return;
 
     const joined = data.available;
-    pill.textContent = data.installed
-        ? (joined ? 'Connected' : (data.backend_state || 'Not connected'))
-        : 'Tailscale not installed';
-    pill.className = 'text-xs px-2 py-1 rounded ' + (joined
+    // "On the tailnet" and "in the mesh" are different things. A unit can be
+    // fully connected to Tailscale yet carry no mesh tag, in which case it
+    // shares no data — so only call it green/Connected when it is actually in
+    // the mesh, and name the in-between state instead of implying success.
+    const inMesh = joined && data.self_tagged;
+    let pillText, pillGreen = false;
+    if (!data.installed) {
+        pillText = 'Tailscale not installed';
+    } else if (!joined) {
+        pillText = data.backend_state || 'Not connected';
+    } else if (!data.self_tagged) {
+        pillText = 'On tailnet · not in mesh';
+    } else {
+        pillText = 'Connected'; pillGreen = true;
+    }
+    pill.textContent = pillText;
+    pill.className = 'text-xs px-2 py-1 rounded ' + (pillGreen
         ? 'bg-green-700/40 text-green-300'
         : 'bg-amber-700/40 text-amber-300');
 
@@ -29064,11 +29077,50 @@ function renderMesh(data) {
         notes.push(meshWarning(`This unit: ${escapeHtml(data.self.key_message || '')}`,
             data.self.key_state === 'expired' ? 'error' : 'warn'));
     }
+
+    const tagCode = escapeHtml(data.mesh_tag || 'tag:ragnar-mesh');
+
+    // The #1 "they sense each other but don't share data" cause: this unit is
+    // on the tailnet but was never tagged into the mesh. An interactive
+    // `tailscale up` login never applies a tag, and the whole mesh keys off it.
+    if (joined && data.self && !data.self_tagged) {
+        notes.push(meshWarning(
+            `<strong>This unit is on the tailnet, but not in the mesh.</strong> ` +
+            `It carries no <code>${tagCode}</code> tag, so Ragnar won't treat it as a mesh ` +
+            `unit and it won't share data — even though other units can see it over Tailscale. ` +
+            `<br>Fix in the Tailscale admin console: <em>Machines → this device → the ⋯ menu → ` +
+            `Edit ACL tags → add ${tagCode}</em>. The tag must be listed under ` +
+            `<code>tagOwners</code> in your ACL policy. Tagging also stops the node key expiring.`,
+            'error'));
+    }
+
+    // The untagged tailnet devices themselves — literally the boxes the tester
+    // sees "sensing each other". Naming them turns a mystery into a checklist.
+    const untaggedCount = data.summary?.untagged_peers || 0;
+    if (untaggedCount > 0) {
+        const names = (data.untagged_peers || [])
+            .map(p => escapeHtml(p.name || p.ip || '?')).join(', ');
+        notes.push(meshWarning(
+            `${untaggedCount} device(s) on your tailnet aren't tagged into the mesh` +
+            (names ? ` (${names})` : '') + `. This unit senses them over Tailscale but won't ` +
+            `share data with them until each carries <code>${tagCode}</code>. Tag them the same way.`));
+    }
+
+    // Tagged and connected, but the poller is switched off — no data will flow.
+    if (inMesh && !data.enabled) {
+        notes.push(meshWarning(
+            `This unit is in the mesh, but <strong>data sharing is turned off</strong>. ` +
+            `Enable <code>mesh_enabled</code> (Config → Ragnar Mesh, or re-run Join) so it starts ` +
+            `polling peers and pooling alerts.`));
+    }
+
     warnings.innerHTML = notes.join('');
 
     if (data.summary) {
         document.getElementById('mesh-stat-total').textContent = data.summary.ragnar_nodes ?? 0;
-        document.getElementById('mesh-stat-online').textContent = (data.summary.online ?? 0) + (data.self ? 1 : 0);
+        // Count self among the online only when it is actually in the mesh, so
+        // Units and Online never contradict each other for an untagged unit.
+        document.getElementById('mesh-stat-online').textContent = (data.summary.online ?? 0) + (inMesh ? 1 : 0);
         document.getElementById('mesh-stat-offline').textContent = data.summary.offline ?? 0;
         document.getElementById('mesh-stat-degraded').textContent = data.summary.degraded ?? 0;
     }

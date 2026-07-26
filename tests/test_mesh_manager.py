@@ -35,6 +35,42 @@ def test_module_self_test_passes():
 
 
 # ---------------------------------------------------------------------------
+# Tag membership — "on the tailnet" vs "in the mesh"
+# ---------------------------------------------------------------------------
+# The single most common first-run confusion: a unit is fully connected to
+# Tailscale (BackendState Running) yet carries no mesh tag, so it shares no
+# data. The status route decides mesh membership purely from the normalized
+# node's `tags`, so that field must survive normalization faithfully — an
+# untagged node must come out untagged, and only the exact tag counts.
+
+def _node(tags):
+    return mesh_manager.normalize_node(
+        {'ID': 'n1', 'HostName': 'pi', 'DNSName': 'pi.ts.net.', 'OS': 'linux',
+         'TailscaleIPs': ['100.78.0.5'], 'Online': True, 'Tags': tags},
+        magic_dns_suffix='ts.net')
+
+
+def test_untagged_node_is_not_in_the_mesh():
+    """A Running-but-untagged node is the tester's exact state: on the tailnet,
+    invisible to the mesh."""
+    node = _node(None)
+    assert node['tags'] == []
+    assert 'tag:ragnar-mesh' not in node['tags']
+
+
+def test_tagged_node_is_in_the_mesh():
+    node = _node(['tag:ragnar-mesh'])
+    assert 'tag:ragnar-mesh' in node['tags']
+
+
+def test_a_different_tag_does_not_grant_membership():
+    """Only the configured mesh tag counts — a node tagged for something else is
+    still not a mesh unit."""
+    node = _node(['tag:server', 'tag:prod'])
+    assert 'tag:ragnar-mesh' not in node['tags']
+
+
+# ---------------------------------------------------------------------------
 # Peer authentication
 # ---------------------------------------------------------------------------
 

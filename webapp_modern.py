@@ -2507,9 +2507,16 @@ def mesh_status():
         peers.append(node)
 
     self_node = state.get('self')
+    self_tagged = False
     if self_node:
         self_node = dict(self_node)
-        self_node['is_ragnar'] = True
+        # Is THIS unit tagged into the mesh? A unit can be fully on the tailnet
+        # (BackendState Running) yet carry no tag, which is the single most
+        # common reason two units "sense each other but don't share data": the
+        # whole mesh keys off the tag, and an interactive `tailscale up` login
+        # never applies one.
+        self_tagged = tag in self_node.get('tags', [])
+        self_node['is_ragnar'] = self_tagged
         self_node['health'] = _mesh_local_health()
         self_node['unit_id'] = _mesh_unit_id()
         self_node['viking_name'] = _mesh_viking_name()
@@ -2518,6 +2525,15 @@ def mesh_status():
         self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
 
     ragnar_peers = [p for p in peers if p['is_ragnar']]
+    # Tailnet peers that are NOT tagged into the mesh. These are exactly the
+    # devices a tester sees "sensing each other" — visible over Tailscale but
+    # invisible to Ragnar's mesh until tagged. Surface them so the gap is
+    # explained rather than looking like nothing is there.
+    untagged_peers = [
+        {'name': p.get('short_name') or p.get('hostname') or p.get('ip'),
+         'ip': p.get('ip'), 'os': p.get('os'), 'online': p.get('online')}
+        for p in peers if not p['is_ragnar']
+    ]
 
     # Two units answering to the same number makes every report ambiguous
     # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
@@ -2552,6 +2568,9 @@ def mesh_status():
         'version': state.get('version', ''),
         'magic_dns_suffix': state.get('magic_dns_suffix', ''),
         'mesh_tag': tag,
+        # Whether THIS unit is tagged into the mesh. False + available means
+        # "on the tailnet but not in the mesh" — the state to explain loudly.
+        'self_tagged': self_tagged,
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),
@@ -2569,15 +2588,17 @@ def mesh_status():
         'last_poll': last_poll,
         'self': self_node,
         'peers': peers,
+        'untagged_peers': untagged_peers,
         'summary': {
             'total': len(peers) + (1 if self_node else 0),
-            'ragnar_nodes': len(ragnar_peers) + (1 if self_node else 0),
+            'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
             'online': sum(1 for p in ragnar_peers if p['online']),
             'offline': sum(1 for p in ragnar_peers if not p['online']),
             # Online in Tailscale but Ragnar not answering: the box has power
             # and network, and the application is the thing that is broken.
             'degraded': sum(1 for p in ragnar_peers if p['online']
                             and not (p.get('health') or {}).get('reachable')),
+            'untagged_peers': len(untagged_peers),
             'duplicate_unit_ids': duplicates,
             'duplicate_names': duplicate_names,
             'unnumbered_units': unnumbered,

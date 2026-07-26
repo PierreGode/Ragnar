@@ -548,10 +548,31 @@ The box has power and network; the application is what is down. Check
 `mesh_node_port` matches on both units, then SSH in and
 `sudo systemctl status ragnar`.
 
-**Peers never appear even though they are in the console.**
-They are not tagged. `mesh_tag` is what marks a tailnet node as a Ragnar unit;
-an untagged node is deliberately invisible to the mesh. Re-run `tailscale up`
-with `--advertise-tags=tag:ragnar-mesh`.
+**"They sense each other but don't share data" / units show "On tailnet · not
+in mesh".**
+This is the most common first-run confusion, and it is a tagging issue, not a
+connection issue. A unit can be fully on the tailnet — you can reach it, and
+other units can see it — yet carry no `tag:ragnar-mesh`. The whole mesh keys off
+that tag, so Ragnar will not treat an untagged node as a mesh unit and no data
+flows. An **interactive `tailscale up` login never applies a tag** (only a
+pre-authorized key with `--advertise-tags`, or a manual edit, does), which is
+why hand-joined units land here.
+
+The Mesh tab now says so directly: the status pill reads *On tailnet · not in
+mesh*, and a banner names the untagged devices. To fix, tag **every** unit:
+
+- *Per device in the console:* Machines → the device → **⋯ → Edit ACL tags** →
+  add `tag:ragnar-mesh`.
+- *Or re-join with a tagged key:* `tailscale up --advertise-tags=tag:ragnar-mesh`.
+
+The tag must be listed under `tagOwners` in your ACL policy first, e.g.
+`"tagOwners": { "tag:ragnar-mesh": ["autogroup:admin"] }`. Tagging also stops
+the node key expiring — a double win for a remote unit.
+
+**Units are tagged and connected but still no data.**
+Check `mesh_enabled` is `true` on each (Config → Ragnar Mesh, or re-run Join).
+Tagging puts a unit *in* the mesh; `mesh_enabled` is what makes it *poll* peers
+and pool alerts. The tab flags this case too.
 
 **"The auth key was rejected."**
 Expired, already spent (`reusable = false` and already used), or from a
