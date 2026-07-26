@@ -4,9 +4,48 @@ Ragnar can drive a locally attached screen as a fullscreen dashboard: enable
 **kiosk mode**, connect a display to the Pi's HDMI, and the Ragnar web UI comes
 up fullscreen in Chromium (`--kiosk`). It launches automatically on every boot.
 
+## Hardware requirement — Ragnar Pi server only
+
+The kiosk is a **Ragnar Pi server** feature. Chromium needs roughly **1 GB of
+RAM resident on its own**, so on a 512 MB Pi Zero 2 W it swaps continuously: the
+dashboard crawls and it drags the rest of Ragnar (scanning, wardriving, the web
+UI) down with it. Rather than ship a feature that only half works there, the
+kiosk is gated:
+
+| Board | Kiosk |
+|-------|-------|
+| Pi Zero / Pi Zero 2 W (512 MB) | **Not available** — card hidden, API refuses |
+| Any board < 2 GB RAM or < 2 cores | **Not available** |
+| Pi 4 / Pi 5 (2 GB+), mini-PC, x86 server | Available |
+
+The gate lives in `server_capabilities.py`
+(`KIOSK_MIN_RAM_GB = 2.0`, `KIOSK_MIN_CORES = 2`) and is enforced in three places:
+
+- **Web UI** — the *On-screen Display* card is hidden entirely on boards below
+  the bar (`/api/kiosk/status` returns `capable: false` plus a
+  `capability_reason`). The one exception: a box that already had a kiosk
+  installed before the gate existed still shows the card, with the reason and
+  the toggle left usable *to switch it off*.
+- **API** — `POST /api/config` with `kiosk_enabled: true` returns `400`, and
+  `POST /api/kiosk/repair` returns `403`, with the reason as the error text.
+- **Installer** — `scripts/install_kiosk.sh` exits `3` and explains why.
+
+If you want it anyway on an unsupported board, the installer can be forced:
+
+```bash
+sudo bash scripts/install_kiosk.sh --force
+```
+
+Expect the lag described above; the web UI will still not show the card, so
+manage it with `systemctl {start,stop} ragnar-kiosk` from the shell.
+
+Running headless on a Pi Zero 2 W? Nothing is lost — point a browser or phone at
+`http://<pi>:8000`, or use the e-Paper/LCD display, which costs almost no RAM.
+
 ## Enabling
 
-Turn on **On-screen Display** in the **Config** tab. Ragnar then:
+Turn on **On-screen Display** in the **Config** tab (visible only on supported
+hardware — see above). Ragnar then:
 
 1. Runs `scripts/install_kiosk.sh`, which auto-detects your setup and installs
    only what's missing.
@@ -27,10 +66,11 @@ live from the app config, so changing them only requires the kiosk to relaunch.
 
 ## Supported boards
 
-Tested and tuned for **Pi Zero 2 W, Pi 4, and Pi 5**. The wrapper adapts to the
+Tested and tuned for **Pi 4 and Pi 5** (2 GB and up). Pi Zero class boards are
+not supported — see the hardware requirement above. The wrapper adapts to the
 board at launch:
 
-- **Low-memory boards (≤ 1 GB, e.g. Pi Zero 2 W 512 MB):** applies Chromium
+- **Low-memory boards (≤ 1 GB, only reachable via `--force`):** applies Chromium
   low-end flags (`--enable-low-end-device-mode`, single renderer,
   `--disable-dev-shm-usage`) so it isn't OOM-killed to a black screen.
 - **Pi 5 / Bookworm service mode:** the installer pulls in `xserver-xorg-legacy`
@@ -75,8 +115,8 @@ background job was running, nothing reported an error, and the state never
 reached `active`/`installed`. Two things it is *not*:
 
 - **A slow first install is no longer this.** Enabling the kiosk for the first
-  time runs the installer, which apt-installs chromium — minutes on a Pi Zero
-  2 W. The UI now shows `Installing the kiosk (fetching chromium)…` with an
+  time runs the installer, which apt-installs chromium — minutes on a slow SD
+  card or link. The UI now shows `Installing the kiosk (fetching chromium)…` with an
   elapsed counter and waits, instead of timing out at ~25 s on a healthy job.
 - **An installer failure is no longer this either.** It now reports the actual
   error (e.g. `Installer failed: E: Unable to locate package chromium`). Note
@@ -158,9 +198,9 @@ uses `PAMName=login`, so logind moves the real work into the login session's own
 scope: `systemctl status` shows `Tasks: 0` and no browser, however healthy the
 kiosk is. That is normal and not a symptom. The doctor checks for the Chromium
 and X processes directly for exactly this reason — read those two lines, not the
-task count. On a 512 MB board (Pi Zero 2 W reports ~415 MB usable) a missing
-browser there is nearly always memory; confirm with
-`sudo dmesg | grep -i 'killed process'`.
+task count. On an under-spec board — one the gate would refuse and that was
+installed with `--force` — a missing browser is nearly always memory; confirm
+with `sudo dmesg | grep -i 'killed process'`.
 
 **"Cannot establish any listening sockets — Make sure an X server isn't already
 running"** means service mode is trying to start its own X on `:0` while a

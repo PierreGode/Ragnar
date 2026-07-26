@@ -24999,6 +24999,25 @@ function _setKioskMessage(text, kind) {
 async function loadKioskState() {
     try {
         const data = await fetchAPI('/api/kiosk/status');
+        // Hardware gate: the kiosk is a Ragnar Pi server feature. Chromium needs
+        // ~1GB resident, so on a 512MB Pi Zero 2 W the card is not shown at all —
+        // the backend refuses to enable it there anyway. The one exception is a
+        // box that already has a kiosk installed from before the gate existed:
+        // hiding the card there would leave no way to switch it off.
+        const card = document.getElementById('kiosk-card');
+        const incapable = data.capable === false;
+        const legacyInstall = incapable && (data.installed || data.enabled);
+        if (card) card.classList.toggle('hidden', incapable && !legacyInstall);
+        if (incapable) {
+            console.log('[Kiosk] unavailable on this hardware:', data.capability_reason);
+            if (!legacyInstall) return;
+            // Leave the toggle usable for turning it OFF only, and drop the
+            // Reinstall button — the API refuses it on this hardware.
+            const repairBtn = document.getElementById('kiosk-repair-btn');
+            if (repairBtn) repairBtn.classList.add('hidden');
+            _setKioskMessage((data.capability_reason || 'This board no longer supports the kiosk.') +
+                             ' Turn it off to remove it.', 'error');
+        }
         const enabledCb = document.getElementById('kiosk-enabled');
         const url = document.getElementById('kiosk-url');
         const rot = document.getElementById('kiosk-rotation');

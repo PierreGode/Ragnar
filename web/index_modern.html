@@ -5899,8 +5899,11 @@
                             </div>
                         </div>
 
-                        <!-- On-screen Kiosk Card -->
-                        <div class="glass rounded-lg p-4">
+                        <!-- On-screen Kiosk Card — Ragnar Pi server only.
+                             Hidden until /api/kiosk/status reports capable=true:
+                             Chromium needs ~1GB resident, which a 512MB Pi Zero 2 W
+                             cannot host without swapping the whole box to a crawl. -->
+                        <div id="kiosk-card" class="glass rounded-lg p-4 hidden">
                             <div class="flex items-center justify-between mb-3">
                                 <h4 class="font-medium">On-screen Display</h4>
                                 <label class="toggle-switch relative inline-flex items-center cursor-pointer">
@@ -5909,7 +5912,7 @@
                                 </label>
                             </div>
                             <div class="text-sm text-gray-400 mb-3">
-                                Show the Ragnar UI fullscreen on an HDMI/DSI display (e.g. Pi Flux). Auto-installs Chromium kiosk + minimal X on Pi OS Lite; idempotent.
+                                Show the Ragnar UI fullscreen on an HDMI/DSI display (e.g. Pi Flux). Auto-installs Chromium kiosk + minimal X on Pi OS Lite; idempotent. Ragnar Pi server only (2GB+ RAM).
                             </div>
                             <div id="kiosk-config" class="space-y-2 hidden">
                                 <div>
@@ -7058,7 +7061,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-ipintel"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-kiosk-server-only"></script>
 
 </body>
 </html>
