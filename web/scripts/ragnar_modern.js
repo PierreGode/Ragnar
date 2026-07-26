@@ -9110,6 +9110,10 @@ async function loadTabData(tabName) {
                 await refreshBluetoothStatus().catch(err => console.warn('Bluetooth refresh failed:', err));
             }
             break;
+        case 'mesh':
+            // Always refresh: the point of the tab is current peer state.
+            await refreshMesh(false);
+            break;
         case 'pentest':
             if (manualModeActive) {
                 await loadPentestData();
@@ -28856,3 +28860,377 @@ window.onMapAiToggleClick = onMapAiToggleClick;
 window.toggleSubnetPanel = toggleSubnetPanel;
 window.addScanSubnet = addScanSubnet;
 window.removeScanSubnet = removeScanSubnet;
+
+// ============================================================================
+// RAGNAR MESH
+// A mesh of peer Ragnars over Tailscale. There is no controller: this unit
+// publishes its own report and reads its neighbours', so every unit renders the
+// same view independently. Everything below the "Reported by the mesh" heading
+// is remote data — labelled as such on purpose, so an operator is never in
+// doubt about which box a number came from.
+// ============================================================================
+
+let meshRefreshInFlight = false;
+
+function meshFormatUptime(seconds) {
+    if (seconds === null || seconds === undefined) return '—';
+    const d = Math.floor(seconds / 86400);
+    const h = Math.floor((seconds % 86400) / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+}
+
+// Units are individuals, so the Viking name is the headline and the unit
+// number and site are the subtitle. A peer we could not reach has no name to
+// show — it never got to tell us — so fall back to what Tailscale knows.
+function meshUnitTitle(unit) {
+    return unit.viking_name || unit.label || unit.short_name || unit.hostname || 'unknown';
+}
+
+function meshUnitSubtitle(unit) {
+    const parts = [];
+    if (unit.unit_id) parts.push(`Unit ${String(unit.unit_id).padStart(2, '0')}`);
+    if (unit.label && unit.label !== unit.viking_name) parts.push(unit.label);
+    if (unit.ip) parts.push(unit.ip);
+    return parts.join(' · ');
+}
+
+const MESH_SEV_CLASS = {
+    critical: 'bg-red-600/30 text-red-300 border-red-700',
+    high: 'bg-orange-600/30 text-orange-300 border-orange-700',
+    medium: 'bg-amber-600/30 text-amber-300 border-amber-700',
+    low: 'bg-sky-600/30 text-sky-300 border-sky-700',
+    info: 'bg-slate-600/30 text-slate-300 border-slate-600'
+};
+
+function meshMetric(label, value, extraClass) {
+    return `<div class="text-center">
+        <p class="text-[10px] uppercase tracking-wider text-gray-500">${escapeHtml(label)}</p>
+        <p class="text-sm font-semibold ${extraClass || ''}">${escapeHtml(String(value))}</p>
+    </div>`;
+}
+
+function meshUnitCard(unit, isSelf) {
+    const health = unit.health || {};
+    // A unit can be "online" to Tailscale while Ragnar itself is dead. That
+    // distinction is the single most useful thing this view shows, so it gets
+    // its own state rather than being folded into offline.
+    const reachable = isSelf || health.reachable;
+    let state, dot, ring;
+    if (!unit.online) {
+        state = 'Offline'; dot = 'bg-gray-500'; ring = 'border-slate-700';
+    } else if (!reachable) {
+        state = 'Ragnar not answering'; dot = 'bg-amber-400'; ring = 'border-amber-700/60';
+    } else {
+        state = 'Online'; dot = 'bg-green-400'; ring = 'border-slate-700';
+    }
+
+    const worst = (health.watchtower || {}).worst;
+    const sevBadge = worst
+        ? `<span class="text-[10px] px-2 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>`
+        : '';
+
+    const warnings = [];
+    if (unit.key_state && unit.key_state !== 'ok') {
+        warnings.push(`<p class="text-[11px] text-amber-300 mt-2">⚠ ${escapeHtml(unit.key_message || '')}</p>`);
+    }
+    if ((health.power || {}).undervoltage) {
+        warnings.push(`<p class="text-[11px] text-red-300 mt-1">⚡ Undervoltage detected — check the power supply.</p>`);
+    }
+
+    let body;
+    if (reachable) {
+        const inc = health.incidents || {};
+        body = `<div class="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-700/60">
+            ${meshMetric('CPU', health.cpu_percent !== undefined ? health.cpu_percent + '%' : '—')}
+            ${meshMetric('Mem', health.memory_percent !== undefined ? health.memory_percent + '%' : '—')}
+            ${meshMetric('Disk', health.disk_percent !== undefined ? health.disk_percent + '%' : '—')}
+            ${meshMetric('Up', meshFormatUptime(health.uptime_s))}
+        </div>
+        <div class="grid grid-cols-2 gap-2 mt-2">
+            ${meshMetric('Alerts', (health.watchtower || {}).total ?? '—')}
+            ${meshMetric('Incidents', inc.total ?? '—')}
+        </div>`;
+    } else if (unit.online) {
+        body = `<p class="text-xs text-amber-300/80 mt-3 pt-3 border-t border-slate-700/60">
+            Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.
+            The box has power and network — the application is what is down.
+        </p>`;
+    } else {
+        body = `<p class="text-xs text-gray-500 mt-3 pt-3 border-t border-slate-700/60">
+            Last seen ${unit.last_seen ? escapeHtml(new Date(unit.last_seen).toLocaleString()) : 'unknown'}.
+        </p>`;
+    }
+
+    const path = unit.online && !isSelf
+        ? `<span class="text-[10px] text-gray-500">${unit.direct ? 'direct' : 'relay' + (unit.relay ? ' · ' + escapeHtml(unit.relay) : '')}</span>`
+        : '';
+
+    return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
+        <div class="flex items-start justify-between gap-2">
+            <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full ${dot} flex-shrink-0"></span>
+                    <h4 class="font-semibold truncate">${escapeHtml(meshUnitTitle(unit))}</h4>
+                </div>
+                <p class="text-[11px] text-gray-500 mt-0.5 font-mono truncate">${escapeHtml(meshUnitSubtitle(unit))}</p>
+            </div>
+            <div class="text-right flex-shrink-0">
+                ${sevBadge}
+                <p class="text-[10px] text-gray-500 mt-1">${escapeHtml(state)}</p>
+                ${path}
+            </div>
+        </div>
+        ${body}
+        ${warnings.join('')}
+    </div>`;
+}
+
+function meshWarning(text, tone) {
+    const cls = tone === 'error'
+        ? 'bg-red-950/40 border-red-800 text-red-200'
+        : 'bg-amber-950/30 border-amber-800 text-amber-200';
+    return `<div class="rounded-lg border ${cls} px-4 py-2 text-sm">${text}</div>`;
+}
+
+function renderMesh(data) {
+    const pill = document.getElementById('mesh-backend-pill');
+    const setup = document.getElementById('mesh-setup');
+    const selfWrap = document.getElementById('mesh-self-wrap');
+    const peersWrap = document.getElementById('mesh-peers-wrap');
+    const controls = document.getElementById('mesh-controls');
+    const summary = document.getElementById('mesh-summary');
+    const warnings = document.getElementById('mesh-warnings');
+    if (!pill) return;
+
+    const joined = data.available;
+    pill.textContent = data.installed
+        ? (joined ? 'Connected' : (data.backend_state || 'Not connected'))
+        : 'Tailscale not installed';
+    pill.className = 'text-xs px-2 py-1 rounded ' + (joined
+        ? 'bg-green-700/40 text-green-300'
+        : 'bg-amber-700/40 text-amber-300');
+
+    // Onboarding shows until this unit is actually on a tailnet.
+    setup.classList.toggle('hidden', joined);
+    if (!joined) {
+        const reason = document.getElementById('mesh-setup-reason');
+        reason.textContent = data.reason || 'This unit is not part of a mesh yet.';
+        if (!data.installed) {
+            reason.textContent += ' Install it with: curl -fsSL https://tailscale.com/install.sh | sh';
+        }
+        // Show the name this unit already has rather than an empty box — the
+        // point is that it is named by default, not that naming is a chore.
+        const vikingField = document.getElementById('mesh-viking-input');
+        if (vikingField && !vikingField.value && data.viking_name) {
+            vikingField.value = data.viking_name;
+        }
+    }
+
+    selfWrap.classList.toggle('hidden', !data.self);
+    peersWrap.classList.toggle('hidden', !joined);
+    controls.classList.toggle('hidden', !joined);
+    summary.classList.toggle('hidden', !joined);
+
+    const notes = [];
+    (data.summary?.duplicate_unit_ids || []).forEach(id => {
+        notes.push(meshWarning(
+            `Two units are both numbered <strong>Unit ${String(id).padStart(2, '0')}</strong>. ` +
+            `Every report naming that number is ambiguous — renumber one of them.`, 'error'));
+    });
+    (data.summary?.duplicate_names || []).forEach(name => {
+        notes.push(meshWarning(
+            `Two units both answer to <strong>${escapeHtml(name)}</strong>. ` +
+            `Names are derived independently with no central allocator, so this ` +
+            `can happen — rename one in Config → Ragnar Mesh.`));
+    });
+    if (data.summary?.unnumbered_units) {
+        notes.push(meshWarning(
+            `${data.summary.unnumbered_units} reachable unit(s) have no unit number assigned.`));
+    }
+    if (data.self && data.self.key_state && data.self.key_state !== 'ok') {
+        notes.push(meshWarning(`This unit: ${escapeHtml(data.self.key_message || '')}`,
+            data.self.key_state === 'expired' ? 'error' : 'warn'));
+    }
+    warnings.innerHTML = notes.join('');
+
+    if (data.summary) {
+        document.getElementById('mesh-stat-total').textContent = data.summary.ragnar_nodes ?? 0;
+        document.getElementById('mesh-stat-online').textContent = (data.summary.online ?? 0) + (data.self ? 1 : 0);
+        document.getElementById('mesh-stat-offline').textContent = data.summary.offline ?? 0;
+        document.getElementById('mesh-stat-degraded').textContent = data.summary.degraded ?? 0;
+    }
+
+    if (data.self) {
+        document.getElementById('mesh-self-card').innerHTML = meshUnitCard(data.self, true);
+    }
+
+    const ragnarPeers = (data.peers || []).filter(p => p.is_ragnar);
+    const cards = document.getElementById('mesh-peer-cards');
+    if (!ragnarPeers.length) {
+        cards.innerHTML = `<p class="text-sm text-gray-500 col-span-full">
+            No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
+            <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
+        </p>`;
+    } else {
+        cards.innerHTML = ragnarPeers.map(p => meshUnitCard(p, false)).join('');
+    }
+
+    renderPiConnect(data.pi_connect || {});
+
+    const lastPoll = document.getElementById('mesh-last-poll');
+    lastPoll.textContent = data.last_poll
+        ? `Peer data last refreshed ${new Date(data.last_poll * 1000).toLocaleTimeString()}.`
+        : 'Peer data has not been polled yet.';
+}
+
+// Pi Connect is a second way in that shares nothing with Tailscale — different
+// vendor, transport and credentials. Its value is precisely that it fails
+// independently, so the card states plainly whether it is actually usable
+// rather than merely installed.
+function renderPiConnect(pc) {
+    const el = document.getElementById('mesh-piconnect');
+    if (!el) return;
+
+    let dot, headline, detail;
+    if (!pc.installed) {
+        dot = 'bg-gray-500';
+        headline = 'Not installed';
+        detail = 'Install with <code class="text-gray-400">sudo apt install rpi-connect</code>, ' +
+                 'then <code class="text-gray-400">rpi-connect on</code> and sign in.';
+    } else if (pc.signed_in || pc.running) {
+        dot = 'bg-green-400';
+        headline = 'Active';
+        detail = 'A second way in is available at ' +
+                 '<a href="https://connect.raspberrypi.com" target="_blank" rel="noopener" ' +
+                 'class="text-Ragnar-400 hover:underline">connect.raspberrypi.com</a>, ' +
+                 'independent of Tailscale.';
+    } else {
+        dot = 'bg-amber-400';
+        headline = 'Installed but not signed in';
+        detail = 'Run <code class="text-gray-400">rpi-connect on</code> on this unit and ' +
+                 'complete the browser sign-in. Until then it is not a usable fallback.';
+    }
+
+    el.innerHTML = `<div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                    <span class="w-2 h-2 rounded-full ${dot} flex-shrink-0"></span>
+                    <h4 class="font-medium">Raspberry Pi Connect — ${escapeHtml(headline)}</h4>
+                </div>
+                <p class="text-xs text-gray-400 mt-2">${detail}</p>
+                ${pc.detail ? `<p class="text-[11px] text-gray-600 mt-1 font-mono truncate">${escapeHtml(pc.detail)}</p>` : ''}
+            </div>
+        </div>`;
+}
+
+async function refreshMesh(force) {
+    if (meshRefreshInFlight) return;
+    meshRefreshInFlight = true;
+    try {
+        const resp = await fetch('/api/mesh/status' + (force ? '?refresh=1' : ''));
+        const data = await resp.json();
+        renderMesh(data);
+    } catch (err) {
+        console.warn('Mesh refresh failed:', err);
+    } finally {
+        meshRefreshInFlight = false;
+    }
+}
+
+async function meshJoin() {
+    const btn = document.getElementById('mesh-join-btn');
+    const out = document.getElementById('mesh-join-result');
+    const authKey = document.getElementById('mesh-authkey-input').value.trim();
+    const unitId = parseInt(document.getElementById('mesh-unit-id-input').value, 10);
+    const label = document.getElementById('mesh-label-input').value.trim();
+    const viking = document.getElementById('mesh-viking-input').value.trim();
+    const routes = document.getElementById('mesh-routes-input').value
+        .split(',').map(r => r.trim()).filter(Boolean);
+
+    if (!authKey) {
+        out.innerHTML = '<span class="text-red-400">An auth key is required.</span>';
+        return;
+    }
+    btn.disabled = true;
+    out.innerHTML = '<span class="text-gray-400">Joining…</span>';
+
+    try {
+        // The unit number and label are this unit's own identity, so they are
+        // saved regardless of whether the tailnet join then succeeds.
+        const cfg = {};
+        if (Number.isInteger(unitId) && unitId > 0) cfg.mesh_unit_id = unitId;
+        if (label) cfg.mesh_site_label = label;
+        if (viking) cfg.mesh_viking_name = viking;
+        if (Object.keys(cfg).length) {
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(cfg)
+            });
+        }
+
+        const resp = await fetch('/api/mesh/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                auth_key: authKey,
+                hostname: label ? label.toLowerCase().replace(/[^a-z0-9-]+/g, '-') : '',
+                advertise_routes: routes,
+                enable_ssh: document.getElementById('mesh-ssh-input').checked
+            })
+        });
+        const data = await resp.json();
+        out.innerHTML = data.success
+            ? `<span class="text-green-400">${escapeHtml(data.message)}</span>`
+            : `<span class="text-red-400">${escapeHtml(data.message || 'Join failed.')}</span>`;
+        if (data.success) {
+            document.getElementById('mesh-authkey-input').value = '';
+            showNotification('This unit joined the mesh', 'success');
+            await refreshMesh(true);
+        }
+    } catch (err) {
+        out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function meshPost(path, body, okMessage) {
+    const out = document.getElementById('mesh-control-result');
+    out.innerHTML = '<span class="text-gray-400">Working…</span>';
+    try {
+        const resp = await fetch(path, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {})
+        });
+        const data = await resp.json();
+        out.innerHTML = data.success
+            ? `<span class="text-green-400">${escapeHtml(data.message || okMessage)}</span>`
+            : `<span class="text-red-400">${escapeHtml(data.message || 'Failed.')}</span>`;
+        await refreshMesh(true);
+        return data.success;
+    } catch (err) {
+        out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
+        return false;
+    }
+}
+
+function meshServe(enable) {
+    return meshPost('/api/mesh/serve', { enable }, enable ? 'Published.' : 'Stopped.');
+}
+
+function meshLeave() {
+    if (!confirm('Log this unit out of the tailnet? It will drop off the mesh until it rejoins with a new auth key.')) {
+        return;
+    }
+    return meshPost('/api/mesh/leave', {}, 'Logged out.');
+}
+
+window.refreshMesh = refreshMesh;
+window.meshJoin = meshJoin;
+window.meshServe = meshServe;
+window.meshLeave = meshLeave;

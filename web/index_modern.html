@@ -708,6 +708,9 @@
                     <button onclick="showTab('connect')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="connect">
                         Connect
                     </button>
+                    <button onclick="showTab('mesh')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="mesh">
+                        Ragnar Mesh
+                    </button>
                     <button onclick="showTab('terminal')" class="terminal-nav hidden nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="terminal">
                         Terminal
                     </button>
@@ -750,6 +753,7 @@
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
                 <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
                 <button onclick="showTab('connect')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Connect</button>
+                <button onclick="showTab('mesh')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Ragnar Mesh</button>
                 <button onclick="showTab('terminal')" class="terminal-nav hidden block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700" data-tab="terminal">Terminal</button>
                 <button onclick="showTab('config')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Config</button>
                 <button id="mobile-logout-btn" onclick="handleLogout()" class="hidden block w-full text-left px-3 py-2 rounded-lg hover:bg-red-700 bg-red-600/30 text-red-300">Logout</button>
@@ -2915,7 +2919,158 @@
             </div>
 
         </div>
-        
+
+        <!-- Ragnar Mesh Tab -->
+        <div id="mesh-tab" class="tab-content hidden">
+            <div class="glass rounded-xl p-6 mb-6">
+                <div class="stackable-row mb-4">
+                    <div>
+                        <h2 class="text-2xl font-bold">Ragnar Mesh</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Every Ragnar is a peer. Each unit publishes its own report and reads
+                            its neighbours' over Tailscale — there is no controller to lose.
+                        </p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <span id="mesh-backend-pill" class="text-xs px-2 py-1 rounded bg-gray-700 text-gray-300">Checking…</span>
+                        <button onclick="refreshMesh(true)" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
+                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                            </svg>
+                            Refresh
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Problems the mesh detects about itself -->
+                <div id="mesh-warnings" class="space-y-2 mb-4"></div>
+
+                <!-- Summary strip -->
+                <div id="mesh-summary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2 hidden">
+                    <div class="glass rounded-lg p-3 text-center">
+                        <p class="text-xs uppercase tracking-wider text-gray-400">Units</p>
+                        <p id="mesh-stat-total" class="text-2xl font-bold">–</p>
+                    </div>
+                    <div class="glass rounded-lg p-3 text-center">
+                        <p class="text-xs uppercase tracking-wider text-gray-400">Online</p>
+                        <p id="mesh-stat-online" class="text-2xl font-bold text-green-400">–</p>
+                    </div>
+                    <div class="glass rounded-lg p-3 text-center">
+                        <p class="text-xs uppercase tracking-wider text-gray-400">Offline</p>
+                        <p id="mesh-stat-offline" class="text-2xl font-bold text-gray-400">–</p>
+                    </div>
+                    <div class="glass rounded-lg p-3 text-center" title="Reachable over Tailscale but Ragnar is not answering">
+                        <p class="text-xs uppercase tracking-wider text-gray-400">Degraded</p>
+                        <p id="mesh-stat-degraded" class="text-2xl font-bold text-amber-400">–</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Onboarding: shown until this unit has joined a tailnet -->
+            <div id="mesh-setup" class="glass rounded-xl p-6 mb-6 hidden">
+                <h3 class="text-xl font-semibold mb-2 text-Ragnar-400">Join this unit to the mesh</h3>
+                <p id="mesh-setup-reason" class="text-sm text-gray-400 mb-4"></p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Unit number</label>
+                        <input id="mesh-unit-id-input" type="number" min="1" max="99" placeholder="3"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                        <p class="text-[11px] text-gray-500 mt-1">How operators refer to this box. Must be unique in the mesh.</p>
+                    </div>
+                    <div>
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Site label</label>
+                        <input id="mesh-label-input" type="text" placeholder="Jersey DC"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                        <p class="text-[11px] text-gray-500 mt-1">Where the box physically is.</p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Viking name</label>
+                        <input id="mesh-viking-input" type="text"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            This unit's name in the army. Derived from the machine itself, so it already
+                            has one and keeps it across reinstalls — change it if you'd rather choose.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
+                        <input id="mesh-authkey-input" type="password" placeholder="tskey-auth-…" autocomplete="off"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            Generate a <strong>tagged, pre-authorized</strong> key in the Tailscale admin console.
+                            Tagging is what stops the key expiring — an expired key on a remote box needs someone on site.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Advertise LAN subnets <span class="text-gray-600 normal-case">(optional)</span></label>
+                        <input id="mesh-routes-input" type="text" placeholder="10.20.0.0/24, 192.168.50.0/24"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            Makes this unit a way into its whole local network. Routes still need approving
+                            in the admin console.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2 flex flex-wrap items-center gap-4">
+                        <label class="flex items-center gap-2 text-sm text-gray-300">
+                            <input id="mesh-ssh-input" type="checkbox" checked class="rounded bg-slate-900 border-slate-700">
+                            Enable Tailscale SSH (backup way in when the web UI is wedged)
+                        </label>
+                    </div>
+                </div>
+
+                <button onclick="meshJoin()" id="mesh-join-btn"
+                        class="mt-4 w-full md:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-6 py-2 rounded-lg transition-colors">
+                    Join mesh
+                </button>
+                <div id="mesh-join-result" class="text-sm mt-3"></div>
+            </div>
+
+            <!-- This unit -->
+            <div id="mesh-self-wrap" class="mb-6 hidden">
+                <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">This unit</h3>
+                <div id="mesh-self-card"></div>
+                <!-- A backup way in that fails independently of Tailscale. -->
+                <div id="mesh-piconnect" class="glass rounded-lg p-4 mt-3"></div>
+            </div>
+
+            <!-- Peer units -->
+            <div id="mesh-peers-wrap" class="hidden">
+                <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">
+                    Reported by the mesh
+                    <span class="normal-case tracking-normal text-gray-500">— live from peer units over Tailscale</span>
+                </h3>
+                <div id="mesh-peer-cards" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+                <p id="mesh-last-poll" class="text-xs text-gray-500 mt-3"></p>
+            </div>
+
+            <!-- Node controls, available once joined -->
+            <div id="mesh-controls" class="glass rounded-xl p-6 mt-6 hidden">
+                <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">This unit's mesh controls</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="glass rounded-lg p-4">
+                        <h4 class="font-medium mb-1">Publish web UI over HTTPS</h4>
+                        <p class="text-xs text-gray-400 mb-3">
+                            Serves this UI on the unit's MagicDNS name with a real certificate — tailnet only,
+                            never the public internet.
+                        </p>
+                        <div class="flex gap-2">
+                            <button onclick="meshServe(true)" class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors">Publish</button>
+                            <button onclick="meshServe(false)" class="flex-1 bg-slate-600 hover:bg-slate-500 text-white py-2 px-3 rounded text-sm transition-colors">Stop</button>
+                        </div>
+                    </div>
+                    <div class="glass rounded-lg p-4">
+                        <h4 class="font-medium mb-1">Leave the mesh</h4>
+                        <p class="text-xs text-gray-400 mb-3">
+                            Logs this unit out of the tailnet. It stays installed and can rejoin with a new key.
+                        </p>
+                        <button onclick="meshLeave()" class="w-full bg-red-600/70 hover:bg-red-600 text-white py-2 px-3 rounded text-sm transition-colors">Log out of tailnet</button>
+                    </div>
+                </div>
+                <div id="mesh-control-result" class="text-sm mt-3"></div>
+            </div>
+        </div>
+
         <!-- Pentest Tab -->
         <div id="pentest-tab" class="tab-content hidden">
             <div class="glass rounded-xl p-6 mb-6 border border-red-800 bg-red-950/30">
@@ -7060,7 +7215,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-traffic-any-board"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh2"></script>
 
 </body>
 </html>

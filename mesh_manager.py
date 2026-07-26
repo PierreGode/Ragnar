@@ -1,0 +1,940 @@
+#!/usr/bin/env python3
+"""mesh_manager.py — Tailscale-backed mesh layer for Ragnar.
+
+Ragnar has always been a single-box tool: one Pi, one LAN, one web UI. That
+works until the box you care about is in someone else's data centre and you are
+not. This module makes a *mesh* of Ragnars addressable — every node reachable
+by a stable private IP no matter what NAT, CGNAT or firewall sits in front of
+it — and gives the local box a way to ask its peers how they are doing.
+
+The transport is Tailscale (WireGuard). We deliberately do not reinvent it:
+Tailscale already solves NAT traversal, key distribution, device authorization
+and per-user ACLs, and it already ships an admin console that answers "is the
+Jersey box up". What Tailscale does *not* know is anything about Ragnar — that
+the box in Jersey saw a rogue AP, that its GPS lost fix, that its disk is 94%
+full. That half is what this module adds.
+
+Design notes
+------------
+* **Two ways to talk to tailscaled, in preference order.** The LocalAPI over the
+  ``/var/run/tailscale/tailscaled.sock`` unix socket is a single round trip with
+  no process spawn, which matters because ``whois`` sits on the web app's
+  authentication hot path. The ``tailscale`` CLI is the fallback for when the
+  socket has moved, permissions differ, or a future release changes the socket
+  contract. Both are wrapped so callers never care which answered.
+
+* **Identity comes from WireGuard, not from a shared secret.** Node-to-node API
+  calls are authenticated by asking tailscaled who owns the source IP
+  (``whois``) and checking the answer carries the mesh tag. There is no bearer
+  token to mint, ship, rotate or leak: a caller either holds a WireGuard private
+  key the coordination server vouches for, or it does not reach us at all. See
+  ``caller_is_mesh_peer``.
+
+* **Tag-owned, not user-owned.** Mesh nodes must be tagged (``tag:ragnar-mesh``
+  by default). Tagging is what makes a node's key non-expiring — a user-owned
+  node's key dies on the tailnet's expiry schedule (180 days by default) and the
+  box silently drops off the tailnet with nobody on site to re-authenticate it.
+  For a remote deployment that is the difference between a device and a brick.
+  ``node_key_health`` surfaces this before it bites.
+
+* **Everything degrades, nothing crashes.** Tailscale is optional. Every entry
+  point returns a structured "not available" result rather than raising when the
+  binary is missing, the daemon is down or the node is logged out, because
+  Ragnar must keep working on a box that never joins a tailnet.
+
+Self-test (no root, no tailnet, no network): ``python3 mesh_manager.py --self-test``.
+"""
+
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+MODULE = 'mesh'
+
+# Where tailscaled listens for LocalAPI calls on Linux. Tailscale's own client
+# uses this path; the Host header value is a fixed sentinel, not a real name.
+LOCALAPI_SOCKET = '/var/run/tailscale/tailscaled.sock'
+LOCALAPI_HOST = 'local-tailscaled.sock'
+
+# Default tag every Ragnar mesh node carries. Overridable via config so an
+# operator running Ragnar inside a larger tailnet can scope it to their own tag.
+DEFAULT_MESH_TAG = 'tag:ragnar-mesh'
+
+# Port a peer Ragnar serves its web API on. Mesh polling assumes the mesh is
+# homogeneous; a node on a different port can be overridden per-node in config.
+DEFAULT_NODE_PORT = 8000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Viking names
+# ─────────────────────────────────────────────────────────────────────────────
+# Units are not clones. A mesh of boxes all called "raspberry" is one an
+# operator cannot reason about out loud — every incident report needs a name
+# nobody has to look up, the way a Flipper is a Flipper and not a serial number.
+#
+# The name is derived from the machine's own identity, so a unit is born with
+# one: no configuration step, no central allocator, and the same box keeps the
+# same name across reinstalls. Two lists rather than one because 48 names alone
+# would collide inside a mesh of a dozen units often enough to be annoying —
+# 48 x 24 gives 1,152 combinations, which pushes a first collision out past any
+# mesh anyone is going to run.
+VIKING_NAMES = (
+    'Ragnar', 'Bjorn', 'Ivar', 'Ubbe', 'Sigurd', 'Halfdan', 'Floki', 'Rollo',
+    'Erik', 'Leif', 'Harald', 'Gunnar', 'Knut', 'Olaf', 'Sven', 'Torstein',
+    'Ulf', 'Arne', 'Egil', 'Hakon', 'Vali', 'Orm', 'Trygve', 'Steinar',
+    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
+    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
+    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
+    'Nanna', 'Signy',
+)
+
+VIKING_EPITHETS = (
+    'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
+    'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
+    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
+    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+)
+
+
+def machine_seed():
+    """A stable, unique-per-box seed for name derivation.
+
+    /etc/machine-id is the right source: unique per installation, stable across
+    reboots, and present on every systemd Linux. The fallbacks matter for the
+    boards Ragnar actually runs on — a Pi's CPU serial survives an OS reimage,
+    and the hostname is a last resort that at least differs between machines.
+    """
+    for path in ('/etc/machine-id', '/var/lib/dbus/machine-id'):
+        try:
+            with open(path, 'r') as fh:
+                value = fh.read().strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    try:
+        with open('/proc/cpuinfo', 'r') as fh:
+            for line in fh:
+                if line.lower().startswith('serial'):
+                    serial = line.split(':', 1)[1].strip()
+                    if serial and serial.strip('0'):
+                        return serial
+    except OSError:
+        pass
+    return socket.gethostname()
+
+
+def derive_viking_name(seed=None):
+    """Deterministically turn a machine seed into 'Bjorn Ironside'.
+
+    Same seed always yields the same name — a unit that is reinstalled comes
+    back as itself rather than as a stranger.
+    """
+    import hashlib
+    if seed is None:
+        seed = machine_seed()
+    digest = hashlib.sha256(str(seed).encode('utf-8')).digest()
+    # Two independent slices so the given name and the epithet vary
+    # independently; deriving both from one number would correlate them and
+    # collapse the effective range back towards 48.
+    name = VIKING_NAMES[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES)]
+    epithet = VIKING_EPITHETS[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS)]
+    return f'{name} {epithet}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Raspberry Pi Connect
+# ─────────────────────────────────────────────────────────────────────────────
+# An access path that shares nothing with Tailscale: different vendor, different
+# transport, different credentials. That independence is the whole value — if a
+# tailnet is misconfigured, a key expires or tailscaled will not start, Pi
+# Connect is still a way to reach a box that would otherwise need a site visit.
+# Ragnar only ever *reports* its state; enabling it is the operator's call and
+# `rpi-connect` requires an interactive browser sign-in that cannot be automated
+# from here anyway.
+
+def pi_connect_status():
+    """Report whether Raspberry Pi Connect is available as a backup way in.
+
+    Returns {'installed', 'running', 'signed_in', 'detail'}. Never raises: this
+    is a nice-to-have on non-Pi hardware where the tool does not exist.
+    """
+    result = {'installed': False, 'running': False, 'signed_in': False,
+              'detail': 'Raspberry Pi Connect is not installed.'}
+    exe = shutil.which('rpi-connect')
+    if not exe:
+        return result
+    result['installed'] = True
+
+    try:
+        proc = subprocess.run([exe, 'status'], capture_output=True, text=True,
+                              timeout=8)
+        out = ((proc.stdout or '') + (proc.stderr or '')).strip()
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        result['detail'] = f'Installed, but status could not be read ({exc}).'
+        return result
+
+    lowered = out.lower()
+    result['detail'] = out.splitlines()[0].strip() if out else 'No status reported.'
+    if 'not running' in lowered or 'not signed in' in lowered:
+        return result
+    result['running'] = 'running' in lowered or 'signed in' in lowered
+    result['signed_in'] = 'signed in' in lowered and 'not signed in' not in lowered
+    return result
+
+# `tailscale status` is cheap but not free, and the UI polls. 5s is short enough
+# that an operator clicking Refresh sees current truth, long enough that a busy
+# dashboard does not fork a process per widget.
+STATUS_TTL = 5.0
+
+# whois sits on the auth path — one lookup per request would be a process spawn
+# per request in the CLI fallback. Peer identity changes only when a node is
+# re-tagged or re-keyed, so a minute of staleness is harmless.
+WHOIS_TTL = 60.0
+
+# A node key inside this many days of expiry is worth shouting about, because
+# re-authenticating a remote node means sending a human to it.
+KEY_EXPIRY_WARN_DAYS = 14
+
+_status_cache = {'at': 0.0, 'data': None}
+_whois_cache = {}
+_cache_lock = threading.Lock()
+
+
+class MeshUnavailable(Exception):
+    """Tailscale is not installed, not running, or not logged in."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Transport: talking to tailscaled
+# ─────────────────────────────────────────────────────────────────────────────
+
+def binary_path():
+    """Absolute path to the `tailscale` CLI, or '' when it is not installed."""
+    return shutil.which('tailscale') or ''
+
+
+def installed():
+    """True when the Tailscale client binary is present on this box."""
+    return bool(binary_path())
+
+
+def socket_present():
+    """True when tailscaled's LocalAPI socket exists (daemon has run)."""
+    try:
+        return os.path.exists(LOCALAPI_SOCKET)
+    except OSError:
+        return False
+
+
+def _run(args, timeout=15):
+    """Run the tailscale CLI. Returns (rc, stdout, stderr); rc 127 if missing."""
+    exe = binary_path()
+    if not exe:
+        return 127, '', 'tailscale is not installed'
+    try:
+        proc = subprocess.run([exe] + list(args), capture_output=True,
+                              text=True, timeout=timeout)
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        return 124, '', f'tailscale {" ".join(args)} timed out after {timeout}s'
+    except OSError as exc:
+        return 126, '', str(exc)
+
+
+def local_api_get(path, timeout=5):
+    """GET a LocalAPI path over the unix socket. Returns parsed JSON or None.
+
+    Speaks just enough HTTP/1.1 to make one request and read one response —
+    pulling in a full HTTP-over-UDS client for this would be a dependency for
+    three lines of framing. Returns None on any failure so callers fall through
+    to the CLI rather than dealing with transport errors.
+    """
+    if not socket_present():
+        return None
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(LOCALAPI_SOCKET)
+        request = (
+            f'GET {path} HTTP/1.1\r\n'
+            f'Host: {LOCALAPI_HOST}\r\n'
+            # tailscaled rejects browser-originated calls; this header marks the
+            # request as a deliberate LocalAPI client rather than a stray fetch.
+            'Sec-Tailscale: localapi\r\n'
+            'Connection: close\r\n\r\n'
+        )
+        sock.sendall(request.encode('ascii'))
+        chunks = []
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b''.join(chunks)
+    except (OSError, socket.timeout):
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    head, _, body = raw.partition(b'\r\n\r\n')
+    status_line = head.split(b'\r\n', 1)[0] if head else b''
+    if b' 200' not in status_line:
+        return None
+    try:
+        return json.loads(body.decode('utf-8'))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Status
+# ─────────────────────────────────────────────────────────────────────────────
+
+def raw_status(force=False):
+    """Raw `tailscale status --json` as a dict, cached for STATUS_TTL seconds.
+
+    Returns None when Tailscale is unavailable. LocalAPI first, CLI second.
+    """
+    now = time.time()
+    with _cache_lock:
+        if not force and _status_cache['data'] is not None:
+            if now - _status_cache['at'] < STATUS_TTL:
+                return _status_cache['data']
+
+    data = local_api_get('/localapi/v0/status')
+    if data is None:
+        rc, out, _ = _run(['status', '--json'], timeout=10)
+        if rc == 0 and out.strip():
+            try:
+                data = json.loads(out)
+            except ValueError:
+                data = None
+
+    with _cache_lock:
+        _status_cache['at'] = now
+        _status_cache['data'] = data
+    return data
+
+
+def invalidate_cache():
+    """Drop cached status/whois. Call after any state-changing operation."""
+    with _cache_lock:
+        _status_cache['at'] = 0.0
+        _status_cache['data'] = None
+        _whois_cache.clear()
+
+
+def _primary_ip(ips):
+    """Pick the IPv4 tailnet address from a node's address list."""
+    for addr in ips or []:
+        candidate = addr.split('/')[0]
+        if ':' not in candidate:
+            return candidate
+    return (ips[0].split('/')[0] if ips else '')
+
+
+def _days_until(timestamp):
+    """Whole days from now until an RFC3339 timestamp; None if unparseable.
+
+    Tailscale uses the zero time ("0001-01-01T00:00:00Z") to mean "never", which
+    must not be reported as an expiry 700,000 days in the past.
+    """
+    if not timestamp or timestamp.startswith('0001-01-01'):
+        return None
+    # Python's fromisoformat did not accept a trailing 'Z' before 3.11, and
+    # tailscaled emits sub-second precision of varying length.
+    text = timestamp.replace('Z', '+00:00')
+    text = re.sub(r'\.(\d{6})\d+', r'.\1', text)
+    try:
+        import datetime
+        when = datetime.datetime.fromisoformat(text)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=datetime.timezone.utc)
+        delta = when - datetime.datetime.now(datetime.timezone.utc)
+        return int(delta.total_seconds() // 86400)
+    except (ValueError, ImportError):
+        return None
+
+
+def normalize_node(raw, is_self=False, magic_dns_suffix=''):
+    """Flatten one `tailscale status` node record into Ragnar's node shape.
+
+    The status JSON is verbose and version-sensitive; everything downstream
+    (routes, UI, poller) speaks this smaller, stable dict instead.
+    """
+    ips = raw.get('TailscaleIPs') or []
+    dns_name = (raw.get('DNSName') or '').rstrip('.')
+    tags = list(raw.get('Tags') or [])
+    key_expiry = raw.get('KeyExpiry') or ''
+    expiry_days = _days_until(key_expiry)
+
+    return {
+        'id': raw.get('ID') or '',
+        'hostname': raw.get('HostName') or '',
+        'dns_name': dns_name,
+        # Short name is what an operator actually recognises in a list.
+        'short_name': dns_name.split('.')[0] if dns_name else raw.get('HostName', ''),
+        'os': raw.get('OS') or '',
+        'ips': [ip.split('/')[0] for ip in ips],
+        'ip': _primary_ip(ips),
+        'online': bool(raw.get('Online')),
+        'active': bool(raw.get('Active')),
+        'tags': tags,
+        'exit_node': bool(raw.get('ExitNode')),
+        'exit_node_option': bool(raw.get('ExitNodeOption')),
+        'relay': raw.get('Relay') or '',
+        # Direct connection vs DERP relay: CurAddr is set only when the peers
+        # found a direct path. Useful when a remote node feels slow.
+        'direct': bool(raw.get('CurAddr')),
+        'rx_bytes': raw.get('RxBytes') or 0,
+        'tx_bytes': raw.get('TxBytes') or 0,
+        'last_seen': raw.get('LastSeen') or '',
+        'created': raw.get('Created') or '',
+        'key_expiry': key_expiry,
+        'key_expiry_days': expiry_days,
+        # A tagged node's key never expires — that is the whole point of tagging
+        # a remote deployment, so surface the distinction explicitly.
+        'key_expires': bool(key_expiry) and not key_expiry.startswith('0001-01-01'),
+        'tagged': bool(tags),
+        'is_self': is_self,
+        'magic_dns_suffix': magic_dns_suffix,
+    }
+
+
+def status():
+    """Mesh-level view of the tailnet.
+
+    Always returns a dict — `available` is False with a human `reason` when
+    Tailscale cannot answer, so callers never branch on exceptions.
+    """
+    if not installed():
+        return {'available': False, 'installed': False, 'reason':
+                'Tailscale is not installed on this node.',
+                'backend_state': '', 'self': None, 'peers': []}
+
+    data = raw_status()
+    if data is None:
+        return {'available': False, 'installed': True, 'reason':
+                'tailscaled is not responding — the service may be stopped.',
+                'backend_state': '', 'self': None, 'peers': []}
+
+    backend = data.get('BackendState') or ''
+    suffix = data.get('MagicDNSSuffix') or ''
+    self_raw = data.get('Self') or {}
+    self_node = normalize_node(self_raw, is_self=True, magic_dns_suffix=suffix) if self_raw else None
+
+    peers = []
+    for raw in (data.get('Peer') or {}).values():
+        peers.append(normalize_node(raw, magic_dns_suffix=suffix))
+    peers.sort(key=lambda n: (not n['online'], n['short_name'].lower()))
+
+    # "Running" is the only state where traffic flows. NeedsLogin/NeedsMachineAuth
+    # are the two an operator can actually act on, so pass the state through.
+    return {
+        'available': backend == 'Running',
+        'installed': True,
+        'reason': '' if backend == 'Running' else _backend_reason(backend, data),
+        'backend_state': backend,
+        'version': data.get('Version') or '',
+        'magic_dns_suffix': suffix,
+        'auth_url': data.get('AuthURL') or '',
+        'self': self_node,
+        'peers': peers,
+    }
+
+
+def _backend_reason(backend, data):
+    """Human-readable explanation for a non-Running backend state."""
+    if backend == 'NeedsLogin':
+        url = data.get('AuthURL')
+        return ('This node is not logged in to a tailnet.'
+                + (f' Authenticate at {url}' if url else ''))
+    if backend == 'NeedsMachineAuth':
+        return 'Waiting for an admin to approve this device in the tailnet.'
+    if backend == 'Stopped':
+        return 'Tailscale is installed but stopped.'
+    if backend == 'NoState':
+        return 'tailscaled has not finished starting.'
+    return f'Tailscale backend state is {backend or "unknown"}.'
+
+
+def node_key_health(node):
+    """Classify a node's key expiry: ('ok'|'warn'|'critical'|'expired', message).
+
+    The failure this guards against is specific and expensive: a user-owned key
+    expires, the node drops off the tailnet, and the only fix is physical access
+    to a box in another country.
+    """
+    if not node:
+        return 'ok', ''
+    if not node.get('key_expires'):
+        return 'ok', 'Key does not expire (tagged node).'
+    days = node.get('key_expiry_days')
+    if days is None:
+        return 'ok', ''
+    if days < 0:
+        return 'expired', 'Node key has expired — this node needs re-authentication on site.'
+    if days <= 3:
+        return 'critical', f'Node key expires in {days} day(s). Tag this node so its key stops expiring.'
+    if days <= KEY_EXPIRY_WARN_DAYS:
+        return 'warn', f'Node key expires in {days} days. Tag this node to make it permanent.'
+    return 'ok', f'Node key expires in {days} days.'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Identity: who is calling us
+# ─────────────────────────────────────────────────────────────────────────────
+
+def whois(ip, ttl=WHOIS_TTL):
+    """Identify the tailnet node behind an IP. Returns a dict or None.
+
+    Result shape: {'node', 'dns_name', 'tags', 'login', 'display_name'}.
+    None means "not a tailnet address we can vouch for" — which callers on the
+    auth path must treat as untrusted, never as an error to ignore.
+    """
+    if not ip:
+        return None
+    now = time.time()
+    with _cache_lock:
+        hit = _whois_cache.get(ip)
+        if hit and now - hit['at'] < ttl:
+            return hit['data']
+
+    # The port is required by the API but irrelevant to node identity.
+    data = local_api_get(f'/localapi/v0/whois?addr={ip}%3A0')
+    if data is None:
+        rc, out, _ = _run(['whois', '--json', ip], timeout=5)
+        if rc == 0 and out.strip():
+            try:
+                data = json.loads(out)
+            except ValueError:
+                data = None
+
+    result = None
+    if data:
+        node = data.get('Node') or {}
+        profile = data.get('UserProfile') or {}
+        name = (node.get('Name') or '').rstrip('.')
+        result = {
+            'node': node.get('ComputedName') or name.split('.')[0],
+            'dns_name': name,
+            'stable_id': node.get('StableID') or '',
+            'tags': list(node.get('Tags') or []),
+            'login': profile.get('LoginName') or '',
+            'display_name': profile.get('DisplayName') or '',
+        }
+
+    with _cache_lock:
+        _whois_cache[ip] = {'at': now, 'data': result}
+    return result
+
+
+def caller_is_mesh_peer(ip, mesh_tag=DEFAULT_MESH_TAG):
+    """True when `ip` is a tailnet node carrying the mesh tag.
+
+    This is the machine-authentication primitive: a peer Ragnar polling this
+    node's API proves who it is by holding a WireGuard key the coordination
+    server issued, and by being tagged into the mesh. Both halves matter —
+    tailnet membership alone would let *any* device on the tailnet (a laptop, a
+    phone, a contractor's box) drive Ragnar's full offensive toolset.
+
+    Fails closed: no tailscaled, no answer, or no tag means False.
+    """
+    if not ip or not installed():
+        return False
+    # Cheap reject before spending a lookup: tailnet addresses are 100.64/10
+    # (CGNAT space) or fd7a:115c:a1e0::/48. Anything else cannot be a peer.
+    if not is_tailnet_addr(ip):
+        return False
+    identity = whois(ip)
+    if not identity:
+        return False
+    return mesh_tag in identity.get('tags', [])
+
+
+def is_tailnet_addr(ip):
+    """True when `ip` falls inside Tailscale's IPv4 or IPv6 range."""
+    if not ip:
+        return False
+    if ':' in ip:
+        return ip.lower().startswith('fd7a:115c:a1e0')
+    parts = ip.split('.')
+    if len(parts) != 4:
+        return False
+    try:
+        first, second = int(parts[0]), int(parts[1])
+    except ValueError:
+        return False
+    # 100.64.0.0/10 — Tailscale allocates node addresses from this CGNAT block.
+    return first == 100 and 64 <= second <= 127
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Provisioning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _valid_auth_key(key):
+    """Tailscale auth keys are `tskey-auth-...` / `tskey-client-...`."""
+    return bool(key) and key.startswith('tskey-') and len(key) > 20
+
+
+def join(auth_key, hostname='', tags=None, advertise_routes=None,
+         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90):
+    """Join this node to a tailnet with a pre-authorized key.
+
+    This is the unattended-deploy path: everything a remote node needs is
+    supplied up front so a technician who plugs the box in never sees a login
+    prompt. Returns (ok, message).
+    """
+    if not installed():
+        return False, 'Tailscale is not installed on this node.'
+    if not _valid_auth_key(auth_key):
+        return False, 'That does not look like a Tailscale auth key (expected tskey-...).'
+
+    args = ['up', '--authkey', auth_key, '--reset']
+    if hostname:
+        args += ['--hostname', hostname]
+    if tags:
+        args += ['--advertise-tags', ','.join(tags)]
+    if advertise_routes:
+        args += ['--advertise-routes', ','.join(advertise_routes)]
+    if enable_ssh:
+        # Tailscale SSH is the out-of-band way back in when Ragnar's own web UI
+        # is wedged — the reason to deploy a Pi as a remote hands device at all.
+        args += ['--ssh']
+    args += ['--accept-routes' if accept_routes else '--accept-routes=false']
+    args += ['--accept-dns' if accept_dns else '--accept-dns=false']
+
+    rc, out, err = _run(args, timeout=timeout)
+    invalidate_cache()
+    if rc == 0:
+        return True, 'Joined the tailnet.'
+    detail = (err or out or '').strip()
+    return False, _explain_up_failure(rc, detail)
+
+
+def _explain_up_failure(rc, detail):
+    """Turn `tailscale up` failure text into something actionable."""
+    lowered = detail.lower()
+    if rc == 124:
+        return ('Timed out contacting the Tailscale coordination server. '
+                'Check this node has outbound internet (UDP 41641 / TCP 443).')
+    if 'invalid key' in lowered or 'unauthorized' in lowered:
+        return 'The auth key was rejected — it may be expired, already used, or from another tailnet.'
+    if 'requires' in lowered and 'tag' in lowered:
+        return ('The auth key is not permitted to apply those tags. In the admin '
+                'console, the key\'s owner must be listed in tagOwners for the tag.')
+    if 'not logged in' in lowered:
+        return 'Tailscale is not logged in and no valid auth key was supplied.'
+    return detail or f'tailscale up failed (exit {rc}).'
+
+
+def leave(timeout=30):
+    """Log this node out of its tailnet. Returns (ok, message)."""
+    if not installed():
+        return False, 'Tailscale is not installed on this node.'
+    rc, out, err = _run(['logout'], timeout=timeout)
+    invalidate_cache()
+    if rc == 0:
+        return True, 'Logged out of the tailnet.'
+    return False, (err or out or f'tailscale logout failed (exit {rc}).').strip()
+
+
+def set_running(running, timeout=30):
+    """Bring the tunnel up or down without logging out. Returns (ok, message)."""
+    if not installed():
+        return False, 'Tailscale is not installed on this node.'
+    rc, out, err = _run(['up' if running else 'down'], timeout=timeout)
+    invalidate_cache()
+    if rc == 0:
+        return True, 'Tunnel up.' if running else 'Tunnel down.'
+    return False, (err or out or f'tailscale {"up" if running else "down"} failed (exit {rc}).').strip()
+
+
+def serve_web(port=DEFAULT_NODE_PORT, enable=True, timeout=30):
+    """Expose (or stop exposing) Ragnar's web UI to the tailnet over HTTPS.
+
+    `tailscale serve` terminates TLS with a real certificate for the node's
+    MagicDNS name, so the UI stops throwing self-signed warnings — but only
+    inside the tailnet. This is deliberately *not* `tailscale funnel`: funnel
+    publishes to the open internet, which for a box full of offensive tooling
+    would be an unambiguous mistake.
+    """
+    if not installed():
+        return False, 'Tailscale is not installed on this node.'
+    if enable:
+        args = ['serve', '--bg', '--https', '443', f'http://127.0.0.1:{port}']
+    else:
+        args = ['serve', '--https', '443', 'off']
+    rc, out, err = _run(args, timeout=timeout)
+    if rc == 0:
+        return True, ('Web UI published to the tailnet over HTTPS.'
+                      if enable else 'Stopped publishing the web UI.')
+    return False, (err or out or f'tailscale serve failed (exit {rc}).').strip()
+
+
+def advertise_routes(routes, timeout=30):
+    """Advertise LAN subnets so the tailnet can reach the node's local network.
+
+    This is what turns a remote Ragnar into a way into the whole site: with the
+    route approved in the admin console, every device on the far-side LAN
+    becomes addressable by its real IP from anywhere on the tailnet.
+    """
+    if not installed():
+        return False, 'Tailscale is not installed on this node.'
+    value = ','.join(routes) if routes else ''
+    rc, out, err = _run(['set', f'--advertise-routes={value}'], timeout=timeout)
+    invalidate_cache()
+    if rc == 0:
+        return True, ('Advertising ' + value) if value else 'Stopped advertising subnet routes.'
+    return False, (err or out or f'tailscale set failed (exit {rc}).').strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Peer polling: what Tailscale cannot tell us
+# ─────────────────────────────────────────────────────────────────────────────
+
+def peer_url(node, port=DEFAULT_NODE_PORT, path='/api/mesh/unit'):
+    """Build the URL for a peer Ragnar's mesh endpoint."""
+    host = node.get('ip') or node.get('dns_name')
+    if not host:
+        return ''
+    if ':' in host and not host.startswith('['):
+        host = f'[{host}]'
+    return f'http://{host}:{port}{path}'
+
+
+def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
+    """Ask one peer for its Ragnar health summary (or any mesh endpoint).
+
+    Returns a dict with `reachable` plus whatever the peer reported. A peer that
+    is online in Tailscale but unreachable here is the interesting case: the box
+    has power and network but Ragnar itself is down.
+    """
+    url = peer_url(node, port, path)
+    if not url:
+        return {'reachable': False, 'error': 'no address'}
+    try:
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return {'reachable': False, 'error': f'HTTP {resp.status}'}
+            payload = json.loads(resp.read().decode('utf-8'))
+        payload['reachable'] = True
+        return payload
+    except urllib.error.HTTPError as exc:
+        # 401 is worth distinguishing: the node is alive and Ragnar answered,
+        # we just are not tagged into its mesh (or it cannot see our tag).
+        if exc.code == 401:
+            return {'reachable': False, 'error': 'not authorized by peer — check the mesh tag'}
+        return {'reachable': False, 'error': f'HTTP {exc.code}'}
+    except Exception as exc:  # socket errors, timeouts, bad JSON
+        return {'reachable': False, 'error': type(exc).__name__}
+
+
+def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8):
+    """Poll every online peer in parallel. Returns {node_id: health_dict}.
+
+    Serial polling would make a 10-node mesh with one dead box take a full
+    timeout per box; the UI would look hung. Offline nodes are skipped entirely
+    since Tailscale already told us they are down.
+    """
+    targets = [n for n in nodes if n.get('online') and not n.get('is_self')]
+    results = {}
+    if not targets:
+        return results
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(targets))) as pool:
+        futures = {pool.submit(poll_peer, n, port, timeout): n for n in targets}
+        for future in futures:
+            node = futures[future]
+            try:
+                results[node['id']] = future.result(timeout=timeout + 2)
+            except Exception as exc:
+                results[node['id']] = {'reachable': False, 'error': type(exc).__name__}
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Self-test
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SAMPLE_STATUS = {
+    'Version': '1.98.4',
+    'BackendState': 'Running',
+    'MagicDNSSuffix': 'tailnet.ts.net',
+    'TailscaleIPs': ['100.78.0.7'],
+    'Self': {
+        'ID': 'nSELF', 'HostName': 'ragnar-home', 'DNSName': 'ragnar-home.tailnet.ts.net.',
+        'OS': 'linux', 'TailscaleIPs': ['100.78.0.7', 'fd7a:115c:a1e0::c01:91'],
+        'Online': True, 'KeyExpiry': '0001-01-01T00:00:00Z', 'Tags': ['tag:ragnar-mesh'],
+    },
+    'Peer': {
+        'k1': {'ID': 'nJERSEY', 'HostName': 'ragnar-jersey',
+               'DNSName': 'ragnar-jersey.tailnet.ts.net.', 'OS': 'linux',
+               'TailscaleIPs': ['100.78.0.9'], 'Online': True, 'CurAddr': '1.2.3.4:41641',
+               'Tags': ['tag:ragnar-mesh'], 'Relay': 'lhr', 'RxBytes': 10, 'TxBytes': 20},
+        'k2': {'ID': 'nLAPTOP', 'HostName': 'laptop',
+               'DNSName': 'laptop.tailnet.ts.net.', 'OS': 'macOS',
+               'TailscaleIPs': ['100.78.0.3'], 'Online': False, 'KeyExpiry': ''},
+    },
+}
+
+
+def _self_test():
+    """Exercise the pure logic with no daemon, no network and no root."""
+    failures = []
+
+    def check(name, condition):
+        print(f'  {"PASS" if condition else "FAIL"}  {name}')
+        if not condition:
+            failures.append(name)
+
+    print('normalize_node')
+    suffix = _SAMPLE_STATUS['MagicDNSSuffix']
+    jersey = normalize_node(_SAMPLE_STATUS['Peer']['k1'], magic_dns_suffix=suffix)
+    check('short_name strips the tailnet suffix', jersey['short_name'] == 'ragnar-jersey')
+    check('primary IP prefers IPv4', jersey['ip'] == '100.78.0.9')
+    check('direct connection detected from CurAddr', jersey['direct'] is True)
+    check('mesh tag preserved', jersey['tags'] == ['tag:ragnar-mesh'])
+
+    laptop = normalize_node(_SAMPLE_STATUS['Peer']['k2'], magic_dns_suffix=suffix)
+    check('offline peer reported offline', laptop['online'] is False)
+    check('untagged peer flagged untagged', laptop['tagged'] is False)
+
+    self_node = normalize_node(_SAMPLE_STATUS['Self'], is_self=True, magic_dns_suffix=suffix)
+    check('IPv6 kept alongside IPv4', len(self_node['ips']) == 2)
+    check('zero KeyExpiry means never expires', self_node['key_expires'] is False)
+
+    print('_days_until')
+    check('zero time is not an expiry', _days_until('0001-01-01T00:00:00Z') is None)
+    check('empty string is not an expiry', _days_until('') is None)
+    check('nanosecond precision parses', _days_until('2099-01-01T00:00:00.123456789Z') is not None)
+    check('past date is negative', (_days_until('2000-01-01T00:00:00Z') or 0) < 0)
+
+    print('node_key_health')
+    state, _ = node_key_health(self_node)
+    check('tagged node is ok', state == 'ok')
+    expired = dict(self_node, key_expires=True, key_expiry_days=-2)
+    check('expired key is critical', node_key_health(expired)[0] == 'expired')
+    soon = dict(self_node, key_expires=True, key_expiry_days=2)
+    check('key expiring in 2 days is critical', node_key_health(soon)[0] == 'critical')
+    warn = dict(self_node, key_expires=True, key_expiry_days=10)
+    check('key expiring in 10 days warns', node_key_health(warn)[0] == 'warn')
+    far = dict(self_node, key_expires=True, key_expiry_days=100)
+    check('key expiring in 100 days is ok', node_key_health(far)[0] == 'ok')
+
+    print('is_tailnet_addr')
+    check('100.78.0.9 is a tailnet address', is_tailnet_addr('100.78.0.9') is True)
+    check('100.64.0.1 is in range', is_tailnet_addr('100.64.0.1') is True)
+    check('100.127.255.254 is in range', is_tailnet_addr('100.127.255.254') is True)
+    check('100.128.0.1 is out of range', is_tailnet_addr('100.128.0.1') is False)
+    check('100.63.0.1 is out of range', is_tailnet_addr('100.63.0.1') is False)
+    check('192.168.1.5 is not a tailnet address', is_tailnet_addr('192.168.1.5') is False)
+    check('tailnet IPv6 recognised', is_tailnet_addr('fd7a:115c:a1e0::c01:91') is True)
+    check('other IPv6 rejected', is_tailnet_addr('fe80::1') is False)
+    check('garbage rejected', is_tailnet_addr('not-an-ip') is False)
+    check('empty rejected', is_tailnet_addr('') is False)
+
+    print('auth key validation')
+    check('real-looking key accepted', _valid_auth_key('tskey-auth-' + 'k' * 30) is True)
+    check('short key rejected', _valid_auth_key('tskey-auth-x') is False)
+    check('non-tskey rejected', _valid_auth_key('hunter2hunter2hunter2hunter2') is False)
+    check('empty rejected', _valid_auth_key('') is False)
+
+    print('peer_url')
+    check('IPv4 peer URL', peer_url(jersey, 8000) == 'http://100.78.0.9:8000/api/mesh/unit')
+    v6_only = dict(jersey, ip='fd7a:115c:a1e0::1')
+    check('IPv6 peer URL is bracketed',
+          peer_url(v6_only, 8000) == 'http://[fd7a:115c:a1e0::1]:8000/api/mesh/unit')
+    check('addressless node yields no URL', peer_url({'ip': '', 'dns_name': ''}) == '')
+
+    print('viking names')
+    check('same seed always gives the same name',
+          derive_viking_name('seed-a') == derive_viking_name('seed-a'))
+    check('different seeds give different names',
+          derive_viking_name('seed-a') != derive_viking_name('seed-b'))
+    check('name has a given name and an epithet',
+          len(derive_viking_name('seed-a').split(' ', 1)) == 2)
+    check('given name comes from the pool',
+          derive_viking_name('seed-a').split(' ', 1)[0] in VIKING_NAMES)
+    check('epithet comes from the pool',
+          derive_viking_name('seed-a').split(' ', 1)[1] in VIKING_EPITHETS)
+    check('numeric seeds work', bool(derive_viking_name(12345)))
+    check('empty seed still yields a name', bool(derive_viking_name('')))
+    # A mesh is only legible if units are actually distinguishable, so measure
+    # the spread rather than trusting the hash: 200 machine-ids should produce
+    # a lot of distinct names, not a handful of favourites.
+    sample = {derive_viking_name(f'machine-id-{i}') for i in range(200)}
+    check(f'200 seeds yield >150 distinct names (got {len(sample)})', len(sample) > 150)
+    check('name pools are collision-free',
+          len(set(VIKING_NAMES)) == len(VIKING_NAMES)
+          and len(set(VIKING_EPITHETS)) == len(VIKING_EPITHETS))
+
+    print('pi connect')
+    pc = pi_connect_status()
+    check('status is always structured', set(pc) ==
+          {'installed', 'running', 'signed_in', 'detail'})
+    check('never raises on any host', isinstance(pc['installed'], bool))
+
+    print('caller_is_mesh_peer fails closed')
+    check('non-tailnet address rejected without a lookup',
+          caller_is_mesh_peer('192.168.1.5') is False)
+    check('empty address rejected', caller_is_mesh_peer('') is False)
+
+    print()
+    if failures:
+        print(f'{len(failures)} check(s) FAILED:')
+        for name in failures:
+            print(f'  - {name}')
+        return 1
+    print('all checks passed')
+    return 0
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if '--self-test' in argv:
+        return _self_test()
+    if '--json' in argv:
+        print(json.dumps(status(), indent=2))
+        return 0
+
+    state = status()
+    if not state['installed']:
+        print('Tailscale is not installed.')
+        return 1
+    if not state['available']:
+        print(f'Tailscale unavailable: {state["reason"]}')
+        return 1
+
+    me = state['self'] or {}
+    print(f'This node : {me.get("dns_name", "?")}  {me.get("ip", "")}')
+    key_state, key_msg = node_key_health(me)
+    if key_msg:
+        print(f'Node key  : [{key_state}] {key_msg}')
+    print(f'Peers     : {len(state["peers"])}')
+    for peer in state['peers']:
+        flag = 'online ' if peer['online'] else 'offline'
+        tags = ','.join(peer['tags']) or '-'
+        print(f'  {flag}  {peer["short_name"]:<24} {peer["ip"]:<16} {peer["os"]:<8} {tags}')
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

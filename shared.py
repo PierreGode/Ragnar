@@ -706,6 +706,45 @@ class SharedData:
             "wifi_initial_connection_timeout": 60,
             "wifi_failsafe_cycle_limit": 10,
 
+            "__title_mesh__": "Ragnar Mesh (Tailscale)",
+            # Master switch for the Mesh tab and all peer polling. Off by
+            # default: a stock single-box Ragnar should never reach out to
+            # anything, and Tailscale is not installed on most images.
+            "mesh_enabled": False,
+            # Tag every Ragnar mesh unit carries. This is the authorization
+            # boundary for unit-to-unit API calls — a tailnet member WITHOUT
+            # this tag (a laptop, a phone, a contractor's box) is refused, so
+            # joining the tailnet alone never grants access to Ragnar's tools.
+            "mesh_tag": "tag:ragnar-mesh",
+            # This unit's number in the mesh. There is no controller: every unit
+            # is a peer, so the number is how an operator refers to a box
+            # ("Unit 03 lost GPS") without memorising tailnet hostnames.
+            # 0 means unassigned — the UI nags until it is set, because two
+            # units sharing a number makes every report ambiguous.
+            "mesh_unit_id": 0,
+            # This unit's Viking name. Units are individuals, not clones: a mesh
+            # of boxes all called "raspberry" is one nobody can discuss out loud.
+            # Blank means "derive from this machine's own identity", so a unit is
+            # born named and keeps that name across reinstalls. Set it to
+            # override with a name you chose.
+            "mesh_viking_name": "",
+            # Human label for this unit in a peer's mesh list ("Jersey DC").
+            # Falls back to the tailnet hostname when blank.
+            "mesh_site_label": "",
+            # Web port peers serve their API on. Mesh units are assumed
+            # homogeneous — same Ragnar build, same port.
+            "mesh_node_port": 8000,
+            # How often the background poller refreshes peer health, seconds.
+            "mesh_poll_interval": 60,
+            # Per-peer HTTP timeout. Kept short: a dead node must not stall the
+            # whole mesh view, and peers are one WireGuard hop away.
+            "mesh_poll_timeout": 6,
+            # Pull peers' Watchtower alerts into this node's incident engine so
+            # attack chains correlate across sites instead of per-box.
+            "mesh_aggregate_alerts": True,
+            # Max alerts to pull from each peer per poll, newest first.
+            "mesh_alert_limit": 50,
+
             "__title_ethernet__": "Ethernet/LAN Settings",
             "ethernet_default_interface": "eth0",
             "ethernet_scan_enabled": True,

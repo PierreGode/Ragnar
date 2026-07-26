@@ -1799,6 +1799,65 @@ BANNER
 }
 
 # Main installation process
+# Install Tailscale and optionally join this unit to the Ragnar mesh.
+# Three entry paths, all handled by scripts/setup_mesh.sh:
+#   * unattended  — RAGNAR_MESH_AUTHKEY set, or /boot/ragnar-mesh.conf present
+#   * interactive — the prompt below
+#   * later       — the web UI's Ragnar Mesh tab, which only needs the binary
+setup_ragnar_mesh() {
+    local script="$ragnar_PATH/scripts/setup_mesh.sh"
+    if [ ! -f "$script" ]; then
+        log "WARNING" "scripts/setup_mesh.sh not found — skipping mesh setup"
+        return 0
+    fi
+    chmod +x "$script" 2>/dev/null
+
+    # Unattended: a key is already present, so never block on a prompt. This is
+    # the imaging path, where there is no human at the console by definition.
+    if [ -n "${RAGNAR_MESH_AUTHKEY:-}" ] || [ -f /boot/ragnar-mesh.conf ] \
+       || [ -f /boot/firmware/ragnar-mesh.conf ]; then
+        log "INFO" "Mesh provisioning data found — joining unattended"
+        bash "$script" provision || log "WARNING" "Mesh provisioning reported a problem"
+        return 0
+    fi
+
+    echo -e "\n${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  Ragnar Mesh (optional)${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "Link this unit to other Ragnars over Tailscale, so you can reach it"
+    echo -e "from anywhere without port forwarding — and so the units share alerts."
+    echo -e "${YELLOW}You can also do this later from the web UI (Ragnar Mesh tab).${NC}"
+    echo ""
+    read -p "Install Tailscale for mesh networking now? (y/n): " mesh_choice
+
+    if [[ ! "$mesh_choice" =~ ^[Yy]$ ]]; then
+        log "INFO" "Mesh setup declined — Tailscale not installed"
+        return 0
+    fi
+
+    if ! bash "$script" install; then
+        log "WARNING" "Tailscale installation failed — the Mesh tab will show how to retry"
+        return 0
+    fi
+
+    echo ""
+    echo -e "Paste a ${GREEN}tagged, pre-authorized${NC} auth key to join now, or press"
+    echo -e "Enter to skip and join later from the web UI."
+    read -r -p "Tailscale auth key (tskey-...): " mesh_key
+
+    if [ -n "$mesh_key" ]; then
+        read -p "Unit number for this box (1-99, blank to set later): " mesh_unit
+        read -p "Site label (e.g. Jersey DC, blank to skip): " mesh_label
+        RAGNAR_MESH_AUTHKEY="$mesh_key" \
+        RAGNAR_MESH_UNIT_ID="$mesh_unit" \
+        RAGNAR_MESH_LABEL="$mesh_label" \
+            bash "$script" provision \
+            || log "WARNING" "Joining the mesh failed — retry from the web UI"
+    else
+        log "INFO" "Tailscale installed; join deferred to the web UI"
+    fi
+}
+
 main() {
     log "INFO" "Starting ragnar installation..."
 
@@ -2292,6 +2351,12 @@ except:
             echo -e "${YELLOW}Advanced tools can be manually installed later if upgraded${NC}"
         fi
     fi
+
+    # ── Ragnar Mesh (Tailscale) ───────────────────────────────────────────
+    # Optional. Skipped entirely unless the operator asks for it or an
+    # unattended deployment supplies a key, so a stock single-box install never
+    # gains a network dependency it did not ask for.
+    setup_ragnar_mesh
 
     # Git repository is preserved for updates
     # Use .gitignore to protect runtime data and configurations
