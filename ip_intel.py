@@ -136,9 +136,7 @@ def _walk_entities(entities, want_role, out):
 
 def parse_rdap(obj):
     """Extract the useful fields from an RDAP 'ip network' object."""
-        out = {'network_name': None, 'prefix': None, 'country': None,
-           'registry': None, 'abuse_email': None, 'rdap_handle': None,
-           'org_address': None}
+        out = {'network_name': None, 'prefix': None, 'country': None,'registry': None, 'abuse_email': None, 'rdap_handle': None,'org_address': None}
     if not isinstance(obj, dict):
         return out
     out['network_name'] = obj.get('name')
