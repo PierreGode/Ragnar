@@ -318,11 +318,11 @@ def lookup(ip, allow_network=True, cache_path=DEFAULT_CACHE, use_cache=True,
     now = _now if _now is not None else time.time()
     ip = str(ip).strip()
     scope, scope_note = ip_scope(ip)
-        rec = {
+    rec = {
         'ip': ip, 'scope': scope, 'module': MODULE, 'ts': now,
         'country': None, 'asn': None, 'as_org': None, 'prefix': None,
         'registry': None, 'network_name': None, 'abuse_email': None,
-        'ptr': None, 'city': None, 'allocated': None,          # ← ADD this
+        'ptr': None, 'city': None, 'allocated': None,
         'classification': 'special',
         'confidence': 0, 'sources': [], 'cached': False,
         'location_note': _LOCATION_NOTE, 'attribution_note': None,
