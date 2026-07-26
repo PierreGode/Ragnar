@@ -28918,6 +28918,10 @@ window.removeScanSubnet = removeScanSubnet;
 // ============================================================================
 
 let meshRefreshInFlight = false;
+// Last status payload, kept so the details modal can render a unit's full
+// pulled data without re-fetching — and crucially without the browser needing
+// to reach the peer's tailnet IP itself (the Ragnar server already pulled it).
+let _meshLastData = null;
 
 function meshFormatUptime(seconds) {
     if (seconds === null || seconds === undefined) return '—';
@@ -29040,12 +29044,15 @@ function meshUnitCard(unit, isSelf, ctx) {
         ? `<span class="text-[10px] text-gray-500">${unit.direct ? 'direct' : 'relay' + (unit.relay ? ' · ' + escapeHtml(unit.relay) : '')}</span>`
         : '';
 
-    // Base URL for launching this unit's own live views. A peer serves its full
-    // UI on the tailnet, so "display the remote traffic analyzer" is honestly
-    // done by opening that unit's UI (authenticated as you), not by piping its
-    // heavy live data cross-unit. Self launches same-origin.
-    const launchBase = isSelf ? '' : meshLaunchBase(unit, ctx);
-    const canLaunch = isSelf || (unit.online && launchBase);
+    // Details open in a modal built from data THIS unit already pulled over the
+    // tailnet — so it works even when the operator's browser can't reach the
+    // peer's tailnet IP directly (the common case: browsing over the LAN or a
+    // tunnel). The id lets the modal re-find this node in the last payload.
+    const nodeId = (unit.id || unit.ip || '').toString();
+    const detailsBtn = (unit.findings && (unit.findings.counts || {}).total !== undefined)
+        ? `<button onclick="meshShowDetails('${nodeId.replace(/'/g, '')}')" ` +
+          `class="text-[11px] bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1 rounded transition-colors">View details</button>`
+        : '';
 
     return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
         <div class="flex items-start justify-between gap-2">
@@ -29064,9 +29071,116 @@ function meshUnitCard(unit, isSelf, ctx) {
         </div>
         ${body}
         ${meshFindingsBlock(unit)}
-        ${canLaunch ? meshLaunchRow(launchBase) : ''}
+        ${detailsBtn ? `<div class="mt-3 pt-3 border-t border-slate-700/40">${detailsBtn}</div>` : ''}
         ${warnings.join('')}
     </div>`;
+}
+
+// Find a unit in the last status payload by id (or ip fallback).
+function _meshFindNode(id) {
+    if (!_meshLastData) return null;
+    const all = [];
+    if (_meshLastData.self) all.push(_meshLastData.self);
+    (_meshLastData.peers || []).forEach(p => all.push(p));
+    return all.find(n => (n.id || n.ip || '').toString() === id) || null;
+}
+
+// Large popup card: everything this unit reported, pulled server-side over the
+// tailnet. No browser→peer connection needed, so it works however you reached
+// this UI. Read-only — it shows findings and health, it doesn't drive the peer.
+function meshShowDetails(id) {
+    const unit = _meshFindNode(id);
+    if (!unit) return;
+    const f = unit.findings || {};
+    const health = unit.health || {};
+    const counts = f.counts || {};
+    const findings = f.findings || [];
+
+    const CATS = [
+        ['vulnerability', 'Vulnerabilities'],
+        ['integrity', 'Network Integrity'],
+        ['watchtower', 'Watchtower'],
+        ['incident', 'Incidents'],
+    ];
+    const sevBadge = (sev) =>
+        `<span class="text-[9px] uppercase px-1.5 rounded border ${MESH_SEV_CLASS[sev] || MESH_SEV_CLASS.info}">${escapeHtml(sev)}</span>`;
+
+    let sections = '';
+    CATS.forEach(([cat, label]) => {
+        const rows = findings.filter(x => x.category === cat);
+        if (!rows.length) return;
+        sections += `<div class="mb-4">
+            <div class="text-xs uppercase tracking-wider text-gray-400 mb-2">${label} <span class="text-gray-600">(${rows.length})</span></div>
+            <div class="space-y-1">${rows.map(x => `
+                <div class="flex items-start gap-2 bg-slate-900/50 border border-slate-800 rounded px-2 py-1.5">
+                    ${sevBadge(x.severity || 'info')}
+                    <div class="min-w-0 text-xs">
+                        <span class="text-gray-100">${escapeHtml(x.title || '')}</span>
+                        ${x.host ? ` <span class="text-gray-500 font-mono">${escapeHtml(x.host)}</span>` : ''}
+                        ${x.detail ? `<span class="text-gray-500"> — ${escapeHtml(x.detail)}</span>` : ''}
+                    </div>
+                </div>`).join('')}</div>
+        </div>`;
+    });
+    if (!sections) {
+        sections = `<p class="text-sm text-gray-500">No findings reported by this unit — clean, or its scanners/watchers aren't enabled.</p>`;
+    }
+
+    const metric = (label, val) => `<div class="text-center">
+        <p class="text-[10px] uppercase tracking-wider text-gray-500">${label}</p>
+        <p class="text-sm font-semibold">${escapeHtml(String(val))}</p></div>`;
+    const healthRow = health.reachable ? `
+        <div class="grid grid-cols-4 gap-2 mb-4">
+            ${metric('CPU', health.cpu_percent !== undefined ? health.cpu_percent + '%' : '—')}
+            ${metric('Mem', health.memory_percent !== undefined ? health.memory_percent + '%' : '—')}
+            ${metric('Disk', health.disk_percent !== undefined ? health.disk_percent + '%' : '—')}
+            ${metric('Uptime', meshFormatUptime(health.uptime_s))}
+        </div>` : '';
+
+    // Optional link to the unit's own full UI — only useful when the browser is
+    // itself on the tailnet, so it's secondary and clearly caveated.
+    const ip = unit.ip;
+    const openLink = (ip && !unit.is_self)
+        ? `<a href="http://${ip.includes(':') ? '[' + ip + ']' : ip}:${(_meshLastData.node_port) || 8000}/"
+              target="_blank" rel="noopener noreferrer"
+              class="text-[11px] text-Ragnar-400 hover:underline">Open this unit's full UI ↗ (needs your browser on the tailnet)</a>`
+        : '';
+
+    const title = escapeHtml(meshUnitTitle(unit));
+    const sub = escapeHtml(meshUnitSubtitle(unit));
+    let modal = document.getElementById('mesh-details-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'mesh-details-modal';
+        document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-[60] bg-black/60 flex items-start justify-center p-4 overflow-auto';
+    modal.onclick = (e) => { if (e.target === modal) meshCloseDetails(); };
+    modal.innerHTML = `
+        <div class="glass rounded-xl w-full max-w-3xl my-8 p-6 border border-slate-700">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <div class="min-w-0">
+                    <h3 class="text-xl font-bold truncate">${title}</h3>
+                    <p class="text-xs text-gray-500 font-mono mt-0.5">${sub}</p>
+                </div>
+                <button onclick="meshCloseDetails()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
+            </div>
+            ${healthRow}
+            <div class="text-xs text-gray-400 mb-3">
+                ${counts.total || 0} finding(s)${counts.worst ? ` · worst: ${escapeHtml(counts.worst)}` : ''}
+            </div>
+            ${sections}
+            ${openLink ? `<div class="mt-4 pt-3 border-t border-slate-700/60">${openLink}</div>` : ''}
+        </div>`;
+    document.addEventListener('keydown', _meshDetailsEsc);
+}
+
+function _meshDetailsEsc(e) { if (e.key === 'Escape') meshCloseDetails(); }
+
+function meshCloseDetails() {
+    const modal = document.getElementById('mesh-details-modal');
+    if (modal) modal.remove();
+    document.removeEventListener('keydown', _meshDetailsEsc);
 }
 
 // Compact severity-ranked findings for one unit, pulled from that unit's own
@@ -29099,47 +29213,6 @@ function meshFindingsBlock(unit) {
     </div>`;
 }
 
-// Build the tailnet URL of a peer's own UI, for launching its live views.
-function meshLaunchBase(unit, ctx) {
-    const ip = unit.ip;
-    if (!ip) return '';
-    const host = ip.includes(':') ? `[${ip}]` : ip;
-    return `http://${host}:${(ctx && ctx.nodePort) || 8000}`;
-}
-
-// One row of launch buttons into a unit's own live views. Opens in a new tab;
-// the operator authenticates to that unit directly.
-function meshLaunchRow(base) {
-    const b = (base || '').replace(/'/g, '');
-    const where = b ? 'this unit’s own live view (new tab)'
-                    : 'this unit’s live view (new tab)';
-    const btn = (feature, label) =>
-        `<button onclick="return meshLaunch('${b}','${feature}')" ` +
-        `title="Open ${escapeHtml(label)} — ${where}" ` +
-        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label} ↗</button>`;
-    return `<div class="mt-3 pt-3 border-t border-slate-700/40">
-        <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Open live view</div>
-        <div class="flex flex-wrap gap-1.5">
-            ${btn('traffic', 'Traffic')}
-            ${btn('threat-intel', 'Threats')}
-            ${btn('network/integrity', 'Integrity')}
-            ${btn('network/watchtower', 'Watchtower')}
-            ${btn('discovered', 'Vulnerabilities')}
-        </div>
-    </div>`;
-}
-
-function meshLaunch(base, feature) {
-    const url = (base || '') + '/#' + feature;
-    // Open a real new TAB, not a popup. Passing a features string (even
-    // "noopener") makes browsers spawn a chrome-less popup window that many
-    // block outright — which is why the launch "did nothing". Omit features and
-    // null the opener for the same isolation.
-    const w = window.open(url, '_blank');
-    if (w) { try { w.opener = null; } catch (e) { /* cross-origin, already safe */ } }
-    return false;
-}
-
 function meshWarning(text, tone) {
     const cls = tone === 'error'
         ? 'bg-red-950/40 border-red-800 text-red-200'
@@ -29156,6 +29229,7 @@ function renderMesh(data) {
     const summary = document.getElementById('mesh-summary');
     const warnings = document.getElementById('mesh-warnings');
     if (!pill) return;
+    _meshLastData = data;
 
     const joined = data.available;
     // "On the tailnet" and "in the mesh" are different things. A unit can be
@@ -29635,4 +29709,5 @@ window.meshServe = meshServe;
 window.meshLeave = meshLeave;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
-window.meshLaunch = meshLaunch;
+window.meshShowDetails = meshShowDetails;
+window.meshCloseDetails = meshCloseDetails;

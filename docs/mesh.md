@@ -21,6 +21,7 @@ be logged into renders the mesh; so would any other.
 - [Why Tailscale](#why-tailscale)
 - [What the mesh adds over the Tailscale console](#what-the-mesh-adds-over-the-tailscale-console)
 - [Fleet security findings](#fleet-security-findings)
+  - [Viewing a unit's details](#viewing-a-units-details)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
@@ -462,22 +463,31 @@ places Ragnar already records them, normalized into one list:
 
 Each unit serves its own findings at `GET /api/mesh/findings` — the third and
 last peer-readable route, read-only like the others. A coordinator does not
-compute anything about its peers; it just displays what each already found.
+compute anything about its peers; it just displays what each already found. See
+[Viewing a unit's details](#viewing-a-units-details) for the popup card.
 
-### Launching a unit's live views
+### Viewing a unit's details
 
-Every unit card carries launch buttons — **Traffic**, **Threats**, **Integrity**,
-**Watchtower**, **Vulnerabilities** — that open *that unit's own* live view in a
-new tab (deep-linked to the feature). This is deliberate: a peer already serves
-its full UI on the tailnet, so the honest way to "watch the Jersey traffic
-analyzer" is to open Jersey's own analyzer, authenticated as yourself — not to
-pipe its heavy live capture cross-unit or to let one box drive another's tools.
-Launching stays within each unit's own auth boundary; the mesh only ever
-*reads* summaries.
+Every unit card has a **View details** button that opens a large popup card with
+that unit's full findings — grouped by category (Vulnerabilities, Network
+Integrity, Watchtower, Incidents) — plus its live CPU/memory/disk/uptime.
 
-> Cross-unit launches rely on your browser being able to reach the peer's
-> tailnet address — which it can, since you are already on the tailnet to reach
-> this unit. If a peer publishes over `serve`, its MagicDNS name works too.
+The data is served **from the unit you are looking at**: it already pulled each
+peer's findings over the tailnet, so the modal renders from that payload and
+needs **no connection between your browser and the peer**. This matters because
+tailnet IPs (`100.x.y.z`) are only reachable from devices *on* the tailnet — if
+you are browsing this UI over the LAN or a tunnel, your browser cannot open a
+peer's `100.x.y.z:8000` directly, but the details card still works because the
+Ragnar server did the fetching.
+
+The modal also offers an *"Open this unit's full UI ↗"* link for peers, but it is
+clearly caveated: it only works when your **browser** is itself on the tailnet.
+The details card is the reliable path; the direct link is a convenience for when
+you are on-tailnet.
+
+Everything here is read-only. The mesh shows what each unit found; it never
+drives a peer's tools — a compromised unit cannot start captures or scans across
+the fleet.
 
 ## Cross-site incident correlation
 
