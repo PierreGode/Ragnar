@@ -318,11 +318,12 @@ def lookup(ip, allow_network=True, cache_path=DEFAULT_CACHE, use_cache=True,
     now = _now if _now is not None else time.time()
     ip = str(ip).strip()
     scope, scope_note = ip_scope(ip)
-    rec = {
+        rec = {
         'ip': ip, 'scope': scope, 'module': MODULE, 'ts': now,
         'country': None, 'asn': None, 'as_org': None, 'prefix': None,
         'registry': None, 'network_name': None, 'abuse_email': None,
-        'ptr': None, 'city': None, 'classification': 'special',
+        'ptr': None, 'city': None, 'allocated': None,          # ← ADD this
+        'classification': 'special',
         'confidence': 0, 'sources': [], 'cached': False,
         'location_note': _LOCATION_NOTE, 'attribution_note': None,
         'error': None,
@@ -407,8 +408,7 @@ def lookup(ip, allow_network=True, cache_path=DEFAULT_CACHE, use_cache=True,
 
 
 def _confidence(rec):
-    """How much of the *ownership* picture we actually resolved (0-100). This is
-    confidence in the network attribution, not in any physical location."""
+    """How much of the *ownership* picture we actually resolved (0-100)."""
     score = 0
     if rec.get('asn'):
         score += 25
@@ -419,7 +419,9 @@ def _confidence(rec):
     if rec.get('prefix'):
         score += 15
     if rec.get('abuse_email'):
-        score += 20
+        score += 15          # was 20, lowered a bit
+    if rec.get('allocated'):
+        score += 5           # ← NEW
     return min(100, score)
 
 
@@ -429,8 +431,10 @@ def report(rec):
     if rec['scope'] != 'public':
         lines.append('  %s' % rec.get('attribution_note'))
         return '\n'.join(lines)
-    lines.append('  Network : %s  %s' % (rec.get('prefix') or '?',
+        lines.append('  Network : %s  %s' % (rec.get('prefix') or '?',
                                          rec.get('network_name') or ''))
+    if rec.get('allocated'):
+        lines.append('  Allocated: %s' % rec['allocated'])
     lines.append('  ASN     : %s %s' % (('AS%s' % rec['asn']) if rec.get('asn') else '?',
                                         rec.get('as_org') or ''))
     lines.append('  Country : %s%s   Registry: %s' % (
