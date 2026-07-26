@@ -6,6 +6,7 @@ Prevents system hangs by monitoring and limiting resource usage
 
 import os
 import logging
+import subprocess
 import time
 from logger import Logger
 
@@ -202,6 +203,62 @@ class ResourceMonitor:
                 'healthy': True  # Fail open if we can't check
             }
     
+    def get_power_status(self):
+        """Raspberry Pi power health from the SoC's throttle register.
+
+        Matters because Ragnar's own peripherals cause the failure: USB Wi-Fi
+        adapters (an Alfa draws ~0.5-1 A) can pull the 5 V rail below spec, and
+        an under-volting Pi resets the whole board — which presents as "Ragnar
+        crashed" with nothing in the logs, because the OS never got to write
+        any. Without this the condition is invisible.
+
+        Returns {'supported', 'undervoltage_now', 'undervoltage_occurred',
+        'throttled_now', 'throttling_occurred', 'raw', 'status', 'message'}.
+        'supported' is False off-Pi (no vcgencmd), where this is a no-op.
+        """
+        info = {'supported': False, 'undervoltage_now': False,
+                'undervoltage_occurred': False, 'throttled_now': False,
+                'throttling_occurred': False, 'raw': None,
+                'status': 'unknown', 'message': None}
+        try:
+            r = subprocess.run(['vcgencmd', 'get_throttled'],
+                               capture_output=True, text=True, timeout=3)
+            if r.returncode != 0 or '=' not in (r.stdout or ''):
+                return info
+            value = int(r.stdout.strip().split('=', 1)[1], 16)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return info   # not a Pi, or vcgencmd unavailable
+
+        info.update({
+            'supported': True,
+            'raw': hex(value),
+            # Live bits (condition present right now)
+            'undervoltage_now': bool(value & 0x1),
+            'throttled_now': bool(value & 0x4),
+            # Sticky bits (has happened since boot)
+            'undervoltage_occurred': bool(value & 0x10000),
+            'throttling_occurred': bool(value & 0x40000),
+        })
+
+        if info['undervoltage_now']:
+            info['status'] = 'critical'
+            info['message'] = (
+                'UNDER-VOLTAGE RIGHT NOW — the 5V supply is below spec. Adding a '
+                'USB WiFi adapter can reset the whole board. Use a stronger PSU '
+                'or a powered USB hub for the dongles.')
+        elif info['undervoltage_occurred']:
+            info['status'] = 'warning'
+            info['message'] = (
+                'Under-voltage has occurred since boot. The supply has no headroom '
+                'for another USB WiFi adapter — expect resets under load. Use a '
+                'stronger PSU or a powered USB hub.')
+        elif info['throttling_occurred']:
+            info['status'] = 'warning'
+            info['message'] = 'The SoC has throttled since boot (power or heat).'
+        else:
+            info['status'] = 'ok'
+        return info
+
     def _get_status_level(self, value, warning_threshold, critical_threshold):
         """Determine status level (ok, warning, critical) based on value and thresholds"""
         if value >= critical_threshold:

@@ -38,6 +38,9 @@ import path_asymmetry
 import tls_watch
 import wifi_analyzer
 import wifi_defense
+import bt_scanner
+import sdr_spectrum
+import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
 
@@ -111,11 +114,19 @@ def _have_scapy():
 # Diagnostics: ping / traceroute / mtr / whois / speedtest
 # --------------------------------------------------------------------------
 
-def do_ping(target, count=4):
+def do_ping(target, count=4, interface=None):
+    """Ping `target`. `interface`, if given, pins the probes to that NIC
+    (ping -I <device>), so a multi-homed box tests the link the caller chose
+    rather than whatever holds the default route."""
     count = _clamp_int(count, 4, 1, 15)
     deadline = count + 3
-    res = _run(['ping', '-n', '-c', str(count), '-w', str(deadline), target],
-               timeout=deadline + 5)
+    cmd = ['ping', '-n', '-c', str(count), '-w', str(deadline)]
+    if interface:
+        if not _valid_iface(interface) or interface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'output': '', 'summary': {},
+                    'error': f'Unknown interface: {interface}'}
+        cmd += ['-I', interface]
+    res = _run(cmd + [target], timeout=deadline + 5)
     out = res['out'] or res['err']
     summary = {}
     m = re.search(r'(\d+) packets transmitted, (\d+) received.*?([\d.]+)% packet loss', out, re.S)
@@ -321,6 +332,15 @@ def _iface_has_default_route(iface):
     return res['rc'] == 0 and bool(res['out'].strip())
 
 
+def _iface_default_gateway(iface):
+    """The gateway of this interface's own default route, or None. Lets a test
+    pinned to a NIC ping *that* link's gateway instead of the global one (which
+    may sit on a different segment entirely)."""
+    res = _run(['ip', 'route', 'show', 'default', 'dev', iface], timeout=5)
+    m = re.search(r'\bvia\s+(\S+)', res['out'] or '')
+    return m.group(1) if m else None
+
+
 def _egress_iface(preferred=None):
     """Best interface to originate an *egress* test (speedtest) from: the
     caller's pin, else a wired port that can actually reach the internet, else
@@ -470,11 +490,16 @@ def do_speedtest(interface=None):
 # Switch & L2: LLDP/CDP/EDP neighbor discovery + ARP scan
 # --------------------------------------------------------------------------
 
-def do_lldp():
+def do_lldp(interface=None):
     """Return discovered switch neighbors via lldpctl. lldpd (configured with
     -c -e -f -s) also decodes CDPv1/v2 (Cisco), EDP (Extreme), FDP (Foundry)
     and SONMP (Nortel) in addition to LLDP. VLAN id/name are included when the
-    neighbor advertises them."""
+    neighbor advertises them.
+
+    `interface` limits discovery to one local port; '' / None reports every
+    interface (the default). On a multi-homed box — a Ragnar with a LAN cable,
+    a USB NIC and WiFi — that is the difference between "which switch am I
+    plugged into on *this* port" and a merged list you have to eyeball."""
     if not _have('lldpctl'):
         return {'success': False,
                 'error': 'lldpd/lldpctl is not installed. Click Install to add it '
@@ -482,9 +507,19 @@ def do_lldp():
                          'Cisco, Extreme, Foundry and Nortel switches are seen too).',
                 'missing_tool': 'lldpd',
                 'neighbors': []}
-    res = _run(['lldpctl', '-f', 'json'], timeout=15)
+    if interface:
+        # Name/injection guard plus an existence check, so a typo surfaces as a
+        # clear error rather than an empty neighbour list that looks like "no
+        # switch found".
+        if not _valid_iface(interface) or interface not in _list_iface_names(include_virtual=True):
+            return {'success': False, 'error': f'Unknown interface: {interface}',
+                    'neighbors': []}
+    # lldpctl takes trailing interface names to filter natively.
+    cmd = ['lldpctl', '-f', 'json'] + ([interface] if interface else [])
+    res = _run(cmd, timeout=15)
     if res['rc'] != 0 and not res['out']:
-        return {'success': False, 'error': res['err'] or 'lldpctl failed', 'neighbors': []}
+        return {'success': False, 'error': res['err'] or 'lldpctl failed',
+                'interface': interface, 'neighbors': []}
     neighbors = []
     try:
         data = json.loads(res['out'])
@@ -496,11 +531,18 @@ def do_lldp():
                 neighbors.append(_parse_lldp_iface(local_if, info))
     except ValueError as e:
         return {'success': False, 'error': f'could not parse lldpctl output: {e}',
-                'neighbors': [], 'output': res['out']}
-    return {'success': True, 'neighbors': neighbors,
-            'note': ('No neighbors yet? Switches announce every ~30s; give it up '
-                     'to a minute after connecting, and ensure the port isn\'t on a hub.')
-            if not neighbors else None}
+                'interface': interface, 'neighbors': [], 'output': res['out']}
+    if not neighbors:
+        note = ('No neighbors yet? Switches announce every ~30s; give it up '
+                'to a minute after connecting, and ensure the port isn\'t on a hub.')
+        if interface:
+            note = (f'No neighbours on {interface}. ' + note +
+                    ' If the cable is on a different port, switch to Auto (all '
+                    'interfaces) to see every neighbour this box can hear.')
+    else:
+        note = None
+    return {'success': True, 'interface': interface, 'neighbors': neighbors,
+            'note': note}
 
 
 def _first_key(d):
@@ -658,11 +700,15 @@ def _parse_lldp_iface(local_if, info):
     }
 
 
-def do_arp_scan(interface):
+def do_arp_scan(interface=None):
     if not _have('arp-scan'):
         return {'success': False,
                 'error': 'arp-scan is not installed. Click Install to add it.',
                 'missing_tool': 'arp-scan', 'hosts': []}
+    interface = _capture_iface(interface)
+    if not interface:
+        return {'success': False, 'hosts': [],
+                'error': 'No suitable interface found — pick one explicitly.'}
     res = _run(['arp-scan', f'--interface={interface}', '--localnet'], timeout=40)
     if res['rc'] == 127:
         return {'success': False, 'error': res['err'] or 'arp-scan not found',
@@ -3285,8 +3331,12 @@ def do_locate_port(interface, count=6, on_ms=800, off_ms=800, force=False, metho
                 link stays up. Never drops connectivity, so no force is needed
                 — safe even on the default route."""
     interface = (interface or '').strip()
-    if not interface:
-        return {'success': False, 'error': 'interface required'}
+    auto = not interface
+    if auto:
+        # _capture_iface prefers a link-up wired port — exactly what locate
+        # needs; if it falls through to a wireless default route, the
+        # ethernet check below rejects it with the auto-specific message.
+        interface = _capture_iface(None) or ''
     method = (method or 'flap').strip().lower()
     if method not in ('flap', 'burst'):
         method = 'flap'
@@ -3294,8 +3344,14 @@ def do_locate_port(interface, count=6, on_ms=800, off_ms=800, force=False, metho
     match = next((i for i in do_interfaces(include_virtual=True).get('interfaces', [])
                   if i['name'] == interface), None)
     if match is None:
-        return {'success': False, 'error': f'unknown interface: {interface}'}
+        return {'success': False, 'error': f'unknown interface: {interface}'
+                if interface else 'no wired Ethernet port found — plug in a cable or pick an interface.'}
     if match.get('type') != 'ethernet' or not interface.startswith(('eth', 'en')):
+        if auto:
+            return {'success': False,
+                    'error': 'no wired Ethernet port with link found — locating a '
+                             'switch port needs a cable; pick an interface explicitly '
+                             'if one exists.'}
         return {'success': False,
                 'error': f'{interface} is not a physical Ethernet port; locating '
                          'a switch port only works on a wired link.'}
@@ -3339,9 +3395,9 @@ def do_l2_health(interface, seconds=12):
     bridge(s) and topology churn (loop smell), CDP/LLDP/DTP/VTP control frames,
     broadcast/multicast storm rate, rogue DHCP servers, rogue IPv6 RA sources,
     and duplicate IPs (conflicting ARP). One 'what's wrong at L2' snapshot."""
-    interface = (interface or '').strip()
+    interface = _capture_iface((interface or '').strip() or None)
     if not interface:
-        return {'success': False, 'error': 'interface required'}
+        return {'success': False, 'error': 'No suitable interface found — pick one explicitly.'}
     if not _have('tcpdump'):
         return {'success': False, 'missing_tool': 'tcpdump',
                 'error': 'tcpdump is not installed. Click Install to add it.'}
@@ -14237,15 +14293,16 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/lldp', methods=['GET'])
     def net_lldp():
         _log("net/lldp")
-        return jsonify(do_lldp())
+        iface = (request.args.get('interface') or '').strip() or None
+        return jsonify(do_lldp(interface=iface))
 
     @app.route('/api/net/arp-scan', methods=['GET'])
     def net_arp_scan():
         iface = (request.args.get('interface') or '').strip()
-        if not _valid_iface(iface):
-            return _bad('Invalid or missing interface')
-        _log(f"net/arp-scan {iface}")
-        return jsonify(do_arp_scan(iface))
+        if iface and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        _log(f"net/arp-scan {iface or 'auto'}")
+        return jsonify(do_arp_scan(iface or None))
 
     @app.route('/api/net/arp-check', methods=['GET'])
     def net_arp_check():
@@ -14919,6 +14976,99 @@ def register_network_diagnostics(app, logger=None):
             _log("net/wifi/history reset")
             return jsonify(wifi_analyzer.db_reset())
         return jsonify({"aps": wifi_analyzer.db_get()})
+
+    # ------------------------------------------------------------------
+    # Bluetooth / BLE 2.4 GHz overlay (bt_scanner.py) — device-discovery
+    # companion to the Wi-Fi analyzer. Receive-only: discovery, never pairs
+    # or connects. Maps BT/BLE energy onto the same 2.4 GHz band.
+    # ------------------------------------------------------------------
+    @app.route('/api/net/bt/controllers', methods=['GET'])
+    def net_bt_controllers():
+        _log("net/bt/controllers")
+        return jsonify({"controllers": bt_scanner.list_controllers()})
+
+    @app.route('/api/net/bt/scan', methods=['GET'])
+    def net_bt_scan():
+        ctrl = (request.args.get('controller') or '').strip() or None
+        if ctrl is not None and not bt_scanner._valid_controller(ctrl):
+            return _bad('Invalid controller')
+        try:
+            dur = int(request.args.get('duration', bt_scanner._DEFAULT_DURATION))
+        except (TypeError, ValueError):
+            return _bad('Invalid duration')
+        _log(f"net/bt/scan controller={ctrl} {dur}s")
+        return jsonify(bt_scanner.do_scan(controller=ctrl, duration=dur))
+
+    @app.route('/api/net/bt/selftest', methods=['GET'])
+    def net_bt_selftest():
+        _log("net/bt/selftest")
+        return jsonify(bt_scanner.selftest())
+
+    # ------------------------------------------------------------------
+    # True-RF spectrum / waterfall via a HackRF SDR (sdr_spectrum.py).
+    # Measures actual on-air energy (any protocol). Receive-only. The UI
+    # gates the Waterfall view on /status.available (device present).
+    # ------------------------------------------------------------------
+    @app.route('/api/net/sdr/status', methods=['GET'])
+    def net_sdr_status():
+        _log("net/sdr/status")
+        return jsonify(sdr_spectrum.status())
+
+    @app.route('/api/net/sdr/start', methods=['POST'])
+    def net_sdr_start():
+        data = request.get_json(silent=True) or {}
+        band = (data.get('band') or '2.4').strip()
+        if band not in sdr_spectrum.BANDS:
+            return _bad('Invalid band')
+        lna = data.get('lna')
+        vga = data.get('vga')
+        _log(f"net/sdr/start band={band}")
+        return jsonify(sdr_spectrum.start(band=band, lna=lna, vga=vga))
+
+    @app.route('/api/net/sdr/stop', methods=['POST'])
+    def net_sdr_stop():
+        _log("net/sdr/stop")
+        return jsonify(sdr_spectrum.stop())
+
+    @app.route('/api/net/sdr/frames', methods=['GET'])
+    def net_sdr_frames():
+        try:
+            since = int(request.args.get('since', 0))
+        except (TypeError, ValueError):
+            return _bad('Invalid since')
+        return jsonify(sdr_spectrum.get_frames(since=since))
+
+    @app.route('/api/net/sdr/selftest', methods=['GET'])
+    def net_sdr_selftest():
+        _log("net/sdr/selftest")
+        return jsonify(sdr_spectrum.selftest())
+
+    # ------------------------------------------------------------------
+    # Zigbee / 802.15.4 overlay via an on-demand HuginnESP sniff
+    # (zigbee_scan.py + zigbee_overlay.py). Receive-only. The UI gates the
+    # Zigbee toggle on /status.available (a Huginn companion is present).
+    # ------------------------------------------------------------------
+    @app.route('/api/net/zigbee/status', methods=['GET'])
+    def net_zigbee_status():
+        _log("net/zigbee/status")
+        return jsonify(zigbee_scan.detect())
+
+    @app.route('/api/net/zigbee/scan', methods=['GET'])
+    def net_zigbee_scan():
+        port = (request.args.get('port') or '').strip() or None
+        if port is not None and not zigbee_scan._valid_port(port):
+            return _bad('Invalid port')
+        try:
+            dur = int(request.args.get('duration', zigbee_scan._DEFAULT_DURATION))
+        except (TypeError, ValueError):
+            return _bad('Invalid duration')
+        _log(f"net/zigbee/scan port={port} {dur}s")
+        return jsonify(zigbee_scan.scan(port=port, duration=dur))
+
+    @app.route('/api/net/zigbee/selftest', methods=['GET'])
+    def net_zigbee_selftest():
+        _log("net/zigbee/selftest")
+        return jsonify(zigbee_scan.selftest())
 
     # ------------------------------------------------------------------
     # WiFi Defense — 802.11 frame monitor / WIDS (wifi_defense.py).

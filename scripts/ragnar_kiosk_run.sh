@@ -240,6 +240,22 @@ fi
 
 XORG_LOG="$LOG_DIR/kiosk-Xorg.log"
 mkdir -p "$HOME/.local/share/xorg" 2>/dev/null || true
+# Where Xorg puts its log when we are NOT allowed to name one (see below). Which
+# of these it picks depends on how it ended up privileged: started through the
+# setuid Xorg.wrap it is really root and writes the system log, while a rootless
+# X writes into the user's own directory. Check both, newest first, or a real X
+# failure reads as "X never started".
+xorg_own_log() {
+    local newest=""
+    local candidate
+    for candidate in /var/log/Xorg.0.log "$HOME/.local/share/xorg/Xorg.0.log"; do
+        [[ -s "$candidate" ]] || continue
+        if [[ -z "$newest" || "$candidate" -nt "$newest" ]]; then
+            newest="$candidate"
+        fi
+    done
+    printf '%s' "$newest"
+}
 rm -f /tmp/.X0-lock 2>/dev/null || true
 rm -f /tmp/.X11-unix/X0 2>/dev/null || true
 
@@ -279,10 +295,16 @@ if [[ -n "\$PRIMARY" && "\$ROT" != "normal" ]]; then
     xrandr --output "\$PRIMARY" --rotate "\$ROT" || true
 fi
 
-if command -v openbox-session >/dev/null 2>&1; then
-    openbox-session &
-elif command -v openbox >/dev/null 2>&1; then
+# Plain openbox, deliberately not openbox-session. A kiosk wants a window
+# manager, not a desktop: openbox-session additionally runs every XDG autostart
+# entry on the box, which on a 512 MB Pi Zero 2 W is memory this cannot spare
+# and which produced the alarming-looking
+#   ERROR: openbox-xdg-autostart requires PyXDG to be installed
+# in the kiosk log, pointing at a component the kiosk never needed.
+if command -v openbox >/dev/null 2>&1; then
     openbox &
+elif command -v openbox-session >/dev/null 2>&1; then
+    openbox-session &
 fi
 
 if [[ "$KIOSK_HIDE_CURSOR" == "true" ]] && command -v unclutter >/dev/null 2>&1; then
@@ -310,10 +332,53 @@ chmod +x "$SESSION_SCRIPT"
 # undebuggable remotely — here we tail the Xorg log on any non-signal exit.
 _kiosk_term() { [[ -n "${XINIT_PID:-}" ]] && kill -TERM "$XINIT_PID" 2>/dev/null || true; }
 trap _kiosk_term TERM INT
-xinit "$SESSION_SCRIPT" -- /usr/bin/X :0 vt7 -nolisten tcp \
-      -auth "$XAUTHORITY" -logfile "$XORG_LOG" -keeptty &
+
+# Do not fight an X server that is already running.
+#
+# MODE A above only triggers when DISPLAY / WAYLAND_DISPLAY are set in the
+# environment, and the systemd unit sets neither — so a service-mode run always
+# reaches here and starts its own X on :0. On a box that has a desktop session
+# (installed in service mode, then a desktop added; or session detection failed
+# at install time) that display is already taken, and X dies with
+#   (EE) Cannot establish any listening sockets -
+#        Make sure an X server isn't already running
+# on every restart until the start limit trips. That message never names the
+# actual conflict, so the failure is undebuggable from the journal alone.
+if pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1; then
+    echo "[kiosk-run] ERROR: an X server is already running on this box, so the" >&2
+    echo "[kiosk-run] kiosk cannot start its own on :0. This box wants AUTOSTART" >&2
+    echo "[kiosk-run] mode (launch into the existing session), not service mode." >&2
+    echo "[kiosk-run] Fix: disable the kiosk in Config -> Kiosk, then re-enable it" >&2
+    echo "[kiosk-run] from inside the desktop session so the installer picks" >&2
+    echo "[kiosk-run] autostart mode. Running X processes:" >&2
+    pgrep -ax Xorg >&2 2>/dev/null || pgrep -ax X >&2 2>/dev/null || true
+    exit 1
+fi
+
+# -logfile is REFUSED when Xorg runs with elevated privileges, and that is
+# precisely how this path runs it: the service runs as a non-root user, so X
+# only starts at all through the setuid Xorg.wrap that the installer puts there
+# (xserver-xorg-legacy + needs_root_rights=yes). Under that wrapper Xorg aborts
+# on sight of the flag —
+#     Invalid argument -logfile with elevated privileges
+# — before it opens anything, so the service died instantly with a bare
+# status=1/FAILURE, no Xorg log was ever written to point at, and the restart
+# loop then tripped the start limit. Let Xorg write its own log and copy that
+# where the doctor expects it afterwards.
+XORG_ARGS=(:0 vt7 -nolisten tcp -auth "$XAUTHORITY" -keeptty)
+if [[ "$(id -u)" -eq 0 ]]; then
+    # Genuine root: privileges are not "elevated", so naming the log is allowed.
+    XORG_ARGS+=(-logfile "$XORG_LOG")
+fi
+xinit "$SESSION_SCRIPT" -- /usr/bin/X "${XORG_ARGS[@]}" &
 XINIT_PID=$!
 if wait "$XINIT_PID"; then rc=0; else rc=$?; fi
+# Keep /var/log/ragnar/kiosk-Xorg.log as the one place to look, whichever log
+# Xorg was actually allowed to write.
+OWN_LOG="$(xorg_own_log)"
+if [[ ! -s "$XORG_LOG" && -n "$OWN_LOG" ]]; then
+    cp -f "$OWN_LOG" "$XORG_LOG" 2>/dev/null || true
+fi
 if [[ "$rc" -ne 0 && "$rc" -ne 143 && "$rc" -ne 130 ]]; then
     echo "[kiosk-run] X/xinit exited with code $rc — last Xorg log lines:" >&2
     tail -n 25 "$XORG_LOG" 2>/dev/null >&2 || true

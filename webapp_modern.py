@@ -52,6 +52,7 @@ try:
 except ImportError:
     pandas_available = False
 from init_shared import shared_data
+import git_updater
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
 from logger import Logger
@@ -102,6 +103,236 @@ except Exception as _nd_err:  # pragma: no cover - defensive
     logger.error(f"Failed to register network diagnostics routes: {_nd_err}")
 
 # ============================================================================
+# PROVENANCE / ORIGIN VERIFICATION
+# Reports authorship and whether this checkout is the official repository or a
+# fork. The mobile app reads this on connect. It is an attribution signal, not
+# a security control — a fork can edit it — but it keeps forks honest.
+# ============================================================================
+
+@app.route('/api/provenance')
+def api_provenance():
+    try:
+        import provenance
+        return jsonify(provenance.verify(os.path.dirname(os.path.abspath(__file__))))
+    except Exception as _prov_err:  # pragma: no cover - defensive
+        return jsonify({
+            'canonical_repo': 'https://github.com/PierreGode/Ragnar.git',
+            'official': False,
+            'error': str(_prov_err),
+        })
+
+# ============================================================================
+# BLE PROVISIONING
+# The Bluetooth GATT peripheral the mobile app uses to discover this box and
+# learn its IP (see ble_provisioning.py + Ragnarmobile docs/PROTOCOL.md). It is
+# provisioning-only: no dashboard data ever crosses Bluetooth. Off by default,
+# because advertising as a peripheral contends with bt_scanner's active scans
+# on the same adapter.
+# ============================================================================
+
+_ble_server = None
+_ble_lock = threading.Lock()
+
+
+def _ble_ap_state():
+    """Live hotspot state for the netStatus characteristic."""
+    active = bool(getattr(shared_data, 'wardrive_ap_active', False))
+    wm = getattr(shared_data, 'wifi_manager', None)
+    ssid = None
+    if active:
+        ssid = getattr(wm, 'ap_ssid', None) or shared_data.config.get('wifi_ap_ssid', 'Ragnar')
+    return {'active': active, 'ssid': ssid}
+
+
+def _ble_set_ap(on):
+    """Bring the hotspot up/down from a bonded AP-control write."""
+    wm = getattr(shared_data, 'wifi_manager', None)
+    if wm is None:
+        raise RuntimeError('Wi-Fi manager not available')
+    if on:
+        return bool(wm.enable_ap_mode_from_web())
+    return bool(wm.stop_ap_mode())
+
+
+def _start_ble_provisioning():
+    """Start the peripheral if config enables it. Never raises."""
+    global _ble_server
+    try:
+        if not shared_data.config.get('ble_provisioning_enabled', False):
+            return False
+        import ble_provisioning
+        # Retire any previous peripheral BEFORE building a new one. Overwriting
+        # the reference used to drop a still-registered server on the floor —
+        # its GLib thread and, worse, its BlueZ registration of the fixed path
+        # /one/gode/ragnar/ble survived, so the new server's
+        # RegisterApplication came back org.bluez.Error.AlreadyExists.
+        old = None
+        with _ble_lock:
+            if _ble_server is not None:
+                if _ble_server.status().get('running'):
+                    return True
+                old, _ble_server = _ble_server, None
+        if old is not None:
+            # Outside the lock: stop() joins the loop thread and would otherwise
+            # stall the status endpoint the UI polls.
+            try:
+                old.stop()
+            except Exception:
+                pass
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        with _ble_lock:
+            # Another caller may have started one while we were stopping.
+            if _ble_server is not None and _ble_server.status().get('running'):
+                return True
+            _ble_server = ble_provisioning.build_server(
+                base_dir,
+                get_config=lambda: shared_data.config,
+                get_ap_state=_ble_ap_state,
+                set_ap=_ble_set_ap,
+                logger=logger,
+            )
+            if _ble_server is None:
+                return False
+            server = _ble_server
+        # start() blocks until BlueZ registers or the wait times out. Do that
+        # OUTSIDE the lock: GET /api/ble/provisioning takes the same lock, so
+        # holding it here made the status the UI polls hang for the full wait —
+        # exactly while the user is watching for it to come up.
+        return server.start()
+    except Exception as e:  # pragma: no cover - hardware/D-Bus dependent
+        logger.error(f"BLE provisioning failed to start: {e}")
+        return False
+
+
+def _stop_ble_provisioning():
+    global _ble_server
+    with _ble_lock:
+        if _ble_server is not None:
+            _ble_server.stop()
+            _ble_server = None
+
+
+def _ble_adapters():
+    """Available Bluetooth controllers for the config picker. Never raises."""
+    try:
+        import ble_provisioning
+        return ble_provisioning.list_controllers()
+    except Exception:
+        return []
+
+
+def _ble_power():
+    """Pi power/under-voltage health. Running BLE + a USB radio on an
+    under-volting Pi can reset the whole board — surface it so the user knows
+    that a 'crash' is the PSU, not the software. Never raises."""
+    try:
+        import resource_monitor
+        p = resource_monitor.resource_monitor.get_power_status()
+        if p.get('supported') and p.get('status') in ('warning', 'critical'):
+            return {'status': p['status'], 'message': p['message']}
+    except Exception:
+        pass
+    return None
+
+
+@app.route('/api/ble/provisioning', methods=['GET'])
+def ble_provisioning_status():
+    enabled = bool(shared_data.config.get('ble_provisioning_enabled', False))
+    running = False
+    starting = False
+    error = None
+    hint = None
+    name = None
+    adapter = None
+    autostopped = False
+    with _ble_lock:
+        if _ble_server is not None:
+            st = _ble_server.status()
+            running = bool(st.get('running'))
+            starting = bool(st.get('starting'))
+            error = st.get('error')
+            hint = st.get('hint')
+            name = st.get('name')
+            adapter = st.get('adapter')
+            autostopped = bool(st.get('autostopped'))
+    return jsonify({
+        'enabled': enabled,
+        'running': running,
+        # Still registering with BlueZ. Distinct from failed: on a slow board
+        # registration can outlast the start() wait and succeed shortly after,
+        # so the UI must keep polling rather than declare it broken.
+        'starting': starting,
+        'error': error,
+        # Plain-language next step when the controller refused to advertise —
+        # the raw BlueZ text ("Failed to register advertisement") says nothing
+        # about what to do about it.
+        'hint': hint,
+        'name': name,
+        # Configured preference ('' = auto: prefer the built-in controller).
+        'adapter': shared_data.config.get('ble_provisioning_adapter', ''),
+        'active_adapter': adapter,
+        'adapters': _ble_adapters(),
+        'autostop': bool(shared_data.config.get('ble_provisioning_autostop', False)),
+        # True once a phone provisioned and the peripheral freed the adapter.
+        'autostopped': autostopped,
+        # Power warning (under-voltage) — running BLE + a USB radio on a weak
+        # PSU can reset the Pi; None when healthy.
+        'power': _ble_power(),
+    })
+
+
+@app.route('/api/ble/provisioning/toggle', methods=['POST'])
+def ble_provisioning_toggle():
+    payload = request.get_json(silent=True) or {}
+    enable = bool(payload.get('enabled', not shared_data.config.get('ble_provisioning_enabled', False)))
+
+    # An adapter or auto-stop change: persist it and, if running, restart so
+    # the new setting takes effect (both are read at server-construction time).
+    needs_restart = False
+    if 'adapter' in payload:
+        new_adapter = (payload.get('adapter') or '').strip()
+        if new_adapter != shared_data.config.get('ble_provisioning_adapter', ''):
+            shared_data.config['ble_provisioning_adapter'] = new_adapter
+            needs_restart = True
+    if 'autostop' in payload:
+        new_autostop = bool(payload.get('autostop'))
+        if new_autostop != bool(shared_data.config.get('ble_provisioning_autostop', False)):
+            shared_data.config['ble_provisioning_autostop'] = new_autostop
+            needs_restart = True
+
+    shared_data.config['ble_provisioning_enabled'] = enable
+    shared_data.save_config()
+
+    if enable:
+        # Restart when a setting changed, or when re-arming after an auto-stop.
+        # A peripheral that is merely still registering is NOT stopped — tearing
+        # it down here would abort a start that was about to succeed.
+        with _ble_lock:
+            if _ble_server is None:
+                stopped = False
+            else:
+                _st = _ble_server.status()
+                stopped = not _st.get('running') and not _st.get('starting')
+        if needs_restart or stopped:
+            _stop_ble_provisioning()
+        ok = _start_ble_provisioning()
+        if not ok:
+            with _ble_lock:
+                st = _ble_server.status() if _ble_server else {}
+            if st.get('starting'):
+                # Registration outlasted the wait but is still in progress; the
+                # UI keeps polling instead of reporting a failure.
+                return jsonify({'enabled': True, 'running': False,
+                                'starting': True, 'error': None}), 200
+            err = st.get('error') or 'no Bluetooth adapter'
+            return jsonify({'enabled': True, 'running': False,
+                            'starting': False, 'error': err}), 200
+        return jsonify({'enabled': True, 'running': True, 'starting': False})
+    _stop_ble_provisioning()
+    return jsonify({'enabled': False, 'running': False})
+
+# ============================================================================
 # AUTHENTICATION MIDDLEWARE
 # ============================================================================
 
@@ -113,7 +344,7 @@ def check_authentication():
 
     # Whitelist: paths that must be accessible without authentication
     path = request.path
-    whitelist_prefixes = ['/login', '/api/auth/', '/api/kill']
+    whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
         return
 
@@ -125,14 +356,21 @@ def check_authentication():
     # Wardriving phone-access AP (KEY1): let AP clients view the minimal live
     # page and its READ-ONLY data without login — same spirit as the captive
     # portal. Scoped to GET on the status/track/networks endpoints so a phone
-    # on the AP can watch but cannot stop wardriving, wipe data, etc.
+    # on the AP can watch but cannot wipe data, change settings, etc.
+    # Two writes are allowed, both being buttons on that page and both only
+    # reachable while the wardriving AP is up: stopping the session and
+    # restarting the Ragnar service (the field "it's wedged" recovery).
     if getattr(shared_data, 'wardrive_ap_active', False) and is_ap_client_request():
         readonly_api = (
             '/api/wardriving/status', '/api/wardriving/track',
             '/api/wardriving/networks', '/api/wardriving/gps',
             '/api/wardriving/bluetooth', '/api/wardriving/cells',
+            '/api/wardriving/diagnostics',
         )
+        write_api = ('/api/wardriving/stop', '/api/system/restart-service')
         if path in ('/', '/wardrive') or (request.method == 'GET' and path in readonly_api):
+            return
+        if request.method == 'POST' and path in write_api:
             return
 
     # Kiosk loopback bypass: any request originating from the Pi itself
@@ -3341,6 +3579,26 @@ def _kiosk_autostart_paths() -> list[str]:
     return paths
 
 
+# Kiosk install/teardown runs on a background thread and can take many minutes
+# on a slow board — the installer apt-installs chromium. The UI polls
+# /api/kiosk/status while that happens, so the task's progress and any failure
+# have to be visible there. Without it the API reported 'not_installed' for the
+# whole install, which is indistinguishable from "nothing happened", and the UI
+# gave up after ~25s on a job that was running fine.
+_kiosk_task = {'busy': False, 'phase': 'idle', 'error': None, 'started': 0.0}
+_kiosk_task_lock = threading.Lock()
+
+
+def _kiosk_task_set(**kw) -> None:
+    with _kiosk_task_lock:
+        _kiosk_task.update(kw)
+
+
+def _kiosk_task_get() -> dict:
+    with _kiosk_task_lock:
+        return dict(_kiosk_task)
+
+
 def _kiosk_mode() -> str:
     """Return 'service', 'autostart', or 'not_installed' based on what's on disk."""
     if _kiosk_autostart_paths():
@@ -3348,10 +3606,6 @@ def _kiosk_mode() -> str:
     if os.path.exists(KIOSK_SERVICE_FILE):
         return 'service'
     return 'not_installed'
-
-
-def _kiosk_installed() -> bool:
-    return _kiosk_mode() != 'not_installed'
 
 
 def _kiosk_running() -> bool:
@@ -3364,6 +3618,36 @@ def _kiosk_running() -> bool:
         return proc.returncode == 0 and bool(proc.stdout.strip())
     except Exception:
         return False
+
+
+def _x11_display_for(uid: int) -> str:
+    """The DISPLAY of this user's X session, via loginctl. '' when there is none.
+
+    Pi OS Desktop is Wayland now, but plenty of boxes still run X11 — the user
+    switched it in raspi-config, or the image predates labwc. Those sessions have
+    no wayland-* socket at all, which is the only thing the spawn used to look
+    for, so enabling the kiosk from the web UI appeared to do nothing until the
+    person at the screen logged out and back in.
+    """
+    try:
+        listing = subprocess.run(['loginctl', 'list-sessions', '--no-legend'],
+                                 capture_output=True, text=True, timeout=5, check=False)
+        for line in listing.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            sid = parts[0]
+            props = subprocess.run(
+                ['loginctl', 'show-session', sid, '-p', 'User', '-p', 'Type', '-p', 'Display'],
+                capture_output=True, text=True, timeout=5, check=False).stdout
+            values = dict(
+                line.split('=', 1) for line in props.splitlines() if '=' in line)
+            if values.get('Type') != 'x11' or values.get('User') != str(uid):
+                continue
+            return values.get('Display', '') or ':0'
+    except Exception as exc:
+        logger.debug(f"[kiosk] could not query X11 sessions: {exc}")
+    return ''
 
 
 def _spawn_kiosk_in_session() -> bool:
@@ -3386,16 +3670,26 @@ def _spawn_kiosk_in_session() -> bool:
             ]
         except OSError:
             socket_names = []
-        if not socket_names:
-            continue
-        wl = sorted(socket_names)[0]
+
+        env_extra = []
+        if socket_names:
+            wl = sorted(socket_names)[0]
+            session_label = f"wayland ({wl})"
+            env_extra = [f"WAYLAND_DISPLAY={wl}", "DISPLAY=:0"]
+        else:
+            display = _x11_display_for(entry.pw_uid)
+            if not display:
+                continue
+            session_label = f"x11 ({display})"
+            env_extra = [f"DISPLAY={display}",
+                         f"XAUTHORITY={os.path.join(entry.pw_dir, '.Xauthority')}"]
+
         cmd = [
             'sudo', '-u', entry.pw_name, '-n',
             'env',
             f"HOME={entry.pw_dir}",
             f"XDG_RUNTIME_DIR={runtime_dir}",
-            f"WAYLAND_DISPLAY={wl}",
-            "DISPLAY=:0",
+        ] + env_extra + [
             f"RAGNAR_REPO={os.path.dirname(os.path.abspath(__file__))}",
             '/usr/local/bin/ragnar-kiosk-run',
         ]
@@ -3407,11 +3701,125 @@ def _spawn_kiosk_in_session() -> bool:
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {wl}")
+            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {session_label}")
             return True
         except Exception as exc:
             logger.error(f"[kiosk] failed to spawn into {entry.pw_name}'s session: {exc}")
-    logger.warning("[kiosk] no active wayland session — will launch on next login")
+    logger.warning("[kiosk] no active desktop session (wayland or X11) — "
+                   "will launch on next login")
+    return False
+
+
+def _kiosk_failure_detail(max_chars: int = 400) -> str:
+    """The most specific line available about why the kiosk service died.
+
+    Prefers the wrapper's own error output over the unit journal: the journal
+    line people paste is almost always "Main process exited, status=1/FAILURE",
+    which names no cause at all, while the wrapper says things like "an X server
+    is already running" or dumps the Xorg error that actually killed it.
+    """
+    candidates = []
+    try:
+        journal = subprocess.run(
+            ['journalctl', '-u', KIOSK_SERVICE, '-n', '40', '--no-pager', '-o', 'cat'],
+            capture_output=True, text=True, timeout=15, check=False).stdout
+        candidates += [l.strip() for l in journal.splitlines()
+                       if 'kiosk-run' in l or '(EE)' in l or 'ERROR' in l]
+    except Exception:
+        pass
+    try:
+        with open('/var/log/ragnar/kiosk-wrapper.log', 'r', errors='replace') as fh:
+            tail = fh.readlines()[-40:]
+        candidates += [l.strip() for l in tail
+                       if 'ERROR' in l or 'WARN' in l or '(EE)' in l]
+    except OSError:
+        pass
+    if not candidates:
+        return ' Click Diagnose for the full picture.'
+    detail = ' '.join(candidates[-3:])
+    if len(detail) > max_chars:
+        detail = detail[:max_chars].rstrip() + '…'
+    return f' Last error: {detail} — click Diagnose for the full picture.'
+
+
+def _kiosk_install_and_start() -> bool:
+    """Do exactly what `sudo bash scripts/install_kiosk.sh` + `systemctl enable
+    --now ragnar-kiosk` do by hand, and report why if it does not take.
+
+    The installer is idempotent by design - it says so at the top of the file
+    and only installs what is missing - so it is run on every enable rather than
+    skipped whenever something already looks installed. Skipping was the reason
+    the toggle and the manual command behaved differently: an earlier attempt
+    that got as far as writing the unit file (or left an autostart entry behind)
+    counted as "installed", so the toggle never re-ran the installer and never
+    fixed what was actually missing, while running the script by hand did.
+    """
+    logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
+    # Installing chromium: minutes on a Pi Zero 2 W. The UI shows this phase
+    # instead of timing the poll out.
+    _kiosk_task_set(phase='installing')
+    proc = subprocess.run(
+        ['sudo', '-n', 'bash', KIOSK_INSTALL_SCRIPT],
+        capture_output=True, text=True, timeout=900, check=False
+    )
+    if proc.returncode != 0:
+        output = (proc.stderr.strip() or proc.stdout.strip() or '')
+        detail = output.splitlines()[-1] if output else f'exit code {proc.returncode}'
+        logger.error(f"[kiosk] install failed (rc={proc.returncode}): {output}")
+        # Surface it. This failure never reaches the systemd journal - the unit
+        # does not exist yet - so telling the user to check journalctl sent them
+        # somewhere with nothing in it.
+        _kiosk_task_set(phase='failed',
+                        error=f'Installer failed: {detail}. Click Diagnose for the full picture.')
+        return False
+    logger.info("[kiosk] install completed")
+
+    mode = _kiosk_mode()
+    _kiosk_task_set(phase='starting')
+    if mode == 'service':
+        # Clear a tripped start limit first. The unit gives up after 5 failures
+        # in 2 minutes and then refuses every later start with "start request
+        # repeated too quickly" until it is reset - so once a box has failed a
+        # few times, enabling it fails for a reason that has nothing to do with
+        # whatever is actually wrong, and the real error never gets a chance to
+        # reappear. This is the same `systemctl reset-failed` the kiosk doctor
+        # tells people to run by hand.
+        _run_systemctl(['reset-failed', KIOSK_SERVICE])
+        enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
+        if enable_proc.returncode != 0:
+            err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
+            logger.error(f"[kiosk] enable --now failed: {err}")
+            _kiosk_task_set(phase='failed',
+                            error=f'Could not start the kiosk service: {err}{_kiosk_failure_detail()}')
+            return False
+        # `enable --now` returns as soon as the process is spawned, so a kiosk
+        # that dies a second later reported success and left the UI waiting on a
+        # service that was already gone. Give it a moment and say so instead.
+        time.sleep(5)
+        state = _systemctl_state_label('ragnar-kiosk')
+        if state not in ('active', 'activating'):
+            logger.error(f"[kiosk] service did not stay up (state={state})")
+            _kiosk_task_set(
+                phase='failed',
+                error=f'The kiosk service started and then stopped ({state}).'
+                      f'{_kiosk_failure_detail()}')
+            return False
+        logger.info("[kiosk] systemd service enabled and started")
+        return True
+
+    if mode == 'autostart':
+        # Autostart mode: the entry covers next login, but spawn into the live
+        # session too so enabling from the web UI shows something now.
+        if not _kiosk_running():
+            _spawn_kiosk_in_session()
+        return True
+
+    # The installer returned success but left neither a unit nor an autostart
+    # entry. Saying "installed" here would be a lie the UI then waits on.
+    logger.error("[kiosk] installer succeeded but nothing was installed")
+    _kiosk_task_set(phase='failed',
+                    error='The installer reported success but installed neither a service nor an '
+                          'autostart entry. Click Diagnose for the full picture.')
     return False
 
 
@@ -3419,30 +3827,12 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
     """Background worker: install/start/stop the kiosk to match config.
     Handles both modes (autostart .desktop entry on Pi OS Desktop, systemd
     unit on Pi OS Lite) — the installer picks the right one."""
+    _kiosk_task_set(busy=True, phase='starting', error=None, started=time.time())
     try:
         if new_enabled and not prev_enabled:
-            if not _kiosk_installed():
-                logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
-                proc = subprocess.run(
-                    ['sudo', 'bash', KIOSK_INSTALL_SCRIPT],
-                    capture_output=True, text=True, timeout=600, check=False
-                )
-                if proc.returncode != 0:
-                    logger.error(f"[kiosk] install failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
-                    return
-                logger.info("[kiosk] install completed")
-            mode = _kiosk_mode()
-            if mode == 'service':
-                enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
-                if enable_proc.returncode != 0:
-                    logger.error(f"[kiosk] enable --now failed: {enable_proc.stderr.strip() or enable_proc.stdout.strip()}")
-                else:
-                    logger.info("[kiosk] systemd service enabled and started")
-            else:
-                # Autostart mode: install handles next-login flow. Spawn now too.
-                if not _kiosk_running():
-                    _spawn_kiosk_in_session()
+            _kiosk_install_and_start()
         elif prev_enabled and not new_enabled:
+            _kiosk_task_set(phase='removing')
             # Kill any running kiosk chromium first (autostart mode)
             subprocess.run(['sudo', 'pkill', '-f', 'ragnar-kiosk-chromium'],
                            capture_output=True, timeout=10, check=False)
@@ -3454,6 +3844,7 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
             )
             logger.info("[kiosk] kiosk removed")
         elif new_enabled and settings_changed:
+            _kiosk_task_set(phase='restarting')
             mode = _kiosk_mode()
             if mode == 'service':
                 restart_proc = _run_systemctl(['restart', KIOSK_SERVICE])
@@ -3470,8 +3861,18 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
                 _spawn_kiosk_in_session()
     except subprocess.TimeoutExpired:
         logger.error("[kiosk] dispatch timed out")
+        _kiosk_task_set(phase='failed', error='Kiosk install/teardown timed out.')
     except Exception as exc:
         logger.error(f"[kiosk] dispatch error: {exc}")
+        _kiosk_task_set(phase='failed', error=str(exc))
+    finally:
+        # Always clear busy, or a crashed dispatch would leave the UI polling
+        # forever. 'failed' is left in place so the reason survives for the
+        # next status read; any later dispatch resets it.
+        with _kiosk_task_lock:
+            _kiosk_task['busy'] = False
+            if _kiosk_task.get('phase') != 'failed':
+                _kiosk_task['phase'] = 'idle'
 
 
 def _deferred_self_stop(delay: int = 1) -> None:
@@ -5185,13 +5586,54 @@ def read_wifi_network_data():
         return []
 
 
+# Ragnar's own access point (wifi_manager.py: ap_ip / ap_subnet).
+_AP_GATEWAY_IP = '192.168.4.1'
+_AP_SUBNET_PREFIX = '192.168.4.'
+_ap_gateway_cache = {'ts': 0.0, 'owned': False}
+_AP_GATEWAY_TTL = 5.0  # seconds; this runs on every request
+
+
+def _ragnar_owns_ap_gateway() -> bool:
+    """Is Ragnar's own access point up — i.e. does THIS box hold 192.168.4.1?
+
+    The AP subnet alone is not evidence of an AP client. 192.168.4.0/24 is also
+    a common home LAN range — notably eero's default — and when the router owns
+    it, every ordinary client looks like an AP client. Holding the gateway
+    address ourselves is what actually distinguishes "we are the AP" from "we
+    are a guest on someone else's 192.168.4.0/24".
+    """
+    now = time.time()
+    if now - _ap_gateway_cache['ts'] < _AP_GATEWAY_TTL:
+        return _ap_gateway_cache['owned']
+    owned = False
+    try:
+        out = subprocess.run(
+            ['ip', '-4', '-o', 'addr'],
+            capture_output=True, text=True, timeout=3, check=False
+        ).stdout
+        # Trailing '/' so 192.168.4.1 does not also match 192.168.4.1{0..9}.
+        owned = f' inet {_AP_GATEWAY_IP}/' in out
+    except Exception:
+        owned = False
+    _ap_gateway_cache.update(ts=now, owned=owned)
+    return owned
+
+
 def is_ap_client_request():
-    """Check if the request is coming from an AP client (192.168.4.x)"""
+    """Is this request from a client of Ragnar's own access point?
+
+    Decides whether to serve the captive portal instead of the dashboard, so a
+    false positive hides Ragnar entirely. This used to test the client IP
+    against 192.168.4.0/24 and nothing else, which meant any home network using
+    that range — eero picks it by default — got the Wi-Fi setup portal on
+    :8000 forever, even with the box happily connected and no AP running.
+    """
     try:
         client_ip = request.environ.get('REMOTE_ADDR', '')
-        # Check if request is from AP network (192.168.4.x)
-        return client_ip.startswith('192.168.4.') and client_ip != '192.168.4.1'
-    except:
+        if not client_ip.startswith(_AP_SUBNET_PREFIX) or client_ip == _AP_GATEWAY_IP:
+            return False
+        return _ragnar_owns_ap_gateway()
+    except Exception:
         return False
 
 
@@ -5575,6 +6017,18 @@ def update_config():
         # Save configuration
         shared_data.save_config()
 
+        # On-Screen Network Diagnostic mode and wardriving both own the e-Paper
+        # panel + HAT keys and can't coexist (the diagnostic layer wins the
+        # display render race). Turning diagnostic mode ON stops any live
+        # wardriving session so the panel isn't left in a half-and-half state.
+        if data.get('network_diagnostic_mode') is True:
+            try:
+                if _wardriving_engine is not None and getattr(_wardriving_engine, '_running', False):
+                    logger.info("Stopping wardriving: On-Screen Network Diagnostic mode enabled (mutually exclusive).")
+                    _wardriving_engine.stop()
+            except Exception as e:
+                logger.warning(f"Could not stop wardriving when enabling diagnostic mode: {e}")
+
         # Auto-install pyserial when wardriving is enabled
         if data.get('wardriving_enabled') is True:
             try:
@@ -5676,11 +6130,25 @@ def kiosk_status():
             state = 'active' if _kiosk_running() else 'inactive'
         else:
             state = 'not_installed'
+        task = _kiosk_task_get()
         return jsonify({
             'installed': mode != 'not_installed',
             'mode': mode,
+            # Whether `journalctl -u ragnar-kiosk` can possibly have anything in
+            # it. In autostart mode, and whenever the install failed, no unit is
+            # ever created - pointing people at that journal sent them to "-- No
+            # entries --" and a dead end.
+            'unit_exists': os.path.exists(KIOSK_SERVICE_FILE),
             'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
             'service_state': state,
+            # Background install/teardown progress. 'busy' tells the UI to keep
+            # waiting instead of declaring a timeout; 'task_error' carries the
+            # real reason a job failed, which for an installer failure never
+            # reaches the systemd journal because the unit does not exist yet.
+            'busy': bool(task.get('busy')),
+            'phase': task.get('phase') or 'idle',
+            'task_error': task.get('error'),
+            'elapsed': round(max(0.0, time.time() - task['started']), 1) if task.get('started') else 0,
             'url': shared_data.config.get('kiosk_url', 'http://localhost:8000'),
             'rotation': shared_data.config.get('kiosk_rotation', 0),
             'hide_cursor': bool(shared_data.config.get('kiosk_hide_cursor', True)),
@@ -5688,6 +6156,85 @@ def kiosk_status():
     except Exception as exc:
         logger.error(f"Error getting kiosk status: {exc}")
         return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/kiosk/repair', methods=['POST'])
+def kiosk_repair():
+    """Re-run the kiosk installer and start it, whatever the current state.
+
+    The toggle only acts on a *change*, so a box whose config already says
+    kiosk_enabled - an install that failed halfway, a restored config, a unit
+    that was removed by hand - had no way back: turning the switch on when it is
+    already on does nothing. That is what left people running
+    `sudo bash scripts/install_kiosk.sh` themselves. This is that command,
+    automated, with the enable step included.
+    """
+    task = _kiosk_task_get()
+    if task.get('busy'):
+        return jsonify({'success': False,
+                        'error': f"A kiosk job is already running ({task.get('phase')})."}), 409
+
+    def worker():
+        _kiosk_task_set(busy=True, phase='installing', error=None, started=time.time())
+        try:
+            _kiosk_install_and_start()
+        except subprocess.TimeoutExpired:
+            logger.error("[kiosk] repair timed out")
+            _kiosk_task_set(phase='failed', error='Kiosk repair timed out.')
+        except Exception as exc:
+            logger.error(f"[kiosk] repair error: {exc}")
+            _kiosk_task_set(phase='failed', error=str(exc))
+        finally:
+            with _kiosk_task_lock:
+                _kiosk_task['busy'] = False
+
+    # Remember the intent, so a reboot mid-repair still comes up with the kiosk.
+    if not shared_data.config.get('kiosk_enabled'):
+        shared_data.config['kiosk_enabled'] = True
+        try:
+            shared_data.save_config()
+        except Exception as exc:
+            logger.warning(f"[kiosk] could not persist kiosk_enabled during repair: {exc}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Reinstalling and starting the kiosk…'})
+
+
+@app.route('/api/kiosk/diagnose', methods=['POST'])
+def kiosk_diagnose():
+    """Run scripts/kiosk_doctor.sh and hand back its report.
+
+    "The kiosk shows nothing" has a dozen causes and the systemd journal answers
+    almost none of them: in autostart mode there is no unit, and when the
+    installer itself fails there is no unit either - so the first thing everyone
+    tries, `journalctl -u ragnar-kiosk`, prints "-- No entries --" and the trail
+    ends. The doctor checks the browser, the X stack, the session, the display
+    hardware and the configured URL, and reads the wrapper and Xorg logs where
+    the real detail lives. Exposing it here means a user can get that report
+    without an ssh session.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'scripts', 'kiosk_doctor.sh')
+    if not os.path.isfile(script):
+        return jsonify({'success': False,
+                        'error': 'scripts/kiosk_doctor.sh is missing - update Ragnar and retry'}), 404
+    try:
+        proc = subprocess.run(['sudo', '-n', 'bash', script],
+                              capture_output=True, text=True, timeout=180, check=False)
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False,
+                        'error': 'The kiosk doctor took longer than 3 minutes and was cancelled.'}), 500
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'Could not run the kiosk doctor: {exc}'}), 500
+
+    report = (proc.stdout or '') + (proc.stderr or '')
+    if not report.strip():
+        return jsonify({'success': False,
+                        'error': f'The kiosk doctor produced no output (exit {proc.returncode}).'}), 500
+    # The doctor counts its own failures and prints them; the exit code is 0
+    # either way, so success here means "the report was produced".
+    return jsonify({'success': True, 'report': report,
+                    'failed_checks': report.count('[FAIL]')})
 
 
 @app.route('/api/config/scan-intensity', methods=['GET', 'POST'])
@@ -8796,6 +9343,29 @@ def _get_wardriving_engine():
         _wardriving_engine = WardrivingEngine(shared_data)
     return _wardriving_engine
 
+def _disable_netdiag_for_wardriving(reason):
+    """Turn On-Screen Network Diagnostic mode off (persisting + notifying the UI).
+
+    Wardriving and diagnostic mode both take over the e-Paper panel and the HAT
+    keys, and the diagnostic layer wins the display render race, so they can't be
+    on at the same time. Called whenever wardriving takes the screen. No-op if
+    diagnostic mode is already off. Returns True if it flipped the flag.
+    """
+    if not shared_data.config.get('network_diagnostic_mode', False):
+        return False
+    logger.info(f"Disabling On-Screen Network Diagnostic mode: {reason}.")
+    shared_data.config['network_diagnostic_mode'] = False
+    setattr(shared_data, 'network_diagnostic_mode', False)
+    try:
+        shared_data.save_config()
+    except Exception as e:
+        logger.warning(f"Could not persist network_diagnostic_mode off: {e}")
+    try:
+        socketio.emit('config_updated', shared_data.config)
+    except Exception:
+        pass
+    return True
+
 @app.route('/api/wardriving/status')
 def wardriving_status():
     """Get wardriving engine status."""
@@ -8836,6 +9406,11 @@ def wardriving_start():
     try:
         if not shared_data.config.get('wardriving_enabled', False):
             return jsonify({'error': 'Wardriving not enabled in config'}), 400
+        # Wardriving and On-Screen Network Diagnostic mode are mutually exclusive:
+        # both own the e-Paper panel + HAT keys and the diagnostic layer wins the
+        # render race (display.py), which would strand the screen on the netdiag
+        # field-test view. Starting wardriving turns diagnostic mode off.
+        _disable_netdiag_for_wardriving('wardriving session started')
         data = request.get_json(silent=True) or {}
         interfaces = data.get('interfaces')  # optional list
         gps_port = data.get('gps_port')      # optional
@@ -8847,12 +9422,56 @@ def wardriving_start():
         logger.error(f"Wardriving start error: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wardriving/diagnostics')
+def wardriving_diagnostics():
+    """Deep diagnostics for the Diagnostics panel.
+
+    Separate from /api/wardriving/status because the panel only fetches this
+    while it is expanded — the 3 s status poll stays cheap, and the sysfs walk
+    plus vcgencmd shell-outs here only run when somebody is actually looking.
+    """
+    try:
+        import wardrive_diagnostics
+        engine = _get_wardriving_engine()
+        return jsonify(wardrive_diagnostics.collect(engine, shared_data))
+    except Exception as e:
+        logger.error(f"Wardriving diagnostics error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/wardriving/stop', methods=['POST'])
 def wardriving_stop():
-    """Stop the current wardriving session."""
+    """Stop the current wardriving session.
+
+    If the phone-access AP is up (the field 'Exit Wardriving' button on the
+    minimal mobile page hits this), also tear the AP down so the device returns
+    to normal Ragnar operation. The teardown is deferred to a background thread
+    so this HTTP response reaches the AP client *before* the AP radio drops —
+    otherwise the client's connection dies mid-response and it never learns the
+    stop succeeded.
+    """
     try:
         engine = _get_wardriving_engine()
         result = engine.stop()
+
+        ap_teardown = False
+        if getattr(shared_data, 'wardrive_ap_active', False):
+            ragnar_instance = getattr(shared_data, 'ragnar_instance', None)
+            wifi_mgr = getattr(ragnar_instance, 'wifi_manager', None) if ragnar_instance else None
+            if wifi_mgr is not None:
+                ap_teardown = True
+
+                def _deferred_ap_teardown():
+                    try:
+                        time.sleep(1.5)
+                        wifi_mgr.stop_wardrive_ap()
+                    except Exception as exc:
+                        logger.error(f"Wardrive AP teardown after stop failed: {exc}")
+
+                threading.Thread(target=_deferred_ap_teardown, daemon=True).start()
+
+        if isinstance(result, dict):
+            result['ap_teardown'] = ap_teardown
         return jsonify(result)
     except Exception as e:
         logger.error(f"Wardriving stop error: {e}")
@@ -8922,7 +9541,8 @@ def wardriving_export(session_id):
             )
         else:
             device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
-            content = session.export_wigle_csv(device_name=device_name)
+            include_zigbee = bool(shared_data.config.get('wardriving_wigle_include_zigbee', False))
+            content = session.export_wigle_csv(device_name=device_name, include_zigbee=include_zigbee)
             return app.response_class(
                 content, mimetype='text/csv',
                 headers={'Content-Disposition': f'attachment; filename=ragnar_wardriving_{session_id}.csv'}
@@ -8937,7 +9557,12 @@ def wardriving_gps():
     try:
         engine = _get_wardriving_engine()
         if engine._gps:
-            return jsonify(engine._gps.get_status())
+            status = engine._gps.get_status()
+            # Include the per-satellite sky list so the live fullscreen sky view
+            # can poll this cheap, uncached endpoint instead of the heavy,
+            # 5 s-cached /diagnostics one.
+            status['sky'] = engine._gps.get_sky_view()
+            return jsonify(status)
         return jsonify({'connected': False, 'error': 'GPS not initialized'})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -9044,6 +9669,38 @@ def wardriving_huginn_config():
         logger.error(f"Wardriving huginn_config error: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wardriving/companion_role', methods=['GET', 'POST'])
+def wardriving_companion_role():
+    """Get or set a Huginn companion's role, keyed by serial port.
+
+    'wardrive' (default) = WiFi + BLE wardriving.
+    'zigbee'             = 802.15.4 (Zigbee/Thread) only — for a dedicated
+                           second Huginn, since one C5 can't do WiFi + 802.15.4
+                           at once (shared 2.4 GHz radio). The change is applied
+                           live (the listener re-sends the mode command).
+    """
+    try:
+        roles = dict(shared_data.config.get('wardriving_companion_roles', {}) or {})
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            port = str(data.get('port', '')).strip()
+            role = str(data.get('role', 'wardrive')).strip().lower()
+            if not port:
+                return jsonify({'error': 'port required'}), 400
+            if role not in ('wardrive', 'zigbee'):
+                return jsonify({'error': "role must be 'wardrive' or 'zigbee'"}), 400
+            if role == 'wardrive':
+                roles.pop(port, None)          # default — don't persist noise
+            else:
+                roles[port] = 'zigbee'
+            shared_data.config['wardriving_companion_roles'] = roles
+            shared_data.save_config()
+            return jsonify({'success': True, 'port': port, 'role': role, 'roles': roles})
+        return jsonify({'roles': roles})
+    except Exception as e:
+        logger.error(f"Wardriving companion_role error: {e}")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/wardriving/track')
 def wardriving_track():
     """Get GPS track for current session (for map display)."""
@@ -9121,6 +9778,25 @@ def wardriving_cells():
             return jsonify({'towers': [], 'total': 0})
         towers = session.get_cell_towers()
         return jsonify({'towers': towers, 'total': len(towers)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wardriving/zigbee')
+def wardriving_zigbee():
+    """Get discovered Zigbee / 802.15.4 devices."""
+    try:
+        engine = _get_wardriving_engine()
+        session_id = request.args.get('session_id')
+        if session_id and (not engine.session or engine.session.session_id != session_id):
+            from wardriving import WardrivingSession
+            session = WardrivingSession(engine.data_dir, session_id=session_id)
+        elif engine.session:
+            session = engine.session
+        else:
+            return jsonify({'devices': [], 'total': 0})
+        devices = session.get_zigbee_devices()
+        return jsonify({'devices': devices, 'total': len(devices)})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -9893,356 +10569,173 @@ def deep_scan_host():
 # SYSTEM MANAGEMENT UTILITIES & ENDPOINTS
 # ============================================================================
 
-# Git config for update commands that may create commits (stash, pull-merge).
-# The service typically runs as root with no git identity configured, and
-# newer git also aborts a divergent pull unless a reconcile strategy is set
-# — either would fail the in-app update on user devices.
-_GIT_UPDATE_ID = [
-    '-c', 'user.name=Ragnar Updater',
-    '-c', 'user.email=ragnar-updater@localhost',
-    '-c', 'pull.rebase=false',
-]
+# The self-update git logic lives in git_updater.py. Everything there is
+# non-interactive and time-bounded, and every failure carries a machine-readable
+# code plus one sentence the user can act on - see that module's docstring for
+# the failure modes it exists to close.
+RAGNAR_REPO_PATH = git_updater.repo_root()
 
-# Serializes every git operation the webapp runs against the checkout. The
-# dashboard polls /api/system/check-updates every 5 minutes (per open tab) and
-# that check runs `git fetch` + a lock sweep — when it overlapped with a
-# user-clicked update, the pull failed on held ref locks (or had its live
-# index.lock deleted from under it) and the UI showed "Update failed. Fix
-# issues and retry." even though clicking again worked. Updates take this
-# blocking; the background check skips its fetch when an update holds it.
-_GIT_MUTEX = threading.Lock()
-
-# Locks younger than this are considered live (held by a running git process),
-# older ones are debris from an interrupted run and safe to sweep.
-_GIT_LOCK_STALE_SECONDS = 120
+# Lets the browser tell "the service is back up" from "the service never went
+# down": after an update it waits for this value to change, not just for the API
+# to answer.
+_PROCESS_START_TIME = time.time()
 
 
-def _ensure_git_safe_dir(repo_path: str) -> None:
-    """Whitelist the checkout in the running user's global git config so root
-    operating on a 'ragnar'-owned tree doesn't hit 'detected dubious ownership'.
-    --add only when missing so repeated updates don't pile up duplicates."""
-    try:
-        existing = subprocess.run(
-            ['git', 'config', '--global', '--get-all', 'safe.directory'],
-            capture_output=True, text=True, check=False
-        ).stdout.splitlines()
-        if repo_path not in existing:
-            subprocess.run(
-                ['git', 'config', '--global', '--add', 'safe.directory', repo_path],
-                capture_output=True, text=True, check=False
-            )
-    except Exception:
-        pass
+_POST_UPDATE_STATUS_PATH = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.json')
+
+# A post-update run writes its status on every step change. The slowest step
+# (network tools, which may apt-get update) can be quiet for minutes on a Pi, so
+# the file is only distrusted well past that.
+_POST_UPDATE_STALE_SECONDS = 30 * 60
 
 
-def _clear_git_locks(repo_path: str, warnings: list, min_age_seconds: int = 0) -> None:
-    """Remove EVERY stale *.lock under .git — not just the old hardcoded short
-    list (index.lock/HEAD.lock/shallow.lock/refs/heads/main.lock).
+def _post_update_status() -> dict:
+    """Read the transcript scripts/post_update.sh leaves behind.
 
-    The locks that actually got stuck and forced users to stop the service and
-    delete files by hand were the ones NOT on that list: refs/remotes/origin/
-    <branch>.lock, packed-refs.lock, config.lock, and ref locks for non-'main'
-    branches. Sweeping all of them means a lock left by an interrupted run is
-    auto-cleared on the next check/update — the service (root) can delete a lock
-    regardless of which user owns it, so this never needs a manual stop.
+    Lets the UI keep reporting progress across the service restart that script
+    performs: the browser polls this while the web app itself is down and back.
 
-    min_age_seconds > 0 restricts the sweep to locks at least that old, so a
-    routine pass (background update check, update preflight) never deletes the
-    live lock of a git process that is still running."""
-    git_dir = os.path.join(repo_path, '.git')
-    if not os.path.isdir(git_dir):
-        return
-    # Primary: one find pass deletes nested ref locks too (coreutils always present).
-    try:
-        find_cmd = ['sudo', 'find', git_dir, '-name', '*.lock', '-type', 'f']
-        if min_age_seconds > 0:
-            find_cmd.extend(['-mmin', f'+{max(1, min_age_seconds // 60)}'])
-        find_cmd.append('-delete')
-        subprocess.run(
-            find_cmd,
-            capture_output=True, text=True, check=False, timeout=20
-        )
-    except Exception as e:
-        logger.debug(f"find-based lock sweep failed (continuing): {e}")
-
-    def _old_enough(path: str) -> bool:
-        if min_age_seconds <= 0:
-            return True
-        try:
-            return (time.time() - os.path.getmtime(path)) >= min_age_seconds
-        except OSError:
-            return False
-
-    # Fallback for no-sudo / no-find edge cases: top-level locks + the refs/
-    # tree only (never the huge objects/ dir).
-    removed = []
-    try:
-        for name in os.listdir(git_dir):
-            if name.endswith('.lock'):
-                lp = os.path.join(git_dir, name)
-                if not _old_enough(lp):
-                    continue
-                try:
-                    os.remove(lp)
-                    removed.append(name)
-                except OSError:
-                    pass
-        refs_dir = os.path.join(git_dir, 'refs')
-        for root_dir, _dirs, files in os.walk(refs_dir):
-            for name in files:
-                if name.endswith('.lock'):
-                    lp = os.path.join(root_dir, name)
-                    if not _old_enough(lp):
-                        continue
-                    try:
-                        os.remove(lp)
-                        removed.append(os.path.relpath(lp, git_dir))
-                    except OSError:
-                        pass
-    except Exception:
-        pass
-    if removed:
-        msg = f"Cleared stale git lock(s): {', '.join(removed[:8])}"
-        logger.warning(msg)
-        warnings.append(msg)
-
-
-def _prepare_git_repo(repo_path: str, warnings: list) -> None:
-    """Make the checkout usable BEFORE the first git command runs.
-
-    Fresh user devices hit three pre-conditions that fail the first git
-    command (and with it the whole update): mixed pi/ragnar/root file
-    ownership, stale lock files from interrupted runs, and git's "dubious
-    ownership" refusal because the service runs as root while the checkout
-    belongs to user 'ragnar'.
+    A run that never reached its end - power cut mid-provision, an apt call that
+    hung, the transient unit killed - leaves 'running' in the file forever.
+    Reported as-is that pinned the update card on a step from an update that
+    finished days ago ("Finishing update: network tools...") and made every later
+    verification wait for a step that would never complete. Past the staleness
+    window the file is treated as the debris it is.
     """
-    # Fix permissions ahead of git to avoid ownership issues on devices
     try:
-        logger.info("Correcting file permissions before git update...")
-        subprocess.run(
-            ['sudo', 'chown', '-R', 'ragnar:ragnar', repo_path],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-    except subprocess.CalledProcessError as e:
-        warning = f"Permission correction failed (continuing): {e.stderr.strip() or e.stdout.strip()}"
-        logger.warning(warning)
-        warnings.append(warning)
-    except Exception as e:
-        warning = f"Permission correction error (continuing): {e}"
-        logger.warning(warning)
-        warnings.append(warning)
+        with open(_POST_UPDATE_STATUS_PATH, 'r') as fh:
+            status = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(status, dict):
+        return {}
 
-    # Remove stale lock files (the common reason the first update attempt
-    # fails but a retry succeeds — and the ref/remote locks that used to need a
-    # manual service stop). Age-gated so a live lock held by a still-running
-    # git process (e.g. a background update check's fetch) survives.
-    _clear_git_locks(repo_path, warnings, min_age_seconds=_GIT_LOCK_STALE_SECONDS)
-
-    # Whitelist the checkout for the current user (safe.directory must live in
-    # the global config; git ignores it from plain -c).
-    _ensure_git_safe_dir(repo_path)
-
-
-def _execute_git_update(repo_path: str, prepared: bool = False) -> dict:
-    """Run the git pull sequence Ragnar uses, returning status metadata."""
-    result = {
-        'success': False,
-        'output': '',
-        'error': '',
-        'warnings': []
-    }
-
-    if not prepared:
-        _prepare_git_repo(repo_path, result['warnings'])
-    git_dir = os.path.join(repo_path, '.git')
-
-    # Resolve which branch to update. A detached HEAD would make plain
-    # `git pull` fail, and naming the branch explicitly also covers
-    # checkouts that have no upstream tracking configured.
-    try:
-        branch = subprocess.run(
-            ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
-            cwd=repo_path, capture_output=True, text=True, check=True
-        ).stdout.strip() or 'main'
-    except Exception:
-        branch = 'main'
-    if branch == 'HEAD':
-        subprocess.run(
-            ['git', 'checkout', 'main'],
-            cwd=repo_path, capture_output=True, text=True, check=False
-        )
-        branch = 'main'
-        result['warnings'].append("Checkout was detached; switched back to main")
-
-    # Perform git pull with one automatic retry on failure
-    max_attempts = 2
-    for attempt in range(1, max_attempts + 1):
+    if status.get('state') == 'running':
         try:
-            pull_proc = subprocess.run(
-                ['git'] + _GIT_UPDATE_ID + ['pull', 'origin', branch],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            result['output'] = pull_proc.stdout.strip()
-            logger.info(f"Git pull completed: {result['output']}")
-            break  # success
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git pull attempt {attempt}/{max_attempts} failed: {error_msg}")
+            age = time.time() - os.path.getmtime(_POST_UPDATE_STATUS_PATH)
+        except OSError:
+            age = 0
+        if age > _POST_UPDATE_STALE_SECONDS:
+            logger.warning("Ignoring post-update status stuck at "
+                           f"'{status.get('step', '?')}' for {int(age // 60)} minutes")
+            return {'state': 'finished', 'outcome': 'unknown', 'step': status.get('step', ''),
+                    'stale': True,
+                    'failures': 'the previous post-update run never finished; '
+                                'see data/logs/post_update.log'}
+    return status
 
-            if attempt >= max_attempts:
-                # Last resort: make the checkout match origin/<branch>
-                # exactly. Callers stash local changes beforehand (and the
-                # retry path already resets the tree), so this only discards
-                # merge debris, never user work.
-                try:
-                    subprocess.run(
-                        ['git', 'fetch', 'origin', branch],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    subprocess.run(
-                        ['git', 'reset', '--hard', f'origin/{branch}'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['output'] = f"Forced checkout to origin/{branch} after pull failures"
-                    result['warnings'].append(
-                        f"git pull kept failing ({error_msg}); forced the checkout to match origin/{branch}")
-                    break
-                except Exception:
-                    result['error'] = f"Git pull failed: {error_msg}"
-                    return result
 
-            # Auto-recover before retrying
-            recovered = False
-            err_lower = error_msg.lower()
+def _reset_post_update_status() -> None:
+    """Drop the previous run's status before starting a new one.
 
-            # Transient network trouble reaching origin — nothing to repair
-            # locally, just wait and retry.
-            if any(tok in err_lower for tok in (
-                    'could not resolve host', 'unable to access',
-                    'connection timed out', 'could not read from remote',
-                    'connection reset', 'early eof')):
-                result['warnings'].append("Transient network error contacting origin; retrying")
-                recovered = True
-
-            # Lock file appeared during pull — likely another git process (a
-            # background update check) still running. Wait for it to finish,
-            # then clear whatever lock remains and retry.
-            if 'lock' in err_lower or 'another git process' in err_lower:
-                time.sleep(3)
-                _clear_git_locks(repo_path, result['warnings'])
-                recovered = True
-
-            # Merge conflict or dirty state
-            if 'conflict' in err_lower or 'merge' in err_lower or 'overwritten by merge' in err_lower:
-                try:
-                    subprocess.run(
-                        ['git', 'reset', '--hard', 'HEAD'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    recovered = True
-                    result['warnings'].append("Reset working tree to resolve conflicts and retrying pull")
-                except Exception:
-                    pass
-
-            # Diverged history
-            if 'diverge' in err_lower or 'need to specify' in err_lower:
-                try:
-                    subprocess.run(
-                        ['git'] + _GIT_UPDATE_ID + ['pull', '--rebase'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['output'] = 'Pulled with rebase after divergence'
-                    result['warnings'].append("Branches had diverged; resolved with rebase")
-                    recovered = True
-                    break  # rebase pull already succeeded
-                except Exception:
-                    pass
-
-            if not recovered:
-                # Generic recovery: reset and retry
-                try:
-                    subprocess.run(
-                        ['git', 'reset', '--hard', 'HEAD'],
-                        cwd=repo_path, capture_output=True, text=True, check=True
-                    )
-                    result['warnings'].append(f"Auto-recovery: reset working tree and retrying (was: {error_msg})")
-                except Exception:
-                    result['error'] = f"Git pull failed: {error_msg}"
-                    return result
-
-            # Brief pause so a transient condition (network blip, concurrent
-            # git process winding down) has a chance to clear before the retry.
-            time.sleep(2)
-            logger.info(f"Auto-recovery applied, retrying git pull...")
-
-    # Ensure executable bits remain in place after pull
+    Without this the first polls of a new update report the *last* update's
+    step, because post_update.sh cannot write its own until it has started.
+    """
     try:
-        logger.info("Making scripts executable after git pull...")
-        # chmod does not expand globs when invoked without a shell, so the
-        # wildcard passes go through find instead.
-        chmod_commands = [
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/Ragnar.py'],
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/kill_port_8000.sh'],
-            ['sudo', 'chmod', '+x', '/home/ragnar/Ragnar/webapp_modern.py'],
-            ['sudo', 'find', '/home/ragnar/Ragnar', '-name', '*.sh', '-exec', 'chmod', '+x', '{}', ';'],
-            ['sudo', 'find', '/home/ragnar/Ragnar', '-maxdepth', '1', '-name', '*.py', '-exec', 'chmod', '+x', '{}', ';']
+        os.remove(_POST_UPDATE_STATUS_PATH)
+    except OSError:
+        pass
+
+
+def _launch_post_update(install_deps: bool, warnings: list) -> str:
+    """Hand the rest of the update to scripts/post_update.sh and let it restart us.
+
+    Returns 'systemd' (running in a transient unit, will survive the restart),
+    'detached' (started, but may be killed by the restart) or 'failed'.
+
+    Dependency installs can take minutes on a Pi, far longer than an HTTP
+    request should live, and they must finish *before* the service comes back or
+    it restarts into modules it cannot import.
+
+    systemd-run is preferred because anything this process spawns stays in the
+    ragnar.service cgroup and is killed the instant the service restarts -
+    including the restart command itself. A transient unit escapes that.
+    """
+    script = os.path.join(RAGNAR_REPO_PATH, 'scripts', 'post_update.sh')
+    if not os.path.isfile(script):
+        warnings.append('scripts/post_update.sh is missing; falling back to a plain restart')
+        return 'failed'
+
+    args = ['bash', script, '--repo', RAGNAR_REPO_PATH]
+    if install_deps:
+        args.append('--deps')
+
+    _reset_post_update_status()
+
+    if shutil.which('systemd-run'):
+        launchers = [
+            ['sudo', '-n', 'systemd-run', '--unit=ragnar-post-update', '--collect',
+             '--no-block', '--description=Ragnar post-update tasks'] + args,
+            ['systemd-run', '--unit=ragnar-post-update', '--collect', '--no-block',
+             '--description=Ragnar post-update tasks'] + args,
         ]
-
-        for cmd in chmod_commands:
+        for launcher in launchers:
             try:
-                subprocess.run(cmd, capture_output=True, text=True, check=False)
-            except Exception as chmod_error:
-                logger.debug(f"Chmod command failed (continuing): {cmd} - {chmod_error}")
+                proc = subprocess.run(launcher, capture_output=True, text=True, timeout=30)
+                if proc.returncode == 0:
+                    logger.info("Post-update tasks handed to transient unit ragnar-post-update")
+                    return 'systemd'
+                logger.warning(f"systemd-run launch failed: {proc.stderr.strip()}")
+            except Exception as e:
+                logger.warning(f"systemd-run launch error: {e}")
 
-        logger.info("Executable permissions refreshed")
-    except subprocess.CalledProcessError as e:
-        warning = f"Chmod failed (continuing): {e.stderr.strip() or e.stdout.strip()}"
-        logger.warning(warning)
-        result['warnings'].append(warning)
+    # No systemd-run (or it refused): detach as best we can. It still performs
+    # its own restart at the end, so the caller must not add a second one.
+    try:
+        log_path = os.path.join(RAGNAR_REPO_PATH, 'data', 'logs', 'post_update.log')
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        log_fh = open(log_path, 'ab')
+        command = args if os.geteuid() == 0 else ['sudo', '-n'] + args
+        subprocess.Popen(command, stdout=log_fh, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+        warnings.append('Post-update tasks started without systemd-run; if the restart cuts them '
+                        'short, run: sudo bash scripts/post_update.sh')
+        return 'detached'
     except Exception as e:
-        warning = f"Chmod error (continuing): {e}"
-        logger.warning(warning)
-        result['warnings'].append(warning)
+        warnings.append(f"Could not start post-update tasks: {e}")
+        return 'failed'
 
-    # Provision radios (rfkill) + network diagnostic tools + lldpd, the same way
-    # the CLI updater does. Without this, updating from the Settings tab only
-    # pulled code and a device would be left missing traceroute/mtr/lldpd/etc.
-    # The shared script is idempotent and never fails the update on a single
-    # missing tool, so provisioning problems become warnings, not hard errors.
-    provision_script = os.path.join(repo_path, 'scripts', 'provision_network_tools.sh')
-    if os.path.isfile(provision_script):
-        try:
-            logger.info("Launching network tool provisioning in background...")
-            log_path = os.path.join(repo_path, 'data', 'logs', 'provision_network_tools.log')
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            log_fh = open(log_path, 'ab')
-            # Detach (start_new_session) and fire-and-forget so slow apt installs
-            # never delay the update response or the service restart the caller
-            # schedules right after this returns. Progress lands in the log file.
-            subprocess.Popen(
-                ['sudo', 'bash', provision_script],
-                stdout=log_fh, stderr=subprocess.STDOUT,
-                stdin=subprocess.DEVNULL, start_new_session=True
-            )
-            result['warnings'].append(
-                "Network tools are being provisioned in the background "
-                "(see data/logs/provision_network_tools.log)")
-        except Exception as e:
-            warning = f"Could not start network tool provisioning (continuing): {e}"
-            logger.warning(warning)
-            result['warnings'].append(warning)
-    else:
-        warning = "provision_network_tools.sh not found - network tools not provisioned"
-        logger.warning(warning)
-        result['warnings'].append(warning)
 
-    result['success'] = True
-    return result
+def _finalize_update(update_result: dict) -> None:
+    """Kick off dependency install + provisioning + restart after a good pull."""
+    warnings = update_result.setdefault('warnings', [])
+    outcome = _launch_post_update(update_result.get('requirements_changed', False), warnings)
+    update_result['post_update_started'] = outcome != 'failed'
+    update_result['restart_pending'] = True
+    if outcome == 'failed':
+        # Nothing else will restart the service, so do it here: the new code is
+        # on disk and running it is better than leaving the old one loaded.
+        _schedule_service_restart()
+
+
+def _update_response(update_result: dict):
+    """Turn a git_updater result into the JSON shape the dashboard expects."""
+    payload = {
+        'success': bool(update_result.get('ok')),
+        'warnings': update_result.get('warnings', []),
+        'output': update_result.get('output', ''),
+        'update_output': update_result.get('output', ''),
+        'branch': update_result.get('branch', ''),
+        'from_commit': update_result.get('from_commit', ''),
+        'to_commit': update_result.get('to_commit', ''),
+        'forced': update_result.get('forced', False),
+        'local_changes_preserved': bool(update_result.get('stash_ref')),
+        'local_changes_restored': bool(update_result.get('stash_ref'))
+                                  and not update_result.get('stash_kept'),
+        'requirements_changed': update_result.get('requirements_changed', False),
+        'post_update_started': update_result.get('post_update_started', False),
+        'restart_pending': update_result.get('restart_pending', False),
+    }
+    if payload['success']:
+        payload['message'] = 'Update applied successfully.'
+        return jsonify(payload)
+
+    payload['error'] = update_result.get('error') or 'Unknown error during update'
+    payload['code'] = update_result.get('code', '')
+    payload['hint'] = update_result.get('hint', '')
+    payload['steps'] = update_result.get('steps', [])
+    # 'busy' is not a failure - another update is simply already running.
+    return jsonify(payload), 409 if payload['code'] == 'busy' else 500
 
 
 def _execute_pwn_git_update(repo_path: str) -> dict:
@@ -10396,310 +10889,99 @@ def _schedule_service_restart(delay_seconds: int = 2) -> None:
 
 @app.route('/api/system/check-updates')
 def check_updates():
-    """Check for system updates using git"""
+    """Report whether an update is available, and the state of the checkout.
+
+    Every open dashboard tab polls this on a timer, so it is bounded, never
+    raises, and never takes the update lock away from a user who is trying to
+    update - when an update is running it answers from the refs already on disk.
+    """
     try:
-        import subprocess
-        import os
-        
-        # Get current working directory (should be the repo root)
-        # Use the directory where the webapp is running from, not the file location
-        repo_path = os.getcwd()
-        
-        logger.info(f"Checking for updates in repository: {repo_path}")
-
-        # Self-heal before any git command so a check never dead-ends on a stale
-        # lock or a dubious-ownership error (same guards the update path uses).
-        _ensure_git_safe_dir(repo_path)
-
-        # Fetch latest changes from remote — but never while an update holds
-        # the git mutex: a background check's fetch racing the update's pull
-        # (and the unconditional lock sweep that ran with it) is exactly what
-        # made first-click updates fail intermittently. If an update is in
-        # flight, answer from the refs we already have.
-        if _GIT_MUTEX.acquire(blocking=False):
-            try:
-                _clear_git_locks(repo_path, [], min_age_seconds=_GIT_LOCK_STALE_SECONDS)
-                try:
-                    fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
-                    logger.info(f"Git fetch completed: {fetch_result.stdout}")
-                except subprocess.CalledProcessError as e:
-                    logger.error(f"Git fetch failed: {e.stderr}")
-                    # Try to fix git safe directory issue and retry
-                    try:
-                        subprocess.run(['git', 'config', '--global', '--add', 'safe.directory', repo_path],
-                                     cwd=repo_path, check=True, capture_output=True)
-                        logger.info(f"Added {repo_path} to git safe directories")
-                        # Retry fetch
-                        fetch_result = subprocess.run(['git', 'fetch'], cwd=repo_path, check=True, capture_output=True, text=True)
-                        logger.info(f"Git fetch completed after fixing safe directory: {fetch_result.stdout}")
-                    except subprocess.CalledProcessError as e2:
-                        logger.error(f"Git fetch still failed after fixing safe directory: {e2.stderr}")
-                        return jsonify({
-                            'error': 'Failed to fetch from remote repository. Git safe directory issue detected.',
-                            'fix_command': f'git config --global --add safe.directory {repo_path}',
-                            'detailed_error': str(e2.stderr)
-                        }), 500
-            finally:
-                _GIT_MUTEX.release()
-        else:
-            logger.info("Update in progress; skipping git fetch for this update check")
-        
-        # Get the current branch name
-        try:
-            branch_result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=repo_path, check=True, capture_output=True, text=True)
-            current_branch = branch_result.stdout.strip()
-        except subprocess.CalledProcessError:
-            current_branch = 'main' # Fallback
-        
-        logger.info(f"Current git branch is: {current_branch}")
-        remote_branch = f'origin/{current_branch}'
-
-        # Check if local branch is behind remote
-        try:
-            result = subprocess.run(
-                ['git', 'rev-list', '--count', f'HEAD..{remote_branch}'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            commits_behind = int(result.stdout.strip())
-            logger.info(f"Commits behind '{remote_branch}': {commits_behind}")
-        except (subprocess.CalledProcessError, ValueError) as e:
-            logger.error(f"Error checking commits behind '{remote_branch}': {e}")
-            commits_behind = 0
-        
-        # Get current HEAD commit
-        try:
-            current_result = subprocess.run(
-                ['git', 'log', 'HEAD', '--oneline', '-1'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            current_commit = current_result.stdout.strip()
-        except:
-            current_commit = "Unable to fetch current commit"
-        
-        # Get latest commit info
-        try:
-            result = subprocess.run(
-                ['git', 'log', remote_branch, '--oneline', '-1'], 
-                cwd=repo_path, 
-                capture_output=True, 
-                text=True, 
-                check=True
-            )
-            latest_commit = result.stdout.strip()
-        except:
-            latest_commit = "Unable to fetch latest commit"
-
-        # Collect local working tree state so the UI can warn about conflicts/stashes
-        git_status = {
-            'is_dirty': False,
-            'has_conflicts': False,
-            'has_stash': False,
-            'stash_entries': 0,
-            'modified_files': [],
-            'conflicted_files': [],
-            'status_error': ''
-        }
-
-        try:
-            status_result = subprocess.run(
-                ['git', 'status', '--porcelain'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            status_lines = [line for line in status_result.stdout.splitlines() if line.strip()]
-            git_status['is_dirty'] = bool(status_lines)
-
-            conflict_codes = {'AA', 'DD', 'AU', 'UA', 'DU', 'UD', 'UU'}
-            for raw_line in status_lines:
-                code = raw_line[:2]
-                path_fragment = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
-                entry = {'code': code, 'path': path_fragment}
-                git_status['modified_files'].append(entry)
-                if code in conflict_codes or 'U' in code:
-                    git_status['conflicted_files'].append(entry)
-
-            git_status['has_conflicts'] = bool(git_status['conflicted_files'])
-        except subprocess.CalledProcessError as status_error:
-            git_status['status_error'] = status_error.stderr.strip() or str(status_error)
-            logger.warning(f"git status failed during update check: {git_status['status_error']}")
-
-        try:
-            stash_result = subprocess.run(
-                ['git', 'stash', 'list'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            stash_lines = [line for line in stash_result.stdout.splitlines() if line.strip()]
-            git_status['stash_entries'] = len(stash_lines)
-            git_status['has_stash'] = git_status['stash_entries'] > 0
-        except subprocess.CalledProcessError as stash_error:
-            stash_msg = stash_error.stderr.strip() or str(stash_error)
-            git_status['status_error'] = git_status['status_error'] or stash_msg
-            logger.warning(f"git stash list failed during update check: {stash_msg}")
-        
-        logger.info(f"Update check result - Behind: {commits_behind}, Current: {current_commit}, Latest: {latest_commit}")
-        
-        return jsonify({
-            'updates_available': commits_behind > 0,
-            'commits_behind': commits_behind,
-            'current_commit': current_commit,
-            'latest_commit': latest_commit,
-            'repo_path': repo_path,
-            'git_status': git_status
-        })
-        
-    except Exception as e:
+        status = git_updater.check(RAGNAR_REPO_PATH)
+    except Exception as e:  # the engine catches its own errors; this is belt-and-braces
         logger.error(f"Error checking for updates: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': str(e), 'code': 'git_error'}), 500
+
+    payload = {
+        'updates_available': status['updates_available'],
+        'commits_behind': status['commits_behind'],
+        'commits_ahead': status['commits_ahead'],
+        'current_commit': status['current_commit'],
+        'latest_commit': status['latest_commit'],
+        'branch': status['branch'],
+        'detached': status['detached'],
+        'repo_path': status['repo_path'],
+        'update_in_progress': status['update_in_progress'],
+        'warnings': status['warnings'],
+        'git_status': status['git_status'],
+    }
+    if not status['ok']:
+        # Still a 200: the counts above are real and the dashboard should render
+        # them. 'code' and 'hint' tell the UI what to say about the problem.
+        payload['error'] = status['error']
+        payload['code'] = status['code']
+        payload['hint'] = status['hint']
+    return jsonify(payload)
+
+
+@app.route('/api/system/update-status')
+def update_status():
+    """Lightweight progress endpoint for the update the browser is watching.
+
+    Deliberately does no network work: it is polled every few seconds while the
+    service is restarting, and its whole job is to answer "is the box running
+    the commit I asked for yet?".
+    """
+    head = git_updater.run_git(['rev-parse', 'HEAD'], RAGNAR_REPO_PATH,
+                               timeout=git_updater.GIT_QUICK_TIMEOUT)
+    state = git_updater.update_state()
+    return jsonify({
+        'commit': head.out if head.ok else '',
+        'branch': git_updater.current_branch(RAGNAR_REPO_PATH) or '',
+        'update_in_progress': state.get('running', False),
+        'step': state.get('step', ''),
+        'post_update': _post_update_status(),
+        'service_started': _PROCESS_START_TIME,
+    })
+
 
 @app.route('/api/system/update', methods=['POST'])
 def perform_update():
-    """Perform system update using git pull"""
+    """Update the box to the latest upstream commit."""
+    logger.info(f"Update requested for repository: {RAGNAR_REPO_PATH}")
     try:
-        repo_path = os.getcwd()
-        logger.info(f"Performing update in repository: {repo_path}")
-        with _GIT_MUTEX:
-            update_result = _execute_git_update(repo_path)
-
-        if not update_result['success']:
-            return jsonify({
-                'success': False,
-                'error': update_result['error'] or 'Unknown error during git pull',
-                'warnings': update_result['warnings'],
-                'suggestion': 'Please check repository status and resolve any conflicts'
-            }), 500
-
-        _schedule_service_restart()
-
-        return jsonify({
-            'success': True,
-            'message': 'Update completed successfully',
-            'output': update_result['output'],
-            'warnings': update_result['warnings']
-        })
-        
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
     except Exception as e:
         logger.error(f"Error performing update: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
+
+    if not update_result['ok']:
+        return _update_response(update_result)
+
+    _finalize_update(update_result)
+    return _update_response(update_result)
 
 
 @app.route('/api/system/stash-update', methods=['POST'])
 def stash_and_update():
-    """Automatically stash local changes, pull updates, and drop the temporary stash."""
-    repo_path = os.getcwd()
-    payload = request.get_json(silent=True) or {}
-    stash_message = payload.get('message') or f"Ragnar auto stash {datetime.utcnow().isoformat()}"
-    include_untracked = payload.get('include_untracked', True)
+    """Update a checkout that has local edits.
 
-    stash_cmd = ['git'] + _GIT_UPDATE_ID + ['stash', 'push']
-    if include_untracked:
-        stash_cmd.append('-u')
-    stash_cmd.extend(['-m', stash_message])
+    Kept as its own route for the dashboard's benefit, but it is the same call:
+    the engine stashes local changes whenever it finds them and replays them
+    afterwards, so there is no longer a separate, more fragile code path for
+    dirty trees.
+    """
+    logger.info("Update (with local changes) requested via UI")
+    try:
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
+    except Exception as e:
+        logger.error(f"Error performing update: {e}")
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
 
-    logger.info("Auto stash + update requested via UI")
+    if not update_result['ok']:
+        return _update_response(update_result)
 
-    # The whole stash → pull → pop sequence runs under the git mutex so a
-    # background update check's `git fetch` can never race it — that overlap
-    # was a root cause of "works on the second click".
-    with _GIT_MUTEX:
-        # Prepare the repo BEFORE the stash — on a fresh install the stash is
-        # the first git command this service ever runs, and it dies on dubious
-        # ownership / stale locks / root-owned files unless those are fixed
-        # first. This was exactly the "Update failed. Fix issues and retry."
-        # dead end users hit from the Settings tab.
-        preflight_warnings = []
-        _prepare_git_repo(repo_path, preflight_warnings)
-
-        try:
-            stash_proc = subprocess.run(
-                stash_cmd,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git stash failed: {error_msg}")
-            return jsonify({
-                'success': False,
-                'error': f'Git stash failed: {error_msg}',
-                'warnings': preflight_warnings
-            }), 500
-
-        stash_stdout = stash_proc.stdout.strip() or stash_proc.stderr.strip() or ''
-        stash_created = 'No local changes to save' not in stash_stdout
-        stash_ref = 'stash@{0}' if stash_created else None
-
-        if stash_created:
-            logger.info(f"Local changes stashed as {stash_ref}")
-        else:
-            logger.info("Auto stash requested but no local changes were found")
-
-        update_result = _execute_git_update(repo_path, prepared=True)
-        update_result['warnings'] = preflight_warnings + update_result['warnings']
-        if not update_result['success']:
-            # Put the tree back the way we found it so a failed update doesn't
-            # silently hide local changes in a stash (which also made the retry
-            # "work" for the wrong reason). If the pop itself fails, the stash
-            # stays preserved for manual recovery.
-            restored = False
-            if stash_created and stash_ref:
-                pop_back = subprocess.run(
-                    ['git', 'stash', 'pop', stash_ref],
-                    cwd=repo_path, capture_output=True, text=True, check=False
-                )
-                restored = pop_back.returncode == 0
-                if restored:
-                    logger.info("Update failed; local changes restored from auto stash")
-                else:
-                    logger.error("Auto stash update failed and stash could not be re-applied; stash preserved for manual recovery")
-            return jsonify({
-                'success': False,
-                'error': update_result['error'] or 'Unknown error during git pull',
-                'warnings': update_result['warnings'],
-                'local_changes_preserved': stash_created,
-                'local_changes_restored': restored
-            }), 500
-
-        if stash_created and stash_ref:
-            try:
-                pop_proc = subprocess.run(
-                    ['git', 'stash', 'pop', stash_ref],
-                    cwd=repo_path,
-                    capture_output=True,
-                    text=True,
-                    check=True
-                )
-                pop_msg = pop_proc.stdout.strip() or pop_proc.stderr.strip() or ''
-                if pop_msg:
-                    logger.debug(f"Stash pop output: {pop_msg}")
-                logger.info(f"Reapplied local changes from {stash_ref}")
-            except subprocess.CalledProcessError as e:
-                stash_pop_warning = e.stderr.strip() or e.stdout.strip() or str(e)
-                logger.warning(f"Failed to reapply stash {stash_ref}: {stash_pop_warning}")
-                update_result['warnings'].append(
-                    "Local changes were saved but could not be re-applied automatically. Resolve conflicts and run 'git stash pop' manually."
-                )
-
-    _schedule_service_restart()
-
-    return jsonify({
-        'success': True,
-        'message': 'Update applied successfully.',
-        'warnings': update_result['warnings'],
-        'update_output': update_result['output']
-    })
+    _finalize_update(update_result)
+    return _update_response(update_result)
 
 @app.route('/api/pwn/check-updates')
 def pwn_check_updates():
@@ -10970,39 +11252,28 @@ def pwn_stash_and_update():
 
 @app.route('/api/system/resolve-conflicts', methods=['POST'])
 def resolve_git_conflicts():
-    """Resolve git merge conflicts by resetting to HEAD then pulling latest."""
-    repo_path = os.getcwd()
-    with _GIT_MUTEX:
-        try:
-            # Hard reset clears both the index (staged conflicts) and working tree
-            subprocess.run(
-                ['git', 'reset', '--hard', 'HEAD'],
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            logger.info("Git reset --hard HEAD completed")
-        except subprocess.CalledProcessError as e:
-            error_msg = e.stderr.strip() or e.stdout.strip() or str(e)
-            logger.error(f"Git reset failed: {error_msg}")
-            return jsonify({'success': False, 'error': f'Git reset failed: {error_msg}'}), 500
+    """Clear a conflicted working tree, then update.
 
-        update_result = _execute_git_update(repo_path)
-    if not update_result['success']:
-        return jsonify({
-            'success': False,
-            'error': update_result['error'] or 'Git pull failed after reset',
-            'warnings': update_result['warnings']
-        }), 500
+    The update engine already stashes and force-syncs whatever it finds, so the
+    only thing this route still adds is discarding a half-finished merge left in
+    the index before starting - and telling the user that is what happened.
+    """
+    logger.info("Conflict resolution + update requested via UI")
+    warnings = []
+    git_updater.abort_in_progress_operation(RAGNAR_REPO_PATH, warnings)
+    try:
+        update_result = git_updater.update(RAGNAR_REPO_PATH)
+    except Exception as e:
+        logger.error(f"Error resolving conflicts: {e}")
+        return jsonify({'success': False, 'error': str(e), 'code': 'git_error'}), 500
 
-    _schedule_service_restart()
-    return jsonify({
-        'success': True,
-        'message': 'Conflicts resolved and update applied successfully.',
-        'output': update_result['output'],
-        'warnings': update_result['warnings']
-    })
+    update_result.setdefault('warnings', [])[:0] = warnings
+    if not update_result['ok']:
+        return _update_response(update_result)
+
+    _finalize_update(update_result)
+    response = _update_response(update_result)
+    return response
 
 
 @app.route('/api/system/fix-git', methods=['POST'])
@@ -20606,6 +20877,17 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(_rusense_notify_loop)
         socketio.start_background_task(net_integrity_monitor_loop)
         socketio.start_background_task(watchtower_monitor_loop)
+
+        # Bring up the BLE provisioning peripheral if the user has enabled it.
+        # Deferred so a slow/absent Bluetooth stack never delays the web server
+        # binding; it runs its own GLib loop thread regardless.
+        def _boot_ble():
+            try:
+                if _start_ble_provisioning():
+                    logger.info("BLE provisioning peripheral advertising")
+            except Exception as _ble_err:  # pragma: no cover
+                logger.error(f"BLE provisioning boot error: {_ble_err}")
+        socketio.start_background_task(_boot_ble)
 
         logger.info("✅ All background threads started successfully")
 

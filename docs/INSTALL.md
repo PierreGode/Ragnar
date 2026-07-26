@@ -48,6 +48,190 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
 ```
 
+#### "Some packages won't install"
+
+Not every package is required. The installer splits them in two, and prints a
+summary of both when the dependency step ends:
+
+- **Required** — a miss here is a real `WARNING`, and the summary repeats the
+  exact `apt-get install` line to fix it. The install continues regardless.
+- **Optional** — `hackrf`, `nikto`, `sqlmap`, `whatweb`, `ffuf`,
+  `libatlas-base-dev`. These back single features (SDR Waterfall, the recon and
+  vulnerability scanners) that look their binary up at runtime and stay disabled
+  without it. Not every Debian suite carries all of them — `ffuf` only arrived in
+  trixie — so seeing these listed as unavailable is expected, not a failed
+  install.
+
+Two steps in the install are also slow and silent, which can look like a hang on
+a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
+`nmap --script-updatedb`. Give them time before interrupting.
+
+#### Changing your screen
+
+The installer asks which screen you have, but that is only a starting value —
+**support for every screen is installed regardless of what you pick.** All the
+backing dependencies go on (`spidev`, `smbus2`, `luma.led_matrix`, the Waveshare
+e-Paper library), and SPI and I2C are both enabled.
+
+So you can change screens at any time in the web UI under **Config → Display**
+without reinstalling. The choice is written to `config/shared_config.json`, which
+is gitignored — it survives both reboots and `update_ragnar.sh`, so the screen
+you select stays selected.
+
+All 17 profiles are offered in both places:
+
+| Type | Screens |
+|---|---|
+| e-Paper | `epd2in13`, `_V2`, `_V3`, `_V4`, `epd2in13b_V4`, `epd2in7`, `epd2in7_V2`, `epd2in9_V2`, `epd3in7`, `epd4in26` |
+| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `whisplay` (1.69" PiSugar) |
+| OLED | `ssd1306` (0.96") |
+| Character LCD | `lcd1602` (16×2 I2C) |
+| LED matrix | `max7219_8panel`, `max7219_4panel` |
+
+In the web selector the e-Paper models are grouped by size (2.13", 2.7", …). If
+your current driver already matches the size you pick, the exact variant is
+kept — selecting "2.13"" on a box running `epd2in13_V4` leaves it on `_V4`
+rather than resetting it.
+
+If the install log ends with `These display types will NOT work until fixed:`,
+that names the dependency that failed — a screen of that type will stay blank
+until it is installed.
+
+### 📶 Connecting Ragnar to a network
+
+Ragnar looks for a saved network for about a minute at boot. If it cannot join
+one, it starts its own access point:
+
+| | |
+|---|---|
+| Network | `Ragnar` (`wifi_ap_ssid`) |
+| Password | `ragnarconnect` (`wifi_ap_password`) |
+| Setup page | `http://192.168.4.1:8000` |
+
+Join it from a phone or laptop and enter the credentials for the network you
+want. **The access point stays up until you use it** — it does not time out, so
+it is still there whether you look after ten seconds or an hour.
+
+This is also how you move a box between places. Take a Ragnar to a summer house
+or an office, power it on, and it will fail to find your home network, raise the
+`Ragnar` AP, and wait. Add the new network and it switches over.
+
+Once at least one network is saved, the box keeps watching for it in the
+background while the AP is up, and hands over on its own within about half a
+minute of that network coming back in range — no reboot, and nothing to press.
+That covers the everyday case of a router rebooting or the box booting faster
+than the router.
+
+Full details — when the AP does and does not start, how it recovers, and how a
+USB Wi-Fi dongle lets the AP and the client connection run on separate radios —
+are in the **[Ragnar AP Mode guide](RagnarAP.md)**.
+
+> Ragnar's AP uses `192.168.4.0/24`. If your own router uses that range too —
+> eero does by default — see the portal note below.
+
+#### The Wi-Fi setup portal keeps appearing instead of the dashboard
+
+If `http://<box>:8000` shows the **Wi-Fi Configuration Portal** asking you to
+join a network — while the box is plainly already connected — your router hands
+out addresses in **192.168.4.0/24**. That is the same range Ragnar uses for its
+own access point, and Ragnar used to treat *any* client in it as an AP client
+and serve the captive portal. **eero mesh systems default to this subnet**, so
+they hit it consistently; it is not a fault in the router.
+
+Ragnar now also requires that the box itself holds the AP gateway address
+`192.168.4.1` before treating a request as an AP client, so an ordinary client
+on a 192.168.4.0/24 LAN gets the dashboard. Update and restart:
+
+```bash
+sudo ./update_ragnar.sh && sudo systemctl restart ragnar
+```
+
+Note also that Ragnar listens on **port 8000 only** — plain `http://<box>` with
+no port will not open anything. Always include `:8000`.
+
+#### "dpkg was interrupted" — nothing installs
+
+```
+E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a'
+```
+
+This is a **system** state, not a Ragnar one, and it blocks *every* apt
+operation until cleared — the main install, updates, and the Pwnagotchi
+installer alike. Fix it with:
+
+```bash
+sudo dpkg --configure -a
+sudo apt-get install -f -y
+```
+
+A Pi reaches this state when a package install is cut off part-way: the OOM
+killer on a 512 MB board, a power loss, or Ctrl-C during one of the long silent
+steps. It often surfaces later than it happened — the Pwnagotchi installer
+failing is a common first symptom of a state broken during the main install.
+
+`install_ragnar.sh`, `update_ragnar.sh` and `scripts/install_pwnagotchi.sh` all
+detect and repair this automatically before their first apt call, so it should
+no longer need doing by hand.
+
+#### Updates in general
+
+How updating works — from the web UI and the terminal — what happens to local
+changes, what each error code on the update card means, and how to recover a box
+by hand: **[Updating Ragnar](updates.md)**.
+
+#### "No git command works" / updates fail
+
+Check this first:
+
+```bash
+git --version
+```
+
+If that prints **Illegal instruction** (or nothing), git itself is broken — not
+Ragnar. Debian Trixie arm64 can ship a git built with ARMv8.1+ atomics that
+crashes on a Cortex-A53, which is the Pi Zero 2 W's core. Reinstall it:
+
+```bash
+sudo apt update && sudo apt install --reinstall git
+```
+
+This has a knock-on effect worth knowing about. The installer checks git up
+front, and when it is unusable it downloads a release tarball instead of
+cloning. That produces a complete, working Ragnar — but with **no `.git`
+directory**, so every later update has no repository to update. If your box was
+installed that way, nothing needs reinstalling: the web update check rebuilds the
+metadata in place the first time it runs, and `update_ragnar.sh` or re-running
+`install_ragnar.sh` do the same, keeping every file on disk.
+
+Note that the up-front check only ever *stood in* for "git is broken". A stock
+Raspberry Pi OS Lite or Debian image simply ships without git, and the installer
+apt-installs it a few steps later — but the verdict had already been latched, so
+those perfectly healthy boxes took the tarball path too and ended up unable to
+update themselves. The installer now re-checks immediately before each clone and
+installs git if it is merely missing, so only a genuinely crashing git (the
+SIGILL case above) still falls back to a tarball.
+
+Re-running the installer used to be a no-op here: it treats a directory
+containing `actions/` as an existing install and skips the clone, so a tarball
+tree stayed permanently without `.git`. Note that the installer never re-clones
+over an existing directory — the path that would `rm -rf` it would take your
+`data/` with it — so reattaching in place is the only safe repair.
+
+#### Ragnar installed to the wrong directory
+
+Ragnar always installs to `/home/ragnar/Ragnar`, and the `ragnar` user is
+created if missing. If you find the tree somewhere else — `/home/Ragnar`, or
+wherever you ran the installer from — you hit a bug in installers before this
+fix, where a failure to enter `/home/ragnar` was ignored and the relative clone
+landed in the current directory instead. Move it into place and re-run:
+
+```bash
+sudo systemctl stop ragnar.service
+sudo mv /home/Ragnar /home/ragnar/Ragnar        # adjust the source path
+sudo chown -R ragnar:ragnar /home/ragnar/Ragnar
+sudo /home/ragnar/Ragnar/update_ragnar.sh
+```
+
 ### 🧰 Manual Install
 
 #### Step 1: Activate SPI & I2C
@@ -491,4 +675,4 @@ Set the static IP address on your Windows PC:
 
 ## 📜 License
 
-2024 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2025 - ragnar is distributed under the MIT License. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.

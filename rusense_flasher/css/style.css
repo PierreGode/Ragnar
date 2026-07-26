@@ -377,6 +377,20 @@ body::before {
   color: var(--accent-light);
   margin-top: 0.4rem;
   font-size: 0.95rem;
+  user-select: none;
+  transition: text-shadow 0.25s ease;
+}
+.footer .skal:hover {
+  text-shadow: 0 0 10px var(--accent-light);
+}
+
+/* Hidden coordinator easter egg — gentle reveal when the Skál rune is struck. */
+#coordinator-egg.egg-reveal {
+  animation: egg-reveal 0.5s ease both;
+}
+@keyframes egg-reveal {
+  from { opacity: 0; transform: translateY(-8px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ── overlay / dialog ── */

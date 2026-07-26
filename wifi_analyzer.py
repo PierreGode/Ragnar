@@ -3,15 +3,17 @@
 wifi_analyzer.py — Passive tri-band Wi-Fi spectrum analyzer & troubleshooter.
 
 A software "Ekahau Sidekick"-style RF troubleshooter for Ragnar. Everything here
-is *strictly passive*: we only ever run ``iw dev <iface> scan passive`` which
+is *strictly passive*: we only ever run ``iw dev <iface> scan -u passive`` which
 listens for beacons and never transmits a probe request to any AP, and we read
-the radio's channel table with ``iw phy``. No frame is ever injected.
+the radio's channel table with ``iw phy``. No frame is ever injected. (``-u``
+only changes how results are *printed* — iw hex-dumps IEs it can't decode,
+which is how Wi-Fi 7 EHT IEs are recognised until iw grows an EHT printer.)
 
 Capabilities
 ------------
 * Tri-band survey (2.4 / 5 / 6 GHz) of every beaconing BSS: SSID, BSSID, RSSI
-  (dBm), primary channel + band, channel width (20/40/80/160 MHz from the
-  HT/VHT/HE operation IEs), security, and the AP-advertised **channel
+  (dBm), primary channel + band, channel width (20/40/80/160/320 MHz from the
+  HT/VHT/HE/EHT operation IEs), security, and the AP-advertised **channel
   utilisation** (BSS-Load IE) which is a real, passive interference metric.
 * Spectrum / congestion analysis: co-channel and adjacent-channel (overlap)
   interference, the classic 2.4 GHz 1/6/11 crowding picture, and a per-channel
@@ -334,9 +336,27 @@ def _parse_width(block):
     if mh and width < 40:
         width = 40
 
-    # Textual widths anywhere ('(160 MHz)', '(80 MHz)', '(40 MHz)')
+    # EHT Operation as a raw -u hex dump (iw <= 6.9 can't decode ext ID 106):
+    # byte0 = params (bit0: operation-info present), bytes1-4 = basic MCS/NSS,
+    # byte5 = control (bits0-2: width code, 4 => 320 MHz), byte6/7 = CCFS0/1.
+    meht = re.search(r"Unknown Extension ID \(106\):((?:\s+[0-9a-f]{2})+)",
+                     block, re.I)
+    if meht:
+        b = [int(x, 16) for x in meht.group(1).split()]
+        if len(b) >= 8 and (b[0] & 0x01):
+            w = {0: 20, 1: 40, 2: 80, 3: 160, 4: 320}.get(b[5] & 0x07)
+            if w:
+                width = max(width, w)
+            # CCFS1 is the wide-channel centre for 160/320; CCFS0 otherwise.
+            cc = b[7] if (w or 0) >= 160 and b[7] else b[6]
+            if cc:
+                center_ch = cc
+
+    # Explicit 'channel width: N (X MHz)' operation lines from any IE. Must be
+    # anchored to a channel-width line: capability blocks contain width tokens
+    # too ('short GI (80 MHz)') that say nothing about the operating width.
     for w in (320, 160, 80, 40):
-        if re.search(r"\(%d MHz\)" % w, block):
+        if re.search(r"channel width:[^\n]*\(%d MHz\)" % w, block):
             width = max(width, w)
             break
     return width, center_ch
@@ -420,8 +440,13 @@ def _oui_lookup(bssid):
 
 
 def _parse_generation(block, band):
-    """(standard label, phy_mode) from the capability IEs present."""
-    if re.search(r"\bEHT (capabilities|Operation)", block):
+    """(standard label, phy_mode) from the capability IEs present.
+
+    EHT is matched two ways: the decoded section headers (future iw versions)
+    and the raw extension IDs a -u scan exposes when iw can't decode them —
+    106 = EHT Operation, 107 = Multi-Link, 108 = EHT Capabilities."""
+    if (re.search(r"\bEHT (capabilities|Operation)", block, re.I)
+            or re.search(r"Unknown Extension ID \((?:106|107|108)\)", block)):
         return ("Wi-Fi 7", "be")
     if re.search(r"\bHE (capabilities|operation)", block):
         return ("Wi-Fi 6E" if band == "6" else "Wi-Fi 6", "ax")
@@ -1070,7 +1095,11 @@ def do_scan(interface="wlan0", band="all", passive=True):
     if not _iface_is_up(interface):
         _bring_iface_up(interface)
     caps = radio_capabilities(interface)
-    args = [_IW, "dev", interface, "scan"]
+    # -u makes iw hex-dump IEs it can't decode. iw <= 6.9 has no scan-side EHT
+    # printer, so a Wi-Fi 7 beacon's EHT/Multi-Link IEs only surface as
+    # "Unknown Extension ID (106/107/108)" lines — without -u they vanish and
+    # every 802.11be AP would be mislabelled Wi-Fi 6/6E from its HE IEs.
+    args = [_IW, "dev", interface, "scan", "-u"]
     if passive:
         args.append("passive")
     rc, out, err = _run(args)
@@ -1784,6 +1813,42 @@ BSS aa:bb:cc:00:00:05(on wlan0)
 	HT operation:
 		 * primary channel: 6
 		 * secondary channel offset: no secondary
+BSS aa:bb:cc:00:00:06(on wlan0)
+	freq: 6115.0
+	signal: -58.00 dBm
+	SSID: HomeNet_7
+	RSN:	 * Version: 1
+		 * Authentication suites: SAE
+		 * Capabilities: MFP-required 16-PTKSA-RC (0x00cc)
+	HE capabilities:
+		HE RX MCS and NSS set <= 80 MHz
+			1 streams: MCS 0-11
+			2 streams: MCS 0-11
+	HE operation
+		 * primary channel: 33
+		 * channel width: 160
+	EHT capabilities:
+		EHT MAC Capabilities (0x0102):
+		EHT PHY Capabilities: (0x0c1b):
+	EHT Operation:
+		 * channel width: 3 (320 MHz)
+BSS aa:bb:cc:00:00:07(on wlan0)
+	freq: 6135.0
+	signal: -52.00 dBm
+	SSID: HomeNet_7_raw
+	RSN:	 * Version: 1
+		 * Authentication suites: SAE
+		 * Capabilities: MFP-required 16-PTKSA-RC (0x00cc)
+	HE capabilities:
+		HE RX MCS and NSS set <= 80 MHz
+			1 streams: MCS 0-11
+			2 streams: MCS 0-11
+	HE operation
+		 * primary channel: 37
+		 * channel width: 160
+	Unknown Extension ID (108): 82 01 ec 01 01 60 20 e7 00 02 00 22 22 22
+	Unknown Extension ID (106): 01 44 44 44 44 04 2f 1f
+	Unknown Extension ID (107): 30 01 0b 62 7f f0 1f a4 80 00 00 80 07
 """
 
 
@@ -1794,7 +1859,7 @@ def selftest():
         results.append({"name": name, "pass": bool(cond), "detail": detail})
 
     aps = parse_scan(_SELFTEST_SCAN)
-    check("parses all 5 BSS", len(aps) == 5, f"got {len(aps)}")
+    check("parses all 7 BSS", len(aps) == 7, f"got {len(aps)}")
 
     by_id = {a["bssid"]: a for a in aps}
     a1 = by_id.get("aa:bb:cc:00:00:01", {})
@@ -1821,6 +1886,34 @@ def selftest():
 
     a5 = by_id.get("aa:bb:cc:00:00:05", {})
     check("hidden SSID flagged", a5.get("hidden") is True, str(a5.get("hidden")))
+
+    # Wi-Fi 7 (802.11be), decoded form: EHT IEs must win over the HE IEs the
+    # same AP also advertises; 320 MHz comes from the textual-width fallback.
+    a6 = by_id.get("aa:bb:cc:00:00:06", {})
+    check("Wi-Fi 7 label from EHT IEs (over HE)",
+          a6.get("standard") == "Wi-Fi 7" and a6.get("phy_mode") == "be",
+          f"{a6.get('standard')}/{a6.get('phy_mode')}")
+    check("6GHz ch33 detected for be AP",
+          a6.get("band") == "6" and a6.get("channel") == 33,
+          f"{a6.get('band')}/{a6.get('channel')}")
+    check("EHT 320MHz width", a6.get("width") == 320, str(a6.get("width")))
+    check("be PHY rate uses 320MHz multiplier",
+          (a6.get("max_phy_mbps") or 0) > 5000, str(a6.get("max_phy_mbps")))
+
+    # Wi-Fi 7, raw form: iw <= 6.9 has no scan-side EHT printer, so with -u the
+    # EHT/Multi-Link IEs appear only as 'Unknown Extension ID (106/107/108)'
+    # hex dumps. This is what every real 802.11be AP looks like today — it must
+    # still be labelled Wi-Fi 7, and 320 MHz must come from the EHT Operation
+    # hex (the HE Operation IE caps out at 160 MHz).
+    a7 = by_id.get("aa:bb:cc:00:00:07", {})
+    check("Wi-Fi 7 label from raw -u ext IDs",
+          a7.get("standard") == "Wi-Fi 7" and a7.get("phy_mode") == "be",
+          f"{a7.get('standard')}/{a7.get('phy_mode')}")
+    check("320MHz width from raw EHT Operation hex",
+          a7.get("width") == 320, str(a7.get("width")))
+    check("320MHz centre from EHT Operation CCFS1",
+          a7.get("center_freq") == channel_to_freq(31, "6"),
+          str(a7.get("center_freq")))
 
     # Width/channel conversions
     check("freq_to_channel 2484 -> ch14", freq_to_channel(2484) == ("2.4", 14))

@@ -31,6 +31,46 @@
   .legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:5px; vertical-align:-1px; }
   .foot { text-align:center; color:var(--mut); font-size:11px; margin-top:14px; }
   .stale { opacity:.5; }
+  .actions { margin-top:18px; display:grid; gap:10px; }
+  .act-btn { width:100%; padding:14px 16px; border-radius:12px; font-size:15px;
+             font-weight:600; letter-spacing:.3px; cursor:pointer;
+             -webkit-appearance:none; appearance:none; }
+  .act-btn:disabled { opacity:.6; cursor:default; }
+  .exit-btn { border:1px solid #7f1d1d; background:#3b1414; color:#fca5a5; }
+  .exit-btn:active { background:#4c1a1a; }
+  .restart-btn { border:1px solid #78350f; background:#3a2410; color:#fcd34d; }
+  .restart-btn:active { background:#4a2f14; }
+  .overlay { position:fixed; inset:0; background:rgba(6,9,20,.92); display:none;
+             align-items:center; justify-content:center; padding:24px; z-index:50; }
+  .overlay.show { display:flex; }
+  .overlay .msg { max-width:360px; text-align:center; }
+  .overlay .msg h2 { font-size:18px; margin:0 0 10px; }
+  .overlay .msg p { color:var(--mut); font-size:13px; line-height:1.5; margin:0; }
+  /* Collapsed-by-default diagnostics. Native <details> so the toggle needs no
+     JS and keeps working if a script errors — this panel is what you read when
+     something is already going wrong. */
+  .diag { margin-top:18px; background:var(--card); border:1px solid var(--line);
+          border-radius:12px; overflow:hidden; }
+  .diag > summary { padding:13px 16px; font-size:14px; font-weight:600;
+                    cursor:pointer; list-style:none; display:flex;
+                    justify-content:space-between; align-items:center; gap:10px; }
+  .diag > summary::-webkit-details-marker { display:none; }
+  .diag > summary::after { content:'\25BE'; color:var(--mut); font-size:12px; }
+  .diag[open] > summary::after { content:'\25B4'; }
+  .diag > summary .sum-note { color:var(--mut); font-weight:400; font-size:12px;
+                              margin-left:auto; }
+  .diag .body { padding:0 16px 14px; }
+  .diag h3 { font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+             color:var(--mut); margin:14px 0 6px; font-weight:600;
+             border-top:1px solid var(--line); padding-top:12px; }
+  .diag h3:first-child { border-top:0; padding-top:0; margin-top:4px; }
+  .diag dl { display:grid; grid-template-columns:auto 1fr; gap:5px 12px; margin:0;
+             font-size:12px; }
+  .diag dt { color:var(--mut); white-space:nowrap; }
+  .diag dd { margin:0; text-align:right; word-break:break-word;
+             font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+  .diag dd.warn { color:var(--open); }
+  .diag dd.good { color:#86efac; }
 </style>
 </head>
 <body>
@@ -46,6 +86,7 @@
     <div class="stat"><div class="v" id="s-24">–</div><div class="l">2.4 GHz</div></div>
     <div class="stat"><div class="v" id="s-5">–</div><div class="l">5 GHz</div></div>
     <div class="stat"><div class="v" id="s-6">–</div><div class="l">6 GHz</div></div>
+    <div class="stat"><div class="v" id="s-zig">–</div><div class="l">Thread/Zig</div></div>
   </div>
 
   <div class="mapwrap">
@@ -58,9 +99,27 @@
     </div>
   </div>
 
+  <div class="actions">
+    <button type="button" id="restart-btn" class="act-btn restart-btn">Restart Ragnar Service</button>
+    <button type="button" id="exit-btn" class="act-btn exit-btn">Exit Wardriving</button>
+  </div>
+
+  <details class="diag" id="diag">
+    <summary>Diagnostics<span class="sum-note" id="diag-note"></span></summary>
+    <div class="body" id="diag-body"></div>
+  </details>
+
   <div class="foot" id="foot">Connecting…</div>
 </main>
 
+<div class="overlay" id="exit-overlay">
+  <div class="msg">
+    <h2 id="exit-title">Stopping wardriving…</h2>
+    <p id="exit-note">Ending the session and shutting down the Ragnar access point.</p>
+  </div>
+</div>
+
+<script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
 <script>
 (function () {
   "use strict";
@@ -152,6 +211,7 @@
       txt('s-24', stats.band_2_4ghz || 0);
       txt('s-5', stats.band_5ghz || 0);
       txt('s-6', stats.band_6ghz || 0);
+      txt('s-zig', stats.zigbee_devices != null ? stats.zigbee_devices : (st.zigbee_count || 0));
 
       var g = document.getElementById('gps');
       var here = null;
@@ -174,6 +234,9 @@
       txt('map-info', track.length + ' pts · ' + nets.length + ' located');
       drawMap(track, nets, here);
 
+      lastStatus = st;
+      renderDiag(st);
+
       lastOk = Date.now();
       document.body.classList.remove('stale');
       txt('foot', 'Live · updated ' + new Date().toLocaleTimeString());
@@ -182,6 +245,424 @@
       txt('foot', 'Reconnecting…');
     });
   }
+
+  // --- Diagnostics -----------------------------------------------------
+  // Everything /api/wardriving/status exposes, grouped. GPS goes first: it is
+  // the section you open when the receiver is seeing satellites but won't fix,
+  // where SNR and used/in-view separate a weak-signal problem from a receiver
+  // that keeps restarting.
+  var diagEl = document.getElementById('diag');
+  var diagBody = document.getElementById('diag-body');
+  var lastStatus = null;
+  // Deep payload (radios, power, GPS constellations, errors) from
+  // /api/wardriving/diagnostics. Fetched only while the panel is open — it
+  // walks sysfs and shells out to vcgencmd, so it must not ride the 3s poll.
+  var diagExtra = null;
+  var diagExtraAt = 0;
+  var diagExtraBusy = false;
+
+  function fetchDiagExtra(force) {
+    if (!diagEl.open || diagExtraBusy) return;
+    if (!force && Date.now() - diagExtraAt < 8000) return;
+    diagExtraBusy = true;
+    getJSON('/api/wardriving/diagnostics').then(function (d) {
+      if (d && !d.error) {
+        diagExtra = d;
+        diagExtraAt = Date.now();
+        if (lastStatus) renderDiag(lastStatus);
+      }
+    }).catch(function () {
+      // panel degrades to the status-only groups
+    }).then(function () { diagExtraBusy = false; });
+  }
+
+  function fmtAge(ts) {
+    if (typeof ts !== 'number' || !isFinite(ts) || ts <= 0) return null;
+    var s = Math.max(0, Math.round(Date.now() / 1000 - ts));
+    if (s < 60) return s + 's ago';
+    if (s < 3600) return Math.floor(s / 60) + 'm ago';
+    return Math.floor(s / 3600) + 'h' + (Math.floor(s / 60) % 60) + 'm ago';
+  }
+  function fmtDur(sec) {
+    if (typeof sec !== 'number' || !isFinite(sec) || sec < 0) return null;
+    var t = Math.round(sec), h = Math.floor(t / 3600), m = Math.floor(t / 60) % 60;
+    return h ? (h + 'h ' + m + 'm') : (m + 'm ' + (t % 60) + 's');
+  }
+  function has(v) { return v !== undefined && v !== null && v !== ''; }
+  // True when an epoch-seconds timestamp is older than maxAge seconds.
+  function stale(ts, maxAge) {
+    if (typeof ts !== 'number' || !isFinite(ts) || ts <= 0) return false;
+    return (Date.now() / 1000 - ts) > maxAge;
+  }
+
+  function section(title, rows) {
+    var any = rows.some(function (r) { return has(r[1]); });
+    if (!any) return;
+    var h = document.createElement('h3');
+    h.textContent = title;
+    diagBody.appendChild(h);
+    var dl = document.createElement('dl');
+    rows.forEach(function (r) {
+      if (!has(r[1])) return;
+      var dt = document.createElement('dt'); dt.textContent = r[0];
+      var dd = document.createElement('dd'); dd.textContent = String(r[1]);
+      if (r[2]) dd.className = r[2];
+      dl.appendChild(dt); dl.appendChild(dd);
+    });
+    diagBody.appendChild(dl);
+  }
+
+  // Polar sky plot: satellites by azimuth/elevation, coloured per
+  // constellation (North up, zenith centre, horizon at the rim). Fill opacity
+  // tracks SNR; untracked satellites (no SNR) render hollow. Styles are inline
+  // so this needs nothing from the page stylesheet.
+  var SKY_COLORS = { GPS: '#34d399', GLONASS: '#f87171', Galileo: '#60a5fa',
+    BeiDou: '#fbbf24', QZSS: '#a78bfa', NavIC: '#f472b6', combined: '#94a3b8' };
+
+  function skyEsc(v) {
+    return String(v).replace(/[<>&"]/g, function (ch) {
+      return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[ch];
+    });
+  }
+
+  function openSkyFullscreen() {
+    if (!window.RagnarSkyView) return;
+    var gps = (diagExtra && diagExtra.gps) || {};
+    window.RagnarSkyView.open({ sky: gps.sky || [], status: gps.status || {} });
+  }
+
+  function skyPlot(sky) {
+    var pts = (sky || []).filter(function (s) { return has(s.az) && has(s.elev); });
+    if (!pts.length) return;
+    var S = 220, c = S / 2, R = c - 16;
+    var svg = '<circle cx="' + c + '" cy="' + c + '" r="' + R + '" fill="#0f172a"/>';
+    [1, 2 / 3, 1 / 3].forEach(function (f) {
+      svg += '<circle cx="' + c + '" cy="' + c + '" r="' + (R * f).toFixed(1) +
+             '" fill="none" stroke="#334155" stroke-width="1"/>';
+    });
+    svg += '<line x1="' + c + '" y1="' + (c - R) + '" x2="' + c + '" y2="' + (c + R) + '" stroke="#334155" stroke-width="1"/>';
+    svg += '<line x1="' + (c - R) + '" y1="' + c + '" x2="' + (c + R) + '" y2="' + c + '" stroke="#334155" stroke-width="1"/>';
+    [['N', 0], ['E', 90], ['S', 180], ['W', 270]].forEach(function (p) {
+      var a = p[1] * Math.PI / 180;
+      var lx = c + (R + 9) * Math.sin(a), ly = c - (R + 9) * Math.cos(a);
+      svg += '<text x="' + lx.toFixed(1) + '" y="' + (ly + 3).toFixed(1) +
+             '" fill="#64748b" font-size="10" text-anchor="middle">' + p[0] + '</text>';
+    });
+    pts.forEach(function (s) {
+      var elev = Math.max(0, Math.min(90, s.elev));
+      var r = R * (90 - elev) / 90, a = s.az * Math.PI / 180;
+      var x = c + r * Math.sin(a), y = c - r * Math.cos(a);
+      var col = SKY_COLORS[s.constellation] || '#94a3b8';
+      var hasSnr = has(s.snr) && s.snr > 0;
+      var op = hasSnr ? (0.3 + 0.7 * Math.min(1, s.snr / 50)) : 0.35;
+      var tip = s.constellation + ' PRN ' + s.prn + ' · el ' + s.elev + '° az ' +
+                s.az + '°' + (hasSnr ? ' · SNR ' + s.snr + ' dB' : ' · untracked');
+      svg += '<circle cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) +
+             '" r="3.2" fill="' + (hasSnr ? col : 'none') + '" stroke="' + col +
+             '" stroke-width="1" opacity="' + op.toFixed(2) + '"><title>' +
+             skyEsc(tip) + '</title></circle>';
+    });
+    var h = document.createElement('h3');
+    h.textContent = 'GPS sky view';
+    if (window.RagnarSkyView) {
+      var fs = document.createElement('button');
+      fs.textContent = '⛶ Fullscreen';
+      fs.style.cssText = 'float:right;background:none;border:none;color:var(--accent);font-size:12px;cursor:pointer;padding:0';
+      fs.onclick = openSkyFullscreen;
+      h.appendChild(fs);
+    }
+    diagBody.appendChild(h);
+    var wrap = document.createElement('div');
+    wrap.innerHTML = '<svg viewBox="0 0 ' + S + ' ' + S +
+      '" style="width:100%;max-width:240px;display:block;margin:0 auto" ' +
+      'xmlns="http://www.w3.org/2000/svg">' + svg + '</svg>';
+    var present = [];
+    pts.forEach(function (s) {
+      if (present.indexOf(s.constellation) < 0) present.push(s.constellation);
+    });
+    var leg = document.createElement('div');
+    leg.style.cssText = 'font-size:10px;color:#9ca3af;display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin-top:4px';
+    leg.innerHTML = present.map(function (name) {
+      var col = SKY_COLORS[name] || '#94a3b8';
+      return '<span><i style="display:inline-block;width:8px;height:8px;border-radius:9999px;background:' +
+             col + ';margin-right:4px;vertical-align:middle"></i>' + skyEsc(name) + '</span>';
+    }).join('');
+    wrap.appendChild(leg);
+    diagBody.appendChild(wrap);
+  }
+
+  function renderDiag(st) {
+    var gps = st.gps || {}, stats = st.stats || {};
+    // Headline stays visible while collapsed so a glance is often enough.
+    var note = gps.has_fix ? 'GPS fix'
+             : (gps.connected ? 'GPS searching' : 'no GPS');
+    if (st.error || gps.error) note += ' · error';
+    txt('diag-note', note);
+    if (!diagEl.open) return;   // don't rebuild the DOM while collapsed
+    fetchDiagExtra(false);      // refresh the deep payload while open
+
+    diagBody.textContent = '';
+
+    var sats = null;
+    if (has(gps.satellites) || has(gps.satellites_in_view)) {
+      sats = (gps.satellites || 0) + ' used / ' + (gps.satellites_in_view || 0) + ' in view';
+    }
+    section('GPS', [
+      ['Fix', gps.has_fix ? 'yes' : 'no', gps.has_fix ? 'good' : 'warn'],
+      ['Fix quality', gps.fix_quality],
+      ['Satellites', sats],
+      ['SNR max', has(gps.snr_max) ? gps.snr_max + ' dB' : null],
+      ['HDOP', gps.hdop],
+      ['Latitude', has(gps.latitude) ? Number(gps.latitude).toFixed(6) : null],
+      ['Longitude', has(gps.longitude) ? Number(gps.longitude).toFixed(6) : null],
+      ['Altitude', has(gps.altitude) ? Number(gps.altitude).toFixed(1) + ' m' : null],
+      ['Speed', has(gps.speed_kmh) ? Number(gps.speed_kmh).toFixed(1) + ' km/h' : null],
+      ['Course', has(gps.course) ? Number(gps.course).toFixed(0) + '°' : null],
+      ['Connected', gps.connected ? 'yes' : 'no'],
+      ['Source', gps.source],
+      ['Port', gps.port],
+      ['Last update', fmtAge(gps.last_update)],
+      // last_sentence is a TIMESTAMP of the last NMEA sentence, not its text —
+      // rendering it raw printed a bare epoch float on the device.
+      ['Last NMEA', fmtAge(gps.last_sentence),
+        stale(gps.last_sentence, 30) ? 'warn' : null],
+      ['Time to first fix', has(gps.ttff_seconds) ? gps.ttff_seconds + 's' : null],
+      ['Searching for', has(gps.searching_seconds)
+        ? fmtDur(gps.searching_seconds) + ' (no fix)' : null,
+        gps.searching_seconds > 120 ? 'warn' : null],
+      ['GPS error', gps.error, 'warn']
+    ]);
+
+    var ex = diagExtra || {};
+    var exGps = ex.gps || {};
+    if ((exGps.constellations || []).length) {
+      section('GPS constellations', exGps.constellations.map(function (c) {
+        return [c.constellation, c.in_view + ' in view' +
+                (has(c.snr_max) ? ' · SNR ' + c.snr_max + ' dB' : '')];
+      }));
+    }
+    skyPlot(exGps.sky);
+
+    var strongest = stats.strongest || null;
+    section('Session', [
+      ['Session', st.session_id],
+      ['Duration', fmtDur(stats.duration_seconds)],
+      ['Networks', stats.total_networks],
+      ['Open / WEP / WPA', has(stats.total_networks)
+        ? (stats.open_networks || 0) + ' / ' + (stats.wep_networks || 0) + ' / ' + (stats.wpa_networks || 0)
+        : null],
+      ['2.4 / 5 / 6 GHz', has(stats.total_networks)
+        ? (stats.band_2_4ghz || 0) + ' / ' + (stats.band_5ghz || 0) + ' / ' + (stats.band_6ghz || 0)
+        : null],
+      ['Bluetooth', stats.bluetooth_devices],
+      ['Cell towers', stats.cell_towers],
+      ['Thread / Zigbee', stats.zigbee_devices],
+      ['Cameras', stats.cameras],
+      ['GPS trackpoints', stats.gps_trackpoints],
+      ['Strongest', strongest ? ((strongest.ssid || strongest.bssid || '?') +
+        (has(strongest.best_rssi) ? ' (' + strongest.best_rssi + ' dBm)' : '')) : null],
+      ['Database', stats.db_path]
+    ]);
+
+    var scanRows = [
+      ['Running', st.running ? 'yes' : 'no', st.running ? 'good' : 'warn'],
+      ['Band mode', st.band_mode],
+      ['Scans completed', st.scans_completed],
+      ['Networks last scan', st.networks_this_scan],
+      ['Last scan', fmtAge(st.last_scan_time),
+        (st.running && stale(st.last_scan_time, 60)) ? 'warn' : null],
+      ['Interfaces', (st.interfaces || []).join(', ')],
+      ['Engine error', st.error, 'warn']
+    ];
+    (st.interface_details || []).forEach(function (d) {
+      var bits = [];
+      if (has(d.networks)) bits.push(d.networks + ' nets');
+      if (d.driver) bits.push(d.driver);
+      if (d.bands) bits.push([].concat(d.bands).join('/'));
+      if (d.is_usb) bits.push('USB');
+      if (d.manufacturer) bits.push(d.manufacturer);
+      scanRows.push(['  ' + d.name, bits.join(' · ')]);
+    });
+    section('Scanning', scanRows);
+
+    var comps = st.companions || [];
+    var compRows = [['Companions', comps.length ? String(comps.length) : null]];
+    comps.forEach(function (c) {
+      var bits = [c.connected ? 'up' : 'down'];
+      if (has(c.networks)) bits.push(c.networks + ' nets');
+      if (has(c.networks_24) || has(c.networks_5)) {
+        bits.push((c.networks_24 || 0) + '/' + (c.networks_5 || 0) + ' 2.4/5');
+      }
+      if (c.esp_mode) bits.push(c.esp_mode);
+      if (has(c.esp_ble_count)) bits.push(c.esp_ble_count + ' BLE');
+      if (has(c.esp_zigbee_count) && c.esp_zigbee_count) bits.push(c.esp_zigbee_count + ' Zig');
+      if (has(c.mesh_node_count) && c.mesh_node_count) bits.push(c.mesh_node_count + ' nodes');
+      if (c.coordinator_board) bits.push(c.coordinator_board);
+      if (c.coordinator_fw) bits.push('fw ' + c.coordinator_fw);
+      compRows.push(['  ' + (c.name || c.port || 'companion'), bits.join(' · ')]);
+      (c.esp_alerts || []).slice(-3).forEach(function (a, i) {
+        compRows.push(['    alert ' + (i + 1),
+                       typeof a === 'string' ? a : JSON.stringify(a), 'warn']);
+      });
+    });
+    section('Companions', compRows);
+
+    // Radios — and, when one is not scanning, why. Answers "only wlan0 is
+    // listed" without needing a shell on the device.
+    var radios = ex.radios || [];
+    if (radios.length) {
+      var rrows = [];
+      radios.forEach(function (r) {
+        var bits = [];
+        if (r.driver) bits.push(r.driver);
+        if (r.mode) bits.push(r.mode);
+        if (r.usb && r.usb.max_power_ma) bits.push(r.usb.max_power_ma + ' mA');
+        if (r.usb && (r.usb.product || r.usb.manufacturer)) {
+          bits.push(r.usb.product || r.usb.manufacturer);
+        }
+        rrows.push([r.name, (r.scanning ? 'scanning' : 'idle') +
+                    (bits.length ? ' · ' + bits.join(' · ') : ''),
+                    r.scanning ? 'good' : 'warn']);
+        if (r.excluded_reason) rrows.push(['  why not', r.excluded_reason, 'warn']);
+      });
+      section('Radios', rrows);
+    }
+
+    // Power — declared USB draw per device (bMaxPower from the descriptor, not
+    // a measurement) plus supply health.
+    var pw = ex.power || {};
+    if (Object.keys(pw).length) {
+      var prows = [];
+      if (pw.model) prows.push(['Board', pw.model]);
+      (pw.usb_devices || []).forEach(function (d) {
+        var bits = [];
+        if (has(d.max_power_ma)) bits.push(d.max_power_ma + ' mA');
+        if (d.interfaces && d.interfaces.length) bits.push(d.interfaces.join(', '));
+        prows.push(['  ' + (d.product || d.manufacturer || d.usb_id || d.id),
+                    bits.join(' · ')]);
+      });
+      if (has(pw.usb_declared_ma)) {
+        prows.push(['USB total', pw.usb_declared_ma + ' mA',
+                    pw.usb_declared_ma > 600 ? 'warn' : null]);
+      }
+      if (pw.usb_max_current_enabled === false) {
+        prows.push(['usb_max_current', 'not set', 'warn']);
+      }
+      var thr = pw.throttled;
+      if (thr) {
+        prows.push(['Supply', thr.healthy ? 'healthy' : 'see below',
+                    thr.healthy ? 'good' : 'warn']);
+        if ((thr.now || []).length) prows.push(['  Right now', thr.now.join(', '), 'warn']);
+        if ((thr.occurred || []).length) prows.push(['  Since boot', thr.occurred.join(', '), 'warn']);
+      }
+      if (has(pw.core_volts)) prows.push(['Core voltage', pw.core_volts + ' V']);
+      if (has(pw.temp_c)) prows.push(['Temperature', pw.temp_c + ' °C']);
+      if (pw.pmic && has(pw.pmic.total_watts)) {
+        prows.push(['Board power', pw.pmic.total_watts + ' W']);
+      }
+      section('Power', prows);
+    }
+
+    var errs = ex.errors || [];
+    if (errs.length) {
+      section('Errors', errs.map(function (e) {
+        return [e.source, e.message, 'warn'];
+      }));
+    }
+
+    section('Device', [
+      ['Device name', st.device_name],
+      ['Bluetooth seen', st.bluetooth_count],
+      ['Cells seen', st.cell_count],
+      ['GPS backfill', has(st.allow_backfill) ? (st.allow_backfill ? 'allowed' : 'off') : null]
+    ]);
+
+    if (!diagBody.childNodes.length) {
+      diagBody.textContent = 'No diagnostics available yet.';
+    }
+  }
+
+  // Expanding while collapsed skips DOM work, so render on open too.
+  diagEl.addEventListener('toggle', function () {
+    if (!diagEl.open) return;
+    fetchDiagExtra(true);
+    if (lastStatus) renderDiag(lastStatus);
+  });
+
+  // Exit Wardriving: stop the session and drop the field AP, then head back to
+  // Ragnar web. The AP teardown is deferred server-side (~1.5s) so this request
+  // completes first; after that the AP radio goes down and this phone loses the
+  // Ragnar network, so we give clear on-screen guidance rather than assume the
+  // redirect will load.
+  var stopping = false;
+  function showOverlay(title, note) {
+    txt('exit-title', title);
+    txt('exit-note', note);
+    document.getElementById('exit-overlay').classList.add('show');
+  }
+  function exitWardriving() {
+    if (stopping) return;
+    if (!window.confirm('Stop wardriving and shut down the Ragnar access point?')) return;
+    stopping = true;
+    var btn = document.getElementById('exit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Stopping…';
+    showOverlay('Stopping wardriving…', 'Ending the session and shutting down the Ragnar access point.');
+    fetch('/api/wardriving/stop', { method: 'POST', cache: 'no-store' })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (res) {
+        if (res && res.ap_teardown) {
+          showOverlay('Wardriving stopped',
+            'The Ragnar access point is shutting down. Reconnect your phone to its normal Wi-Fi to reach Ragnar web.');
+        } else {
+          showOverlay('Wardriving stopped', 'Returning to Ragnar web…');
+        }
+        setTimeout(function () { window.location.href = '/'; }, 2500);
+      })
+      .catch(function () {
+        // The AP may have dropped before the response arrived — that still means
+        // the stop was issued. Guide the user rather than showing a raw error.
+        showOverlay('Wardriving stopping',
+          'If this page does not return, reconnect your phone to its normal Wi-Fi to reach Ragnar web.');
+        setTimeout(function () { window.location.href = '/'; }, 3000);
+      });
+  }
+  document.getElementById('exit-btn').addEventListener('click', exitWardriving);
+
+  // Restart the Ragnar service — the field recovery when the UI or a scan
+  // thread has wedged. The AP itself is run by hostapd/dnsmasq, not the Ragnar
+  // service, so the phone stays connected across the restart; we just poll the
+  // status endpoint until it answers again and then resume the live refresh.
+  function restartService() {
+    if (stopping) return;
+    if (!window.confirm('Restart the Ragnar service? Wardriving will stop and the page will reconnect.')) return;
+    var btn = document.getElementById('restart-btn');
+    btn.disabled = true;
+    btn.textContent = 'Restarting…';
+    showOverlay('Restarting Ragnar…', 'The service is coming back up. This page reconnects on its own.');
+    fetch('/api/system/restart-service', { method: 'POST', cache: 'no-store' })
+      .catch(function () { /* the service may drop the connection as it goes down */ })
+      .then(function () { setTimeout(waitForService, 4000); });
+  }
+
+  function waitForService(attempt) {
+    attempt = attempt || 0;
+    getJSON('/api/wardriving/status').then(function () {
+      document.getElementById('exit-overlay').classList.remove('show');
+      var btn = document.getElementById('restart-btn');
+      btn.disabled = false;
+      btn.textContent = 'Restart Ragnar Service';
+      refresh();
+    }).catch(function () {
+      if (attempt > 40) {   // ~2 min
+        showOverlay('Still restarting',
+          'Ragnar has not come back yet. Reload this page, or power-cycle the device.');
+        return;
+      }
+      setTimeout(function () { waitForService(attempt + 1); }, 3000);
+    });
+  }
+  document.getElementById('restart-btn').addEventListener('click', restartService);
 
   refresh();
   setInterval(refresh, 3000);

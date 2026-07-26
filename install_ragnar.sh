@@ -119,6 +119,50 @@ check_git() {
     fi
 }
 
+# Re-probe git immediately before a clone, installing it when it is merely
+# absent. check_git runs early (it has to: the display menu clones the e-Paper
+# repo before the dependency step), so by the time Ragnar itself is cloned its
+# verdict can be stale in the one way that matters — a stock Raspberry Pi OS
+# Lite / Debian image ships without git, so GIT_WORKS was latched to false, the
+# clone fell back to a tarball, and the resulting install had no .git at all.
+# That install works fine but can never update itself, and the Updates card on a
+# brand-new box reported "Needs attention" instead of "Up to Date".
+#
+# A git that is installed but crashes (SIGILL on Cortex-A53, Debian Trixie
+# arm64) is left alone — reinstalling the same broken binary does not help, and
+# the tarball fallback exists precisely for it.
+ensure_git() {
+    if git --version >/dev/null 2>&1; then
+        GIT_WORKS=true
+        return 0
+    fi
+    if command -v git >/dev/null 2>&1; then
+        GIT_WORKS=false
+        return 1
+    fi
+
+    log "INFO" "git is not installed — installing it so this install stays a real clone"
+    [ -z "$PKG_MGR" ] && detect_platform
+    install_package git >/dev/null 2>&1 || true
+
+    # A never-updated package index is the usual reason that first attempt
+    # fails on a freshly imaged box. Refresh once and retry before giving up on
+    # a real clone.
+    if ! git --version >/dev/null 2>&1 && [ -n "$UPDATE_CMD" ]; then
+        eval "$UPDATE_CMD" >/dev/null 2>&1 || true
+        install_package git >/dev/null 2>&1 || true
+    fi
+
+    if git --version >/dev/null 2>&1; then
+        GIT_WORKS=true
+        log "SUCCESS" "git installed — cloning instead of downloading a tarball"
+        return 0
+    fi
+    GIT_WORKS=false
+    log "WARNING" "git still unavailable — falling back to tarball download"
+    return 1
+}
+
 # Clone a repository, falling back to a wget tarball download when git is broken.
 # Usage: clone_or_download <repo_url> [target_dir] [branch]
 # repo_url must be a GitHub https URL (https://github.com/owner/repo.git or without .git).
@@ -132,7 +176,8 @@ clone_or_download() {
         target_dir=$(basename "${repo_url%.git}")
     fi
 
-    # Try git first
+    # Try git first, re-probing rather than trusting the early check_git verdict.
+    ensure_git
     if [ "$GIT_WORKS" = true ]; then
         if git clone "$repo_url" "$target_dir" 2>/dev/null; then
             return 0
@@ -260,7 +305,11 @@ package_candidates() {
         network-manager) echo "network-manager NetworkManager networkmanager" ;;
         iproute2) echo "iproute2 iproute" ;;
         iputils-ping) echo "iputils-ping iputils" ;;
-        libatlas-base-dev) echo "libatlas-base-dev atlas-devel" ;;
+        # ATLAS was dropped from Debian Trixie, so libatlas-base-dev resolves to
+        # nothing there and warned on every install. OpenBLAS is its replacement
+        # and is already a required package, so it is normally "already present"
+        # and this becomes a silent no-op instead of a scary double warning.
+        libatlas-base-dev) echo "libatlas-base-dev atlas-devel libopenblas-dev openblas-devel" ;;
         arp-scan) echo "arp-scan arpscan" ;;
         mtr-tiny) echo "mtr-tiny mtr" ;;
         whois) echo "whois jwhois" ;;
@@ -277,6 +326,36 @@ package_candidates() {
     esac
 }
 
+# Repair an interrupted dpkg transaction before touching apt.
+#
+# apt refuses every operation while a previous dpkg run is unfinished:
+#   "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"
+# A low-memory Pi reaches that state easily — an install killed by the OOM
+# killer, a power loss, or a Ctrl-C during one of the long silent steps — and
+# from then on nothing installs, including re-running this script or the
+# Pwnagotchi installer. Repairing is idempotent and a no-op when healthy, so it
+# runs unconditionally rather than making the user find the command themselves.
+ensure_dpkg_healthy() {
+    [ "$PKG_MGR" = "apt" ] || return 0
+    local interrupted=false
+    # Files here mean a transaction was cut off mid-write; --audit catches
+    # packages left half-installed or half-configured.
+    [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] && interrupted=true
+    [ -n "$(dpkg --audit 2>/dev/null)" ] && interrupted=true
+    [ "$interrupted" = false ] && return 0
+
+    log "WARNING" "dpkg is in an interrupted state — repairing before installing"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+        log "WARNING" "dpkg still reports problems — package installs may fail"
+        log "WARNING" "Inspect manually with: sudo dpkg --audit && sudo dpkg --configure -a"
+    else
+        log "SUCCESS" "dpkg state repaired"
+    fi
+}
+
 # Install a package using detected package manager with fallbacks
 install_package() {
     local pkg=$1
@@ -290,12 +369,18 @@ install_package() {
         fi
     done
 
+    # Only announce a fallback when there actually is one — a single-candidate
+    # package was otherwise logged as "trying next fallback" with nothing left
+    # to try, which reads as a broken installer rather than a missing package.
+    local remaining
+    remaining=$(echo "$candidates" | wc -w)
     for candidate in $candidates; do
         if eval "$INSTALL_CMD $candidate" >/dev/null 2>&1; then
             log "SUCCESS" "Installed ${candidate}"
             return 0
         fi
-        log "WARNING" "Failed to install ${candidate}, trying next fallback"
+        remaining=$((remaining - 1))
+        [ "$remaining" -gt 0 ] && log "INFO" "${candidate} unavailable, trying next fallback"
     done
 
     log "WARNING" "Could not install package ${pkg} on ${PKG_MGR}"
@@ -420,6 +505,9 @@ install_dependencies() {
 
     [ -z "$PKG_MGR" ] && detect_platform
 
+    # Must run before the first apt command, or every install below fails.
+    ensure_dpkg_healthy
+
     eval "$UPDATE_CMD"
     check_success "Package index updated via ${PKG_MGR}"
 
@@ -434,6 +522,8 @@ install_dependencies() {
         "libopenblas-dev"
         "bluez"
         "bluez-tools"
+        "python3-dbus"
+        "python3-gi"
         "bridge-utils"
         "python3-pil"
         "libjpeg-dev"
@@ -467,25 +557,50 @@ install_dependencies() {
         "lldpd"
         "ethtool"
         "speedtest-cli"
-        "nikto"
-        "sqlmap"
-        "whatweb"
-        "ffuf"
     )
 
     if [ "$IS_ARM" = true ]; then
         packages+=("libgpiod-dev" "libi2c-dev" "dhcpcd5")
     fi
 
-    optional_packages=("libatlas-base-dev")
+    # Nice-to-have, never required. Ragnar resolves each of these at runtime and
+    # simply disables the feature that uses it (server_capabilities.py marks the
+    # scanners 'critical': False; recon_engine looks ffuf up in _tool_paths; the
+    # Waterfall button stays greyed without hackrf). Several are also genuinely
+    # absent from some suites — ffuf only entered Debian in trixie, and the
+    # 32-bit Raspbian builds for a Pi Zero 2 W carry a smaller set than arm64 —
+    # so a miss here must not read as a broken install.
+    optional_packages=(
+        "libatlas-base-dev"
+        "hackrf"
+        "nikto"
+        "sqlmap"
+        "whatweb"
+        "ffuf"
+    )
+
+    # Collect misses instead of letting them scroll past in a 2000-line log, so
+    # the end of the install answers "which packages didn't make it?" directly.
+    local failed_required=()
+    local failed_optional=()
 
     for package in "${packages[@]}"; do
-        install_package "$package"
+        install_package "$package" || failed_required+=("$package")
     done
 
     for package in "${optional_packages[@]}"; do
-        install_package "$package" || log "WARNING" "Optional package $package unavailable on ${PKG_MGR}"
+        install_package "$package" || failed_optional+=("$package")
     done
+
+    if [ ${#failed_optional[@]} -gt 0 ]; then
+        log "INFO" "Optional packages unavailable on ${PKG_MGR} (features that use them stay disabled): ${failed_optional[*]}"
+    fi
+    if [ ${#failed_required[@]} -gt 0 ]; then
+        log "WARNING" "These required packages did not install: ${failed_required[*]}"
+        log "WARNING" "Install continues, but fix them with: sudo ${INSTALL_CMD#DEBIAN_FRONTEND=noninteractive } ${failed_required[*]}"
+    else
+        log "SUCCESS" "All required system packages installed"
+    fi
 
     # Ensure vulners.nse script is available for vulnerability scanning
     local vulners_path="/usr/share/nmap/scripts/vulners.nse"
@@ -505,11 +620,54 @@ install_dependencies() {
     # Update nmap scripts (may fail with SIGILL on some ARM builds)
     nmap --script-updatedb >/dev/null 2>&1 || log "WARNING" "nmap --script-updatedb failed — vulnerability scripts may be stale"
 
-    # Recon engine Python deps (TLS audit + DNS recon)
+    # Recon engine Python deps (TLS audit + DNS recon). Installed one at a time
+    # and never as a single pip command: they back independent features, and
+    # sslyze is the only one that can realistically fail — it pulls nassl, a
+    # compiled extension with no wheel for every Pi platform. Bundled together,
+    # a failed sslyze build also took out dnspython and tldextract, which are
+    # pure Python and ship in apt. Prefer apt for those two (no build at all),
+    # fall back to pip, and report per-package so the log says which feature is
+    # actually degraded.
     log "INFO" "Installing recon engine Python dependencies..."
-    pip3 install --break-system-packages sslyze dnspython tldextract >/dev/null 2>&1 \
-        || pip3 install sslyze dnspython tldextract >/dev/null 2>&1 \
-        || log "WARNING" "Failed to install sslyze/dnspython/tldextract — recon engine will report errors per scan"
+    _recon_missing=()
+
+    # dnspython — DNS recon (recon_engine.py resolves via dns.resolver)
+    if python3 -c "import dns.resolver" 2>/dev/null; then
+        log "INFO" "dnspython already available"
+    elif install_package python3-dnspython 2>/dev/null && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (apt)"
+    elif pip3 install --break-system-packages dnspython >/dev/null 2>&1 && python3 -c "import dns.resolver" 2>/dev/null; then
+        log "SUCCESS" "Installed dnspython (pip)"
+    else
+        _recon_missing+=("dnspython → DNS recon")
+    fi
+
+    # tldextract — domain parsing for the recon engine
+    if python3 -c "import tldextract" 2>/dev/null; then
+        log "INFO" "tldextract already available"
+    elif install_package python3-tldextract 2>/dev/null && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (apt)"
+    elif pip3 install --break-system-packages tldextract >/dev/null 2>&1 && python3 -c "import tldextract" 2>/dev/null; then
+        log "SUCCESS" "Installed tldextract (pip)"
+    else
+        _recon_missing+=("tldextract → domain parsing")
+    fi
+
+    # sslyze — TLS audit. No apt package; needs to build nassl on some platforms.
+    if python3 -c "import sslyze" 2>/dev/null; then
+        log "INFO" "sslyze already available"
+    elif pip3 install --break-system-packages sslyze >/dev/null 2>&1 && python3 -c "import sslyze" 2>/dev/null; then
+        log "SUCCESS" "Installed sslyze (pip)"
+    else
+        _recon_missing+=("sslyze → TLS audit scans")
+    fi
+
+    if [ ${#_recon_missing[@]} -gt 0 ]; then
+        log "WARNING" "Recon engine features unavailable: ${_recon_missing[*]}"
+        log "WARNING" "The rest of Ragnar is unaffected; retry later with: sudo pip3 install --break-system-packages <name>"
+    else
+        log "SUCCESS" "Recon engine dependencies installed"
+    fi
 
     # Recon engine wordlist for content discovery
     local wordlist_dir="/opt/ragnar/wordlists"
@@ -781,11 +939,58 @@ setup_ragnar() {
         check_success "Created ragnar user"
     fi
 
+    # The home directory must exist before anything below can land in it. This
+    # cd used to be unguarded, and every path after it is relative ("Ragnar"),
+    # so a failure here silently installed the whole tree into whatever
+    # directory the installer happened to be run from — e.g. /home/Ragnar when
+    # started from /home. Fail loudly instead of scattering files.
+    if [ ! -d "/home/$ragnar_USER" ]; then
+        log "WARNING" "/home/$ragnar_USER does not exist — creating it"
+        mkdir -p "/home/$ragnar_USER" || {
+            log "ERROR" "Cannot create /home/$ragnar_USER — installation cannot continue"
+            clean_exit 1
+        }
+        chown "$ragnar_USER:$ragnar_USER" "/home/$ragnar_USER" 2>/dev/null || true
+    fi
+    cd "/home/$ragnar_USER" || {
+        log "ERROR" "Cannot enter /home/$ragnar_USER — installation cannot continue"
+        log "ERROR" "Refusing to continue, as Ragnar would be installed into $(pwd) instead"
+        clean_exit 1
+    }
+
     # Check for existing ragnar directory with a valid git clone
-    cd /home/$ragnar_USER
     if [ -d "Ragnar/.git" ] || [ -d "Ragnar/actions" ]; then
         log "INFO" "Using existing ragnar directory"
         echo -e "${GREEN}Using existing ragnar directory${NC}"
+        # A tree with actions/ but no .git is a tarball install (what this
+        # script produces when git is unusable at install time). It counts as
+        # "existing" above, so re-running the installer would skip the clone and
+        # leave it un-updatable forever — the one thing a user re-runs the
+        # installer to fix. Reattach it here instead. Deliberately NOT a
+        # re-clone: the else branch below does rm -rf, which would take the
+        # user's data/ with it.
+        if [ ! -d "Ragnar/.git" ] && ensure_git; then
+            log "WARNING" "Existing install has no .git (tarball install) — reattaching to upstream"
+            echo -e "${YELLOW}Reattaching this install to the git repository (your files are kept)...${NC}"
+            if git init -q Ragnar 2>/dev/null \
+               && git -C Ragnar remote add origin https://github.com/PierreGode/Ragnar.git 2>/dev/null \
+               && git -C Ragnar fetch --depth=1 origin main 2>/dev/null; then
+                # Mixed reset only: the working tree on disk is left untouched,
+                # so local edits and data files survive as ordinary changes.
+                git -C Ragnar reset -q --mixed FETCH_HEAD 2>/dev/null || true
+                git -C Ragnar branch -q -f main FETCH_HEAD 2>/dev/null || true
+                git -C Ragnar symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+                git -C Ragnar branch -q --set-upstream-to=origin/main main 2>/dev/null || true
+                # Restore only files upstream has that the tarball lacked.
+                git -C Ragnar ls-files -d -z 2>/dev/null \
+                    | xargs -0 -r git -C Ragnar checkout -- 2>/dev/null || true
+                log "SUCCESS" "Reattached existing install to the git repository"
+                echo -e "${GREEN}Reattached — future updates will work.${NC}"
+            else
+                rm -rf Ragnar/.git
+                log "WARNING" "Could not reattach to upstream (network?) — install continues, but updates will not work"
+            fi
+        fi
     else
         # Remove empty/invalid directory if it exists
         if [ -d "Ragnar" ]; then
@@ -949,63 +1154,61 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         log "WARNING" "You can install it manually later with: sudo pip3 install --break-system-packages cryptography>=41.0.0"
     }
 
-    # Verify display driver availability
-    if [ "$HEADLESS_MODE" = true ] || [ -z "${EPD_VERSION:-}" ]; then
-        log "INFO" "Headless mode or unknown display version detected - skipping driver verification"
-    elif [ "$EPD_VERSION" = "gc9a01" ]; then
-        # TFT drivers ship with Ragnar in resources/waveshare_epd/, verify the file exists
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/gc9a01.py" ]; then
-            log "SUCCESS" "GC9A01 TFT driver verified (resources/waveshare_epd/gc9a01.py)"
-        else
-            log "ERROR" "GC9A01 TFT driver not found at $ragnar_PATH/resources/waveshare_epd/gc9a01.py"
-        fi
-        # Ensure spidev is installed for TFT SPI communication
-        pip3 install spidev --break-system-packages >/dev/null 2>&1
-        log "INFO" "SPI dependencies installed for TFT display"
-    elif [ "$EPD_VERSION" = "whisplay" ]; then
-        # TFT drivers ship with Ragnar in resources/waveshare_epd/, verify the file exists
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/whisplay.py" ]; then
-            log "SUCCESS" "Whisplay TFT driver verified (resources/waveshare_epd/whisplay.py)"
-        else
-            log "ERROR" "Whisplay TFT driver not found at $ragnar_PATH/resources/waveshare_epd/whisplay.py"
-        fi
-        # Ensure spidev is installed for TFT SPI communication
-        pip3 install spidev --break-system-packages >/dev/null 2>&1
-        log "INFO" "SPI dependencies installed for TFT display"
-    elif [ "$EPD_VERSION" = "ssd1306" ]; then
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/ssd1306.py" ]; then
-            log "SUCCESS" "SSD1306 OLED driver verified (resources/waveshare_epd/ssd1306.py)"
-        else
-            log "ERROR" "SSD1306 OLED driver not found at $ragnar_PATH/resources/waveshare_epd/ssd1306.py"
-        fi
-        # Install smbus2 for I2C communication
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1
-        # Enable I2C interface
-        raspi-config nonint do_i2c 0 2>/dev/null || true
-        log "INFO" "I2C interface enabled for SSD1306"
-    elif [ "$EPD_VERSION" = "lcd1602" ]; then
-        if [ -f "$ragnar_PATH/resources/waveshare_epd/lcd1602.py" ]; then
-            log "SUCCESS" "LCD1602 driver verified (resources/waveshare_epd/lcd1602.py)"
-        else
-            log "ERROR" "LCD1602 driver not found at $ragnar_PATH/resources/waveshare_epd/lcd1602.py"
-        fi
-        # Install smbus2 for I2C communication
-        pip3 install smbus2 --break-system-packages >/dev/null 2>&1
-        # Enable I2C interface
-        raspi-config nonint do_i2c 0 2>/dev/null || true
-        log "INFO" "I2C interface enabled for LCD1602"
+    # Display drivers — install support for EVERY screen, not just the one
+    # picked during install. Config → Display in the web UI can switch to any
+    # profile in shared.py's DISPLAY_PROFILES at any time, and that switch has
+    # to just work. Previously this was an if/elif chain that installed only the
+    # selected driver's dependency, so picking e-Paper at install and later
+    # selecting the SSD1306 OLED in the web UI gave a dead screen (no smbus2),
+    # and vice versa (no Waveshare library). SPI and I2C are already enabled by
+    # configure_interfaces. Every dependency is small; installing all of them
+    # costs far less than a reinstall to change screens.
+    if [ "$HEADLESS_MODE" = true ]; then
+        log "INFO" "Headless mode - skipping display driver installation"
     else
-        log "INFO" "Verifying Waveshare e-Paper library installation for $EPD_VERSION..."
-        cd /home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python
-        pip3 install . --break-system-packages
-        
-        python3 -c "from waveshare_epd import ${EPD_VERSION}; print('EPD module OK')" \
-            && log "SUCCESS" "$EPD_VERSION driver verified successfully" \
-            || log "ERROR" "EPD driver $EPD_VERSION failed to import"
-    fi
+        log "INFO" "Installing display driver support for all screen types..."
 
-    if [[ "$EPD_VERSION" == max7219* ]]; then
-        sudo pip3 install --break-system-packages luma.led_matrix luma.core 2>/dev/null || pip3 install --break-system-packages luma.led_matrix luma.core 2>/dev/null || true
+        # SPI transport: e-Paper, GC9A01 / ST7735S / Whisplay TFT, MAX7219.
+        pip3 install spidev --break-system-packages >/dev/null 2>&1 \
+            && log "SUCCESS" "spidev installed (SPI displays)" \
+            || log "WARNING" "spidev failed to install — SPI displays will not work"
+
+        # I2C transport: SSD1306 OLED, LCD1602 character LCD.
+        pip3 install smbus2 --break-system-packages >/dev/null 2>&1 \
+            && log "SUCCESS" "smbus2 installed (I2C displays)" \
+            || log "WARNING" "smbus2 failed to install — I2C displays will not work"
+
+        # MAX7219 LED matrix panels.
+        pip3 install --break-system-packages luma.led_matrix luma.core >/dev/null 2>&1 \
+            && log "SUCCESS" "luma.led_matrix installed (MAX7219 LED matrix)" \
+            || log "WARNING" "luma.led_matrix failed to install — MAX7219 panels will not work"
+
+        # Waveshare library — backs every epd* profile.
+        if [ -d "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" ]; then
+            (cd "/home/$ragnar_USER/e-Paper/RaspberryPi_JetsonNano/python" \
+                && pip3 install . --break-system-packages >/dev/null 2>&1) \
+                && log "SUCCESS" "Waveshare e-Paper library installed (all e-Paper models)" \
+                || log "WARNING" "Waveshare e-Paper library failed to install — e-Paper screens will not work"
+        else
+            log "WARNING" "Waveshare e-Paper source not found — e-Paper screens will not work"
+        fi
+
+        # Report what is actually usable, so a bad screen choice later is easy
+        # to trace back to a missing dependency rather than a wiring fault.
+        local unusable=()
+        python3 -c "import spidev" 2>/dev/null || unusable+=("SPI displays (spidev)")
+        python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
+        python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
+        python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
+        for drv in gc9a01 st7735s whisplay ssd1306 lcd1602 max7219; do
+            [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
+                || unusable+=("${drv} (driver file missing)")
+        done
+        if [ ${#unusable[@]} -eq 0 ]; then
+            log "SUCCESS" "All display types supported — any screen can be selected in Config → Display"
+        else
+            log "WARNING" "These display types will NOT work until fixed: ${unusable[*]}"
+        fi
     fi
 
     check_success "Installed Python requirements"
@@ -1210,6 +1413,30 @@ fi
 EOF
     chmod +x $ragnar_PATH/kill_port_8000.sh
     chown ragnar:ragnar $ragnar_PATH/kill_port_8000.sh
+
+    # Persistent journal — so a crash leaves evidence behind.
+    #
+    # Default Raspberry Pi OS ships Storage=auto, which means journald only
+    # writes to disk if /var/log/journal exists; otherwise logs live in RAM and
+    # are wiped on every boot. On a field device that is exactly backwards: a
+    # board reset (e.g. a USB WiFi adapter browning out the 5V rail) erases the
+    # log that would have explained it, and `journalctl -b -1` answers
+    # "no persistent journal was found". Capped so it can't fill the SD card.
+    setup_persistent_journal() {
+        if [ ! -d /var/log/journal ]; then
+            log "INFO" "Enabling persistent journald logging (survives reboots)"
+            mkdir -p /var/log/journal
+            systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+        fi
+        # Cap total journal size; SD cards are small and wear out.
+        if ! grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null; then
+            sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf 2>/dev/null || true
+            grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null \
+                || echo 'SystemMaxUse=200M' >> /etc/systemd/journald.conf
+        fi
+        systemctl restart systemd-journald >/dev/null 2>&1 || true
+    }
+    setup_persistent_journal
 
     # Create ragnar service
     cat > /etc/systemd/system/ragnar.service << EOF
@@ -1729,24 +1956,30 @@ main() {
 
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
-            echo "2. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
-            echo "3. SSD1306     (0.96\" OLED 128x64)"
-            echo "4. LCD1602     (16x2 I2C Character LCD)"
-            echo "5. No display  (headless install)"
+            echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
+            echo "3. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
+            echo "4. SSD1306     (0.96\" OLED 128x64)"
+            echo "5. LCD1602     (16x2 I2C Character LCD)"
+            echo "6. No display  (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # ST7735S was missing here, so the 1.44" LCD HAT could not be
+            # selected on the TFT install path at all.
             while true; do
-                read -p "Enter your choice (1-5): " tft_choice
+                read -p "Enter your choice (1-6): " tft_choice
                 case $tft_choice in
                     1) EPD_VERSION="gc9a01"; break;;
-                    2) EPD_VERSION="whisplay"; break;;
-                    3) EPD_VERSION="ssd1306"; break;;
-                    4) EPD_VERSION="lcd1602"; break;;
-                    5)
+                    2) EPD_VERSION="st7735s"; break;;
+                    3) EPD_VERSION="whisplay"; break;;
+                    4) EPD_VERSION="ssd1306"; break;;
+                    5) EPD_VERSION="lcd1602"; break;;
+                    6)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-5.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-6.${NC}";;
                 esac
             done
 
@@ -1764,7 +1997,7 @@ main() {
         if [ ! -d "e-Paper" ]; then
             local epd_cloned=false
             # Try git sparse-checkout first (smallest download)
-            if [ "$GIT_WORKS" = true ]; then
+            if ensure_git; then
                 if git clone --depth=1 --filter=blob:none --sparse https://github.com/waveshareteam/e-Paper.git 2>/dev/null \
                    && cd e-Paper \
                    && git sparse-checkout set RaspberryPi_JetsonNano 2>/dev/null; then
@@ -1816,7 +2049,10 @@ main() {
             log "INFO" "Attempting to auto-detect E-Paper display"
             
             EPD_VERSION=""
-            EPD_VERSIONS=("epd2in13b_V4", "epd2in13_V4" "epd2in13_V3" "epd2in13_V2" "epd2in7_V2" "epd2in7" "epd2in13" "epd2in9_V2" "epd3in7" "epd4in26")
+            # No commas — a stray one made the first element "epd2in13b_V4,",
+            # so that model could never be auto-detected (the import always
+            # failed on the trailing comma).
+            EPD_VERSIONS=("epd2in13b_V4" "epd2in13_V4" "epd2in13_V3" "epd2in13_V2" "epd2in7_V2" "epd2in7" "epd2in13" "epd2in9_V2" "epd3in7" "epd4in26")
             
             for version in "${EPD_VERSIONS[@]}"; do
                 echo -e "${BLUE}Testing ${version}...${NC}"
@@ -1900,21 +2136,28 @@ except:
             echo ""
             echo -e "${CYAN}  TFT LCD displays:${NC}"
             echo "11. GC9A01       (1.28\" Round 240x240)"
+            echo "12. ST7735S      (1.44\" LCD HAT + joystick 128x128)"
+            echo "13. Whisplay     (1.69\" ST7789 240x280, PiSugar HAT)"
             echo ""
             echo -e "${CYAN}  OLED displays:${NC}"
-            echo "12. SSD1306      (0.96\" OLED 128x64)"
+            echo "14. SSD1306      (0.96\" OLED 128x64)"
             echo ""
             echo -e "${CYAN}  Character LCD:${NC}"
-            echo "13. LCD1602      (16x2 I2C Character LCD)"
+            echo "15. LCD1602      (16x2 I2C Character LCD)"
             echo ""
             echo -e "${CYAN}  LED Matrix displays:${NC}"
-            echo "14. MAX7219  (8 panels 64×8 LED matrix)"
-            echo "15. MAX7219  (4 panels 32×8 LED matrix)"
+            echo "16. MAX7219  (8 panels 64×8 LED matrix)"
+            echo "17. MAX7219  (4 panels 32×8 LED matrix)"
             echo ""
-            echo "16. No display (headless install)"
+            echo "18. No display (headless install)"
+            echo ""
+            echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
 
+            # Every profile in shared.py's DISPLAY_PROFILES is offered here.
+            # ST7735S and Whisplay used to be missing, so owners of those two
+            # screens had no way to pick them during install.
             while true; do
-                read -p "Enter your choice (1-15): " epd_choice
+                read -p "Enter your choice (1-18): " epd_choice
                 case $epd_choice in
                     1) EPD_VERSION="epd2in13"; break;;
                     2) EPD_VERSION="epd2in13_V2"; break;;
@@ -1927,16 +2170,18 @@ except:
                     9) EPD_VERSION="epd3in7"; break;;
                     10) EPD_VERSION="epd4in26"; break;;
                     11) EPD_VERSION="gc9a01"; break;;
-                    12) EPD_VERSION="ssd1306"; break;;
-                    13) EPD_VERSION="lcd1602"; break;;
-                    14) EPD_VERSION="max7219_8panel"; break;;
-                    15) EPD_VERSION="max7219_4panel"; break;;
-                    16)
+                    12) EPD_VERSION="st7735s"; break;;
+                    13) EPD_VERSION="whisplay"; break;;
+                    14) EPD_VERSION="ssd1306"; break;;
+                    15) EPD_VERSION="lcd1602"; break;;
+                    16) EPD_VERSION="max7219_8panel"; break;;
+                    17) EPD_VERSION="max7219_4panel"; break;;
+                    18)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-15.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-18.${NC}";;
                 esac
             done
 

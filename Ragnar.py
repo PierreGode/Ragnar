@@ -84,6 +84,19 @@ class Ragnar:
         wardriving_boot = self.shared_data.config.get('wardriving_on_boot', False)
         if wardriving_boot:
             logger.info("Wardriving-on-boot enabled. Starting wardriving early, orchestrator will be suppressed.")
+            # Wardriving and On-Screen Network Diagnostic mode both hijack the
+            # e-Paper display and the HAT keys, and the diagnostic layer wins the
+            # render race (see display.py) — leaving Ragnar stuck on the netdiag
+            # field-test screen even though wardriving is scanning underneath.
+            # They are mutually exclusive, so if diagnostic mode was left on,
+            # turn it off before wardriving takes over the panel.
+            if self.shared_data.config.get('network_diagnostic_mode', False):
+                logger.info("Disabling On-Screen Network Diagnostic mode: wardriving-on-boot takes the display.")
+                self.shared_data.config['network_diagnostic_mode'] = False
+                try:
+                    self.shared_data.save_config()
+                except Exception as e:
+                    logger.warning(f"Could not persist network_diagnostic_mode off at boot: {e}")
             self.shared_data.manual_mode = True
             threading.Thread(
                 target=self._start_wardriving_on_boot,

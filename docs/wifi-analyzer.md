@@ -5,11 +5,15 @@ A passive, tri-band Wi-Fi RF troubleshooter built into Ragnar's web UI —
 software [Ekahau Sidekick 2](https://www.ekahau.com/products/sidekick/): the
 same survey-and-heatmap workflow a wireless engineer expects, on a Raspberry Pi
 Zero 2 W with an off-the-shelf Wi-Fi 6E dongle instead of a $4,000 instrument.
+The spectrum graph is interactive (hover to identify, click to inspect), and
+**⛶ Full screen** gives the whole viewport to a survey console with a full-record
+inspector — see [Full-screen console](#-full-screen-console).
 
-> **Strictly passive.** The analyzer only ever runs `iw dev <iface> scan
+> **Strictly passive.** The analyzer only ever runs `iw dev <iface> scan -u
 > passive`, which *listens for beacons* and **never transmits a probe request**
 > to any AP, and reads the radio's own channel table with `iw phy`. No frame is
-> injected. It is a diagnostic/troubleshooting tool, not an attack tool.
+> injected. It is a diagnostic/troubleshooting tool, not an attack tool. (`-u`
+> only changes how the results are *printed* — see the Wi-Fi 7 note below.)
 
 ---
 
@@ -24,7 +28,7 @@ For every beaconing BSS it hears:
 | **RSSI (dBm)** | radiotap signal |
 | **Band** — 2.4 / 5 / 6 GHz | centre frequency |
 | **Channel** (number) | centre frequency |
-| **Channel width** — 20/40/80/160 MHz | HT / VHT / HE operation IEs |
+| **Channel width** — 20/40/80/160/320 MHz | HT / VHT / HE / EHT operation IEs |
 | **Security** — Open/WEP/WPA/WPA2/WPA3 | RSN / WPA IE (SAE ⇒ WPA3) |
 | **Channel utilisation %** | the AP-advertised **BSS-Load IE** — a real, passive medium-busy metric |
 | **Stations** | BSS-Load IE station count |
@@ -40,15 +44,29 @@ For every beaconing BSS it hears:
 Supported bands are detected **per radio**, so the tool lights up 2.4/5/6 GHz on
 the Alfa AWUS036AXM and 2.4/5 GHz on the Pi's onboard radio automatically.
 
+### Wi-Fi 7 (802.11be) detection
+
+`iw` (through at least 6.9) has **no scan-side EHT printer**: a Wi-Fi 7
+beacon's EHT IEs are silently dropped from `iw scan` output, so the AP would
+be mislabelled Wi-Fi 6/6E from the HE IEs it also advertises. The analyzer
+therefore scans with `-u` ("print unknown IEs"), which makes iw hex-dump the
+undecoded IEs as `Unknown Extension ID (…)` lines, and recognises the raw
+extension IDs itself: **106** (EHT Operation, also parsed for 320 MHz width
+and the wide-channel centre), **107** (Multi-Link) and **108** (EHT
+Capabilities). The decoded `EHT capabilities:` section headers are still
+matched too, so nothing breaks when iw eventually learns to print them.
+
 ---
 
 ## AP inventory, networks & export
 
 The AP table is sortable on 9 columns (SSID, Vendor, Band, Channel, Width, Rate,
-Signal, Security, Utilisation), with a **search** box and an **issues-only**
-filter. Generation and security are shown as inline badges (Wi‑Fi 6E, 802.1X,
-PMF, WPS, 11k/v/r). A **Networks** view collapses BSSIDs that share an SSID into
-one logical network (bands, AP count, best signal). **Export CSV** dumps the full
+Signal, Security, Utilisation), with a **search** box, an **issues-only**
+filter, and a **generation filter** (Wi‑Fi 7 / 6E / 6 / 5 / 4 / legacy — applies
+to both the AP and Networks views). Generation and security are shown as inline
+badges (Wi‑Fi 6E, 802.1X, PMF, WPS, 11k/v/r). A **Networks** view collapses
+BSSIDs that share an SSID into one logical network (bands, AP count, best
+signal). **Export CSV** dumps the full
 enriched inventory for offline analysis.
 
 ---
@@ -82,6 +100,50 @@ shaded. Toggle between:
 - **◗ Cone/Dome** — the classic Wi-Fi-analyzer filled **bell curve** per AP,
   centred on its operating channel and spanning its channel width, peak = RSSI.
   This is the view that makes channel overlap and crowding obvious at a glance.
+
+Each band segment is scaled to the channels its APs actually *occupy*, so a
+160 MHz Wi-Fi 6E/7 BSS is drawn at its true span instead of running off the end
+of the band.
+
+**The graph is interactive.** Hover any bar/dome to identify it — a tooltip
+gives SSID, BSSID, vendor, RSSI + SNR, band/channel/width, security and any
+security findings — and a marker readout in the corner tracks the cursor's
+**channel · frequency · level**. Click a signal to select that AP (the same
+selection the AP table and Signal Radius use); click empty space to clear it.
+
+---
+
+## ⛶ Full-screen console
+
+**Full screen** (next to *Scan*, or `Esc` to leave) hands the whole viewport to
+the analyzer, Sidekick-style:
+
+- a **large hit-testable spectrum** — same Bar / Dome / Waterfall views, with the
+  hover tooltip, cursor readout, and per-signal `RSSI · ch/width` captions that
+  the in-page chart hasn't room for;
+- an **inspector** down the right side showing *everything* the survey holds for
+  the selected AP — identity (SSID/BSSID/vendor), a large RSSI reading with its
+  quality band, SNR and a full-width **RSSI history** trace, radio detail
+  (band, channel, width, frequency + centre frequency, generation, PHY mode,
+  spatial streams, max PHY rate, advertised Tx power, country, DFS), load &
+  timing (channel utilisation with a bar, associated stations, beacon interval,
+  DTIM, last beacon, times seen), the full **security** picture (suite, PMF,
+  802.1X, WPS, 802.11k/v/r roaming, hidden-SSID) and every security finding,
+  plus the **modelled coverage rings** when a radius estimate has been made.
+  Below it: interference, what changed since the last scan, and the live
+  Bluetooth / Zigbee device lists when those overlays are on (clickable, same as
+  their panels);
+- the **AP list** underneath the graph — sortable, filterable (text, generation,
+  issues-only), CSV/report export, and hovering a row highlights that AP in the
+  spectrum above it;
+- **band chips** that filter the view when clicked, mirrored band/view/overlay
+  controls, and keyboard shortcuts: `↑`/`↓` walk the list, `s` scan, `b`/`d`
+  switch Bar/Dome, `a`/`2`/`5`/`6` pick a band, `Esc` exits.
+
+Selection, scans and overlays are shared with the in-page analyzer, so entering
+or leaving full screen never loses your place. Actions in the inspector can
+**copy the BSSID**, **filter the list to the same SSID**, or send the AP
+straight to the coverage heatmap as its survey target.
 
 **WIDS pivot:** clicking a BSSID in a **WiFi Defense** detection (or a row of
 its AP table) lands here with that AP pre-selected and marked by a red dashed
@@ -259,6 +321,108 @@ survey.
 
 ---
 
+## Bluetooth / BLE overlay (2.4 GHz)
+
+Tick **📶 Bluetooth** in the toolbar to overlay nearby **Bluetooth Classic
+(BR/EDR)** and **Bluetooth Low Energy** activity onto the 2.4 GHz segment of the
+spectrum — the two radios share the ISM band, so BT/BLE is a real, often
+invisible, source of 2.4 GHz Wi-Fi interference.
+
+**What it draws:**
+
+- **BLE advertising markers** — the three fixed advertising channels **37 / 38 /
+  39** at **2402 / 2426 / 2480 MHz**, placed (by design) in the gaps around Wi-Fi
+  1/6/11. Marker opacity scales with how many advertisers are heard.
+- **A band-wide "BT hopping" strip** — BLE data (37 channels) and Classic BT (79
+  channels) frequency-hop across the whole band, drawn as a hatched activity
+  strip whose height scales with device count, proximity and Classic presence.
+- **A device table** — every in-range device with **RSSI**, kind (BLE / Classic /
+  dual-mode), **vendor** (IEEE OUI for public addresses, Bluetooth SIG company
+  ID for randomised ones), and decoded **class-of-device** (Audio/Video, Phone,
+  Wearable, …). Randomised (LE-privacy) addresses are tagged `rnd`. **Click any
+  row to highlight that device on the spectrum** (like selecting a Wi-Fi AP): its
+  RSSI is drawn as a level line across the 2.4 GHz band, with its energy marked
+  on the three BLE advertising channels (BLE) or shaded band-wide (Classic, which
+  hops). Click again to clear.
+- **Per-channel BT pressure chips** — an estimated low/moderate/high interference
+  level for Wi-Fi channels 1/6/11/13.
+
+**It is a device-activity estimate, not a measured RF sweep.** We ask the
+Bluetooth controller (via BlueZ) which devices it can hear and model where their
+energy lands — a true per-Hz energy sweep of BT hopping needs an SDR. Capture is
+**receive-only**: device *discovery* only, never pairing or connecting.
+
+**Hardware / capture.** Discovery runs over BlueZ's D-Bus API (`python3-dbus`),
+falling back to `bluetoothctl` text mode if unavailable. Any BlueZ controller
+works — the Pi's **onboard** radio or the tri-band **Alfa's built-in BT 5.2**.
+When the Alfa combo dongle is plugged in its controller enumerates on **USB**
+while the onboard radio is **UART**, so the scanner prefers the USB controller
+(same adapter as the Wi-Fi capture). On a combo chip the Wi-Fi and BT radios
+time-share the RF front-end, so the overlay is best-effort and duty-cycled —
+running BT discovery and Wi-Fi monitor capture flat-out can cost frames on both.
+
+The scan always runs on the controller it selected: a just-plugged USB dongle
+shows up in `hciconfig` a moment before `bluetoothd` registers it on D-Bus, so
+the scanner waits briefly for the chosen adapter to appear rather than falling
+back onto the onboard radio. That fallback used to make the *first* overlay
+scan run on the onboard `hci0` (slow, and mislabelled) before settling on the
+dongle — subsequent scans were always fast on the right controller.
+
+## Zigbee / 802.15.4 overlay (via Huginn)
+
+Tick **🐝 Zigbee** to overlay nearby **Zigbee / Thread / 802.15.4** activity onto
+the 2.4 GHz spectrum — another real Wi-Fi interference source (smart-home hubs,
+bulbs, sensors, locks) that shares the band.
+
+The Pi has no 802.15.4 radio, so this uses a **HuginnESP companion**
+(ESP32-C5/C6/H2) on demand — **no wardriving needed**. On toggle, Ragnar opens
+the Huginn's USB-serial port, sends the `zigbee` command, reads the streamed
+`{"type":"ZIGBEE",…}` device lines for ~8 s while Huginn hops **channels 11–26**,
+then sends `stop`. **The toggle stays greyed out until a Huginn is detected on
+USB** (`/api/net/zigbee/status`).
+
+**What it draws** — a labelled marker per occupied Zigbee channel (Z11–Z26 at
+2405–2480 MHz; 15/20/25/26 fall in the Wi-Fi 1/6/11 gaps), scaled by how many
+devices and how strong; a **device table** (address, proto, channel, PAN ID,
+vendor from the EUI-64 OUI, RSSI) — **click a row to highlight it** on the
+spectrum like a Wi-Fi AP; and an estimated **per-Wi-Fi-channel Zigbee pressure**.
+
+**Caveats.** Huginn is a packet sniffer, so this is device-activity, not a
+per-channel energy sweep. One ESP32-C5 can't do Wi-Fi and 802.15.4 at once, so
+the scan briefly switches the Huginn into zigbee mode (a board without an
+802.15.4 radio answers with a "not compiled in" notice). If wardriving is
+running it owns the serial port — stop it first to sniff on demand. Receive-only.
+
+## True-RF Waterfall (HackRF SDR)
+
+The Bar and Dome views draw the *beacon* picture (what APs announce). The
+**📈 Waterfall** view is different: it measures the **actual radio energy on the
+air** with a Software Defined Radio — so it sees what nothing else here can:
+microwave ovens, drones, analog cameras, jammers, the true noise floor, and
+Wi-Fi/BT energy as *measured* rather than modelled.
+
+**The button stays greyed out until Ragnar actually detects a HackRF.** The UI
+polls `/api/net/sdr/status` and only un-greys 📈 Waterfall when the `hackrf`
+tools are installed **and** a board answers; otherwise the tooltip tells you
+what's missing. Bar/Dome keep working with no SDR at all.
+
+**What it shows** — a live **spectrum line** with **max-hold** on top, above a
+scrolling **time × frequency × power waterfall**, with your Wi-Fi channel ticks
+(and BT advertising markers in 2.4 GHz) overlaid on the measured energy. Change
+the band selector to retune the sweep (2.4 / 5 GHz).
+
+**How it works** — `sdr_spectrum.py` runs `hackrf_sweep -f LO:HI`, parses its
+power-per-bin CSV, assembles each sweep into a fixed-width frame plus a
+cumulative max-hold, and streams frames to the browser. **Receive-only** — an
+SDR sweep never transmits.
+
+**Hardware.** Needs a **HackRF One** (1 MHz–6 GHz — covers 2.4 *and* 5 GHz).
+The cheap RTL-SDR only reaches ~1.7 GHz and **cannot** see these bands. Install
+the tools with `apt install hackrf` (done by `install_ragnar.sh` / ensured by
+`update_ragnar.sh`). The HackRF draws real USB current — a **powered USB hub** is
+recommended on the Pi. Wi-Fi 6 GHz is within HackRF's range but its band edges
+vary by region, so only 2.4/5 ship as presets.
+
 ## Hardware
 
 Tuned for the **Alfa AWUS036AXM** (MediaTek MT7921AU, `mt7921u` driver — a
@@ -286,17 +450,49 @@ All endpoints are passive and read-only except the heatmap store.
 | `GET/POST /api/net/wifi/surveys` | list / save / load / delete named surveys |
 | `GET/POST /api/net/wifi/history` | get AP history DB / reset it |
 | `GET /api/net/wifi/selftest` | parser + analyzer self-test |
+| `GET /api/net/bt/controllers` | Bluetooth controllers (USB-first: Alfa before onboard) |
+| `GET /api/net/bt/scan?controller=&duration=` | BT/BLE discovery + 2.4 GHz interference model |
+| `GET /api/net/bt/selftest` | Bluetooth parser + model self-test |
+| `GET /api/net/sdr/status` | HackRF detection (gates the Waterfall button) + capture state |
+| `POST /api/net/sdr/start` `{band}` | start the HackRF sweep (2.4/5) |
+| `POST /api/net/sdr/stop` | stop the sweep |
+| `GET /api/net/sdr/frames?since=` | new waterfall frames + max-hold since a seq |
+| `GET /api/net/sdr/selftest` | sweep parser + frame-assembly self-test |
+| `GET /api/net/zigbee/status` | HuginnESP detection (gates the Zigbee toggle) |
+| `GET /api/net/zigbee/scan?duration=&port=` | on-demand Huginn 802.15.4 sniff → channel markers + devices |
+| `GET /api/net/zigbee/selftest` | Zigbee line-parser + overlay-model self-test |
 
 ```bash
 python3 wifi_analyzer.py interfaces
 python3 wifi_analyzer.py scan --interface wlan0 --band all
 python3 wifi_analyzer.py radius --interface wlan0 --bssid aa:bb:cc:dd:ee:ff
 python3 wifi_analyzer.py selftest
+
+# Bluetooth / BLE 2.4 GHz overlay (bt_scanner.py)
+python3 bt_scanner.py controllers
+python3 bt_scanner.py scan --duration 12
+python3 bt_scanner.py selftest
+
+# True-RF waterfall (sdr_spectrum.py — needs a HackRF)
+python3 sdr_spectrum.py detect
+python3 sdr_spectrum.py sweep --band 2.4 --frames 5
+python3 sdr_spectrum.py selftest
+
+# Zigbee / 802.15.4 overlay (needs a HuginnESP companion)
+python3 zigbee_scan.py detect
+python3 zigbee_scan.py scan --duration 8
+python3 zigbee_scan.py selftest      # + zigbee_overlay.py selftest
 ```
 
+The Bluetooth scanner ships its own offline self-test — **28 checks** covering
+the D-Bus/`bluetoothctl` parsers, class-of-device decode, public-vs-random
+address handling, OUI/company-ID vendor attribution, device classification
+(BLE/Classic/dual), controller enumeration, and the 2.4 GHz interference model.
+
 The self-test (`selftest`) drives the beacon parser (2.4/5/6 GHz, HT/VHT/HE
-widths, BSS-Load, security, generation, NSS, roaming, TPC), the
-congestion/interference analysis, SSID/device grouping, the AP-history change
-detector, the frequency↔channel conversions, the radius model and its
-two-point calibration, and the named-survey store — all against synthetic `iw`
-output, **54 checks, all offline**.
+widths, a Wi-Fi 7 / 802.11be AP with EHT IEs and 320 MHz width, BSS-Load,
+security, generation, NSS, roaming, TPC), the congestion/interference
+analysis, SSID/device grouping, the AP-history change detector, the
+frequency↔channel conversions, the radius model and its two-point
+calibration, and the named-survey store — all against synthetic `iw`
+output, **91 checks, all offline**.

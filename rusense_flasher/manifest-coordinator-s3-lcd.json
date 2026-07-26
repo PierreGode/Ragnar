@@ -1,0 +1,13 @@
+{
+  "name": "Ragnar ESP32-S3-Touch-LCD-4B Coordinator (with 480x480 display)",
+  "version": "1.0",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/coordinator-s3-lcd.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

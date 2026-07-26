@@ -14,6 +14,17 @@ NC='\033[0m'
 
 ragnar_PATH="/home/ragnar/Ragnar"
 
+# Never let git stop and wait for a human. A checkout whose origin wants
+# credentials, or an ssh remote with an unknown host key, otherwise parks on a
+# prompt - and when this script is driven from a service or a cron job there is
+# nobody to answer it, so the update hangs instead of failing. Same guards the
+# in-app updater (git_updater.py) applies.
+export GIT_TERMINAL_PROMPT=0
+export GIT_ASKPASS=echo
+export SSH_ASKPASS=echo
+export SSH_ASKPASS_REQUIRE=never
+export GIT_SSH_COMMAND="ssh -oBatchMode=yes -oStrictHostKeyChecking=accept-new -oConnectTimeout=15"
+
 echo -e "${BLUE}ragnar Update Script${NC}"
 echo -e "${YELLOW}This will update ragnar while preserving your data and configurations.${NC}"
 
@@ -23,18 +34,65 @@ if [ ! -d "$ragnar_PATH" ]; then
     exit 1
 fi
 
-if [ ! -d "$ragnar_PATH/.git" ]; then
-    echo -e "${RED}Error: This is not a git repository. Cannot update.${NC}"
-    echo -e "${YELLOW}Please reinstall ragnar using the installation script.${NC}"
-    exit 1
-fi
-
 cd "$ragnar_PATH"
 
 # Check if script is run as root
 if [ "$(id -u)" -ne 0 ]; then
     echo -e "${RED}This script must be run as root. Please use 'sudo'.${NC}"
     exit 1
+fi
+
+# A working git is a hard prerequisite, and on some boards it is exactly what is
+# broken: Debian Trixie arm64 can ship a git built with ARMv8.1+ atomics that
+# dies with SIGILL on a Cortex-A53 (Pi Zero 2 W). The installer detects this and
+# falls back to tarball downloads, so a box can be running Ragnar perfectly well
+# with no usable git at all. Say so plainly rather than failing on a git command.
+if ! git --version >/dev/null 2>&1; then
+    echo -e "${RED}Error: git does not run on this system.${NC}"
+    echo -e "${YELLOW}If this is a Pi Zero 2 W (or another Cortex-A53 board), the packaged"
+    echo -e "git may be built for a newer ARM revision and crash with 'Illegal"
+    echo -e "instruction'. Confirm with:${NC}"
+    echo -e "    git --version"
+    echo -e "${YELLOW}Then try reinstalling it:${NC}"
+    echo -e "    sudo apt update && sudo apt install --reinstall git"
+    echo -e "${YELLOW}Ragnar itself keeps running — only updates need git.${NC}"
+    exit 1
+fi
+
+# Repair a tarball install. When git was unusable at install time the installer
+# unpacks a release tarball instead of cloning, which leaves a complete, working
+# tree with no .git in it — and every update from then on had nothing to work
+# with. If git runs now, rebuild the repository metadata in place rather than
+# dead-ending the user into a full reinstall. The working tree is left alone;
+# only .git is created, so local data files are untouched.
+if [ ! -d "$ragnar_PATH/.git" ]; then
+    echo -e "${YELLOW}No .git found — this box was installed from a tarball.${NC}"
+    echo -e "${BLUE}Reattaching it to the upstream repository (your files are kept)...${NC}"
+    if git init -q "$ragnar_PATH" 2>/dev/null \
+       && git -C "$ragnar_PATH" remote add origin https://github.com/PierreGode/Ragnar.git 2>/dev/null \
+       && git -C "$ragnar_PATH" fetch --depth=1 origin main 2>/dev/null; then
+        # Point main at upstream WITHOUT touching the working tree, so the files
+        # already on disk (including local data) survive. Anything that differs
+        # from upstream simply shows up as a normal local modification, which
+        # the stash step below then handles like any other update.
+        git -C "$ragnar_PATH" reset -q --mixed FETCH_HEAD 2>/dev/null || true
+        git -C "$ragnar_PATH" branch -q -f main FETCH_HEAD 2>/dev/null || true
+        git -C "$ragnar_PATH" symbolic-ref HEAD refs/heads/main 2>/dev/null || true
+        git -C "$ragnar_PATH" branch -q --set-upstream-to=origin/main main 2>/dev/null || true
+        # Restore only files upstream has that the tree is missing. A tarball
+        # can be short of files (.github, dotfiles) that would otherwise look
+        # like deliberate local deletions and get stashed by the step below.
+        # Deleted-only: modified files are left alone so real local edits still
+        # reach the stash/merge path intact.
+        git -C "$ragnar_PATH" ls-files -d -z 2>/dev/null \
+            | xargs -0 -r git -C "$ragnar_PATH" checkout -- 2>/dev/null || true
+        echo -e "${GREEN}Repository metadata rebuilt — continuing with the update.${NC}"
+    else
+        rm -rf "$ragnar_PATH/.git"
+        echo -e "${RED}Error: could not reattach to the upstream repository.${NC}"
+        echo -e "${YELLOW}Check network access to github.com, then re-run this script.${NC}"
+        exit 1
+    fi
 fi
 
 echo -e "\n${BLUE}Step 1: Stopping ragnar service...${NC}"
@@ -86,6 +144,16 @@ if [ "$CURRENT_BRANCH" = "HEAD" ]; then
     git checkout main 2>/dev/null || git checkout -B main origin/main
     CURRENT_BRANCH="main"
 fi
+# A branch that upstream no longer has (a leftover test branch, a rename) makes
+# every pull below fail with "couldn't find remote ref" and nothing recovers
+# from it. Fall back to whatever origin's default branch is.
+if ! git rev-parse --verify --quiet "refs/remotes/origin/$CURRENT_BRANCH" >/dev/null; then
+    DEFAULT_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+    [ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=main
+    echo -e "${YELLOW}Branch '$CURRENT_BRANCH' does not exist on origin - updating from '$DEFAULT_BRANCH' instead.${NC}"
+    git checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" 2>/dev/null || true
+    CURRENT_BRANCH="$DEFAULT_BRANCH"
+fi
 if git "${GIT_ID[@]}" pull origin "$CURRENT_BRANCH"; then
     echo -e "${GREEN}Update completed successfully!${NC}"
 else
@@ -118,6 +186,87 @@ if ! pip3 install --break-system-packages --upgrade -r requirements.txt; then
         pip3 install --break-system-packages --upgrade "$req" \
             || echo -e "  ${YELLOW}!${NC} Failed to install: $req (continuing)"
     done < requirements.txt
+fi
+
+echo -e "${BLUE}Step 5.1: Checking package system health...${NC}"
+# apt refuses every operation while a previous dpkg run is unfinished
+# ("E: dpkg was interrupted, you must manually run 'dpkg --configure -a'").
+# A low-memory Pi reaches that state easily — an OOM kill, power loss, or a
+# Ctrl-C mid-install — and it then blocks every apt call below. Idempotent and
+# a no-op on a healthy system.
+if [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null)" ] || [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+    echo -e "  ${YELLOW}⚠${NC} dpkg is in an interrupted state — repairing"
+    DEBIAN_FRONTEND=noninteractive dpkg --configure -a >/dev/null 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y >/dev/null 2>&1 || true
+    if [ -n "$(dpkg --audit 2>/dev/null)" ]; then
+        echo -e "  ${YELLOW}⚠${NC} dpkg still reports problems — run: sudo dpkg --configure -a"
+    else
+        echo -e "  ${GREEN}✓${NC} dpkg state repaired"
+    fi
+fi
+
+echo -e "${BLUE}Step 5.2: Ensuring Bluetooth overlay dependencies...${NC}"
+# The WiFi-analyzer Bluetooth/BLE 2.4 GHz overlay (bt_scanner.py) talks to BlueZ
+# over D-Bus via python3-dbus, and needs bluez/bluetoothctl. The BLE
+# provisioning peripheral (ble_provisioning.py) additionally needs python3-gi
+# for its GLib main loop. These ship in the installer; ensure them here too so
+# update-only boxes get both. Guarded and idempotent — only apt-installs a
+# package that is actually missing.
+for _btpkg in python3-dbus python3-gi bluez; do
+    if ! dpkg -s "$_btpkg" >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_btpkg" >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed $_btpkg (Bluetooth overlay)" \
+            || echo -e "  ${YELLOW}⚠${NC} Could not install $_btpkg — the overlay falls back to bluetoothctl text mode"
+    fi
+done
+# Optional tooling. Each backs one feature that resolves the binary at runtime
+# and disables itself when it is missing (hackrf → the true-RF Waterfall view in
+# sdr_spectrum.py; the rest → the recon/vuln scanners, which server_capabilities
+# already marks 'critical': False). Not every suite ships all of them — ffuf only
+# entered Debian in trixie — so a miss is reported and skipped, never fatal.
+_missing_optional=()
+for _opt in hackrf:"true-RF Waterfall" nikto:"vuln scanner" sqlmap:"vuln scanner" \
+            whatweb:"vuln scanner" ffuf:"content discovery"; do
+    _pkg="${_opt%%:*}"; _why="${_opt#*:}"
+    dpkg -s "$_pkg" >/dev/null 2>&1 && continue
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_pkg" >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed $_pkg ($_why)"
+    else
+        _missing_optional+=("$_pkg")
+    fi
+done
+if [ ${#_missing_optional[@]} -gt 0 ]; then
+    echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
+fi
+
+echo -e "${BLUE}Step 5.3: Ensuring recon engine dependencies...${NC}"
+# sslyze (TLS audit), dnspython (DNS recon) and tldextract (domain parsing) back
+# three independent recon_engine features. They are deliberately NOT in
+# requirements.txt — sslyze pulls nassl, a compiled extension with no wheel for
+# every Pi platform, and a failure there must not abort the whole requirements
+# install. So they are ensured here, one at a time, preferring apt for the two
+# pure-Python ones. Idempotent: an importable module is left alone.
+_recon_missing=()
+_ensure_recon() {   # <import name> <apt package|-> <pip package> <feature>
+    python3 -c "import $1" 2>/dev/null && return 0
+    if [ "$2" != "-" ] && ! dpkg -s "$2" >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$2" >/dev/null 2>&1
+    fi
+    python3 -c "import $1" 2>/dev/null && { echo -e "  ${GREEN}✓${NC} Installed $3 (apt)"; return 0; }
+    # Confirm the import, not just pip's exit code — a "successful" install that
+    # still cannot be imported must be reported as missing, not as installed.
+    if pip3 install --break-system-packages "$3" >/dev/null 2>&1 \
+       && python3 -c "import $1" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} Installed $3 (pip)"; return 0
+    fi
+    _recon_missing+=("$3 → $4")
+    return 1
+}
+_ensure_recon "dns.resolver" python3-dnspython  dnspython  "DNS recon"
+_ensure_recon "tldextract"   python3-tldextract tldextract "domain parsing"
+_ensure_recon "sslyze"       -                  sslyze     "TLS audit scans"
+if [ ${#_recon_missing[@]} -gt 0 ]; then
+    echo -e "  ${YELLOW}⚠${NC} Recon features unavailable: ${_recon_missing[*]}"
 fi
 
 echo -e "${BLUE}Step 5.5: Restoring local runtime data...${NC}"
@@ -311,6 +460,26 @@ if [ -f "$ragnar_PATH/scripts/provision_network_tools.sh" ]; then
 else
     echo -e "${YELLOW}provision_network_tools.sh missing - skipping tool provisioning.${NC}"
 fi
+
+echo -e "${BLUE}Step 6.9: Ensuring persistent journal...${NC}"
+# Raspberry Pi OS defaults to Storage=auto, which keeps logs in RAM unless
+# /var/log/journal exists — so a board reset (e.g. a USB WiFi adapter browning
+# out the 5V rail) wipes the log that would have explained it and
+# `journalctl -b -1` reports "no persistent journal was found". Idempotent, and
+# capped so the journal can't fill the SD card. Mirrors install_ragnar.sh.
+if [ ! -d /var/log/journal ]; then
+    mkdir -p /var/log/journal
+    systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} Persistent journald logging enabled (survives reboots)"
+else
+    echo -e "  ${GREEN}✓${NC} Persistent journal already enabled"
+fi
+if ! grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null; then
+    sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=200M/' /etc/systemd/journald.conf 2>/dev/null || true
+    grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null \
+        || echo 'SystemMaxUse=200M' >> /etc/systemd/journald.conf
+fi
+systemctl restart systemd-journald >/dev/null 2>&1 || true
 
 echo -e "${BLUE}Step 7: Starting ragnar service...${NC}"
 systemctl start ragnar.service

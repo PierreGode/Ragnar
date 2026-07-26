@@ -119,6 +119,11 @@ class _CompanionState:
         self.thread: threading.Thread | None = None
         self.connected: bool = False
         self.networks: int = 0
+        # Split by band so a dual-band companion (Huginn on an ESP32-C5) shows
+        # what each radio is actually contributing instead of one merged total.
+        # A 2.4-only board simply leaves networks_5 at 0.
+        self.networks_24: int = 0
+        self.networks_5: int = 0
         # Identity: 'Huginn' | 'Piglet' | 'Piglet Core' | 'Piglet Coordinator' | 'Companion'
         self.name: str = ''
         self.mesh_node_count: int = 0
@@ -130,7 +135,16 @@ class _CompanionState:
         self.huginn_handshake_pushed: bool = False
         # Per-connection scan state
         self.current_esp_mode: str = 'wifi'
+        # True while the companion is in HuginnESP's wardrive loop. In that mode
+        # the device rotates through WiFi -> BLE -> Zigbee phases on one shared
+        # radio, so the per-line `current_esp_mode` (set from the last data line)
+        # is a misleading "current activity" — WiFi is de-duplicated on-device so
+        # it goes quiet after the first cycle while BLE keeps re-emitting, which
+        # pins the label to 'ble-all'. When wardriving we report 'wardrive'
+        # instead; the per-radio WiFi/BLE/Zigbee counts show what's captured.
+        self.in_wardrive: bool = False
         self.esp_ble_count: int = 0
+        self.esp_zigbee_count: int = 0
         self.esp_alerts: list = []
         self.esp_alert_buffer: dict = {}
         self.esp_airtag_buffer = None
@@ -140,6 +154,31 @@ class _CompanionState:
         # Piglet WiGLE CSV column-header tracking
         self.wigle_col_map = None
         self.wigle_expect_header: bool = False
+
+    def count_network(self, channel=0, band=None) -> None:
+        """Record one newly-seen network, bucketed by band.
+
+        Band comes from an explicit `Band:` field when the companion sends one
+        (the HuginnESP text format does), otherwise from the channel number:
+        1-14 is 2.4 GHz, 32+ is 5 GHz. Channel 0/unknown still counts toward the
+        total but no band, so the two buckets never over-report.
+        """
+        self.networks += 1
+        label = str(band or '').strip().lower()
+        if label.startswith('2'):
+            self.networks_24 += 1
+            return
+        if label.startswith('5'):
+            self.networks_5 += 1
+            return
+        try:
+            ch = int(channel)
+        except (TypeError, ValueError):
+            return
+        if 1 <= ch <= 14:
+            self.networks_24 += 1
+        elif ch >= 32:
+            self.networks_5 += 1
 
     def active_coordinator_nodes(self) -> list:
         now_ts = time.time()
@@ -156,12 +195,15 @@ class _CompanionState:
             'connected':         self.connected,
             'name':              self.name,
             'networks':          self.networks,
+            'networks_24':       self.networks_24,
+            'networks_5':        self.networks_5,
             'mesh_node_count':   self.mesh_node_count,
             'coordinator_board': self.coordinator_board,
             'coordinator_fw':    self.coordinator_fw,
             'coordinator_nodes': self.active_coordinator_nodes(),
-            'esp_mode':          self.current_esp_mode,
+            'esp_mode':          'wardrive' if self.in_wardrive else self.current_esp_mode,
             'esp_ble_count':     self.esp_ble_count,
+            'esp_zigbee_count':  self.esp_zigbee_count,
             'esp_alerts':        self.esp_alerts[-5:],
         }
 
@@ -333,6 +375,36 @@ class WardrivingSession:
             conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_cell ON cell_towers(cell_id)
             """)
+            # Zigbee / IEEE 802.15.4 devices seen by a companion with a
+            # 2.4 GHz 802.15.4 radio (e.g. HuginnESP on an ESP32-C5). Keyed by
+            # the device identity: its 64-bit extended address (EUI-64) when the
+            # frame carries one, otherwise "<panid>:<short>" as a fallback.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS zigbee_devices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    addr TEXT NOT NULL,
+                    panid TEXT DEFAULT '',
+                    short_addr TEXT DEFAULT '',
+                    device_type TEXT DEFAULT '',
+                    proto TEXT DEFAULT 'zigbee',
+                    rssi INTEGER DEFAULT -100,
+                    best_rssi INTEGER DEFAULT -100,
+                    lqi INTEGER DEFAULT 0,
+                    channel INTEGER DEFAULT 0,
+                    latitude REAL,
+                    longitude REAL,
+                    altitude REAL,
+                    best_lat REAL,
+                    best_lon REAL,
+                    first_seen TEXT NOT NULL,
+                    last_seen TEXT NOT NULL,
+                    scan_count INTEGER DEFAULT 1,
+                    gps_backfilled INTEGER DEFAULT 0
+                )
+            """)
+            conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_zigbee_addr ON zigbee_devices(addr)
+            """)
             # Migrate older networks / cell_towers tables that predate the
             # GPS-backfill flag. Table names here are hardcoded literals, so
             # the f-string interpolation carries no injection risk.
@@ -343,6 +415,14 @@ class WardrivingSession:
                         conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN gps_backfilled INTEGER DEFAULT 0")
                 except Exception:
                     pass
+            # Add the 802.15.4 protocol column (zigbee/thread/802.15.4) to
+            # zigbee_devices tables created before Thread classification existed.
+            try:
+                zcols = {r[1] for r in conn.execute("PRAGMA table_info(zigbee_devices)").fetchall()}
+                if zcols and 'proto' not in zcols:
+                    conn.execute("ALTER TABLE zigbee_devices ADD COLUMN proto TEXT DEFAULT 'zigbee'")
+            except Exception:
+                pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS gps_track (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -656,6 +736,68 @@ class WardrivingSession:
             except Exception as e:
                 logger.debug(f"Cell upsert error: {e}")
 
+    def upsert_zigbee(self, addr, panid, short_addr, device_type,
+                      rssi, lqi, channel, lat, lon, alt, proto='zigbee'):
+        """Insert or update a discovered 802.15.4 device (Zigbee / Thread).
+
+        `addr` is the stable identity (EUI-64 or "<panid>:<short>"). Best
+        position is tracked at the strongest RSSI sighting, mirroring how
+        Bluetooth devices are recorded so map exports stay consistent.
+
+        `proto` is the classified network layer ('zigbee' / 'thread' /
+        '802.15.4'). It's only upgraded to a *specific* protocol on re-sightings
+        so a later opaque (encrypted) frame can't downgrade a device that a
+        beacon already identified.
+        """
+        if not addr:
+            return
+        proto = (proto or 'zigbee').lower()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    existing = conn.execute(
+                        "SELECT scan_count, best_rssi FROM zigbee_devices WHERE addr = ?",
+                        (addr,)
+                    ).fetchone()
+                    if existing:
+                        count = (existing[0] or 0) + 1
+                        old_best = existing[1] if existing[1] is not None else -100
+                        new_best = rssi if rssi > old_best else old_best
+                        best_lat_val = lat if (rssi > old_best and lat) else None
+                        best_lon_val = lon if (rssi > old_best and lon) else None
+                        conn.execute("""
+                            UPDATE zigbee_devices SET
+                                panid = COALESCE(NULLIF(?, ''), panid),
+                                short_addr = COALESCE(NULLIF(?, ''), short_addr),
+                                device_type = COALESCE(NULLIF(?, ''), device_type),
+                                proto = CASE WHEN ? IN ('zigbee','thread') THEN ? ELSE proto END,
+                                rssi = ?, lqi = ?,
+                                channel = CASE WHEN ? > 0 THEN ? ELSE channel END,
+                                best_rssi = ?,
+                                best_lat = COALESCE(?, best_lat),
+                                best_lon = COALESCE(?, best_lon),
+                                latitude = COALESCE(?, latitude),
+                                longitude = COALESCE(?, longitude),
+                                altitude = COALESCE(?, altitude),
+                                last_seen = ?, scan_count = ?
+                            WHERE addr = ?
+                        """, (panid, short_addr, device_type, proto, proto,
+                              rssi, lqi, channel, channel,
+                              new_best, best_lat_val, best_lon_val,
+                              lat, lon, alt, now, count, addr))
+                    else:
+                        conn.execute("""
+                            INSERT INTO zigbee_devices
+                                (addr, panid, short_addr, device_type, proto, rssi, best_rssi,
+                                 lqi, channel, latitude, longitude, altitude,
+                                 best_lat, best_lon, first_seen, last_seen, scan_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                        """, (addr, panid, short_addr, device_type, proto, rssi, rssi,
+                              lqi, channel, lat, lon, alt, lat, lon, now, now))
+            except Exception as e:
+                logger.debug(f"Zigbee upsert error: {e}")
+
     def get_stats(self):
         """Return session statistics (cached for 5 s to reduce SQLite load)."""
         now = time.time()
@@ -689,15 +831,20 @@ class WardrivingSession:
                     strongest = conn.execute("SELECT bssid, ssid, best_rssi FROM networks ORDER BY best_rssi DESC LIMIT 1").fetchone()
                     trackpoints = conn.execute("SELECT COUNT(*) FROM gps_track").fetchone()[0]
 
-                    # Bluetooth and cell counts (tables may not exist in old DBs)
+                    # Bluetooth, cell and Zigbee counts (tables may not exist in old DBs)
                     bt_count = 0
                     cell_count = 0
+                    zigbee_count = 0
                     try:
                         bt_count = conn.execute("SELECT COUNT(*) FROM bluetooth_devices").fetchone()[0]
                     except Exception:
                         pass
                     try:
                         cell_count = conn.execute("SELECT COUNT(*) FROM cell_towers").fetchone()[0]
+                    except Exception:
+                        pass
+                    try:
+                        zigbee_count = conn.execute("SELECT COUNT(*) FROM zigbee_devices").fetchone()[0]
                     except Exception:
                         pass
 
@@ -713,6 +860,7 @@ class WardrivingSession:
                         'band_6ghz': band_6,
                         'bluetooth_devices': bt_count,
                         'cell_towers': cell_count,
+                        'zigbee_devices': zigbee_count,
                         'cameras': camera_count,
                         'gps_trackpoints': trackpoints,
                         'strongest': dict(strongest) if strongest else None,
@@ -830,6 +978,19 @@ class WardrivingSession:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
                         "SELECT * FROM cell_towers ORDER BY signal_dbm DESC"
+                    ).fetchall()
+                    return [dict(r) for r in rows]
+            except Exception:
+                return []
+
+    def get_zigbee_devices(self):
+        """Get all discovered Zigbee / 802.15.4 devices."""
+        with self._lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT * FROM zigbee_devices ORDER BY rssi DESC"
                     ).fetchall()
                     return [dict(r) for r in rows]
             except Exception:
@@ -981,12 +1142,17 @@ class WardrivingSession:
                 logger.error(f"GPS backfill error: {e}")
         return result
 
-    def export_wigle_csv(self, device_name='Ragnar'):
+    def export_wigle_csv(self, device_name='Ragnar', include_zigbee=False):
         """Export session to WiGLE CSV format string including WiFi, BT, and cell.
 
         Rows whose position was estimated via backfill_gps_from_track
         (gps_backfilled = 1) are excluded — they are interpolated coordinates,
-        not real observations, and must not be submitted to WiGLE."""
+        not real observations, and must not be submitted to WiGLE.
+
+        Zigbee / 802.15.4 devices are excluded by default: WiGLE has no
+        standard 802.15.4 record type, so those rows are only useful for the
+        user's own tooling. Set `include_zigbee=True` (opt-in from the config
+        tab) to append them with a `ZIGBEE` type token."""
         lines = []
         dn = device_name or 'Ragnar'
         lines.append(f'WigleWifi-1.4,appRelease=Ragnar,model=RaspberryPi,release=1.0,device={dn},display=EPD,board=RPi,brand=Ragnar')
@@ -1062,6 +1228,32 @@ class WardrivingSession:
                             ]))
                     except Exception:
                         pass
+                    # Zigbee / 802.15.4 devices — opt-in only (see docstring).
+                    if include_zigbee:
+                        try:
+                            zb_rows = conn.execute(
+                                "SELECT * FROM zigbee_devices WHERE COALESCE(gps_backfilled, 0) = 0 "
+                                "ORDER BY first_seen"
+                            ).fetchall()
+                            for row in zb_rows:
+                                r = dict(row)
+                                zlat = r.get('best_lat') if r.get('best_lat') is not None else r.get('latitude')
+                                zlon = r.get('best_lon') if r.get('best_lon') is not None else r.get('longitude')
+                                lines.append(','.join([
+                                    r.get('addr', ''),
+                                    (r.get('panid', '') or '').replace(',', '\\,'),
+                                    '[ZIGBEE]',
+                                    r.get('first_seen', ''),
+                                    str(r.get('channel', 0)),
+                                    str(r.get('best_rssi', -100)),
+                                    str(zlat if zlat is not None else ''),
+                                    str(zlon if zlon is not None else ''),
+                                    str(r.get('altitude', '') or ''),
+                                    '',
+                                    'ZIGBEE'
+                                ]))
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error(f"WiGLE export error: {e}")
 
@@ -1360,6 +1552,10 @@ class WardrivingEngine:
         self._iface_prepared = set()  # interfaces successfully brought up at least once
         self._iface_last_error = {}  # most informative scan-failure reason per interface
         self._iface_freq_cache = {}  # cached supported-frequency list per interface
+        # WiFi-adapter hot-plug: re-detect the scan set periodically so an Alfa
+        # plugged in after wardriving started is picked up without a restart.
+        self._last_iface_rescan = 0.0
+        self._iface_rescan_interval = 12  # seconds between scan-set re-detections
         # Band-splitting: when multiple adapters are present, pin each one to a
         # subset of bands so adapters don't redundantly sweep the same channels.
         # 'redundant' (default) = every adapter sweeps every band it supports.
@@ -1375,6 +1571,7 @@ class WardrivingEngine:
         self._last_gps_track = 0
         self.bt_count = 0
         self.cell_count = 0
+        self.zigbee_count = 0
         self.device_name = ''
         # Multi-companion support: one _CompanionState per USB-serial port.
         # Keyed by port path (e.g. '/dev/ttyACM0').
@@ -1438,12 +1635,16 @@ class WardrivingEngine:
     def _current_esp_mode(self) -> str:
         for c in self._companions.values():
             if c.connected and c.current_esp_mode:
-                return c.current_esp_mode
+                return 'wardrive' if c.in_wardrive else c.current_esp_mode
         return 'wifi'
 
     @property
     def _esp_ble_count(self) -> int:
         return sum(c.esp_ble_count for c in self._companions.values())
+
+    @property
+    def _esp_zigbee_count(self) -> int:
+        return sum(c.esp_zigbee_count for c in self._companions.values())
 
     @property
     def _esp_alerts(self) -> list:
@@ -1530,6 +1731,23 @@ class WardrivingEngine:
         if not self.interfaces:
             return {'error': 'No WiFi interfaces found'}
 
+        # Power check before spinning the radios up. USB Wi-Fi adapters are the
+        # heaviest load Ragnar adds (~0.5-1 A each), so an already-marginal 5 V
+        # rail browns out and resets the board the moment a second dongle starts
+        # scanning — a "crash" that leaves nothing in the logs because the OS
+        # never got to write any. Warn loudly rather than fail: plenty of rigs
+        # run fine, and this is the user's call.
+        try:
+            from resource_monitor import ResourceMonitor
+            power = ResourceMonitor().get_power_status()
+            if power.get('supported') and power.get('status') != 'ok':
+                logger.warning(
+                    f"Wardriving: POWER — {power.get('message')} "
+                    f"(throttle register {power.get('raw')}, "
+                    f"{len(self.interfaces)} radio(s) about to start)")
+        except Exception as e:
+            logger.debug(f"power status check failed: {e}")
+
         # Bring each interface up (rfkill unblock + ip link up). USB adapters
         # like the NETGEAR mt76x2u enumerate as admin-DOWN; iw scan on a DOWN
         # interface returns "Network is down" and zero results forever.
@@ -1563,7 +1781,9 @@ class WardrivingEngine:
         # Treat "auto" or empty string as None to trigger auto-detection
         if gps_port and gps_port.lower() == 'auto':
             gps_port = None
-        self._gps = GPSManager(port=gps_port, exclude_ports=esp_exclude)
+        self._gps = GPSManager(
+            port=gps_port, exclude_ports=esp_exclude,
+            state_file=os.path.join(self.data_dir, 'last_gps.json'))
         gps_ok = self._gps.start()
         if not gps_ok:
             logger.warning(f"GPS not available: {self._gps.error}. Wardriving without GPS.")
@@ -1575,6 +1795,7 @@ class WardrivingEngine:
         self.scans_completed = 0
         self.bt_count = 0
         self.cell_count = 0
+        self.zigbee_count = 0
 
         # Save device name and session info
         if self.device_name:
@@ -1637,6 +1858,93 @@ class WardrivingEngine:
         except Exception as e:
             logger.debug(f"HAT button reclaim skipped: {e}")
 
+    @staticmethod
+    def _iface_is_usb(iface):
+        """True if this radio is a USB dongle (as opposed to a built-in radio)."""
+        try:
+            return 'usb' in os.path.realpath(
+                f'/sys/class/net/{iface}/device').lower()
+        except OSError:
+            return False
+
+    @staticmethod
+    def _iface_supports_ap(iface):
+        """True if the radio behind iface advertises AP mode (iw phy info).
+
+        Built-in Pi radios do; a number of USB dongles (several Alfa cards
+        among them) do NOT, and hostapd started on one that doesn't just fails.
+        Fails open (True) when the mode list can't be read, so an unknown radio
+        is never wrongly excluded.
+        """
+        try:
+            phy = os.path.basename(
+                os.path.realpath(f'/sys/class/net/{iface}/phy80211'))
+            r = subprocess.run(['iw', 'phy', phy, 'info'],
+                               capture_output=True, text=True, timeout=6)
+            if r.returncode != 0:
+                return True
+            block = re.search(r"Supported interface modes:(.*?)(?:\n\s*\n|\Z)",
+                              r.stdout, re.S)
+            if not block:
+                return True
+            return bool(re.search(r"\*\s*AP\b", block.group(1)))
+        except Exception:
+            return True
+
+    @staticmethod
+    def _iface_mode(iface):
+        """Current 802.11 mode (managed/AP/monitor/…) via `iw dev info`, or None."""
+        try:
+            r = subprocess.run(['iw', 'dev', iface, 'info'],
+                               capture_output=True, text=True, timeout=4)
+            m = re.search(r'^\s*type\s+(\S+)', r.stdout, re.M)
+            return m.group(1) if m else None
+        except Exception:
+            return None
+
+    def _refresh_interfaces(self):
+        """Reconcile the scan set with the radios actually present, so a WiFi
+        adapter hot-plugged after start() is picked up (and a yanked one dropped)
+        without a service restart.
+
+        Skips the radio currently hosting the phone AP and anything in AP/monitor
+        mode (e.g. WiFi Defense), and leaves rfkill-blocked adapters for a later
+        pass. Runs on the scan-loop cadence (see _iface_rescan_interval)."""
+        try:
+            present = set(self._detect_wifi_interfaces(quiet=True))
+        except Exception as e:
+            logger.debug(f"Wardriving: hot-plug re-detect failed: {e}")
+            return
+        ap_iface = getattr(self.shared_data, 'wardrive_ap_iface', '') or ''
+        with self._iface_swap_lock:
+            current = list(self.interfaces)
+            current_set = set(current)
+            gone = [n for n in current if n not in present]
+            added = []
+            for n in present:
+                if n in current_set or n == ap_iface:
+                    continue
+                if self._iface_rfkill_blocked(n):
+                    continue                       # retried once unblocked
+                if self._iface_mode(n) in ('AP', 'monitor'):
+                    continue                       # owned by the AP / WIDS
+                try:
+                    self._prepare_interface(n)
+                    added.append(n)
+                except Exception as e:
+                    logger.warning(f"Wardriving: hot-plug prepare {n} failed: {e}")
+            if not added and not gone:
+                return
+            self.interfaces = [n for n in current if n not in gone] + added
+            for n in gone:
+                self._iface_prepared.discard(n)
+                self._iface_freq_cache.pop(n, None)
+            self._iface_freq_cache.clear()          # re-derive band assignments
+            self._compute_band_assignments()
+            logger.info(
+                f"Wardriving: scan set changed (added={added or '—'}, "
+                f"removed={gone or '—'}); now scanning {self.interfaces or ['(none)']}")
+
     def lend_interface_for_ap(self, prefer=None):
         """Remove one scanning interface so the KEY1 AP can own it.
 
@@ -1646,12 +1954,30 @@ class WardrivingEngine:
         it. Returns the lent interface name, or None if nothing is available.
         The scan loop re-reads self.interfaces each cycle, so swapping the list
         reference is picked up safely on the next scan.
+
+        Choosing which radio to lend matters once there's more than one: the
+        phone AP needs an **AP-capable** radio, and the Pi's built-in radio is
+        the reliable one for that. A premium USB scanner (e.g. an Alfa) is both
+        the better antenna to keep scanning AND, on many cards, unable to run
+        hostapd at all — so lending it (the old ifaces[-1] default) started the
+        AP on a radio that couldn't be an AP and it silently failed, which is
+        exactly the "works without the Alfa, dead with it" symptom. Preference:
+        an explicit `prefer`, then a built-in AP-capable radio, then any
+        AP-capable radio, then the last interface.
         """
         with self._iface_swap_lock:
             ifaces = list(self.interfaces)
             if not ifaces:
                 return None
-            iface = prefer if (prefer in ifaces) else ifaces[-1]
+            if prefer in ifaces:
+                iface = prefer
+            else:
+                ap_capable = [n for n in ifaces if self._iface_supports_ap(n)]
+                if ap_capable:
+                    non_usb = [n for n in ap_capable if not self._iface_is_usb(n)]
+                    iface = (non_usb or ap_capable)[0]
+                else:
+                    iface = ifaces[-1]
             ifaces.remove(iface)
             self.interfaces = ifaces
             self._iface_prepared.discard(iface)
@@ -2248,6 +2574,7 @@ class WardrivingEngine:
             'gps': gps_status,
             'bluetooth_count': self.bt_count,
             'cell_count': self.cell_count,
+            'zigbee_count': self.zigbee_count,
             'device_name': self.device_name,
             # Backward-compat single-companion fields (aggregated)
             'serial_connected': self.serial_connected,
@@ -2261,10 +2588,16 @@ class WardrivingEngine:
             'coordinator_nodes': self._active_coordinator_nodes(),
             'esp_mode':      self._current_esp_mode,
             'esp_ble_count': self._esp_ble_count,
+            'esp_zigbee_count': self._esp_zigbee_count,
             'esp_alerts':    self._esp_alerts[-5:],
             'band_mode': self.band_mode,
-            # Multi-companion list: full per-device status for the UI
-            'companions': [c.as_dict() for c in self._companions.values()],
+            # Multi-companion list: full per-device status for the UI. Each gets
+            # its configured role ('wardrive' | 'zigbee') so the UI can show and
+            # toggle which Huginn is the dedicated Zigbee/Thread node.
+            'companions': [
+                {**c.as_dict(), 'role': self._companion_role(c)}
+                for c in self._companions.values()
+            ],
         }
         # Interface details (cached 30s — sysfs/udev calls are slow)
         now_if = time.time()
@@ -2327,6 +2660,17 @@ class WardrivingEngine:
                         result['esp_ble_count'] = row[0] if row else 0
                     except Exception:
                         pass
+                    # Unique Zigbee / 802.15.4 devices seen via a companion radio.
+                    # DB-backed so the status bar reflects unique devices, not
+                    # the running stream line count.
+                    try:
+                        row = conn.execute(
+                            "SELECT COUNT(*) FROM zigbee_devices"
+                        ).fetchone()
+                        result['esp_zigbee_count'] = row[0] if row else 0
+                        result['zigbee_count'] = result['esp_zigbee_count']
+                    except Exception:
+                        pass
             except Exception:
                 result['serial_unique'] = 0
                 result['serial_seen_unique'] = 0
@@ -2381,9 +2725,20 @@ class WardrivingEngine:
         logger.info(f"Wardriving data wiped: {deleted} files deleted")
         return {'success': True, 'deleted': deleted}
 
-    def _detect_wifi_interfaces(self):
-        """Detect all available WiFi interfaces (including external USB adapters)."""
-        interfaces = []
+    def _detect_wifi_interfaces(self, quiet=False):
+        """Detect all available WiFi interfaces (including external USB adapters).
+
+        Enumerated from BOTH nmcli and sysfs and then UNIONed — never
+        nmcli-with-sysfs-as-fallback. NetworkManager omits a radio entirely when
+        it is unmanaged (Ragnar marks its own scan adapters unmanaged so NM
+        doesn't add competing routes), left in monitor mode, or its driver
+        loaded after NM started. Treating sysfs as a fallback that only runs
+        when nmcli returned *nothing* silently dropped exactly those adapters,
+        so a third dongle never joined the sweep. sysfs is the authority on
+        "this radio exists"; nmcli only adds names sysfs might miss.
+        """
+        found = set()
+
         try:
             result = subprocess.run(
                 ['nmcli', '-t', '-f', 'DEVICE,TYPE,STATE', 'device'],
@@ -2393,21 +2748,59 @@ class WardrivingEngine:
                 for line in result.stdout.strip().split('\n'):
                     parts = line.split(':')
                     if len(parts) >= 3 and parts[1] == 'wifi':
-                        interfaces.append(parts[0])
+                        found.add(parts[0])
         except Exception as e:
             logger.debug(f"nmcli detection failed: {e}")
 
-        # Fallback: check sysfs
-        if not interfaces:
-            try:
-                import os
-                for name in sorted(os.listdir('/sys/class/net')):
-                    if os.path.isdir(f'/sys/class/net/{name}/wireless'):
-                        interfaces.append(name)
-            except Exception:
-                pass
+        # sysfs: every wireless netdev, including nl80211 *and* wext-only
+        # dongles that report no wireless/ dir but do have phy80211/.
+        try:
+            for name in os.listdir('/sys/class/net'):
+                if os.path.isdir(f'/sys/class/net/{name}/wireless') \
+                        or os.path.isdir(f'/sys/class/net/{name}/phy80211'):
+                    found.add(name)
+        except Exception as e:
+            logger.debug(f"sysfs wifi detection failed: {e}")
 
+        # Drop the monitor/child vifs our own tooling (and airmon-ng) creates,
+        # so a rebuilt monitor interface never doubles up with its parent.
+        interfaces = sorted(n for n in found
+                            if not n.endswith('mon') and not n.startswith('mon'))
+
+        blocked = [n for n in interfaces if self._iface_rfkill_blocked(n)]
+        if blocked and not quiet:
+            # A soft-blocked dongle is present in sysfs but cannot scan; say so
+            # explicitly because the symptom (adapter listed, zero networks) is
+            # otherwise indistinguishable from a driver problem.
+            logger.warning(
+                f"Wardriving: {', '.join(blocked)} is rfkill-blocked and will not "
+                f"scan until unblocked — run 'sudo rfkill unblock all'")
+        # quiet=True on the periodic hot-plug rescan, so it doesn't log this
+        # every cycle — only the genuine start-up detection is announced.
+        (logger.debug if quiet else logger.info)(
+            f"Wardriving detected {len(interfaces)} WiFi interface(s): "
+            f"{', '.join(interfaces) or '(none)'}")
         return interfaces
+
+    @staticmethod
+    def _iface_rfkill_blocked(iface):
+        """True when this radio is soft/hard rfkill-blocked. A freshly plugged
+        USB dongle commonly comes up blocked, so it enumerates but never scans."""
+        try:
+            phy = os.path.realpath(f'/sys/class/net/{iface}/phy80211')
+            for entry in os.listdir(f'{phy}/rfkill'):
+                if not entry.startswith('rfkill'):
+                    continue
+                for kind in ('soft', 'hard'):
+                    try:
+                        with open(f'{phy}/rfkill/{entry}/{kind}') as f:
+                            if f.read().strip() == '1':
+                                return True
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return False
 
     def _scan_loop(self):
         """Main scanning loop — runs fast continuous scans."""
@@ -2415,6 +2808,11 @@ class WardrivingEngine:
 
         while self._running:
             scan_start = time.time()
+
+            # Pick up a hot-plugged (or removed) WiFi adapter without a restart.
+            if scan_start - self._last_iface_rescan >= self._iface_rescan_interval:
+                self._last_iface_rescan = scan_start
+                self._refresh_interfaces()
 
             try:
                 # Get GPS position
@@ -2516,6 +2914,44 @@ class WardrivingEngine:
         # 5 GHz UNII-3 (149-165)
         5745, 5765, 5785, 5805, 5825,
     ]
+
+    def _management_ifaces(self):
+        """Radios carrying Ragnar's own connectivity — never claimed from NM.
+
+        Association state alone is NOT a safe guard: it is a point-in-time
+        check, and the uplink is briefly unassociated while roaming, during the
+        boot race, or when a neighbouring scan knocks it off. Losing that race
+        means we mark the uplink 'managed no', NetworkManager then refuses to
+        reconnect it, and the box drops off the network for good — which looks
+        exactly like "Ragnar crashed". Adding adapters makes it worse: more
+        interfaces get prepared, and kernel renumbering can move the uplink to a
+        different wlanN than the one we checked.
+
+        So identity comes from stable sources instead: the interface holding the
+        default route, and the configured/auto-detected management interface.
+        """
+        protected = set()
+
+        # 1. Whoever holds the default route is by definition our uplink.
+        try:
+            r = subprocess.run(['ip', 'route', 'show', 'default'],
+                               capture_output=True, text=True, timeout=3)
+            for m in re.finditer(r'\bdev\s+(\S+)', r.stdout or ''):
+                protected.add(m.group(1))
+        except Exception as e:
+            logger.debug(f"default-route lookup failed: {e}")
+
+        # 2. The configured (or auto-detected) WiFi management interface.
+        try:
+            from shared import detect_wifi_interface
+            cfg = getattr(self.shared_data, 'config', {}) or {}
+            mgmt = detect_wifi_interface(cfg.get('wifi_interface', 'auto') or 'auto')
+            if mgmt:
+                protected.add(mgmt)
+        except Exception as e:
+            logger.debug(f"management interface lookup failed: {e}")
+
+        return protected
 
     def _is_associated(self, interface):
         """True if the interface is currently associated with an AP as a client.
@@ -2789,6 +3225,19 @@ class WardrivingEngine:
                            capture_output=True, timeout=3)
         except Exception as e:
             logger.debug(f"rfkill unblock failed: {e}")
+
+        # Never tear the uplink out of NetworkManager or reset its type. Doing
+        # so is unrecoverable (NM will not reconnect an unmanaged device), so
+        # the box would silently lose connectivity — see _management_ifaces.
+        # It still gets rfkill-unblocked and brought up above/below, which is
+        # harmless, and it remains scannable.
+        if interface in self._management_ifaces():
+            if interface not in self._iface_prepared:
+                logger.info(
+                    f"Wardriving: {interface} is the management/uplink radio — "
+                    f"scanning it but leaving NetworkManager and its mode alone")
+            self._iface_prepared.add(interface)
+            return
 
         # Claim non-associated interfaces from NetworkManager so its autoscan
         # doesn't race our scan trigger (kernel returns -EBUSY when NM has a
@@ -3564,18 +4013,41 @@ class WardrivingEngine:
         companion.connected = False
         logger.info(f"Serial listener stopped for {companion.port}")
 
+    def _companion_role(self, companion: '_CompanionState') -> str:
+        """Role for a Huginn companion, keyed by serial port.
+
+        'wardrive' (default) = WiFi + BLE wardriving.
+        'zigbee'             = 802.15.4 (Zigbee/Thread) only. On the C5 the one
+                               2.4 GHz radio can't do WiFi and 802.15.4 at once,
+                               so a dedicated second Huginn is put in this role to
+                               sniff Zigbee while the first does WiFi.
+        """
+        roles = self.shared_data.config.get('wardriving_companion_roles', {}) or {}
+        return 'zigbee' if roles.get(companion.port) == 'zigbee' else 'wardrive'
+
+    @staticmethod
+    def _role_command(role: str):
+        # (serial command, esp_mode label, is_wardrive)
+        if role == 'zigbee':
+            return (b"zigbee\r\n", 'zigbee', False)
+        return (b"wardrive\r\n", 'wardrive', True)
+
     def _run_huginn_wardrive_loop(self, ser, companion: '_CompanionState'):
-        companion.current_esp_mode = 'wardrive'
+        active_role = self._companion_role(companion)
+        cmd, mode, in_wd = self._role_command(active_role)
+        companion.current_esp_mode = mode
         try:
             self._drain_huginn_queue(ser, companion)
             ser.reset_input_buffer()
-            ser.write(b"wardrive\r\n")
-            logger.info(f"HuginnESP {companion.port}: entered fast wardrive mode")
+            ser.write(cmd)
+            companion.in_wardrive = in_wd
+            logger.info(f"HuginnESP {companion.port}: entered {mode} mode")
         except Exception as e:
-            logger.warning(f"Failed to start Huginn wardrive mode on {companion.port}: {e}")
+            logger.warning(f"Failed to start Huginn {mode} mode on {companion.port}: {e}")
             return
 
         last_config_drain = time.time()
+        last_role_check = time.time()
         while self._running and companion.port in self._companions:
             try:
                 raw = ser.readline()
@@ -3587,8 +4059,23 @@ class WardrivingEngine:
                 if now - last_config_drain > 5:
                     self._drain_huginn_queue(ser, companion)
                     last_config_drain = now
+                # Live role switch (from the Ragnar UI) without a replug.
+                if now - last_role_check > 3:
+                    last_role_check = now
+                    new_role = self._companion_role(companion)
+                    if new_role != active_role:
+                        active_role = new_role
+                        cmd, mode, in_wd = self._role_command(active_role)
+                        try:
+                            ser.reset_input_buffer()
+                            ser.write(cmd)
+                            companion.current_esp_mode = mode
+                            companion.in_wardrive = in_wd
+                            logger.info(f"HuginnESP {companion.port}: switched to {mode} mode")
+                        except Exception as e:
+                            logger.warning(f"Role switch failed on {companion.port}: {e}")
             except Exception as e:
-                logger.debug(f"Serial read error (wardrive) on {companion.port}: {e}")
+                logger.debug(f"Serial read error (huginn) on {companion.port}: {e}")
                 break
 
         if companion.serial_entry_buffer.get('bssid'):
@@ -3600,6 +4087,8 @@ class WardrivingEngine:
                 companion
             )
             companion.serial_entry_buffer = {}
+
+        companion.in_wardrive = False
 
         try:
             ser.write(b"stop\r\n")
@@ -3845,6 +4334,63 @@ class WardrivingEngine:
                         companion.mesh_node_count = len(companion.coordinator_nodes)
                     return
 
+                # Zigbee / IEEE 802.15.4 rows from a companion with an
+                # 802.15.4 radio (HuginnESP on ESP32-C5). Handled before the
+                # 48-bit-MAC guard below because a Zigbee device is identified
+                # by its EUI-64 / PAN-ID + short address, not a Wi-Fi BSSID.
+                if data.get('type', '').upper() in ('ZIGBEE', 'ZB', '802.15.4', 'IEEE802154'):
+                    companion.current_esp_mode = 'zigbee'
+                    addr = str(data.get('addr') or data.get('eui')
+                               or data.get('ext') or data.get('mac') or ''
+                               ).upper().replace(':', '')
+                    panid = str(data.get('panid') or data.get('pan') or '').upper()
+                    short = str(data.get('short') or data.get('nwk') or '').upper()
+                    if not addr:
+                        # No extended address in the frame — fall back to the
+                        # PAN + short address (or just the PAN) as identity.
+                        if panid and short:
+                            addr = f"{panid}:{short}"
+                        elif panid:
+                            addr = panid
+                    if not addr:
+                        return
+                    try:
+                        z_rssi = int(data.get('rssi', data.get('signal', -80)))
+                    except (ValueError, TypeError):
+                        z_rssi = -80
+                    try:
+                        z_lqi = int(data.get('lqi', 0) or 0)
+                    except (ValueError, TypeError):
+                        z_lqi = 0
+                    try:
+                        z_channel = int(data.get('channel', data.get('ch', 0)) or 0)
+                    except (ValueError, TypeError):
+                        z_channel = 0
+                    z_dtype = str(data.get('ftype') or data.get('dev')
+                                  or data.get('name') or '')
+                    # Network layer riding on 802.15.4, classified by the
+                    # companion: 'zigbee' / 'thread' / '802.15.4'. Older firmware
+                    # omits it, so default to 'zigbee' for back-compat.
+                    z_proto = str(data.get('proto') or 'zigbee').lower()
+                    z_lat, z_lon, z_alt, z_from = self._resolve_coords(
+                        data.get('lat', data.get('latitude')),
+                        data.get('lon', data.get('longitude')),
+                        data.get('alt', data.get('altitude')),
+                        gps_lat, gps_lon, gps_alt,
+                    )
+                    self.session.upsert_zigbee(
+                        addr, panid, short, z_dtype,
+                        z_rssi, z_lqi, z_channel, z_lat, z_lon, z_alt,
+                        proto=z_proto
+                    )
+                    companion.esp_zigbee_count += 1
+                    if z_from and self._gps is not None:
+                        self._gps.update_external_fix(
+                            z_lat, z_lon, z_alt,
+                            source=companion.name or 'companion'
+                        )
+                    return
+
                 mac = data.get('mac', data.get('bssid', '')).upper()
                 if not mac or len(mac) < 12:
                     # GPS-only telemetry row (no network record)
@@ -3897,7 +4443,8 @@ class WardrivingEngine:
                         interface='esp32-serial'
                     )
                     if is_new:
-                        companion.networks += 1
+                        companion.count_network(channel=channel,
+                                                band=data.get('band'))
                 if from_companion and self._gps is not None:
                     self._gps.update_external_fix(lat, lon, alt,
                                                    source=companion.name or 'companion')
@@ -4061,7 +4608,7 @@ class WardrivingEngine:
                 interface='esp32-serial'
             )
             if is_new:
-                companion.networks += 1
+                companion.count_network(channel=channel, band=_field('band'))
 
     def _flush_serial_entry(self, gps_lat, gps_lon, gps_alt, companion: '_CompanionState'):
         """Flush a buffered HuginnESP multi-line entry to the session."""
@@ -4096,4 +4643,6 @@ class WardrivingEngine:
             interface='esp32-serial'
         )
         if is_new:
-            companion.networks += 1
+            # The multi-line format carries an explicit `Band:` line — prefer it
+            # over inferring from the channel number.
+            companion.count_network(channel=channel, band=buf.get('band'))

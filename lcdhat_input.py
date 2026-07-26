@@ -26,11 +26,24 @@
 #   KEY2          : rotate the screen (0→90→180→270)
 #   KEY3 short/long: next display page / restart Ragnar service
 #
+# Wardriving layer (engine running AND the display is on the main page, which is
+# where display.py overrides the dashboard with the wardriving render). The
+# joystick pages a carousel of wardriving screens and the keys become wardriving
+# actions; everything acts on press:
+#   Joy Up/Left   : previous wardriving screen (STATS/MAP/GPS/SKY/SESSION/VIKING)
+#   Joy Down/Right: next wardriving screen
+#   Joy Press     : jump back to the STATS screen
+#   KEY1          : return to the Ragnar screens — steps off the main page so
+#                   the default layer takes over. Does NOT stop wardriving.
+#   KEY2          : reconnect to a known WiFi (wardriving keeps running)
+#   KEY3          : start/stop the phone-access AP
+#
 # Network Diagnostic layer (config network_diagnostic_mode) — a field-test pad,
 # navigated as a stack of "cards": LINK / IP / SWITCH / DHCP / WIFI (SSID+RSSI) /
-# SIGNAL (nearby strengths). Left/Right move between cards; Up/Down cycle the
-# test functions inside a card; the centre press runs the highlighted one. The
-# three keys are exits/toggles (everything acts on press — no long-press here):
+# SIGNAL (nearby strengths) / SPECTRUM / IFACE / BT / ZIGBEE. Left/Right move between cards;
+# Up/Down cycle the test functions inside a card; the centre press runs the
+# highlighted one. The three keys are exits/toggles (everything acts on press —
+# no long-press here):
 #   Joy Left      : previous card    (as seen on the text)
 #   Joy Right     : next card        (as seen on the text)
 #   Joy Up / Down : cycle the highlighted function inside the card
@@ -39,16 +52,21 @@
 #   KEY2          : exit card → the card-selection menu (press again to leave it)
 #   KEY3          : pause / start auto-switch (auto-cycle the cards every 5 s)
 # Card functions (Up/Down + press): LINK/SWITCH → Locate Port · L2 Health;
-# IP → Ping GW · Ping WAN · DNS Doctor · Speedtest; DHCP/WIFI/SIGNAL are read-only.
+# IP → Ping GW · Ping WAN · DNS Doctor · Speedtest; DHCP/WIFI/SIGNAL are
+# read-only. BT and ZIGBEE are the other two 2.4 GHz occupants — each is a
+# one-shot scan run with the centre press (~8 s), showing the last result until
+# you scan again. The IFACE card pins which NIC the egress tests (speedtest, pings)
+# originate from — Up/Down highlights Auto or an interface, press selects it;
+# Auto follows the priority order built-in eth → USB eth → wlan1 → wlan0.
 # In the card-selection menu any joystick direction moves the highlight and press
-# enters the card. See epd_button.NETDIAG_CARD_FUNCS.
+# enters the card. See epd_button.netdiag_card_funcs.
 
 import logging
 import threading
 import time
 
-from epd_button import (EPDButtonListener, PAGE_COUNT, NETDIAG_HOLD_TIME,
-                        NETDIAG_CARD_FUNCS)
+from epd_button import (EPDButtonListener, PAGE_COUNT, PAGE_MAIN, PAGE_NETWORK,
+                        NETDIAG_HOLD_TIME, netdiag_card_funcs)
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +75,13 @@ logger = logging.getLogger(__name__)
 AUTOSCROLL_INTERVAL = 5.0
 
 # Number of net-diag sub-pages (LINK / IP / SWITCH / DHCP / WIFI / SIGNAL /
-# SPECTRUM). Mirrors display.NETDIAG_PAGE_COUNT; kept local so this module
-# needn't import display.py.
-NETDIAG_PAGE_COUNT = 7
+# SPECTRUM / IFACE / BT / ZIGBEE). Mirrors display.NETDIAG_PAGE_COUNT; kept
+# local so this module needn't import display.py.
+NETDIAG_PAGE_COUNT = 10
+
+# Number of wardriving screens the joystick pages through while wardriving runs
+# (STATS / MAP / GPS / SKY / SESSION / VIKING). Mirrors display.WARDRIVE_PAGE_COUNT.
+WARDRIVE_PAGE_COUNT = 6
 
 # Button pins
 KEY1_PIN = 21
@@ -165,18 +187,31 @@ class LCDHATInputListener(EPDButtonListener):
         """Inputs that resolve short-vs-long on release/hold (the rest act on
         press). In net-diag every input now acts on press — the tests moved onto
         the joystick's function menu, so KEY2/KEY3 no longer carry a short/long
-        pair. In the default layer only KEY3 does (short = next page, long =
-        restart)."""
-        if self._netdiag_active():
+        pair. Wardriving is press-only too (KEY3 toggles the AP, so a long press
+        must not also fire a short one). In the default layer only KEY3 defers
+        (short = next page, long = restart)."""
+        if self._netdiag_active() or self._wardrive_view():
             return False
         return name == 'key3'
+
+    def _wardrive_view(self):
+        """True when the wardriving screens own the inputs: the engine is
+        running AND the display is on the main page (where display.py overrides
+        the dashboard with the wardriving render). Paging off the main page with
+        KEY1 hands the inputs back to the default layer."""
+        return self._is_wardriving_active() and self.current_page == PAGE_MAIN
 
     def _on_input_press(self, name):
         self._held_inputs.discard(name)
         if name == 'key1':
-            # KEY1 is the global mode switch: flip net-diag on/off on press,
-            # in every layer. Its release/hold are ignored (not deferred).
-            self._set_netdiag(not self._netdiag_active())
+            # KEY1 is the layer's "get me out of here" key. In the wardriving
+            # screens it returns to the normal Ragnar pages (wardriving keeps
+            # running); everywhere else it flips net-diag on/off. Its
+            # release/hold are ignored (not deferred).
+            if self._wardrive_view():
+                self._wardrive_exit_to_ragnar()
+            else:
+                self._set_netdiag(not self._netdiag_active())
             return
         if self._defers(name):
             return  # decided on release (short) / hold (long)
@@ -199,6 +234,8 @@ class LCDHATInputListener(EPDButtonListener):
     def _dispatch(self, name, gesture):
         if self._netdiag_active():
             self._netdiag_input(name, gesture)
+        elif self._wardrive_view():
+            self._wardrive_input(name, gesture)
         else:
             self._default_input(name, gesture)
 
@@ -253,6 +290,54 @@ class LCDHATInputListener(EPDButtonListener):
         self.autoscroll = not self.autoscroll
         logger.info(f"LCD: page autoscroll {'ON' if self.autoscroll else 'OFF'}")
 
+    # --- Wardriving layer (joystick pages the wardriving screens) ----------
+
+    def _wardrive_input(self, name, gesture='short'):
+        """Map an input to a wardriving action while the wardriving screens are
+        showing:
+
+          Joy Up/Left    : previous wardriving screen
+          Joy Down/Right : next wardriving screen
+          Joy Press      : jump back to the STATS screen
+          KEY1           : return to the Ragnar screens (handled on press)
+          KEY2           : reconnect to a known Wi-Fi (wardriving keeps running)
+          KEY3           : start/stop the phone-access AP
+        """
+        if name == 'key2':
+            logger.info("LCD KEY2 (wardriving): connecting to known WiFi...")
+            threading.Thread(target=self._connect_known_wifi, daemon=True).start()
+            return
+        if name == 'key3':
+            self._toggle_wardrive_ap()
+            return
+
+        name = self._visual_dir(name)
+        if name in ('up', 'left'):
+            self._change_wardrive_page(-1)
+        elif name in ('down', 'right'):
+            self._change_wardrive_page(+1)
+        elif name == 'press':
+            self.wardrive_page = 0
+            logger.info("LCD wardriving: back to STATS screen")
+        # KEY1 is handled on press in _on_input_press (exit to Ragnar view).
+
+    def _change_wardrive_page(self, step):
+        self.wardrive_page = (self.wardrive_page + step) % WARDRIVE_PAGE_COUNT
+        names = ("STATS", "MAP", "GPS", "SKY", "SESSION", "VIKING")
+        label = names[self.wardrive_page] if self.wardrive_page < len(names) else str(self.wardrive_page)
+        logger.info(f"LCD wardriving: screen -> {label} ({self.wardrive_page})")
+
+    def _wardrive_exit_to_ragnar(self):
+        """KEY1 while wardriving: leave the wardriving screens for the normal
+        Ragnar pages. Wardriving itself keeps running — display.py only
+        overrides the main page, so stepping off it shows the dashboard again.
+        Joystick back round to the main page to return to wardriving."""
+        self.wardrive_page = 0
+        self.autoscroll = False   # don't let the ticker drag us straight back
+        self.current_page = PAGE_NETWORK
+        logger.info("LCD KEY1 (wardriving): back to Ragnar view "
+                    "(wardriving still running)")
+
     def _set_netdiag(self, on):
         """Flip Network Diagnostic Mode on/off (KEY1), persist it, wake panel."""
         try:
@@ -265,6 +350,7 @@ class LCDHATInputListener(EPDButtonListener):
             if on:
                 self.netdiag_page = 0
                 self.netdiag_result = None
+                self.netdiag_iface = None   # fresh session tests on Auto again
                 # Card model: start on the card view, driven manually by the
                 # joystick. Auto-switch is off until KEY3 turns it on (frozen =
                 # auto-cycle paused).
@@ -322,7 +408,7 @@ class LCDHATInputListener(EPDButtonListener):
             self._netdiag_step_page(+1)
             return
         if name in ('up', 'down'):
-            funcs = NETDIAG_CARD_FUNCS.get(self.netdiag_page, [])
+            funcs = netdiag_card_funcs(self.netdiag_page)
             if funcs:
                 step = -1 if name == 'up' else 1
                 self.netdiag_func_idx = (self.netdiag_func_idx + step) % len(funcs)
@@ -332,7 +418,7 @@ class LCDHATInputListener(EPDButtonListener):
             if self.netdiag_result is not None:
                 self.netdiag_result = None
                 return
-            funcs = NETDIAG_CARD_FUNCS.get(self.netdiag_page, [])
+            funcs = netdiag_card_funcs(self.netdiag_page)
             if funcs:
                 idx = self.netdiag_func_idx % len(funcs)
                 self._run_netdiag_test(funcs[idx][1])

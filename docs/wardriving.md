@@ -2,14 +2,14 @@
 
 ## Overview
 
-Ragnar's wardriving engine collects WiFi networks, BLE devices, cell towers, and GPS positions while driving. Data is stored in SQLite per session and can be exported to WiGLE CSV or KML.
+Ragnar's wardriving engine collects WiFi networks, BLE devices, Zigbee / 802.15.4 devices, cell towers, and GPS positions while driving. Data is stored in SQLite per session and can be exported to WiGLE CSV or KML.
 
 Ragnar supports **five operating modes**, in any combination — all five can run at the same time and merge into one session DB:
 
 | # | Mode | Hardware | What it adds |
 |---|------|----------|--------------|
 | 1 | **Standalone wardriver** | Raspberry Pi (or PC) with its built-in Wi-Fi and/or one or more USB Wi-Fi adapters | WiFi scanning via `iw`, multi-adapter antenna coverage |
-| 2 | **+ HuginnESP (USB)** | ESP32-S3-Touch-LCD-4B running [HuginnESP](https://github.com/PierreGode/HuginnESP) | Real-time WiFi + BLE + AirTag/Flipper/skimmer/pineapple detection |
+| 2 | **+ HuginnESP (USB)** | ESP32-S3-Touch-LCD-4B or ESP32-C5 running [HuginnESP](https://github.com/PierreGode/HuginnESP) | Real-time WiFi + BLE + AirTag/Flipper/skimmer/pineapple detection (+ Zigbee/802.15.4 on ESP32-C5) |
 | 3 | **+ Piglet (USB)** | Any [Piglet](https://github.com/Hamspiced/piglet) board (XIAO ESP32-S3/C5/C6, LilyGo T-Dongle C5) Works only with my fork till tested and aprooved by [Hamspiced](https://github.com/Hamspiced/), flash [here](https://pierregode.github.io/piglet/) | Live WiGLE-CSV stream over serial |
 | 4 | **+ Piglet Coordinator (USB)** | Dedicated [Coordinator](https://pierregode.github.io/Ragnar/) firmware on a Waveshare ESP32-C5 *or* ESP32-S3-Touch-LCD-4B | Receives records from a fleet of Piglet mesh nodes over ESP-Now and forwards them to Ragnar live |
 | 5 | **+ Piglet Core (USB)** | A regular Piglet board running mesh `core` mode, tethered to Ragnar | Same idea as #4 but on a standard Piglet — the Core scans locally *and* aggregates its mesh nodes, streaming the combined feed to Ragnar |
@@ -75,6 +75,25 @@ required).
 ### GPS
 
 Optional USB GPS receiver (NMEA via pyserial). Auto-detected at startup.
+
+**u-blox receivers stuck in UBX binary mode.** Some u-blox 7 USB pucks
+(VID 1546) come up emitting only UBX binary frames instead of NMEA, which
+looks like a healthy receiver that never finds a position ("Searching..."
+forever). Ragnar detects this and reconfigures the receiver in place over
+the same serial port — no action needed; the journal logs
+`sent the NMEA-enable config (attempt N/3)` when it happens. The cheap
+pucks have no battery-backed RAM or flash, so the fix cannot be persisted
+on them and is reapplied automatically after every power cycle or replug.
+If the automatic recovery fails, the manual path is:
+
+```bash
+sudo systemctl stop ragnar
+sudo python3 scripts/gps_set_nmea.py /dev/ttyACM0 --verify
+sudo systemctl restart ragnar
+```
+
+`scripts/gps_diag.sh` answers "is it the receiver or is it us" — it reports
+whether the port is emitting NMEA, UBX binary, or nothing at all.
 
 ---
 
@@ -171,10 +190,59 @@ Used when the companion identifies as something other than HuginnESP — Ragnar 
 {"type":"WIFI","mac":"00:00:00:00:00:00","ssid":"wifiSSID","rssi":-84,"channel":1,"auth":"WPA2"}
 ```
 
+**Band split.** Companion counts are bucketed into 2.4 GHz and 5 GHz. The band
+is taken from an explicit `"band"` field when the firmware sends one (the
+multi-line text format's `Band:` line also counts), otherwise inferred from the
+channel — 1–14 is 2.4 GHz, 32+ is 5 GHz. A record with an unknown channel still
+counts toward the companion total but lands in neither bucket, so the two never
+over-report. The companion status bar shows `2.4G` / `5G` alongside the total
+**only once a 5 GHz network has actually been seen**, so a 2.4-only board
+(plain ESP32-S3) keeps its compact single-total display.
+
 #### BLE Devices (JSON, ALL mode, one line per device)
 ```json
 {"type":"BLE","mac":"AA:BB:CC:DD:EE:FF","name":"DeviceName","rssi":-60}
 ```
+
+#### Thread / Zigbee (802.15.4) Devices (JSON, one line per sighting)
+
+Emitted by HuginnESP builds with an IEEE 802.15.4 radio (ESP32-C5). Zigbee and
+Thread share the same 802.15.4 radio and channels (11–26), so the companion
+sniffs both and tags each sighting with a `proto` field — `zigbee`, `thread`, or
+`802.15.4` (unknown). **Matter-over-Thread** is ordinary Thread traffic at the
+radio layer, so it reports as `thread`. Ragnar stores these in a dedicated
+`zigbee_devices` table (with the `proto` column) and counts them separately from
+BLE — the live status bar and displays show a **Thread / Zigbee** total
+alongside `BT` and `Cell`, the "Thread / Zigbee" table view lists them with a
+Proto column, and `/api/wardriving/zigbee` returns the full list.
+
+> **One C5 can't do WiFi *and* Zigbee at once.** WiFi, BLE and 802.15.4 share a
+> single 2.4 GHz radio on the ESP32-C5 — once 802.15.4 starts receiving, the WiFi
+> scan can't reclaim the radio, so the wardrive cycle is WiFi + BLE only. To
+> capture Zigbee/Thread **simultaneously**, add a **second Huginn** and give it
+> the Zigbee role: on the wardrive dashboard, each Huginn companion bar has a
+> **Role** selector — set the dedicated node to **"Zigbee / Thread only"** and
+> Ragnar sends it the `zigbee` command (parks WiFi/BLE, continuous 802.15.4
+> sniff) while the other keeps wardriving WiFi. The role is stored per serial
+> port (`wardriving_companion_roles`), applied live, and exposed at
+> `GET/POST /api/wardriving/companion_role`.
+
+> **WiGLE export is opt-in.** WiGLE has no standard 802.15.4 record type, so
+> Zigbee devices are **excluded from WiGLE CSV export by default**. Enable
+> **Config → Wardriving → Include Zigbee in WiGLE CSV** (`wardriving_wigle_include_zigbee`)
+> to append them with a `ZIGBEE` type token — intended for your own tooling,
+> not for submitting to WiGLE. Applies to both manual export and Auto Export on Stop.
+
+```json
+{"type":"ZIGBEE","panid":"0x1A2B","addr":"AABBCCDDEEFF0011","short":"0x1234","channel":15,"rssi":-70,"lqi":180,"ftype":"beacon","proto":"thread"}
+```
+
+Each device is identified by its 64-bit extended address (`addr` / EUI-64) when
+the frame carries one; otherwise Ragnar falls back to `"<panid>:<short>"` as the
+identity so a device is still counted once. `lqi` (link quality) and the
+802.15.4 `channel` (11–26) are retained; `ftype` (e.g. `beacon` / `data` /
+`cmd`) is stored as the device type. GPS is stamped from Ragnar's fix when the
+frame has none, exactly like WiFi/BLE rows.
 
 #### AirTag (multi-line, FILTERED + ALL mode)
 ```
@@ -285,7 +353,7 @@ Re-run `sudo scripts/setup_gpsd.sh` manually after swapping to a different GPS r
 
 - **Permissive talker IDs.** The GGA/RMC/GSV regexes accept any two-letter talker prefix (GP, GN, GL, GA, GB, GI, GQ, …) so multi-GNSS modules are covered.
 - **Optional time field.** Pre-fix receivers emit GGA/RMC with empty time and position. The parser accepts these so `last_update` and satellite counters move as soon as any NMEA is received — not only after first fix.
-- **GSV parsing.** Per-constellation `$xxGSV` sentences are aggregated; the API exposes `satellites_in_view` (sum across all reporting constellations) and `snr_max` (highest reported SNR in dB-Hz). Entries that haven't been heard from in 30 s are pruned so a constellation that stops reporting doesn't inflate the total.
+- **GSV parsing.** Per-constellation `$xxGSV` sentences are aggregated; the API exposes `satellites_in_view` (sum across all reporting constellations) and `snr_max` (highest reported SNR in dB-Hz). The multi-message GSV sweep is also stitched back into a **per-satellite list** (PRN, elevation, azimuth, SNR) per constellation, which the diagnostics endpoint surfaces as `gps.sky` for the sky-view plot; the NMEA 4.10+ trailing signal-ID field is ignored. Entries that haven't been heard from in 30 s are pruned so a constellation that stops reporting doesn't inflate the total.
 - **Liveness signal.** `last_sentence` updates on any recognized NMEA line (including GSV / GSA / VTG / GLL / TXT and pre-fix GGA/RMC). `last_update` continues to mean "last positional/fix update". Together they distinguish "GPS is alive but has no fix yet" from "GPS isn't transmitting at all".
 
 ### Status Fields (`/api/wardriving/gps`)
@@ -314,6 +382,87 @@ Shows the most actionable signals at a glance:
 - **Status line** — `GPS-Fix OK` / `Searching (N visible)` / `Connected` / `No GPS`. The visible count appears when there's no fix but the antenna is seeing satellites — it tells you whether you're antenna-limited or signal-limited.
 - **Coords line** — `lat, lon` once a fix is established.
 - **Sats line** — `Sats: used/in-view · SNR N dB · HDOP H`. HDOP is hidden while it's still the pre-fix 99.99 placeholder.
+- **Speed line** — velocity in the configured unit. Set **Config → Wardriving → Speed Unit** (`wardriving_speed_unit`, `kmh` or `mph`) to choose km/h or mph. This is display-only and applies everywhere speed is shown — GPS card, live map marker, kiosk readout, and the hardware display. Recorded data (`speed_kmh`) is always stored in km/h regardless of the setting.
+
+### Diagnostics Panel (UI)
+
+> Full reference: **[Diagnostics Panel Guide](diagnostics.md)** — the endpoint,
+> every group, the Radios exclusion reasons, the Power/throttle fields, and the
+> feed-stall correlation logic.
+
+At the bottom of the **Wardriving** tab (and of the phone-access AP page,
+`web/wardrive_mobile.html`) sits a **Diagnostics** panel, collapsed by default.
+It is a native `<details>` element, so the toggle keeps working even if a script
+errors — which is precisely when the panel gets opened.
+
+Its summary always shows a live hint (`GPS fix` / `GPS searching` / `no GPS`,
+with `· error` appended when the engine or GPS reports one), so a glance is
+often enough without expanding. Expanded, it lists everything the
+[Status Object](#status-object) exposes, grouped:
+
+The **GPS**, **Session**, **Scanning**, **Coverage**, **Companions** and
+**Device** groups come from the status object the panel already polls. The
+**GPS constellations**, **GPS sky view**, **Radios**, **Power** and **Errors**
+groups come from a second endpoint, `GET /api/wardriving/diagnostics`, which the
+panel fetches **only while it is expanded** (and at most every 8 s; the backend
+caches 5 s).
+That walk touches sysfs and shells out to `vcgencmd`, so it deliberately does
+not ride the 3-second status poll.
+
+| Group | Contents |
+|-------|----------|
+| **GPS** | fix + quality, satellites used/in-view, SNR max, HDOP, lat/lon/altitude, speed, course, source, port, age of last update and last NMEA sentence, time-to-first-fix (or how long it has been searching), error |
+| **GPS constellations** | per-constellation satellites in view and peak SNR (GPS / GLONASS / Galileo / BeiDou / QZSS / NavIC) |
+| **GPS sky view** | polar plot of every satellite by azimuth/elevation, coloured per constellation — North up, zenith at centre, horizon at the rim. Fill opacity tracks SNR (untracked satellites render hollow); hover a dot for PRN / elevation / azimuth / SNR. This is the graphical half of the same GSV data u-center draws |
+| **Radios** | every wireless interface present, whether it is scanning, its driver / mode / link state, the USB adapter behind it — and **when it is not scanning, the reason** |
+| **Power** | per-USB-device declared draw and which interface it backs, summed USB budget, `usb_max_current_enable`, supply throttle/under-voltage flags (now and since boot), core voltage, temperature, and Pi 5 PMIC board power |
+| **Errors** | everything currently complaining — engine, GPS, radios, companions, supply and **stalled feeds** — gathered into one list |
+
+> **Declared, not measured.** The per-device milliamps come from the USB
+> descriptor's `bMaxPower`. No Pi meters per-port current, and the figure is
+> frequently understated — a tri-band adapter that really pulls several hundred
+> milliamps may declare 100 mA. Treat the total as the budget the host *thinks*
+> it has handed out, not as consumption. `usb_max_current_enable` is a Pi 5
+> setting and is only shown on a Pi 5.
+
+> **Stalled feeds.** A feed that has *stopped* looks identical to a weak one in
+> the summary numbers — the last-known satellite count and SNR simply sit at
+> their final value. So **Last NMEA** and **Last scan** turn red once they go
+> stale (30 s and 60 s), and the Errors group says so in words. When GPS and
+> scanning go quiet within a minute of each other, it adds a note that both hang
+> off USB, so a bus/hub glitch or a dip on the USB rail fits better than an RF
+> or per-device fault — check `dmesg` for USB resets. That correlation is
+> invisible if you only read the satellite counts.
+| **Session** | id, duration, network totals, open/WEP/WPA, per-band, Bluetooth, cell towers, Zigbee devices, cameras, trackpoints, strongest AP, DB path |
+| **Scanning** | running, band mode, scans completed, networks last scan, last scan age, interfaces, plus per-adapter driver / bands / USB / manufacturer / network count |
+| **Coverage** | BSSIDs seen by 2+ adapters, and per adapter its unique count, *only-here* count and median best RSSI — the antenna-comparison view (dashboard only) |
+| **Companions** | per-device up/down, network counts, 2.4/5 split, ESP mode, BLE count, Zigbee count (802.15.4 boards), mesh nodes, coordinator board/firmware, recent alerts |
+| **Device** | device name, Bluetooth/cell totals, GPS-backfill setting |
+
+Fields with no value are omitted rather than rendered blank, and the panel skips
+its DOM work entirely while collapsed (re-rendering from the last status when
+expanded), so the polling loop costs nothing extra when it is closed.
+
+> **Diagnosing "sees satellites but never gets a fix":** open **GPS** and read
+> **SNR max** together with **Satellites** (`used / in view`) and **Searching
+> for**. A cold start must demodulate the ephemeris — roughly 30 s of continuous
+> reception at ≥30 dB-Hz — while an already-established fix tracks down to
+> ~20 dB-Hz. So a receiver showing satellites in view with `0 used` and a low
+> SNR is signal-limited (antenna placement, or RF desense from an adapter sat
+> next to the puck), whereas comparable SNR with the fix repeatedly resetting
+> points at power instead. **Power** settles that second half: compare the
+> summed USB draw against what the board allows, and check whether
+> `under-voltage` appears under *Right now* or *Since boot* — the "since boot"
+> flags are what catch a brownout that has already passed.
+
+> **Diagnosing "only wlan0 is scanning":** open **Radios**. Every wireless
+> interface the kernel knows about is listed, and any radio that is not in the
+> scan set carries a *why not* line — `rfkill-blocked` (with the unblock
+> command), `held as the uplink / management radio` (wardriving never claims the
+> interface carrying Ragnar's own connectivity — see `_management_ifaces`), `in
+> AP mode (lent to the phone-access AP)`, a monitor child, or simply *present
+> but not claimed*. A radio that does not appear at all was never enumerated by
+> the kernel, which points at the adapter, cable or power rather than at Ragnar.
 
 ### Network Position Preservation
 
@@ -355,6 +504,7 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/wardriving/status` | Full status incl. GPS, serial, counters |
+| GET | `/api/wardriving/diagnostics` | Deep diagnostics: radios + exclusion reasons, USB power budget, supply health, GPS constellations, errors ([panel](#diagnostics-panel-ui)) |
 | POST | `/api/wardriving/start` | Start wardriving session |
 | POST | `/api/wardriving/stop` | Stop session |
 | GET | `/api/wardriving/networks` | List captured WiFi networks |
@@ -372,6 +522,11 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | GET/POST | `/api/wardriving/huginn_config` | Read / push HuginnESP runtime knobs |
 | POST | `/api/wardriving/device_name` | Set device name |
 | GET/POST | `/api/wardriving/on_boot` | Auto-start on boot |
+
+> **Mutually exclusive with On-Screen Network Diagnostic mode.** Both take over
+> the e-Paper panel and HAT keys, so starting wardriving turns Network Diagnostic
+> mode off (this includes `on_boot` — it is cleared at boot if it was left on),
+> and enabling Network Diagnostic mode stops a live wardriving session.
 
 ---
 
@@ -518,6 +673,90 @@ In modes 2 and 4 the companion has no GPS, so Ragnar's GPS is the only source.
 
 Click **Start Wardriving** in the web UI. Ragnar begins scanning with all
 active wlan interfaces and ingesting whatever is on the serial port.
+
+### Adapter detection — "I plugged in a third adapter but only see wlan0/wlan1"
+
+Radios are enumerated from **both** `nmcli` **and** `/sys/class/net`, and the two
+lists are **unioned**. This matters because NetworkManager omits a radio
+entirely when it is unmanaged (Ragnar marks its own scan adapters unmanaged so
+NM doesn't add competing routes), left in monitor mode, or its driver loaded
+after NM started — so nmcli alone is never authoritative. Monitor child vifs
+(`wlan1mon`, `mon0`) are filtered out so they don't double up with their parent.
+
+On start, the log lists exactly what was found:
+
+```
+Wardriving detected 3 WiFi interface(s): wlan0, wlan1, wlan2
+```
+
+If an adapter is still missing, check in this order:
+
+```bash
+ls /sys/class/net          # is the radio enumerating at all?
+rfkill list                # soft/hard blocked? -> sudo rfkill unblock all
+dmesg | tail -30           # driver/power errors on plug-in
+```
+
+If the interface is **absent from `/sys/class/net`** it is not a Ragnar problem —
+the adapter isn't enumerating (driver, power, or a hard rfkill block). A
+freshly-plugged USB dongle commonly comes up **soft-blocked**: it appears in
+`/sys/class/net` and in the adapter list but scans zero networks. Ragnar logs a
+warning naming any blocked radio; clear it with `sudo rfkill unblock all`.
+
+**Hot-plug is live — no restart needed.** The scan set is reconciled with the
+radios actually present every ~12 s, so an adapter plugged in *after* wardriving
+started (e.g. booting without the Alfa, then connecting it) joins the sweep on
+its own, and a yanked one drops out. The scan-set change is logged:
+
+```
+Wardriving: scan set changed (added=['wlan1'], removed=—); now scanning ['wlan0', 'wlan1']
+```
+
+The rescan deliberately leaves alone the radio currently hosting the phone-access
+AP and any radio in AP/monitor mode (e.g. WiFi Defense), and re-checks a
+soft-blocked adapter on the next pass once you `rfkill unblock` it.
+
+### "Adding a second dongle crashes the whole box"
+
+Two distinct causes, and they look identical from the outside.
+
+**1. Power (most common).** A USB Wi-Fi adapter is the heaviest load you can add
+— an Alfa draws roughly **0.5–1 A**. On a Pi whose 5 V rail is already marginal,
+the second dongle browns out the board and it **resets**. Nothing appears in the
+logs, because the OS never got the chance to write any. Check the SoC's throttle
+register:
+
+```bash
+vcgencmd get_throttled     # 0x0 is healthy
+dmesg | grep -i voltage    # "Undervoltage detected!"
+```
+
+Any non-zero value means the supply has no headroom. Ragnar now reads this at
+wardriving start and logs a `Wardriving: POWER — …` warning naming the
+condition. The fix is hardware: a stronger PSU, or run the dongles from a
+**powered** USB hub so they don't draw off the Pi.
+
+**2. Losing the uplink (looks like a crash, box is actually still running).**
+Wardriving claims each scan adapter from NetworkManager (`managed no`) so NM's
+autoscan doesn't race the scan trigger. That operation is **unrecoverable** — NM
+will not reconnect a device it has been told not to manage. If it were applied
+to the radio carrying Ragnar's own connectivity, the box would drop off the
+network permanently while still running happily headless.
+
+The uplink is therefore protected by **stable identity** — the interface holding
+the default route, plus the configured/auto-detected management interface — and
+never by association state alone, which is a point-in-time check that loses the
+race while roaming, during the boot race, or when a scan knocks the link off.
+The protected radio is still scanned; only the NM claim and the mode reset are
+skipped. The log names it on start:
+
+```
+Wardriving: wlan0 is the management/uplink radio — scanning it but leaving
+NetworkManager and its mode alone
+```
+
+If a box ever does end up unmanaged, `sudo nmcli dev set wlan0 managed yes`
+restores it.
 
 ---
 

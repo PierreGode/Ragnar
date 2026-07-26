@@ -2,14 +2,20 @@ name: Deploy RuSense CSI Node Flasher (ESP32-S3 / C6)
 
 # The CSI-node firmware binaries are vendored under rusense_flasher/firmware/
 # (copied bit-identically from the upstream RuView repo at the commit pinned in
-# rusense_flasher/rusense-csi-node.version). There is no build step — this
-# workflow just publishes the static web flasher to GitHub Pages.
+# rusense_flasher/rusense-csi-node.version) — those need no build step.
+#
+# The hidden "Skál" easter egg on the same page forges the Ragnar Piglet
+# Coordinator (ESP32-C5 headless / ESP32-S3-Touch-LCD-4B). That firmware IS
+# built here from source with arduino-cli, then merged into single .bin images
+# and staged under site/firmware/ so the page can flash them.
 
 on:
   push:
     branches: [View, main]
     paths:
       - 'rusense_flasher/**'
+      - 'espnow_bridge_firmware/espnow_bridge_c5/**'
+      - 'espnow_bridge_firmware/espnow_bridge_s3_lcd/**'
       - '.github/workflows/build-rusense-flasher.yml'
   workflow_dispatch:
 
@@ -32,15 +38,126 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Stage site and stamp build version
+      # ───────── Coordinator firmware toolchain (easter-egg only) ─────────
+      - name: Install arduino-cli
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$PWD/bin" >> $GITHUB_PATH
+
+      - name: Configure arduino-cli and add ESP32 board index
+        # Use the STABLE index (not package_esp32_dev_index.json) — the dev
+        # index serves pre-release alphas, and an unpinned install pulls the
+        # highest version (e.g. 4.0.0-alpha1), whose stricter gpio_num_t typing
+        # breaks GFX 1.6.7. Pin an explicit stable core for reproducible builds.
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls \
+            "https://espressif.github.io/arduino-esp32/package_esp32_index.json"
+          arduino-cli core update-index
+
+      - name: Install ESP32 board core
+        # 3.3.0 is the first STABLE core with the ESP32-C5 target (it's absent
+        # from 3.2.x — that's why the old workflow needed the dev/alpha index).
+        run: arduino-cli core install esp32:esp32@3.3.0
+
+      - name: Install Arduino libraries
+        # Arduino_GFX is only needed by the S3 LCD build (Waveshare 480x480
+        # ST7701 panel). C5 is headless and uses no external libs. Pinned so a
+        # future GFX release can't silently break the build.
+        run: arduino-cli lib install "GFX Library for Arduino@1.6.7"
+
+      - name: Compile ESP32-C5 Coordinator (headless)
+        # CDCOnBoot=cdc → Serial is HWCDC (USB-Serial-JTAG, /dev/ttyACM0).
+        # PSRAM=enabled because the Waveshare C5 board has 4 MB PSRAM.
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32c5:CDCOnBoot=cdc,PSRAM=enabled,PartitionScheme=default_8MB" \
+            --export-binaries \
+            "espnow_bridge_firmware/espnow_bridge_c5"
+
+      - name: Compile ESP32-S3 LCD Coordinator
+        # USBMode=hwcdc keeps Serial on USB-Serial-JTAG (CDC ACM).
+        # PSRAM=opi for the N16R8 OPI PSRAM Waveshare S3-Touch-LCD-4B.
+        #
+        # -fpermissive: GFX 1.6.7 compiles ALL its databus .cpp files (even the
+        # unused i80 Arduino_ESP32LCD8.cpp — this panel is RGB, not i80), and
+        # that file assigns int8_t pins to gpio_num_t, which the newer IDF
+        # rejects. -fpermissive downgrades it to a warning (compiler.cpp.extra_flags
+        # is empty by default, so overriding it drops nothing).
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,PartitionScheme=default_8MB,PSRAM=opi,FlashSize=8M" \
+            --build-property "compiler.cpp.extra_flags=-fpermissive" \
+            --export-binaries \
+            "espnow_bridge_firmware/espnow_bridge_s3_lcd"
+
+      - name: Install esptool
+        run: pip install esptool
+
+      - name: Stage site, merge coordinator firmware, stamp build version
         run: |
           mkdir -p site
           cp -r rusense_flasher/. site/
+          mkdir -p site/firmware
+
+          # ── Merge the coordinator images into single .bin files ─────────
+          # esptool merge_bin flattens bootloader + partition-table +
+          # boot_app0 + app into one image the manifest flashes at offset 0.
+          BOOT_APP0=$(find ~/.arduino15/packages/esp32 -name boot_app0.bin | head -n 1)
+          if [ -z "$BOOT_APP0" ]; then
+            echo "::error::boot_app0.bin not found in ESP32 core"
+            exit 1
+          fi
+          echo "boot_app0.bin: $BOOT_APP0"
+
+          # ESP32-C5 second-stage bootloader lives at flash 0x2000 (NOT 0x0
+          # like S3/C6). --target-offset 0x0 pads from 0 so the manifest can
+          # still flash the merged file at offset 0.
+          C5_BUILD=$(find espnow_bridge_firmware/espnow_bridge_c5/build \
+            -name "espnow_bridge_c5.ino.bin" -printf '%h\n' | head -n 1)
+          if [ -z "$C5_BUILD" ]; then
+            echo "::error::C5 build output not found"
+            exit 1
+          fi
+          echo "C5 build dir: $C5_BUILD"
+          python -m esptool --chip esp32c5 merge_bin \
+            --output site/firmware/coordinator-c5.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            --target-offset 0x0 \
+            0x2000  "$C5_BUILD/espnow_bridge_c5.ino.bootloader.bin" \
+            0x8000  "$C5_BUILD/espnow_bridge_c5.ino.partitions.bin" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$C5_BUILD/espnow_bridge_c5.ino.bin"
+
+          S3_BUILD=$(find espnow_bridge_firmware/espnow_bridge_s3_lcd/build \
+            -name "espnow_bridge_s3_lcd.ino.bin" -printf '%h\n' | head -n 1)
+          if [ -z "$S3_BUILD" ]; then
+            echo "::error::S3 LCD build output not found"
+            exit 1
+          fi
+          echo "S3 build dir: $S3_BUILD"
+          python -m esptool --chip esp32s3 merge_bin \
+            --output site/firmware/coordinator-s3-lcd.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            --target-offset 0x0 \
+            0x0000  "$S3_BUILD/espnow_bridge_s3_lcd.ino.bootloader.bin" \
+            0x8000  "$S3_BUILD/espnow_bridge_s3_lcd.ino.partitions.bin" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$S3_BUILD/espnow_bridge_s3_lcd.ino.bin"
+
+          # Stamp the coordinator manifests with a build version too.
+          COORD_VERSION="$(date -u +%-m.%-d).${GITHUB_SHA::7}"
+          for m in manifest-coordinator-c5.json manifest-coordinator-s3-lcd.json; do
+            if [ -f "site/$m" ]; then
+              jq --arg v "$COORD_VERSION" '.version = $v' "site/$m" > "site/$m.tmp"
+              mv "site/$m.tmp" "site/$m"
+            fi
+          done
 
           FW_VERSION="$(grep -E '^version=' rusense_flasher/rusense-csi-node.version | cut -d= -f2)"
           BUILD="${FW_VERSION}.${GITHUB_SHA::7}"
           echo "Build: $BUILD"
-          echo "{\"build\":\"$BUILD\",\"fw\":\"$FW_VERSION\",\"sha\":\"${GITHUB_SHA::7}\",\"date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+          echo "{\"build\":\"$BUILD\",\"fw\":\"$FW_VERSION\",\"coord\":\"$COORD_VERSION\",\"sha\":\"${GITHUB_SHA::7}\",\"date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
             > site/version.json
 
           echo "=== Firmware binaries ==="

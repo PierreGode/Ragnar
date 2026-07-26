@@ -13,10 +13,19 @@ Based on the research tool by [Mathy Vanhoef](https://github.com/vanhoefm/airsni
 
 AirSnitch uses **two wireless interfaces** simultaneously:
 
-- **Victim interface** (`wlan1`) — connects to the target AP as a normal client
-- **Attacker interface** (`wlan2`) — connects to the same AP as a separate client and attempts to intercept or reach the victim
+- **Victim interface** — connects to the target AP as a normal client
+- **Attacker interface** — connects to the same AP as a separate client and attempts to intercept or reach the victim
 
 It then runs up to four attack tests to detect isolation bypass vulnerabilities.
+
+**Interface selection is automatic.** When `airsnitch_iface_victim` /
+`airsnitch_iface_attacker` are unset (or name an adapter that isn't plugged in),
+AirSnitch assigns the two roles from the **spare wireless adapters** — every
+radio except the one Ragnar uses for its own uplink — in stable order (`wlan1`,
+`wlan2`, USB `wlx…` names, …). So plugging in two Alfas needs no config; add a
+third and it becomes the next available spare. Set the config keys to pin
+specific adapters. If fewer than two spare radios are present the result records
+a note telling you to plug in another adapter.
 
 ---
 
@@ -76,8 +85,8 @@ Settings are stored in `config/actions.json`:
 
 | Key | Default | Description |
 |---|---|---|
-| `airsnitch_iface_victim` | `wlan1` | Wireless interface for the victim role |
-| `airsnitch_iface_attacker` | `wlan2` | Wireless interface for the attacker role |
+| `airsnitch_iface_victim` | _auto_ | Wireless interface for the victim role. Unset/missing → first spare radio |
+| `airsnitch_iface_attacker` | _auto_ | Wireless interface for the attacker role. Unset/missing → next spare radio |
 | `airsnitch_tests` | all four | Which tests to run: `gtk`, `gateway`, `port_steal_down`, `port_steal_up` |
 | `airsnitch_same_bss` | `false` | Test same-BSS scenarios (victim and attacker on same AP radio) |
 | `airsnitch_server` | `8.8.8.8` | Pingable server IP used by port-steal tests |

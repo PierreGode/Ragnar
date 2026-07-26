@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="css/style.css?v=rusense1" />
+    <link rel="stylesheet" href="css/style.css?v=rusense2" />
     <style>
       .prov-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin: .5rem 0 1rem; }
       .prov-fields #prov-port { max-width: 8rem; }
@@ -226,6 +226,103 @@
           <button class="btn-logs" onclick="openLogs()">📡 Open Skald&rsquo;s Ear</button>
         </div>
       </section>
+
+      <!-- ───────── Hidden easter egg: Piglet Coordinator forge ─────────
+           Revealed by clicking the "Skál 📡" rune in the footer. The old
+           Ragnar coordinator flasher (C5 / S3-LCD) used to live on its own
+           Pages site; this brings it back as a secret rune on the CSI page.
+           flashDevice() is board-agnostic, so the same forge flow drives it. -->
+      <section class="flash-panel" id="coordinator-egg" hidden>
+        <h2>🐗 Piglet Coordinator <span class="panel-sub">(secret rune · ESP-Now mesh core)</span></h2>
+        <p>
+          You found the hidden longship. This is the <strong>Ragnar Piglet Coordinator</strong> &mdash;
+          it pairs with the Piglet wardriving mesh on channel&nbsp;6 and herds WiGLE / BLE records
+          back to Ragnar over USB serial as one-object-per-line JSON. Not a CSI sensor node &mdash;
+          a different beast entirely. Pick a board, plug it in, raise the sails.
+        </p>
+
+        <div class="s3-board-row">
+          <label for="coord-board">Board:</label>
+          <select id="coord-board">
+            <option value="coord-c5" selected>Waveshare ESP32-C5-WIFI6-KIT — headless · the scout</option>
+            <option value="coord-s3-lcd">Waveshare ESP32-S3-Touch-LCD-4B — 480×480 display · the jarl</option>
+          </select>
+        </div>
+
+        <p id="coord-board-desc"></p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span><span id="coord-board-badge"></span></span>
+        </div>
+
+        <div class="flash-buttons">
+          <button id="coord-forge-btn" class="btn-flash" onclick="flashCoordinator()">
+            🔨 Forge Coordinator
+          </button>
+        </div>
+        <p style="margin-top:.6rem;font-size:.85rem;color:#9fb0c3">
+          Coordinator serial runs at <code>460800</code> baud &mdash; set that in Skald&rsquo;s Ear if you monitor it.
+        </p>
+      </section>
+
+      <script>
+        const COORD_BOARDS = {
+          "coord-c5": {
+            manifest: "manifest-coordinator-c5.json",
+            badge: "Waveshare ESP32-C5-WIFI6-KIT · 16 MB · headless",
+            button: "🔨 Forge C5 Coordinator",
+            desc: "<strong>Waveshare ESP32-C5-WIFI6-KIT</strong> — single-core RISC-V @240 MHz, " +
+                  "16 MB flash, 4 MB PSRAM, dual-band Wi-Fi 6, BLE 5. No display, no fuss — the " +
+                  "smallest, lightest pig in the sty. Plug it into Ragnar's USB and it starts oinking immediately.",
+          },
+          "coord-s3-lcd": {
+            manifest: "manifest-coordinator-s3-lcd.json",
+            badge: "Waveshare ESP32-S3-Touch-LCD-4B · 16 MB · 480×480 display",
+            button: "🔨 Forge S3-LCD Coordinator",
+            desc: "<strong>Waveshare ESP32-S3-Touch-LCD-4B</strong> — dual-core LX7 @240 MHz, 16 MB flash, " +
+                  "8 MB OPI PSRAM, 4″ 480×480 RGB IPS touch panel. Same coordinator firmware, plus a glowing " +
+                  "rune-board on the built-in display (mesh nodes, networks heard, uptime, last RX).",
+          },
+        };
+        function coordBoardChanged() {
+          const b = COORD_BOARDS[document.getElementById("coord-board").value];
+          document.getElementById("coord-board-desc").innerHTML = b.desc;
+          document.getElementById("coord-board-badge").textContent = b.badge;
+          document.getElementById("coord-forge-btn").textContent = b.button;
+        }
+        function flashCoordinator() {
+          flashDevice(COORD_BOARDS[document.getElementById("coord-board").value].manifest);
+        }
+        document.getElementById("coord-board").addEventListener("change", coordBoardChanged);
+        coordBoardChanged();
+
+        /* Skál rune → reveal the hidden coordinator forge, then scroll to it.
+           The footer is parsed after this script, so wire it once the DOM is ready. */
+        document.addEventListener("DOMContentLoaded", () => {
+          const skal = document.querySelector(".footer .skal");
+          const egg  = document.getElementById("coordinator-egg");
+          if (!skal || !egg) return;
+          skal.style.cursor = "pointer";
+          skal.addEventListener("click", () => {
+            const revealing = egg.hidden;
+            egg.hidden = false;
+            if (revealing) {
+              egg.classList.add("egg-reveal");
+              egg.scrollIntoView({ behavior: "smooth", block: "center" });
+            }
+          });
+        });
+      </script>
 
       <!-- Browser warning -->
       <div id="browserWarn" class="browser-warn">

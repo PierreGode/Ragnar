@@ -307,8 +307,13 @@ class AirSnitch:
     Ragnar action wrapper for AirSnitch Wi-Fi client isolation testing.
 
     Configuration (read from shared_data.config):
-        airsnitch_iface_victim   – wireless interface acting as victim   (default: wlan1)
-        airsnitch_iface_attacker – wireless interface acting as attacker (default: wlan2)
+        airsnitch_iface_victim   – wireless interface acting as victim
+        airsnitch_iface_attacker – wireless interface acting as attacker
+                                   Both auto-detect when unset or missing: the
+                                   spare wireless adapters (every radio except
+                                   Ragnar's uplink) are assigned in order, so a
+                                   second/third Alfa is used with no config. See
+                                   _resolve_ifaces.
         airsnitch_tests          – list of tests to run; options:
                                      "gtk", "gateway", "port_steal_down", "port_steal_up"
                                    (default: all four)
@@ -341,6 +346,84 @@ class AirSnitch:
         cfg = getattr(self.shared_data, "config", {})
         return cfg.get(key, default)
 
+    @staticmethod
+    def _wireless_interfaces():
+        """Every wireless netdev present, sorted (wlan0, wlan1, wlan2, wlx…).
+        Read straight from sysfs so a USB Alfa shows up regardless of driver."""
+        names = []
+        try:
+            for name in sorted(os.listdir("/sys/class/net")):
+                if os.path.isdir(f"/sys/class/net/{name}/wireless") \
+                        or os.path.isdir(f"/sys/class/net/{name}/phy80211"):
+                    names.append(name)
+        except OSError:
+            pass
+        return names
+
+    def _primary_wifi_interface(self):
+        """The radio Ragnar uses for its own connectivity — kept out of the
+        AirSnitch victim/attacker pool so we never tear down the uplink."""
+        try:
+            from shared import detect_wifi_interface
+            return detect_wifi_interface(
+                self._cfg("wifi_interface", "auto") or "auto")
+        except Exception:
+            return "wlan0"
+
+    def _resolve_ifaces(self):
+        """Pick the victim + attacker radios AirSnitch drives.
+
+        Honours explicit config (airsnitch_iface_victim / _attacker) when those
+        interfaces actually exist, and auto-assigns any still-unset or missing
+        one from the spare wireless adapters — everything except Ragnar's own
+        uplink radio — in stable order. So a second/third Alfa is used without
+        any config, and a stale hardcoded wlanN never silently targets a NIC
+        that isn't there. Returns (victim, attacker, note) where note explains
+        an auto-pick or a shortfall for the results/logs."""
+        present = self._wireless_interfaces()
+        primary = self._primary_wifi_interface()
+        spare = [i for i in present if i != primary]
+
+        def _valid(name):
+            return bool(name) and name in present
+
+        victim = self._cfg("airsnitch_iface_victim")
+        attacker = self._cfg("airsnitch_iface_attacker")
+        auto = []
+
+        # Drop configured names that aren't actually present, then fill the
+        # gaps from the spare pool (skipping any already chosen).
+        if not _valid(victim):
+            victim = None
+        if not _valid(attacker):
+            attacker = None
+        for slot in ("victim", "attacker"):
+            if locals()[slot] is not None:
+                continue
+            pick = next((i for i in spare
+                         if i not in (victim, attacker)), None)
+            if pick is None:
+                continue
+            auto.append(f"{slot}={pick}")
+            if slot == "victim":
+                victim = pick
+            else:
+                attacker = pick
+
+        # Last resort: keep the documented defaults so downstream error
+        # messages name a concrete interface rather than "None".
+        victim = victim or "wlan1"
+        attacker = attacker or "wlan2"
+
+        note = None
+        if len(spare) < 2:
+            note = (f"AirSnitch needs two spare Wi-Fi radios besides the uplink "
+                    f"({primary}); found {len(spare)} ({', '.join(spare) or 'none'}). "
+                    f"Plug in another adapter.")
+        elif auto:
+            note = "auto-assigned " + ", ".join(auto)
+        return victim, attacker, note
+
     def _save_results(self, results: dict) -> Path:
         ts = int(time.time())
         path = self.results_dir / f"airsnitch_{ts}.json"
@@ -363,8 +446,9 @@ class AirSnitch:
                 self.logger.error("AirSnitch installation failed – skipping")
                 return "failed"
 
-        iface_victim   = self._cfg("airsnitch_iface_victim",   "wlan1")
-        iface_attacker = self._cfg("airsnitch_iface_attacker", "wlan2")
+        iface_victim, iface_attacker, iface_note = self._resolve_ifaces()
+        if iface_note:
+            self.logger.info(f"AirSnitch interfaces: {iface_note}")
         tests          = self._cfg("airsnitch_tests",          ["gtk", "gateway", "port_steal_down", "port_steal_up"])
         same_bss       = self._cfg("airsnitch_same_bss",       False)
         server         = self._cfg("airsnitch_server",         "8.8.8.8")
@@ -397,6 +481,7 @@ class AirSnitch:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "iface_victim": iface_victim,
             "iface_attacker": iface_attacker,
+            "iface_note": iface_note,
             "tests": {},
         }
 

@@ -441,6 +441,171 @@
             transition: background-color 0.15s ease, color 0.15s ease;
         }
         .wifi-hm-zoom-btn:hover { background: #334155; color: #fff; }
+
+        /* ---------- Spectrum Analyzer: full-screen console ---------- */
+        #wifi-fs {
+            position: fixed;
+            inset: 0;
+            z-index: 99998;
+            background: radial-gradient(1200px 600px at 20% -10%, #0d1b2f 0%, #060b16 60%, #04070e 100%);
+            display: flex;
+            flex-direction: column;
+            color: #e2e8f0;
+        }
+        #wifi-fs.hidden { display: none; }
+        body.wifi-fs-open { overflow: hidden; }
+        .wifi-fs-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 14px;
+            border-bottom: 1px solid #1e293b;
+            background: rgba(8, 15, 28, 0.9);
+        }
+        .wifi-fs-title { font-size: 14px; font-weight: 600; letter-spacing: .2px; }
+        .wifi-fs-meta { font-size: 11px; color: #64748b; }
+        .wifi-fs-status { margin-left: auto; }
+        .wifi-fs-hint { white-space: nowrap; }
+        .wifi-fs-close {
+            border: 1px solid #334155;
+            background: rgba(30, 41, 59, 0.8);
+            color: #cbd5e1;
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-size: 13px;
+            line-height: 1.2;
+            cursor: pointer;
+        }
+        .wifi-fs-close:hover { background: #7f1d1d; border-color: #b91c1c; color: #fff; }
+        .wifi-fs-body { flex: 1; display: flex; min-height: 0; }
+        .wifi-fs-main { flex: 1; display: flex; flex-direction: column; min-width: 0; padding: 10px 12px 12px; gap: 8px; }
+        .wifi-fs-summary { display: flex; flex-wrap: wrap; gap: 8px; font-size: 11px; }
+        .wifi-fs-canvas-wrap { position: relative; flex: 1 1 auto; min-height: 220px; }
+        .wifi-fs-canvas-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+        .wifi-fs-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 11px; color: #94a3b8; }
+        .wifi-fs-readout {
+            position: absolute;
+            visibility: hidden;      /* shown once the cursor is over the plot */
+            bottom: 4px;             /* below the plot, clear of the band labels */
+            right: 8px;
+            font-family: ui-monospace, SFMono-Regular, monospace;
+            font-size: 11px;
+            color: #64748b;
+            background: rgba(4, 8, 16, 0.6);
+            border: 1px solid rgba(51, 65, 85, 0.6);
+            border-radius: 5px;
+            padding: 2px 7px;
+            pointer-events: none;
+        }
+        .wifi-fs-tip {
+            position: absolute;
+            z-index: 5;
+            pointer-events: none;
+            min-width: 170px;
+            max-width: 300px;
+            background: rgba(8, 15, 28, 0.97);
+            border: 1px solid #334155;
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+            padding: 7px 9px;
+            font-size: 11px;
+            line-height: 1.45;
+            color: #e2e8f0;
+        }
+        .wifi-fs-tip.hidden { display: none; }
+        .wifi-fs-tip b { font-weight: 600; }
+        .wifi-fs-tip .k { color: #64748b; }
+        .wifi-fs-listwrap {
+            flex: 0 0 34%;
+            min-height: 120px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #1e293b;
+            border-radius: 10px;
+            background: rgba(10, 17, 31, 0.6);
+            overflow: hidden;
+        }
+        .wifi-fs-listbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 10px;
+            border-bottom: 1px solid #1e293b;
+        }
+        .wifi-fs-listtitle { font-size: 12px; font-weight: 600; }
+        .wifi-fs-list { flex: 1; overflow: auto; }
+        .wifi-fs-list table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .wifi-fs-list thead th {
+            position: sticky;
+            top: 0;
+            background: #0b1424;
+            color: #94a3b8;
+            font-weight: 500;
+            text-align: left;
+            padding: 5px 8px;
+            border-bottom: 1px solid #1e293b;
+            cursor: pointer;
+            white-space: nowrap;
+            z-index: 1;
+        }
+        .wifi-fs-list tbody td { padding: 4px 8px; border-bottom: 1px solid rgba(30, 41, 59, 0.6); white-space: nowrap; }
+        .wifi-fs-list tbody tr { cursor: pointer; }
+        .wifi-fs-list tbody tr:hover { background: rgba(30, 41, 59, 0.5); }
+        .wifi-fs-list tbody tr.sel { background: rgba(2, 132, 199, 0.28); box-shadow: inset 3px 0 0 #38bdf8; }
+        .wifi-fs-side {
+            flex: 0 0 380px;
+            border-left: 1px solid #1e293b;
+            background: rgba(8, 14, 26, 0.75);
+            overflow: auto;
+            padding: 12px;
+        }
+        .wifi-fs-card {
+            border: 1px solid #1e293b;
+            border-radius: 10px;
+            background: rgba(15, 23, 42, 0.55);
+            padding: 10px 12px;
+            margin-bottom: 10px;
+        }
+        .wifi-fs-card h4 {
+            font-size: 10px;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+            color: #64748b;
+            margin-bottom: 7px;
+        }
+        .wifi-fs-kv { display: grid; grid-template-columns: minmax(88px, auto) 1fr; gap: 3px 10px; font-size: 12px; }
+        .wifi-fs-kv dt { color: #64748b; }
+        .wifi-fs-kv dd { color: #e2e8f0; overflow-wrap: anywhere; }
+        .wifi-fs-big { font-size: 26px; font-weight: 700; line-height: 1.1; }
+        .wifi-fs-tag {
+            display: inline-block;
+            font-size: 10px;
+            border-radius: 4px;
+            padding: 1px 5px;
+            margin: 0 3px 3px 0;
+            border: 1px solid rgba(148, 163, 184, 0.35);
+            color: #cbd5e1;
+        }
+        .wifi-fs-empty { color: #64748b; font-size: 12px; text-align: center; padding: 18px 8px; }
+        .wifi-fs-devrow {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            font-size: 11px;
+            padding: 3px 4px;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .wifi-fs-devrow:hover { background: rgba(30, 41, 59, 0.6); }
+        .wifi-fs-devrow.sel { background: rgba(2, 132, 199, 0.3); }
+        @media (max-width: 1100px) {
+            .wifi-fs-body { flex-direction: column; }
+            .wifi-fs-side { flex: 0 0 auto; max-height: 44%; border-left: none; border-top: 1px solid #1e293b; }
+            .wifi-fs-listwrap { flex: 0 0 30%; }
+        }
     </style>
     <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
@@ -1632,7 +1797,7 @@
                             <h3 class="text-lg font-semibold">Switch Discovery (LLDP / CDPv1/v2 / EDP / FDP)</h3>
                             <p class="text-sm text-gray-400">Neighbouring switches via LLDP, Cisco CDPv1/v2, Extreme EDP, Foundry FDP and Nortel SONMP: name, port, VLAN, PoE and management IP.</p>
                         </div>
-                        <div class="flex gap-2 w-full sm:w-auto"><button onclick="loadLldp()" class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Refresh</button><button onclick="exportLldpCsv()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap">Export CSV</button></div>
+                        <div class="flex flex-wrap gap-2 w-full sm:w-auto"><select id="lldp-iface" onchange="loadLldp()" title="Local port to query — Auto reports neighbours on every interface" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"><option value="">Auto (all interfaces)</option></select><button onclick="loadLldp()" class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Refresh</button><button onclick="exportLldpCsv()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap">Export CSV</button></div>
                     </div>
                     <div id="lldp-results" class="mt-3 overflow-x-auto text-sm text-gray-400">Loading…</div>
                 </div>
@@ -1641,8 +1806,10 @@
                         <h3 class="text-lg font-semibold">ARP Scan</h3>
                         <p class="text-sm text-gray-400">Discover live hosts on the local segment via ARP.</p>
                     </div>
-                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                        <input id="arp-iface" type="text" autocomplete="off" placeholder="interface (e.g. eth0)" class="w-full sm:w-auto sm:flex-1 sm:min-w-[12rem] bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runArpScan()">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="arp-iface" title="Interface for the ARP scan — pick your WiFi or LAN NIC to scan that segment" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
                         <button onclick="runArpScan()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan</button>
                         <button onclick="exportArpCsv()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap">Export CSV</button>
                     </div>
@@ -2016,8 +2183,10 @@
                             <li><strong class="text-gray-400">Traffic burst</strong> — floods traffic so the <strong>ACTIVITY</strong> LED blinks while the link <strong>stays up</strong>. Never drops connectivity — safe on any port.</li>
                         </ul>
                     </div>
-                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                        <input id="locate-iface" type="text" autocomplete="off" placeholder="interface (e.g. eth0)" class="w-full sm:w-auto sm:flex-1 sm:min-w-[12rem] bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')locatePort()">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="locate-iface" title="Wired port to flash — Auto picks the link-up Ethernet port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired)</option>
+                        </select>
                         <select id="locate-method" title="Which LED to blink" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
                             <option value="flap">Link flap (LINK LED)</option>
                             <option value="burst">Traffic burst (ACTIVITY LED)</option>
@@ -2032,8 +2201,10 @@
                         <h3 class="text-lg font-semibold">L2 Link Health</h3>
                         <p class="text-sm text-gray-400">Listens passively for a few seconds and reports Layer-2 problems: STP root bridge &amp; loop churn, CDP/LLDP/DTP/VTP control frames, broadcast-storm rate, rogue DHCP servers, rogue IPv6 RA, and duplicate IPs. One "what's wrong at L2" snapshot.</p>
                     </div>
-                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                        <input id="l2-iface" type="text" autocomplete="off" placeholder="interface (e.g. eth0)" class="w-full sm:w-auto sm:flex-1 sm:min-w-[12rem] bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runL2Health()">
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="l2-iface" title="Interface for the L2 capture — pick the LAN/WiFi NIC for the segment to watch" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
                         <input id="l2-secs" type="number" min="3" max="30" value="12" title="capture seconds" class="w-full sm:w-24 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
                         <button onclick="runL2Health()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan L2</button>
                     </div>
@@ -2118,10 +2289,19 @@
                             <div class="flex rounded-lg overflow-hidden border border-slate-700">
                                 <button id="wifi-view-bar"  class="px-3 py-1.5 text-sm bg-Ragnar-600 text-white">📊 Bar</button>
                                 <button id="wifi-view-dome" class="px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-700">◗ Dome</button>
+                                <button id="wifi-view-wf" disabled class="px-3 py-1.5 text-sm text-slate-500 opacity-40 cursor-not-allowed border-l border-slate-700" title="Connect a HackRF SDR to enable true-RF waterfall">Waterfall</button>
                             </div>
                         </div>
                         <button onclick="wifiScan()" id="wifi-scan-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm font-semibold">Scan</button>
+                        <button onclick="wifiToggleFullscreen()" id="wifi-fs-btn" title="Full-screen analyzer — bigger spectrum, click any AP for the full record (Esc to exit)" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">
+                            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
+                            Full screen
+                        </button>
                         <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifi-auto" class="accent-Ragnar-600"> Auto-refresh (8s)</label>
+                        <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Overlay Bluetooth / BLE device activity on the 2.4 GHz band (device-discovery estimate, not measured RF)"><input type="checkbox" id="wifi-bt" class="accent-sky-500"> <span class="text-sky-400">📶 Bluetooth</span></label>
+                        <span id="wifi-bt-status" class="text-xs text-sky-500/70"></span>
+                        <label id="wifi-zb-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Connect a HuginnESP (ESP32-C5) companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-zb" disabled class="accent-amber-500"> <span class="text-amber-400">🐝 Zigbee</span></label>
+                        <span id="wifi-zb-status" class="text-xs text-amber-500/70"></span>
                         <span id="wifi-status" class="text-xs text-gray-500 ml-auto"></span>
                     </div>
                 </div>
@@ -2130,13 +2310,59 @@
                 <div class="glass rounded-xl p-4 mb-5">
                     <div id="wifi-flag-banner" class="hidden"></div>
                     <div id="wifi-band-summary" class="flex flex-wrap gap-3 mb-3 text-xs"></div>
-                    <div class="w-full overflow-x-auto">
+                    <div class="w-full overflow-x-auto relative">
                         <canvas id="wifi-spectrum" class="w-full" style="height:360px; min-width:640px;"></canvas>
+                        <div id="wifi-tip" class="wifi-fs-tip hidden"></div>
                     </div>
+                    <p class="text-[11px] text-gray-500 mt-1">Hover a signal to identify it, click it to inspect — or open <span class="text-gray-300">Full screen</span> for the whole record.</p>
                     <div id="wifi-legend" class="flex flex-wrap gap-4 mt-2 text-xs text-gray-400"></div>
                 </div>
 
                 <div id="wifi-changes" class="flex flex-wrap gap-2 mb-4 text-xs"></div>
+
+                <!-- Bluetooth / BLE 2.4 GHz overlay (hidden until toggled) -->
+                <div id="wifi-bt-panel" class="hidden glass rounded-xl p-4 mb-4">
+                    <div class="flex flex-wrap items-center gap-3 mb-3">
+                        <h3 class="text-sm font-semibold text-sky-300">📶 Bluetooth / BLE on 2.4 GHz</h3>
+                        <span id="wifi-bt-summary" class="text-xs text-gray-400"></span>
+                        <span id="wifi-bt-pressure" class="flex flex-wrap gap-2 text-xs ml-auto"></span>
+                    </div>
+                    <p class="text-[11px] text-gray-500 mb-3" id="wifi-bt-note"></p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead class="text-gray-500 border-b border-slate-700">
+                                <tr class="text-left">
+                                    <th class="py-1 pr-3">Device</th><th class="py-1 pr-3">Type</th>
+                                    <th class="py-1 pr-3">Vendor</th><th class="py-1 pr-3">Class</th>
+                                    <th class="py-1 pr-3 text-right">RSSI</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wifi-bt-tbody" class="text-gray-300"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Zigbee / 802.15.4 overlay (hidden until toggled) -->
+                <div id="wifi-zb-panel" class="hidden glass rounded-xl p-4 mb-4">
+                    <div class="flex flex-wrap items-center gap-3 mb-3">
+                        <h3 class="text-sm font-semibold text-amber-300">🐝 Zigbee / 802.15.4 on 2.4 GHz</h3>
+                        <span id="wifi-zb-summary" class="text-xs text-gray-400"></span>
+                        <span id="wifi-zb-pressure" class="flex flex-wrap gap-2 text-xs ml-auto"></span>
+                    </div>
+                    <p class="text-[11px] text-gray-500 mb-3" id="wifi-zb-note"></p>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-xs">
+                            <thead class="text-gray-500 border-b border-slate-700">
+                                <tr class="text-left">
+                                    <th class="py-1 pr-3">Device</th><th class="py-1 pr-3">Proto</th>
+                                    <th class="py-1 pr-3">Ch</th><th class="py-1 pr-3">PAN ID</th>
+                                    <th class="py-1 pr-3">Vendor</th><th class="py-1 pr-3 text-right">RSSI</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wifi-zb-tbody" class="text-gray-300"></tbody>
+                        </table>
+                    </div>
+                </div>
 
                 <div class="grid grid-cols-1 xl:grid-cols-3 gap-5">
                     <!-- AP list -->
@@ -2148,6 +2374,15 @@
                                 <button id="wifi-view-nets" onclick="wifiSetApView('nets')" class="px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-700">Networks</button>
                             </div>
                             <input id="wifi-ap-search" oninput="wifiRenderTable()" placeholder="filter SSID / vendor / BSSID" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs flex-1 min-w-[140px]">
+                            <select id="wifi-ap-std" onchange="wifiRenderTable()" title="filter by Wi-Fi generation" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-gray-300">
+                                <option value="">all gens</option>
+                                <option value="Wi-Fi 7">Wi-Fi 7</option>
+                                <option value="Wi-Fi 6E">Wi-Fi 6E</option>
+                                <option value="Wi-Fi 6">Wi-Fi 6</option>
+                                <option value="Wi-Fi 5">Wi-Fi 5</option>
+                                <option value="Wi-Fi 4">Wi-Fi 4</option>
+                                <option value="legacy">Legacy (a/b/g)</option>
+                            </select>
                             <label class="flex items-center gap-1 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifi-ap-issues" onchange="wifiRenderTable()" class="accent-amber-500"> issues only</label>
                             <button onclick="wifiExportCsv()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded text-xs">Export CSV</button>
                         </div>
@@ -5339,6 +5574,12 @@
                         <div id="wd-cell-count" class="text-2xl font-bold text-fuchsia-400">0</div>
                         <div class="text-xs text-gray-500 mt-1">towers</div>
                     </div>
+                    <!-- Thread / Zigbee (802.15.4) -->
+                    <div class="bg-slate-800/50 rounded-lg p-3">
+                        <div class="text-xs text-gray-400 mb-1 uppercase tracking-wider">Thread / Zigbee</div>
+                        <div id="wd-zigbee-count" class="text-2xl font-bold text-teal-400">0</div>
+                        <div class="text-xs text-gray-500 mt-1">802.15.4</div>
+                    </div>
                     <!-- Cameras + Bands -->
                     <div class="bg-slate-800/50 rounded-lg p-3">
                         <div class="text-xs text-gray-400 mb-1 uppercase tracking-wider">More</div>
@@ -5346,6 +5587,7 @@
                             <span class="text-xs">📷 <span class="text-pink-400" id="wd-camera-count">0</span></span>
                             <span class="text-xs"><span class="text-cyan-400" id="wd-band24">0</span> 2.4G</span>
                             <span class="text-xs"><span class="text-purple-400" id="wd-band5">0</span> 5G</span>
+                            <span class="text-xs"><span class="text-pink-400" id="wd-band6">0</span> 6G</span>
                         </div>
                         <div id="wd-scans-done" class="text-xs text-gray-500 mt-1">Scans: 0</div>
                     </div>
@@ -5365,6 +5607,7 @@
                         <option value="bluetooth">🔵 Bluetooth Devices</option>
                         <option value="cell">📶 Cell Towers</option>
                         <option value="cameras">📷 Cameras</option>
+                        <option value="zigbee">🧵 Thread / Zigbee</option>
                     </select>
                     <span id="wd-interfaces-info" class="text-xs text-gray-500 w-full sm:w-auto sm:ml-auto"></span>
                 </div>
@@ -5462,9 +5705,23 @@
                         <p class="text-gray-500 text-sm">No previous sessions.</p>
                     </div>
                 </div>
+
+                <!-- Diagnostics — collapsed by default. Mirrors the panel on the
+                     phone-access AP page (web/wardrive_mobile.html); a native
+                     <details> so the toggle survives a script error, which is
+                     exactly when this panel gets opened. -->
+                <details id="wd-diag" class="mt-8 bg-slate-800/40 border border-slate-700 rounded-lg overflow-hidden">
+                    <summary class="px-4 py-3 cursor-pointer select-none flex items-center gap-3 hover:bg-slate-700/30 transition-colors">
+                        <h3 class="text-md font-semibold text-gray-300">Diagnostics</h3>
+                        <span id="wd-diag-note" class="text-xs text-gray-500 ml-auto"></span>
+                    </summary>
+                    <div id="wd-diag-body" class="px-4 pb-4">
+                        <p class="text-gray-500 text-sm">Waiting for status…</p>
+                    </div>
+                </details>
             </div>
         </div>
-        
+
         <!-- Config Tab -->
         <div id="config-tab" class="tab-content hidden">
             <div class="glass rounded-xl p-6">
@@ -5683,9 +5940,17 @@
                             </div>
                             <div class="flex items-center justify-between mt-3 pt-2 border-t border-gray-700/50">
                                 <span class="text-xs text-gray-500">Service</span>
-                                <span id="kiosk-service-badge" class="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">unknown</span>
+                                <div class="flex items-center gap-2">
+                                    <button id="kiosk-repair-btn" onclick="repairKiosk()"
+                                            class="px-2 py-0.5 rounded bg-amber-700 hover:bg-amber-600 text-white text-xs"
+                                            title="Re-run the kiosk installer and start it, whatever state it is in">Reinstall</button>
+                                    <button id="kiosk-diagnose-btn" onclick="runKioskDoctor()"
+                                            class="px-2 py-0.5 rounded bg-slate-600 hover:bg-slate-500 text-white text-xs">Diagnose</button>
+                                    <span id="kiosk-service-badge" class="text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300">unknown</span>
+                                </div>
                             </div>
                             <div id="kiosk-status-message" class="text-xs mt-2 hidden"></div>
+                            <pre id="kiosk-doctor-report" class="hidden mt-3 max-h-64 overflow-auto rounded bg-black/50 p-2 text-xs text-gray-300 whitespace-pre-wrap"></pre>
                         </div>
 
                         <!-- Wardriving on Boot Card -->
@@ -5715,6 +5980,44 @@
                             <option value="high">High — Full Viking Rage (-T4, top 3000, scan gateway)</option>
                         </select>
                         <p id="scan-intensity-status" class="text-xs mt-2 hidden"></p>
+                    </div>
+                </div>
+
+                <!-- Bluetooth Provisioning Section -->
+                <div id="ble-provisioning-section" class="mb-8">
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Provisioning</h3>
+
+                    <div class="glass rounded-lg p-4 mb-4">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium">Discoverable over Bluetooth</h4>
+                                <p class="text-xs text-gray-500 mt-1">Lets the Ragnar mobile app find this box and read its IP over Bluetooth. Provisioning only — all real traffic stays on Wi-Fi.</p>
+                            </div>
+                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="ble-provisioning-enabled" class="sr-only peer" onchange="toggleBleProvisioning(this)">
+                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                            </label>
+                        </div>
+                        <div class="mt-4">
+                            <label class="block text-sm text-gray-400 mb-1">Bluetooth adapter</label>
+                            <select id="ble-provisioning-adapter" class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm" onchange="setBleProvisioningAdapter(this)">
+                                <option value="">Auto — prefer built-in radio</option>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-2">Advertise on the built-in radio and keep a USB dongle (e.g. Alfa) free for scanning. It shares the adapter with the BLE overlay scanner, so pick a dedicated one when you have two.</p>
+                        </div>
+                        <div class="mt-4 flex items-center justify-between">
+                            <div>
+                                <h4 class="font-medium text-sm">Auto-stop after provisioning</h4>
+                                <p class="text-xs text-gray-500 mt-1">Free the radio once a phone has read the box's address. For single-radio boxes — the app must re-enable discovery to find the box again.</p>
+                            </div>
+                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" id="ble-provisioning-autostop" class="sr-only peer" onchange="setBleProvisioningAutostop(this)">
+                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                            </label>
+                        </div>
+                        <button id="ble-provisioning-readvertise" class="hidden mt-3 px-3 py-1.5 rounded-lg bg-Ragnar-600 hover:bg-Ragnar-500 text-white text-sm" onclick="readvertiseBle()">Re-advertise</button>
+                        <p id="ble-provisioning-power" class="hidden text-xs mt-3 px-3 py-2 rounded-lg bg-amber-900/40 border border-amber-700 text-amber-200"></p>
+                        <p id="ble-provisioning-status" class="text-xs mt-3 text-gray-500">—</p>
                     </div>
                 </div>
 
@@ -5754,6 +6057,24 @@
                             </div>
                             <div class="text-xs text-gray-500">
                                 Ragnar will enter wardriving mode immediately on power-on — ideal for mobile/walk setups.
+                            </div>
+                        </div>
+
+                        <!-- Speed Unit Card -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Speed Unit</h4>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                How GPS speed is shown across the wardriving dashboard, map, kiosk, and hardware display. Recorded data stays in km/h.
+                            </div>
+                            <div class="flex items-center justify-center gap-3">
+                                <span id="wd-speed-unit-kmh-label" class="text-sm font-semibold text-Ragnar-400">km/h</span>
+                                <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="wardriving-speed-unit" class="sr-only peer" onchange="toggleWardrivingSpeedUnit()">
+                                    <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                                </label>
+                                <span id="wd-speed-unit-mph-label" class="text-sm font-semibold text-gray-500">mph</span>
                             </div>
                         </div>
 
@@ -6673,8 +6994,72 @@
         </div>
     </div>
 
+    <!-- ==================================================================
+         WiFi Spectrum Analyzer — full-screen console.
+         Lives at body level (a .glass ancestor's backdrop-filter would
+         otherwise become the containing block for position:fixed).
+         Shares _wifiState with the in-page analyzer: same scan, same
+         selection, same overlays — just far more room to read them.
+    =================================================================== -->
+    <div id="wifi-fs" class="hidden" aria-hidden="true">
+        <div class="wifi-fs-bar">
+            <span class="wifi-fs-title">📊 Spectrum Analyzer</span>
+            <span id="wifi-fs-iface" class="wifi-fs-meta"></span>
+            <div class="wifi-hm-segment" id="wifi-fs-band">
+                <button data-band="all" class="wifi-hm-seg-btn wifi-hm-seg-on">All</button>
+                <button data-band="2.4" class="wifi-hm-seg-btn wifi-hm-seg-off">2.4</button>
+                <button data-band="5" class="wifi-hm-seg-btn wifi-hm-seg-off">5</button>
+                <button data-band="6" class="wifi-hm-seg-btn wifi-hm-seg-off">6&nbsp;GHz</button>
+            </div>
+            <div class="wifi-hm-segment" id="wifi-fs-view">
+                <button data-view="bar" class="wifi-hm-seg-btn wifi-hm-seg-on">📊 Bar</button>
+                <button data-view="dome" class="wifi-hm-seg-btn wifi-hm-seg-off">◗ Dome</button>
+                <button data-view="waterfall" id="wifi-fs-view-wf" disabled class="wifi-hm-seg-btn wifi-hm-seg-off" title="Connect a HackRF SDR to enable the true-RF waterfall">Waterfall</button>
+            </div>
+            <button onclick="wifiScan()" id="wifi-fs-scan" class="wifi-hm-btn-primary">Scan</button>
+            <label class="wifi-hm-chip" title="Re-run the passive survey every 8 s"><input type="checkbox" id="wifi-fs-auto" class="accent-Ragnar-500 w-3.5 h-3.5"> Auto 8s</label>
+            <label class="wifi-hm-chip" title="Overlay Bluetooth / BLE activity on 2.4 GHz"><input type="checkbox" id="wifi-fs-bt" class="accent-sky-500 w-3.5 h-3.5"> <span style="color:#38bdf8">📶 BT</span></label>
+            <label class="wifi-hm-chip" id="wifi-fs-zb-label" style="opacity:.4;cursor:not-allowed" title="Connect a HuginnESP companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-fs-zb" disabled class="accent-amber-500 w-3.5 h-3.5"> <span style="color:#fbbf24">🐝 Zigbee</span></label>
+            <span id="wifi-fs-status" class="wifi-fs-meta wifi-fs-status"></span>
+            <button onclick="wifiToggleFullscreen()" class="wifi-fs-close" title="Exit full screen (Esc)">✕</button>
+        </div>
+        <div class="wifi-fs-body">
+            <div class="wifi-fs-main">
+                <div id="wifi-fs-summary" class="wifi-fs-summary"></div>
+                <div class="wifi-fs-canvas-wrap">
+                    <canvas id="wifi-spectrum-fs"></canvas>
+                    <div id="wifi-fs-readout" class="wifi-fs-readout"></div>
+                    <div id="wifi-fs-tip" class="wifi-fs-tip hidden"></div>
+                </div>
+                <div id="wifi-fs-legend" class="wifi-fs-legend"></div>
+                <div class="wifi-fs-listwrap">
+                    <div class="wifi-fs-listbar">
+                        <span class="wifi-fs-listtitle">Access Points <span id="wifi-fs-count" class="wifi-fs-meta"></span></span>
+                        <input id="wifi-fs-search" oninput="_wifiFsRenderList()" placeholder="filter SSID / vendor / BSSID" class="wifi-hm-input" style="width:210px">
+                        <select id="wifi-fs-std" onchange="_wifiFsRenderList()" class="wifi-hm-select">
+                            <option value="">all gens</option>
+                            <option value="Wi-Fi 7">Wi-Fi 7</option>
+                            <option value="Wi-Fi 6E">Wi-Fi 6E</option>
+                            <option value="Wi-Fi 6">Wi-Fi 6</option>
+                            <option value="Wi-Fi 5">Wi-Fi 5</option>
+                            <option value="Wi-Fi 4">Wi-Fi 4</option>
+                            <option value="legacy">Legacy (a/b/g)</option>
+                        </select>
+                        <label class="wifi-hm-chip"><input type="checkbox" id="wifi-fs-issues" onchange="_wifiFsRenderList()" class="accent-amber-500 w-3.5 h-3.5"> issues only</label>
+                        <span class="wifi-fs-meta wifi-fs-hint">↑↓ walk the list · Esc exits</span>
+                        <button onclick="wifiExportCsv()" class="wifi-hm-btn">Export CSV</button>
+                        <button onclick="wifiExportReport()" class="wifi-hm-btn" title="Printable survey report">📄 Report</button>
+                    </div>
+                    <div id="wifi-fs-list" class="wifi-fs-list"></div>
+                </div>
+            </div>
+            <aside id="wifi-fs-side" class="wifi-fs-side"></aside>
+        </div>
+    </div>
+
     <!-- JavaScript -->
-    <script src="/web/scripts/ragnar_modern.js?v=20260718-ipintel"></script>
+    <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ipintel"></script>
 
 </body>
 </html>
