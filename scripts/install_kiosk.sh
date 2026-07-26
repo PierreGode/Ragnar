@@ -9,6 +9,11 @@
 #     the existing labwc/Xwayland session — no separate X server.
 #   - Pi OS Lite / headless: installs a systemd unit that spawns its own
 #     Xorg on vt7 and runs chromium in --kiosk.
+#
+# Hardware requirement: this is a Ragnar Pi server feature. Chromium needs
+# roughly 1GB resident on its own, so a 512MB Pi Zero 2 W swaps itself into the
+# ground and drags Ragnar's scanning down with it. The installer refuses to run
+# below 2GB RAM / 2 cores. Pass --force to override (you are on your own).
 
 set -euo pipefail
 
@@ -26,9 +31,55 @@ mkdir -p "$LOG_DIR"
 touch "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) FORCE=1 ;;
+        *) echo "[kiosk-install] unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
+BOARD_MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+BOARD_RAM_MB="$(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+BOARD_CORES="$(nproc 2>/dev/null || echo 1)"
+
 echo "[kiosk-install] starting at $(date -Iseconds)"
 echo "[kiosk-install] repo root: $REPO_ROOT"
-echo "[kiosk-install] board: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown) | RAM: $(awk '/^MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)MB"
+echo "[kiosk-install] board: ${BOARD_MODEL} | RAM: ${BOARD_RAM_MB}MB | cores: ${BOARD_CORES}"
+
+# Hardware gate — mirrors server_capabilities.KIOSK_MIN_RAM_GB / KIOSK_MIN_CORES.
+# Keep the two in step: the web UI hides the kiosk card using the Python side,
+# this catches anyone running the script by hand.
+# 1800MB, not 2048: a real 2GB Pi 4 reports ~1900MB after firmware reservations.
+KIOSK_MIN_RAM_MB=1800
+KIOSK_MIN_CORES=2
+kiosk_hardware_verdict() {
+    case "${BOARD_MODEL,,}" in
+        *zero*) echo "This is a Pi Zero class board (${BOARD_RAM_MB}MB RAM); Chromium alone needs about 1GB."; return ;;
+    esac
+    if [ "$BOARD_RAM_MB" -lt "$KIOSK_MIN_RAM_MB" ]; then
+        echo "This board has ${BOARD_RAM_MB}MB RAM; the kiosk needs a 2GB board or better."
+        return
+    fi
+    if [ "$BOARD_CORES" -lt "$KIOSK_MIN_CORES" ]; then
+        echo "This board has ${BOARD_CORES} CPU core(s); the kiosk needs at least ${KIOSK_MIN_CORES}."
+        return
+    fi
+    echo ""
+}
+KIOSK_BLOCK_REASON="$(kiosk_hardware_verdict)"
+if [ -n "$KIOSK_BLOCK_REASON" ]; then
+    if [ "$FORCE" -eq 1 ]; then
+        echo "[kiosk-install] WARNING: $KIOSK_BLOCK_REASON"
+        echo "[kiosk-install] --force given; installing anyway. Expect the box to lag badly."
+    else
+        echo "[kiosk-install] REFUSING: the on-screen kiosk is a Ragnar Pi server feature."
+        echo "[kiosk-install] $KIOSK_BLOCK_REASON"
+        echo "[kiosk-install] Run a Ragnar Pi server (2GB+ RAM, 2+ cores) for the on-screen display,"
+        echo "[kiosk-install] or re-run with --force to install anyway."
+        exit 3
+    fi
+fi
 
 # Detect if a desktop session is already running on this Pi.
 detect_desktop_mode() {

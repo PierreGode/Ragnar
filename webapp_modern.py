@@ -3564,6 +3564,24 @@ KIOSK_UNINSTALL_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__))
 KIOSK_AUTOSTART_REL = '.config/autostart/ragnar-kiosk.desktop'
 
 
+def _kiosk_capability() -> tuple[bool, str]:
+    """(capable, reason) - may the on-screen kiosk run on this hardware?
+
+    The kiosk drives a full Chromium (~1GB resident), which a 512MB Pi Zero 2 W
+    cannot host without swapping itself to a standstill and taking Ragnar's
+    scanning down with it. It is a Ragnar Pi server feature; everything below
+    that bar is refused here rather than half-installed and left lagging.
+    Fails closed - if capability cannot be determined, the kiosk stays off.
+    """
+    try:
+        from server_capabilities import kiosk_capability
+        return kiosk_capability(shared_data)
+    except Exception as exc:
+        logger.error(f"[kiosk] capability check unavailable: {exc}")
+        return False, ('Could not verify this system meets the kiosk hardware requirements '
+                       f'({exc}). The kiosk needs a Ragnar Pi server (2GB+ RAM).')
+
+
 def _kiosk_autostart_paths() -> list[str]:
     """Return every existing per-user autostart .desktop path."""
     import pwd
@@ -3754,9 +3772,18 @@ def _kiosk_install_and_start() -> bool:
     counted as "installed", so the toggle never re-ran the installer and never
     fixed what was actually missing, while running the script by hand did.
     """
+    # Hardware gate, enforced here as well as at the API edge: a config file
+    # restored from a Pi server onto a Pi Zero, or an old config that predates
+    # the gate, must not install a kiosk the board cannot run.
+    capable, reason = _kiosk_capability()
+    if not capable:
+        logger.warning(f"[kiosk] install refused: {reason}")
+        _kiosk_task_set(phase='failed', error=reason)
+        return False
+
     logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
-    # Installing chromium: minutes on a Pi Zero 2 W. The UI shows this phase
-    # instead of timing the poll out.
+    # Installing chromium takes a while even on a capable board. The UI shows
+    # this phase instead of timing the poll out.
     _kiosk_task_set(phase='installing')
     proc = subprocess.run(
         ['sudo', '-n', 'bash', KIOSK_INSTALL_SCRIPT],
@@ -5991,6 +6018,14 @@ def update_config():
 
         # Capture pre-update kiosk state so we can detect toggles after save.
         prev_kiosk_enabled = bool(shared_data.config.get('kiosk_enabled', False))
+        # Refuse to even record kiosk_enabled on hardware that cannot host
+        # Chromium — persisting it would leave a box permanently trying (and
+        # failing) to install a kiosk on every boot.
+        if data.get('kiosk_enabled'):
+            kiosk_ok, kiosk_reason = _kiosk_capability()
+            if not kiosk_ok:
+                logger.warning(f"[kiosk] enable rejected: {kiosk_reason}")
+                return jsonify({'success': False, 'error': kiosk_reason}), 400
         kiosk_settings_keys = {'kiosk_url', 'kiosk_rotation', 'kiosk_hide_cursor'}
         kiosk_settings_changed = any(
             k in data and data[k] != shared_data.config.get(k)
@@ -6123,6 +6158,7 @@ def kiosk_status():
     Handles both modes: systemd service (Pi OS Lite) and XDG autostart
     .desktop entry (Pi OS Desktop / coexist mode)."""
     try:
+        kiosk_ok, kiosk_reason = _kiosk_capability()
         mode = _kiosk_mode()
         if mode == 'service':
             state = _systemctl_state_label('ragnar-kiosk')
@@ -6132,6 +6168,10 @@ def kiosk_status():
             state = 'not_installed'
         task = _kiosk_task_get()
         return jsonify({
+            # Hardware gate: the Settings UI hides the whole card when the
+            # board cannot host Chromium (Pi Zero class / <2GB).
+            'capable': kiosk_ok,
+            'capability_reason': kiosk_reason,
             'installed': mode != 'not_installed',
             'mode': mode,
             # Whether `journalctl -u ragnar-kiosk` can possibly have anything in
@@ -6169,6 +6209,11 @@ def kiosk_repair():
     `sudo bash scripts/install_kiosk.sh` themselves. This is that command,
     automated, with the enable step included.
     """
+    capable, reason = _kiosk_capability()
+    if not capable:
+        logger.warning(f"[kiosk] repair refused: {reason}")
+        return jsonify({'success': False, 'error': reason}), 403
+
     task = _kiosk_task_get()
     if task.get('busy'):
         return jsonify({'success': False,

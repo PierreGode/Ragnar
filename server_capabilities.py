@@ -39,6 +39,8 @@ class SystemCapabilities:
     is_64bit: bool = False
     is_server_capable: bool = False
     is_pi_zero: bool = False
+    kiosk_capable: bool = False
+    kiosk_block_reason: str = ""
     hostname: str = ""
     os_name: str = ""
     os_version: str = ""
@@ -72,6 +74,15 @@ class ServerCapabilities:
     # Use 7.5GB to account for system reserved memory on 8GB devices
     MIN_RAM_GB = 7.5
     MIN_CORES = 2
+    # The on-screen kiosk drives a full Chromium, which needs ~1GB resident on
+    # its own. A Pi Zero 2 W has 512MB total, so the kiosk there thrashes swap
+    # and the whole box crawls — Ragnar's own scanning included. Chromium runs
+    # fine from 2GB up, so the kiosk floor is its own bar rather than full
+    # server mode (a 4GB Pi 4/5 with a screen is a perfectly good kiosk host).
+    # 1.8 rather than 2.0 for the same reason MIN_RAM_GB is 7.5 rather than 8:
+    # firmware/kernel reservations mean a real 2GB Pi 4 reports ~1.9GB.
+    KIOSK_MIN_RAM_GB = 1.8
+    KIOSK_MIN_CORES = 2
     # Include armv8l which is 32-bit userspace on 64-bit ARM (Pi 4/5 with 32-bit OS)
     SUPPORTED_ARCHS = ['x86_64', 'amd64', 'aarch64', 'arm64', 'armv8l', 'armv7l']
     
@@ -231,7 +242,11 @@ class ServerCapabilities:
     def _determine_feature_flags(self):
         """Determine which advanced features can be enabled"""
         caps = self.capabilities
-        
+
+        # Kiosk gate is independent of full server mode: it is a RAM/CPU
+        # question about running Chromium, not about running OpenVAS.
+        caps.kiosk_capable, caps.kiosk_block_reason = self._evaluate_kiosk_support()
+
         if caps.is_server_capable:
             # Traffic Analysis: needs tcpdump at minimum
             caps.traffic_analysis_enabled = caps.available_tools.get('tcpdump', False)
@@ -255,6 +270,45 @@ class ServerCapabilities:
             caps.local_ai_enabled = False
             caps.large_dictionaries_enabled = False
     
+    def _evaluate_kiosk_support(self) -> Tuple[bool, str]:
+        """Can this box host the on-screen kiosk (Chromium fullscreen)?
+
+        Returns (capable, reason). `reason` is empty when capable and is shown
+        verbatim in the UI/installer otherwise, so it has to name the board's
+        actual numbers - "not supported" alone sends people hunting.
+        """
+        caps = self.capabilities
+        ram_gb = caps.total_ram_gb
+
+        if caps.is_pi_zero:
+            return False, (
+                f"Kiosk needs a Ragnar Pi server. This is a Pi Zero class board "
+                f"({ram_gb:.1f}GB RAM) and Chromium alone needs about 1GB."
+            )
+        # A RAM read of 0 means /proc/meminfo and psutil both failed. Don't hand
+        # a kiosk to a box we know nothing about.
+        if ram_gb <= 0:
+            return False, "Kiosk needs a Ragnar Pi server. Could not read this system's RAM size."
+        if ram_gb < self.KIOSK_MIN_RAM_GB:
+            return False, (
+                "Kiosk needs a Ragnar Pi server with at least 2GB RAM. "
+                f"This board has {ram_gb:.1f}GB and Chromium alone needs about 1GB."
+            )
+        if caps.cpu_cores < self.KIOSK_MIN_CORES:
+            return False, (
+                f"Kiosk needs at least {self.KIOSK_MIN_CORES} CPU cores. "
+                f"This board has {caps.cpu_cores}."
+            )
+        return True, ""
+
+    def is_kiosk_capable(self) -> bool:
+        """Check if the on-screen kiosk may run on this hardware"""
+        return self.capabilities.kiosk_capable
+
+    def kiosk_block_reason(self) -> str:
+        """Why the kiosk is unavailable ('' when it is available)"""
+        return self.capabilities.kiosk_block_reason
+
     def is_server_mode(self) -> bool:
         """Check if running in server mode"""
         return self.capabilities.is_server_capable
@@ -273,6 +327,7 @@ class ServerCapabilities:
             'parallel_scanning': caps.parallel_scanning_enabled,
             'local_ai': caps.local_ai_enabled,
             'large_dictionaries': caps.large_dictionaries_enabled,
+            'kiosk': caps.kiosk_capable,
             'wardriving_enabled': self.shared_data.config.get('wardriving_enabled', False) if self.shared_data else False,
         }
     
@@ -361,3 +416,17 @@ def get_server_capabilities(shared_data=None) -> ServerCapabilities:
 def is_server_mode() -> bool:
     """Quick check if running in server mode"""
     return get_server_capabilities().is_server_mode()
+
+
+def kiosk_capability(shared_data=None) -> Tuple[bool, str]:
+    """(capable, reason) for the on-screen kiosk on this hardware.
+
+    Never raises: a detection failure must not take the kiosk API down, and a
+    box we cannot measure is treated as capable=False with a stated reason.
+    """
+    try:
+        caps = get_server_capabilities(shared_data)
+        return caps.is_kiosk_capable(), caps.kiosk_block_reason()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(f"Kiosk capability check failed: {exc}")
+        return False, f"Could not determine hardware capability for the kiosk: {exc}"

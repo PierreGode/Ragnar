@@ -218,16 +218,30 @@ if [ -z "$(ls /dev/dri/card* 2>/dev/null)" ]; then
     check "Display hardware present (/dev/dri/card*)" 1 \
           "headless box: the kiosk needs a real display (HDMI/DSI) attached"
 fi
-echo "  model: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+MODEL="$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
+echo "  model: $MODEL"
 RAM_MB="$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
 SWAP_MB="$(awk '/^SwapTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
-echo "  RAM  : ${RAM_MB} MB (swap ${SWAP_MB} MB)"
-# Not a [FAIL] - the kiosk does run on these boards - but when the browser is
-# missing from section 4 on one of them, this is nearly always the reason.
-if [ "${RAM_MB:-0}" -gt 0 ] && [ "${RAM_MB:-0}" -lt 1024 ]; then
-    echo "  NOTE: under 1 GB of RAM. Chromium itself warns about this. The wrapper"
-    echo "        already applies its low-memory flags; if the browser keeps dying,"
-    echo "        check for OOM kills with:  sudo dmesg | grep -i 'killed process'"
+CORES="$(nproc 2>/dev/null || echo 1)"
+echo "  RAM  : ${RAM_MB} MB (swap ${SWAP_MB} MB) | cores: ${CORES}"
+# Hardware gate — the kiosk is a Ragnar Pi server feature (see install_kiosk.sh
+# and server_capabilities.KIOSK_MIN_RAM_GB). A box below the bar is the whole
+# explanation for "the kiosk is not there" and for "everything lags", so it is a
+# real [FAIL] rather than a note.
+KIOSK_UNSUPPORTED=""
+case "${MODEL,,}" in
+    *zero*) KIOSK_UNSUPPORTED="Pi Zero class board — Chromium alone needs about 1 GB" ;;
+esac
+if [ -z "$KIOSK_UNSUPPORTED" ] && [ "${RAM_MB:-0}" -gt 0 ] && [ "${RAM_MB:-0}" -lt 1800 ]; then
+    KIOSK_UNSUPPORTED="only ${RAM_MB} MB RAM — the kiosk needs a 2 GB board or better"
+fi
+if [ -z "$KIOSK_UNSUPPORTED" ] && [ "${CORES:-1}" -lt 2 ]; then
+    KIOSK_UNSUPPORTED="only ${CORES} CPU core — the kiosk needs 2"
+fi
+if [ -n "$KIOSK_UNSUPPORTED" ]; then
+    check "Hardware supports the kiosk" 1 \
+          "$KIOSK_UNSUPPORTED. The on-screen display is a Ragnar Pi server feature; \
+the installer refuses this board unless run with --force"
 fi
 if pgrep -f 'ragnar-kiosk-chromium' >/dev/null 2>&1; then
     echo "  chromium RSS: $(ps -o rss= -C chromium 2>/dev/null | awk '{s+=$1} END {printf "%d MB", s/1024}')"
