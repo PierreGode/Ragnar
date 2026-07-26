@@ -29111,21 +29111,33 @@ function meshLaunchBase(unit, ctx) {
 // the operator authenticates to that unit directly.
 function meshLaunchRow(base) {
     const b = (base || '').replace(/'/g, '');
+    const where = b ? 'this unit’s own live view (new tab)'
+                    : 'this unit’s live view (new tab)';
     const btn = (feature, label) =>
-        `<button onclick="meshLaunch('${b}','${feature}')" ` +
-        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label}</button>`;
-    return `<div class="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-slate-700/40">
-        ${btn('traffic', 'Traffic')}
-        ${btn('threat-intel', 'Threats')}
-        ${btn('network/integrity', 'Integrity')}
-        ${btn('network/watchtower', 'Watchtower')}
-        ${btn('discovered', 'Vulnerabilities')}
+        `<button onclick="return meshLaunch('${b}','${feature}')" ` +
+        `title="Open ${escapeHtml(label)} — ${where}" ` +
+        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label} ↗</button>`;
+    return `<div class="mt-3 pt-3 border-t border-slate-700/40">
+        <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Open live view</div>
+        <div class="flex flex-wrap gap-1.5">
+            ${btn('traffic', 'Traffic')}
+            ${btn('threat-intel', 'Threats')}
+            ${btn('network/integrity', 'Integrity')}
+            ${btn('network/watchtower', 'Watchtower')}
+            ${btn('discovered', 'Vulnerabilities')}
+        </div>
     </div>`;
 }
 
 function meshLaunch(base, feature) {
     const url = (base || '') + '/#' + feature;
-    window.open(url, '_blank', 'noopener');
+    // Open a real new TAB, not a popup. Passing a features string (even
+    // "noopener") makes browsers spawn a chrome-less popup window that many
+    // block outright — which is why the launch "did nothing". Omit features and
+    // null the opener for the same isolation.
+    const w = window.open(url, '_blank');
+    if (w) { try { w.opener = null; } catch (e) { /* cross-origin, already safe */ } }
+    return false;
 }
 
 function meshWarning(text, tone) {
