@@ -135,6 +135,19 @@ if [ "$MODE" = "service" ]; then
     STATE="$(systemctl is-active "$SERVICE" 2>/dev/null)"
     check "Service is active" "$([ "$STATE" = "active" ] && echo 0 || echo 1)" \
           "see the journal and wrapper log below"
+    # "active" only means the wrapper is alive. PAMName=login moves the real
+    # work into the login session's own scope, so the unit's own Tasks count
+    # reads 0 and the browser never shows up in `systemctl status` - checking
+    # for the process directly is the only way to tell a working kiosk from a
+    # wrapper sitting there with a dead browser.
+    if [ "$STATE" = "active" ]; then
+        check "Kiosk chromium process running" \
+              "$(pgrep -f 'ragnar-kiosk-chromium' >/dev/null 2>&1 && echo 0 || echo 1)" \
+              "X is up but the browser is not - see the wrapper log below (on a 512MB board it is usually memory)"
+        check "X server running" \
+              "$(pgrep -x Xorg >/dev/null 2>&1 || pgrep -x X >/dev/null 2>&1 && echo 0 || echo 1)" \
+              "the wrapper started but X did not - see section 7"
+    fi
     # A tripped start limit stays stopped until reset — easy to miss.
     if systemctl show "$SERVICE" -p NRestarts 2>/dev/null | grep -qv 'NRestarts=0'; then
         echo "  $(systemctl show "$SERVICE" -p NRestarts 2>/dev/null)"
@@ -179,7 +192,9 @@ section "7. Xorg log (service mode)"
 # Xorg refuses -logfile under the setuid wrapper, so a non-root kiosk leaves its
 # log in the user's own directory instead. Check both, or a real X failure looks
 # like "X never started".
-XORG_LOGS="$LOG_DIR/kiosk-Xorg.log"
+# /var/log/Xorg.0.log is where it lands in service mode: started through the
+# setuid Xorg.wrap, X is really root and uses the system default path.
+XORG_LOGS="$LOG_DIR/kiosk-Xorg.log /var/log/Xorg.0.log"
 for home in /home/* /root; do
     [ -f "$home/.local/share/xorg/Xorg.0.log" ] && XORG_LOGS="$XORG_LOGS $home/.local/share/xorg/Xorg.0.log"
 done
@@ -204,7 +219,19 @@ if [ -z "$(ls /dev/dri/card* 2>/dev/null)" ]; then
           "headless box: the kiosk needs a real display (HDMI/DSI) attached"
 fi
 echo "  model: $(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo unknown)"
-echo "  RAM  : $(awk '/^MemTotal:/{printf "%d MB", $2/1024}' /proc/meminfo 2>/dev/null)"
+RAM_MB="$(awk '/^MemTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+SWAP_MB="$(awk '/^SwapTotal:/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 0)"
+echo "  RAM  : ${RAM_MB} MB (swap ${SWAP_MB} MB)"
+# Not a [FAIL] - the kiosk does run on these boards - but when the browser is
+# missing from section 4 on one of them, this is nearly always the reason.
+if [ "${RAM_MB:-0}" -gt 0 ] && [ "${RAM_MB:-0}" -lt 1024 ]; then
+    echo "  NOTE: under 1 GB of RAM. Chromium itself warns about this. The wrapper"
+    echo "        already applies its low-memory flags; if the browser keeps dying,"
+    echo "        check for OOM kills with:  sudo dmesg | grep -i 'killed process'"
+fi
+if pgrep -f 'ragnar-kiosk-chromium' >/dev/null 2>&1; then
+    echo "  chromium RSS: $(ps -o rss= -C chromium 2>/dev/null | awk '{s+=$1} END {printf "%d MB", s/1024}')"
+fi
 
 # ---------------------------------------------------------------------------
 section "9. Configured URL"

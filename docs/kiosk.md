@@ -147,10 +147,20 @@ non-root user, so X can only start through the setuid `Xorg.wrap` the installer
 installs (`xserver-xorg-legacy` + `needs_root_rights=yes`). X therefore aborted
 while still parsing its arguments — before opening any log — which is why the
 journal showed a bare exit code with nothing to go on and the restart loop
-tripped the start limit. The wrapper no longer passes the flag; X writes to
-`~/.local/share/xorg/Xorg.0.log` and the wrapper copies that to
-`/var/log/ragnar/kiosk-Xorg.log`, so both paths keep working. Update and click
-**Reinstall**.
+tripped the start limit. The wrapper no longer passes the flag. X then writes wherever its default is —
+`/var/log/Xorg.0.log` when it is really root (the setuid wrapper case, which is
+service mode) or `~/.local/share/xorg/Xorg.0.log` when it is rootless — and the
+wrapper copies whichever it finds to `/var/log/ragnar/kiosk-Xorg.log`, so that
+stays the one place to look. Update and click **Reinstall**.
+
+**Service `active (running)` but the screen is blank.** In service mode the unit
+uses `PAMName=login`, so logind moves the real work into the login session's own
+scope: `systemctl status` shows `Tasks: 0` and no browser, however healthy the
+kiosk is. That is normal and not a symptom. The doctor checks for the Chromium
+and X processes directly for exactly this reason — read those two lines, not the
+task count. On a 512 MB board (Pi Zero 2 W reports ~415 MB usable) a missing
+browser there is nearly always memory; confirm with
+`sudo dmesg | grep -i 'killed process'`.
 
 **"Cannot establish any listening sockets — Make sure an X server isn't already
 running"** means service mode is trying to start its own X on `:0` while a
