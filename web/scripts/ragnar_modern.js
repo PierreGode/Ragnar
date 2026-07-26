@@ -5800,6 +5800,7 @@ async function runIpIntel() {
                 ${row('Registry', d.registry)}
                 ${row('Reverse DNS', d.ptr)}
                 ${row('Abuse contact', d.abuse_email || 'not published')}
+                ${row('Org address', d.org_address)}
                 ${row('Resolved from', d.resolved_from)}
             </div>
             ${d.country_note ? `<p class="text-xs text-amber-300/80 mt-2">${escapeHtml(d.country_note)}</p>` : ''}
