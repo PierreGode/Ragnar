@@ -5758,6 +5758,61 @@ async function netIntegrityTrustGateway() {
     }
 }
 
+// ---- IP Attribution --------------------------------------------------------
+const _IPINTEL_CLASS_STYLE = {
+    vpn:         ['bg-amber-950/50 border-amber-800 text-amber-300', 'VPN exit'],
+    tor:         ['bg-amber-950/50 border-amber-800 text-amber-300', 'Tor exit'],
+    hosting:     ['bg-sky-950/50 border-sky-800 text-sky-300', 'Cloud / hosting'],
+    mobile:      ['bg-slate-800 border-slate-700 text-slate-300', 'Mobile carrier'],
+    residential: ['bg-slate-800 border-slate-700 text-slate-300', 'Consumer ISP'],
+    special:     ['bg-slate-800 border-slate-700 text-slate-400', 'Non-public address'],
+    unknown:     ['bg-slate-800 border-slate-700 text-slate-400', 'Unclassified'],
+};
+async function runIpIntel() {
+    const input = document.getElementById('ipintel-target');
+    const out = document.getElementById('ipintel-results');
+    const target = (input.value || '').trim();
+    if (!target) { input.focus(); return; }
+    const btn = event && event.target ? event.target : null;
+    _ndBusy(btn, true, 'Looking up…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Querying the regional registry…</p>';
+    try {
+        const d = await postAPI('/api/net/ip-intel', { ip: target });
+        if (!d.success) {
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(d.error || 'lookup failed') + '</p>';
+            return;
+        }
+        const [cls, label] = _IPINTEL_CLASS_STYLE[d.classification] || _IPINTEL_CLASS_STYLE.unknown;
+        const row = (k, v) => v ? `<div class="flex gap-2"><span class="text-gray-500 w-28 shrink-0">${k}</span><span class="text-gray-200 break-all">${escapeHtml(String(v))}</span></div>` : '';
+        const country = d.country ? d.country + (d.country_routing ? ' (routing: ' + escapeHtml(d.country_routing) + ')' : '') : '';
+        out.innerHTML = `
+            <div class="rounded-lg border ${cls} px-3 py-2 mb-3">
+                <span class="text-sm font-semibold">${escapeHtml(d.ip)}</span>
+                <span class="text-xs ml-2">${escapeHtml(label)}</span>
+                <span class="text-xs opacity-70 ml-2">${d.confidence != null ? d.confidence + '% ownership resolved' : ''}${d.cached ? ' · cached' : ''}</span>
+            </div>
+            <div class="space-y-1 text-xs">
+                ${row('Network', (d.prefix || '') + (d.network_name ? '  ' + d.network_name : ''))}
+                ${row('Allocated', d.allocated)}
+                ${row('ASN', d.asn ? 'AS' + d.asn + (d.as_org ? '  ' + d.as_org : '') : '')}
+                ${row('Country', country)}
+                ${row('Registry', d.registry)}
+                ${row('Reverse DNS', d.ptr)}
+                ${row('Abuse contact', d.abuse_email || 'not published')}
+                ${row('Org address', d.org_address)}
+                ${row('Resolved from', d.resolved_from)}
+            </div>
+            ${d.country_note ? `<p class="text-xs text-amber-300/80 mt-2">${escapeHtml(d.country_note)}</p>` : ''}
+            ${d.attribution_note ? `<p class="text-xs text-amber-300/90 mt-2">${escapeHtml(d.attribution_note)}</p>` : ''}
+            <p class="text-xs text-gray-500 mt-2">${escapeHtml(d.location_note || '')}</p>`;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- Watchtower: unified pane for the standalone watchers ------------------
 const _WT_SEV_STYLE = {
     critical: ['bg-red-950/60 border-red-800 text-red-300', '🛑'],
@@ -5792,6 +5847,9 @@ function renderIncidents(incidents, elId, max) {
             </div>
             ${inc.technique ? `<div class="text-xs opacity-80 mt-0.5">${escapeHtml(inc.technique)}</div>` : ''}
             <div class="text-xs opacity-60 mt-0.5">${escapeHtml((inc.sources || []).join(', '))}${ents ? ' · ' + ents : ''} · ${inc.alert_count || 0} alerts</div>
+            ${Object.entries(inc.ip_attribution || {}).map(([ip, a]) =>
+                `<div class="text-xs opacity-75 mt-1">🌐 ${escapeHtml(ip)} — ${escapeHtml(a.country || '?')}${a.as_org ? ' · ' + escapeHtml(a.as_org) : ''}${a.classification && a.classification !== 'unknown' ? ' · ' + escapeHtml(a.classification) : ''}${a.abuse_email ? ' · abuse: ' + escapeHtml(a.abuse_email) : ''}</div>`
+            ).join('')}
         </div>`;
     }).join('');
 }

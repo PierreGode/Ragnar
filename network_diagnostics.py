@@ -225,6 +225,32 @@ def do_whois(target):
     return {'success': True, 'output': (res['out'] or res['err']).strip(), 'error': None}
 
 
+def do_ip_intel(target, offline=False):
+    """Attribute an IP address — country, ASN, network owner, abuse contact.
+
+    Thin wrapper over ip_intel.lookup(); see that module for why no street
+    address is ever reported. Accepts a hostname too, resolving it first, so the
+    UI can take either."""
+    import ip_intel
+    ip = str(target).strip()
+    resolved_from = None
+    if ip_intel.ip_scope(ip)[0] == 'invalid':
+        try:                                  # maybe it's a hostname
+            resolved = socket.gethostbyname(ip)
+            resolved_from, ip = ip, resolved
+        except (OSError, socket.gaierror):
+            return {'success': False, 'error': f'Not a valid IP or resolvable host: {target}'}
+    try:
+        rec = ip_intel.lookup(ip, allow_network=not offline)
+    except Exception as exc:
+        return {'success': False, 'error': f'lookup failed: {exc}'}
+    rec['success'] = True
+    rec['report'] = ip_intel.report(rec)
+    if resolved_from:
+        rec['resolved_from'] = resolved_from
+    return rec
+
+
 def _probe_egress(iface, timeout=4.0):
     """Can `iface` actually reach the internet? True / False / None (unknown).
 
@@ -14244,6 +14270,18 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid target')
         _log(f"net/whois {target}")
         return jsonify(do_whois(target))
+
+    @app.route('/api/net/ip-intel', methods=['POST'])
+    def net_ip_intel():
+        """Attribute an IP: country, ASN, ISP/network owner, and the abuse
+        contact to report it to. Registry-derived (RDAP + Team Cymru), never a
+        street address — see ip_intel.py."""
+        data = request.get_json(silent=True) or {}
+        target = (data.get('ip') or data.get('target') or '').strip()
+        if not target:
+            return _bad('No IP provided')
+        _log(f"net/ip-intel {target}")
+        return jsonify(do_ip_intel(target, offline=bool(data.get('offline'))))
 
     @app.route('/api/net/speedtest', methods=['POST'])
     def net_speedtest():

@@ -1589,6 +1589,16 @@
                         </div>
                         <pre id="whois-results" class="hidden mt-3 text-xs font-mono bg-slate-900/70 rounded p-3 overflow-x-auto whitespace-pre-wrap max-h-96"></pre>
                     </div>
+                    <!-- IP Attribution -->
+                    <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
+                        <h3 class="text-lg font-semibold mb-1">IP Attribution</h3>
+                        <p class="text-xs text-amber-300/90 mb-2">Who owns a hostile IP — country, ASN, network operator, and the <strong>abuse contact to report it to</strong>. Registry-derived (RDAP + Team Cymru), so ownership is authoritative.</p>
+                        <div class="flex flex-col sm:flex-row gap-2">
+                            <input id="ipintel-target" type="text" inputmode="url" autocomplete="off" placeholder="IP address (or hostname)" class="w-full flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runIpIntel()">
+                            <button onclick="runIpIntel()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Attribute</button>
+                        </div>
+                        <div id="ipintel-results" class="hidden mt-3 text-sm"></div>
+                    </div>
                     <!-- Speed Test -->
                     <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
@@ -7048,7 +7058,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-kiosk-doctor"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ipintel"></script>
 
 </body>
 </html>

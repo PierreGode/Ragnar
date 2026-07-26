@@ -27,6 +27,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [Traceroute](#traceroute) | Diagnostics | `POST /api/net/traceroute` |
 | [MTR](#mtr) | Diagnostics | `POST /api/net/mtr` |
 | [WHOIS](#whois) | Diagnostics | `POST /api/net/whois` |
+| [IP Attribution (country/ASN/ISP/abuse)](ip-intel.md) | Diagnostics | `POST /api/net/ip-intel` |
 | [DNS Doctor (poisoning check)](#dns-doctor) | Diagnostics | `POST /api/net/dns` |
 | [ARP Poisoning](#arp-poisoning) | Diagnostics | `GET /api/net/arp-check`, `/arp-baseline` |
 | [MAC Watch](#mac-watch) | Diagnostics | `GET /api/net/mac-watch`, `POST /api/net/mac-watch-reset` |
