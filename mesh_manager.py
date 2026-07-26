@@ -828,6 +828,97 @@ def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
         return {'reachable': False, 'error': type(exc).__name__}
 
 
+def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
+                  mesh_tag=DEFAULT_MESH_TAG):
+    """Probe a peer and classify *why* it does or doesn't answer.
+
+    `poll_peer` answers "did it work"; a red card that only says "Ragnar's API
+    did not answer" is nearly useless because that one symptom covers at least
+    four causes with four different fixes:
+
+      * refused — nothing is listening on the port (app down / wrong port);
+      * timeout — the port is filtered (ACL or host firewall), not closed;
+      * auth    — the peer answered but rejected this unit's identity;
+      * badbody — something else is on the port, not Ragnar.
+
+    This runs the same request the poller does and returns a machine `category`
+    plus a human `hint`, so the operator gets the actual fix instead of a guess.
+    """
+    result = {'ip': ip, 'port': port, 'url': '', 'reachable': False,
+              'status': None, 'error': '', 'category': '', 'hint': ''}
+    if not ip:
+        result.update(category='address', error='no address',
+                      hint='This peer has no tailnet address to probe.')
+        return result
+
+    host = f'[{ip}]' if (':' in ip and not ip.startswith('[')) else ip
+    url = f'http://{host}:{port}{path}'
+    result['url'] = url
+
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh-Diagnose'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            result['status'] = getattr(resp, 'status', None) or resp.getcode()
+            body = resp.read(65536)
+        if result['status'] == 200:
+            try:
+                json.loads(body.decode('utf-8'))
+                result.update(reachable=True, category='ok',
+                              hint='The peer answered normally — it is reachable and sharing data.')
+            except (ValueError, UnicodeDecodeError):
+                result.update(category='badbody',
+                              hint=(f'Something is listening on port {port} at {ip}, but the reply '
+                                    'was not Ragnar JSON — it is probably a different service. '
+                                    'Check that this is the peer\'s Ragnar port.'))
+        else:
+            result.update(category='http', error=f'HTTP {result["status"]}',
+                          hint=f'The peer returned HTTP {result["status"]}.')
+        return result
+    except urllib.error.HTTPError as exc:
+        result['status'] = exc.code
+        if exc.code == 401:
+            result.update(category='auth', error='HTTP 401',
+                          hint=('The peer answered but rejected this unit. It has login enabled and '
+                                'did not recognize this unit as a tagged mesh peer. Confirm THIS '
+                                f'unit carries {mesh_tag} (the peer authorizes the *caller* by tag), '
+                                'and that tailscaled is running on the peer so it can identify it.'))
+        else:
+            result.update(category='http', error=f'HTTP {exc.code}',
+                          hint=f'The peer returned HTTP {exc.code}.')
+        return result
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, 'reason', None)
+        text = str(reason) if reason is not None else str(exc)
+        result['error'] = text or 'URLError'
+        low = text.lower()
+        if isinstance(reason, ConnectionRefusedError) or 'refused' in low:
+            result.update(category='refused',
+                          hint=(f'Nothing is listening on port {port} at {ip}. The peer\'s Ragnar is '
+                                'not running, crashed, or serves on a different port. On that box: '
+                                '`sudo systemctl status ragnar`, and check its web port.'))
+        elif isinstance(reason, TimeoutError) or 'timed out' in low or 'timeout' in low:
+            result.update(category='timeout',
+                          hint=(f'The connection to port {port} timed out — the port is filtered, not '
+                                f'closed. Almost always your Tailscale ACL does not permit '
+                                f'{mesh_tag}:{port} between units, or a host firewall (ufw/iptables) '
+                                'blocks it. Tailnet membership alone does not open the port.'))
+        else:
+            result.update(category='network',
+                          hint=f'Could not reach port {port} at {ip}: {result["error"]}.')
+        return result
+    except (TimeoutError, socket.timeout):
+        result.update(category='timeout', error='timed out',
+                      hint=(f'The connection to port {port} timed out — likely a Tailscale ACL or a '
+                            f'host firewall blocking {mesh_tag}:{port} between units.'))
+        return result
+    except Exception as exc:
+        result.update(category='error', error=type(exc).__name__,
+                      hint=f'Unexpected error probing the peer: {type(exc).__name__}.')
+        return result
+
+
 def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8):
     """Poll every online peer in parallel. Returns {node_id: health_dict}.
 

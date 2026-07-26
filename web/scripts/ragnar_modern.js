@@ -28969,14 +28969,20 @@ function meshUnitCard(unit, isSelf, ctx) {
                     : ''}
         </p>`;
     } else if (unit.online) {
-        // Polled and genuinely failed. Could be the peer's Ragnar being down,
-        // but just as likely a wrong web port or an ACL that permits the
-        // tailnet but not port 8000 between tags — so don't over-claim.
+        // Polled and genuinely failed. "Ragnar's API did not answer" spans four
+        // very different causes, so offer a live probe that names the real one
+        // rather than making the operator guess or SSH in.
+        const diagIp = escapeHtml(unit.ip || '');
         body = `<p class="text-xs text-amber-300/80 mt-3 pt-3 border-t border-slate-700/60">
             Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.
-            Check the peer's web port (default 8000) is up, and that your ACL allows
-            <code>${escapeHtml((ctx.meshTag || 'tag:ragnar-mesh'))}:${ctx.nodePort || 8000}</code> between units.
-        </p>`;
+        </p>
+        <div class="mt-2">
+            <button onclick="meshDiagnose('${diagIp}', ${ctx.nodePort || 8000}, this)"
+                    class="text-[11px] bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded transition-colors">
+                Diagnose
+            </button>
+            <div class="mesh-diag-out text-[11px] mt-2"></div>
+        </div>`;
     } else {
         body = `<p class="text-xs text-gray-500 mt-3 pt-3 border-t border-slate-700/60">
             Last seen ${unit.last_seen ? escapeHtml(new Date(unit.last_seen).toLocaleString()) : 'unknown'}.
@@ -29452,9 +29458,44 @@ async function meshEnable() {
     }
 }
 
+// Probe a failing peer live and name the real cause. Runs the same request the
+// poller does, from this unit, and classifies the result server-side.
+async function meshDiagnose(ip, port, btn) {
+    const box = btn.parentElement.querySelector('.mesh-diag-out');
+    if (box) box.innerHTML = `<span class="text-gray-400">Probing ${escapeHtml(ip)}:${port}…</span>`;
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/mesh/diagnose', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip, port })
+        });
+        const data = await resp.json();
+        const r = (data && data.result) || {};
+        const good = r.category === 'ok';
+        // Category badges make the class of problem scannable at a glance.
+        const label = {
+            ok: 'Reachable', refused: 'Port closed', timeout: 'Port filtered',
+            auth: 'Rejected', badbody: 'Wrong service', http: 'HTTP error',
+            network: 'Unreachable', address: 'No address', error: 'Error',
+        }[r.category] || 'Result';
+        if (box) {
+            box.innerHTML =
+                `<span class="inline-block px-2 py-0.5 rounded ${good
+                    ? 'bg-green-700/40 text-green-300' : 'bg-amber-700/40 text-amber-200'}">${label}</span>` +
+                `<span class="block mt-1 ${good ? 'text-green-300/90' : 'text-gray-300'}">${escapeHtml(r.hint || r.error || 'No result.')}</span>`;
+        }
+    } catch (err) {
+        if (box) box.innerHTML = `<span class="text-red-400">Diagnose failed: ${escapeHtml(String(err))}</span>`;
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
 window.meshEnable = meshEnable;
+window.meshDiagnose = meshDiagnose;

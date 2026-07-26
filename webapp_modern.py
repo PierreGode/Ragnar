@@ -2645,6 +2645,30 @@ def mesh_leave():
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
+@app.route('/api/mesh/diagnose', methods=['POST'])
+def mesh_diagnose():
+    """Probe a specific peer from this unit and classify why it does/doesn't
+    answer. Operator action (POST, session-gated) — turns a red "did not answer"
+    card into the actual cause (app down / wrong port / ACL / auth)."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    ip = (data.get('ip') or '').strip()
+    if not ip:
+        return jsonify({'success': False, 'message': 'No peer address to probe.'}), 400
+    try:
+        port = int(data.get('port') or _mesh_node_port())
+    except (TypeError, ValueError):
+        port = _mesh_node_port()
+    try:
+        timeout = max(2, int(shared_data.config.get('mesh_poll_timeout', 6)))
+    except (TypeError, ValueError):
+        timeout = 6
+    result = mesh_manager.diagnose_peer(ip, port=port, timeout=timeout,
+                                        mesh_tag=_mesh_tag())
+    return jsonify({'success': True, 'result': result})
+
+
 @app.route('/api/mesh/install', methods=['POST'])
 def mesh_install():
     """Install the Tailscale client on this unit from the web UI.

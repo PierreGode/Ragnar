@@ -554,11 +554,22 @@ tab shows a banner with a one-click **Enable data sharing** button; that flips
 failed read "Ragnar not answering" instead — a different state.)
 
 **A peer shows "Ragnar not answering".**
-This one *was* polled and the peer's API did not respond. It is not necessarily
-the peer's Ragnar being down — check, in order: the peer's web port is up
-(`mesh_node_port`, default 8000, must match on both), your ACL permits
-`tag:ragnar-mesh:8000` between units (tailnet membership alone does not open the
-port), and only then SSH in and `sudo systemctl status ragnar`.
+This one *was* polled and the peer's API did not respond — but "did not respond"
+covers four different faults, so **click the card's `Diagnose` button**. It
+probes the peer live from this unit and names the actual cause:
+
+| Result | Meaning | Fix |
+|---|---|---|
+| **Port closed** (refused) | Nothing is listening on the port | The peer's Ragnar is down, crashed, or on another port. `sudo systemctl status ragnar` on that box; check `mesh_node_port`. |
+| **Port filtered** (timeout) | The port is blocked, not closed | Your ACL doesn't permit `tag:ragnar-mesh:8000` between units, or a host firewall (ufw/iptables) does. Tailnet membership alone does not open the port. |
+| **Rejected** (401) | The peer answered but refused this unit | This unit isn't recognised as a tagged mesh peer. Confirm **this** unit carries the tag (the peer authorises the caller). |
+| **Wrong service** | Something else is on the port | Not Ragnar — check the port number. |
+
+The ACL rule most first-time meshes are missing:
+
+```jsonc
+{ "action": "accept", "src": ["tag:ragnar-mesh"], "dst": ["tag:ragnar-mesh:8000"] }
+```
 
 **"They sense each other but don't share data" / units show "On tailnet · not
 in mesh".**

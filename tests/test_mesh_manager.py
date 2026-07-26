@@ -198,6 +198,101 @@ def test_join_rejects_a_bad_auth_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# diagnose_peer — turning "Ragnar's API did not answer" into the real cause
+# ---------------------------------------------------------------------------
+# A red "did not answer" card spans four causes with four different fixes.
+# diagnose_peer must classify each so the operator gets the fix, not a guess.
+# Each is one urlopen outcome, mocked here — no real network.
+
+import urllib.error
+
+
+class _FakeResp:
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self, *a): return self._body
+    def getcode(self): return self.status
+
+
+def _patch_urlopen(monkeypatch, behaviour):
+    import urllib.request
+    monkeypatch.setattr(urllib.request, 'urlopen', behaviour)
+
+
+def test_diagnose_no_address():
+    r = mesh_manager.diagnose_peer('')
+    assert r['category'] == 'address'
+    assert r['reachable'] is False
+
+
+def test_diagnose_healthy_peer(monkeypatch):
+    _patch_urlopen(monkeypatch,
+                   lambda *a, **k: _FakeResp(200, b'{"success": true, "unit_id": 2}'))
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'ok'
+    assert r['reachable'] is True
+
+
+def test_diagnose_something_else_on_the_port(monkeypatch):
+    """200 but not Ragnar JSON — a different service is on that port."""
+    _patch_urlopen(monkeypatch, lambda *a, **k: _FakeResp(200, b'<html>nginx</html>'))
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'badbody'
+    assert r['reachable'] is False
+
+
+def test_diagnose_connection_refused(monkeypatch):
+    """Nothing listening — the peer's Ragnar is down or on another port."""
+    def refuse(*a, **k):
+        raise urllib.error.URLError(ConnectionRefusedError('Connection refused'))
+    _patch_urlopen(monkeypatch, refuse)
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'refused'
+    assert 'systemctl' in r['hint']
+
+
+def test_diagnose_timeout_is_a_firewall_or_acl(monkeypatch):
+    """Filtered, not closed — the ACL or a host firewall blocks the port."""
+    def slow(*a, **k):
+        raise urllib.error.URLError(TimeoutError('timed out'))
+    _patch_urlopen(monkeypatch, slow)
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'timeout'
+    assert 'ACL' in r['hint'] or 'firewall' in r['hint']
+
+
+def test_diagnose_bare_timeout_error(monkeypatch):
+    """Some stacks raise TimeoutError directly rather than wrapping it."""
+    def slow(*a, **k):
+        raise TimeoutError('timed out')
+    _patch_urlopen(monkeypatch, slow)
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'timeout'
+
+
+def test_diagnose_401_is_an_identity_problem(monkeypatch):
+    """The peer answered but rejected this unit — a tag/auth issue, not a port."""
+    def unauth(*a, **k):
+        raise urllib.error.HTTPError('http://x', 401, 'Unauthorized', {}, None)
+    _patch_urlopen(monkeypatch, unauth)
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000, mesh_tag='tag:ragnar-mesh')
+    assert r['category'] == 'auth'
+    assert 'tag:ragnar-mesh' in r['hint']
+
+
+def test_diagnose_other_http_code(monkeypatch):
+    def teapot(*a, **k):
+        raise urllib.error.HTTPError('http://x', 418, "I'm a teapot", {}, None)
+    _patch_urlopen(monkeypatch, teapot)
+    r = mesh_manager.diagnose_peer('100.78.0.9', port=8000)
+    assert r['category'] == 'http'
+    assert '418' in r['error']
+
+
+# ---------------------------------------------------------------------------
 # `tailscale serve`
 # ---------------------------------------------------------------------------
 # With the tailnet's HTTPS Certificates feature disabled, `tailscale serve
