@@ -139,6 +139,8 @@ def parse_rdap(obj):
     _walk_entities(obj.get('entities'), 'abuse', emails)
     if emails:
         out['abuse_email'] = emails[0]
+    if addresses:
+        out['org_address'] = addresses[0]
     return out
 
 
