@@ -5794,6 +5794,7 @@ async function runIpIntel() {
             </div>
             <div class="space-y-1 text-xs">
                 ${row('Network', (d.prefix || '') + (d.network_name ? '  ' + d.network_name : ''))}
+                ${row('Allocated', d.allocated)}
                 ${row('ASN', d.asn ? 'AS' + d.asn + (d.as_org ? '  ' + d.as_org : '') : '')}
                 ${row('Country', country)}
                 ${row('Registry', d.registry)}
