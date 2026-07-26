@@ -335,10 +335,37 @@ Only two routes are peer-readable:
 
 ### Never Funnel
 
-`tailscale serve` (tailnet-only, real TLS certificate for the unit's MagicDNS
-name) is supported and exposed in the UI. `tailscale funnel` publishes to the
-open internet and is **not** — for a box full of offensive tooling that would be
-an unambiguous mistake.
+`tailscale serve` (tailnet-only) is supported and exposed in the UI.
+`tailscale funnel` publishes to the open internet and is **not** — for a box
+full of offensive tooling that would be an unambiguous mistake.
+
+### Publishing needs HTTPS certificates enabled first
+
+**Publish (HTTPS)** needs the tailnet's *HTTPS Certificates* feature switched on
+(admin console → **DNS → HTTPS Certificates**). Without it there is no
+certificate to issue for the unit's MagicDNS name.
+
+This one is worth calling out because the failure is nasty: with the feature
+disabled, `tailscale serve --https` does **not** return an error — it blocks
+indefinitely, even with stdin closed, so it is not a prompt waiting for an
+answer. The only symptom is an unexplained timeout.
+
+Ragnar therefore checks `CertDomains` *before* invoking the command and refuses
+in milliseconds with a link to the setting, rather than hanging. If you would
+rather not enable certificates, **Publish (HTTP)** serves the same proxy on port
+80 — still tailnet-only, just without TLS:
+
+```sh
+sudo tailscale serve --bg --http 80 http://127.0.0.1:8000
+```
+
+Publishing at all is optional. Peers and operators can always reach a unit
+directly at `http://100.x.y.z:8000`; `serve` only buys a friendly hostname and,
+with certificates, real TLS.
+
+> `tailscale serve` writes tailnet-wide config and needs root. The packaged
+> Ragnar service runs as root, so this is only a problem for a hand-started
+> instance — in which case run `sudo tailscale set --operator=$USER` once.
 
 ### Serve + kiosk is refused
 
@@ -503,6 +530,22 @@ in that tag's `tagOwners`.
 
 **Publishing over HTTPS returns 409.**
 Kiosk mode is enabled. See [Serve + kiosk is refused](#serve--kiosk-is-refused).
+
+**"HTTPS certificates are not enabled for this tailnet."**
+Enable **DNS → HTTPS Certificates** in the admin console, or use
+**Publish (HTTP)**. See
+[Publishing needs HTTPS certificates enabled first](#publishing-needs-https-certificates-enabled-first).
+Confirm with:
+```sh
+tailscale status --json | grep -i certdomains
+```
+An empty or absent `CertDomains` means certificates cannot be issued.
+
+**`tailscale serve` timed out.**
+Fixed in the mesh code — the precondition is now checked before the command
+runs. If you hit it from the shell directly, it is the same cause: HTTPS
+certificates are off and the command will never return. `Ctrl-C` and use the
+HTTP form.
 
 ---
 

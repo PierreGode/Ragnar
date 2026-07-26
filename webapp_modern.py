@@ -2513,6 +2513,10 @@ def mesh_status():
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),
+        # Whether `tailscale serve --https` can actually work here. Reported so
+        # the UI can say so up front instead of offering a button that hangs.
+        'https_available': mesh_manager.https_available() if mesh_available else False,
+        'https_setup_url': mesh_manager.HTTPS_SETUP_URL if mesh_available else '',
         # An access path that shares nothing with Tailscale — reported so an
         # operator can confirm a second way in exists *before* needing it.
         'pi_connect': (mesh_manager.pi_connect_status() if mesh_available
@@ -2595,6 +2599,7 @@ def mesh_serve():
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     data = request.get_json(silent=True) or {}
     enable = bool(data.get('enable', True))
+    use_https = bool(data.get('https', True))
 
     # Refuse the one combination that silently disables authentication.
     # `tailscale serve` proxies from tailscaled, so every request reaches Flask
@@ -2612,8 +2617,10 @@ def mesh_serve():
                         f'{_mesh_node_port()} instead.'),
         }), 409
 
-    ok, message = mesh_manager.serve_web(port=_mesh_node_port(), enable=enable)
-    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+    ok, message = mesh_manager.serve_web(port=_mesh_node_port(), enable=enable,
+                                         use_https=use_https)
+    return jsonify({'success': ok, 'message': message,
+                    'https_available': mesh_manager.https_available()}), (200 if ok else 400)
 
 
 @app.route('/api/mesh/routes', methods=['POST'])

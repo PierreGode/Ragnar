@@ -240,7 +240,13 @@ def _run(args, timeout=15):
         return 127, '', 'tailscale is not installed'
     try:
         proc = subprocess.run([exe] + list(args), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, timeout=timeout,
+                              # Nothing here runs on a terminal. Without this a
+                              # subcommand that decides to prompt would block on
+                              # a stdin that is never going to answer, and the
+                              # only symptom would be a timeout that says
+                              # nothing about the actual question being asked.
+                              stdin=subprocess.DEVNULL)
         return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return 124, '', f'tailscale {" ".join(args)} timed out after {timeout}s'
@@ -663,26 +669,98 @@ def set_running(running, timeout=30):
     return False, (err or out or f'tailscale {"up" if running else "down"} failed (exit {rc}).').strip()
 
 
-def serve_web(port=DEFAULT_NODE_PORT, enable=True, timeout=30):
-    """Expose (or stop exposing) Ragnar's web UI to the tailnet over HTTPS.
+def https_available():
+    """True when this tailnet can issue TLS certificates for MagicDNS names.
 
-    `tailscale serve` terminates TLS with a real certificate for the node's
-    MagicDNS name, so the UI stops throwing self-signed warnings — but only
-    inside the tailnet. This is deliberately *not* `tailscale funnel`: funnel
-    publishes to the open internet, which for a box full of offensive tooling
-    would be an unambiguous mistake.
+    `CertDomains` is populated by the control plane only when the tailnet has
+    HTTPS Certificates switched on. Checking it is not an optimisation — with
+    the feature disabled, `tailscale serve --https` does not fail, it *hangs*
+    indefinitely waiting for a certificate that can never be issued (verified
+    against a live tailnet; it blocks even with stdin closed, so it is not an
+    unanswered prompt). Every caller must therefore check before invoking, or
+    the only symptom a user ever sees is an unexplained timeout.
+    """
+    data = raw_status()
+    if not data:
+        return False
+    return bool(data.get('CertDomains'))
+
+
+HTTPS_SETUP_URL = 'https://login.tailscale.com/admin/dns'
+
+
+def serve_web(port=DEFAULT_NODE_PORT, enable=True, use_https=True, timeout=120):
+    """Expose (or stop exposing) Ragnar's web UI to the tailnet.
+
+    With HTTPS, `tailscale serve` terminates TLS with a real certificate for the
+    node's MagicDNS name, so the UI stops throwing self-signed warnings. Without
+    it, the same proxy is served over plain HTTP on port 80 — still tailnet-only,
+    just without TLS.
+
+    Either way this is deliberately *not* `tailscale funnel`: funnel publishes to
+    the open internet, which for a box full of offensive tooling would be an
+    unambiguous mistake.
+
+    The timeout is generous because a genuine first-time certificate issuance
+    goes out to Let's Encrypt and is legitimately slow. That is only ever
+    reached once the precondition below has passed.
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
+
+    # Refuse rather than hang. See https_available().
+    if enable and use_https and not https_available():
+        return False, (
+            'HTTPS certificates are not enabled for this tailnet, so no '
+            'certificate can be issued for this unit and the request would '
+            f'hang rather than fail. Enable them at {HTTPS_SETUP_URL} '
+            '(DNS → HTTPS Certificates), or publish over plain HTTP instead — '
+            'still tailnet-only, just without TLS.')
+
     if enable:
-        args = ['serve', '--bg', '--https', '443', f'http://127.0.0.1:{port}']
+        args = (['serve', '--bg', '--https', '443', f'http://127.0.0.1:{port}']
+                if use_https else
+                ['serve', '--bg', '--http', '80', f'http://127.0.0.1:{port}'])
     else:
-        args = ['serve', '--https', '443', 'off']
+        args = (['serve', '--https', '443', 'off'] if use_https else
+                ['serve', '--http', '80', 'off'])
+
     rc, out, err = _run(args, timeout=timeout)
     if rc == 0:
-        return True, ('Web UI published to the tailnet over HTTPS.'
-                      if enable else 'Stopped publishing the web UI.')
-    return False, (err or out or f'tailscale serve failed (exit {rc}).').strip()
+        if not enable:
+            return True, 'Stopped publishing the web UI.'
+        scheme = 'HTTPS' if use_https else 'HTTP'
+        host = magic_dns_name()
+        where = f' at {"https" if use_https else "http"}://{host}' if host else ''
+        return True, f'Web UI published to the tailnet over {scheme}{where}.'
+    return False, _explain_serve_failure(rc, (err or out or '').strip(), use_https)
+
+
+def magic_dns_name():
+    """This node's MagicDNS name, e.g. 'ragnar-jersey.tailnet.ts.net'."""
+    data = raw_status()
+    if not data:
+        return ''
+    return ((data.get('Self') or {}).get('DNSName') or '').rstrip('.')
+
+
+def _explain_serve_failure(rc, detail, use_https):
+    """Turn a `tailscale serve` failure into something the operator can act on."""
+    lowered = detail.lower()
+    if 'access denied' in lowered or 'permission denied' in lowered:
+        return ('Tailscale refused the serve config because Ragnar is not '
+                'running as root. Either run Ragnar as root (the packaged '
+                'service does) or grant this user control with: '
+                'sudo tailscale set --operator=$USER')
+    if rc == 124 and use_https:
+        return ('Timed out waiting for a TLS certificate. Confirm HTTPS '
+                f'Certificates are enabled for the tailnet at {HTTPS_SETUP_URL}, '
+                'then try again — or publish over plain HTTP instead.')
+    if rc == 124:
+        return 'Timed out talking to tailscaled. Check: systemctl status tailscaled'
+    if 'funnel' in lowered:
+        return detail
+    return detail or f'tailscale serve failed (exit {rc}).'
 
 
 def advertise_routes(routes, timeout=30):

@@ -3049,14 +3049,20 @@
                 <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">This unit's mesh controls</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="glass rounded-lg p-4">
-                        <h4 class="font-medium mb-1">Publish web UI over HTTPS</h4>
-                        <p class="text-xs text-gray-400 mb-3">
-                            Serves this UI on the unit's MagicDNS name with a real certificate — tailnet only,
+                        <h4 class="font-medium mb-1">Publish web UI to the tailnet</h4>
+                        <p class="text-xs text-gray-400 mb-2">
+                            Serves this UI on the unit's MagicDNS name — tailnet only,
                             never the public internet.
                         </p>
+                        <div id="mesh-https-note" class="hidden text-[11px] rounded border px-2 py-1.5 mb-2"></div>
                         <div class="flex gap-2">
-                            <button onclick="meshServe(true)" class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors">Publish</button>
-                            <button onclick="meshServe(false)" class="flex-1 bg-slate-600 hover:bg-slate-500 text-white py-2 px-3 rounded text-sm transition-colors">Stop</button>
+                            <button onclick="meshServe(true, true)" id="mesh-serve-https-btn"
+                                    class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors">Publish (HTTPS)</button>
+                            <button onclick="meshServe(true, false)"
+                                    class="flex-1 bg-slate-600 hover:bg-slate-500 text-white py-2 px-3 rounded text-sm transition-colors"
+                                    title="Plain HTTP on port 80 — still tailnet-only, no certificate needed">Publish (HTTP)</button>
+                            <button onclick="meshServe(false, true)"
+                                    class="bg-slate-700 hover:bg-slate-600 text-white py-2 px-3 rounded text-sm transition-colors">Stop</button>
                         </div>
                     </div>
                     <div class="glass rounded-lg p-4">
@@ -7215,7 +7221,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh3"></script>
 
 </body>
 </html>

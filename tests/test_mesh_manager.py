@@ -162,6 +162,110 @@ def test_join_rejects_a_bad_auth_key(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# `tailscale serve`
+# ---------------------------------------------------------------------------
+# With the tailnet's HTTPS Certificates feature disabled, `tailscale serve
+# --https` does not return an error — it blocks indefinitely waiting for a
+# certificate that can never be issued (confirmed against a live tailnet; it
+# hangs even with stdin closed, so it is not an unanswered prompt). The only
+# symptom is an unexplained timeout, so the precondition must be checked before
+# the command is ever invoked.
+
+def test_https_serve_refuses_when_certs_are_unavailable(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: False)
+    ran = []
+    monkeypatch.setattr(mesh_manager, '_run',
+                        lambda *a, **k: ran.append(a) or (0, '', ''))
+
+    ok, message = mesh_manager.serve_web(enable=True, use_https=True)
+    assert ok is False
+    # The command must never be reached — reaching it *is* the hang.
+    assert ran == []
+    assert 'not enabled' in message.lower()
+    assert 'login.tailscale.com' in message
+
+
+def test_http_serve_works_without_certs(monkeypatch):
+    """Plain HTTP needs no certificate, so it stays available as the fallback."""
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: False)
+    monkeypatch.setattr(mesh_manager, 'magic_dns_name', lambda: 'unit.tailnet.ts.net')
+    captured = {}
+
+    def fake_run(args, timeout=None):
+        captured['args'] = list(args)
+        return 0, 'Serve started', ''
+
+    monkeypatch.setattr(mesh_manager, '_run', fake_run)
+    ok, message = mesh_manager.serve_web(port=8000, enable=True, use_https=False)
+    assert ok is True
+    assert '--http' in captured['args'] and '80' in captured['args']
+    assert '--https' not in captured['args']
+    assert 'unit.tailnet.ts.net' in message
+
+
+def test_stopping_serve_never_checks_certs(monkeypatch):
+    """Turning it off must work even when certs are unavailable."""
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: False)
+    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k: (0, '', ''))
+    ok, message = mesh_manager.serve_web(enable=False, use_https=True)
+    assert ok is True
+    assert 'stopped' in message.lower()
+
+
+def test_https_serve_proceeds_when_certs_are_available(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'magic_dns_name', lambda: 'unit.tailnet.ts.net')
+    captured = {}
+
+    def fake_run(args, timeout=None):
+        captured['args'] = list(args)
+        captured['timeout'] = timeout
+        return 0, '', ''
+
+    monkeypatch.setattr(mesh_manager, '_run', fake_run)
+    ok, _ = mesh_manager.serve_web(port=8000, enable=True, use_https=True)
+    assert ok is True
+    assert '--https' in captured['args']
+    # Real certificate issuance goes out to Let's Encrypt and is slow; a short
+    # timeout here would fail a request that was going to succeed.
+    assert captured['timeout'] >= 60
+
+
+def test_https_available_reads_cert_domains(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'raw_status',
+                        lambda force=False: {'CertDomains': ['unit.tailnet.ts.net']})
+    assert mesh_manager.https_available() is True
+    monkeypatch.setattr(mesh_manager, 'raw_status', lambda force=False: {'CertDomains': None})
+    assert mesh_manager.https_available() is False
+    monkeypatch.setattr(mesh_manager, 'raw_status', lambda force=False: {})
+    assert mesh_manager.https_available() is False
+    monkeypatch.setattr(mesh_manager, 'raw_status', lambda force=False: None)
+    assert mesh_manager.https_available() is False
+
+
+def test_permission_failure_is_explained(monkeypatch):
+    """Ragnar runs as root, but a hand-run instance may not — say so plainly."""
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: True)
+    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k:
+                        (1, '', 'Access denied: serve config denied'))
+    ok, message = mesh_manager.serve_web(enable=True, use_https=True)
+    assert ok is False
+    assert 'root' in message.lower()
+
+
+def test_subprocess_never_inherits_stdin():
+    """A prompt-on-stdin would hang until the timeout and explain nothing."""
+    import inspect
+    source = inspect.getsource(mesh_manager._run)
+    assert 'stdin=subprocess.DEVNULL' in source
+
+
+# ---------------------------------------------------------------------------
 # Cross-site correlation scoping
 # ---------------------------------------------------------------------------
 

@@ -29079,6 +29079,7 @@ function renderMesh(data) {
     }
 
     renderPiConnect(data.pi_connect || {});
+    renderHttpsNote(data);
 
     const lastPoll = document.getElementById('mesh-last-poll');
     lastPoll.textContent = data.last_poll
@@ -29219,8 +29220,37 @@ async function meshPost(path, body, okMessage) {
     }
 }
 
-function meshServe(enable) {
-    return meshPost('/api/mesh/serve', { enable }, enable ? 'Published.' : 'Stopped.');
+function meshServe(enable, https) {
+    return meshPost('/api/mesh/serve', { enable, https: https !== false },
+                    enable ? 'Published.' : 'Stopped.');
+}
+
+// Say up front that HTTPS cannot work here, rather than letting the operator
+// click a button whose only possible outcome is a two-minute wait. With the
+// tailnet's HTTPS Certificates feature off, `tailscale serve --https` blocks
+// forever instead of returning an error.
+function renderHttpsNote(data) {
+    const note = document.getElementById('mesh-https-note');
+    const btn = document.getElementById('mesh-serve-https-btn');
+    if (!note || !btn) return;
+
+    if (data.https_available) {
+        note.classList.add('hidden');
+        btn.disabled = false;
+        btn.classList.remove('opacity-40', 'cursor-not-allowed');
+        return;
+    }
+
+    note.className = 'text-[11px] rounded border px-2 py-1.5 mb-2 ' +
+                     'bg-amber-950/30 border-amber-800 text-amber-200';
+    note.innerHTML = 'HTTPS certificates are not enabled for this tailnet, so no ' +
+        'certificate can be issued for this unit. Enable them at ' +
+        `<a href="${escapeHtml(data.https_setup_url || 'https://login.tailscale.com/admin/dns')}" ` +
+        'target="_blank" rel="noopener" class="underline">DNS → HTTPS Certificates</a>, ' +
+        'or use <strong>Publish (HTTP)</strong> — still tailnet-only, just without TLS.';
+    note.classList.remove('hidden');
+    btn.disabled = true;
+    btn.classList.add('opacity-40', 'cursor-not-allowed');
 }
 
 function meshLeave() {
