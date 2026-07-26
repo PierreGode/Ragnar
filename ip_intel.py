@@ -67,18 +67,27 @@ def ip_scope(ip):
 # Parsers (pure — the network functions below are thin wrappers)
 # --------------------------------------------------------------------------
 
+def _vcard_email(vcard_array):
+    """Pull the email out of an RDAP jCard (['vcard', [[name,{},type,value],...]])."""
+    try:
+        for entry in vcard_array[1]:
+            if entry[0] == 'email' and len(entry) >= 4 and entry[3]:
+                return str(entry[3]).strip()
+    except (IndexError, TypeError):
+        pass
+    return None
+
+
 def _vcard_address(vcard_array):
     """Pull a postal address out of an RDAP jCard, if present."""
     try:
         for entry in vcard_array[1]:
             if entry[0] != 'adr' or len(entry) < 4:
                 continue
-            # Prefer the human-readable label if the registry provided one
             params = entry[1] if isinstance(entry[1], dict) else {}
             label = (params.get('label') or '').strip()
             if label:
                 return ' '.join(label.split())
-            # Otherwise join the structured components that are non-empty
             parts = entry[3] if isinstance(entry[3], (list, tuple)) else []
             text = ', '.join(str(p).strip() for p in parts if p and str(p).strip())
             if text:
