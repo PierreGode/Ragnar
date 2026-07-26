@@ -28912,15 +28912,21 @@ function meshMetric(label, value, extraClass) {
     </div>`;
 }
 
-function meshUnitCard(unit, isSelf) {
+function meshUnitCard(unit, isSelf, ctx) {
+    ctx = ctx || {};
     const health = unit.health || {};
-    // A unit can be "online" to Tailscale while Ragnar itself is dead. That
-    // distinction is the single most useful thing this view shows, so it gets
-    // its own state rather than being folded into offline.
-    const reachable = isSelf || health.reachable;
+    // Three distinct states, not two. A peer whose health is *null* was never
+    // polled — that is NOT the same as one that was polled and failed to
+    // answer. Reporting "Ragnar not answering" for a never-polled peer (which
+    // happens whenever data sharing is off) is a false alarm, and it directly
+    // contradicts the "not polled yet" footer.
+    const polled = isSelf || unit.health != null;
+    const reachable = isSelf || health.reachable === true;
     let state, dot, ring;
     if (!unit.online) {
         state = 'Offline'; dot = 'bg-gray-500'; ring = 'border-slate-700';
+    } else if (!polled) {
+        state = 'Not polled yet'; dot = 'bg-sky-400'; ring = 'border-slate-700';
     } else if (!reachable) {
         state = 'Ragnar not answering'; dot = 'bg-amber-400'; ring = 'border-amber-700/60';
     } else {
@@ -28953,10 +28959,23 @@ function meshUnitCard(unit, isSelf) {
             ${meshMetric('Alerts', (health.watchtower || {}).total ?? '—')}
             ${meshMetric('Incidents', inc.total ?? '—')}
         </div>`;
+    } else if (unit.online && !polled) {
+        // Never polled — say so plainly and point at the actual cause instead
+        // of accusing the peer's Ragnar of being down.
+        body = `<p class="text-xs text-sky-300/80 mt-3 pt-3 border-t border-slate-700/60">
+            Tagged and reachable over Tailscale, waiting for the first health poll.${
+                ctx.enabled === false
+                    ? ' Data sharing is off on this unit, so it isn\'t polling yet — enable it above.'
+                    : ''}
+        </p>`;
     } else if (unit.online) {
+        // Polled and genuinely failed. Could be the peer's Ragnar being down,
+        // but just as likely a wrong web port or an ACL that permits the
+        // tailnet but not port 8000 between tags — so don't over-claim.
         body = `<p class="text-xs text-amber-300/80 mt-3 pt-3 border-t border-slate-700/60">
             Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.
-            The box has power and network — the application is what is down.
+            Check the peer's web port (default 8000) is up, and that your ACL allows
+            <code>${escapeHtml((ctx.meshTag || 'tag:ragnar-mesh'))}:${ctx.nodePort || 8000}</code> between units.
         </p>`;
     } else {
         body = `<p class="text-xs text-gray-500 mt-3 pt-3 border-t border-slate-700/60">
@@ -29106,12 +29125,19 @@ function renderMesh(data) {
             `share data with them until each carries <code>${tagCode}</code>. Tag them the same way.`));
     }
 
-    // Tagged and connected, but the poller is switched off — no data will flow.
-    if (inMesh && !data.enabled) {
+    // In the mesh (this unit tagged, or tagged peers visible) but the poller is
+    // switched off — no data will ever flow, and peers show "Not polled yet".
+    // This is the exact state a unit lands in when it was tagged in the admin
+    // console rather than through Ragnar's Join flow (which sets mesh_enabled).
+    // Offer to fix it in one click rather than sending them to Config.
+    const hasMeshNodes = data.self_tagged || (data.peers || []).some(p => p.is_ragnar);
+    if (hasMeshNodes && !data.enabled) {
         notes.push(meshWarning(
-            `This unit is in the mesh, but <strong>data sharing is turned off</strong>. ` +
-            `Enable <code>mesh_enabled</code> (Config → Ragnar Mesh, or re-run Join) so it starts ` +
-            `polling peers and pooling alerts.`));
+            `<strong>Data sharing is off on this unit</strong>, so it never polls its peers — ` +
+            `that's why they read "Not polled yet". This happens when a unit is tagged in the ` +
+            `Tailscale console instead of through Join. ` +
+            `<button onclick="meshEnable()" class="ml-1 mt-2 inline-block bg-Ragnar-600 hover:bg-Ragnar-700 ` +
+            `text-white text-xs px-3 py-1 rounded transition-colors">Enable data sharing</button>`));
     }
 
     warnings.innerHTML = notes.join('');
@@ -29125,8 +29151,16 @@ function renderMesh(data) {
         document.getElementById('mesh-stat-degraded').textContent = data.summary.degraded ?? 0;
     }
 
+    // Context every card needs to describe a poll failure or pending state
+    // honestly: whether polling is even on, and what port/tag to check.
+    const cardCtx = {
+        enabled: data.enabled,
+        meshTag: data.mesh_tag,
+        nodePort: data.node_port,
+    };
+
     if (data.self) {
-        document.getElementById('mesh-self-card').innerHTML = meshUnitCard(data.self, true);
+        document.getElementById('mesh-self-card').innerHTML = meshUnitCard(data.self, true, cardCtx);
     }
 
     const ragnarPeers = (data.peers || []).filter(p => p.is_ragnar);
@@ -29137,7 +29171,7 @@ function renderMesh(data) {
             <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
         </p>`;
     } else {
-        cards.innerHTML = ragnarPeers.map(p => meshUnitCard(p, false)).join('');
+        cards.innerHTML = ragnarPeers.map(p => meshUnitCard(p, false, cardCtx)).join('');
     }
 
     renderPiConnect(data.pi_connect || {});
@@ -29396,8 +29430,31 @@ function meshLeave() {
     return meshPost('/api/mesh/leave', {}, 'Logged out.');
 }
 
+// Turn on data sharing (the mesh_enabled master switch) in one click. This is
+// the fix for a unit tagged in the console but never Joined through Ragnar:
+// tagging puts it in the mesh, this makes it actually poll.
+async function meshEnable() {
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mesh_enabled: true })
+        });
+        const data = await resp.json();
+        if (data && data.success === false) {
+            showNotification('Could not enable data sharing: ' + (data.error || 'unknown'), 'error');
+            return;
+        }
+        showNotification('Mesh data sharing enabled — polling peers now', 'success');
+        await refreshMesh(true);   // ?refresh=1 now passes the enabled gate and polls
+    } catch (err) {
+        showNotification('Could not enable data sharing: ' + err, 'error');
+    }
+}
+
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
+window.meshEnable = meshEnable;

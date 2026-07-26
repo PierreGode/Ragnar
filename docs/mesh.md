@@ -543,10 +543,22 @@ service runs as root and is unaffected.
 at `/var/run/tailscale/tailscaled.sock` and needs root — which the Ragnar
 service already has.
 
+**A peer shows "Not polled yet" and the footer says "Peer data has not been
+polled yet".**
+The peer is tagged and reachable, but this unit has never polled it — almost
+always because **`mesh_enabled` is off**. Tagging a node in the Tailscale
+console puts it *in* the mesh; `mesh_enabled` is the separate switch that makes
+this unit actually *poll* its peers, and only Ragnar's Join flow sets it. The
+tab shows a banner with a one-click **Enable data sharing** button; that flips
+`mesh_enabled` and starts the poller. (Peers that were genuinely polled and
+failed read "Ragnar not answering" instead — a different state.)
+
 **A peer shows "Ragnar not answering".**
-The box has power and network; the application is what is down. Check
-`mesh_node_port` matches on both units, then SSH in and
-`sudo systemctl status ragnar`.
+This one *was* polled and the peer's API did not respond. It is not necessarily
+the peer's Ragnar being down — check, in order: the peer's web port is up
+(`mesh_node_port`, default 8000, must match on both), your ACL permits
+`tag:ragnar-mesh:8000` between units (tailnet membership alone does not open the
+port), and only then SSH in and `sudo systemctl status ragnar`.
 
 **"They sense each other but don't share data" / units show "On tailnet · not
 in mesh".**
