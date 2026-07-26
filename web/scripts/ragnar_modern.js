@@ -29224,11 +29224,18 @@ function renderPiConnect(pc) {
                  `through it yet. Run <code class="text-gray-400">rpi-connect signin</code>${asUser} ` +
                  `and open the link it prints to finish. Until then it is not a usable fallback.`;
     } else {
+        // Off on THIS unit. It is per-unit and per-user: signing in on another
+        // Pi does nothing here. The linger note is the common headless gotcha —
+        // without it the service dies when the login session ends.
         dot = 'bg-amber-400';
-        headline = 'Installed but off';
-        detail = `Run <code class="text-gray-400">rpi-connect on</code>${asUser} on this unit, then ` +
-                 `<code class="text-gray-400">rpi-connect signin</code> and open the link it prints. ` +
-                 `Until then it is not a usable fallback.`;
+        const lingerUser = pc.user || 'pi';
+        headline = 'Installed but off (this unit)';
+        detail = `Pi Connect isn't running for <code class="text-gray-400">${escapeHtml(lingerUser)}</code> ` +
+                 `on this unit — it is per-unit, so signing in on another Pi doesn't count. On this box, ` +
+                 `as that user: <code class="text-gray-400">rpi-connect on</code>, ` +
+                 `<code class="text-gray-400">rpi-connect signin</code> (open the link), and ` +
+                 `<code class="text-gray-400">sudo loginctl enable-linger ${escapeHtml(lingerUser)}</code> ` +
+                 `so it survives logout and reboot. Until then it is not a usable fallback.`;
     }
 
     el.innerHTML = `<div class="flex items-start justify-between gap-3">

@@ -320,6 +320,21 @@ belong to.
 > run `rpi-connect` commands, run them as that same user or they act on the
 > wrong (empty) session.
 
+**"Installed but off" but I thought I set it up?** Two things trip people up,
+and both make the card *correct*, not wrong:
+
+* **It is per-unit and per-user.** Signing in on one Pi does nothing for
+  another. Each unit you want reachable via Connect must be signed in on that
+  box, as its own login user.
+* **Linger.** If you run `rpi-connect on` over SSH without enabling linger, the
+  per-user service stops the moment your session ends — so it works while you're
+  logged in and is dead an hour later. Enable it once:
+  ```sh
+  sudo loginctl enable-linger pi      # the login user Connect runs as
+  ```
+  This is the single most common reason Connect "stops working" on a headless
+  Pi. Confirm with `loginctl show-user pi -p Linger`.
+
 > **Set this up before you ship the hardware.** Every one of these paths is
 > trivial to establish with the box on your desk and impossible to establish
 > once it is 1,500 km away and unreachable.
