@@ -136,7 +136,9 @@ def _walk_entities(entities, want_role, out):
 
 def parse_rdap(obj):
     """Extract the useful fields from an RDAP 'ip network' object."""
-        out = {'network_name': None, 'prefix': None, 'country': None,'registry': None, 'abuse_email': None, 'rdap_handle': None,'org_address': None}
+    out = {'network_name': None, 'prefix': None, 'country': None,
+           'registry': None, 'abuse_email': None, 'rdap_handle': None,
+           'org_address': None}
     if not isinstance(obj, dict):
         return out
     out['network_name'] = obj.get('name')
@@ -165,30 +167,9 @@ def parse_rdap(obj):
     if m:
         out['registry'] = m.group(1).upper()
     emails = []
-    addresses = []
     _walk_entities(obj.get('entities'), 'abuse', emails)
-    # Prefer abuse contact address; fall back to registrant
-    def _collect_addr(entities, want_role, out):
-        if not isinstance(entities, list):
-            return
-        for ent in entities:
-            if not isinstance(ent, dict):
-                continue
-            roles = [str(r).lower() for r in (ent.get('roles') or [])]
-            if want_role in roles:
-                addr = _vcard_address(ent.get('vcardArray') or [])
-                if addr:
-                    out.append(addr)
-            _collect_addr(ent.get('entities'), want_role, out)
-
-    _collect_addr(obj.get('entities'), 'abuse', addresses)
-    if not addresses:
-        _collect_addr(obj.get('entities'), 'registrant', addresses)
-
     if emails:
         out['abuse_email'] = emails[0]
-    if addresses:
-        out['org_address'] = addresses[0]
     return out
 
 
