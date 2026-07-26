@@ -2151,6 +2151,9 @@ _mesh_last_poll = 0.0
 # Per-peer set of alert keys already folded into the incident engine. Peers
 # serve a rolling window, so every poll re-sends what we saw last cycle.
 _mesh_alert_seen = {}
+# Per-peer cached security findings (vulns/integrity/watchtower/incidents),
+# refreshed each poll and rendered as the fleet findings view.
+_mesh_peer_findings = {}
 
 # Tailscale-install-from-the-UI state. Installing pulls a vendor script and runs
 # apt, so it takes a minute or two — run it in the background and let the tab
@@ -2360,6 +2363,156 @@ def mesh_unit_alerts():
                     'alerts': alerts})
 
 
+# Canonical severity ladder for the fleet findings view. Kept local so the mesh
+# never hard-depends on watchtower's constants being importable.
+_MESH_SEV_RANK = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
+_MESH_SEV_ORDER = ('critical', 'high', 'medium', 'low', 'info')
+_MESH_SEV_ALIAS = {
+    'crit': 'critical', 'emergency': 'critical', 'fatal': 'critical',
+    'error': 'high', 'err': 'high', 'severe': 'high',
+    'warning': 'medium', 'warn': 'medium', 'moderate': 'medium', 'med': 'medium',
+    'notice': 'low', 'minor': 'low',
+    'informational': 'info', 'debug': 'info',
+}
+
+
+def _mesh_sev(value, default='medium'):
+    """Normalize any severity token to the canonical ladder."""
+    s = str(value or '').strip().lower()
+    s = _MESH_SEV_ALIAS.get(s, s)
+    return s if s in _MESH_SEV_RANK else default
+
+
+def _mesh_local_findings(limit=40):
+    """This unit's current security findings as one normalized, ranked list.
+
+    Flattens the four places Ragnar already records findings — the vulnerability
+    scanner, the network-integrity monitor, Watchtower, and the incident engine
+    — into a common shape, so a peer (or this unit's own Mesh tab) can show what
+    every box has found without opening four separate views on each of them.
+
+    Each finding: {category, severity, title, host, detail, ts, feature}, where
+    `feature` names the tab a launch button deep-links to for the full detail.
+    Read-only; computes nothing new, just reads existing state.
+    """
+    findings = []
+
+    # 1. Vulnerabilities — the finding an operator most wants across a fleet.
+    try:
+        ni = getattr(shared_data, 'network_intelligence', None)
+        if ni:
+            data = ni.get_active_findings_for_dashboard() or {}
+            for v in (data.get('vulnerabilities') or {}).values():
+                if not isinstance(v, dict):
+                    continue
+                port = v.get('port')
+                where = str(v.get('host', '?')) + (f":{port}" if port else '')
+                findings.append({
+                    'category': 'vulnerability',
+                    'severity': _mesh_sev(v.get('severity')),
+                    'title': v.get('vulnerability') or 'Vulnerability',
+                    'host': where,
+                    'detail': v.get('service') or '',
+                    'ts': v.get('last_confirmed') or v.get('discovered') or '',
+                    'feature': 'discovered',
+                })
+    except Exception as exc:
+        logger.debug(f"[mesh] vuln findings unavailable: {exc}")
+
+    # 2. Network integrity — any check whose verdict is a real problem.
+    try:
+        with _net_integrity_lock:
+            checks = dict(_net_integrity_state.get('checks') or {})
+        for name, chk in checks.items():
+            if not isinstance(chk, dict):
+                continue
+            verdict = str(chk.get('verdict', '')).lower()
+            rank = chk.get('rank', 0) or 0
+            if rank <= 0 and verdict in ('', 'ok', 'clean', 'pass', 'good',
+                                         'unknown', 'no-traffic', 'no_traffic'):
+                continue
+            sev = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low'}.get(rank, 'medium')
+            reasons = chk.get('reasons') or []
+            findings.append({
+                'category': 'integrity',
+                'severity': sev,
+                'title': chk.get('label') or name,
+                'host': '',
+                'detail': ('; '.join(reasons) if isinstance(reasons, list)
+                           else str(reasons)),
+                'ts': chk.get('ts') or '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] integrity findings unavailable: {exc}")
+
+    # 3. Watchtower — top passive-watcher alerts, medium and up.
+    try:
+        with _watchtower_lock:
+            recent = _wt_get().recent(limit=limit, min_severity='medium')
+        for a in recent:
+            findings.append({
+                'category': 'watchtower',
+                'severity': _mesh_sev(a.get('severity')),
+                'title': (a.get('title') or ','.join(a.get('codes') or [])
+                          or a.get('source', 'alert')),
+                'host': a.get('src') or a.get('target') or '',
+                'detail': a.get('source') or '',
+                'ts': a.get('ts') or '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] watchtower findings unavailable: {exc}")
+
+    # 4. Incidents — named cross-signal campaigns (high value, low volume).
+    try:
+        with _watchtower_lock:
+            incs = _inc_get().incidents(min_severity='high')
+        for inc in incs:
+            if not inc.get('pattern'):
+                continue
+            findings.append({
+                'category': 'incident',
+                'severity': _mesh_sev(inc.get('severity')),
+                'title': inc.get('label') or inc.get('pattern'),
+                'host': '',
+                'detail': f"{inc.get('alert_count', 0)} alerts",
+                'ts': '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] incident findings unavailable: {exc}")
+
+    findings.sort(key=lambda f: _MESH_SEV_RANK.get(f['severity'], 0), reverse=True)
+    findings = findings[:limit]
+
+    by_sev, by_cat = {}, {}
+    for f in findings:
+        by_sev[f['severity']] = by_sev.get(f['severity'], 0) + 1
+        by_cat[f['category']] = by_cat.get(f['category'], 0) + 1
+    worst = next((s for s in _MESH_SEV_ORDER if by_sev.get(s)), None)
+    return {'findings': findings,
+            'counts': {'total': len(findings), 'by_severity': by_sev,
+                       'by_category': by_cat, 'worst': worst}}
+
+
+@app.route('/api/mesh/findings', methods=['GET'])
+def mesh_unit_findings():
+    """This unit's security findings, for a peer to display.
+
+    The third and last peer-readable route (with /unit and /alerts). Read-only:
+    it surfaces what this box already found — vulnerabilities, integrity issues,
+    watcher alerts, incidents — so the fleet view can show findings per unit.
+    """
+    try:
+        limit = max(1, min(200, int(request.args.get('limit', 40))))
+    except (TypeError, ValueError):
+        limit = 40
+    result = _mesh_local_findings(limit=limit)
+    return jsonify({'success': True, 'node': _mesh_unit_name(),
+                    'unit_id': _mesh_unit_id(), **result})
+
+
 def _mesh_poll_once():
     """Refresh cached peer health. Safe to call when Tailscale is absent."""
     global _mesh_last_poll
@@ -2385,6 +2538,36 @@ def _mesh_poll_once():
 
     if shared_data.config.get('mesh_aggregate_alerts', True):
         _mesh_ingest_peer_alerts(peers, results, timeout)
+
+    _mesh_poll_peer_findings(peers, results, timeout)
+
+
+def _mesh_poll_peer_findings(peers, health, timeout):
+    """Pull each reachable peer's security findings into the local cache.
+
+    Findings power the fleet view — vulnerabilities and alerts from every unit
+    on one pane. Only reachable peers are asked (an unreachable one already
+    shows as degraded), and one call per peer keeps it bounded.
+    """
+    try:
+        limit = max(1, min(200, int(shared_data.config.get('mesh_findings_limit', 40))))
+    except (TypeError, ValueError):
+        limit = 40
+    port = _mesh_node_port()
+    fresh = {}
+    for peer in peers:
+        if not (health.get(peer['id']) or {}).get('reachable'):
+            continue
+        payload = mesh_manager.poll_peer(peer, port=port, timeout=timeout,
+                                         path=f'/api/mesh/findings?limit={limit}')
+        if payload.get('reachable'):
+            fresh[peer['id']] = {
+                'findings': payload.get('findings') or [],
+                'counts': payload.get('counts') or {},
+            }
+    with _mesh_lock:
+        _mesh_peer_findings.clear()
+        _mesh_peer_findings.update(fresh)
 
 
 def _mesh_ingest_peer_alerts(peers, health, timeout):
@@ -2489,6 +2672,7 @@ def mesh_status():
 
     with _mesh_lock:
         health = dict(_mesh_peer_health)
+        findings = dict(_mesh_peer_findings)
         last_poll = _mesh_last_poll
 
     peers = []
@@ -2496,6 +2680,7 @@ def mesh_status():
         node = dict(peer)
         node['is_ragnar'] = tag in peer.get('tags', [])
         node['health'] = health.get(peer['id'])
+        node['findings'] = findings.get(peer['id'])
         # The unit number is reported by the unit itself, so it is only known
         # for peers we could actually reach.
         node['unit_id'] = (node['health'] or {}).get('unit_id', 0)
@@ -2518,6 +2703,7 @@ def mesh_status():
         self_tagged = tag in self_node.get('tags', [])
         self_node['is_ragnar'] = self_tagged
         self_node['health'] = _mesh_local_health()
+        self_node['findings'] = _mesh_local_findings()
         self_node['unit_id'] = _mesh_unit_id()
         self_node['viking_name'] = _mesh_viking_name()
         key_state, key_msg = mesh_manager.node_key_health(state.get('self'))
@@ -2525,15 +2711,6 @@ def mesh_status():
         self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
 
     ragnar_peers = [p for p in peers if p['is_ragnar']]
-    # Tailnet peers that are NOT tagged into the mesh. These are exactly the
-    # devices a tester sees "sensing each other" — visible over Tailscale but
-    # invisible to Ragnar's mesh until tagged. Surface them so the gap is
-    # explained rather than looking like nothing is there.
-    untagged_peers = [
-        {'name': p.get('short_name') or p.get('hostname') or p.get('ip'),
-         'ip': p.get('ip'), 'os': p.get('os'), 'online': p.get('online')}
-        for p in peers if not p['is_ragnar']
-    ]
 
     # Two units answering to the same number makes every report ambiguous
     # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
@@ -2587,10 +2764,12 @@ def mesh_status():
         'node_port': _mesh_node_port(),
         'last_poll': last_poll,
         'self': self_node,
-        'peers': peers,
-        'untagged_peers': untagged_peers,
+        # Only Ragnar mesh units are surfaced. Other tailnet devices (laptops,
+        # phones, unrelated services) are intentionally not listed — they are
+        # not the mesh's business and naming them just leaks the tailnet roster.
+        'peers': ragnar_peers,
         'summary': {
-            'total': len(peers) + (1 if self_node else 0),
+            'total': len(ragnar_peers) + (1 if self_node else 0),
             'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
             'online': sum(1 for p in ragnar_peers if p['online']),
             'offline': sum(1 for p in ragnar_peers if not p['online']),
@@ -2598,7 +2777,6 @@ def mesh_status():
             # and network, and the application is the thing that is broken.
             'degraded': sum(1 for p in ragnar_peers if p['online']
                             and not (p.get('health') or {}).get('reachable')),
-            'untagged_peers': len(untagged_peers),
             'duplicate_unit_ids': duplicates,
             'duplicate_names': duplicate_names,
             'unnumbered_units': unnumbered,

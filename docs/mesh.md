@@ -20,6 +20,7 @@ be logged into renders the mesh; so would any other.
 
 - [Why Tailscale](#why-tailscale)
 - [What the mesh adds over the Tailscale console](#what-the-mesh-adds-over-the-tailscale-console)
+- [Fleet security findings](#fleet-security-findings)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
@@ -444,6 +445,39 @@ letting you configure your way into it silently.
 ```
 
 ---
+
+## Fleet security findings
+
+Each unit card in the Mesh tab shows that unit's own **security findings**,
+severity-ranked, pulled live over the mesh — so one pane answers "what has every
+box found?" without opening each unit in turn. Findings come from the four
+places Ragnar already records them, normalized into one list:
+
+| Category | Source |
+|---|---|
+| `vulnerability` | the vulnerability scanner (host\:port, CVE/score, service) |
+| `integrity` | the Network Integrity Monitor (failing DNS/ARP/DHCP/RA checks) |
+| `watchtower` | the standalone passive watchers (arp_guard, ndpwatch, …) |
+| `incident` | named cross-signal campaigns from the incident engine |
+
+Each unit serves its own findings at `GET /api/mesh/findings` — the third and
+last peer-readable route, read-only like the others. A coordinator does not
+compute anything about its peers; it just displays what each already found.
+
+### Launching a unit's live views
+
+Every unit card carries launch buttons — **Traffic**, **Threats**, **Integrity**,
+**Watchtower**, **Vulnerabilities** — that open *that unit's own* live view in a
+new tab (deep-linked to the feature). This is deliberate: a peer already serves
+its full UI on the tailnet, so the honest way to "watch the Jersey traffic
+analyzer" is to open Jersey's own analyzer, authenticated as yourself — not to
+pipe its heavy live capture cross-unit or to let one box drive another's tools.
+Launching stays within each unit's own auth boundary; the mesh only ever
+*reads* summaries.
+
+> Cross-unit launches rely on your browser being able to reach the peer's
+> tailnet address — which it can, since you are already on the tailnet to reach
+> this unit. If a peer publishes over `serve`, its MagicDNS name works too.
 
 ## Cross-site incident correlation
 

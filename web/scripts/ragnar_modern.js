@@ -830,8 +830,55 @@ function setupEventListeners() {
 }
 
 function initializeTabs() {
-    showTab('dashboard');
+    // Honor a deep-link hash so cross-unit mesh launch buttons land on the
+    // right feature, e.g. #traffic, #threat-intel, #network/watchtower. Falls
+    // back to the dashboard for anything unrecognised.
+    if (!routeFromHash()) {
+        showTab('dashboard');
+    }
 }
+
+// Map a location hash to a tab (and optional subtab). Returns true if it routed.
+// Known top-level tabs are driven by showTab; the network tab carries subtabs
+// (integrity, watchtower, …) reached via showNetworkSubtab.
+function routeFromHash() {
+    const raw = (window.location.hash || '').replace(/^#/, '').trim();
+    if (!raw) return false;
+    const [tab, sub] = raw.split('/');
+    const known = new Set([
+        'dashboard', 'network', 'wifidef', 'discovered', 'rusense', 'pentest',
+        'threat-intel', 'traffic', 'adv-vuln', 'wardriving', 'epaper', 'files',
+        'system', 'connect', 'mesh', 'terminal', 'config',
+    ]);
+    if (!known.has(tab)) return false;
+    try {
+        showTab(tab);
+        if (tab === 'network' && sub && typeof showNetworkSubtab === 'function') {
+            // Integrity and Watchtower live on the Diagnostics subtab, not as
+            // subtabs of their own — route there and scroll to the right card.
+            const onDiag = { integrity: 'netint-card', watchtower: 'watchtower-card' };
+            const realSub = onDiag[sub] ? 'diagnostics' : sub;
+            const anchor = onDiag[sub];
+            // Let the network tab finish mounting before selecting a subtab.
+            setTimeout(() => {
+                try { showNetworkSubtab(realSub); } catch (e) {}
+                if (anchor) {
+                    setTimeout(() => {
+                        const el = document.getElementById(anchor);
+                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }, 120);
+                }
+            }, 60);
+        }
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// Re-route when the hash changes in an already-open tab (e.g. a second launch
+// click into the same unit's window).
+window.addEventListener('hashchange', () => { routeFromHash(); });
 
 // ── RuSense (native RuView WiFi-CSI console, Shadow-DOM island) ─────────────
 // The RuView SPA is served from /web/rusense/ and mounted into a shadow root
@@ -28993,6 +29040,13 @@ function meshUnitCard(unit, isSelf, ctx) {
         ? `<span class="text-[10px] text-gray-500">${unit.direct ? 'direct' : 'relay' + (unit.relay ? ' · ' + escapeHtml(unit.relay) : '')}</span>`
         : '';
 
+    // Base URL for launching this unit's own live views. A peer serves its full
+    // UI on the tailnet, so "display the remote traffic analyzer" is honestly
+    // done by opening that unit's UI (authenticated as you), not by piping its
+    // heavy live data cross-unit. Self launches same-origin.
+    const launchBase = isSelf ? '' : meshLaunchBase(unit, ctx);
+    const canLaunch = isSelf || (unit.online && launchBase);
+
     return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
         <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
@@ -29009,8 +29063,69 @@ function meshUnitCard(unit, isSelf, ctx) {
             </div>
         </div>
         ${body}
+        ${meshFindingsBlock(unit)}
+        ${canLaunch ? meshLaunchRow(launchBase) : ''}
         ${warnings.join('')}
     </div>`;
+}
+
+// Compact severity-ranked findings for one unit, pulled from that unit's own
+// vulnerability scanner / integrity monitor / Watchtower / incident engine.
+function meshFindingsBlock(unit) {
+    const f = unit.findings;
+    if (!f || !f.counts || !f.counts.total) return '';
+    const rows = (f.findings || []).slice(0, 5).map(x => {
+        const sev = x.severity || 'info';
+        const badge = MESH_SEV_CLASS[sev] || MESH_SEV_CLASS.info;
+        return `<div class="flex items-start gap-2 py-0.5">
+            <span class="mt-0.5 text-[9px] uppercase px-1.5 rounded border ${badge}">${escapeHtml(sev)}</span>
+            <span class="min-w-0 text-[11px]">
+                <span class="text-gray-200">${escapeHtml(x.title || '')}</span>
+                ${x.host ? ` <span class="text-gray-500 font-mono">${escapeHtml(x.host)}</span>` : ''}
+            </span>
+        </div>`;
+    }).join('');
+    const more = f.counts.total > 5
+        ? `<div class="text-[10px] text-gray-500 mt-1">+${f.counts.total - 5} more — open a view below for the full list.</div>`
+        : '';
+    const byCat = f.counts.by_category || {};
+    const catBits = Object.keys(byCat).map(c => `${byCat[c]} ${c}`).join(' · ');
+    return `<div class="mt-3 pt-3 border-t border-slate-700/60">
+        <div class="flex items-center justify-between mb-1">
+            <span class="text-[10px] uppercase tracking-wider text-gray-400">Findings (${f.counts.total})</span>
+            <span class="text-[10px] text-gray-500">${escapeHtml(catBits)}</span>
+        </div>
+        ${rows}${more}
+    </div>`;
+}
+
+// Build the tailnet URL of a peer's own UI, for launching its live views.
+function meshLaunchBase(unit, ctx) {
+    const ip = unit.ip;
+    if (!ip) return '';
+    const host = ip.includes(':') ? `[${ip}]` : ip;
+    return `http://${host}:${(ctx && ctx.nodePort) || 8000}`;
+}
+
+// One row of launch buttons into a unit's own live views. Opens in a new tab;
+// the operator authenticates to that unit directly.
+function meshLaunchRow(base) {
+    const b = (base || '').replace(/'/g, '');
+    const btn = (feature, label) =>
+        `<button onclick="meshLaunch('${b}','${feature}')" ` +
+        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label}</button>`;
+    return `<div class="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-slate-700/40">
+        ${btn('traffic', 'Traffic')}
+        ${btn('threat-intel', 'Threats')}
+        ${btn('network/integrity', 'Integrity')}
+        ${btn('network/watchtower', 'Watchtower')}
+        ${btn('discovered', 'Vulnerabilities')}
+    </div>`;
+}
+
+function meshLaunch(base, feature) {
+    const url = (base || '') + '/#' + feature;
+    window.open(url, '_blank', 'noopener');
 }
 
 function meshWarning(text, tone) {
@@ -29117,18 +29232,6 @@ function renderMesh(data) {
             `Edit ACL tags → add ${tagCode}</em>. The tag must be listed under ` +
             `<code>tagOwners</code> in your ACL policy. Tagging also stops the node key expiring.`,
             'error'));
-    }
-
-    // The untagged tailnet devices themselves — literally the boxes the tester
-    // sees "sensing each other". Naming them turns a mystery into a checklist.
-    const untaggedCount = data.summary?.untagged_peers || 0;
-    if (untaggedCount > 0) {
-        const names = (data.untagged_peers || [])
-            .map(p => escapeHtml(p.name || p.ip || '?')).join(', ');
-        notes.push(meshWarning(
-            `${untaggedCount} device(s) on your tailnet aren't tagged into the mesh` +
-            (names ? ` (${names})` : '') + `. This unit senses them over Tailscale but won't ` +
-            `share data with them until each carries <code>${tagCode}</code>. Tag them the same way.`));
     }
 
     // In the mesh (this unit tagged, or tagged peers visible) but the poller is
@@ -29520,3 +29623,4 @@ window.meshServe = meshServe;
 window.meshLeave = meshLeave;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
+window.meshLaunch = meshLaunch;

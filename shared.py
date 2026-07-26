@@ -744,6 +744,9 @@ class SharedData:
             "mesh_aggregate_alerts": True,
             # Max alerts to pull from each peer per poll, newest first.
             "mesh_alert_limit": 50,
+            # Max security findings (vulns/integrity/watchtower/incidents) to
+            # pull from each peer per poll for the fleet findings view.
+            "mesh_findings_limit": 40,
 
             "__title_ethernet__": "Ethernet/LAN Settings",
             "ethernet_default_interface": "eth0",

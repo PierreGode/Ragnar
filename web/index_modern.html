@@ -1481,7 +1481,7 @@
                     <p id="netdiag-display-note" class="text-xs text-gray-500 mt-2 hidden">Active — the display is showing the network diagnostic screen. Turn off to restore the normal display.</p>
                 </div>
                 <!-- Passive network-integrity monitor (DNS poisoning + ARP spoofing) -->
-                <div class="glass rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div id="netint-card" class="glass rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Network Integrity Monitor</h3>
@@ -1513,7 +1513,7 @@
                     <p class="text-xs text-gray-500 mt-2">"Check now" runs the fast core (DNS · ARP · DHCP) immediately; the extended scanners run on the background rotation once the monitor is enabled. Capture-based scanners listen on a link-up <strong>wired</strong> port by default (or the interface pinned above) — DNS and RA-Guard always check the host's actual traffic path.</p>
                 </div>
                 <!-- Watchtower: unified alert pane for the standalone passive watchers -->
-                <div class="glass rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
+                <div id="watchtower-card" class="glass rounded-xl p-4 sm:p-6 mb-4 sm:mb-6">
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Watchtower <span class="text-xs font-normal text-gray-500">— unified watcher alerts</span></h3>
@@ -7248,7 +7248,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh10"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh11"></script>
 
 </body>
 </html>
