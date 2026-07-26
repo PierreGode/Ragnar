@@ -178,7 +178,7 @@ def parse_cymru_origin(txt):
     if len(parts) > 3 and parts[3]:
         out['registry'] = parts[3].upper()
     if len(parts) > 4 and parts[4]:
-        out['allocated'] = parts[4]          # ← NEW
+        out['allocated'] = parts[4]
     return out
 
 
