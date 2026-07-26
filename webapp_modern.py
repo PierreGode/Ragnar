@@ -2152,6 +2152,44 @@ _mesh_last_poll = 0.0
 # serve a rolling window, so every poll re-sends what we saw last cycle.
 _mesh_alert_seen = {}
 
+# Tailscale-install-from-the-UI state. Installing pulls a vendor script and runs
+# apt, so it takes a minute or two — run it in the background and let the tab
+# poll, exactly like the sensing-backend install.
+MESH_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'setup_mesh.sh')
+MESH_INSTALL_LOG = os.path.join(shared_data.currentdir, 'data', 'mesh_install.log')
+_mesh_install_lock = threading.Lock()
+_mesh_installing = False
+
+
+def _run_mesh_install():
+    """Install the Tailscale client in the background, logging to MESH_INSTALL_LOG.
+
+    Uses the same script the installer and updater call, so the UI path cannot
+    drift from them. Root is required to install a system package; the packaged
+    Ragnar service already runs as root, and a hand-started instance falls back
+    to `sudo -n` (which fails cleanly into the log if no passwordless sudo).
+    """
+    global _mesh_installing
+    cmd = (['bash', MESH_INSTALL_SCRIPT, 'install'] if os.geteuid() == 0
+           else ['sudo', '-n', 'bash', MESH_INSTALL_SCRIPT, 'install'])
+    try:
+        with open(MESH_INSTALL_LOG, 'a') as logf:
+            logf.write("\n=== install tailscale ===\n")
+            logf.flush()
+            subprocess.run(cmd, stdout=logf, stderr=subprocess.STDOUT, timeout=600)
+    except Exception as exc:
+        logger.error(f"[mesh] tailscale install failed: {exc}")
+        try:
+            with open(MESH_INSTALL_LOG, 'a') as logf:
+                logf.write(f"\nERROR: {exc}\n")
+        except OSError:
+            pass
+    finally:
+        with _mesh_install_lock:
+            _mesh_installing = False
+        if mesh_available:
+            mesh_manager.invalidate_cache()
+
 
 def _mesh_enabled():
     return bool(mesh_available and shared_data.config.get('mesh_enabled'))
@@ -2499,10 +2537,14 @@ def mesh_status():
                      if u.get('is_ragnar') is not False and not u.get('unit_id')
                      and (u is self_node or (u.get('health') or {}).get('reachable')))
 
+    with _mesh_install_lock:
+        installing = _mesh_installing
+
     return jsonify({
         'success': True,
         'enabled': bool(cfg.get('mesh_enabled')),
         'installed': state.get('installed', False),
+        'installing': installing,
         'available': state.get('available', False),
         'reason': state.get('reason', ''),
         'backend_state': state.get('backend_state', ''),
@@ -2580,6 +2622,55 @@ def mesh_leave():
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     ok, message = mesh_manager.leave()
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+
+
+@app.route('/api/mesh/install', methods=['POST'])
+def mesh_install():
+    """Install the Tailscale client on this unit from the web UI.
+
+    A stock Ragnar does not ship Tailscale — the mesh is opt-in — and `update`
+    only installs it once a unit has opted in (auth key, boot config, or
+    mesh_enabled). This route is the third onboarding path: a fresh unit whose
+    operator opened the Mesh tab and wants to start here. Idempotent; the script
+    no-ops if Tailscale is already present.
+    """
+    global _mesh_installing
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    if mesh_manager.installed():
+        return jsonify({'success': True, 'message': 'Tailscale is already installed.',
+                        'installing': False})
+    if not os.path.isfile(MESH_INSTALL_SCRIPT):
+        return jsonify({'success': False,
+                        'message': 'scripts/setup_mesh.sh is missing — reinstall or update Ragnar.'}), 500
+    with _mesh_install_lock:
+        if _mesh_installing:
+            return jsonify({'success': True, 'message': 'Install already in progress.',
+                            'installing': True})
+        _mesh_installing = True
+    try:
+        open(MESH_INSTALL_LOG, 'w').close()  # fresh log per run
+    except OSError:
+        pass
+    threading.Thread(target=_run_mesh_install, daemon=True, name='mesh-install').start()
+    return jsonify({'success': True, 'message': 'Tailscale install started.',
+                    'installing': True})
+
+
+@app.route('/api/mesh/install-log', methods=['GET'])
+def mesh_install_log():
+    """Live install log plus whether Tailscale is now present. Polled by the tab."""
+    with _mesh_install_lock:
+        installing = _mesh_installing
+    log = ''
+    try:
+        with open(MESH_INSTALL_LOG, 'r') as fh:
+            log = fh.read()[-8000:]  # tail — the whole apt log is not useful
+    except OSError:
+        pass
+    return jsonify({'success': True, 'installing': installing,
+                    'installed': mesh_manager.installed() if mesh_available else False,
+                    'log': log})
 
 
 @app.route('/api/mesh/tunnel', methods=['POST'])

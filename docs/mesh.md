@@ -210,11 +210,26 @@ set in the environment or a boot config is present.
 
 ### Path 3 — later, from the web UI
 
-**Ragnar Mesh → Join mesh.** Enter unit number, site label, auth key and any LAN
-subnets to advertise. This is the path most existing units will take, which is
-why the mesh prerequisites also run from `update_ragnar.sh` — a unit that has
-`mesh_enabled` set gets Tailscale installed on its next update without anyone
-re-running the installer.
+Open the **Ragnar Mesh** tab. It is a two-step funnel:
+
+1. **Install Tailscale.** If the client is not present, the tab shows an
+   **Install Tailscale** button. It runs the same `scripts/setup_mesh.sh install`
+   the installer uses, in the background, and streams the log; when the binary
+   appears it moves you straight to step 2. (Prefer the shell?
+   `curl -fsSL https://tailscale.com/install.sh | sh`, then reload the tab.)
+2. **Join mesh.** Enter unit number, site label, auth key and any LAN subnets to
+   advertise. Joining sets `mesh_enabled`, which is what makes every subsequent
+   `update_ragnar.sh` keep Tailscale installed and current.
+
+### Why `update` does not install Tailscale by itself
+
+A stock Ragnar deliberately ships **without** Tailscale, and `update_ragnar.sh`
+installs it only once a unit has opted in — an auth key in the environment, a
+`/boot/ragnar-mesh.conf`, or `mesh_enabled: true` in the config. This is on
+purpose: a security tool should not silently add an outbound mesh dependency to
+every box on every update. So on a fresh unit that has never touched the mesh,
+"I ran update and Tailscale still isn't there" is expected — use the **Install
+Tailscale** button (or join once), and updates maintain it from then on.
 
 ---
 
@@ -506,12 +521,22 @@ installed by a technician you do not want to hand credentials to.
 ## Troubleshooting
 
 **"Tailscale is not installed on this node."**
-Install it and restart Ragnar:
+Click **Install Tailscale** in the Mesh tab — that is the intended fix. It runs
+in the background and reveals the join step when done. Update did not install it
+because the unit had not opted into the mesh yet
+([why](#why-update-does-not-install-tailscale-by-itself)). To do it by hand
+instead:
 ```sh
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo systemctl enable --now tailscaled
 ```
-Or re-run `sudo ./scripts/setup_mesh.sh install`.
+Or re-run `sudo ./scripts/setup_mesh.sh install`, then reload the tab.
+
+**The Install Tailscale button says it did not complete.**
+Expand the log it shows. The usual causes are no outbound internet (the vendor
+script pulls from `tailscale.com` and `pkgs.tailscale.com`) or, on a
+hand-started Ragnar not running as root, no passwordless sudo — the packaged
+service runs as root and is unaffected.
 
 **"tailscaled is not responding."**
 `sudo systemctl status tailscaled`. Ragnar reads the daemon's local API socket

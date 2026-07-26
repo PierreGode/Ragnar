@@ -29013,20 +29013,30 @@ function renderMesh(data) {
         ? 'bg-green-700/40 text-green-300'
         : 'bg-amber-700/40 text-amber-300');
 
-    // Onboarding shows until this unit is actually on a tailnet.
-    setup.classList.toggle('hidden', joined);
-    if (!joined) {
+    // Onboarding is a two-step funnel: install Tailscale, then join. Show the
+    // install step only when the binary is absent, and the join step only once
+    // it is present. Never both, so the tester is never asked to fill in an
+    // auth key for a client that isn't there yet.
+    const install = document.getElementById('mesh-install');
+    const needsInstall = !data.installed;
+    if (install) install.classList.toggle('hidden', joined || !needsInstall);
+    setup.classList.toggle('hidden', joined || needsInstall);
+
+    if (!joined && !needsInstall) {
         const reason = document.getElementById('mesh-setup-reason');
         reason.textContent = data.reason || 'This unit is not part of a mesh yet.';
-        if (!data.installed) {
-            reason.textContent += ' Install it with: curl -fsSL https://tailscale.com/install.sh | sh';
-        }
         // Show the name this unit already has rather than an empty box — the
         // point is that it is named by default, not that naming is a chore.
         const vikingField = document.getElementById('mesh-viking-input');
         if (vikingField && !vikingField.value && data.viking_name) {
             vikingField.value = data.viking_name;
         }
+    }
+
+    // A page load that lands mid-install should resume the progress view rather
+    // than showing a fresh Install button that starts a second run.
+    if (needsInstall && data.installing && !meshInstallPolling) {
+        meshPollInstall();
     }
 
     selfWrap.classList.toggle('hidden', !data.self);
@@ -29139,6 +29149,79 @@ async function refreshMesh(force) {
     } finally {
         meshRefreshInFlight = false;
     }
+}
+
+// Installing Tailscale from the tab. A stock Ragnar ships without it and
+// `update` only installs it once opted in, so this is how a fresh unit gets the
+// client — the tester's blocker. The install runs server-side in the
+// background; here we kick it off and tail the log until the binary appears.
+let meshInstallPolling = false;
+
+async function meshInstall() {
+    const btn = document.getElementById('mesh-install-btn');
+    const out = document.getElementById('mesh-install-result');
+    if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+    if (out) out.innerHTML = '<span class="text-gray-400">Starting install…</span>';
+    try {
+        const resp = await fetch('/api/mesh/install', { method: 'POST' });
+        const data = await resp.json();
+        if (!data.success) {
+            if (out) out.innerHTML = `<span class="text-red-400">${escapeHtml(data.message || 'Install failed to start.')}</span>`;
+            if (btn) { btn.disabled = false; btn.textContent = 'Install Tailscale'; }
+            return;
+        }
+        if (data.installing === false) {
+            // Already installed — jump straight to the join step.
+            await refreshMesh(true);
+            return;
+        }
+        meshPollInstall();
+    } catch (err) {
+        if (out) out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
+        if (btn) { btn.disabled = false; btn.textContent = 'Install Tailscale'; }
+    }
+}
+
+async function meshPollInstall() {
+    if (meshInstallPolling) return;
+    meshInstallPolling = true;
+    const btn = document.getElementById('mesh-install-btn');
+    const out = document.getElementById('mesh-install-result');
+    const logEl = document.getElementById('mesh-install-log');
+    if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+    if (out) out.innerHTML = '<span class="text-gray-400">Installing Tailscale — this takes a minute or two…</span>';
+
+    const tick = async () => {
+        let data;
+        try {
+            data = await (await fetch('/api/mesh/install-log')).json();
+        } catch (err) {
+            meshInstallPolling = false;
+            if (out) out.innerHTML = `<span class="text-red-400">Lost contact while installing: ${escapeHtml(String(err))}</span>`;
+            return;
+        }
+        if (logEl && data.log) {
+            logEl.classList.remove('hidden');
+            logEl.textContent = data.log;
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+        if (data.installed) {
+            meshInstallPolling = false;
+            if (out) out.innerHTML = '<span class="text-green-400">Tailscale installed. Continue to join the mesh below.</span>';
+            showNotification('Tailscale installed', 'success');
+            await refreshMesh(true);   // reveals the join step
+            return;
+        }
+        if (!data.installing) {
+            // Thread finished but the binary isn't there — the install failed.
+            meshInstallPolling = false;
+            if (out) out.innerHTML = '<span class="text-red-400">Install did not complete. See the log below; you can retry, or install over SSH.</span>';
+            if (btn) { btn.disabled = false; btn.textContent = 'Retry install'; }
+            return;
+        }
+        setTimeout(tick, 2500);
+    };
+    tick();
 }
 
 async function meshJoin() {
@@ -29263,5 +29346,6 @@ function meshLeave() {
 
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
+window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
