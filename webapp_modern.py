@@ -2773,10 +2773,13 @@ def mesh_status():
             'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
             'online': sum(1 for p in ragnar_peers if p['online']),
             'offline': sum(1 for p in ragnar_peers if not p['online']),
-            # Online in Tailscale but Ragnar not answering: the box has power
-            # and network, and the application is the thing that is broken.
+            # Online in Tailscale but Ragnar not answering — i.e. actually
+            # polled and the poll failed. A peer that has not been polled yet
+            # (health is None) is NOT degraded; it shows "Not polled yet" on its
+            # card, and counting it here would contradict that.
             'degraded': sum(1 for p in ragnar_peers if p['online']
-                            and not (p.get('health') or {}).get('reachable')),
+                            and p.get('health') is not None
+                            and not p['health'].get('reachable')),
             'duplicate_unit_ids': duplicates,
             'duplicate_names': duplicate_names,
             'unnumbered_units': unnumbered,
