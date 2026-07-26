@@ -1,35 +1,4 @@
 #!/usr/bin/env python3
-"""ip_intel.py — attribution for a single IP address (Ragnar).
-
-Answers the question you actually have about a hostile IP: **whose network is
-this, what country, and who do I report it to?**
-
-Deliberately honest about what an IP can and cannot tell you:
-
-* **Authoritative** (straight from the regional registry via RDAP, and Team
-  Cymru's ASN service): the owning network, its CIDR, the ASN + AS name, the
-  registry, the country, and the **abuse contact** — the one field that actually
-  gets an attack stopped.
-* **Estimated**: city, at best. Included only when an offline GeoIP database is
-  present, and always flagged low-confidence.
-* **Never emitted**: a street address. Sites that show one are showing either the
-  ISP's registered corporate address or a *centroid* — a fallback midpoint used
-  when the database only knows "somewhere in this country". MaxMind's US default
-  centroid famously landed on a Kansas farm whose residents were harassed for
-  years over IPs that had nothing to do with them. This module reports a
-  ``location_note`` instead of inventing precision.
-
-It also refuses to over-claim attribution: if the IP is a VPN exit, Tor exit, or
-cloud/hosting host, the geolocation describes *the server*, not the operator, and
-``attribution_note`` says so.
-
-Offline-first where it can be: scope classification (private/bogon/reserved) and
-every parser run with no network at all, and results are cached. Network use is
-opt-in via ``allow_network``.
-
-Self-test: ``python3 ip_intel.py --self-test`` (no network, no keys).
-"""
-
 import ipaddress
 import json
 import os
@@ -358,8 +327,7 @@ def lookup(ip, allow_network=True, cache_path=DEFAULT_CACHE, use_cache=True,
         return out
 
     if not allow_network:
-        rec['error'] = ('no cached record and outbound lookups are disabled '
-                        '(allow_network=False)')
+        rec['error'] = ('no cached record and outbound lookups are disabled ' '(allow_network=False)')
         rec['classification'] = 'unknown'
         return rec
 
