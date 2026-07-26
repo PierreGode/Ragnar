@@ -22124,6 +22124,18 @@ async function checkServerCapabilities() {
                 }
             });
 
+            // Traffic Analysis has its own gate: it is a tcpdump pipe, not
+            // OpenVAS-class work, so it shows up on any board that can run it
+            // (a Pi Zero included) rather than only in server mode.
+            const trafficEnabled = data.features?.traffic_analysis || false;
+            document.querySelectorAll('.traffic-feature').forEach(el => {
+                el.classList.toggle('hidden', !trafficEnabled);
+            });
+            if (!trafficEnabled) {
+                console.log('[ServerMode] Traffic Analysis unavailable:',
+                            data.capabilities?.traffic_block_reason || 'unknown reason');
+            }
+
             // Show/hide wardriving feature based on config
             const wdEnabled = data.features?.wardriving_enabled || false;
             applyWardrivingEnabledState(wdEnabled);
@@ -22140,6 +22152,9 @@ async function checkServerCapabilities() {
                 console.log('[ServerMode]   - Full capabilities:', data.capabilities);
             }
             
+            // Re-measure the nav: we just changed which buttons are visible,
+            // and that decides desktop bar vs hamburger.
+            if (window._updateNavMode) window._updateNavMode();
             return data;
         } else if (!data.success) {
             console.error('[ServerMode] API error:', data.error);
@@ -22178,7 +22193,7 @@ async function loadTrafficAnalysisData() {
         const data = await statusResponse.json();
 
         if (!data.success || !data.available) {
-            showTrafficNotAvailable();
+            showTrafficNotAvailable(data.reason || data.error);
             return;
         }
 
@@ -22197,9 +22212,16 @@ async function loadTrafficAnalysisData() {
     }
 }
 
-function showTrafficNotAvailable() {
+function showTrafficNotAvailable(reason) {
     const notice = document.getElementById('traffic-not-available');
     if (notice) notice.classList.remove('hidden');
+    const reasonEl = document.getElementById('traffic-not-available-reason');
+    // The backend names what is actually missing (usually tcpdump); only fall
+    // back to generic wording when it did not say.
+    if (reasonEl) {
+        reasonEl.textContent = reason ||
+            'Traffic analysis could not start on this system.';
+    }
 }
 
 function hideTrafficNotAvailable() {

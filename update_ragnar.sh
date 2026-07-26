@@ -269,6 +269,31 @@ if [ ${#_recon_missing[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Recon features unavailable: ${_recon_missing[*]}"
 fi
 
+echo -e "${BLUE}Step 5.4: Ensuring Traffic Analysis capture tools...${NC}"
+# Traffic Analysis is no longer gated behind server mode — it is a tcpdump pipe
+# and runs on any board, Pi Zero included. tcpdump is its one hard requirement
+# and the sudoers rule is what lets Ragnar spawn it, so both are ensured here
+# for boxes that only ever update. Both are idempotent.
+if ! command -v tcpdump >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tcpdump >/dev/null 2>&1 || true
+fi
+if command -v tcpdump >/dev/null 2>&1; then
+    if [ ! -f /etc/sudoers.d/ragnar-traffic ]; then
+        cat > /etc/sudoers.d/ragnar-traffic << 'EOF'
+# Allow ragnar user to run traffic analysis tools without password
+ragnar ALL=(ALL) NOPASSWD: /usr/bin/tcpdump
+ragnar ALL=(ALL) NOPASSWD: /usr/bin/tshark
+ragnar ALL=(ALL) NOPASSWD: /usr/sbin/iftop
+ragnar ALL=(ALL) NOPASSWD: /usr/sbin/nethogs
+EOF
+        chmod 440 /etc/sudoers.d/ragnar-traffic
+        echo -e "  ${GREEN}✓${NC} Added sudoers rule for packet capture"
+    fi
+    echo -e "  ${GREEN}✓${NC} tcpdump present — Traffic Analysis available"
+else
+    echo -e "  ${YELLOW}⚠${NC} tcpdump missing — Traffic Analysis tab stays hidden (apt install tcpdump)"
+fi
+
 echo -e "${BLUE}Step 5.5: Restoring local runtime data...${NC}"
 for file in "${PRESERVE_FILES[@]}"; do
     backup_file="$BACKUP_DIR/$(basename $file)"

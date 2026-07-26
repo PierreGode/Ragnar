@@ -2253,7 +2253,7 @@ except:
         echo -e "${CYAN}  Installing Advanced Security Tools${NC}"
         echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
         echo -e "${GREEN}Your system has sufficient resources for advanced features:${NC}"
-        echo -e "  ${BLUE}•${NC} Real-time traffic analysis (tcpdump, tshark, ngrep)"
+        echo -e "  ${BLUE}•${NC} Deep traffic analysis extras (tshark JA3/IRC sidecars, ngrep)"
         echo -e "  ${BLUE}•${NC} Advanced vulnerability scanning (Nuclei, Nikto, SQLMap)"
         echo -e "  ${BLUE}•${NC} Web application security testing (OWASP ZAP)"
         echo -e "  ${BLUE}•${NC} Enhanced Nmap vulnerability scripts"

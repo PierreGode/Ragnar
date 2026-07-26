@@ -49,7 +49,7 @@ Legend: `✅✅` strong · `✅` yes · `⚠️` partial · `❌` no
 | Nessus | Vuln scanning (commercial) | Huge QA'd plugin DB, low FP, compliance audits | 6/10 |
 | OWASP ZAP | Web app scanning | Ragnar *is* ZAP + a custom context-aware fuzzer → automation parity-plus | 7/10 |
 | Burp Suite | Web app pentest | Burp Pro's manual proxy/Repeater/Intruder + Collaborator OOB still ahead | 6/10 |
-| Zeek | NSM (passive/defensive) | `traffic_analyzer` does C2/DNS-tunnel/port-scan detection — same categories, heuristic depth, 8GB-gated | 4/10 |
+| Zeek | NSM (passive/defensive) | `traffic_analyzer` does C2/DNS-tunnel/port-scan detection — same categories, heuristic depth; runs on any board (only the tshark sidecars are gated) | 4/10 |
 | Wazuh | SIEM/XDR/HIDS | `threat_intelligence` (MISP/VT/Shodan/OpenCTI) gives enrichment — but no agents, FIM, compliance, fleet scale | 3/10 |
 | Kali-on-Pi (drop box) | Portable pentest | More raw power, but manual, headless, no autonomy/UX/hardening | 7/10 |
 
@@ -64,8 +64,10 @@ auth layer that most hobby tools lack.
 
 1. **Breadth over depth** — every module trails its specialist (Zeek / Wazuh /
    Nessus / Burp) on depth, QA, and false-positive discipline.
-2. **8GB-gating** — traffic analysis, advanced vuln scanning, and the heavy intel
-   features do not run on the Pi Zero tier.
+2. **8GB-gating** — advanced vuln scanning and the heavy intel features do not
+   run on the Pi Zero tier. (Traffic analysis used to be in this list; it is a
+   tcpdump pipe, so it now runs on any board — see
+   [Traffic Analysis](traffic-analysis.md).)
 3. **Unverified claims** — e.g. the "predictive ML / threat attribution" in
    `threat_intelligence.py` is credited from docstrings, not confirmed behavior.
 4. **Solo maintenance, no ecosystem** — the one weakness that appears in every
@@ -80,7 +82,8 @@ auth layer that most hobby tools lack.
   a custom `ragnar-fuzz` engine with a 19-category payload library and
   context-aware reflection triage. Also wires Nuclei, Nikto, SQLMap, WhatWeb.
 - `traffic_analyzer.py` — tcpdump capture, C2 beacon detection, DNS tunneling and
-  port-scan detection (server-mode / 8GB+).
+  port-scan detection; 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s, with
+  capped/evicted tracked state so it is safe on a 512MB board.
 - `threat_intelligence.py` — multi-source TI fusion (MISP, OpenCTI, VirusTotal,
   Shodan), risk scoring, IOC management.
 - `network_intelligence.py` — network-aware, active/resolved vuln + credential

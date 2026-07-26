@@ -17830,6 +17830,7 @@ def get_server_capabilities_api():
             'features': {
                 'server_mode': False,
                 'traffic_analysis': False,
+                'traffic_sidecars': False,
                 'advanced_vuln_assessment': False,
                 'parallel_scanning': False,
                 'local_ai': False,
@@ -17899,15 +17900,17 @@ def install_server_tools():
         from server_capabilities import get_server_capabilities
         caps = get_server_capabilities(shared_data)
         
-        if not caps.is_server_mode():
+        data = request.get_json(silent=True) or {}
+        feature = data.get('feature', '')
+
+        # Traffic Analysis runs on any board, so installing its tools (tcpdump)
+        # must work on any board too. Server-class features still need one.
+        if feature != 'traffic_analysis' and not caps.is_server_mode():
             return jsonify({
                 'success': False,
                 'error': 'Server mode not available on this system'
             }), 400
-        
-        data = request.get_json(silent=True) or {}
-        feature = data.get('feature', '')
-        
+
         if feature not in ['traffic_analysis', 'advanced_vuln']:
             return jsonify({
                 'success': False,
@@ -17954,15 +17957,25 @@ def get_traffic_status():
     try:
         analyzer = get_traffic_analyzer()
         if not analyzer:
+            # The module itself failed to import. Ask the capability layer
+            # directly so the UI still gets a real reason (usually: no tcpdump).
+            from server_capabilities import traffic_capability
+            _, reason = traffic_capability(shared_data)
             return jsonify({
                 'success': False,
                 'available': False,
+                'reason': reason or 'Traffic analysis module not available',
                 'error': 'Traffic analysis module not available'
             })
-        
+
+
+        available = analyzer.is_available()
         return jsonify({
             'success': True,
-            'available': analyzer.is_available(),
+            'available': available,
+            # Named reason so the UI can say what is actually missing (almost
+            # always an uninstalled tcpdump) instead of "server mode required".
+            'reason': '' if available else analyzer.unavailable_reason(),
             'summary': analyzer.get_summary()
         })
     except Exception as e:
@@ -18045,7 +18058,8 @@ def start_traffic_capture():
         if not analyzer.is_available():
             return jsonify({
                 'success': False,
-                'error': 'Traffic analysis not available - check system requirements'
+                'error': (analyzer.unavailable_reason()
+                          or 'Traffic analysis not available - check system requirements')
             }), 400
         
         data = request.get_json(silent=True) or {}
