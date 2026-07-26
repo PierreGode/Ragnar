@@ -890,9 +890,10 @@ class TrafficAnalyzer:
             conn.bytes_sent += packet_size
             conn.last_seen = datetime.now()
             
-            # Record listening ports (a host using a service port = listener).
-            self._record_listening_port(src_ip, src_port)
-            self._record_listening_port(dst_ip, dst_port)
+            # Record listening ports. Only the SOURCE side counts, and only
+            # when the packet carries payload — see _record_listening_port.
+            if packet_size > 0:
+                self._record_listening_port(src_ip, src_port)
 
             # Check for suspicious patterns
             self._check_suspicious_patterns(src_ip, dst_ip, src_port, dst_port, protocol)
@@ -1019,9 +1020,27 @@ class TrafficAnalyzer:
             self.host_stats[ip].mac = mac
 
     def _record_listening_port(self, ip: str, port: int):
+        """Record that `ip` appears to serve on `port`. Feeds the hosts DB.
+
+        The caller must only pass the packet's SOURCE ip/port, and only for a
+        packet carrying payload. Both halves of that rule are load-bearing:
+
+        - Source only. Crediting the *destination* of a packet takes "someone
+          sent something to this port" as proof the host listens there, which
+          any port scan turns into a lie — Ragnar's own scanner sweeps the
+          whole configured portlist against every LAN host, so every host ends
+          up claiming ~50 open ports it never had.
+        - Payload only. `tcpdump -q` prints a SYN-ACK and an RST identically as
+          `tcp 0`, so a reply alone cannot tell an open port from a closed one.
+          Requiring payload means only a host that actually served something
+          counts, and scan responses of either kind are ignored.
+
+        This is inference from traffic, not a scan result: no payload seen, no
+        claim made. An active scan overwrites this field with the truth.
+        """
         if not ip or not port or port <= 0:
             return
-        # A host using a service port (<1024 or high-value) = it's a listener.
+        # A host serving from a service port (<1024 or high-value) = a listener.
         if port >= self.PORTSCAN_EPHEMERAL_FLOOR and port not in self.HIGH_VALUE_HIGH_PORTS:
             return
         if not self._is_lan_ip(ip):
@@ -1124,8 +1143,6 @@ class TrafficAnalyzer:
 
         merged_ports = existing_ports | listening_ports
         new_ports = listening_ports - existing_ports
-        if not existing and not merged_ports:
-            return  # nothing useful to write yet
 
         services = dict(existing_services)
         for port in merged_ports:
@@ -1133,15 +1150,21 @@ class TrafficAnalyzer:
             if key not in services or not services[key]:
                 services[key] = self.PORT_SERVICE_NAMES.get(port, '')
 
-        ports_str = ','.join(str(p) for p in sorted(merged_ports))
-        # Only pass services if we have something to add — avoid clobbering
-        # richer service descriptions an active scan may have written.
-        services_arg = services if new_ports or not existing else None
+        # Touch the port columns only when we actually inferred something new.
+        # A host we never saw serve anything is still worth recording — hosts
+        # that never answer a scan are the whole point of passive discovery —
+        # but its port list must be left alone, not overwritten with an empty
+        # one. Passing None leaves both columns untouched.
+        write_ports = bool(new_ports) or (not existing and bool(merged_ports))
+        ports_arg = ','.join(str(p) for p in sorted(merged_ports)) if write_ports else None
+        # Only pass services alongside ports — avoid clobbering richer service
+        # descriptions an active scan may have written.
+        services_arg = services if write_ports else None
 
         db.upsert_host(
             mac=target_mac,
             ip=ip,
-            ports=ports_str if (new_ports or not existing) else None,
+            ports=ports_arg,
             services=services_arg,
         )
 
