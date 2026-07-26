@@ -48,32 +48,52 @@ detect_desktop_mode() {
 }
 
 # Find the user who actually owns the active graphical session.
-# loginctl shows seat0 sessions; pick the first non-greeter user.
+#
+# Deliberately asks each session what it is instead of parsing the columns of
+# `loginctl list-sessions`, whose layout has changed between systemd versions.
+# The old parse had two problems: its first pass compared the *user* column
+# against "seat0" so it never matched anything, and when no seated session
+# existed at all it fell back to whoever `who` listed first - an ssh login on a
+# pty. The autostart entry then landed in that user's home directory, so it
+# never ran for the person actually sitting at the screen. Returning nothing is
+# the right answer there: the caller falls back to detect_kiosk_user_bare.
+_session_prop() {   # _session_prop <session-id> <property>
+    local out
+    out="$(loginctl show-session "$1" -p "$2" --value 2>/dev/null)" && [[ -n "$out" ]] && {
+        echo "$out"; return 0
+    }
+    # --value predates systemd 238; fall back to Property=value output.
+    loginctl show-session "$1" -p "$2" 2>/dev/null | cut -d= -f2-
+}
+
 detect_session_user() {
     if command -v loginctl >/dev/null 2>&1; then
-        local user
-        user="$(loginctl list-sessions --no-legend 2>/dev/null \
-            | awk '$3 == "seat0" {print $3, $0}' \
-            | awk '{print $4}' \
-            | grep -v -E '^(lightdm|greeter|gdm|sddm|_)?$' \
-            | head -n1)"
-        if [[ -n "$user" ]]; then
-            echo "$user"
-            return 0
-        fi
-        # Alternative loginctl format: session-id, uid, user, seat, tty
-        user="$(loginctl list-sessions --no-legend 2>/dev/null \
-            | awk '/seat0/ {print $3}' \
-            | grep -v -E '^(lightdm|greeter|gdm|sddm|_)?$' \
-            | head -n1)"
-        if [[ -n "$user" ]]; then
-            echo "$user"
-            return 0
-        fi
+        local sid user stype pass
+        # Pass 1: a genuinely graphical session. Pass 2: any seated session.
+        for pass in graphical seated; do
+            while read -r sid; do
+                [[ -z "$sid" ]] && continue
+                user="$(_session_prop "$sid" Name)"
+                stype="$(_session_prop "$sid" Type)"
+                case "$user" in
+                    lightdm|gdm|gdm3|sddm|greeter|'') continue ;;
+                esac
+                if [[ "$pass" == "graphical" ]]; then
+                    case "$stype" in
+                        wayland|x11|mir) ;;
+                        *) continue ;;
+                    esac
+                else
+                    [[ "$(_session_prop "$sid" Seat)" == "" ]] && continue
+                fi
+                echo "$user"
+                return 0
+            done < <(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}')
+        done
     fi
-    # Fallback: who is logged in on a real tty
+    # Fallback: whoever is logged in on a real (non-pty) tty.
     if command -v who >/dev/null 2>&1; then
-        who | awk '{print $1}' | head -n1
+        who 2>/dev/null | awk '$2 !~ /^pts/ {print $1; exit}'
     fi
 }
 

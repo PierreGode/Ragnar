@@ -3583,10 +3583,6 @@ def _kiosk_mode() -> str:
     return 'not_installed'
 
 
-def _kiosk_installed() -> bool:
-    return _kiosk_mode() != 'not_installed'
-
-
 def _kiosk_running() -> bool:
     """Best-effort: is a kiosk chromium process running right now?"""
     try:
@@ -3597,6 +3593,36 @@ def _kiosk_running() -> bool:
         return proc.returncode == 0 and bool(proc.stdout.strip())
     except Exception:
         return False
+
+
+def _x11_display_for(uid: int) -> str:
+    """The DISPLAY of this user's X session, via loginctl. '' when there is none.
+
+    Pi OS Desktop is Wayland now, but plenty of boxes still run X11 — the user
+    switched it in raspi-config, or the image predates labwc. Those sessions have
+    no wayland-* socket at all, which is the only thing the spawn used to look
+    for, so enabling the kiosk from the web UI appeared to do nothing until the
+    person at the screen logged out and back in.
+    """
+    try:
+        listing = subprocess.run(['loginctl', 'list-sessions', '--no-legend'],
+                                 capture_output=True, text=True, timeout=5, check=False)
+        for line in listing.stdout.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            sid = parts[0]
+            props = subprocess.run(
+                ['loginctl', 'show-session', sid, '-p', 'User', '-p', 'Type', '-p', 'Display'],
+                capture_output=True, text=True, timeout=5, check=False).stdout
+            values = dict(
+                line.split('=', 1) for line in props.splitlines() if '=' in line)
+            if values.get('Type') != 'x11' or values.get('User') != str(uid):
+                continue
+            return values.get('Display', '') or ':0'
+    except Exception as exc:
+        logger.debug(f"[kiosk] could not query X11 sessions: {exc}")
+    return ''
 
 
 def _spawn_kiosk_in_session() -> bool:
@@ -3619,16 +3645,26 @@ def _spawn_kiosk_in_session() -> bool:
             ]
         except OSError:
             socket_names = []
-        if not socket_names:
-            continue
-        wl = sorted(socket_names)[0]
+
+        env_extra = []
+        if socket_names:
+            wl = sorted(socket_names)[0]
+            session_label = f"wayland ({wl})"
+            env_extra = [f"WAYLAND_DISPLAY={wl}", "DISPLAY=:0"]
+        else:
+            display = _x11_display_for(entry.pw_uid)
+            if not display:
+                continue
+            session_label = f"x11 ({display})"
+            env_extra = [f"DISPLAY={display}",
+                         f"XAUTHORITY={os.path.join(entry.pw_dir, '.Xauthority')}"]
+
         cmd = [
             'sudo', '-u', entry.pw_name, '-n',
             'env',
             f"HOME={entry.pw_dir}",
             f"XDG_RUNTIME_DIR={runtime_dir}",
-            f"WAYLAND_DISPLAY={wl}",
-            "DISPLAY=:0",
+        ] + env_extra + [
             f"RAGNAR_REPO={os.path.dirname(os.path.abspath(__file__))}",
             '/usr/local/bin/ragnar-kiosk-run',
         ]
@@ -3640,11 +3676,125 @@ def _spawn_kiosk_in_session() -> bool:
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {wl}")
+            logger.info(f"[kiosk] spawned into {entry.pw_name}'s session via {session_label}")
             return True
         except Exception as exc:
             logger.error(f"[kiosk] failed to spawn into {entry.pw_name}'s session: {exc}")
-    logger.warning("[kiosk] no active wayland session — will launch on next login")
+    logger.warning("[kiosk] no active desktop session (wayland or X11) — "
+                   "will launch on next login")
+    return False
+
+
+def _kiosk_failure_detail(max_chars: int = 400) -> str:
+    """The most specific line available about why the kiosk service died.
+
+    Prefers the wrapper's own error output over the unit journal: the journal
+    line people paste is almost always "Main process exited, status=1/FAILURE",
+    which names no cause at all, while the wrapper says things like "an X server
+    is already running" or dumps the Xorg error that actually killed it.
+    """
+    candidates = []
+    try:
+        journal = subprocess.run(
+            ['journalctl', '-u', KIOSK_SERVICE, '-n', '40', '--no-pager', '-o', 'cat'],
+            capture_output=True, text=True, timeout=15, check=False).stdout
+        candidates += [l.strip() for l in journal.splitlines()
+                       if 'kiosk-run' in l or '(EE)' in l or 'ERROR' in l]
+    except Exception:
+        pass
+    try:
+        with open('/var/log/ragnar/kiosk-wrapper.log', 'r', errors='replace') as fh:
+            tail = fh.readlines()[-40:]
+        candidates += [l.strip() for l in tail
+                       if 'ERROR' in l or 'WARN' in l or '(EE)' in l]
+    except OSError:
+        pass
+    if not candidates:
+        return ' Click Diagnose for the full picture.'
+    detail = ' '.join(candidates[-3:])
+    if len(detail) > max_chars:
+        detail = detail[:max_chars].rstrip() + '…'
+    return f' Last error: {detail} — click Diagnose for the full picture.'
+
+
+def _kiosk_install_and_start() -> bool:
+    """Do exactly what `sudo bash scripts/install_kiosk.sh` + `systemctl enable
+    --now ragnar-kiosk` do by hand, and report why if it does not take.
+
+    The installer is idempotent by design - it says so at the top of the file
+    and only installs what is missing - so it is run on every enable rather than
+    skipped whenever something already looks installed. Skipping was the reason
+    the toggle and the manual command behaved differently: an earlier attempt
+    that got as far as writing the unit file (or left an autostart entry behind)
+    counted as "installed", so the toggle never re-ran the installer and never
+    fixed what was actually missing, while running the script by hand did.
+    """
+    logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
+    # Installing chromium: minutes on a Pi Zero 2 W. The UI shows this phase
+    # instead of timing the poll out.
+    _kiosk_task_set(phase='installing')
+    proc = subprocess.run(
+        ['sudo', '-n', 'bash', KIOSK_INSTALL_SCRIPT],
+        capture_output=True, text=True, timeout=900, check=False
+    )
+    if proc.returncode != 0:
+        output = (proc.stderr.strip() or proc.stdout.strip() or '')
+        detail = output.splitlines()[-1] if output else f'exit code {proc.returncode}'
+        logger.error(f"[kiosk] install failed (rc={proc.returncode}): {output}")
+        # Surface it. This failure never reaches the systemd journal - the unit
+        # does not exist yet - so telling the user to check journalctl sent them
+        # somewhere with nothing in it.
+        _kiosk_task_set(phase='failed',
+                        error=f'Installer failed: {detail}. Click Diagnose for the full picture.')
+        return False
+    logger.info("[kiosk] install completed")
+
+    mode = _kiosk_mode()
+    _kiosk_task_set(phase='starting')
+    if mode == 'service':
+        # Clear a tripped start limit first. The unit gives up after 5 failures
+        # in 2 minutes and then refuses every later start with "start request
+        # repeated too quickly" until it is reset - so once a box has failed a
+        # few times, enabling it fails for a reason that has nothing to do with
+        # whatever is actually wrong, and the real error never gets a chance to
+        # reappear. This is the same `systemctl reset-failed` the kiosk doctor
+        # tells people to run by hand.
+        _run_systemctl(['reset-failed', KIOSK_SERVICE])
+        enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
+        if enable_proc.returncode != 0:
+            err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
+            logger.error(f"[kiosk] enable --now failed: {err}")
+            _kiosk_task_set(phase='failed',
+                            error=f'Could not start the kiosk service: {err}{_kiosk_failure_detail()}')
+            return False
+        # `enable --now` returns as soon as the process is spawned, so a kiosk
+        # that dies a second later reported success and left the UI waiting on a
+        # service that was already gone. Give it a moment and say so instead.
+        time.sleep(5)
+        state = _systemctl_state_label('ragnar-kiosk')
+        if state not in ('active', 'activating'):
+            logger.error(f"[kiosk] service did not stay up (state={state})")
+            _kiosk_task_set(
+                phase='failed',
+                error=f'The kiosk service started and then stopped ({state}).'
+                      f'{_kiosk_failure_detail()}')
+            return False
+        logger.info("[kiosk] systemd service enabled and started")
+        return True
+
+    if mode == 'autostart':
+        # Autostart mode: the entry covers next login, but spawn into the live
+        # session too so enabling from the web UI shows something now.
+        if not _kiosk_running():
+            _spawn_kiosk_in_session()
+        return True
+
+    # The installer returned success but left neither a unit nor an autostart
+    # entry. Saying "installed" here would be a lie the UI then waits on.
+    logger.error("[kiosk] installer succeeded but nothing was installed")
+    _kiosk_task_set(phase='failed',
+                    error='The installer reported success but installed neither a service nor an '
+                          'autostart entry. Click Diagnose for the full picture.')
     return False
 
 
@@ -3655,39 +3805,7 @@ def _dispatch_kiosk_change(prev_enabled: bool, new_enabled: bool, settings_chang
     _kiosk_task_set(busy=True, phase='starting', error=None, started=time.time())
     try:
         if new_enabled and not prev_enabled:
-            if not _kiosk_installed():
-                logger.info(f"[kiosk] running installer: {KIOSK_INSTALL_SCRIPT}")
-                # Installing chromium: minutes on a Pi Zero 2 W. The UI shows
-                # this phase instead of timing the poll out.
-                _kiosk_task_set(phase='installing')
-                proc = subprocess.run(
-                    ['sudo', 'bash', KIOSK_INSTALL_SCRIPT],
-                    capture_output=True, text=True, timeout=600, check=False
-                )
-                if proc.returncode != 0:
-                    detail = (proc.stderr.strip() or proc.stdout.strip() or '').splitlines()
-                    detail = detail[-1] if detail else f'exit code {proc.returncode}'
-                    logger.error(f"[kiosk] install failed (rc={proc.returncode}): {proc.stderr.strip() or proc.stdout.strip()}")
-                    # Surface it. This failure never reaches the systemd journal
-                    # — the unit does not exist yet — so telling the user to
-                    # check journalctl sent them somewhere with nothing in it.
-                    _kiosk_task_set(phase='failed', error=f'Installer failed: {detail}')
-                    return
-                logger.info("[kiosk] install completed")
-            mode = _kiosk_mode()
-            _kiosk_task_set(phase='starting')
-            if mode == 'service':
-                enable_proc = _run_systemctl(['enable', '--now', KIOSK_SERVICE])
-                if enable_proc.returncode != 0:
-                    err = enable_proc.stderr.strip() or enable_proc.stdout.strip() or 'unknown error'
-                    logger.error(f"[kiosk] enable --now failed: {err}")
-                    _kiosk_task_set(phase='failed', error=f'Could not start the kiosk service: {err}')
-                else:
-                    logger.info("[kiosk] systemd service enabled and started")
-            else:
-                # Autostart mode: install handles next-login flow. Spawn now too.
-                if not _kiosk_running():
-                    _spawn_kiosk_in_session()
+            _kiosk_install_and_start()
         elif prev_enabled and not new_enabled:
             _kiosk_task_set(phase='removing')
             # Kill any running kiosk chromium first (autostart mode)
@@ -5991,6 +6109,11 @@ def kiosk_status():
         return jsonify({
             'installed': mode != 'not_installed',
             'mode': mode,
+            # Whether `journalctl -u ragnar-kiosk` can possibly have anything in
+            # it. In autostart mode, and whenever the install failed, no unit is
+            # ever created - pointing people at that journal sent them to "-- No
+            # entries --" and a dead end.
+            'unit_exists': os.path.exists(KIOSK_SERVICE_FILE),
             'enabled': bool(shared_data.config.get('kiosk_enabled', False)),
             'service_state': state,
             # Background install/teardown progress. 'busy' tells the UI to keep
@@ -6008,6 +6131,85 @@ def kiosk_status():
     except Exception as exc:
         logger.error(f"Error getting kiosk status: {exc}")
         return jsonify({'error': str(exc)}), 500
+
+
+@app.route('/api/kiosk/repair', methods=['POST'])
+def kiosk_repair():
+    """Re-run the kiosk installer and start it, whatever the current state.
+
+    The toggle only acts on a *change*, so a box whose config already says
+    kiosk_enabled - an install that failed halfway, a restored config, a unit
+    that was removed by hand - had no way back: turning the switch on when it is
+    already on does nothing. That is what left people running
+    `sudo bash scripts/install_kiosk.sh` themselves. This is that command,
+    automated, with the enable step included.
+    """
+    task = _kiosk_task_get()
+    if task.get('busy'):
+        return jsonify({'success': False,
+                        'error': f"A kiosk job is already running ({task.get('phase')})."}), 409
+
+    def worker():
+        _kiosk_task_set(busy=True, phase='installing', error=None, started=time.time())
+        try:
+            _kiosk_install_and_start()
+        except subprocess.TimeoutExpired:
+            logger.error("[kiosk] repair timed out")
+            _kiosk_task_set(phase='failed', error='Kiosk repair timed out.')
+        except Exception as exc:
+            logger.error(f"[kiosk] repair error: {exc}")
+            _kiosk_task_set(phase='failed', error=str(exc))
+        finally:
+            with _kiosk_task_lock:
+                _kiosk_task['busy'] = False
+
+    # Remember the intent, so a reboot mid-repair still comes up with the kiosk.
+    if not shared_data.config.get('kiosk_enabled'):
+        shared_data.config['kiosk_enabled'] = True
+        try:
+            shared_data.save_config()
+        except Exception as exc:
+            logger.warning(f"[kiosk] could not persist kiosk_enabled during repair: {exc}")
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({'success': True, 'message': 'Reinstalling and starting the kiosk…'})
+
+
+@app.route('/api/kiosk/diagnose', methods=['POST'])
+def kiosk_diagnose():
+    """Run scripts/kiosk_doctor.sh and hand back its report.
+
+    "The kiosk shows nothing" has a dozen causes and the systemd journal answers
+    almost none of them: in autostart mode there is no unit, and when the
+    installer itself fails there is no unit either - so the first thing everyone
+    tries, `journalctl -u ragnar-kiosk`, prints "-- No entries --" and the trail
+    ends. The doctor checks the browser, the X stack, the session, the display
+    hardware and the configured URL, and reads the wrapper and Xorg logs where
+    the real detail lives. Exposing it here means a user can get that report
+    without an ssh session.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          'scripts', 'kiosk_doctor.sh')
+    if not os.path.isfile(script):
+        return jsonify({'success': False,
+                        'error': 'scripts/kiosk_doctor.sh is missing - update Ragnar and retry'}), 404
+    try:
+        proc = subprocess.run(['sudo', '-n', 'bash', script],
+                              capture_output=True, text=True, timeout=180, check=False)
+    except subprocess.TimeoutExpired:
+        return jsonify({'success': False,
+                        'error': 'The kiosk doctor took longer than 3 minutes and was cancelled.'}), 500
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'Could not run the kiosk doctor: {exc}'}), 500
+
+    report = (proc.stdout or '') + (proc.stderr or '')
+    if not report.strip():
+        return jsonify({'success': False,
+                        'error': f'The kiosk doctor produced no output (exit {proc.returncode}).'}), 500
+    # The doctor counts its own failures and prints them; the exit code is 0
+    # either way, so success here means "the report was produced".
+    return jsonify({'success': True, 'report': report,
+                    'failed_checks': report.count('[FAIL]')})
 
 
 @app.route('/api/config/scan-intensity', methods=['GET', 'POST'])

@@ -25015,16 +25015,32 @@ function onKioskSettingChanged() {
     }, 500);
 }
 
+// Where the answer actually is when the kiosk misbehaves. `journalctl -u
+// ragnar-kiosk` is only worth naming when that unit exists: in autostart mode,
+// and whenever the installer failed, it was never created — so the first thing
+// everyone tried printed "-- No entries --" and the trail ended there.
+function _kioskWhereToLook(status) {
+    if (status && status.unit_exists) {
+        return 'Check `journalctl -u ragnar-kiosk` on the Pi, or click Diagnose.';
+    }
+    return 'There is no kiosk service unit on this box'
+        + (status && status.mode === 'autostart'
+            ? ' (autostart mode runs inside your desktop session)' : '')
+        + ', so `journalctl -u ragnar-kiosk` will be empty. Click Diagnose for the real state.';
+}
+
 function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
     // Stability differs by mode:
     //   service  → service_state reaches 'active' (enabled) or 'inactive' (disabled)
     //   autostart → installed=true is the success signal on enable; mode!=autostart on disable.
     if (_kioskPollTimer) clearTimeout(_kioskPollTimer);
     let attempts = 0;
+    let lastStatus = null;
     const tick = async () => {
         attempts++;
         try {
             const data = await fetchAPI('/api/kiosk/status');
+            lastStatus = data;
             _setKioskBadge(data.service_state || 'unknown');
 
             const isStableSuccess = (() => {
@@ -25080,10 +25096,7 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
                 return;
             }
             if (isStableFailure) {
-                _setKioskMessage(
-                    'Kiosk service failed. Check `journalctl -u ragnar-kiosk` on the Pi.',
-                    'error'
-                );
+                _setKioskMessage('Kiosk service failed. ' + _kioskWhereToLook(data), 'error');
                 return;
             }
         } catch (e) { /* keep polling */ }
@@ -25091,16 +25104,63 @@ function _pollKioskStatusUntilStable(expectEnabled, maxAttempts = 12) {
             _kioskPollTimer = setTimeout(tick, 2000);
         } else {
             // Genuinely stuck: no background job running, no reported error,
-            // and the state never settled. Name both places worth looking,
-            // since which one has the answer depends on how far it got.
-            _setKioskMessage(
-                'Kiosk state did not settle. Check `journalctl -u ragnar-kiosk` on the Pi, '
-                + 'and the Ragnar log for lines tagged [kiosk].',
-                'error'
-            );
+            // and the state never settled.
+            _setKioskMessage('Kiosk state did not settle. ' + _kioskWhereToLook(lastStatus), 'error');
         }
     };
     _kioskPollTimer = setTimeout(tick, 1500);
+}
+
+// Re-run the kiosk installer and start it, whatever state the box is in — the
+// same thing as `sudo bash scripts/install_kiosk.sh` followed by
+// `systemctl enable --now ragnar-kiosk`. The toggle only reacts to a *change*,
+// so this is the way back for a box whose config already says enabled.
+async function repairKiosk() {
+    const btn = document.getElementById('kiosk-repair-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Reinstalling…'; }
+    try {
+        const data = await postAPI('/api/kiosk/repair', {});
+        _setKioskMessage(data.message || 'Reinstalling the kiosk…', 'info');
+        const cb = document.getElementById('kiosk-enabled');
+        if (cb) cb.checked = true;
+        _pollKioskStatusUntilStable(true);
+    } catch (e) {
+        _setKioskMessage('Could not start the kiosk reinstall: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Reinstall'; }
+    }
+}
+
+// Run scripts/kiosk_doctor.sh on the box and show its report here, so "the
+// screen is blank" can be diagnosed without an ssh session.
+async function runKioskDoctor() {
+    const btn = document.getElementById('kiosk-diagnose-btn');
+    const out = document.getElementById('kiosk-doctor-report');
+    if (btn) { btn.disabled = true; btn.textContent = 'Diagnosing…'; }
+    if (out) {
+        out.classList.remove('hidden');
+        out.textContent = 'Running the kiosk doctor — this checks the browser, display, session and logs…';
+    }
+    try {
+        const data = await postAPI('/api/kiosk/diagnose', {});
+        if (out) {
+            out.textContent = data.report || 'The kiosk doctor returned no output.';
+            out.scrollTop = 0;
+        }
+        if (data.failed_checks > 0) {
+            _setKioskMessage(`${data.failed_checks} check(s) failed — see the [FAIL] lines below.`, 'error');
+        } else {
+            _setKioskMessage('No failed checks. If the screen is still blank, the wrapper log '
+                             + 'section of the report has the detail.', 'info');
+        }
+    } catch (e) {
+        if (out) {
+            out.textContent = 'Could not run the kiosk doctor: ' + e.message
+                + '\n\nRun it directly on the Pi instead:\n  sudo bash scripts/kiosk_doctor.sh';
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Diagnose'; }
+    }
 }
 
 // Kiosk-mode bootstrap: when the page is loaded with ?kiosk=1 (the chromium

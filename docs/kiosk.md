@@ -86,12 +86,39 @@ reached `active`/`installed`. Two things it is *not*:
 If you still see it, the service exists but is stuck part-way (usually
 `activating`). Check both logs below.
 
-**Start here — `scripts/kiosk_doctor.sh`.** One command that collects every
-answer in the right order, so you are not guessing which log to read:
+**"Nothing happened when I turned it on."** Use **Reinstall** in
+**Config → On-screen Display**. It runs the installer and the enable step for
+you — the same two commands people were resorting to by hand:
+
+```bash
+sudo bash scripts/install_kiosk.sh
+sudo systemctl enable --now ragnar-kiosk.service   # service mode only
+```
+
+Why it was needed: the toggle only acts on a *change*, and it used to skip the
+installer whenever anything already looked installed. An attempt that got as far
+as writing the unit file, or left an autostart entry behind, therefore counted as
+"installed" — so flipping the switch never re-ran the installer and never fixed
+what was missing, while running the script by hand did. The installer is
+idempotent, so it is now run on every enable, and **Reinstall** gives a box whose
+config already says enabled a way back without toggling off and on.
+
+**Start here — the Diagnose button.** In **Config → On-screen Display** it runs
+`scripts/kiosk_doctor.sh` on the box and prints the whole report in the card, so
+a blank screen can be diagnosed without an ssh session. Same thing from a
+terminal:
 
 ```bash
 sudo ./scripts/kiosk_doctor.sh
 ```
+
+> `sudo journalctl -u ragnar-kiosk` returning **`-- No entries --`** is the most
+> common dead end, and it is usually not a fault: that unit only exists in
+> *service* mode. On a desktop image the kiosk runs as an autostart entry inside
+> your session and there is no unit at all — and if the installer failed, there
+> is no unit either. The web UI now says which of those applies instead of
+> naming a journal that cannot exist. Use Diagnose, or
+> `sudo journalctl -u ragnar | grep '\[kiosk\]'`.
 
 It reports install mode, browser, the whole X stack (including the suid
 `Xorg.wrap` that causes most Pi 5 crash loops), service state and restart
@@ -106,6 +133,25 @@ wrapper and Xorg logs. Output is saved to `/tmp/kiosk_doctor_<timestamp>.log`
 > `journalctl -u ragnar-kiosk` is legitimately empty; those failures are logged
 > by Ragnar itself under `[kiosk]`.
 
+**Service starts and immediately fails with `status=1/FAILURE`, and there is no
+Xorg log at all.** This was Ragnar's own bug, fixed — the wrapper passed
+`-logfile` to Xorg, and Xorg *refuses* that flag whenever it runs with elevated
+privileges:
+
+```
+Invalid argument -logfile with elevated privileges
+```
+
+Elevated privileges is exactly how service mode runs it: the unit runs as a
+non-root user, so X can only start through the setuid `Xorg.wrap` the installer
+installs (`xserver-xorg-legacy` + `needs_root_rights=yes`). X therefore aborted
+while still parsing its arguments — before opening any log — which is why the
+journal showed a bare exit code with nothing to go on and the restart loop
+tripped the start limit. The wrapper no longer passes the flag; X writes to
+`~/.local/share/xorg/Xorg.0.log` and the wrapper copies that to
+`/var/log/ragnar/kiosk-Xorg.log`, so both paths keep working. Update and click
+**Reinstall**.
+
 **"Cannot establish any listening sockets — Make sure an X server isn't already
 running"** means service mode is trying to start its own X on `:0` while a
 desktop session already owns it. The kiosk has two modes and this box was set
@@ -117,7 +163,9 @@ detects this and says so instead of crash-looping until the start limit trips.
 - Wrapper log: `/var/log/ragnar/kiosk-wrapper.log` — board, RAM, the
   `input: touchscreen=… keyboard=… osk=…` line, which OSK launched, target URL.
 - Xorg log (service mode): `/var/log/ragnar/kiosk-Xorg.log`.
-- Service state: `journalctl -u ragnar-kiosk`.
+- Service state: `journalctl -u ragnar-kiosk` — **service mode only**; empty by
+  design in autostart mode.
+- Install/enable failures, either mode: `journalctl -u ragnar | grep '\[kiosk\]'`.
 
 **Crash loop** (`status=1/FAILURE`, restart counter climbing) in service mode is
 almost always X failing to start. The service now stops itself after 5 failures
