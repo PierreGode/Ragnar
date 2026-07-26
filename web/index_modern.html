@@ -671,7 +671,7 @@
                     <button onclick="showTab('threat-intel')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="threat-intel">
                         Threat Intel
                     </button>
-                    <button onclick="showTab('traffic')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap server-mode-feature hidden" data-tab="traffic">
+                    <button onclick="showTab('traffic')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap traffic-feature hidden" data-tab="traffic">
                         <span class="flex items-center space-x-1">
                             <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
@@ -743,7 +743,7 @@
                     Pentest
                 </button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
-                <button onclick="showTab('traffic')" data-tab="traffic" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 server-mode-feature hidden">Traffic Analysis</button>
+                <button onclick="showTab('traffic')" data-tab="traffic" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 traffic-feature hidden">Traffic Analysis</button>
                 <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 server-mode-feature hidden">Adv Scan</button>
                 <button onclick="showTab('wardriving')" data-tab="wardriving" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 wardriving-feature hidden">Wardriving</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 requires-display">Display</button>
@@ -4453,7 +4453,7 @@
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
                     <div class="flex items-center space-x-3">
                         <h2 class="text-xl sm:text-2xl font-bold">Traffic Analysis</h2>
-                        <span class="px-2 py-1 bg-cyan-600 bg-opacity-30 text-cyan-400 text-xs rounded-full">Server Mode</span>
+                        <span class="px-2 py-1 bg-cyan-600 bg-opacity-30 text-cyan-400 text-xs rounded-full">Live capture</span>
                     </div>
                     <div class="flex flex-wrap gap-2">
                         <button onclick="toggleTrafficCapture()" id="traffic-toggle-btn" class="flex-1 sm:flex-none bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors text-sm sm:text-base">
@@ -4827,17 +4827,16 @@
                     </div>
                 </div>
 
-                <!-- Server Mode Notice -->
+                <!-- Unavailable notice — the reason comes from the API -->
                 <div id="traffic-not-available" class="hidden mt-6 p-4 bg-yellow-900 bg-opacity-30 border border-yellow-600 rounded-lg">
                     <div class="flex items-start">
                         <svg class="w-6 h-6 text-yellow-500 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                         </svg>
                         <div>
-                            <h4 class="font-semibold text-yellow-400">Server Mode Required</h4>
-                            <p class="text-gray-300 text-sm mt-1">
-                                Traffic analysis requires Server Mode (AMD64/ARM64 with 8GB+ RAM).
-                                This feature provides real-time packet capture and network traffic monitoring.
+                            <h4 class="font-semibold text-yellow-400">Traffic Analysis unavailable</h4>
+                            <p class="text-gray-300 text-sm mt-1" id="traffic-not-available-reason">
+                                Traffic analysis could not start on this system.
                             </p>
                         </div>
                     </div>
@@ -7061,7 +7060,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-kiosk-server-only"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-traffic-any-board"></script>
 
 </body>
 </html>

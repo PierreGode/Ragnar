@@ -1,9 +1,15 @@
 # traffic_analyzer.py
 """
-Traffic Analysis Module for Ragnar Server Mode
+Traffic Analysis Module
 
-This module provides real-time network traffic analysis capabilities
-that are only available when running on a capable server (8GB+ RAM).
+Real-time network traffic analysis. The engine is a `tcpdump` pipe read line by
+line in Python — measured on a Pi 5 at ~90 packets/sec it costs 0.4% of one core
+and 18MB RSS (plus 8MB for tcpdump), so it runs on any board Ragnar runs on,
+down to a Pi Zero 2 W. Tracked state is capped and evicted (see _prune_state) so
+a long capture cannot grow into a small board's RAM.
+
+The one server-class part is the optional JA3/IRC sidecars, which each spawn a
+full tshark dissector; those stay gated (traffic_sidecars_enabled).
 
 Features:
 - Real-time packet capture with tcpdump
@@ -33,7 +39,11 @@ from collections import defaultdict, deque
 from enum import Enum
 
 from logger import Logger
-from server_capabilities import get_server_capabilities, is_server_mode
+from server_capabilities import (
+    ServerCapabilities,
+    get_server_capabilities,
+    is_server_mode,
+)
 
 logger = Logger(name="traffic_analyzer", level=logging.INFO)
 
@@ -154,8 +164,8 @@ class HostTrafficStats:
 
 class TrafficAnalyzer:
     """
-    Real-time traffic analyzer for Ragnar server mode.
-    
+    Real-time traffic analyzer.
+
     Uses tcpdump for packet capture and provides:
     - Live connection tracking
     - Per-host bandwidth statistics
@@ -272,10 +282,26 @@ class TrafficAnalyzer:
     PASSIVE_MAX_LISTEN_PORTS = 100       # cap per host
     PASSIVE_LAN_PREFIX = 24              # /24 around each known local/gateway IP
 
+    # Bounded state. Alerts and DNS queries are ring buffers already, but
+    # host_stats, connections and the beacon flow history gain an entry per new
+    # peer/flow seen and have no natural ceiling — on a box left capturing for a
+    # week they are the only thing that grows without limit. Cap them and evict
+    # the least-recently-seen entries.
+    #
+    # The caps are what makes this feature honest on a 512MB Pi Zero 2 W: at the
+    # low-memory numbers below the tracked state tops out around 3MB, on top of
+    # ~18MB for the analyzer itself and ~8MB for tcpdump.
+    STATE_PRUNE_INTERVAL = 60.0          # seconds between eviction sweeps
+    MAX_TRACKED_HOSTS = 4000
+    MAX_TRACKED_CONNECTIONS = 8000
+    MAX_TRACKED_FLOWS = 2000             # each holds a 64-sample ring buffer
+    LOW_MEMORY_RAM_GB = 1.0              # below this, use the divided caps
+    LOW_MEMORY_DIVISOR = 8
+
     # Rate limiting
     MAX_ALERTS_PER_MINUTE = 10
     STATS_RETENTION_HOURS = 24
-    
+
     def __init__(self, shared_data=None, interface: str = None):
         self.shared_data = shared_data
         self.interface = interface or self._detect_interface()
@@ -344,6 +370,13 @@ class TrafficAnalyzer:
         self._beacon_scored: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
         self._last_beacon_sweep = time.time()
 
+        # State caps, sized for the board this is actually running on
+        caps_obj = get_server_capabilities(shared_data).capabilities
+        self._max_hosts, self._max_connections, self._max_flows = self._state_caps(
+            caps_obj.total_ram_gb
+        )
+        self._last_state_prune = time.time()
+
         # Optional sidecar subsystems (lazy, only spawned if tshark exists)
         self._ja3_collector = None
         self._irc_parser = None
@@ -352,10 +385,61 @@ class TrafficAnalyzer:
         self._on_alert_callbacks: List[Callable] = []
         
         # Check if feature is available
-        caps = get_server_capabilities(shared_data)
-        if not caps.capabilities.traffic_analysis_enabled:
-            logger.warning("Traffic analysis not available - missing requirements")
-    
+        if not caps_obj.traffic_analysis_enabled:
+            logger.warning("Traffic analysis not available: "
+                           f"{caps_obj.traffic_block_reason or 'missing requirements'}")
+
+    @classmethod
+    def _state_caps(cls, total_ram_gb: float) -> Tuple[int, int, int]:
+        """(hosts, connections, flows) caps for a board with this much RAM.
+
+        A RAM read of 0 means detection failed, which is exactly when the
+        conservative numbers are wanted — so it lands in the low-memory branch.
+        """
+        if total_ram_gb < cls.LOW_MEMORY_RAM_GB:
+            d = cls.LOW_MEMORY_DIVISOR
+            return (cls.MAX_TRACKED_HOSTS // d,
+                    cls.MAX_TRACKED_CONNECTIONS // d,
+                    cls.MAX_TRACKED_FLOWS // d)
+        return (cls.MAX_TRACKED_HOSTS, cls.MAX_TRACKED_CONNECTIONS, cls.MAX_TRACKED_FLOWS)
+
+    def _prune_state(self):
+        """Evict least-recently-seen tracked state back down to the caps.
+
+        Called from the analysis loop, not per packet: eviction is a sort over
+        the whole map, so doing it every STATE_PRUNE_INTERVAL keeps the cost off
+        the packet path entirely.
+        """
+        with self._lock:
+            if len(self.connections) > self._max_connections:
+                for key in sorted(self.connections,
+                                  key=lambda k: self.connections[k].last_seen
+                                  )[:len(self.connections) - self._max_connections]:
+                    del self.connections[key]
+
+            if len(self._flow_history) > self._max_flows:
+                def flow_last_seen(key):
+                    samples = self._flow_history[key]
+                    return samples[-1][0] if samples else 0.0
+                for key in sorted(self._flow_history, key=flow_last_seen
+                                  )[:len(self._flow_history) - self._max_flows]:
+                    del self._flow_history[key]
+                    self._beacon_scored.pop(key, None)
+
+            if len(self.host_stats) > self._max_hosts:
+                for ip in sorted(self.host_stats,
+                                 key=lambda k: self.host_stats[k].last_seen
+                                 )[:len(self.host_stats) - self._max_hosts]:
+                    del self.host_stats[ip]
+
+            # Per-IP side tables only make sense for hosts still tracked. They
+            # are rebuilt from the next packet, so dropping them is free.
+            live = self.host_stats.keys()
+            for table in (self._mac_by_ip, self._listening_ports,
+                          self._hostname_by_ip, self._dns_query_times):
+                for ip in [k for k in table if k not in live]:
+                    del table[ip]
+
     def _detect_interface(self) -> str:
         """Detect the primary network interface"""
         try:
@@ -510,11 +594,20 @@ class TrafficAnalyzer:
     def is_available(self) -> bool:
         """Check if traffic analysis is available"""
         return get_server_capabilities().capabilities.traffic_analysis_enabled
-    
+
+    def unavailable_reason(self) -> str:
+        """Why traffic analysis cannot run here ('' when it can).
+
+        Shown verbatim in the web UI, so it names what is actually missing —
+        almost always an uninstalled tcpdump rather than the hardware.
+        """
+        return get_server_capabilities().capabilities.traffic_block_reason
+
     def start(self) -> bool:
         """Start traffic capture and analysis"""
         if not self.is_available():
-            logger.error("Traffic analysis not available on this system")
+            logger.error("Traffic analysis not available: "
+                         f"{self.unavailable_reason() or 'requirements not met'}")
             return False
         
         if self._running:
@@ -544,7 +637,7 @@ class TrafficAnalyzer:
         try:
             self._start_sidecars()
         except Exception as exc:
-            logger.debug("Sidecar startup failed: %s", exc)
+            logger.debug(f"Sidecar startup failed: {exc}")
 
         logger.info(f"Traffic analyzer started on interface {self.interface}")
         return True
@@ -556,7 +649,7 @@ class TrafficAnalyzer:
         try:
             self._stop_sidecars()
         except Exception as exc:
-            logger.debug("Sidecar shutdown failed: %s", exc)
+            logger.debug(f"Sidecar shutdown failed: {exc}")
 
         if self._capture_process:
             try:
@@ -683,6 +776,14 @@ class TrafficAnalyzer:
                     except Exception as exc:
                         logger.debug(f"Passive host sync error: {exc}")
                     self._last_passive_sync = time.time()
+
+                # Periodically evict stale tracked state back under the caps
+                if time.time() - self._last_state_prune >= self.STATE_PRUNE_INTERVAL:
+                    try:
+                        self._prune_state()
+                    except Exception as exc:
+                        logger.debug(f"State prune error: {exc}")
+                    self._last_state_prune = time.time()
 
             except Exception as e:
                 logger.error(f"Analysis error: {e}")
@@ -1356,11 +1457,25 @@ class TrafficAnalyzer:
         """Best-effort start of tshark-based JA3 and IRC sidecars.
 
         Both modules degrade gracefully if tshark is missing.
+
+        These are the one genuinely heavy part of Traffic Analysis: each spawns
+        a full tshark dissector (~290MB RSS plus a ~155MB dumpcap child), so the
+        pair alone outweighs everything a Pi Zero has. The tcpdump core runs on
+        any board; the sidecars need a big one, hence the separate capability.
         """
+        caps = get_server_capabilities(self.shared_data).capabilities
+        if not caps.traffic_sidecars_enabled:
+            logger.info(
+                f"JA3/IRC sidecars skipped: they need tshark and a board with at "
+                f"least {ServerCapabilities.TRAFFIC_SIDECAR_MIN_RAM_GB:.1f}GB RAM "
+                f"(this one reports {caps.total_ram_gb:.2f}GB). Packet capture, "
+                f"beacon and port-scan detection are unaffected.")
+            return
+
         try:
             from tls_fingerprint import JA3Collector
         except Exception as exc:
-            logger.debug("JA3 collector unavailable: %s", exc)
+            logger.debug(f"JA3 collector unavailable: {exc}")
             JA3Collector = None  # type: ignore
 
         if JA3Collector is not None and self._ja3_collector is None:
@@ -1374,7 +1489,7 @@ class TrafficAnalyzer:
         try:
             from irc_dpi import IRCDPIParser
         except Exception as exc:
-            logger.debug("IRC DPI unavailable: %s", exc)
+            logger.debug(f"IRC DPI unavailable: {exc}")
             IRCDPIParser = None  # type: ignore
 
         if IRCDPIParser is not None and self._irc_parser is None:
@@ -1624,6 +1739,12 @@ class TrafficAnalyzer:
                 # Configuration
                 'excluded_local_ips': list(self._local_ips),
                 'alert_dedup_window_seconds': self._alert_dedup_window,
+                'sidecars_active': bool(self._ja3_collector or self._irc_parser),
+                'tracked_state_caps': {
+                    'hosts': self._max_hosts,
+                    'connections': self._max_connections,
+                    'flows': self._max_flows,
+                },
             }
     
     def get_top_hosts(self, limit: int = 10, sort_by: str = 'bytes') -> List[Dict]:

@@ -6,11 +6,16 @@ This module detects when Ragnar is running on a capable server (AMD64/ARM64 with
 and unlocks advanced features that would be impossible on a Pi Zero W2.
 
 Features unlocked in server mode:
-- Traffic Analysis (packet capture, network monitoring)
 - Advanced Vulnerability Assessment (OpenVAS, Nuclei, Nikto)
 - Parallel scanning
 - Large dictionary attacks
 - Local AI/LLM integration
+
+Not everything heavy-sounding belongs behind that bar. Two features have their
+own, much lower gates because what they actually cost has nothing to do with
+OpenVAS-class work:
+- Traffic Analysis - a tcpdump pipe parsed in Python (see TRAFFIC_MIN_RAM_GB)
+- The on-screen kiosk - one Chromium (see KIOSK_MIN_RAM_GB)
 """
 
 import os
@@ -41,6 +46,8 @@ class SystemCapabilities:
     is_pi_zero: bool = False
     kiosk_capable: bool = False
     kiosk_block_reason: str = ""
+    traffic_capable: bool = False
+    traffic_block_reason: str = ""
     hostname: str = ""
     os_name: str = ""
     os_version: str = ""
@@ -48,6 +55,7 @@ class SystemCapabilities:
     
     # Feature flags
     traffic_analysis_enabled: bool = False
+    traffic_sidecars_enabled: bool = False
     advanced_vuln_enabled: bool = False
     parallel_scanning_enabled: bool = False
     local_ai_enabled: bool = False
@@ -83,6 +91,19 @@ class ServerCapabilities:
     # firmware/kernel reservations mean a real 2GB Pi 4 reports ~1.9GB.
     KIOSK_MIN_RAM_GB = 1.8
     KIOSK_MIN_CORES = 2
+    # Traffic Analysis is a tcpdump pipe read line by line in Python. Measured
+    # on a Pi 5 against a live LAN at ~90 packets/sec: 0.4% of one core, 18MB
+    # RSS for the analyzer and 8MB for tcpdump. That is a Pi Zero 2 W workload,
+    # not a server one - so it gets its own floor rather than server mode's
+    # 7.5GB. Kept above zero only to fail closed when RAM cannot be read; a
+    # 512MB Zero 2 W reports ~0.42GB after the GPU split.
+    TRAFFIC_MIN_RAM_GB = 0.3
+    TRAFFIC_MIN_CORES = 1
+    # The JA3 and IRC sidecars are the exception: each spawns a full tshark
+    # dissector (measured ~290MB RSS each, plus a ~155MB dumpcap child), so the
+    # pair costs more than a Zero has in total. They stay a big-board feature
+    # while the tcpdump core runs everywhere.
+    TRAFFIC_SIDECAR_MIN_RAM_GB = 3.5
     # Include armv8l which is 32-bit userspace on 64-bit ARM (Pi 4/5 with 32-bit OS)
     SUPPORTED_ARCHS = ['x86_64', 'amd64', 'aarch64', 'arm64', 'armv8l', 'armv7l']
     
@@ -247,10 +268,18 @@ class ServerCapabilities:
         # question about running Chromium, not about running OpenVAS.
         caps.kiosk_capable, caps.kiosk_block_reason = self._evaluate_kiosk_support()
 
+        # Traffic Analysis is likewise its own gate: parsing tcpdump output is
+        # cheap enough for a Pi Zero, so it is not tied to server mode.
+        caps.traffic_capable, caps.traffic_block_reason = self._evaluate_traffic_support()
+        caps.traffic_analysis_enabled = caps.traffic_capable
+        # tshark sidecars (JA3 fingerprinting, IRC DPI) are the heavy part.
+        caps.traffic_sidecars_enabled = (
+            caps.traffic_capable
+            and caps.total_ram_gb >= self.TRAFFIC_SIDECAR_MIN_RAM_GB
+            and caps.available_tools.get('tshark', False)
+        )
+
         if caps.is_server_capable:
-            # Traffic Analysis: needs tcpdump at minimum
-            caps.traffic_analysis_enabled = caps.available_tools.get('tcpdump', False)
-            
             # Advanced Vuln: needs nmap (which Ragnar already uses)
             caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
             
@@ -263,8 +292,8 @@ class ServerCapabilities:
             # Large dictionaries: enabled on 7.5GB+ RAM (8GB devices report ~7.87GB)
             caps.large_dictionaries_enabled = caps.total_ram_gb >= 7.5
         else:
-            # All advanced features disabled on Pi Zero / low-spec systems
-            caps.traffic_analysis_enabled = False
+            # Server-class features stay off on Pi Zero / low-spec systems.
+            # Traffic Analysis is deliberately not in this list - see above.
             caps.advanced_vuln_enabled = False
             caps.parallel_scanning_enabled = False
             caps.local_ai_enabled = False
@@ -301,6 +330,52 @@ class ServerCapabilities:
             )
         return True, ""
 
+    def _evaluate_traffic_support(self) -> Tuple[bool, str]:
+        """Can this box run Traffic Analysis (tcpdump capture + parsing)?
+
+        Returns (capable, reason), same contract as _evaluate_kiosk_support:
+        `reason` is empty when capable and is shown verbatim otherwise.
+
+        Unlike the vulnerability scanners this needs no dictionaries, no
+        parallel scan fleet and no dissector - just a tcpdump pipe - so a Pi
+        Zero passes. The only hard requirement is tcpdump itself.
+        """
+        caps = self.capabilities
+        ram_gb = caps.total_ram_gb
+
+        if not caps.available_tools.get('tcpdump', False):
+            return False, (
+                "Traffic Analysis needs tcpdump, which is not installed. "
+                "Install it with: sudo apt-get install tcpdump"
+            )
+        if caps.architecture not in self.SUPPORTED_ARCHS:
+            return False, (
+                f"Traffic Analysis does not support this architecture "
+                f"({caps.architecture or 'unknown'})."
+            )
+        # A RAM read of 0 means psutil and /proc/meminfo both failed. Fail
+        # closed rather than start a capture on a box we cannot measure.
+        if ram_gb <= 0:
+            return False, "Traffic Analysis could not read this system's RAM size."
+        if ram_gb < self.TRAFFIC_MIN_RAM_GB:
+            return False, (
+                f"Traffic Analysis needs at least {self.TRAFFIC_MIN_RAM_GB:.1f}GB RAM. "
+                f"This board reports {ram_gb:.2f}GB."
+            )
+        if caps.cpu_cores < self.TRAFFIC_MIN_CORES:
+            return False, (
+                f"Traffic Analysis needs at least {self.TRAFFIC_MIN_CORES} CPU core."
+            )
+        return True, ""
+
+    def is_traffic_capable(self) -> bool:
+        """Check if Traffic Analysis may run on this hardware"""
+        return self.capabilities.traffic_capable
+
+    def traffic_block_reason(self) -> str:
+        """Why Traffic Analysis is unavailable ('' when it is available)"""
+        return self.capabilities.traffic_block_reason
+
     def is_kiosk_capable(self) -> bool:
         """Check if the on-screen kiosk may run on this hardware"""
         return self.capabilities.kiosk_capable
@@ -323,6 +398,7 @@ class ServerCapabilities:
         return {
             'server_mode': caps.is_server_capable,
             'traffic_analysis': caps.traffic_analysis_enabled,
+            'traffic_sidecars': caps.traffic_sidecars_enabled,
             'advanced_vuln_assessment': caps.advanced_vuln_enabled,
             'parallel_scanning': caps.parallel_scanning_enabled,
             'local_ai': caps.local_ai_enabled,
@@ -352,9 +428,12 @@ class ServerCapabilities:
     
     def install_missing_tools(self, feature: str) -> Tuple[bool, str]:
         """Attempt to install missing tools for a feature"""
-        if not self.capabilities.is_server_capable:
+        # Traffic Analysis runs on any board, so its tools install on any board
+        # too - and this is the path that installs the missing tcpdump the gate
+        # is complaining about. Only server-class features need server mode.
+        if feature != 'traffic_analysis' and not self.capabilities.is_server_capable:
             return False, "Server mode not available on this system"
-        
+
         missing = self.get_missing_tools(feature)
         if not missing:
             return True, "All required tools are already installed"
@@ -416,6 +495,20 @@ def get_server_capabilities(shared_data=None) -> ServerCapabilities:
 def is_server_mode() -> bool:
     """Quick check if running in server mode"""
     return get_server_capabilities().is_server_mode()
+
+
+def traffic_capability(shared_data=None) -> Tuple[bool, str]:
+    """(capable, reason) for Traffic Analysis on this hardware.
+
+    Never raises: a detection failure must not take the traffic API down, and a
+    box we cannot measure is treated as capable=False with a stated reason.
+    """
+    try:
+        caps = get_server_capabilities(shared_data)
+        return caps.is_traffic_capable(), caps.traffic_block_reason()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(f"Traffic capability check failed: {exc}")
+        return False, f"Could not determine hardware capability for Traffic Analysis: {exc}"
 
 
 def kiosk_capability(shared_data=None) -> Tuple[bool, str]:

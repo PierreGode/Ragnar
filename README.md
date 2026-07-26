@@ -13,7 +13,7 @@
   </tr>
 </table>
 
-Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including real-time traffic analysis and enhanced vulnerability scanning.
+Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including enhanced vulnerability scanning and parallel scanning.
 
 > [!IMPORTANT]
 > **For educational and authorized testing purposes only.**
@@ -83,7 +83,8 @@ the adapter with the BLE overlay scanner); enable it from the app's Box tab or
 - **AI-Powered Analysis** — GPT-5 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
 - **System Attacks** — Brute-force attacks on FTP, SSH, SMB, RDP, Telnet, SQL
 - **File Stealing** — Extracts data from vulnerable services
-- **Advanced Server Features (8GB+ RAM)** — Real-time traffic analysis, advanced vulnerability scanning with Nuclei/Nikto/SQLMap/ZAP, parallel scanning, and CVE correlation. See [Server Mode](#-server-mode-advanced-features-8gb-ram)
+- **Traffic Analysis** — Live `tcpdump` capture in its own web-UI tab: per-host bandwidth and top talkers, connection tracking, protocol mix, DNS logging, and detection of **port scans**, **DNS tunnelling** and **C2 beacons** (interval/size-regularity scoring). Also drives **passive host discovery** — firewalled hosts that never answer a scan still land in the hosts DB. **Detection-only**, it never sends a packet. Needs only `tcpdump`, so it runs on **any board**, Pi Zero included (measured: 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s); only the optional `tshark` JA3/IRC sidecars need a bigger board. See [Traffic Analysis](docs/traffic-analysis.md)
+- **Advanced Server Features (8GB+ RAM)** — Advanced vulnerability scanning with Nuclei/Nikto/SQLMap/ZAP, parallel scanning, and CVE correlation. See [Server Mode](#-server-mode-advanced-features-8gb-ram)
 - **LAN-First Connectivity** — Prefers Ethernet when present, manages WiFi as fallback
 - **Smart WiFi Management** — Auto-connects to known networks, falls back to AP mode, captive portal for configuration
 - **E-Paper Display** — Real-time status showing targets, vulnerabilities, credentials, and network info
@@ -133,7 +134,7 @@ See [Gen 2 Hardware Requirements](docs/hardware-gen2.md) for the full BOM, assem
 
 - Debian 11+ or Ubuntu 20.04+ (AMD64, ARM64, or ARMv7)
 - Minimum: 2GB RAM, 2 CPU cores, 10GB free disk
-- Recommended: 8GB+ RAM for advanced features (traffic analysis, Nuclei, Nikto, SQLMap)
+- Recommended: 8GB+ RAM for advanced features (Nuclei, Nikto, SQLMap, ZAP). Traffic analysis is not in this tier — it needs only `tcpdump`
 
 ### WiFi Pineapple Pager
 
@@ -164,6 +165,11 @@ For the full installation walkthrough see [Install Guide](docs/INSTALL.md). For 
 
 When deployed on systems with 8GB+ RAM, Ragnar automatically unlocks advanced security capabilities.
 
+> **Traffic Analysis is not one of them any more.** It is a `tcpdump` pipe, not
+> OpenVAS-class work, so it has its own much lower gate and runs on any board
+> with `tcpdump` installed — see [Traffic Analysis](docs/traffic-analysis.md).
+> Only its optional `tshark` JA3/IRC sidecars need a 4GB-class board.
+
 > **Fresh installs:** The main installer detects 8GB+ RAM and installs advanced tools automatically.
 >
 > **Existing installs:** Run the advanced tools installer separately:
@@ -172,14 +178,6 @@ When deployed on systems with 8GB+ RAM, Ragnar automatically unlocks advanced se
 > sudo ./scripts/install_advanced_tools.sh
 > sudo systemctl restart ragnar
 > ```
-
-### Real-Time Traffic Analysis
-- Live packet capture with tcpdump and tshark
-- Connection tracking with detailed TCP/UDP statistics
-- Deep protocol inspection (HTTP, DNS, SMB, SSH)
-- Per-host bandwidth monitoring and top talkers
-- Automated security risk scoring and anomaly detection
-- DNS query logging and port activity monitoring
 
 ### Advanced Vulnerability Scanning
 - **OWASP ZAP** — Spider + AJAX spider + active scan with automatic browser detection
