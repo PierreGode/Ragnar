@@ -411,7 +411,12 @@ if __name__ == "__main__":
         signal.signal(signal.SIGTERM, lambda sig, frame: handle_exit(sig, frame, display_thread, ragnar_thread, web_thread))
 
     except Exception as e:
+        import traceback
         logger.error(f"An exception occurred during thread start: {e}")
+        # Log the full traceback — a bare str(e) (e.g. "cannot import name
+        # 'run_server' from 'webapp_modern'") hides where the failure actually
+        # happened, which turns a two-minute diagnosis into a guessing game.
+        logger.error("Full traceback:\n" + traceback.format_exc())
         if 'display_thread' in locals():
             handle_exit_display(signal.SIGINT, None, display_thread)
         exit(1)
