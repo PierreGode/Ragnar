@@ -3056,14 +3056,20 @@
                         </p>
                         <div id="mesh-https-note" class="hidden text-[11px] rounded border px-2 py-1.5 mb-2"></div>
                         <div class="flex gap-2">
-                            <button onclick="meshServe(true, true)" id="mesh-serve-https-btn"
-                                    class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors">Publish (HTTPS)</button>
                             <button onclick="meshServe(true, false)"
+                                    class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors"
+                                    title="Plain HTTP on port 80 — tailnet-only, no certificate needed. The way in most units use.">Publish</button>
+                            <button onclick="meshServe(true, true)" id="mesh-serve-https-btn"
                                     class="flex-1 bg-slate-600 hover:bg-slate-500 text-white py-2 px-3 rounded text-sm transition-colors"
-                                    title="Plain HTTP on port 80 — still tailnet-only, no certificate needed">Publish (HTTP)</button>
-                            <button onclick="meshServe(false, true)"
+                                    title="Adds TLS on the MagicDNS name — only works when the tailnet has HTTPS Certificates enabled">Publish (HTTPS)</button>
+                            <button onclick="meshServe(false, false)"
                                     class="bg-slate-700 hover:bg-slate-600 text-white py-2 px-3 rounded text-sm transition-colors">Stop</button>
                         </div>
+                        <p class="text-[11px] text-gray-500 mt-2">
+                            Publishing is optional — a unit is always reachable directly at
+                            <code class="text-gray-400">http://&lt;tailnet-ip&gt;:8000</code>. HTTPS just adds
+                            a certificate on the friendly hostname, and only when the tailnet supports it.
+                        </p>
                     </div>
                     <div class="glass rounded-lg p-4">
                         <h4 class="font-medium mb-1">Leave the mesh</h4>
@@ -7221,7 +7227,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh3"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260726-ragnar-mesh4"></script>
 
 </body>
 </html>

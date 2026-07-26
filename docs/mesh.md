@@ -339,29 +339,34 @@ Only two routes are peer-readable:
 `tailscale funnel` publishes to the open internet and is **not** — for a box
 full of offensive tooling that would be an unambiguous mistake.
 
-### Publishing needs HTTPS certificates enabled first
+### Publishing: HTTP by default, HTTPS opt-in
 
-**Publish (HTTPS)** needs the tailnet's *HTTPS Certificates* feature switched on
-(admin console → **DNS → HTTPS Certificates**). Without it there is no
-certificate to issue for the unit's MagicDNS name.
+Publishing at all is optional — peers and operators can always reach a unit
+directly at `http://100.x.y.z:8000`. `serve` only buys a friendly hostname and,
+with certificates, real TLS.
 
-This one is worth calling out because the failure is nasty: with the feature
-disabled, `tailscale serve --https` does **not** return an error — it blocks
-indefinitely, even with stdin closed, so it is not a prompt waiting for an
-answer. The only symptom is an unexplained timeout.
-
-Ragnar therefore checks `CertDomains` *before* invoking the command and refuses
-in milliseconds with a link to the setting, rather than hanging. If you would
-rather not enable certificates, **Publish (HTTP)** serves the same proxy on port
-80 — still tailnet-only, just without TLS:
+**Publish** serves the UI over plain HTTP on port 80. It needs no certificate,
+works on every tailnet, is still tailnet-only, and is how units are actually
+reached — so it is the default:
 
 ```sh
 sudo tailscale serve --bg --http 80 http://127.0.0.1:8000
 ```
 
-Publishing at all is optional. Peers and operators can always reach a unit
-directly at `http://100.x.y.z:8000`; `serve` only buys a friendly hostname and,
-with certificates, real TLS.
+**Publish (HTTPS)** is the opt-in. It needs the tailnet's *HTTPS Certificates*
+feature switched on (admin console → **DNS → HTTPS Certificates**); without it
+there is no certificate to issue for the unit's MagicDNS name.
+
+That opt-in is guarded because the failure is nasty: with the feature disabled,
+`tailscale serve --https` does **not** return an error — it blocks indefinitely,
+even with stdin closed, so it is not a prompt waiting for an answer. The only
+symptom is an unexplained timeout. Ragnar therefore checks `CertDomains`
+*before* invoking the command and refuses in milliseconds with a link to the
+setting, and the UI disables the HTTPS button entirely until certificates are
+available.
+
+**Stop** fully unpublishes either scheme — you never have to remember which one
+you turned on.
 
 > `tailscale serve` writes tailnet-wide config and needs root. The packaged
 > Ragnar service runs as root, so this is only a problem for a hand-started
@@ -532,9 +537,10 @@ in that tag's `tagOwners`.
 Kiosk mode is enabled. See [Serve + kiosk is refused](#serve--kiosk-is-refused).
 
 **"HTTPS certificates are not enabled for this tailnet."**
-Enable **DNS → HTTPS Certificates** in the admin console, or use
-**Publish (HTTP)**. See
-[Publishing needs HTTPS certificates enabled first](#publishing-needs-https-certificates-enabled-first).
+You clicked **Publish (HTTPS)** on a tailnet without certificates. Either enable
+**DNS → HTTPS Certificates** in the admin console, or just use **Publish** (the
+default, plain HTTP). See
+[Publishing: HTTP by default, HTTPS opt-in](#publishing-http-by-default-https-opt-in).
 Confirm with:
 ```sh
 tailscale status --json | grep -i certdomains

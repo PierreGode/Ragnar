@@ -29221,7 +29221,8 @@ async function meshPost(path, body, okMessage) {
 }
 
 function meshServe(enable, https) {
-    return meshPost('/api/mesh/serve', { enable, https: https !== false },
+    // HTTP is the default; HTTPS only when explicitly requested (https === true).
+    return meshPost('/api/mesh/serve', { enable, https: https === true },
                     enable ? 'Published.' : 'Stopped.');
 }
 

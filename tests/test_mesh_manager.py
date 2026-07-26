@@ -205,14 +205,34 @@ def test_http_serve_works_without_certs(monkeypatch):
     assert 'unit.tailnet.ts.net' in message
 
 
-def test_stopping_serve_never_checks_certs(monkeypatch):
-    """Turning it off must work even when certs are unavailable."""
+def test_publish_defaults_to_http(monkeypatch):
+    """HTTP is the default path — no use_https means plain HTTP, no cert check."""
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    # If the default were HTTPS this would be consulted and, being False, refuse.
+    monkeypatch.setattr(mesh_manager, 'https_available', lambda: False)
+    monkeypatch.setattr(mesh_manager, 'magic_dns_name', lambda: 'unit.tailnet.ts.net')
+    captured = {}
+    monkeypatch.setattr(mesh_manager, '_run',
+                        lambda args, timeout=None: captured.update(args=list(args)) or (0, '', ''))
+    ok, _ = mesh_manager.serve_web(port=8000, enable=True)   # no use_https
+    assert ok is True
+    assert '--http' in captured['args'] and '--https' not in captured['args']
+
+
+def test_stopping_serve_clears_both_schemes(monkeypatch):
+    """Stop must fully unpublish regardless of which scheme was live, and must
+    never depend on the cert feature being available."""
     monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
     monkeypatch.setattr(mesh_manager, 'https_available', lambda: False)
-    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k: (0, '', ''))
+    calls = []
+    monkeypatch.setattr(mesh_manager, '_run',
+                        lambda args, timeout=None: calls.append(list(args)) or (0, '', ''))
     ok, message = mesh_manager.serve_web(enable=False, use_https=True)
     assert ok is True
     assert 'stopped' in message.lower()
+    # Both an https-off and an http-off were issued.
+    assert any('--https' in c and 'off' in c for c in calls)
+    assert any('--http' in c and 'off' in c for c in calls)
 
 
 def test_https_serve_proceeds_when_certs_are_available(monkeypatch):

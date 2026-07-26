@@ -2599,7 +2599,9 @@ def mesh_serve():
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     data = request.get_json(silent=True) or {}
     enable = bool(data.get('enable', True))
-    use_https = bool(data.get('https', True))
+    # HTTP is the default publish path: no certificate, works on every tailnet,
+    # and is how units are actually reached. HTTPS is opt-in.
+    use_https = bool(data.get('https', False))
 
     # Refuse the one combination that silently disables authentication.
     # `tailscale serve` proxies from tailscaled, so every request reaches Flask

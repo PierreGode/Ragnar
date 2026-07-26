@@ -689,13 +689,15 @@ def https_available():
 HTTPS_SETUP_URL = 'https://login.tailscale.com/admin/dns'
 
 
-def serve_web(port=DEFAULT_NODE_PORT, enable=True, use_https=True, timeout=120):
+def serve_web(port=DEFAULT_NODE_PORT, enable=True, use_https=False, timeout=120):
     """Expose (or stop exposing) Ragnar's web UI to the tailnet.
 
-    With HTTPS, `tailscale serve` terminates TLS with a real certificate for the
-    node's MagicDNS name, so the UI stops throwing self-signed warnings. Without
-    it, the same proxy is served over plain HTTP on port 80 — still tailnet-only,
-    just without TLS.
+    Plain HTTP on port 80 is the default and the path most units use: it needs
+    no certificate, is still tailnet-only, and works on every tailnet. Opting
+    into `use_https` terminates TLS with a real certificate for the node's
+    MagicDNS name — but only works once the tailnet has HTTPS Certificates
+    enabled (see https_available), so it is the deliberate choice, not the
+    default that hangs when the feature is off.
 
     Either way this is deliberately *not* `tailscale funnel`: funnel publishes to
     the open internet, which for a box full of offensive tooling would be an
@@ -703,13 +705,21 @@ def serve_web(port=DEFAULT_NODE_PORT, enable=True, use_https=True, timeout=120):
 
     The timeout is generous because a genuine first-time certificate issuance
     goes out to Let's Encrypt and is legitimately slow. That is only ever
-    reached once the precondition below has passed.
+    reached on the HTTPS path once the precondition below has passed.
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
 
+    # Stopping clears BOTH schemes, so "Stop" always fully unpublishes no matter
+    # which one is live — the caller should not have to know what was published.
+    if not enable:
+        _run(['serve', '--https', '443', 'off'], timeout=30)
+        _run(['serve', '--http', '80', 'off'], timeout=30)
+        invalidate_cache()
+        return True, 'Stopped publishing the web UI.'
+
     # Refuse rather than hang. See https_available().
-    if enable and use_https and not https_available():
+    if use_https and not https_available():
         return False, (
             'HTTPS certificates are not enabled for this tailnet, so no '
             'certificate can be issued for this unit and the request would '
@@ -717,18 +727,12 @@ def serve_web(port=DEFAULT_NODE_PORT, enable=True, use_https=True, timeout=120):
             '(DNS → HTTPS Certificates), or publish over plain HTTP instead — '
             'still tailnet-only, just without TLS.')
 
-    if enable:
-        args = (['serve', '--bg', '--https', '443', f'http://127.0.0.1:{port}']
-                if use_https else
-                ['serve', '--bg', '--http', '80', f'http://127.0.0.1:{port}'])
-    else:
-        args = (['serve', '--https', '443', 'off'] if use_https else
-                ['serve', '--http', '80', 'off'])
+    args = (['serve', '--bg', '--https', '443', f'http://127.0.0.1:{port}']
+            if use_https else
+            ['serve', '--bg', '--http', '80', f'http://127.0.0.1:{port}'])
 
     rc, out, err = _run(args, timeout=timeout)
     if rc == 0:
-        if not enable:
-            return True, 'Stopped publishing the web UI.'
         scheme = 'HTTPS' if use_https else 'HTTP'
         host = magic_dns_name()
         where = f' at {"https" if use_https else "http"}://{host}' if host else ''
