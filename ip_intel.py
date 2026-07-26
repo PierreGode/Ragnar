@@ -202,6 +202,8 @@ def classify(as_org=None, network_name=None, ptr=None, scope='public'):
     hay = ' '.join(str(x).lower() for x in (as_org, network_name, ptr) if x)
     if not hay:
         return 'unknown'
+    if 'tor' in hay or 'torproject' in hay or 'tor-exit' in hay:
+        return 'tor'                              # ← NEW
     if any(k in hay for k in _VPN_HINTS):
         return 'vpn'
     if any(k in hay for k in _HOSTING_HINTS):
