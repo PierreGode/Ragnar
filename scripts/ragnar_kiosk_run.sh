@@ -240,8 +240,22 @@ fi
 
 XORG_LOG="$LOG_DIR/kiosk-Xorg.log"
 mkdir -p "$HOME/.local/share/xorg" 2>/dev/null || true
-# Where Xorg puts its log when we are NOT allowed to name one (see below).
-XORG_OWN_LOG="$HOME/.local/share/xorg/Xorg.0.log"
+# Where Xorg puts its log when we are NOT allowed to name one (see below). Which
+# of these it picks depends on how it ended up privileged: started through the
+# setuid Xorg.wrap it is really root and writes the system log, while a rootless
+# X writes into the user's own directory. Check both, newest first, or a real X
+# failure reads as "X never started".
+xorg_own_log() {
+    local newest=""
+    local candidate
+    for candidate in /var/log/Xorg.0.log "$HOME/.local/share/xorg/Xorg.0.log"; do
+        [[ -s "$candidate" ]] || continue
+        if [[ -z "$newest" || "$candidate" -nt "$newest" ]]; then
+            newest="$candidate"
+        fi
+    done
+    printf '%s' "$newest"
+}
 rm -f /tmp/.X0-lock 2>/dev/null || true
 rm -f /tmp/.X11-unix/X0 2>/dev/null || true
 
@@ -281,10 +295,16 @@ if [[ -n "\$PRIMARY" && "\$ROT" != "normal" ]]; then
     xrandr --output "\$PRIMARY" --rotate "\$ROT" || true
 fi
 
-if command -v openbox-session >/dev/null 2>&1; then
-    openbox-session &
-elif command -v openbox >/dev/null 2>&1; then
+# Plain openbox, deliberately not openbox-session. A kiosk wants a window
+# manager, not a desktop: openbox-session additionally runs every XDG autostart
+# entry on the box, which on a 512 MB Pi Zero 2 W is memory this cannot spare
+# and which produced the alarming-looking
+#   ERROR: openbox-xdg-autostart requires PyXDG to be installed
+# in the kiosk log, pointing at a component the kiosk never needed.
+if command -v openbox >/dev/null 2>&1; then
     openbox &
+elif command -v openbox-session >/dev/null 2>&1; then
+    openbox-session &
 fi
 
 if [[ "$KIOSK_HIDE_CURSOR" == "true" ]] && command -v unclutter >/dev/null 2>&1; then
@@ -355,12 +375,13 @@ XINIT_PID=$!
 if wait "$XINIT_PID"; then rc=0; else rc=$?; fi
 # Keep /var/log/ragnar/kiosk-Xorg.log as the one place to look, whichever log
 # Xorg was actually allowed to write.
-if [[ ! -s "$XORG_LOG" && -s "$XORG_OWN_LOG" ]]; then
-    cp -f "$XORG_OWN_LOG" "$XORG_LOG" 2>/dev/null || true
+OWN_LOG="$(xorg_own_log)"
+if [[ ! -s "$XORG_LOG" && -n "$OWN_LOG" ]]; then
+    cp -f "$OWN_LOG" "$XORG_LOG" 2>/dev/null || true
 fi
 if [[ "$rc" -ne 0 && "$rc" -ne 143 && "$rc" -ne 130 ]]; then
     echo "[kiosk-run] X/xinit exited with code $rc — last Xorg log lines:" >&2
-    { tail -n 25 "$XORG_LOG" 2>/dev/null || tail -n 25 "$XORG_OWN_LOG" 2>/dev/null; } >&2 || true
+    tail -n 25 "$XORG_LOG" 2>/dev/null >&2 || true
     echo "[kiosk-run] full detail: $XORG_LOG and $WRAPPER_LOG" >&2
 fi
 exit "$rc"
