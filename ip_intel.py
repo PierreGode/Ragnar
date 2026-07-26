@@ -144,8 +144,27 @@ def parse_rdap(obj):
     m = re.search(r'whois\.([a-z]+)\.net', str(p43))
     if m:
         out['registry'] = m.group(1).upper()
-    emails = []
+        emails = []
+    addresses = []
     _walk_entities(obj.get('entities'), 'abuse', emails)
+
+    def _collect_addr(entities, want_role, out_list):
+        if not isinstance(entities, list):
+            return
+        for ent in entities:
+            if not isinstance(ent, dict):
+                continue
+            roles = [str(r).lower() for r in (ent.get('roles') or [])]
+            if want_role in roles:
+                addr = _vcard_address(ent.get('vcardArray') or [])
+                if addr:
+                    out_list.append(addr)
+            _collect_addr(ent.get('entities'), want_role, out_list)
+
+    _collect_addr(obj.get('entities'), 'abuse', addresses)
+    if not addresses:
+        _collect_addr(obj.get('entities'), 'registrant', addresses)
+
     if emails:
         out['abuse_email'] = emails[0]
     if addresses:
