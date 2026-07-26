@@ -74,10 +74,41 @@ the next packet.
 
 Alerts are rate-limited (10/min) and deduplicated in a 300s window.
 
+## Passive host discovery
+
 Capture also feeds **passive host discovery**: LAN hosts seen only in traffic —
 firewalled boxes that never answer a scan — are flushed into the hosts DB every
-30s, with MACs learned from ARP replies and services inferred from the ports
-they answer on.
+30s, with MACs learned from ARP replies.
+
+A port is recorded as **listening** only on real evidence: the host must have
+sent a packet **from** that port **carrying payload**. Both halves matter.
+
+- *Source only.* Crediting the destination of a packet treats "someone sent
+  something to this port" as proof the host listens there. Any port scan then
+  becomes a lie — and Ragnar's own scanner sweeps the configured portlist
+  against every LAN host, so a capture running during a scan wrote ~50 phantom
+  ports onto every host and pushed the dashboard's Open Ports count into the
+  hundreds.
+- *Payload only.* `tcpdump -q` prints a SYN-ACK and an RST identically as
+  `tcp 0`, so a reply on its own cannot tell an open port from a closed one.
+
+The consequence is that most hosts contribute no ports at all, which is
+correct: this is inference from traffic, not a scan result. The host is still
+recorded — that is the point — and its port list is left untouched rather than
+overwritten with an empty one. An active scan replaces the field with the truth.
+
+### Repairing a database written before the fix
+
+```bash
+python3 scripts/repair_passive_ports.py           # report only
+python3 scripts/repair_passive_ports.py --apply   # clear the phantom rows
+```
+
+It finds rows carrying the sweep signature — dozens of ports dominated by the
+scanner's portlist, three or more services nobody runs together (ftp-data,
+tftp, nntp, bgp…), and no 22 or 8000, which the capture filter hid — then backs
+up the DB and clears their `ports`/`services`. The next active scan repopulates
+real results, so a false positive costs one scan cycle.
 
 ## API
 

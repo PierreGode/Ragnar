@@ -90,36 +90,71 @@ def test_arp_request_does_not_record_mac(analyzer):
 # Listening-port detection
 # ---------------------------------------------------------------------------
 
-def test_listening_port_recorded_when_well_known_dst(analyzer):
-    base_ts = '2026-05-28 01:00:00.000000'
-    line = f'{base_ts} IP 192.168.1.20.50000 > 192.168.1.50.443: tcp 0'
+BASE_TS = '2026-05-28 01:00:00.000000'
+
+
+def test_listening_port_recorded_when_host_serves_payload(analyzer):
+    """The evidence is the host answering *from* the port with data."""
+    line = f'{BASE_TS} IP 192.168.1.50.443 > 192.168.1.20.50000: tcp 1440'
     analyzer._parse_and_record_packet(line)
 
     assert 443 in analyzer._listening_ports['192.168.1.50']
 
 
 def test_listening_port_recorded_for_high_value_high_port(analyzer):
-    base_ts = '2026-05-28 01:00:00.000000'
-    line = f'{base_ts} IP 192.168.1.20.50000 > 192.168.1.50.6379: tcp 0'
+    line = f'{BASE_TS} IP 192.168.1.50.6379 > 192.168.1.20.50000: tcp 96'
     analyzer._parse_and_record_packet(line)
 
     assert 6379 in analyzer._listening_ports['192.168.1.50']
 
 
-def test_listening_port_not_recorded_for_ephemeral(analyzer):
-    base_ts = '2026-05-28 01:00:00.000000'
-    # Random ephemeral; should NOT be considered a listening port.
-    line = f'{base_ts} IP 192.168.1.20.50000 > 192.168.1.50.40000: tcp 0'
+def test_listening_port_not_recorded_from_being_contacted(analyzer):
+    """Regression: a packet *to* a port is not evidence anyone listens there.
+
+    Ragnar's own scanner sweeps the configured portlist against every LAN
+    host. Crediting the destination turned that sweep into ~50 phantom open
+    ports per host in the hosts DB, and a four-digit port count on the
+    dashboard.
+    """
+    line = f'{BASE_TS} IP 192.168.1.20.50000 > 192.168.1.50.443: tcp 0'
     analyzer._parse_and_record_packet(line)
 
-    assert 192_168_1_50 != 0  # sanity
+    assert 443 not in analyzer._listening_ports.get('192.168.1.50', set())
+
+
+def test_listening_port_not_recorded_from_empty_reply(analyzer):
+    """`tcpdump -q` prints SYN-ACK and RST identically as `tcp 0`, so a reply
+    with no payload cannot distinguish an open port from a closed one."""
+    line = f'{BASE_TS} IP 192.168.1.50.443 > 192.168.1.20.50000: tcp 0'
+    analyzer._parse_and_record_packet(line)
+
+    assert 443 not in analyzer._listening_ports.get('192.168.1.50', set())
+
+
+def test_full_port_sweep_leaves_no_listening_ports(analyzer):
+    """The exact shape of the reported bug: a scan of every service port,
+    each target replying RST (closed) — nothing may be recorded."""
+    sweep = [20, 21, 23, 25, 53, 80, 111, 139, 143, 389, 443, 445, 515, 631]
+    for port in sweep:
+        analyzer._parse_and_record_packet(
+            f'{BASE_TS} IP 192.168.1.10.50000 > 192.168.1.50.{port}: tcp 0')
+        analyzer._parse_and_record_packet(
+            f'{BASE_TS} IP 192.168.1.50.{port} > 192.168.1.10.50000: tcp 0')
+
+    assert analyzer._listening_ports.get('192.168.1.50', set()) == set()
+
+
+def test_listening_port_not_recorded_for_ephemeral(analyzer):
+    # Random ephemeral source; the host is a client, not a listener.
+    line = f'{BASE_TS} IP 192.168.1.50.40000 > 192.168.1.20.443: tcp 512'
+    analyzer._parse_and_record_packet(line)
+
     listening = analyzer._listening_ports.get('192.168.1.50', set())
     assert 40000 not in listening
 
 
 def test_listening_port_not_recorded_for_non_lan(analyzer):
-    base_ts = '2026-05-28 01:00:00.000000'
-    line = f'{base_ts} IP 192.168.1.20.50000 > 8.8.8.8.443: tcp 0'
+    line = f'{BASE_TS} IP 8.8.8.8.443 > 192.168.1.20.50000: tcp 512'
     analyzer._parse_and_record_packet(line)
 
     assert '8.8.8.8' not in analyzer._listening_ports
@@ -155,12 +190,12 @@ def test_passive_sync_creates_new_host_with_real_mac(analyzer):
     db = _build_db()
     analyzer.shared_data = MagicMock(db=db)
 
-    # Seed: ARP reply + a packet to a service port.
+    # Seed: ARP reply + the host serving payload from a service port.
     base_ts = '2026-05-28 01:00:00.000000'
     analyzer._parse_and_record_packet(
         f'{base_ts} ARP, Reply 192.168.1.50 is-at aa:bb:cc:dd:ee:ff, length 28')
     analyzer._parse_and_record_packet(
-        f'{base_ts} IP 192.168.1.20.50000 > 192.168.1.50.443: tcp 0')
+        f'{base_ts} IP 192.168.1.50.443 > 192.168.1.20.50000: tcp 1440')
 
     analyzer._passive_sync_to_db()
 
@@ -185,13 +220,13 @@ def test_passive_sync_merges_ports_with_existing_host(analyzer):
     analyzer.shared_data = MagicMock(db=db)
 
     base_ts = '2026-05-28 01:00:00.000000'
-    # Observed listening on 443 and 6379 (new ports).
+    # Observed serving on 443 and 6379 (new ports).
     analyzer._parse_and_record_packet(
         f'{base_ts} ARP, Reply 192.168.1.50 is-at aa:bb:cc:dd:ee:ff, length 28')
     analyzer._parse_and_record_packet(
-        f'{base_ts} IP 192.168.1.20.50000 > 192.168.1.50.443: tcp 0')
+        f'{base_ts} IP 192.168.1.50.443 > 192.168.1.20.50000: tcp 1440')
     analyzer._parse_and_record_packet(
-        f'{base_ts} IP 192.168.1.20.50001 > 192.168.1.50.6379: tcp 0')
+        f'{base_ts} IP 192.168.1.50.6379 > 192.168.1.20.50001: tcp 96')
 
     analyzer._passive_sync_to_db()
 
@@ -306,6 +341,55 @@ def test_passive_sync_skips_when_existing_host_and_no_new_ports(analyzer):
     analyzer._passive_sync_to_db()
 
     # upsert_host should be called but with ports=None to avoid clobbering.
+    call = db.upsert_host.call_args
+    assert call.kwargs.get('ports') is None
+    assert call.kwargs.get('services') is None
+
+
+def test_passive_sync_records_host_that_serves_nothing(analyzer):
+    """A host seen only as a client still belongs in the DB.
+
+    With listening ports now requiring real evidence, most hosts contribute
+    none — and hosts that never answer a scan are exactly what passive
+    discovery is for. It must record the host and leave the port columns alone.
+    """
+    db = _build_db()
+    analyzer.shared_data = MagicMock(db=db)
+
+    base_ts = '2026-05-28 01:00:00.000000'
+    analyzer._parse_and_record_packet(
+        f'{base_ts} ARP, Reply 192.168.1.50 is-at aa:bb:cc:dd:ee:ff, length 28')
+    analyzer._parse_and_record_packet(
+        f'{base_ts} IP 192.168.1.50.51000 > 8.8.8.8.443: tcp 517')
+
+    analyzer._passive_sync_to_db()
+
+    call = next((c for c in db.upsert_host.call_args_list
+                 if c.kwargs.get('ip') == '192.168.1.50'), None)
+    assert call is not None
+    assert call.kwargs['mac'] == 'aa:bb:cc:dd:ee:ff'
+    assert call.kwargs.get('ports') is None
+    assert call.kwargs.get('services') is None
+
+
+def test_passive_sync_never_overwrites_ports_with_empty(analyzer):
+    """An existing host's scanned port list must survive a quiet capture."""
+    existing = {
+        '192.168.1.50': {
+            'mac': 'aa:bb:cc:dd:ee:ff',
+            'ports': '22,443',
+            'services': '{"22": "ssh", "443": "https"}',
+        }
+    }
+    db = _build_db(existing)
+    analyzer.shared_data = MagicMock(db=db)
+
+    base_ts = '2026-05-28 01:00:00.000000'
+    analyzer._parse_and_record_packet(
+        f'{base_ts} ARP, Reply 192.168.1.50 is-at aa:bb:cc:dd:ee:ff, length 28')
+
+    analyzer._passive_sync_to_db()
+
     call = db.upsert_host.call_args
     assert call.kwargs.get('ports') is None
     assert call.kwargs.get('services') is None
