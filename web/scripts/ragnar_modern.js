@@ -29044,15 +29044,26 @@ function meshUnitCard(unit, isSelf, ctx) {
         ? `<span class="text-[10px] text-gray-500">${unit.direct ? 'direct' : 'relay' + (unit.relay ? ' · ' + escapeHtml(unit.relay) : '')}</span>`
         : '';
 
-    // Details open in a modal built from data THIS unit already pulled over the
-    // tailnet — so it works even when the operator's browser can't reach the
-    // peer's tailnet IP directly (the common case: browsing over the LAN or a
-    // tunnel). The id lets the modal re-find this node in the last payload.
-    const nodeId = (unit.id || unit.ip || '').toString();
-    const detailsBtn = (unit.findings && (unit.findings.counts || {}).total !== undefined)
-        ? `<button onclick="meshShowDetails('${nodeId.replace(/'/g, '')}')" ` +
-          `class="text-[11px] bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1 rounded transition-colors">View details</button>`
-        : '';
+    // One button per feature. Each opens a popup with THAT feature's info,
+    // built from data this unit already pulled over the tailnet — so it works
+    // even when the operator's browser can't reach the peer's tailnet IP (the
+    // common case: browsing over the LAN or a tunnel). The id lets the modal
+    // re-find this node in the last status payload.
+    const nodeId = (unit.id || unit.ip || '').toString().replace(/'/g, '');
+    const hasData = unit.findings && (unit.findings.counts || unit.findings.features);
+    const fbtn = (feature, label) =>
+        `<button onclick="meshShowFeature('${nodeId}','${feature}')" ` +
+        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label}</button>`;
+    const launchRow = hasData ? `<div class="mt-3 pt-3 border-t border-slate-700/40">
+        <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Open</div>
+        <div class="flex flex-wrap gap-1.5">
+            ${fbtn('traffic', 'Traffic')}
+            ${fbtn('threats', 'Threats')}
+            ${fbtn('integrity', 'Integrity')}
+            ${fbtn('watchtower', 'Watchtower')}
+            ${fbtn('vulnerabilities', 'Vulnerabilities')}
+        </div>
+    </div>` : '';
 
     return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
         <div class="flex items-start justify-between gap-2">
@@ -29071,7 +29082,7 @@ function meshUnitCard(unit, isSelf, ctx) {
         </div>
         ${body}
         ${meshFindingsBlock(unit)}
-        ${detailsBtn ? `<div class="mt-3 pt-3 border-t border-slate-700/40">${detailsBtn}</div>` : ''}
+        ${launchRow}
         ${warnings.join('')}
     </div>`;
 }
@@ -29085,69 +29096,144 @@ function _meshFindNode(id) {
     return all.find(n => (n.id || n.ip || '').toString() === id) || null;
 }
 
-// Large popup card: everything this unit reported, pulled server-side over the
-// tailnet. No browser→peer connection needed, so it works however you reached
-// this UI. Read-only — it shows findings and health, it doesn't drive the peer.
-function meshShowDetails(id) {
-    const unit = _meshFindNode(id);
-    if (!unit) return;
-    const f = unit.findings || {};
-    const health = unit.health || {};
-    const counts = f.counts || {};
-    const findings = f.findings || [];
+const _MESH_FEATURE_TITLE = {
+    traffic: 'Traffic Analyzer',
+    threats: 'External Threat Detection',
+    integrity: 'Network Integrity Monitor',
+    watchtower: 'Watchtower',
+    vulnerabilities: 'Vulnerabilities',
+};
 
-    const CATS = [
-        ['vulnerability', 'Vulnerabilities'],
-        ['integrity', 'Network Integrity'],
-        ['watchtower', 'Watchtower'],
-        ['incident', 'Incidents'],
-    ];
-    const sevBadge = (sev) =>
-        `<span class="text-[9px] uppercase px-1.5 rounded border ${MESH_SEV_CLASS[sev] || MESH_SEV_CLASS.info}">${escapeHtml(sev)}</span>`;
+function _meshSevBadge(sev) {
+    sev = sev || 'info';
+    return `<span class="text-[9px] uppercase px-1.5 rounded border ${MESH_SEV_CLASS[sev] || MESH_SEV_CLASS.info}">${escapeHtml(sev)}</span>`;
+}
 
-    let sections = '';
-    CATS.forEach(([cat, label]) => {
-        const rows = findings.filter(x => x.category === cat);
-        if (!rows.length) return;
-        sections += `<div class="mb-4">
-            <div class="text-xs uppercase tracking-wider text-gray-400 mb-2">${label} <span class="text-gray-600">(${rows.length})</span></div>
-            <div class="space-y-1">${rows.map(x => `
-                <div class="flex items-start gap-2 bg-slate-900/50 border border-slate-800 rounded px-2 py-1.5">
-                    ${sevBadge(x.severity || 'info')}
-                    <div class="min-w-0 text-xs">
-                        <span class="text-gray-100">${escapeHtml(x.title || '')}</span>
-                        ${x.host ? ` <span class="text-gray-500 font-mono">${escapeHtml(x.host)}</span>` : ''}
-                        ${x.detail ? `<span class="text-gray-500"> — ${escapeHtml(x.detail)}</span>` : ''}
-                    </div>
-                </div>`).join('')}</div>
-        </div>`;
-    });
-    if (!sections) {
-        sections = `<p class="text-sm text-gray-500">No findings reported by this unit — clean, or its scanners/watchers aren't enabled.</p>`;
+function _meshKV(label, val) {
+    return `<div class="flex justify-between gap-3 py-1 border-b border-slate-800/60">
+        <span class="text-gray-400">${escapeHtml(label)}</span>
+        <span class="text-gray-100 font-mono text-right">${escapeHtml(String(val))}</span></div>`;
+}
+
+function _meshUnavailable(reason) {
+    return `<p class="text-sm text-gray-500">${escapeHtml(reason || 'Not available on this unit.')}</p>`;
+}
+
+// Render one feature's body from the peer's pulled `features` block (+ findings
+// for the vulnerabilities view). Each returns HTML for the modal.
+function _meshFeatureBody(feature, unit) {
+    const feats = (unit.findings || {}).features || {};
+
+    if (feature === 'vulnerabilities') {
+        const rows = ((unit.findings || {}).findings || []).filter(x => x.category === 'vulnerability');
+        if (!rows.length) return _meshUnavailable('No vulnerabilities reported by this unit.');
+        return `<div class="space-y-1">${rows.map(x => `
+            <div class="flex items-start gap-2 bg-slate-900/50 border border-slate-800 rounded px-2 py-1.5">
+                ${_meshSevBadge(x.severity)}
+                <div class="min-w-0 text-xs">
+                    <span class="text-gray-100">${escapeHtml(x.title || '')}</span>
+                    ${x.host ? ` <span class="text-gray-500 font-mono">${escapeHtml(x.host)}</span>` : ''}
+                    ${x.detail ? `<span class="text-gray-500"> — ${escapeHtml(x.detail)}</span>` : ''}
+                </div>
+            </div>`).join('')}</div>`;
     }
 
-    const metric = (label, val) => `<div class="text-center">
-        <p class="text-[10px] uppercase tracking-wider text-gray-500">${label}</p>
-        <p class="text-sm font-semibold">${escapeHtml(String(val))}</p></div>`;
-    const healthRow = health.reachable ? `
-        <div class="grid grid-cols-4 gap-2 mb-4">
-            ${metric('CPU', health.cpu_percent !== undefined ? health.cpu_percent + '%' : '—')}
-            ${metric('Mem', health.memory_percent !== undefined ? health.memory_percent + '%' : '—')}
-            ${metric('Disk', health.disk_percent !== undefined ? health.disk_percent + '%' : '—')}
-            ${metric('Uptime', meshFormatUptime(health.uptime_s))}
-        </div>` : '';
+    if (feature === 'traffic') {
+        const t = feats.traffic || {};
+        if (!t.available) return _meshUnavailable(t.reason);
+        const protos = t.protocols || {};
+        const protoRows = Object.keys(protos).sort((a, b) => protos[b] - protos[a]).slice(0, 8)
+            .map(p => _meshKV(p, protos[p])).join('');
+        return `<div class="text-xs">
+            ${_meshKV('Status', t.status + (t.interface ? ' · ' + t.interface : ''))}
+            ${_meshKV('Throughput', (t.throughput_mbps || 0) + ' Mbps')}
+            ${_meshKV('Packets', (t.total_packets || 0) + ' (' + (t.packets_per_second || 0) + '/s)')}
+            ${_meshKV('Volume', t.total_bytes_human || '0 B')}
+            ${_meshKV('Hosts / connections', (t.unique_hosts || 0) + ' / ' + (t.active_connections || 0))}
+            ${_meshKV('Alerts', t.total_alerts || 0)}
+            ${protoRows ? `<div class="text-[10px] uppercase tracking-wider text-gray-500 mt-3 mb-1">Protocols</div>${protoRows}` : ''}
+        </div>`;
+    }
 
-    // Optional link to the unit's own full UI — only useful when the browser is
-    // itself on the tailnet, so it's secondary and clearly caveated.
-    const ip = unit.ip;
-    const openLink = (ip && !unit.is_self)
-        ? `<a href="http://${ip.includes(':') ? '[' + ip + ']' : ip}:${(_meshLastData.node_port) || 8000}/"
-              target="_blank" rel="noopener noreferrer"
-              class="text-[11px] text-Ragnar-400 hover:underline">Open this unit's full UI ↗ (needs your browser on the tailnet)</a>`
-        : '';
+    if (feature === 'threats') {
+        const t = feats.threats || {};
+        if (!t.available) return _meshUnavailable(t.reason);
+        return `<div class="text-xs">
+            ${_meshKV('Enriched findings', t.total_enriched_findings || 0)}
+            ${_meshKV('Critical risk', t.critical_risk_findings || 0)}
+            ${_meshKV('High risk', t.high_risk_findings || 0)}
+            ${_meshKV('Known-exploited (KEV)', t.known_exploited_vulnerabilities || 0)}
+            ${_meshKV('Threat sources enabled', t.threat_sources_enabled || 0)}
+            ${t.last_intelligence_update ? _meshKV('Last update', new Date(t.last_intelligence_update).toLocaleString()) : ''}
+        </div>`;
+    }
 
+    if (feature === 'integrity') {
+        const i = feats.integrity || {};
+        if (!i.available) return _meshUnavailable(i.reason);
+        const checks = (i.checks || []).slice().sort((a, b) => (b.rank || 0) - (a.rank || 0));
+        const rows = checks.map(c => {
+            const bad = (c.rank || 0) > 0;
+            const rsn = Array.isArray(c.reasons) ? c.reasons.join('; ') : (c.reasons || '');
+            return `<div class="flex items-start gap-2 py-1 border-b border-slate-800/60">
+                <span class="w-2 h-2 rounded-full mt-1 flex-shrink-0 ${bad ? 'bg-amber-400' : 'bg-green-500'}"></span>
+                <div class="min-w-0 text-xs">
+                    <span class="text-gray-100">${escapeHtml(c.label || c.name)}</span>
+                    <span class="text-gray-500">— ${escapeHtml(c.verdict || 'ok')}</span>
+                    ${rsn ? `<div class="text-[10px] text-gray-500">${escapeHtml(rsn)}</div>` : ''}
+                </div>
+            </div>`;
+        }).join('');
+        return `<div class="text-xs">
+            ${_meshKV('Overall', i.overall || 'unknown')}
+            ${_meshKV('Monitor', i.enabled ? 'enabled' : 'off')}
+            ${rows ? `<div class="text-[10px] uppercase tracking-wider text-gray-500 mt-3 mb-1">Checks</div>${rows}` : '<p class="text-gray-500 mt-2">No checks have run yet.</p>'}
+        </div>`;
+    }
+
+    if (feature === 'watchtower') {
+        const w = feats.watchtower || {};
+        if (!w.available) return _meshUnavailable(w.reason);
+        const recent = (w.recent || []).slice(0, 12);
+        const rows = recent.map(a => `
+            <div class="flex items-start gap-2 bg-slate-900/50 border border-slate-800 rounded px-2 py-1.5">
+                ${_meshSevBadge(a.severity)}
+                <div class="min-w-0 text-xs">
+                    <span class="text-gray-100">${escapeHtml(a.title || '')}</span>
+                    ${a.host ? ` <span class="text-gray-500 font-mono">${escapeHtml(a.host)}</span>` : ''}
+                    ${a.source ? ` <span class="text-gray-600">· ${escapeHtml(a.source)}</span>` : ''}
+                </div>
+            </div>`).join('');
+        return `<div class="text-xs">
+            ${_meshKV('Total alerts', w.total || 0)}
+            ${_meshKV('Watchtower', w.enabled ? 'enabled' : 'off')}
+            ${w.worst ? _meshKV('Worst severity', w.worst) : ''}
+            ${rows ? `<div class="text-[10px] uppercase tracking-wider text-gray-500 mt-3 mb-1">Recent</div><div class="space-y-1">${rows}</div>` : '<p class="text-gray-500 mt-2">No recent alerts.</p>'}
+        </div>`;
+    }
+
+    return _meshUnavailable('Unknown view.');
+}
+
+// Popup for one feature of one unit. Data comes from the last status payload
+// (server-side pulled over the tailnet) — no browser→peer connection needed, so
+// it works however you reached this UI. Read-only; it never drives the peer.
+function meshShowFeature(id, feature) {
+    const unit = _meshFindNode(id);
+    if (!unit) return;
     const title = escapeHtml(meshUnitTitle(unit));
     const sub = escapeHtml(meshUnitSubtitle(unit));
+    const featTitle = _MESH_FEATURE_TITLE[feature] || feature;
+    const body = _meshFeatureBody(feature, unit);
+
+    // Tabs across the top so the operator can switch features without closing.
+    const tabs = Object.keys(_MESH_FEATURE_TITLE).map(f => {
+        const active = f === feature;
+        return `<button onclick="meshShowFeature('${id}','${f}')" ` +
+            `class="text-[11px] px-2.5 py-1 rounded transition-colors ${active
+                ? 'bg-Ragnar-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}">${_MESH_FEATURE_TITLE[f]}</button>`;
+    }).join('');
+
     let modal = document.getElementById('mesh-details-modal');
     if (!modal) {
         modal = document.createElement('div');
@@ -29158,19 +29244,15 @@ function meshShowDetails(id) {
     modal.onclick = (e) => { if (e.target === modal) meshCloseDetails(); };
     modal.innerHTML = `
         <div class="glass rounded-xl w-full max-w-3xl my-8 p-6 border border-slate-700">
-            <div class="flex items-start justify-between gap-3 mb-4">
+            <div class="flex items-start justify-between gap-3 mb-3">
                 <div class="min-w-0">
-                    <h3 class="text-xl font-bold truncate">${title}</h3>
-                    <p class="text-xs text-gray-500 font-mono mt-0.5">${sub}</p>
+                    <h3 class="text-xl font-bold truncate">${escapeHtml(featTitle)}</h3>
+                    <p class="text-xs text-gray-500 mt-0.5">${title} <span class="font-mono">· ${sub}</span></p>
                 </div>
                 <button onclick="meshCloseDetails()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
             </div>
-            ${healthRow}
-            <div class="text-xs text-gray-400 mb-3">
-                ${counts.total || 0} finding(s)${counts.worst ? ` · worst: ${escapeHtml(counts.worst)}` : ''}
-            </div>
-            ${sections}
-            ${openLink ? `<div class="mt-4 pt-3 border-t border-slate-700/60">${openLink}</div>` : ''}
+            <div class="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-700/60">${tabs}</div>
+            ${body}
         </div>`;
     document.addEventListener('keydown', _meshDetailsEsc);
 }
@@ -29709,5 +29791,5 @@ window.meshServe = meshServe;
 window.meshLeave = meshLeave;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
-window.meshShowDetails = meshShowDetails;
+window.meshShowFeature = meshShowFeature;
 window.meshCloseDetails = meshCloseDetails;

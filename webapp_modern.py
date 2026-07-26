@@ -2496,6 +2496,115 @@ def _mesh_local_findings(limit=40):
                        'by_category': by_cat, 'worst': worst}}
 
 
+def _mesh_local_features():
+    """Per-feature live summaries a peer can display in its own popup.
+
+    One block per launch button — Traffic, Threats, Integrity, Watchtower — each
+    a small, already-computed summary of that subsystem. Read-only: it reports
+    what the feature already knows, and never starts anything. Every block is
+    guarded so a disabled or missing subsystem degrades to `available: False`
+    with a reason, never an exception.
+    """
+    cfg = shared_data.config
+    features = {}
+
+    # Traffic analyzer — the live capture's headline stats.
+    traffic = {'available': False, 'reason': 'Traffic analysis is not running.'}
+    try:
+        analyzer = get_traffic_analyzer()
+        if analyzer:
+            s = analyzer.get_summary() or {}
+            traffic = {
+                'available': bool(s.get('status') == 'running'),
+                'status': s.get('status', 'stopped'),
+                'interface': s.get('interface', ''),
+                'uptime_seconds': s.get('uptime_seconds', 0),
+                'total_packets': s.get('total_packets', 0),
+                'total_bytes_human': s.get('total_bytes_human', '0 B'),
+                'throughput_mbps': s.get('throughput_mbps', 0),
+                'packets_per_second': s.get('packets_per_second', 0),
+                'unique_hosts': s.get('unique_hosts', 0),
+                'active_connections': s.get('active_connections', 0),
+                'total_alerts': s.get('total_alerts', 0),
+                'alerts_by_severity': s.get('alerts_by_severity', {}),
+                'protocols': analyzer.get_protocol_distribution() or {},
+            }
+            if not traffic['available']:
+                traffic['reason'] = 'Traffic analysis is installed but stopped.'
+    except Exception as exc:
+        traffic['reason'] = f'unavailable ({exc})'
+    features['traffic'] = traffic
+
+    # External threat detection — threat-intel enrichment posture.
+    threats = {'available': False, 'reason': 'Threat intelligence is not configured.'}
+    try:
+        if threat_intelligence:
+            summary = threat_intelligence.get_enriched_findings_summary() or {}
+            threats = {
+                'available': True,
+                'total_enriched_findings': summary.get('total_enriched_findings', 0),
+                'critical_risk_findings': summary.get('critical_risk_findings', 0),
+                'high_risk_findings': summary.get('high_risk_findings', 0),
+                'known_exploited_vulnerabilities': summary.get('known_exploited_vulnerabilities', 0),
+                'threat_sources_enabled': summary.get('threat_sources_enabled', 0),
+                'last_intelligence_update': summary.get('last_intelligence_update', ''),
+            }
+    except Exception as exc:
+        threats['reason'] = f'unavailable ({exc})'
+    features['threats'] = threats
+
+    # Network integrity monitor — overall verdict + per-check state.
+    integrity = {'available': False, 'reason': 'Network integrity monitor is off.'}
+    try:
+        with _net_integrity_lock:
+            ni = dict(_net_integrity_state)
+        checks = ni.get('checks') or {}
+        integrity = {
+            'available': True,
+            'enabled': bool(cfg.get('net_integrity_monitor_enabled', False)),
+            'overall': ni.get('overall', 'unknown'),
+            'ts': ni.get('ts'),
+            'checks': [
+                {'name': name, 'label': (c or {}).get('label', name),
+                 'verdict': (c or {}).get('verdict', ''),
+                 'rank': (c or {}).get('rank', 0),
+                 'reasons': (c or {}).get('reasons', [])}
+                for name, c in checks.items() if isinstance(c, dict)
+            ],
+        }
+    except Exception as exc:
+        integrity['reason'] = f'unavailable ({exc})'
+    features['integrity'] = integrity
+
+    # Watchtower — unified watcher feed summary + recent alerts.
+    watchtower = {'available': False, 'reason': 'Watchtower is off.'}
+    try:
+        with _watchtower_lock:
+            wt_sum = _wt_get().summary()
+            recent = [dict(a, raw=None) for a in
+                      _wt_get().recent(limit=15, min_severity=None)]
+        watchtower = {
+            'available': True,
+            'enabled': bool(cfg.get('watchtower_enabled', False)),
+            'total': wt_sum.get('total', 0),
+            'by_severity': wt_sum.get('by_severity', {}),
+            'worst': wt_sum.get('worst'),
+            'sources': wt_sum.get('sources', []),
+            'recent': [
+                {'severity': _mesh_sev(a.get('severity')),
+                 'title': a.get('title') or ','.join(a.get('codes') or []) or a.get('source', ''),
+                 'source': a.get('source', ''),
+                 'host': a.get('src') or a.get('target') or ''}
+                for a in recent
+            ],
+        }
+    except Exception as exc:
+        watchtower['reason'] = f'unavailable ({exc})'
+    features['watchtower'] = watchtower
+
+    return features
+
+
 @app.route('/api/mesh/findings', methods=['GET'])
 def mesh_unit_findings():
     """This unit's security findings, for a peer to display.
@@ -2510,7 +2619,8 @@ def mesh_unit_findings():
         limit = 40
     result = _mesh_local_findings(limit=limit)
     return jsonify({'success': True, 'node': _mesh_unit_name(),
-                    'unit_id': _mesh_unit_id(), **result})
+                    'unit_id': _mesh_unit_id(),
+                    'features': _mesh_local_features(), **result})
 
 
 def _mesh_poll_once():
@@ -2564,6 +2674,7 @@ def _mesh_poll_peer_findings(peers, health, timeout):
             fresh[peer['id']] = {
                 'findings': payload.get('findings') or [],
                 'counts': payload.get('counts') or {},
+                'features': payload.get('features') or {},
             }
     with _mesh_lock:
         _mesh_peer_findings.clear()
@@ -2703,7 +2814,8 @@ def mesh_status():
         self_tagged = tag in self_node.get('tags', [])
         self_node['is_ragnar'] = self_tagged
         self_node['health'] = _mesh_local_health()
-        self_node['findings'] = _mesh_local_findings()
+        self_node['findings'] = dict(_mesh_local_findings(),
+                                     features=_mesh_local_features())
         self_node['unit_id'] = _mesh_unit_id()
         self_node['viking_name'] = _mesh_viking_name()
         key_state, key_msg = mesh_manager.node_key_health(state.get('self'))

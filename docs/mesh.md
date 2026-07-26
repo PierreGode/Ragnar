@@ -21,7 +21,7 @@ be logged into renders the mesh; so would any other.
 - [Why Tailscale](#why-tailscale)
 - [What the mesh adds over the Tailscale console](#what-the-mesh-adds-over-the-tailscale-console)
 - [Fleet security findings](#fleet-security-findings)
-  - [Viewing a unit's details](#viewing-a-units-details)
+  - [Per-feature popups](#per-feature-popups)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
@@ -464,13 +464,16 @@ places Ragnar already records them, normalized into one list:
 Each unit serves its own findings at `GET /api/mesh/findings` — the third and
 last peer-readable route, read-only like the others. A coordinator does not
 compute anything about its peers; it just displays what each already found. See
-[Viewing a unit's details](#viewing-a-units-details) for the popup card.
+[Per-feature popups](#per-feature-popups) for the popup card.
 
-### Viewing a unit's details
+### Per-feature popups
 
-Every unit card has a **View details** button that opens a large popup card with
-that unit's full findings — grouped by category (Vulnerabilities, Network
-Integrity, Watchtower, Incidents) — plus its live CPU/memory/disk/uptime.
+Every unit card has a row of buttons — **Traffic**, **Threats**, **Integrity**,
+**Watchtower**, **Vulnerabilities** — and each opens a popup showing *that*
+feature's live info for that unit (traffic throughput and protocol mix; threat-
+intel risk counts; the integrity monitor's per-check verdicts; recent Watchtower
+alerts; the vulnerability list). The popup has tabs, so you can switch features
+without closing it.
 
 The data is served **from the unit you are looking at**: it already pulled each
 peer's findings over the tailnet, so the modal renders from that payload and
