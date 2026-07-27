@@ -29616,6 +29616,25 @@ function renderMesh(data) {
             `text-white text-xs px-3 py-1 rounded transition-colors">Enable data sharing</button>`));
     }
 
+    // Surface the poll LOOP's own health. This is what separates "this unit
+    // can't reach its peers" from "this unit's poller isn't running" — the exact
+    // ambiguity behind a peer stuck on "Not polled" while Diagnose says 200.
+    const ps = data.poll_status || {};
+    if (data.enabled) {
+        if (ps.loop_started === false) {
+            notes.push(meshWarning(
+                `<strong>This unit's mesh poller is not running.</strong> No peer will ever be ` +
+                `polled until it starts — restart Ragnar on this unit (Config → Service Control → ` +
+                `Restart Service).`, 'error'));
+        } else if (ps.last_error) {
+            notes.push(meshWarning(
+                `<strong>This unit's poll cycle is failing</strong>, so peers stay "Not polled" even ` +
+                `when they're reachable. Last error: <code>${escapeHtml(ps.last_error)}</code>. ` +
+                `If it mentions <code>include_offline</code>, this box has a partial update — run a ` +
+                `clean update and restart.`, 'error'));
+        }
+    }
+
     warnings.innerHTML = notes.join('');
 
     renderMeshHealth(data.summary && data.summary.health);

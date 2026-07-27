@@ -2158,6 +2158,12 @@ _mesh_alert_seen = {}
 # Per-peer cached security findings (vulns/integrity/watchtower/incidents),
 # refreshed each poll and rendered as the fleet findings view.
 _mesh_peer_findings = {}
+# Live health of the poll LOOP itself, surfaced in the Mesh tab so a stalled or
+# crashing poller is visible in the browser instead of only in the logs. This is
+# the difference between "sees peers but never polls" (a loop problem) and "polls
+# but the peer refuses" (a peer problem) — the UI could not tell them apart.
+_mesh_poll_state = {'loop_started': False, 'last_ok_at': 0.0,
+                    'last_error': '', 'last_summary': ''}
 
 # Tailscale-install-from-the-UI state. Installing pulls a vendor script and runs
 # apt, so it takes a minute or two — run it in the background and let the tab
@@ -2781,6 +2787,10 @@ def _mesh_poll_once():
     reachable = sum(1 for r in results.values() if r.get('reachable'))
     logger.info(f"[mesh] polled {len(results)}/{len(peers)} tagged peer(s), "
                 f"{reachable} reachable")
+    _mesh_poll_state['last_ok_at'] = time.time()
+    _mesh_poll_state['last_error'] = ''
+    _mesh_poll_state['last_summary'] = (f"polled {len(results)}/{len(peers)} "
+                                        f"tagged peer(s), {reachable} reachable")
 
     if shared_data.config.get('mesh_aggregate_alerts', True):
         _mesh_ingest_peer_alerts(peers, results, timeout)
@@ -2878,6 +2888,7 @@ def _mesh_ingest_peer_alerts(peers, health, timeout):
 def mesh_monitor_loop():
     """Background poller keeping the mesh view warm."""
     logger.info("[mesh] poll loop started")
+    _mesh_poll_state['loop_started'] = True
     while not getattr(shared_data, 'webapp_should_exit', False):
         if not _mesh_enabled():
             time.sleep(10)
@@ -2892,6 +2903,7 @@ def mesh_monitor_loop():
             import traceback
             logger.error(f"[mesh] poll cycle failed: {type(exc).__name__}: {exc}")
             logger.error("[mesh] " + traceback.format_exc().replace("\n", "\n[mesh] "))
+            _mesh_poll_state['last_error'] = f"{type(exc).__name__}: {exc}"
         try:
             interval = max(15, int(shared_data.config.get('mesh_poll_interval', 60)))
         except (TypeError, ValueError):
@@ -3098,6 +3110,10 @@ def mesh_status():
         # How often the background poller refreshes peer data, so the UI can say
         # the rate outright instead of leaving the operator guessing.
         'poll_interval': max(15, int(cfg.get('mesh_poll_interval', 60) or 60)),
+        # Health of the poll LOOP, so the UI can distinguish "peers refuse me"
+        # (a peer problem — Diagnose says why) from "my poller never ran / keeps
+        # crashing" (a local problem — last_error names it).
+        'poll_status': dict(_mesh_poll_state),
         'self': self_node,
         # Only Ragnar mesh units are surfaced. Other tailnet devices (laptops,
         # phones, unrelated services) are intentionally not listed — they are
