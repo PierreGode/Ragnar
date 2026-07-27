@@ -28973,15 +28973,21 @@ function meshUnitCard(unit, isSelf, ctx) {
     // contradicts the "not polled yet" footer.
     const polled = isSelf || unit.health != null;
     const reachable = isSelf || health.reachable === true;
+    // A successful health poll is the authoritative "this unit is up" signal —
+    // more so than Tailscale's Online flag, which lags real reachability and
+    // marks idle-but-reachable peers offline. So a peer we just polled reads
+    // Online even if Tailscale still says otherwise; the flag only decides how
+    // to describe a peer we could NOT reach.
     let state, dot, ring;
-    if (!unit.online) {
-        state = 'Offline'; dot = 'bg-gray-500'; ring = 'border-slate-700';
+    if (reachable) {
+        state = 'Online'; dot = 'bg-green-400'; ring = 'border-slate-700';
     } else if (!polled) {
-        state = 'Not polled yet'; dot = 'bg-sky-400'; ring = 'border-slate-700';
-    } else if (!reachable) {
+        state = unit.online ? 'Not polled yet' : 'Offline';
+        dot = unit.online ? 'bg-sky-400' : 'bg-gray-500'; ring = 'border-slate-700';
+    } else if (unit.online) {
         state = 'Ragnar not answering'; dot = 'bg-amber-400'; ring = 'border-amber-700/60';
     } else {
-        state = 'Online'; dot = 'bg-green-400'; ring = 'border-slate-700';
+        state = 'Offline'; dot = 'bg-gray-500'; ring = 'border-slate-700';
     }
 
     const worst = (health.watchtower || {}).worst;
@@ -29010,34 +29016,33 @@ function meshUnitCard(unit, isSelf, ctx) {
             ${meshMetric('Alerts', (health.watchtower || {}).total ?? '—')}
             ${meshMetric('Incidents', inc.total ?? '—')}
         </div>`;
-    } else if (unit.online && !polled) {
+    } else if (!polled) {
         // Never polled — say so plainly and point at the actual cause instead
         // of accusing the peer's Ragnar of being down.
         body = `<p class="text-xs text-sky-300/80 mt-3 pt-3 border-t border-slate-700/60">
-            Tagged and reachable over Tailscale, waiting for the first health poll.${
+            Tagged mesh unit, waiting for the first health poll.${
                 ctx.enabled === false
                     ? ' Data sharing is off on this unit, so it isn\'t polling yet — enable it above.'
                     : ''}
         </p>`;
-    } else if (unit.online) {
+    } else {
         // Polled and genuinely failed. "Ragnar's API did not answer" spans four
         // very different causes, so offer a live probe that names the real one
-        // rather than making the operator guess or SSH in.
+        // rather than making the operator guess or SSH in. This now also covers
+        // peers Tailscale marks offline: we poll them anyway, so a failure here
+        // is a real, diagnosable failure rather than just "not seen lately".
         const diagIp = escapeHtml(unit.ip || '');
-        body = `<p class="text-xs text-amber-300/80 mt-3 pt-3 border-t border-slate-700/60">
-            Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.
-        </p>
-        <div class="mt-2">
+        const lead = unit.online
+            ? `Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.`
+            : `Not answering${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}. Tailscale also marks it offline${unit.last_seen ? ' — last seen ' + escapeHtml(new Date(unit.last_seen).toLocaleString()) : ''}.`;
+        body = `<p class="text-xs ${unit.online ? 'text-amber-300/80' : 'text-gray-400'} mt-3 pt-3 border-t border-slate-700/60">${lead}</p>` +
+            (diagIp ? `<div class="mt-2">
             <button onclick="meshDiagnose('${diagIp}', ${ctx.nodePort || 8000}, this)"
                     class="text-[11px] bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded transition-colors">
                 Diagnose
             </button>
             <div class="mesh-diag-out text-[11px] mt-2"></div>
-        </div>`;
-    } else {
-        body = `<p class="text-xs text-gray-500 mt-3 pt-3 border-t border-slate-700/60">
-            Last seen ${unit.last_seen ? escapeHtml(new Date(unit.last_seen).toLocaleString()) : 'unknown'}.
-        </p>`;
+        </div>` : '');
     }
 
     const path = unit.online && !isSelf
@@ -29455,10 +29460,26 @@ function renderMesh(data) {
     renderHttpsNote(data);
 
     const lastPoll = document.getElementById('mesh-last-poll');
-    lastPoll.textContent = data.last_poll
+    const rate = data.poll_interval ? ` Automatic poll every ${data.poll_interval}s.` : '';
+    lastPoll.textContent = (data.last_poll
         ? `Peer data last refreshed ${new Date(data.last_poll * 1000).toLocaleTimeString()}.`
-        : 'Peer data has not been polled yet.';
+        : 'Peer data has not been polled yet.') + rate;
 }
+
+// On-demand poll. The background loop keeps data warm on its own interval, but
+// after toggling something or when a unit was just brought up the operator
+// wants an answer *now* rather than waiting out the cycle. This forces a
+// synchronous server-side poll (?refresh=1) and re-renders with the result.
+async function meshPollNow(btn) {
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Polling…'; }
+    try {
+        await refreshMesh(true);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label || 'Poll now'; }
+    }
+}
+window.meshPollNow = meshPollNow;
 
 // Pi Connect is a second way in that shares nothing with Tailscale — different
 // vendor, transport and credentials. Its value is precisely that it fails

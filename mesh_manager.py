@@ -1003,14 +1003,28 @@ def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
         return result
 
 
-def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8):
-    """Poll every online peer in parallel. Returns {node_id: health_dict}.
+def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8,
+              include_offline=False):
+    """Poll peers in parallel. Returns {node_id: health_dict}.
 
     Serial polling would make a 10-node mesh with one dead box take a full
-    timeout per box; the UI would look hung. Offline nodes are skipped entirely
-    since Tailscale already told us they are down.
+    timeout per box; the UI would look hung, so every peer is polled at once.
+
+    `include_offline` controls whether peers Tailscale currently marks offline
+    are still polled. Tailscale's `Online` flag is *lazy*: a peer with no recent
+    traffic flips to offline even though it is perfectly reachable, and it only
+    flips back once something sends it traffic. If the mesh poller skips those
+    peers, an idle unit is never polled, so it never exchanges traffic, so it
+    stays "offline" forever — a chicken-and-egg that silently stops data sharing
+    minutes after units go quiet. For the mesh we therefore poll tagged peers
+    regardless of the Online flag: the poll itself is the keepalive that both
+    tests the link and warms it. A genuinely dead box just costs one parallel
+    timeout. (The default stays False so other callers keep the cheap behaviour.)
     """
-    targets = [n for n in nodes if n.get('online') and not n.get('is_self')]
+    if include_offline:
+        targets = [n for n in nodes if not n.get('is_self')]
+    else:
+        targets = [n for n in nodes if n.get('online') and not n.get('is_self')]
     results = {}
     if not targets:
         return results

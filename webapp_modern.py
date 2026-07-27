@@ -2639,8 +2639,12 @@ def _mesh_poll_once():
     # hammering the operator's laptop and phone with HTTP requests.
     tag = _mesh_tag()
     peers = [p for p in state.get('peers', []) if tag in p.get('tags', [])]
+    # Poll every tagged unit, even ones Tailscale currently marks offline: its
+    # Online flag lags real reachability, and skipping "offline" peers is what
+    # silently stopped data sharing once units went idle. The poll doubles as
+    # the keepalive that flips them back online.
     results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(),
-                                     timeout=timeout)
+                                     timeout=timeout, include_offline=True)
     with _mesh_lock:
         _mesh_peer_health.clear()
         _mesh_peer_health.update(results)
@@ -2875,6 +2879,9 @@ def mesh_status():
         'site_label': cfg.get('mesh_site_label', ''),
         'node_port': _mesh_node_port(),
         'last_poll': last_poll,
+        # How often the background poller refreshes peer data, so the UI can say
+        # the rate outright instead of leaving the operator guessing.
+        'poll_interval': max(15, int(cfg.get('mesh_poll_interval', 60) or 60)),
         'self': self_node,
         # Only Ragnar mesh units are surfaced. Other tailnet devices (laptops,
         # phones, unrelated services) are intentionally not listed — they are

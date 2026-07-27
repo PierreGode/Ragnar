@@ -3057,10 +3057,17 @@
 
             <!-- Peer units -->
             <div id="mesh-peers-wrap" class="hidden">
-                <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">
-                    Reported by the mesh
-                    <span class="normal-case tracking-normal text-gray-500">— live from peer units over Tailscale</span>
-                </h3>
+                <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                    <h3 class="text-sm uppercase tracking-wider text-gray-400">
+                        Reported by the mesh
+                        <span class="normal-case tracking-normal text-gray-500">— live from peer units over Tailscale</span>
+                    </h3>
+                    <button id="mesh-poll-btn" onclick="meshPollNow(this)"
+                            title="Poll every unit right now instead of waiting for the next automatic cycle"
+                            class="text-xs bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded transition-colors whitespace-nowrap">
+                        Poll now
+                    </button>
+                </div>
                 <div id="mesh-peer-cards" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
                 <p id="mesh-last-poll" class="text-xs text-gray-500 mt-3"></p>
             </div>
@@ -7248,7 +7255,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh15"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh16"></script>
 
 </body>
 </html>
