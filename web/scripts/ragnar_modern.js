@@ -29447,6 +29447,8 @@ function renderMesh(data) {
     peersWrap.classList.toggle('hidden', !joined);
     controls.classList.toggle('hidden', !joined);
     summary.classList.toggle('hidden', !joined);
+    const piWrap = document.getElementById('mesh-piconnect-wrap');
+    if (piWrap) piWrap.classList.toggle('hidden', !joined);
 
     const notes = [];
     (data.summary?.duplicate_unit_ids || []).forEach(id => {

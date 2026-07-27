@@ -3051,8 +3051,6 @@
             <div id="mesh-self-wrap" class="mb-6 hidden">
                 <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">This unit</h3>
                 <div id="mesh-self-card"></div>
-                <!-- A backup way in that fails independently of Tailscale. -->
-                <div id="mesh-piconnect" class="glass rounded-lg p-4 mt-3"></div>
             </div>
 
             <!-- Peer units -->
@@ -3108,6 +3106,14 @@
                     </div>
                 </div>
                 <div id="mesh-control-result" class="text-sm mt-3"></div>
+            </div>
+
+            <!-- Backup access, at the bottom: a way in that fails independently
+                 of Tailscale. Not the first thing an operator needs, so it sits
+                 below the mesh view and controls rather than under This unit. -->
+            <div id="mesh-piconnect-wrap" class="mt-6 hidden">
+                <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Backup access</h3>
+                <div id="mesh-piconnect" class="glass rounded-lg p-4"></div>
             </div>
         </div>
 
@@ -7255,7 +7261,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh18"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh19"></script>
 
 </body>
 </html>
