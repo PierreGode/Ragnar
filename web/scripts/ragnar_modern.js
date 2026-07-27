@@ -30018,13 +30018,7 @@ function meshShowSetupHelp() {
             </div>
             <p class="text-sm text-gray-400 mb-4">Do this once per tailnet at
                 <a href="https://login.tailscale.com" target="_blank" rel="noopener noreferrer" class="text-cyan-400 underline">login.tailscale.com</a>,
-                before joining any unit.</p>
-
-            <div class="mb-4 p-3 rounded-lg bg-red-950/40 border border-red-800 text-sm text-red-200">
-                ⚠ Use the tag <code class="font-mono text-red-100">tag:ragnar-mesh</code> in
-                <strong>lowercase</strong> — Tailscale rejects uppercase, and it must match every
-                unit's <code class="font-mono">mesh_tag</code> exactly. <code class="font-mono">Ragnar-mesh</code> will not work.
-            </div>
+                before joining any unit. Use the tag <code class="font-mono text-gray-200">tag:ragnar-mesh</code>.</p>
 
             <ol class="space-y-4 text-sm text-gray-300">
                 <li>
