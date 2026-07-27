@@ -1077,15 +1077,33 @@ def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8,
     if not targets:
         return results
 
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(targets))) as pool:
-        futures = {pool.submit(poll_peer, n, port, timeout): n for n in targets}
-        for future in futures:
-            node = futures[future]
-            try:
-                results[node['id']] = future.result(timeout=timeout + 2)
-            except Exception as exc:
-                results[node['id']] = {'reachable': False, 'error': type(exc).__name__}
+    # Deliberately NOT concurrent.futures. Its ThreadPoolExecutor keys off a
+    # process-global "shutdown" flag that flask-socketio/eventlet can trip while
+    # the process is still very much alive; once set, every submit() raises
+    # "cannot schedule new futures after interpreter shutdown" and the poller is
+    # dead until a restart (silently — peers just read "Not polled"). Plain
+    # threads have no such global, so they keep working for the life of the
+    # process. Fan out in batches of `max_workers` so a large fleet never spawns
+    # thousands of threads at once; each poll_peer has its own socket timeout.
+    import threading
+    lock = threading.Lock()
+
+    def _worker(node):
+        try:
+            r = poll_peer(node, port, timeout)
+        except Exception as exc:
+            r = {'reachable': False, 'error': type(exc).__name__}
+        with lock:
+            results[node['id']] = r
+
+    batch = max(1, int(max_workers))
+    for i in range(0, len(targets), batch):
+        threads = [threading.Thread(target=_worker, args=(n,), daemon=True)
+                   for n in targets[i:i + batch]]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=timeout + 3)
     return results
 
 
