@@ -21,6 +21,7 @@ be logged into renders the mesh; so would any other.
 - [Why Tailscale](#why-tailscale)
 - [What the mesh adds over the Tailscale console](#what-the-mesh-adds-over-the-tailscale-console)
 - [Fleet security findings](#fleet-security-findings)
+  - [Mesh Health card](#mesh-health-card)
   - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Deploying a unit](#deploying-a-unit)
@@ -495,6 +496,22 @@ places Ragnar already records them, normalized into one list:
 Each unit serves its own findings at `GET /api/mesh/findings`. A coordinator
 does not compute anything about its peers; it just displays what each already
 found. See [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page) for the node page.
+
+### Mesh Health card
+
+Above the node list sits a single **Mesh Health** card — the answer to "is
+anything wrong across the fleet?" without scrolling thousands of rows. It is
+rolled up **server-side** (`summary.health` in `GET /api/mesh/status`), so the
+browser only paints six counts and a few chips no matter how large the mesh is:
+
+- **Nodes / Online / Need attention / Unreachable / Open alerts / Open incidents.**
+  A node "needs attention" if it is unreachable, its node key is expiring, it
+  reports undervoltage, or it is carrying a high/critical finding.
+- A **headline** pill — green *All clear* when nothing needs attention, otherwise
+  coloured by the worst finding anywhere in the mesh.
+- A **severity distribution** (how many nodes are at each worst severity) and
+  **condition chips** (undervoltage, key expiring, not polled yet, published)
+  that appear only when non-zero, so a healthy mesh stays quiet.
 
 ### Mesh Nodes list and the node page
 

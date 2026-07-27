@@ -2944,26 +2944,6 @@
 
                 <!-- Problems the mesh detects about itself -->
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
-
-                <!-- Summary strip -->
-                <div id="mesh-summary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2 hidden">
-                    <div class="glass rounded-lg p-3 text-center">
-                        <p class="text-xs uppercase tracking-wider text-gray-400">Units</p>
-                        <p id="mesh-stat-total" class="text-2xl font-bold">–</p>
-                    </div>
-                    <div class="glass rounded-lg p-3 text-center">
-                        <p class="text-xs uppercase tracking-wider text-gray-400">Online</p>
-                        <p id="mesh-stat-online" class="text-2xl font-bold text-green-400">–</p>
-                    </div>
-                    <div class="glass rounded-lg p-3 text-center">
-                        <p class="text-xs uppercase tracking-wider text-gray-400">Offline</p>
-                        <p id="mesh-stat-offline" class="text-2xl font-bold text-gray-400">–</p>
-                    </div>
-                    <div class="glass rounded-lg p-3 text-center" title="Reachable over Tailscale but Ragnar is not answering">
-                        <p class="text-xs uppercase tracking-wider text-gray-400">Degraded</p>
-                        <p id="mesh-stat-degraded" class="text-2xl font-bold text-amber-400">–</p>
-                    </div>
-                </div>
             </div>
 
             <!-- Install step: shown when Tailscale is not on this unit yet. -->
@@ -3051,6 +3031,25 @@
             <div id="mesh-self-wrap" class="mb-6 hidden">
                 <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">This unit</h3>
                 <div id="mesh-self-card"></div>
+            </div>
+
+            <!-- Overall mesh health, rolled up server-side so it stays a single
+                 glance even at thousands of nodes. Sits above the node list. -->
+            <div id="mesh-summary" class="glass rounded-xl p-4 mb-4 hidden">
+                <div class="flex items-center justify-between gap-3 mb-3 flex-wrap">
+                    <h3 class="text-sm uppercase tracking-wider text-gray-400">Mesh Health</h3>
+                    <span id="mesh-health-headline" class="text-xs px-2.5 py-1 rounded"></span>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+                    <div class="text-center"><p class="text-[10px] uppercase tracking-wider text-gray-500">Nodes</p><p id="mesh-h-total" class="text-2xl font-bold">–</p></div>
+                    <div class="text-center"><p class="text-[10px] uppercase tracking-wider text-gray-500">Online</p><p id="mesh-h-online" class="text-2xl font-bold text-green-400">–</p></div>
+                    <div class="text-center" title="Unreachable, key expiring, undervoltage, or carrying a high/critical finding"><p class="text-[10px] uppercase tracking-wider text-gray-500">Need attention</p><p id="mesh-h-attention" class="text-2xl font-bold text-amber-400">–</p></div>
+                    <div class="text-center" title="Reachable over Tailscale but Ragnar is not answering"><p class="text-[10px] uppercase tracking-wider text-gray-500">Unreachable</p><p id="mesh-h-unreachable" class="text-2xl font-bold text-gray-400">–</p></div>
+                    <div class="text-center"><p class="text-[10px] uppercase tracking-wider text-gray-500">Open alerts</p><p id="mesh-h-alerts" class="text-2xl font-bold">–</p></div>
+                    <div class="text-center"><p class="text-[10px] uppercase tracking-wider text-gray-500">Open incidents</p><p id="mesh-h-incidents" class="text-2xl font-bold">–</p></div>
+                </div>
+                <div id="mesh-health-sev" class="flex flex-wrap gap-2 mt-3"></div>
+                <div id="mesh-health-chips" class="flex flex-wrap gap-2 mt-2"></div>
             </div>
 
             <!-- Peer units -->
@@ -7263,7 +7262,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh20"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh21"></script>
 
 </body>
 </html>

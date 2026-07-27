@@ -2877,6 +2877,80 @@ def mesh_monitor_loop():
             time.sleep(5)
 
 
+def _mesh_health_rollup(known, self_node):
+    """Aggregate one health posture for the whole mesh.
+
+    `known` is every Ragnar node in the mesh (this unit if tagged, plus tagged
+    peers). At fleet scale the per-node cards are useless for "is anything
+    wrong?" — this rolls the whole mesh into a handful of counts so the operator
+    sees the state of thousands of units at a glance. Computed here, server-side,
+    so the browser never iterates the fleet.
+
+    A node "needs attention" if it is unreachable, its node key is warning/
+    expired, it reports undervoltage, or it is carrying a high/critical finding.
+    """
+    roll = {
+        'total': len(known), 'reachable': 0, 'unreachable': 0, 'not_polled': 0,
+        'attention': 0, 'with_alerts': 0, 'alerts_total': 0,
+        'with_incidents': 0, 'incidents_total': 0,
+        'undervoltage': 0, 'key_issues': 0, 'published': 0,
+        'worst': None, 'by_severity': {s: 0 for s in _MESH_SEV_ORDER},
+    }
+    worst_rank = -1
+    for node in known:
+        is_self = node is self_node
+        health = node.get('health') or {}
+        polled = is_self or node.get('health') is not None
+        reachable = is_self or health.get('reachable') is True
+
+        if reachable:
+            roll['reachable'] += 1
+        elif not polled:
+            roll['not_polled'] += 1
+        else:
+            roll['unreachable'] += 1
+
+        wt = health.get('watchtower') or {}
+        inc = health.get('incidents') or {}
+        alerts = wt.get('total') or 0
+        incidents = inc.get('total') or 0
+        if alerts:
+            roll['with_alerts'] += 1
+            roll['alerts_total'] += alerts
+        if incidents:
+            roll['with_incidents'] += 1
+            roll['incidents_total'] += incidents
+
+        undervoltage = bool((health.get('power') or {}).get('undervoltage'))
+        if undervoltage:
+            roll['undervoltage'] += 1
+        key_bad = node.get('key_state') in ('warn', 'critical', 'expired')
+        if key_bad:
+            roll['key_issues'] += 1
+        if (health.get('serve') or {}).get('published'):
+            roll['published'] += 1
+
+        # Worst severity this node is carrying (its Watchtower + incident worst),
+        # tallied so the card can show the mesh-wide distribution and headline.
+        node_worst = None
+        node_rank = -1
+        for sev in (wt.get('worst'), inc.get('worst')):
+            if sev and _MESH_SEV_RANK.get(sev, -1) > node_rank:
+                node_rank = _MESH_SEV_RANK[sev]
+                node_worst = sev
+        if node_worst:
+            roll['by_severity'][node_worst] += 1
+            if node_rank > worst_rank:
+                worst_rank = node_rank
+                roll['worst'] = node_worst
+
+        if (reachable is False and polled) or (not is_self and not node.get('online') and not reachable) \
+                or key_bad or undervoltage or node_rank >= _MESH_SEV_RANK['high']:
+            roll['attention'] += 1
+
+    return roll
+
+
 @app.route('/api/mesh/status', methods=['GET'])
 def mesh_status():
     """Whole-mesh view: tailnet state, this node, peers, and peer health."""
@@ -2961,6 +3035,8 @@ def mesh_status():
     with _mesh_install_lock:
         installing = _mesh_installing
 
+    health_rollup = _mesh_health_rollup(known, self_node)
+
     return jsonify({
         'success': True,
         'enabled': bool(cfg.get('mesh_enabled')),
@@ -3014,6 +3090,9 @@ def mesh_status():
             'duplicate_unit_ids': duplicates,
             'duplicate_names': duplicate_names,
             'unnumbered_units': unnumbered,
+            # Mesh-wide health, rolled up server-side so a fleet of thousands is
+            # one small object here instead of the browser crunching every node.
+            'health': health_rollup,
         },
     })
 

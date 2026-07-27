@@ -29377,6 +29377,64 @@ function meshWarning(text, tone) {
     return `<div class="rounded-lg border ${cls} px-4 py-2 text-sm">${text}</div>`;
 }
 
+// Overall mesh health card. Everything is pre-aggregated server-side
+// (data.summary.health), so this only paints — no per-node work in the browser,
+// which is what keeps it cheap at thousands of nodes.
+function renderMeshHealth(h) {
+    h = h || {};
+    const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
+    set('mesh-h-total', h.total ?? 0);
+    set('mesh-h-online', h.reachable ?? 0);
+    set('mesh-h-attention', h.attention ?? 0);
+    set('mesh-h-unreachable', h.unreachable ?? 0);
+    set('mesh-h-alerts', h.alerts_total ?? 0);
+    set('mesh-h-incidents', h.incidents_total ?? 0);
+
+    // Headline: green when nothing needs attention, otherwise coloured by the
+    // worst finding anywhere in the mesh.
+    const headline = document.getElementById('mesh-health-headline');
+    if (headline) {
+        const att = h.attention || 0;
+        if (!att) {
+            headline.textContent = 'All clear';
+            headline.className = 'text-xs px-2.5 py-1 rounded bg-green-700/40 text-green-300';
+        } else {
+            const sev = h.worst || 'medium';
+            const cls = (sev === 'critical' || sev === 'high')
+                ? 'bg-red-700/40 text-red-300' : 'bg-amber-700/40 text-amber-300';
+            headline.textContent = `${att} node${att === 1 ? '' : 's'} need attention`;
+            headline.className = 'text-xs px-2.5 py-1 rounded ' + cls;
+        }
+    }
+
+    // Severity distribution: one chip per non-zero severity, worst first.
+    const sevEl = document.getElementById('mesh-health-sev');
+    if (sevEl) {
+        const by = h.by_severity || {};
+        const chips = ['critical', 'high', 'medium', 'low', 'info']
+            .filter(s => by[s])
+            .map(s => `<span class="text-[11px] px-2 py-0.5 rounded border ${MESH_SEV_CLASS[s] || MESH_SEV_CLASS.info}">${by[s]} ${s}</span>`);
+        sevEl.innerHTML = chips.join('');
+    }
+
+    // Condition chips: only surfaced when non-zero, so a healthy mesh is quiet.
+    const chipsEl = document.getElementById('mesh-health-chips');
+    if (chipsEl) {
+        const chip = (n, label, tone) => n
+            ? `<span class="text-[11px] px-2 py-0.5 rounded border ${tone}">${n} ${label}</span>` : '';
+        const amber = 'bg-amber-600/20 text-amber-300 border-amber-800';
+        const red = 'bg-red-600/20 text-red-300 border-red-800';
+        const slate = 'bg-slate-600/20 text-gray-300 border-slate-600';
+        const green = 'bg-green-700/20 text-green-300 border-green-800';
+        chipsEl.innerHTML = [
+            chip(h.undervoltage, 'undervoltage', red),
+            chip(h.key_issues, 'key expiring', amber),
+            chip(h.not_polled, 'not polled yet', slate),
+            chip(h.published, 'published', green),
+        ].filter(Boolean).join('');
+    }
+}
+
 function renderMesh(data) {
     const pill = document.getElementById('mesh-backend-pill');
     const setup = document.getElementById('mesh-setup');
@@ -29496,14 +29554,7 @@ function renderMesh(data) {
 
     warnings.innerHTML = notes.join('');
 
-    if (data.summary) {
-        document.getElementById('mesh-stat-total').textContent = data.summary.ragnar_nodes ?? 0;
-        // Count self among the online only when it is actually in the mesh, so
-        // Units and Online never contradict each other for an untagged unit.
-        document.getElementById('mesh-stat-online').textContent = (data.summary.online ?? 0) + (inMesh ? 1 : 0);
-        document.getElementById('mesh-stat-offline').textContent = data.summary.offline ?? 0;
-        document.getElementById('mesh-stat-degraded').textContent = data.summary.degraded ?? 0;
-    }
+    renderMeshHealth(data.summary && data.summary.health);
 
     // Context every card needs to describe a poll failure or pending state
     // honestly: whether polling is even on, and what port/tag to check.
