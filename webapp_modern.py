@@ -2761,12 +2761,26 @@ def _mesh_poll_once():
     # Online flag lags real reachability, and skipping "offline" peers is what
     # silently stopped data sharing once units went idle. The poll doubles as
     # the keepalive that flips them back online.
-    results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(),
-                                     timeout=timeout, include_offline=True)
+    try:
+        results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(),
+                                         timeout=timeout, include_offline=True)
+    except TypeError:
+        # Defends against a partial update: a stale mesh_manager whose poll_mesh
+        # predates the include_offline argument would otherwise raise here and
+        # kill ALL polling silently (every peer stuck on "Not polled") while the
+        # rest of Ragnar looks current. Fall back to the old signature so peers
+        # are still polled, and say loudly that the box needs a clean update.
+        logger.warning("[mesh] poll_mesh() rejected include_offline — stale "
+                       "mesh_manager.py (partial update). Polling online peers "
+                       "only; run a clean 'git pull' + restart on this unit.")
+        results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(), timeout=timeout)
     with _mesh_lock:
         _mesh_peer_health.clear()
         _mesh_peer_health.update(results)
         _mesh_last_poll = time.time()
+    reachable = sum(1 for r in results.values() if r.get('reachable'))
+    logger.info(f"[mesh] polled {len(results)}/{len(peers)} tagged peer(s), "
+                f"{reachable} reachable")
 
     if shared_data.config.get('mesh_aggregate_alerts', True):
         _mesh_ingest_peer_alerts(peers, results, timeout)
@@ -2863,6 +2877,7 @@ def _mesh_ingest_peer_alerts(peers, health, timeout):
 
 def mesh_monitor_loop():
     """Background poller keeping the mesh view warm."""
+    logger.info("[mesh] poll loop started")
     while not getattr(shared_data, 'webapp_should_exit', False):
         if not _mesh_enabled():
             time.sleep(10)
@@ -2870,7 +2885,13 @@ def mesh_monitor_loop():
         try:
             _mesh_poll_once()
         except Exception as exc:
-            logger.debug(f"[mesh] poll cycle failed: {exc}")
+            # A failure here means NO peer data flows — the whole "sees each other
+            # but never polls" symptom. It must be visible, not swallowed at
+            # debug, and the traceback names the cause (e.g. a stale mesh_manager
+            # whose poll_mesh() lacks a newer argument after a partial update).
+            import traceback
+            logger.error(f"[mesh] poll cycle failed: {type(exc).__name__}: {exc}")
+            logger.error("[mesh] " + traceback.format_exc().replace("\n", "\n[mesh] "))
         try:
             interval = max(15, int(shared_data.config.get('mesh_poll_interval', 60)))
         except (TypeError, ValueError):
@@ -2881,6 +2902,7 @@ def mesh_monitor_loop():
             if not _mesh_enabled():
                 break
             time.sleep(5)
+    logger.info("[mesh] poll loop exited")
 
 
 def _mesh_health_rollup(known, self_node):
