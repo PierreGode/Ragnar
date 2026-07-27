@@ -29044,7 +29044,12 @@ function meshNodeBanner(unit, isSelf, ctx) {
     const counts = (unit.findings || {}).counts || {};
     const alerts = st.reachable ? (wt.total ?? 0) : '—';
     const incidents = st.reachable ? (inc.total ?? 0) : '—';
-    const vulns = st.reachable ? (counts.vulnerabilities ?? 0) : '—';
+    // Prefer the true pre-truncation vulnerability count; fall back to the
+    // per-category tally (capped at the findings limit) for peers on older code
+    // that don't emit `vulnerabilities` yet — a capped real number beats 0.
+    const vulns = st.reachable
+        ? (counts.vulnerabilities ?? (counts.by_category || {}).vulnerability ?? 0)
+        : '—';
     const worst = wt.worst;
     const sevBadge = worst
         ? `<span class="text-[10px] px-1.5 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>` : '';
