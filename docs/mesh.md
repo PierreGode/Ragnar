@@ -21,7 +21,7 @@ be logged into renders the mesh; so would any other.
 - [Why Tailscale](#why-tailscale)
 - [What the mesh adds over the Tailscale console](#what-the-mesh-adds-over-the-tailscale-console)
 - [Fleet security findings](#fleet-security-findings)
-  - [Per-feature popups](#per-feature-popups)
+  - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
@@ -402,7 +402,7 @@ This is the one write the peer gate allows, and it is fenced in on every side:
   remotely, do not tag it into the mesh.
 
 The operator's browser never talks to a peer directly (it is not on the
-tailnet). Clicking Start/Stop in a unit's popup POSTs to the **local** unit's
+tailnet). Clicking Start/Stop on the node page POSTs to the **local** unit's
 `/api/mesh/peer-control`, which relays the command over the tailnet with the
 peer's WireGuard identity — exactly how peer data is pulled. A command aimed at
 the local unit is applied directly with no network hop.
@@ -494,40 +494,46 @@ places Ragnar already records them, normalized into one list:
 
 Each unit serves its own findings at `GET /api/mesh/findings`. A coordinator
 does not compute anything about its peers; it just displays what each already
-found. See [Per-feature popups](#per-feature-popups) for the popup card.
+found. See [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page) for the node page.
 
-### Per-feature popups
+### Mesh Nodes list and the node page
 
-Every unit card has a row of buttons — **Traffic**, **Threats**, **Integrity**,
-**Watchtower**, **Vulnerabilities** — and each opens a popup showing *that*
-feature's live info for that unit (traffic throughput and protocol mix; threat-
-intel risk counts; the integrity monitor's per-check verdicts; recent Watchtower
-alerts; the vulnerability list). The popup has tabs, so you can switch features
-without closing it.
+The **Mesh Nodes** list is a flat column of compact **banner rows**, one per
+node — name, unit number, location (site label), IP, online/offline, alert and
+incident counts, a worst-severity badge, a **Published** badge, and an **Open**
+button. Rows are deliberately light: a mesh of hundreds of them is still a small
+DOM, so the list stays responsive even on a Pi Zero. Heavy per-feature detail is
+*not* rendered for the list — only for the single node you open.
 
-The data is served **from the unit you are looking at**: it already pulled each
-peer's findings over the tailnet, so the modal renders from that payload and
-needs **no connection between your browser and the peer**. This matters because
-tailnet IPs (`100.x.y.z`) are only reachable from devices *on* the tailnet — if
-you are browsing this UI over the LAN or a tunnel, your browser cannot open a
-peer's `100.x.y.z:8000` directly, but the details card still works because the
-Ragnar server did the fetching.
+**Open** swaps the list for the **node page**: one generic full page that renders
+whichever node you opened — its resource metrics, each feature's live view
+(Traffic throughput and protocol mix; threat-intel risk counts; the integrity
+monitor's per-check verdicts; recent Watchtower alerts; the vulnerability list),
+the remote Start/Stop controls, and the direct link. Only one node's detail is
+live at a time, which is what keeps a large mesh affordable in the browser. A
+**← Back to Mesh Nodes** button returns to the list.
 
-Each peer card also carries an *"Open full UI ↗"* link that opens that unit's own
-web UI in a new tab — but it is clearly caveated ("tailnet only"): unlike the
-popups (which render from data this unit already pulled), a direct link only
-works when your **browser** is itself on the tailnet, because a peer's `100.x`
-address / MagicDNS name is only routable from tailnet members. The link prefers
-the unit's **published** hostname when it reports one — a green **Published**
-badge appears alongside — and falls back to `http://<tailnet-ip>:<port>`
-otherwise. Publish state is local to each node (Tailscale does not share it), so
-each unit reports its own in `GET /api/mesh/unit` and peers display it. The
-popups remain the reliable path; the direct link is the on-tailnet convenience.
+All of it renders **from the unit you are looking at**: it already pulled each
+peer's data over the tailnet, so the page needs **no connection between your
+browser and the peer**. This matters because tailnet IPs (`100.x.y.z`) are only
+reachable from devices *on* the tailnet — if you are browsing this UI over the
+LAN or a tunnel, your browser cannot open a peer's `100.x.y.z:8000` directly, but
+the node page still works because the Ragnar server did the fetching.
 
-Beyond showing what each unit found, the popup can **start and stop that unit's
-monitor remotely** — a Start/Stop button appears for the four controllable
-features (Traffic, Threats, Integrity, Watchtower), reflecting the live running
-state. The command is relayed server-side over the tailnet; see
+The node page also carries an *"Open full UI ↗"* link that opens that unit's own
+web UI in a new tab — clearly caveated ("tailnet only"): unlike the page itself
+(which renders from pulled data), a direct link only works when your **browser**
+is itself on the tailnet, because a peer's `100.x` address / MagicDNS name is
+only routable from tailnet members. The link prefers the unit's **published**
+hostname when it reports one — a green **Published** badge appears alongside —
+and falls back to `http://<tailnet-ip>:<port>` otherwise. Publish state is local
+to each node (Tailscale does not share it), so each unit reports its own in
+`GET /api/mesh/unit` and peers display it.
+
+Beyond showing what each unit found, the node page can **start and stop that
+unit's monitor remotely** — a Start/Stop control appears for the four
+controllable features (Traffic, Threats, Integrity, Watchtower), reflecting the
+live running state. The command is relayed server-side over the tailnet; see
 [Remote scan control](#remote-scan-control) for the security model. Any tagged
 unit can drive any other — the trust boundary is the mesh tag, so the way to
 keep a unit from being actuated remotely is simply not to tag it into the mesh.

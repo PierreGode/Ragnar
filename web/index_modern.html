@@ -3056,19 +3056,21 @@
             <!-- Peer units -->
             <div id="mesh-peers-wrap" class="hidden">
                 <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
-                    <h3 class="text-sm uppercase tracking-wider text-gray-400">
-                        Reported by the mesh
-                        <span class="normal-case tracking-normal text-gray-500">— live from peer units over Tailscale</span>
-                    </h3>
+                    <h3 class="text-sm uppercase tracking-wider text-gray-400">Mesh Nodes</h3>
                     <button id="mesh-poll-btn" onclick="meshPollNow(this)"
                             title="Poll every unit right now instead of waiting for the next automatic cycle"
                             class="text-xs bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded transition-colors whitespace-nowrap">
                         Poll now
                     </button>
                 </div>
-                <div id="mesh-peer-cards" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+                <div id="mesh-peer-cards" class="space-y-2"></div>
                 <p id="mesh-last-poll" class="text-xs text-gray-500 mt-3"></p>
             </div>
+
+            <!-- The generic node page: full info + controls for whichever node
+                 was opened. Hidden until Open is pressed; renders one node at a
+                 time so hundreds of banners never blow up a small board. -->
+            <div id="mesh-node-detail" class="hidden"></div>
 
             <!-- Node controls, available once joined -->
             <div id="mesh-controls" class="glass rounded-xl p-6 mt-6 hidden">
@@ -7261,7 +7263,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh19"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh20"></script>
 
 </body>
 </html>

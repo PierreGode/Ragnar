@@ -28963,160 +28963,67 @@ function meshMetric(label, value, extraClass) {
     </div>`;
 }
 
-function meshUnitCard(unit, isSelf, ctx) {
-    ctx = ctx || {};
+// Shared status read for a node, used by both the compact banner and the full
+// node page. Kept identical so a node reads the same in both places.
+function _meshNodeStatus(unit, isSelf) {
     const health = unit.health || {};
-    // Three distinct states, not two. A peer whose health is *null* was never
-    // polled — that is NOT the same as one that was polled and failed to
-    // answer. Reporting "Ragnar not answering" for a never-polled peer (which
-    // happens whenever data sharing is off) is a false alarm, and it directly
-    // contradicts the "not polled yet" footer.
+    // A null health means never polled — distinct from polled-and-failed. And a
+    // successful poll outranks Tailscale's lazy Online flag (idle-but-reachable
+    // peers read offline there), so a polled peer reads Online regardless.
     const polled = isSelf || unit.health != null;
     const reachable = isSelf || health.reachable === true;
-    // A successful health poll is the authoritative "this unit is up" signal —
-    // more so than Tailscale's Online flag, which lags real reachability and
-    // marks idle-but-reachable peers offline. So a peer we just polled reads
-    // Online even if Tailscale still says otherwise; the flag only decides how
-    // to describe a peer we could NOT reach.
-    let state, dot, ring;
-    if (reachable) {
-        state = 'Online'; dot = 'bg-green-400'; ring = 'border-slate-700';
-    } else if (!polled) {
-        state = unit.online ? 'Not polled yet' : 'Offline';
-        dot = unit.online ? 'bg-sky-400' : 'bg-gray-500'; ring = 'border-slate-700';
-    } else if (unit.online) {
-        state = 'Ragnar not answering'; dot = 'bg-amber-400'; ring = 'border-amber-700/60';
-    } else {
-        state = 'Offline'; dot = 'bg-gray-500'; ring = 'border-slate-700';
-    }
+    let label, dot, ring = 'border-slate-700';
+    if (reachable) { label = 'Online'; dot = 'bg-green-400'; }
+    else if (!polled) { label = unit.online ? 'Not polled' : 'Offline'; dot = unit.online ? 'bg-sky-400' : 'bg-gray-500'; }
+    else if (unit.online) { label = 'Not answering'; dot = 'bg-amber-400'; ring = 'border-amber-700/60'; }
+    else { label = 'Offline'; dot = 'bg-gray-500'; }
+    return { label, dot, ring, reachable, polled };
+}
 
-    const worst = (health.watchtower || {}).worst;
+// One compact row per node — name, location, IP, status, alerts, incidents,
+// published, and an Open button. Deliberately light: a mesh of hundreds of
+// these is a flat list of small rows, and the heavy per-feature detail only
+// renders for the single node you Open, so even a Pi Zero stays responsive.
+function meshNodeBanner(unit, isSelf, ctx) {
+    ctx = ctx || {};
+    const health = unit.health || {};
+    const st = _meshNodeStatus(unit, isSelf);
+    const name = escapeHtml(meshUnitTitle(unit));
+    const unitNo = unit.unit_id ? 'Unit ' + String(unit.unit_id).padStart(2, '0') : '';
+    const location = unit.label && unit.label !== (unit.viking_name || '') ? escapeHtml(unit.label) : '';
+    const ip = unit.ip ? escapeHtml(unit.ip) : '';
+    const meta = [unitNo, location, ip].filter(Boolean).join(' · ');
+
+    const wt = health.watchtower || {}, inc = health.incidents || {};
+    const alerts = st.reachable ? (wt.total ?? 0) : '—';
+    const incidents = st.reachable ? (inc.total ?? 0) : '—';
+    const worst = wt.worst;
     const sevBadge = worst
-        ? `<span class="text-[10px] px-2 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>`
-        : '';
-
-    const warnings = [];
-    if (unit.key_state && unit.key_state !== 'ok') {
-        warnings.push(`<p class="text-[11px] text-amber-300 mt-2">⚠ ${escapeHtml(unit.key_message || '')}</p>`);
-    }
-    if ((health.power || {}).undervoltage) {
-        warnings.push(`<p class="text-[11px] text-red-300 mt-1">⚡ Undervoltage detected — check the power supply.</p>`);
-    }
-
-    let body;
-    if (reachable) {
-        const inc = health.incidents || {};
-        body = `<div class="grid grid-cols-4 gap-2 mt-3 pt-3 border-t border-slate-700/60">
-            ${meshMetric('CPU', health.cpu_percent !== undefined ? health.cpu_percent + '%' : '—')}
-            ${meshMetric('Mem', health.memory_percent !== undefined ? health.memory_percent + '%' : '—')}
-            ${meshMetric('Disk', health.disk_percent !== undefined ? health.disk_percent + '%' : '—')}
-            ${meshMetric('Up', meshFormatUptime(health.uptime_s))}
-        </div>
-        <div class="grid grid-cols-2 gap-2 mt-2">
-            ${meshMetric('Alerts', (health.watchtower || {}).total ?? '—')}
-            ${meshMetric('Incidents', inc.total ?? '—')}
-        </div>`;
-    } else if (!polled) {
-        // Never polled — say so plainly and point at the actual cause instead
-        // of accusing the peer's Ragnar of being down.
-        body = `<p class="text-xs text-sky-300/80 mt-3 pt-3 border-t border-slate-700/60">
-            Tagged mesh unit, waiting for the first health poll.${
-                ctx.enabled === false
-                    ? ' Data sharing is off on this unit, so it isn\'t polling yet — enable it above.'
-                    : ''}
-        </p>`;
-    } else {
-        // Polled and genuinely failed. "Ragnar's API did not answer" spans four
-        // very different causes, so offer a live probe that names the real one
-        // rather than making the operator guess or SSH in. This now also covers
-        // peers Tailscale marks offline: we poll them anyway, so a failure here
-        // is a real, diagnosable failure rather than just "not seen lately".
-        const diagIp = escapeHtml(unit.ip || '');
-        const lead = unit.online
-            ? `Reachable over Tailscale, but Ragnar's API did not answer${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}.`
-            : `Not answering${health.error ? ' (' + escapeHtml(health.error) + ')' : ''}. Tailscale also marks it offline${unit.last_seen ? ' — last seen ' + escapeHtml(new Date(unit.last_seen).toLocaleString()) : ''}.`;
-        body = `<p class="text-xs ${unit.online ? 'text-amber-300/80' : 'text-gray-400'} mt-3 pt-3 border-t border-slate-700/60">${lead}</p>` +
-            (diagIp ? `<div class="mt-2">
-            <button onclick="meshDiagnose('${diagIp}', ${ctx.nodePort || 8000}, this)"
-                    class="text-[11px] bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded transition-colors">
-                Diagnose
-            </button>
-            <div class="mesh-diag-out text-[11px] mt-2"></div>
-        </div>` : '');
-    }
-
-    const path = unit.online && !isSelf
-        ? `<span class="text-[10px] text-gray-500">${unit.direct ? 'direct' : 'relay' + (unit.relay ? ' · ' + escapeHtml(unit.relay) : '')}</span>`
-        : '';
-
-    // One button per feature. Each opens a popup with THAT feature's info,
-    // built from data this unit already pulled over the tailnet — so it works
-    // even when the operator's browser can't reach the peer's tailnet IP (the
-    // common case: browsing over the LAN or a tunnel). The id lets the modal
-    // re-find this node in the last status payload.
+        ? `<span class="text-[10px] px-1.5 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>` : '';
+    const pubBadge = (health.serve || {}).published
+        ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-700/30 text-green-300 border border-green-800">Published</span>' : '';
     const nodeId = (unit.id || unit.ip || '').toString().replace(/'/g, '');
-    const hasData = unit.findings && (unit.findings.counts || unit.findings.features);
-    const fbtn = (feature, label) =>
-        `<button onclick="meshShowFeature('${nodeId}','${feature}')" ` +
-        `class="text-[11px] bg-slate-700 hover:bg-Ragnar-700 text-gray-200 px-2.5 py-1 rounded transition-colors">${label}</button>`;
-    const launchRow = hasData ? `<div class="mt-3 pt-3 border-t border-slate-700/40">
-        <div class="text-[10px] uppercase tracking-wider text-gray-500 mb-1.5">Open</div>
-        <div class="flex flex-wrap gap-1.5">
-            ${fbtn('traffic', 'Traffic')}
-            ${fbtn('threats', 'Threats')}
-            ${fbtn('integrity', 'Integrity')}
-            ${fbtn('watchtower', 'Watchtower')}
-            ${fbtn('vulnerabilities', 'Vulnerabilities')}
-        </div>
-    </div>` : '';
 
-    // Direct link to the peer's OWN web UI in a new tab. Unlike the popups (which
-    // render from data this unit already pulled), this only works when the
-    // operator's browser is itself on the tailnet — a peer's 100.x address / its
-    // MagicDNS name is only routable from tailnet members. So it is offered
-    // alongside, clearly caveated, never instead of, the always-works popups.
-    // Prefer the published hostname when the peer reports one (nicer + HTTPS-
-    // capable); fall back to the raw tailnet IP:port otherwise.
-    const serve = health.serve || {};
-    let openUrl = '';
-    if (serve.published && serve.url) {
-        openUrl = serve.url;
-    } else if (unit.ip) {
-        const h = unit.ip.includes(':') ? '[' + unit.ip + ']' : unit.ip;
-        openUrl = 'http://' + h + ':' + (ctx.nodePort || 8000);
-    }
-    const openRow = (!isSelf && openUrl && (reachable || unit.online))
-        ? `<div class="mt-2 flex items-center gap-2 flex-wrap">
-            ${serve.published
-                ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-700/30 text-green-300 border border-green-800">Published</span>'
-                : ''}
-            <a href="${escapeHtml(openUrl)}" target="_blank" rel="noopener noreferrer"
-               title="Opens this unit's own web UI in a new tab. Works only when your browser is on the tailnet."
-               class="text-[11px] text-cyan-400 hover:text-cyan-300 underline">Open full UI ↗</a>
-            <span class="text-[10px] text-gray-600">tailnet only</span>
-        </div>`
-        : '';
-
-    return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
-        <div class="flex items-start justify-between gap-2">
-            <div class="min-w-0">
-                <div class="flex items-center gap-2">
-                    <span class="w-2 h-2 rounded-full ${dot} flex-shrink-0"></span>
-                    <h4 class="font-semibold truncate">${escapeHtml(meshUnitTitle(unit))}</h4>
-                </div>
-                <p class="text-[11px] text-gray-500 mt-0.5 font-mono truncate">${escapeHtml(meshUnitSubtitle(unit))}</p>
+    return `<div class="glass rounded-lg px-4 py-3 flex items-center gap-3 flex-wrap border ${st.ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
+        <span class="w-2.5 h-2.5 rounded-full flex-shrink-0 ${st.dot}"></span>
+        <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-semibold truncate">${name}</span>
+                ${isSelf ? '<span class="text-[10px] px-1.5 rounded bg-Ragnar-600/40 text-Ragnar-200">this unit</span>' : ''}
+                ${sevBadge}${pubBadge}
             </div>
-            <div class="text-right flex-shrink-0">
-                ${sevBadge}
-                <p class="text-[10px] text-gray-500 mt-1">${escapeHtml(state)}</p>
-                ${path}
-            </div>
+            <div class="text-[11px] text-gray-500 font-mono truncate">${meta || '—'}</div>
         </div>
-        ${body}
-        ${meshFindingsBlock(unit)}
-        ${launchRow}
-        ${openRow}
-        ${warnings.join('')}
+        <div class="flex items-center gap-4 text-center flex-shrink-0">
+            <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Status</div>
+                 <div class="text-xs ${st.reachable ? 'text-green-300' : 'text-gray-400'}">${escapeHtml(st.label)}</div></div>
+            <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Alerts</div>
+                 <div class="text-sm font-semibold">${alerts}</div></div>
+            <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Incidents</div>
+                 <div class="text-sm font-semibold">${incidents}</div></div>
+        </div>
+        <button onclick="meshOpenNode('${nodeId}')"
+                class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
     </div>`;
 }
 
@@ -29251,102 +29158,187 @@ function _meshFeatureBody(feature, unit) {
 // Popup for one feature of one unit. Data comes from the last status payload
 // (server-side pulled over the tailnet) — no browser→peer connection needed, so
 // it works however you reached this UI. Read-only; it never drives the peer.
-function meshShowFeature(id, feature) {
+// ── The generic node page ───────────────────────────────────────────────────
+// Instead of a popup, Open swaps the mesh list for a full page rendering ONE
+// node's data and controls. There is a single generic page; it renders whatever
+// node was opened, read from the last status payload (already pulled over the
+// tailnet), so it works however this UI was reached and costs nothing to open.
+let _meshOpenNodeId = null;
+
+function _meshNodePort() {
+    return (_meshLastData && _meshLastData.node_port) || 8000;
+}
+
+// One start/stop bar for a controllable feature, shown on the node page.
+function _meshControlBar(id, feature, unit) {
+    const fc = ((unit.findings || {}).features || {})[feature] || {};
+    if (!fc.controllable) return '';
+    const running = !!fc.running;
+    const next = running ? 'stop' : 'start';
+    const btnCls = running ? 'bg-red-600/70 hover:bg-red-600' : 'bg-green-600/80 hover:bg-green-600';
+    return `<div class="flex items-center gap-3 mb-3 p-3 rounded-lg bg-slate-900/60 border border-slate-800">
+        <span class="w-2 h-2 rounded-full flex-shrink-0 ${running ? 'bg-green-400' : 'bg-gray-500'}"></span>
+        <span class="text-sm text-gray-300">${running ? 'Running' : 'Stopped'}</span>
+        <button onclick="meshControl('${id}','${feature}','${next}',this)"
+                class="ml-auto flex-shrink-0 ${btnCls} text-white text-xs px-4 py-1.5 rounded transition-colors">
+            ${running ? 'Stop' : 'Start'} remotely
+        </button>
+    </div>`;
+}
+
+// Render the node page for one unit into #mesh-node-detail.
+function _meshRenderNodeDetail(id) {
+    const el = document.getElementById('mesh-node-detail');
+    if (!el) return;
     const unit = _meshFindNode(id);
-    if (!unit) return;
+    if (!unit) {
+        el.innerHTML = `<button onclick="meshBackToMesh()" class="text-sm text-cyan-400 hover:text-cyan-300">← Back to Mesh Nodes</button>
+            <p class="text-gray-400 mt-3">This node is no longer in the mesh.</p>`;
+        return;
+    }
+    const isSelf = !!(_meshLastData && _meshLastData.self &&
+        (_meshLastData.self.id || _meshLastData.self.ip || '').toString() === id);
+    const health = unit.health || {};
+    const st = _meshNodeStatus(unit, isSelf);
     const title = escapeHtml(meshUnitTitle(unit));
     const sub = escapeHtml(meshUnitSubtitle(unit));
-    const featTitle = _MESH_FEATURE_TITLE[feature] || feature;
-    const body = _meshFeatureBody(feature, unit);
+    const worst = (health.watchtower || {}).worst;
+    const sevBadge = worst
+        ? `<span class="text-[10px] px-2 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>` : '';
 
-    // Control bar: for the four monitors the peer can actuate, offer a Start or
-    // Stop that reflects the current running state (pulled with the rest of the
-    // peer's data). The command is relayed server-side over the tailnet — the
-    // browser never talks to the peer directly — so it works however this UI
-    // was reached. Absent for vulnerabilities (nothing to start) and for
-    // unreachable peers (no features block, so nothing to actuate).
-    const feats = (unit.findings || {}).features || {};
-    const fc = feats[feature] || {};
-    let controlBar = '';
-    if (fc.controllable) {
-        const running = !!fc.running;
-        const next = running ? 'stop' : 'start';
-        const btnCls = running ? 'bg-red-600/70 hover:bg-red-600' : 'bg-green-600/80 hover:bg-green-600';
-        controlBar = `<div class="flex items-center gap-3 mb-4 p-3 rounded-lg bg-slate-900/60 border border-slate-800">
-            <span class="w-2 h-2 rounded-full flex-shrink-0 ${running ? 'bg-green-400' : 'bg-gray-500'}"></span>
-            <span class="text-sm text-gray-300 min-w-0">${running ? 'Running' : 'Stopped'} on <span class="text-gray-100 font-medium">${title}</span></span>
-            <button onclick="meshControl('${id}','${feature}','${next}',this)"
-                    class="ml-auto flex-shrink-0 ${btnCls} text-white text-xs px-4 py-1.5 rounded transition-colors">
-                ${running ? 'Stop' : 'Start'} remotely
-            </button>
+    const serve = health.serve || {};
+    let openUrl = '';
+    if (serve.published && serve.url) openUrl = serve.url;
+    else if (unit.ip) { const h = unit.ip.includes(':') ? '[' + unit.ip + ']' : unit.ip; openUrl = 'http://' + h + ':' + _meshNodePort(); }
+    const pubBadge = serve.published
+        ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-700/30 text-green-300 border border-green-800">Published</span>' : '';
+    const extLink = (!isSelf && openUrl)
+        ? `<a href="${escapeHtml(openUrl)}" target="_blank" rel="noopener noreferrer"
+             title="Opens this unit's own web UI in a new tab. Works only when your browser is on the tailnet."
+             class="text-xs text-cyan-400 hover:text-cyan-300 underline">Open full UI ↗</a>
+           <span class="text-[10px] text-gray-600">tailnet only</span>` : '';
+
+    let overview;
+    if (st.reachable) {
+        const inc = health.incidents || {};
+        overview = `<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+            ${meshMetric('CPU', health.cpu_percent !== undefined ? health.cpu_percent + '%' : '—')}
+            ${meshMetric('Mem', health.memory_percent !== undefined ? health.memory_percent + '%' : '—')}
+            ${meshMetric('Disk', health.disk_percent !== undefined ? health.disk_percent + '%' : '—')}
+            ${meshMetric('Up', meshFormatUptime(health.uptime_s))}
+            ${meshMetric('Alerts', (health.watchtower || {}).total ?? '—')}
+            ${meshMetric('Incidents', inc.total ?? '—')}
+        </div>`;
+    } else {
+        const diagIp = escapeHtml(unit.ip || '');
+        overview = `<div class="mb-5 p-3 rounded-lg bg-slate-900/60 border border-slate-800 text-sm text-gray-300">
+            This node is not answering right now (${escapeHtml(st.label)}) — its data below may be stale or empty.
+            ${diagIp ? `<button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
+                    class="ml-2 text-[11px] bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded">Diagnose</button>
+                <div class="mesh-diag-out text-[11px] mt-2"></div>` : ''}
         </div>`;
     }
 
-    // Tabs across the top so the operator can switch features without closing.
-    const tabs = Object.keys(_MESH_FEATURE_TITLE).map(f => {
-        const active = f === feature;
-        return `<button onclick="meshShowFeature('${id}','${f}')" ` +
-            `class="text-[11px] px-2.5 py-1 rounded transition-colors ${active
-                ? 'bg-Ragnar-600 text-white' : 'bg-slate-800 text-gray-300 hover:bg-slate-700'}">${_MESH_FEATURE_TITLE[f]}</button>`;
-    }).join('');
+    const featureSections = ['traffic', 'threats', 'integrity', 'watchtower'].map(f => `
+        <div class="glass rounded-lg p-4 mb-3">
+            <h4 class="font-semibold mb-2">${escapeHtml(_MESH_FEATURE_TITLE[f])}</h4>
+            ${_meshControlBar(id, f, unit)}
+            ${_meshFeatureBody(f, unit)}
+        </div>`).join('');
+    const vulnSection = `<div class="glass rounded-lg p-4 mb-3">
+        <h4 class="font-semibold mb-2">${escapeHtml(_MESH_FEATURE_TITLE.vulnerabilities)}</h4>
+        ${_meshFeatureBody('vulnerabilities', unit)}
+    </div>`;
 
-    let modal = document.getElementById('mesh-details-modal');
-    if (!modal) {
-        modal = document.createElement('div');
-        modal.id = 'mesh-details-modal';
-        document.body.appendChild(modal);
-    }
-    modal.className = 'fixed inset-0 z-[60] bg-black/60 flex items-start justify-center p-4 overflow-auto';
-    modal.onclick = (e) => { if (e.target === modal) meshCloseDetails(); };
-    modal.innerHTML = `
-        <div class="glass rounded-xl w-full max-w-3xl my-8 p-6 border border-slate-700">
-            <div class="flex items-start justify-between gap-3 mb-3">
-                <div class="min-w-0">
-                    <h3 class="text-xl font-bold truncate">${escapeHtml(featTitle)}</h3>
-                    <p class="text-xs text-gray-500 mt-0.5">${title} <span class="font-mono">· ${sub}</span></p>
+    el.innerHTML = `
+        <div class="flex items-center justify-between gap-3 mb-4 flex-wrap">
+            <button onclick="meshBackToMesh()" class="text-sm text-cyan-400 hover:text-cyan-300">← Back to Mesh Nodes</button>
+            <button onclick="refreshMesh(true)" class="text-xs bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded">Refresh</button>
+        </div>
+        <div class="flex items-start gap-3 mb-4">
+            <span class="w-3 h-3 rounded-full mt-2 flex-shrink-0 ${st.dot}"></span>
+            <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <h2 class="text-2xl font-bold truncate">${title}</h2>
+                    ${isSelf ? '<span class="text-[10px] px-1.5 rounded bg-Ragnar-600/40 text-Ragnar-200">this unit</span>' : ''}
+                    ${sevBadge}${pubBadge}
                 </div>
-                <button onclick="meshCloseDetails()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
+                <p class="text-sm text-gray-500 font-mono mt-0.5">${sub || '—'}</p>
+                <p class="text-xs text-gray-500 mt-1">${escapeHtml(st.label)}${extLink ? ' · ' + extLink : ''}</p>
             </div>
-            <div class="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-700/60">${tabs}</div>
-            ${controlBar}
-            ${body}
-        </div>`;
-    document.addEventListener('keydown', _meshDetailsEsc);
+        </div>
+        ${overview}
+        ${featureSections}
+        ${vulnSection}`;
+}
+
+// Show / hide the node page vs. the mesh list. When the page is open the list
+// sections are all hidden so only one node's DOM is live at a time.
+function _meshApplyMeshView() {
+    const detail = document.getElementById('mesh-node-detail');
+    const open = _meshOpenNodeId != null;
+    if (detail) detail.classList.toggle('hidden', !open);
+    if (open) {
+        ['mesh-summary', 'mesh-self-wrap', 'mesh-peers-wrap', 'mesh-controls', 'mesh-piconnect-wrap']
+            .forEach(idd => { const e = document.getElementById(idd); if (e) e.classList.add('hidden'); });
+    }
+}
+
+function meshOpenNode(id) {
+    _meshOpenNodeId = id;
+    _meshRenderNodeDetail(id);
+    _meshApplyMeshView();
+    try { window.scrollTo(0, 0); } catch (e) {}
+    refreshMesh(true);   // freshen in the background; renderMesh re-renders the page
+}
+window.meshOpenNode = meshOpenNode;
+
+function meshBackToMesh() {
+    _meshOpenNodeId = null;
+    const detail = document.getElementById('mesh-node-detail');
+    if (detail) detail.classList.add('hidden');
+    if (_meshLastData) renderMesh(_meshLastData);   // restore the list's visibility
+}
+window.meshBackToMesh = meshBackToMesh;
+
+// Robust mesh API call: never throws, and never surfaces a cryptic JSON
+// SyntaxError. A non-JSON body (an HTML error page, an empty response, a proxy
+// interstitial) is returned as readable text so the real cause is visible
+// instead of "SyntaxError: The string did not match the expected pattern".
+async function _meshApi(url, opts) {
+    try {
+        const resp = await fetch(url, opts || {});
+        const text = await resp.text();
+        let data = null;
+        if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+        return {
+            ok: resp.ok, status: resp.status, data,
+            error: data ? null : (text ? text.slice(0, 200) : ('empty response (HTTP ' + resp.status + ')'))
+        };
+    } catch (err) {
+        return { ok: false, status: 0, data: null, error: String((err && err.message) || err) };
+    }
 }
 
 // Relay a start/stop to a unit (peer or self) over the tailnet, server-side.
-// After it lands, re-poll so the popup's running state and the card reflect the
-// new reality rather than a stale snapshot.
+// After it lands, re-poll; renderMesh re-renders the open node page with the
+// new running state.
 async function meshControl(id, feature, action, btn) {
     if (btn) { btn.disabled = true; btn.textContent = action === 'start' ? 'Starting…' : 'Stopping…'; }
-    try {
-        const resp = await fetch('/api/mesh/peer-control', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ node_id: id, feature: feature, action: action })
-        });
-        const data = await resp.json();
-        if (data.success) {
-            showNotification(data.message || (feature + ' ' + action + 'ed'), 'success');
-        } else {
-            showNotification(data.error || 'Remote control failed', 'error');
-        }
-    } catch (err) {
-        showNotification('Remote control failed: ' + err, 'error');
-    } finally {
-        await refreshMesh(true);      // pull the new running state
-        meshShowFeature(id, feature); // re-render the popup with it
+    const res = await _meshApi('/api/mesh/peer-control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ node_id: id, feature: feature, action: action })
+    });
+    if (res.ok && res.data && res.data.success) {
+        showNotification(res.data.message || (feature + ' ' + action), 'success');
+    } else {
+        const msg = (res.data && res.data.error) || res.error || ('HTTP ' + res.status);
+        showNotification('Remote control failed: ' + msg, 'error');
     }
+    await refreshMesh(true);
 }
 window.meshControl = meshControl;
-
-function _meshDetailsEsc(e) { if (e.key === 'Escape') meshCloseDetails(); }
-
-function meshCloseDetails() {
-    const modal = document.getElementById('mesh-details-modal');
-    if (modal) modal.remove();
-    document.removeEventListener('keydown', _meshDetailsEsc);
-}
 
 // Compact severity-ranked findings for one unit, pulled from that unit's own
 // vulnerability scanner / integrity monitor / Watchtower / incident engine.
@@ -29522,22 +29514,30 @@ function renderMesh(data) {
     };
 
     if (data.self) {
-        document.getElementById('mesh-self-card').innerHTML = meshUnitCard(data.self, true, cardCtx);
+        document.getElementById('mesh-self-card').innerHTML = meshNodeBanner(data.self, true, cardCtx);
     }
 
     const ragnarPeers = (data.peers || []).filter(p => p.is_ragnar);
     const cards = document.getElementById('mesh-peer-cards');
     if (!ragnarPeers.length) {
-        cards.innerHTML = `<p class="text-sm text-gray-500 col-span-full">
+        cards.innerHTML = `<p class="text-sm text-gray-500">
             No other Ragnar units on this tailnet yet. A unit joins the mesh by carrying the
             <code class="text-gray-400">${escapeHtml(data.mesh_tag || 'tag:ragnar-mesh')}</code> tag.
         </p>`;
     } else {
-        cards.innerHTML = ragnarPeers.map(p => meshUnitCard(p, false, cardCtx)).join('');
+        cards.innerHTML = ragnarPeers.map(p => meshNodeBanner(p, false, cardCtx)).join('');
     }
 
     renderPiConnect(data.pi_connect || {});
     renderHttpsNote(data);
+
+    // If a node page is open, re-render it with this fresh payload and keep it
+    // showing over the (now hidden) list. If its node vanished, drop back.
+    if (_meshOpenNodeId != null) {
+        if (_meshFindNode(_meshOpenNodeId)) _meshRenderNodeDetail(_meshOpenNodeId);
+        else _meshOpenNodeId = null;
+    }
+    _meshApplyMeshView();
 
     const lastPoll = document.getElementById('mesh-last-poll');
     const rate = data.poll_interval ? ` Automatic poll every ${data.poll_interval}s.` : '';
@@ -29892,5 +29892,3 @@ window.meshServe = meshServe;
 window.meshLeave = meshLeave;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
-window.meshShowFeature = meshShowFeature;
-window.meshCloseDetails = meshCloseDetails;

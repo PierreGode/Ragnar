@@ -3059,26 +3059,34 @@ def mesh_peer_control():
     if action not in ('start', 'stop'):
         return jsonify({'success': False, 'error': f'Unknown action {action!r}.'}), 400
 
-    state = mesh_manager.status()
-    tag = _mesh_tag()
+    # Everything below can touch Tailscale/the network, so guard it: this route
+    # must ALWAYS return JSON. A 500 HTML error page here is what surfaces in the
+    # browser as an opaque "SyntaxError: The string did not match the expected
+    # pattern" when the client tries to parse it, hiding the real cause.
+    try:
+        state = mesh_manager.status()
+        tag = _mesh_tag()
 
-    # Self? Apply locally — no need to loop back over the network.
-    self_node = state.get('self') or {}
-    if node_id and node_id == str(self_node.get('id', '')):
-        result = _mesh_apply_control(feature, action)
-        return jsonify(result), (200 if result.get('success') else 400)
+        # Self? Apply locally — no need to loop back over the network.
+        self_node = state.get('self') or {}
+        if node_id and node_id == str(self_node.get('id', '')):
+            result = _mesh_apply_control(feature, action)
+            return jsonify(result), (200 if result.get('success') else 400)
 
-    peer = next((p for p in state.get('peers', [])
-                 if str(p.get('id', '')) == node_id and tag in p.get('tags', [])), None)
-    if not peer:
-        return jsonify({'success': False,
-                        'error': 'No such tagged mesh unit — refresh and try again.'}), 404
+        peer = next((p for p in state.get('peers', [])
+                     if str(p.get('id', '')) == node_id and tag in p.get('tags', [])), None)
+        if not peer:
+            return jsonify({'success': False,
+                            'error': 'No such tagged mesh unit — refresh and try again.'}), 404
 
-    reply = mesh_manager.command_peer(peer, feature, action, port=_mesh_node_port())
-    if not reply.get('reachable'):
-        return jsonify({'success': False,
-                        'error': reply.get('error') or 'The peer did not answer.'}), 502
-    return jsonify(reply), (200 if reply.get('success') else 400)
+        reply = mesh_manager.command_peer(peer, feature, action, port=_mesh_node_port())
+        if not reply.get('reachable'):
+            return jsonify({'success': False,
+                            'error': reply.get('error') or 'The peer did not answer.'}), 502
+        return jsonify(reply), (200 if reply.get('success') else 400)
+    except Exception as exc:
+        logger.error(f"[mesh] peer-control {feature}/{action} on {node_id!r} failed: {exc}")
+        return jsonify({'success': False, 'error': f'Mesh command failed: {exc}'}), 500
 
 
 @app.route('/api/mesh/join', methods=['POST'])
