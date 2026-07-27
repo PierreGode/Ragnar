@@ -2497,6 +2497,11 @@ def _mesh_local_findings(limit=40):
     except Exception as exc:
         logger.debug(f"[mesh] incident findings unavailable: {exc}")
 
+    # True vulnerability count, taken BEFORE the display truncation below — a
+    # node with 100 vulns must not report 40 just because the findings list is
+    # capped for transport. This is what the banner's "Vulns" tile shows.
+    vuln_total = sum(1 for f in findings if f['category'] == 'vulnerability')
+
     findings.sort(key=lambda f: _MESH_SEV_RANK.get(f['severity'], 0), reverse=True)
     findings = findings[:limit]
 
@@ -2507,7 +2512,8 @@ def _mesh_local_findings(limit=40):
     worst = next((s for s in _MESH_SEV_ORDER if by_sev.get(s)), None)
     return {'findings': findings,
             'counts': {'total': len(findings), 'by_severity': by_sev,
-                       'by_category': by_cat, 'worst': worst}}
+                       'by_category': by_cat, 'worst': worst,
+                       'vulnerabilities': vuln_total}}
 
 
 def _mesh_local_features():

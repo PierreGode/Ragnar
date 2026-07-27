@@ -29041,8 +29041,10 @@ function meshNodeBanner(unit, isSelf, ctx) {
     const meta = [unitNo, location, ip].filter(Boolean).join(' · ');
 
     const wt = health.watchtower || {}, inc = health.incidents || {};
+    const counts = (unit.findings || {}).counts || {};
     const alerts = st.reachable ? (wt.total ?? 0) : '—';
     const incidents = st.reachable ? (inc.total ?? 0) : '—';
+    const vulns = st.reachable ? (counts.vulnerabilities ?? 0) : '—';
     const worst = wt.worst;
     const sevBadge = worst
         ? `<span class="text-[10px] px-1.5 py-0.5 rounded border ${MESH_SEV_CLASS[worst] || MESH_SEV_CLASS.info}">${escapeHtml(worst)}</span>` : '';
@@ -29076,6 +29078,8 @@ function meshNodeBanner(unit, isSelf, ctx) {
                  <div class="text-sm font-semibold">${alerts}</div></div>
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Incidents</div>
                  <div class="text-sm font-semibold">${incidents}</div></div>
+            <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Vulns</div>
+                 <div class="text-sm font-semibold ${(typeof vulns === 'number' && vulns > 0) ? 'text-orange-300' : ''}">${vulns}</div></div>
         </div>
     </div>`;
 }
