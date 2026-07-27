@@ -29293,11 +29293,13 @@ function _meshRenderNodeDetail(id) {
         </div>`;
     } else {
         const diagIp = escapeHtml(unit.ip || '');
-        overview = `<div class="mb-5 p-3 rounded-lg bg-slate-900/60 border border-slate-800 text-sm text-gray-300">
-            This node is not answering right now (${escapeHtml(st.label)}) — its data below may be stale or empty.
+        overview = `<div class="mb-5 p-4 rounded-lg bg-slate-900/60 border border-slate-800">
+            <p class="text-sm text-gray-300">This node is not answering right now
+                (<span class="text-amber-300">${escapeHtml(st.label)}</span>) — its data below may be stale or empty.
+                Run a probe from <strong>this</strong> unit to find out why.</p>
             ${diagIp ? `<button onclick="meshDiagnose('${diagIp}', ${_meshNodePort()}, this)"
-                    class="ml-2 text-[11px] bg-slate-700 hover:bg-slate-600 text-gray-200 px-2.5 py-1 rounded">Diagnose</button>
-                <div class="mesh-diag-out text-[11px] mt-2"></div>` : ''}
+                    class="mt-3 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-4 py-2 rounded transition-colors">Diagnose connection</button>
+                <div class="mesh-diag-out mt-3"></div>` : ''}
         </div>`;
     }
 
@@ -29967,34 +29969,61 @@ async function meshEnable() {
 // Probe a failing peer live and name the real cause. Runs the same request the
 // poller does, from this unit, and classifies the result server-side.
 async function meshDiagnose(ip, port, btn) {
-    const box = btn.parentElement.querySelector('.mesh-diag-out');
-    if (box) box.innerHTML = `<span class="text-gray-400">Probing ${escapeHtml(ip)}:${port}…</span>`;
-    btn.disabled = true;
+    // The output box is a sibling of the button; fall back to a document lookup
+    // so the result renders no matter where the button is placed (card or page).
+    const box = (btn.parentElement && btn.parentElement.querySelector('.mesh-diag-out'))
+        || document.querySelector('.mesh-diag-out');
+    const origLabel = btn.textContent;
+    const url = `http://${ip.includes(':') ? '[' + ip + ']' : ip}:${port}/api/mesh/unit`;
+    if (box) box.innerHTML = `<div class="text-sm text-gray-400">Probing <span class="font-mono">${escapeHtml(url)}</span> from this unit…</div>`;
+    btn.disabled = true; btn.textContent = 'Probing…';
     try {
         const resp = await fetch('/api/mesh/diagnose', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ip, port })
         });
-        const data = await resp.json();
-        const r = (data && data.result) || {};
+        const text = await resp.text();
+        let data = null; try { data = JSON.parse(text); } catch (e) { data = null; }
+        if (!data) {
+            if (box) box.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">
+                The diagnose request returned a non-JSON response (HTTP ${resp.status}).
+                <span class="block mt-1 font-mono text-[11px] text-red-200/80">${escapeHtml((text || '').slice(0, 160))}</span></div>`;
+            return;
+        }
+        const r = data.result || {};
         const good = r.category === 'ok';
-        // Category badges make the class of problem scannable at a glance.
-        const label = {
-            ok: 'Reachable', refused: 'Port closed', timeout: 'Port filtered',
-            auth: 'Rejected', badbody: 'Wrong service', http: 'HTTP error',
-            network: 'Unreachable', address: 'No address', error: 'Error',
-        }[r.category] || 'Result';
+        // Human title + a one-line "what it means" per category, so the operator
+        // gets the class of problem AND the direction to look without guessing.
+        const meta = {
+            ok:      ['Reachable', 'This unit reached the peer and it answered normally.'],
+            refused: ['Connection refused', 'Nothing is listening on that port — the peer\'s Ragnar is down, crashed, or on a different port.'],
+            timeout: ['Timed out (filtered)', 'The port is filtered, not closed — almost always a Tailscale ACL or host firewall blocking this direction.'],
+            auth:    ['Rejected (401)', 'The peer answered but refused this unit — a tag mismatch. Confirm both carry the same mesh tag.'],
+            badbody: ['Wrong service', 'Something answered on that port but it is not Ragnar — check the peer\'s port.'],
+            http:    ['HTTP error', 'The peer returned an unexpected HTTP status.'],
+            network: ['Unreachable', 'Could not reach the peer over the tailnet at all.'],
+            address: ['No address', 'This peer has no tailnet address to probe.'],
+            error:   ['Error', 'Unexpected error while probing.'],
+        }[r.category] || ['Result', ''];
+        const tone = good
+            ? 'border-green-800 bg-green-950/30 text-green-200'
+            : 'border-amber-800 bg-amber-950/30 text-amber-100';
         if (box) {
-            box.innerHTML =
-                `<span class="inline-block px-2 py-0.5 rounded ${good
-                    ? 'bg-green-700/40 text-green-300' : 'bg-amber-700/40 text-amber-200'}">${label}</span>` +
-                `<span class="block mt-1 ${good ? 'text-green-300/90' : 'text-gray-300'}">${escapeHtml(r.hint || r.error || 'No result.')}</span>`;
+            box.innerHTML = `<div class="text-sm border rounded-lg p-3 ${tone}">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="w-2.5 h-2.5 rounded-full ${good ? 'bg-green-400' : 'bg-amber-400'}"></span>
+                    <span class="font-semibold">${escapeHtml(meta[0])}</span>
+                    ${r.status ? `<span class="text-[11px] opacity-70">HTTP ${escapeHtml(String(r.status))}</span>` : ''}
+                </div>
+                <div class="opacity-90">${escapeHtml(r.hint || meta[1] || r.error || 'No detail.')}</div>
+                <div class="mt-2 text-[11px] font-mono opacity-60">probed ${escapeHtml(r.url || url)}${r.error ? ' · ' + escapeHtml(r.error) : ''}</div>
+            </div>`;
         }
     } catch (err) {
-        if (box) box.innerHTML = `<span class="text-red-400">Diagnose failed: ${escapeHtml(String(err))}</span>`;
+        if (box) box.innerHTML = `<div class="text-sm text-red-300 border border-red-800 rounded-lg p-3 bg-red-950/30">Diagnose failed: ${escapeHtml(String(err))}</div>`;
     } finally {
-        btn.disabled = false;
+        btn.disabled = false; btn.textContent = origLabel;
     }
 }
 
