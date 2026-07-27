@@ -24,6 +24,7 @@ be logged into renders the mesh; so would any other.
   - [Mesh Health card](#mesh-health-card)
   - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
+- [Tailscale console: one-time setup](#tailscale-console-one-time-setup)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
   - [Path 2 — during install](#path-2--during-install)
@@ -159,6 +160,77 @@ exactly why it is checked rather than assumed away.
 
 Units with no number assigned are counted and reported too. A unit works fine
 without a number; it is just harder to talk about.
+
+---
+
+## Tailscale console: one-time setup
+
+Do this **once per tailnet**, before deploying any unit. It creates the tag, an
+auth key that carries it, and — only if you want TLS on the friendly hostname —
+HTTPS certificates. Everything here happens at
+[login.tailscale.com](https://login.tailscale.com); nothing is Ragnar-specific
+yet.
+
+### 1. Create the mesh tag (do this first)
+
+A tag is "created" by listing it in your ACL policy under `tagOwners` — there is
+no separate button. **Access Controls → edit the policy** and add:
+
+```jsonc
+{ "tagOwners": { "tag:ragnar-mesh": ["autogroup:admin"] } }
+```
+
+This must exist **before** you can put the tag on an auth key or a device, so do
+it first. (Full policy example in [Suggested ACL shape](#suggested-acl-shape).)
+
+> ⚠️ **Use lowercase: `ragnar-mesh`, not `Ragnar-mesh`.** Tailscale tags may only
+> contain lowercase letters, numbers and hyphens — an uppercase tag is rejected.
+> Ragnar also defaults to `tag:ragnar-mesh` (the `mesh_tag` config), and the tag
+> is the mesh's whole authorization boundary, so it must match **exactly** on
+> every unit. If you genuinely want a different tag, that's fine — but then set
+> `mesh_tag` to the same value on every unit, and keep it lowercase. For almost
+> everyone: just use `tag:ragnar-mesh` and change nothing.
+
+So to answer the common question directly: **`Ragnar-mesh` is *not* correct —
+use `ragnar-mesh`.**
+
+### 2. Generate a tagged auth key
+
+**Settings → Keys → Generate auth key.** The one setting that matters is the
+**tag** — assign `tag:ragnar-mesh` (this is what makes the node key non-expiring
+and enrols the unit into the mesh). Then:
+
+| Option | Set to | Why |
+|---|---|---|
+| **Tags** | `tag:ragnar-mesh` | Authorizes the unit into the mesh; makes its node key never expire. |
+| **Reusable** | on for several units, off for one | One reusable key can enrol a whole batch; a single-use key is tidier for one box. |
+| **Ephemeral** | **off** | Units must persist across reboots — ephemeral nodes vanish when they disconnect. |
+| **Expiration** | short if the key will sit on an SD card | The key only needs to live until the unit powers on and joins; see Path 1. |
+
+Copy the `tskey-auth-…` value — it is shown **once**. That key is what you hand
+to Ragnar (boot config, installer, or the **Join** form). You do **not** run
+`tailscale up` by hand.
+
+### 3. (Optional) HTTPS certificates
+
+Only needed if you intend to use the **Publish (HTTPS)** button — plain-HTTP
+publishing and all unit-to-unit polling work fine without it. **DNS →** confirm
+**MagicDNS** is enabled (it usually is) **→ enable HTTPS Certificates.** See
+[Publishing: HTTP by default, HTTPS opt-in](#publishing-http-by-default-https-opt-in).
+
+### 4. About "Add a device → Linux server"
+
+You *can* use the console's **Add a device → Linux** flow, but note it just
+generates a tagged `tailscale up --authkey=…` command. For Ragnar you don't run
+that yourself — take the key and let Ragnar join (any path below), so it applies
+the right flags, sets the unit number/label, and advertises subnets for you. A
+unit that joins with a **tagged key already carries the tag** and appears in
+**Machines** tagged, with no manual step.
+
+If a unit was ever brought up *interactively* (no key, e.g. `tailscale up` by
+hand), it will be **untagged** — fix it in **Machines → the device → the ⋯ menu
+→ Edit ACL tags → add `tag:ragnar-mesh`**. Ragnar's Mesh tab detects this exact
+"on the tailnet but not in the mesh" state and says so.
 
 ---
 
