@@ -561,3 +561,54 @@ def test_scoped_private_addresses_are_still_valid_entities():
     """Scoping must namespace the value, not discard the entity."""
     ents = extract_entities(alert('192.168.1.1'), scope='Unit 07')
     assert ents == {('ip', 'Unit 07/192.168.1.1')}
+
+
+# ── poll_mesh: the idle-peer fix ────────────────────────────────────────────
+# Tailscale's Online flag lags real reachability; skipping "offline" peers is
+# what silently stopped data sharing once units went idle. include_offline lets
+# the mesh poll them anyway (the poll is the keepalive).
+
+def _nodes():
+    return [
+        {'id': 'a', 'ip': '100.0.0.1', 'online': True, 'is_self': False},
+        {'id': 'b', 'ip': '100.0.0.2', 'online': False, 'is_self': False},
+        {'id': 's', 'ip': '100.0.0.9', 'online': True, 'is_self': True},
+    ]
+
+
+def test_poll_mesh_skips_offline_by_default(monkeypatch):
+    polled = []
+    monkeypatch.setattr(mesh_manager, 'poll_peer',
+                        lambda n, *a, **k: (polled.append(n['id']) or {'reachable': True}))
+    mesh_manager.poll_mesh(_nodes(), timeout=1)
+    assert polled == ['a']            # offline 'b' and self 's' excluded
+
+
+def test_poll_mesh_includes_offline_when_asked(monkeypatch):
+    polled = []
+    monkeypatch.setattr(mesh_manager, 'poll_peer',
+                        lambda n, *a, **k: (polled.append(n['id']) or {'reachable': True}))
+    mesh_manager.poll_mesh(_nodes(), timeout=1, include_offline=True)
+    assert sorted(polled) == ['a', 'b']   # offline 'b' now polled; self still excluded
+
+
+# ── command_peer: the mesh write path ───────────────────────────────────────
+
+def test_command_peer_no_address():
+    r = mesh_manager.command_peer({'id': 'x'}, 'traffic', 'start')
+    assert r['reachable'] is False and r['success'] is False
+
+
+def test_command_peer_success(monkeypatch):
+    _patch_urlopen(monkeypatch,
+                   lambda *a, **k: _FakeResp(200, b'{"success": true, "running": true}'))
+    r = mesh_manager.command_peer({'id': 'a', 'ip': '100.0.0.1'}, 'traffic', 'start')
+    assert r['reachable'] is True and r['success'] is True and r['running'] is True
+
+
+def test_command_peer_rejected_by_tag(monkeypatch):
+    def unauth(*a, **k):
+        raise urllib.error.HTTPError('u', 401, 'Unauthorized', {}, None)
+    _patch_urlopen(monkeypatch, unauth)
+    r = mesh_manager.command_peer({'id': 'a', 'ip': '100.0.0.1'}, 'traffic', 'start')
+    assert r['reachable'] is False and 'mesh tag' in r['error']

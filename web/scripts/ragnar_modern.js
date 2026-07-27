@@ -29231,6 +29231,29 @@ function meshShowFeature(id, feature) {
     const featTitle = _MESH_FEATURE_TITLE[feature] || feature;
     const body = _meshFeatureBody(feature, unit);
 
+    // Control bar: for the four monitors the peer can actuate, offer a Start or
+    // Stop that reflects the current running state (pulled with the rest of the
+    // peer's data). The command is relayed server-side over the tailnet — the
+    // browser never talks to the peer directly — so it works however this UI
+    // was reached. Absent for vulnerabilities (nothing to start) and for
+    // unreachable peers (no features block, so nothing to actuate).
+    const feats = (unit.findings || {}).features || {};
+    const fc = feats[feature] || {};
+    let controlBar = '';
+    if (fc.controllable) {
+        const running = !!fc.running;
+        const next = running ? 'stop' : 'start';
+        const btnCls = running ? 'bg-red-600/70 hover:bg-red-600' : 'bg-green-600/80 hover:bg-green-600';
+        controlBar = `<div class="flex items-center gap-3 mb-4 p-3 rounded-lg bg-slate-900/60 border border-slate-800">
+            <span class="w-2 h-2 rounded-full flex-shrink-0 ${running ? 'bg-green-400' : 'bg-gray-500'}"></span>
+            <span class="text-sm text-gray-300 min-w-0">${running ? 'Running' : 'Stopped'} on <span class="text-gray-100 font-medium">${title}</span></span>
+            <button onclick="meshControl('${id}','${feature}','${next}',this)"
+                    class="ml-auto flex-shrink-0 ${btnCls} text-white text-xs px-4 py-1.5 rounded transition-colors">
+                ${running ? 'Stop' : 'Start'} remotely
+            </button>
+        </div>`;
+    }
+
     // Tabs across the top so the operator can switch features without closing.
     const tabs = Object.keys(_MESH_FEATURE_TITLE).map(f => {
         const active = f === feature;
@@ -29257,10 +29280,37 @@ function meshShowFeature(id, feature) {
                 <button onclick="meshCloseDetails()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
             </div>
             <div class="flex flex-wrap gap-1.5 mb-4 pb-3 border-b border-slate-700/60">${tabs}</div>
+            ${controlBar}
             ${body}
         </div>`;
     document.addEventListener('keydown', _meshDetailsEsc);
 }
+
+// Relay a start/stop to a unit (peer or self) over the tailnet, server-side.
+// After it lands, re-poll so the popup's running state and the card reflect the
+// new reality rather than a stale snapshot.
+async function meshControl(id, feature, action, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = action === 'start' ? 'Starting…' : 'Stopping…'; }
+    try {
+        const resp = await fetch('/api/mesh/peer-control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ node_id: id, feature: feature, action: action })
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showNotification(data.message || (feature + ' ' + action + 'ed'), 'success');
+        } else {
+            showNotification(data.error || 'Remote control failed', 'error');
+        }
+    } catch (err) {
+        showNotification('Remote control failed: ' + err, 'error');
+    } finally {
+        await refreshMesh(true);      // pull the new running state
+        meshShowFeature(id, feature); // re-render the popup with it
+    }
+}
+window.meshControl = meshControl;
 
 function _meshDetailsEsc(e) { if (e.key === 'Escape') meshCloseDetails(); }
 

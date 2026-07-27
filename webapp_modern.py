@@ -415,18 +415,22 @@ def check_authentication():
     if request.remote_addr in ('127.0.0.1', '::1') and shared_data.config.get('kiosk_enabled'):
         return
 
-    # Mesh machine auth: let a *peer Ragnar* read this node's mesh endpoints
+    # Mesh machine auth: let a *peer Ragnar* reach this node's mesh endpoints
     # without a session. Identity is proven by WireGuard, not by a shared
     # secret — tailscaled tells us which tailnet node owns the source IP, and
     # we require that node to carry the mesh tag. Scoped hard on purpose:
-    #   * read-only (GET) — a peer can observe, never actuate;
-    #   * /api/mesh/* only — the other 290-odd routes stay session-gated;
+    #   * reads — any GET under /api/mesh/* (observe the unit's data);
+    #   * one write — POST /api/mesh/control ONLY, whose body is itself an
+    #     allowlist (start/stop the four monitors, nothing else). Matched by
+    #     exact path so join/leave/serve/peer-control stay session-only;
+    #   * every other route stays session-gated;
     #   * fails closed — no tailscaled, no answer, or no tag means 401.
     # Tailnet membership alone is NOT enough. Every laptop and phone on the
     # tailnet would otherwise inherit Ragnar's full offensive toolset.
-    if (request.method == 'GET' and path.startswith('/api/mesh/')
-            and shared_data.config.get('mesh_enabled')):
-        if _is_mesh_peer_request():
+    if shared_data.config.get('mesh_enabled'):
+        peer_read = request.method == 'GET' and path.startswith('/api/mesh/')
+        peer_control = request.method == 'POST' and path == '/api/mesh/control'
+        if (peer_read or peer_control) and _is_mesh_peer_request():
             return
 
     # Check if user is authenticated via Flask session
@@ -2602,7 +2606,105 @@ def _mesh_local_features():
         watchtower['reason'] = f'unavailable ({exc})'
     features['watchtower'] = watchtower
 
+    # Mark which subsystems a mesh peer may start/stop remotely, and each one's
+    # current running state, so a peer's popup can show a Start or a Stop button
+    # that reflects reality. "External threat detection" maps to the continuous
+    # threat monitor, which runs independently of threat-intel enrichment — so
+    # it is controllable even when the enrichment block reads unavailable.
+    try:
+        tm_running = bool(_threat_monitor_state.get('enabled'))
+    except Exception:
+        tm_running = False
+    features['traffic']['controllable'] = True
+    features['traffic']['running'] = bool(features['traffic'].get('available'))
+    features['threats']['controllable'] = True
+    features['threats']['running'] = tm_running
+    features['integrity']['controllable'] = True
+    features['integrity']['running'] = bool(features['integrity'].get('enabled'))
+    features['watchtower']['controllable'] = True
+    features['watchtower']['running'] = bool(features['watchtower'].get('enabled'))
+
     return features
+
+
+# Exactly which subsystems a mesh peer (or the local operator, via the same
+# path) may start/stop remotely. An allowlist on purpose: a peer can toggle
+# these four monitors and nothing else — never an arbitrary route or command.
+_MESH_CONTROLLABLE = {
+    'traffic': 'Traffic analyzer',
+    'threats': 'External threat monitor',
+    'integrity': 'Network integrity monitor',
+    'watchtower': 'Watchtower',
+}
+
+
+def _mesh_apply_control(feature, action):
+    """Start or stop one local subsystem, for a mesh peer or the local operator.
+
+    Idempotent: starting a running feature (or stopping a stopped one) is a
+    success, not an error — a remote button press should converge to the asked
+    state, not fail because someone got there first. Returns a plain dict the
+    caller hands straight back as JSON. Only the four allowlisted monitors in
+    `_MESH_CONTROLLABLE` are reachable; anything else is rejected up front.
+    """
+    feature = (feature or '').strip().lower()
+    action = (action or '').strip().lower()
+    if feature not in _MESH_CONTROLLABLE:
+        return {'success': False, 'error': f'Unknown feature {feature!r}.'}
+    if action not in ('start', 'stop'):
+        return {'success': False, 'error': f'Unknown action {action!r}.'}
+    start = action == 'start'
+    label = _MESH_CONTROLLABLE[feature]
+    try:
+        if feature == 'traffic':
+            analyzer = get_traffic_analyzer()
+            if not analyzer:
+                return {'success': False, 'feature': feature,
+                        'error': 'Traffic analysis is not available on this unit.'}
+            if start:
+                if not analyzer.is_available():
+                    return {'success': False, 'feature': feature,
+                            'error': (analyzer.unavailable_reason()
+                                      or 'Traffic analysis is not available on this unit.')}
+                if (analyzer.get_summary() or {}).get('status') != 'running':
+                    analyzer.start()
+            else:
+                analyzer.stop()
+            running = (analyzer.get_summary() or {}).get('status') == 'running'
+
+        elif feature == 'threats':
+            # Mirror toggle_threat_monitor's start path, but idempotently.
+            with _threat_monitor_lock:
+                running = bool(_threat_monitor_state.get('enabled'))
+                if start and not running:
+                    _threat_monitor_state['enabled'] = True
+                    _threat_monitor_state['findings'] = []
+                    _threat_monitor_state['sweep_count'] = 0
+                    _threat_monitor_state['last_sweep'] = None
+                    t = threading.Thread(target=_threat_monitor_loop, daemon=True,
+                                         name='threat-monitor')
+                    _threat_monitor_state['thread'] = t
+                    t.start()
+                    running = True
+                elif not start and running:
+                    _threat_monitor_state['enabled'] = False
+                    running = False
+
+        else:  # integrity / watchtower — always-running loops gated by a config flag
+            key = ('net_integrity_monitor_enabled' if feature == 'integrity'
+                   else 'watchtower_enabled')
+            shared_data.config[key] = start
+            setattr(shared_data, key, start)
+            shared_data.save_config()
+            running = start
+
+        logger.info(f"[mesh] {label} {'started' if running else 'stopped'} via mesh control")
+        return {'success': True, 'feature': feature, 'label': label,
+                'action': action, 'running': bool(running),
+                'message': f'{label} {"started" if running else "stopped"}.'}
+    except Exception as exc:
+        logger.error(f"[mesh] control {feature}/{action} failed: {exc}")
+        return {'success': False, 'feature': feature, 'error': str(exc)}
 
 
 @app.route('/api/mesh/findings', methods=['GET'])
@@ -2904,6 +3006,69 @@ def mesh_status():
             'unnumbered_units': unnumbered,
         },
     })
+
+
+@app.route('/api/mesh/control', methods=['POST'])
+def mesh_control():
+    """Start/stop one of this unit's monitors — the mesh's write endpoint.
+
+    Reachable two ways, both trusted:
+      * a tagged peer Ragnar over the tailnet (the auth bypass in
+        check_authentication lets THIS one POST through on WireGuard identity);
+      * the local operator with a session (self-control, no network hop).
+
+    Everything actuable is allowlisted in `_mesh_apply_control`; there is no way
+    to reach an arbitrary route from here.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    result = _mesh_apply_control(data.get('feature'), data.get('action'))
+    return jsonify(result), (200 if result.get('success') else 400)
+
+
+@app.route('/api/mesh/peer-control', methods=['POST'])
+def mesh_peer_control():
+    """Operator-facing proxy: tell a *peer* unit to start/stop a monitor.
+
+    The browser can't dial a peer's tailnet IP (it isn't on the tailnet — that's
+    the whole reason peer data is pulled server-side), so this unit relays the
+    command over the tailnet on the operator's behalf, exactly as it relays
+    polls. A command aimed at THIS unit is applied directly with no network hop.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    if not _mesh_enabled():
+        return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
+    data = request.get_json(silent=True) or {}
+    feature = (data.get('feature') or '').strip().lower()
+    action = (data.get('action') or '').strip().lower()
+    node_id = (data.get('node_id') or '').strip()
+    if feature not in _MESH_CONTROLLABLE:
+        return jsonify({'success': False, 'error': f'Unknown feature {feature!r}.'}), 400
+    if action not in ('start', 'stop'):
+        return jsonify({'success': False, 'error': f'Unknown action {action!r}.'}), 400
+
+    state = mesh_manager.status()
+    tag = _mesh_tag()
+
+    # Self? Apply locally — no need to loop back over the network.
+    self_node = state.get('self') or {}
+    if node_id and node_id == str(self_node.get('id', '')):
+        result = _mesh_apply_control(feature, action)
+        return jsonify(result), (200 if result.get('success') else 400)
+
+    peer = next((p for p in state.get('peers', [])
+                 if str(p.get('id', '')) == node_id and tag in p.get('tags', [])), None)
+    if not peer:
+        return jsonify({'success': False,
+                        'error': 'No such tagged mesh unit — refresh and try again.'}), 404
+
+    reply = mesh_manager.command_peer(peer, feature, action, port=_mesh_node_port())
+    if not reply.get('reachable'):
+        return jsonify({'success': False,
+                        'error': reply.get('error') or 'The peer did not answer.'}), 502
+    return jsonify(reply), (200 if reply.get('success') else 400)
 
 
 @app.route('/api/mesh/join', methods=['POST'])

@@ -1041,6 +1041,46 @@ def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8,
     return results
 
 
+def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):
+    """Ask one peer to start/stop a subsystem — the write side of the mesh.
+
+    Polling reads; this actuates. It POSTs to the peer's `/api/mesh/control`,
+    which authorises the *caller* by mesh tag (same WireGuard identity check the
+    read path uses) and only accepts an allowlisted feature+action. The timeout
+    is generous because starting a capture can take a couple of seconds.
+
+    Returns the peer's JSON reply plus `reachable`, mirroring `poll_peer` so the
+    caller handles a dead box and a refusal the same way.
+    """
+    url = peer_url(node, port, '/api/mesh/control')
+    if not url:
+        return {'reachable': False, 'success': False, 'error': 'no address'}
+    body = json.dumps({'feature': feature, 'action': action}).encode('utf-8')
+    try:
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(
+            url, data=body, method='POST',
+            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+        payload['reachable'] = True
+        return payload
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {'reachable': False, 'success': False,
+                    'error': 'not authorized by peer — check the mesh tag'}
+        try:
+            payload = json.loads(exc.read().decode('utf-8'))
+            payload.setdefault('success', False)
+            payload['reachable'] = True
+            return payload
+        except Exception:
+            return {'reachable': False, 'success': False, 'error': f'HTTP {exc.code}'}
+    except Exception as exc:
+        return {'reachable': False, 'success': False, 'error': type(exc).__name__}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Self-test
 # ─────────────────────────────────────────────────────────────────────────────

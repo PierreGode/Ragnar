@@ -359,8 +359,8 @@ The gate is deliberately narrow:
 
 | Property | Rule |
 |---|---|
-| Methods | `GET` only — a peer can observe, never actuate |
-| Paths | `/api/mesh/*` only; the other ~290 routes stay session-gated |
+| Methods | Any `GET` for reads, plus exactly one write: `POST /api/mesh/control` |
+| Paths | `/api/mesh/*` for reads; the write is matched by **exact path** so `join`/`leave`/`serve`/`peer-control` stay session-only. The other ~290 routes stay session-gated |
 | Identity | Must carry `mesh_tag` (default `tag:ragnar-mesh`) |
 | Source | Must be a real tailnet address (100.64/10 or `fd7a:115c:a1e0::/48`) |
 | Loopback | Rejected — a proxied request's true origin is unknowable at that layer |
@@ -371,10 +371,41 @@ tailnet node; it is not a Ragnar unit, and it must log in like anyone else.
 Without the tag check, every phone and laptop on the tailnet would inherit
 Ragnar's full toolset.
 
-Only two routes are peer-readable:
+Peer-readable routes:
 
 - `GET /api/mesh/unit` — this unit's health report
 - `GET /api/mesh/alerts` — this unit's recent Watchtower alerts
+- `GET /api/mesh/findings` — this unit's security findings + per-feature summaries
+
+### Remote scan control
+
+The mesh is read-mostly, but a tagged peer may also **start and stop the four
+monitors** on another unit — traffic analyzer, external threat monitor, network
+integrity monitor, and Watchtower — so the fleet can be driven from any single
+pane rather than SSHing box to box.
+
+This is the one write the peer gate allows, and it is fenced in on every side:
+
+- **One route.** `POST /api/mesh/control`, matched by exact path. Nothing else
+  accepts a peer write.
+- **Body is itself an allowlist.** The payload is `{feature, action}` where
+  `feature ∈ {traffic, threats, integrity, watchtower}` and
+  `action ∈ {start, stop}`. There is no free-form command; an unknown feature or
+  action is a 400. See `_MESH_CONTROLLABLE` / `_mesh_apply_control`.
+- **Idempotent.** Starting a running monitor (or stopping a stopped one) is a
+  success, so a button press converges to the asked state.
+- **Symmetric, by design.** Any tagged unit can control any other — the
+  controller-free "Viking army" model, where the tag *is* the trust boundary.
+  A unit that carries the mesh tag is already fully trusted (it can read every
+  other unit's findings); letting it also flip a monitor adds no principal that
+  could not already observe everything. If you do not want a unit actuated
+  remotely, do not tag it into the mesh.
+
+The operator's browser never talks to a peer directly (it is not on the
+tailnet). Clicking Start/Stop in a unit's popup POSTs to the **local** unit's
+`/api/mesh/peer-control`, which relays the command over the tailnet with the
+peer's WireGuard identity — exactly how peer data is pulled. A command aimed at
+the local unit is applied directly with no network hop.
 
 ### Never Funnel
 
@@ -461,10 +492,9 @@ places Ragnar already records them, normalized into one list:
 | `watchtower` | the standalone passive watchers (arp_guard, ndpwatch, …) |
 | `incident` | named cross-signal campaigns from the incident engine |
 
-Each unit serves its own findings at `GET /api/mesh/findings` — the third and
-last peer-readable route, read-only like the others. A coordinator does not
-compute anything about its peers; it just displays what each already found. See
-[Per-feature popups](#per-feature-popups) for the popup card.
+Each unit serves its own findings at `GET /api/mesh/findings`. A coordinator
+does not compute anything about its peers; it just displays what each already
+found. See [Per-feature popups](#per-feature-popups) for the popup card.
 
 ### Per-feature popups
 
@@ -488,9 +518,13 @@ clearly caveated: it only works when your **browser** is itself on the tailnet.
 The details card is the reliable path; the direct link is a convenience for when
 you are on-tailnet.
 
-Everything here is read-only. The mesh shows what each unit found; it never
-drives a peer's tools — a compromised unit cannot start captures or scans across
-the fleet.
+Beyond showing what each unit found, the popup can **start and stop that unit's
+monitor remotely** — a Start/Stop button appears for the four controllable
+features (Traffic, Threats, Integrity, Watchtower), reflecting the live running
+state. The command is relayed server-side over the tailnet; see
+[Remote scan control](#remote-scan-control) for the security model. Any tagged
+unit can drive any other — the trust boundary is the mesh tag, so the way to
+keep a unit from being actuated remotely is simply not to tag it into the mesh.
 
 ## Cross-site incident correlation
 
