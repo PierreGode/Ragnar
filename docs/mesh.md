@@ -589,6 +589,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 
 | Key | Default | Meaning |
 |---|---|---|
+| `mesh_tab_enabled` | `true` | Show the Ragnar Mesh **tab** in the UI. Cosmetic only — hiding it never joins/leaves the mesh. Toggle in Config → Ragnar Mesh. |
 | `mesh_enabled` | `false` | Master switch. Off means no peer polling at all. |
 | `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls. |
 | `mesh_unit_id` | `0` | This unit's number. `0` = unassigned. |

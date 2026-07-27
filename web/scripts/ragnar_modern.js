@@ -624,10 +624,12 @@ document.addEventListener('DOMContentLoaded', function() {
     handleHeadlessMode();
     applyRusenseTabVisibility();
     applyTerminalVisibility();
+    applyMeshTabVisibility();
     // localStorage gave us an instant paint above; now reconcile with the
     // server (the shared source of truth) without blocking startup.
     syncRusenseTabFromServer();
     syncTerminalFromServer();
+    syncMeshTabFromServer();
 
 });
 
@@ -1104,6 +1106,49 @@ function onRusenseTabToggled(cb) {
     if (cb.checked) showTab('rusense');
 }
 
+// ── Ragnar Mesh tab visibility (toggle in Settings; ON by default) ──────────
+// Same server-backed + localStorage-cache pattern as the RuSense tab, but the
+// default is VISIBLE: absent the key the tab shows, and only an explicit '0'
+// hides it. Hiding is cosmetic — it never joins or leaves the mesh (that is
+// mesh_enabled); it only removes the nav entry.
+const MESH_TAB_KEY = 'mesh_tab_enabled';
+
+function _meshTabVisible() {
+    return localStorage.getItem(MESH_TAB_KEY) !== '0';   // default on
+}
+
+function syncMeshTabToggle() {
+    const cb = document.getElementById('mesh-tab-enabled');
+    if (cb) cb.checked = _meshTabVisible();
+}
+
+function applyMeshTabVisibility() {
+    const visible = _meshTabVisible();
+    document.querySelectorAll('.mesh-nav').forEach(btn => btn.classList.toggle('hidden', !visible));
+    // If the tab is hidden while it's the active one, fall back to the dashboard.
+    if (!visible && typeof currentTab !== 'undefined' && currentTab === 'mesh') showTab('dashboard');
+    syncMeshTabToggle();
+}
+
+async function syncMeshTabFromServer(config) {
+    try {
+        const cfg = config || await fetchAPI('/api/config');
+        if (cfg && Object.prototype.hasOwnProperty.call(cfg, MESH_TAB_KEY)) {
+            localStorage.setItem(MESH_TAB_KEY, cfg[MESH_TAB_KEY] ? '1' : '0');
+            applyMeshTabVisibility();
+        }
+    } catch (e) { /* offline — keep the localStorage value */ }
+}
+
+function onMeshTabToggled(cb) {
+    localStorage.setItem(MESH_TAB_KEY, cb.checked ? '1' : '0');
+    applyMeshTabVisibility();
+    postAPI('/api/config', { [MESH_TAB_KEY]: cb.checked })
+        .catch(err => console.warn('Failed to persist Mesh tab visibility:', err));
+    if (cb.checked) showTab('mesh');
+}
+window.onMeshTabToggled = onMeshTabToggled;
+
 // ==================== Web Terminal (xterm.js over Socket.IO) ====================
 const TERMINAL_KEY = 'terminal_enabled';
 let _term = null, _termFit = null, _termSocket = null, _termResizeHooked = false;
@@ -1249,7 +1294,7 @@ function showTab(tabName) {
     loadTabData(tabName);
 
     if (tabName === 'config') {
-        try { refreshSensingInstallCard(); syncRusenseTabToggle(); syncTerminalToggle(); } catch (e) { /* ignore */ }
+        try { refreshSensingInstallCard(); syncRusenseTabToggle(); syncTerminalToggle(); syncMeshTabToggle(); } catch (e) { /* ignore */ }
     }
 
     const mobileMenu = document.getElementById('mobile-menu');
@@ -11990,6 +12035,7 @@ async function loadConfigData() {
 
         // Reflect the server-stored RuSense tab visibility on the toggle here.
         syncRusenseTabFromServer(config);
+        syncMeshTabFromServer(config);
 
         // Load AI configuration
         loadAIConfiguration(config);

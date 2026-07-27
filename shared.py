@@ -707,9 +707,15 @@ class SharedData:
             "wifi_failsafe_cycle_limit": 10,
 
             "__title_mesh__": "Ragnar Mesh (Tailscale)",
-            # Master switch for the Mesh tab and all peer polling. Off by
-            # default: a stock single-box Ragnar should never reach out to
-            # anything, and Tailscale is not installed on most images.
+            # Whether the Ragnar Mesh *tab* is shown in the UI. Purely cosmetic —
+            # it hides/shows the nav entry and does NOT join or poll anything
+            # (that is mesh_enabled below). On by default so the mesh is
+            # discoverable out of the box; turn it off to declutter a unit that
+            # will never be meshed.
+            "mesh_tab_enabled": True,
+            # Master switch for peer polling / participation. Off by default: a
+            # stock single-box Ragnar should never reach out to anything, and
+            # Tailscale is not installed on most images.
             "mesh_enabled": False,
             # Tag every Ragnar mesh unit carries. This is the authorization
             # boundary for unit-to-unit API calls — a tailnet member WITHOUT

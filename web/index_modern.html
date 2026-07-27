@@ -708,7 +708,7 @@
                     <button onclick="showTab('connect')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="connect">
                         Connect
                     </button>
-                    <button onclick="showTab('mesh')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="mesh">
+                    <button onclick="showTab('mesh')" class="mesh-nav nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="mesh">
                         Ragnar Mesh
                     </button>
                     <button onclick="showTab('terminal')" class="terminal-nav hidden nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="terminal">
@@ -753,7 +753,7 @@
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
                 <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
                 <button onclick="showTab('connect')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Connect</button>
-                <button onclick="showTab('mesh')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Ragnar Mesh</button>
+                <button onclick="showTab('mesh')" class="mesh-nav block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Ragnar Mesh</button>
                 <button onclick="showTab('terminal')" class="terminal-nav hidden block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700" data-tab="terminal">Terminal</button>
                 <button onclick="showTab('config')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Config</button>
                 <button id="mobile-logout-btn" onclick="handleLogout()" class="hidden block w-full text-left px-3 py-2 rounded-lg hover:bg-red-700 bg-red-600/30 text-red-300">Logout</button>
@@ -6061,6 +6061,21 @@
                             </div>
                         </div>
 
+                        <!-- Ragnar Mesh tab visibility -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Ragnar Mesh</h4>
+                                <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="mesh-tab-enabled" class="sr-only peer" onchange="onMeshTabToggled(this)">
+                                    <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                                </label>
+                            </div>
+                            <div class="text-sm text-gray-400">
+                                Show the <strong>Ragnar Mesh</strong> tab in the top navigation — the Tailscale-linked
+                                fleet view. On by default. This only hides the tab; it does not join or leave the mesh.
+                            </div>
+                        </div>
+
                         <!-- WiFi Sensing (RuSense) Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -7262,7 +7277,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh22"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh23"></script>
 
 </body>
 </html>
