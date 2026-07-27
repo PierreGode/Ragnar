@@ -513,10 +513,16 @@ you are browsing this UI over the LAN or a tunnel, your browser cannot open a
 peer's `100.x.y.z:8000` directly, but the details card still works because the
 Ragnar server did the fetching.
 
-The modal also offers an *"Open this unit's full UI ↗"* link for peers, but it is
-clearly caveated: it only works when your **browser** is itself on the tailnet.
-The details card is the reliable path; the direct link is a convenience for when
-you are on-tailnet.
+Each peer card also carries an *"Open full UI ↗"* link that opens that unit's own
+web UI in a new tab — but it is clearly caveated ("tailnet only"): unlike the
+popups (which render from data this unit already pulled), a direct link only
+works when your **browser** is itself on the tailnet, because a peer's `100.x`
+address / MagicDNS name is only routable from tailnet members. The link prefers
+the unit's **published** hostname when it reports one — a green **Published**
+badge appears alongside — and falls back to `http://<tailnet-ip>:<port>`
+otherwise. Publish state is local to each node (Tailscale does not share it), so
+each unit reports its own in `GET /api/mesh/unit` and peers display it. The
+popups remain the reliable path; the direct link is the on-tailnet convenience.
 
 Beyond showing what each unit found, the popup can **start and stop that unit's
 monitor remotely** — a Start/Stop button appears for the four controllable

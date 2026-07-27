@@ -29070,6 +29070,33 @@ function meshUnitCard(unit, isSelf, ctx) {
         </div>
     </div>` : '';
 
+    // Direct link to the peer's OWN web UI in a new tab. Unlike the popups (which
+    // render from data this unit already pulled), this only works when the
+    // operator's browser is itself on the tailnet — a peer's 100.x address / its
+    // MagicDNS name is only routable from tailnet members. So it is offered
+    // alongside, clearly caveated, never instead of, the always-works popups.
+    // Prefer the published hostname when the peer reports one (nicer + HTTPS-
+    // capable); fall back to the raw tailnet IP:port otherwise.
+    const serve = health.serve || {};
+    let openUrl = '';
+    if (serve.published && serve.url) {
+        openUrl = serve.url;
+    } else if (unit.ip) {
+        const h = unit.ip.includes(':') ? '[' + unit.ip + ']' : unit.ip;
+        openUrl = 'http://' + h + ':' + (ctx.nodePort || 8000);
+    }
+    const openRow = (!isSelf && openUrl && (reachable || unit.online))
+        ? `<div class="mt-2 flex items-center gap-2 flex-wrap">
+            ${serve.published
+                ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-700/30 text-green-300 border border-green-800">Published</span>'
+                : ''}
+            <a href="${escapeHtml(openUrl)}" target="_blank" rel="noopener noreferrer"
+               title="Opens this unit's own web UI in a new tab. Works only when your browser is on the tailnet."
+               class="text-[11px] text-cyan-400 hover:text-cyan-300 underline">Open full UI ↗</a>
+            <span class="text-[10px] text-gray-600">tailnet only</span>
+        </div>`
+        : '';
+
     return `<div class="glass rounded-lg p-4 border ${ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
         <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
@@ -29088,6 +29115,7 @@ function meshUnitCard(unit, isSelf, ctx) {
         ${body}
         ${meshFindingsBlock(unit)}
         ${launchRow}
+        ${openRow}
         ${warnings.join('')}
     </div>`;
 }

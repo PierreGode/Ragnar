@@ -832,6 +832,54 @@ def magic_dns_name():
     return ((data.get('Self') or {}).get('DNSName') or '').rstrip('.')
 
 
+def serve_state():
+    """Whether THIS unit is currently publishing its web UI, and at what URL.
+
+    Publish state is *local* to each node — Tailscale does not report a peer's
+    `serve` config in status — so a unit reports its own here and peers display
+    it (that is the only way one Ragnar can know another is published). Read from
+    `tailscale serve status --json`, whose shape is, e.g.::
+
+        {"Web": {"host.tailnet.ts.net:80": {"Handlers": {"/": {"Proxy": "..."}}}}}
+
+    Returns {'published', 'url', 'scheme', 'host'}. Any failure — not installed,
+    not serving, unparseable — degrades to not-published rather than raising,
+    because this is folded into a health report polled on a timer.
+    """
+    blank = {'published': False, 'url': '', 'scheme': '', 'host': ''}
+    if not installed():
+        return blank
+    rc, out, _ = _run(['serve', 'status', '--json'], timeout=8)
+    if rc != 0 or not (out or '').strip():
+        return blank
+    try:
+        cfg = json.loads(out)
+    except (ValueError, TypeError):
+        return blank
+
+    # Only an entry that actually proxies something counts as "the web UI is
+    # published" — a bare TCP forward is not it. Prefer HTTPS (443) over HTTP
+    # (80) if both somehow exist, so the link offered is the better one.
+    best = None
+    for key, entry in (cfg.get('Web') or {}).items():
+        handlers = (entry or {}).get('Handlers') or {}
+        if not any((h or {}).get('Proxy') for h in handlers.values()):
+            continue
+        host, _, port = key.rpartition(':')
+        scheme = 'https' if port == '443' else 'http'
+        if best is None or (scheme == 'https' and best['scheme'] != 'https'):
+            best = {'host': host, 'scheme': scheme, 'port': port}
+    if not best:
+        return blank
+
+    # Drop the port when it is the scheme default, so the link reads as the
+    # clean friendly hostname the operator expects.
+    is_default = ((best['scheme'] == 'https' and best['port'] == '443')
+                  or (best['scheme'] == 'http' and best['port'] == '80'))
+    url = f"{best['scheme']}://{best['host']}" + ('' if is_default else f":{best['port']}")
+    return {'published': True, 'url': url, 'scheme': best['scheme'], 'host': best['host']}
+
+
 def _explain_serve_failure(rc, detail, use_https):
     """Turn a `tailscale serve` failure into something the operator can act on."""
     lowered = detail.lower()

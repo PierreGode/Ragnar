@@ -612,3 +612,35 @@ def test_command_peer_rejected_by_tag(monkeypatch):
     _patch_urlopen(monkeypatch, unauth)
     r = mesh_manager.command_peer({'id': 'a', 'ip': '100.0.0.1'}, 'traffic', 'start')
     assert r['reachable'] is False and 'mesh tag' in r['error']
+
+
+# ── serve_state: reporting a unit's own publish status ──────────────────────
+
+def test_serve_state_http_published(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k: (0,
+        '{"Web": {"here.tailnet.ts.net:80": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8000"}}}}}', ''))
+    s = mesh_manager.serve_state()
+    assert s['published'] is True
+    assert s['scheme'] == 'http'
+    assert s['url'] == 'http://here.tailnet.ts.net'   # default :80 dropped
+
+
+def test_serve_state_https_preferred(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k: (0,
+        '{"Web": {"h.ts.net:80": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8000"}}},'
+        ' "h.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8000"}}}}}', ''))
+    s = mesh_manager.serve_state()
+    assert s['scheme'] == 'https' and s['url'] == 'https://h.ts.net'
+
+
+def test_serve_state_not_serving(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: True)
+    monkeypatch.setattr(mesh_manager, '_run', lambda *a, **k: (0, '{}', ''))
+    assert mesh_manager.serve_state()['published'] is False
+
+
+def test_serve_state_not_installed(monkeypatch):
+    monkeypatch.setattr(mesh_manager, 'installed', lambda: False)
+    assert mesh_manager.serve_state() == {'published': False, 'url': '', 'scheme': '', 'host': ''}

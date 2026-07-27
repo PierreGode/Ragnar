@@ -2301,6 +2301,16 @@ def _mesh_local_health():
     except OSError:
         pass
 
+    # Whether this unit is publishing its own web UI to the tailnet, so peers can
+    # offer a direct "Open full UI" link at the friendly hostname. Publish state
+    # is local to each node — Tailscale doesn't share it — so each unit reports
+    # its own and peers display it.
+    if mesh_available:
+        try:
+            health['serve'] = mesh_manager.serve_state()
+        except Exception as exc:
+            logger.debug(f"[mesh] serve state unavailable: {exc}")
+
     # Alert posture, so any unit can rank the mesh by "needs attention".
     try:
         with _watchtower_lock:
