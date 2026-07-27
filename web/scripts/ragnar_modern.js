@@ -29004,17 +29004,26 @@ function meshNodeBanner(unit, isSelf, ctx) {
         ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-green-700/30 text-green-300 border border-green-800">Published</span>' : '';
     const nodeId = (unit.id || unit.ip || '').toString().replace(/'/g, '');
 
-    return `<div class="glass rounded-lg px-4 py-3 flex items-center gap-3 flex-wrap border ${st.ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
-        <span class="w-2.5 h-2.5 rounded-full flex-shrink-0 ${st.dot}"></span>
-        <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2 flex-wrap">
-                <span class="font-semibold truncate">${name}</span>
-                ${isSelf ? '<span class="text-[10px] px-1.5 rounded bg-Ragnar-600/40 text-Ragnar-200">this unit</span>' : ''}
-                ${sevBadge}${pubBadge}
+    // Two stacked rows so every field is visible without truncation: identity +
+    // Open on top, then the metric strip below a divider. Taller on purpose —
+    // the single-line version clipped the location/IP meta to "Unit 01 · …".
+    return `<div class="glass rounded-lg p-4 border ${st.ring} ${isSelf ? 'ring-1 ring-Ragnar-600/50' : ''}">
+        <div class="flex items-start justify-between gap-3">
+            <div class="flex items-start gap-2 min-w-0">
+                <span class="w-2.5 h-2.5 rounded-full flex-shrink-0 mt-1.5 ${st.dot}"></span>
+                <div class="min-w-0">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <span class="font-semibold">${name}</span>
+                        ${isSelf ? '<span class="text-[10px] px-1.5 rounded bg-Ragnar-600/40 text-Ragnar-200">this unit</span>' : ''}
+                        ${sevBadge}${pubBadge}
+                    </div>
+                    <div class="text-[11px] text-gray-500 font-mono mt-1 break-words">${meta || '—'}</div>
+                </div>
             </div>
-            <div class="text-[11px] text-gray-500 font-mono truncate">${meta || '—'}</div>
+            <button onclick="meshOpenNode('${nodeId}')"
+                    class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
         </div>
-        <div class="flex items-center gap-4 text-center flex-shrink-0">
+        <div class="flex items-center gap-6 mt-3 pt-3 border-t border-slate-700/40">
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Status</div>
                  <div class="text-xs ${st.reachable ? 'text-green-300' : 'text-gray-400'}">${escapeHtml(st.label)}</div></div>
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Alerts</div>
@@ -29022,8 +29031,6 @@ function meshNodeBanner(unit, isSelf, ctx) {
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Incidents</div>
                  <div class="text-sm font-semibold">${incidents}</div></div>
         </div>
-        <button onclick="meshOpenNode('${nodeId}')"
-                class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
     </div>`;
 }
 
