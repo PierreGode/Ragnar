@@ -62,6 +62,12 @@ from actions.lynis_pentest_ssh import LynisPentestSSH
 from actions.connector_utils import CredentialChecker
 from db_manager import get_db, DatabaseManager
 from auth_manager import AuthManager
+try:
+    import mesh_manager
+    mesh_available = True
+except ImportError:  # pragma: no cover — mesh is optional, never fatal
+    mesh_manager = None
+    mesh_available = False
 
 # Initialize logger
 logger = Logger(name="webapp_modern.py", level=logging.DEBUG)
@@ -336,6 +342,35 @@ def ble_provisioning_toggle():
 # AUTHENTICATION MIDDLEWARE
 # ============================================================================
 
+def _is_mesh_peer_request():
+    """True when this request came from a tagged peer Ragnar over the tailnet.
+
+    Deliberately paranoid about the *source address*, because the whole scheme
+    rests on it being the real peer:
+
+    * A proxied request cannot be trusted. If the operator has published the UI
+      with `tailscale serve`, requests arrive from 127.0.0.1 and the original
+      peer is unknowable at this layer — so loopback is rejected outright here
+      rather than being resolved through a spoofable X-Forwarded-For.
+    * Peer polling never goes through `serve`; it dials the node's tailnet IP
+      and port directly, so the genuine mesh path always presents a real
+      100.64/10 (or fd7a:115c:a1e0::/48) source address.
+
+    Any failure — Tailscale missing, tailscaled silent, tag absent — is False.
+    """
+    if not mesh_available:
+        return False
+    remote = request.remote_addr or ''
+    if remote in ('127.0.0.1', '::1'):
+        return False
+    try:
+        mesh_tag = shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
+        return mesh_manager.caller_is_mesh_peer(remote, mesh_tag)
+    except Exception as exc:
+        logger.warning(f"[mesh] peer identity check failed for {remote}: {exc}")
+        return False
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
@@ -379,6 +414,24 @@ def check_authentication():
     # adds no attack surface vs. the existing network-facing auth.
     if request.remote_addr in ('127.0.0.1', '::1') and shared_data.config.get('kiosk_enabled'):
         return
+
+    # Mesh machine auth: let a *peer Ragnar* reach this node's mesh endpoints
+    # without a session. Identity is proven by WireGuard, not by a shared
+    # secret — tailscaled tells us which tailnet node owns the source IP, and
+    # we require that node to carry the mesh tag. Scoped hard on purpose:
+    #   * reads — any GET under /api/mesh/* (observe the unit's data);
+    #   * one write — POST /api/mesh/control ONLY, whose body is itself an
+    #     allowlist (start/stop the four monitors, nothing else). Matched by
+    #     exact path so join/leave/serve/peer-control stay session-only;
+    #   * every other route stays session-gated;
+    #   * fails closed — no tailscaled, no answer, or no tag means 401.
+    # Tailnet membership alone is NOT enough. Every laptop and phone on the
+    # tailnet would otherwise inherit Ragnar's full offensive toolset.
+    if shared_data.config.get('mesh_enabled'):
+        peer_read = request.method == 'GET' and path.startswith('/api/mesh/')
+        peer_control = request.method == 'POST' and path == '/api/mesh/control'
+        if (peer_read or peer_control) and _is_mesh_peer_request():
+            return
 
     # Check if user is authenticated via Flask session
     if not session.get('authenticated'):
@@ -2083,6 +2136,1255 @@ def incidents_status():
         'summary': summary,
         'incidents': incidents,
     })
+
+
+# ============================================================================
+# MESH (TAILSCALE)
+# Ragnar as a mesh: every node reachable over WireGuard regardless of NAT, and
+# each node able to ask its peers how they are. Tailscale supplies the tunnel
+# and device identity; everything below supplies the Ragnar-specific half —
+# health, alerts and incidents that the Tailscale console knows nothing about.
+# ============================================================================
+
+_mesh_lock = threading.Lock()
+# Cache of the last peer poll. The UI reads this rather than triggering a fan-out
+# on every page render — a 10-unit mesh must not cost 10 HTTP round trips per
+# dashboard refresh.
+_mesh_peer_health = {}
+_mesh_last_poll = 0.0
+# Per-peer set of alert keys already folded into the incident engine. Peers
+# serve a rolling window, so every poll re-sends what we saw last cycle.
+_mesh_alert_seen = {}
+# Per-peer cached security findings (vulns/integrity/watchtower/incidents),
+# refreshed each poll and rendered as the fleet findings view.
+_mesh_peer_findings = {}
+# Live health of the poll LOOP itself, surfaced in the Mesh tab so a stalled or
+# crashing poller is visible in the browser instead of only in the logs. This is
+# the difference between "sees peers but never polls" (a loop problem) and "polls
+# but the peer refuses" (a peer problem) — the UI could not tell them apart.
+_mesh_poll_state = {'loop_started': False, 'last_ok_at': 0.0,
+                    'last_error': '', 'last_summary': ''}
+
+# Tailscale-install-from-the-UI state. Installing pulls a vendor script and runs
+# apt, so it takes a minute or two — run it in the background and let the tab
+# poll, exactly like the sensing-backend install.
+MESH_INSTALL_SCRIPT = os.path.join(shared_data.currentdir, 'scripts', 'setup_mesh.sh')
+MESH_INSTALL_LOG = os.path.join(shared_data.currentdir, 'data', 'mesh_install.log')
+_mesh_install_lock = threading.Lock()
+_mesh_installing = False
+
+
+def _run_mesh_install():
+    """Install the Tailscale client in the background, logging to MESH_INSTALL_LOG.
+
+    Uses the same script the installer and updater call, so the UI path cannot
+    drift from them. Root is required to install a system package; the packaged
+    Ragnar service already runs as root, and a hand-started instance falls back
+    to `sudo -n` (which fails cleanly into the log if no passwordless sudo).
+    """
+    global _mesh_installing
+    cmd = (['bash', MESH_INSTALL_SCRIPT, 'install'] if os.geteuid() == 0
+           else ['sudo', '-n', 'bash', MESH_INSTALL_SCRIPT, 'install'])
+    try:
+        with open(MESH_INSTALL_LOG, 'a') as logf:
+            logf.write("\n=== install tailscale ===\n")
+            logf.flush()
+            subprocess.run(cmd, stdout=logf, stderr=subprocess.STDOUT, timeout=600)
+    except Exception as exc:
+        logger.error(f"[mesh] tailscale install failed: {exc}")
+        try:
+            with open(MESH_INSTALL_LOG, 'a') as logf:
+                logf.write(f"\nERROR: {exc}\n")
+        except OSError:
+            pass
+    finally:
+        with _mesh_install_lock:
+            _mesh_installing = False
+        if mesh_available:
+            mesh_manager.invalidate_cache()
+
+
+def _mesh_enabled():
+    return bool(mesh_available and shared_data.config.get('mesh_enabled'))
+
+
+def _mesh_tag():
+    if not mesh_available:
+        return 'tag:ragnar-mesh'
+    return shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
+
+
+def _mesh_node_port():
+    try:
+        return int(shared_data.config.get('mesh_node_port', 8000))
+    except (TypeError, ValueError):
+        return 8000
+
+
+def _mesh_unit_id():
+    """This unit's mesh number, or 0 when the operator has not assigned one."""
+    try:
+        return max(0, int(shared_data.config.get('mesh_unit_id', 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mesh_viking_name():
+    """This unit's Viking name — its identity in the army.
+
+    Falls back to one derived from the machine's own hardware identity, so a
+    unit always has a name even if nobody ever configured it, and the same box
+    keeps the same name across reinstalls.
+    """
+    configured = (shared_data.config.get('mesh_viking_name') or '').strip()
+    if configured:
+        return configured
+    if not mesh_available:
+        return socket.gethostname()
+    try:
+        return mesh_manager.derive_viking_name()
+    except Exception:
+        return socket.gethostname()
+
+
+def _mesh_unit_name():
+    """How this unit identifies itself to peers: 'Bjorn Ironside (Unit 03)'."""
+    unit_id = _mesh_unit_id()
+    name = _mesh_viking_name()
+    return f'{name} (Unit {unit_id:02d})' if unit_id else name
+
+
+def _mesh_local_health():
+    """This unit's own report — the payload peers receive from us.
+
+    There is no controller in this design: every unit serves this endpoint and
+    every unit polls its peers, so the same payload is both what we publish and
+    what we render locally. Deliberately small and cheap — it is polled on a
+    timer by every other unit and must stay affordable on a Pi Zero. Everything
+    here is already computed elsewhere in Ragnar; nothing is measured specially.
+    """
+    cfg = shared_data.config
+    health = {
+        'unit_id': _mesh_unit_id(),
+        'viking_name': _mesh_viking_name(),
+        'name': _mesh_unit_name(),
+        'label': cfg.get('mesh_site_label') or socket.gethostname(),
+        'hostname': socket.gethostname(),
+        'time': datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Uptime, straight from the kernel — no psutil dependency for the one number
+    # an operator checks first when a remote box misbehaves.
+    try:
+        with open('/proc/uptime', 'r') as fh:
+            health['uptime_s'] = int(float(fh.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        health['uptime_s'] = None
+
+    try:
+        import resource_monitor
+        status = resource_monitor.resource_monitor.get_system_status()
+        health['cpu_percent'] = round(status.get('cpu', {}).get('percent', 0), 1)
+        health['memory_percent'] = round(status.get('memory', {}).get('percent', 0), 1)
+        health['healthy'] = bool(status.get('healthy', True))
+        # Undervoltage is the classic remote-Pi failure and is invisible over
+        # SSH until the box starts corrupting its own SD card.
+        power = resource_monitor.resource_monitor.get_power_status()
+        if isinstance(power, dict):
+            health['power'] = {
+                'undervoltage': bool(power.get('undervoltage_now')
+                                     or power.get('undervoltage')),
+                'throttled': bool(power.get('throttled_now')
+                                  or power.get('throttled')),
+            }
+    except Exception as exc:
+        logger.debug(f"[mesh] resource stats unavailable: {exc}")
+
+    try:
+        usage = shutil.disk_usage(shared_data.currentdir)
+        health['disk_percent'] = round(usage.used / usage.total * 100, 1)
+        health['disk_free_gb'] = round(usage.free / (1024 ** 3), 1)
+    except OSError:
+        pass
+
+    # Whether this unit is publishing its own web UI to the tailnet, so peers can
+    # offer a direct "Open full UI" link at the friendly hostname. Publish state
+    # is local to each node — Tailscale doesn't share it — so each unit reports
+    # its own and peers display it.
+    if mesh_available:
+        try:
+            health['serve'] = mesh_manager.serve_state()
+        except Exception as exc:
+            logger.debug(f"[mesh] serve state unavailable: {exc}")
+
+    # Alert posture, so any unit can rank the mesh by "needs attention".
+    try:
+        with _watchtower_lock:
+            wt_summary = _wt_get().summary()
+            inc_summary = _inc_get().summary()
+        health['watchtower'] = {
+            'enabled': bool(cfg.get('watchtower_enabled', False)),
+            'by_severity': wt_summary.get('by_severity', {}),
+            'total': wt_summary.get('total', 0),
+            # The single number that ranks a site: worst severity currently held.
+            'worst': wt_summary.get('worst'),
+        }
+        health['incidents'] = {
+            'total': inc_summary.get('total', 0),
+            'named': inc_summary.get('named', 0),
+            'worst': inc_summary.get('worst'),
+        }
+    except Exception as exc:
+        logger.debug(f"[mesh] alert summary unavailable: {exc}")
+
+    return health
+
+
+@app.route('/api/mesh/unit', methods=['GET'])
+def mesh_unit_self():
+    """This unit's own report, for any peer in the mesh to poll.
+
+    One of only two routes a tagged tailnet peer may reach without a session
+    (see `check_authentication`). Read-only by construction.
+    """
+    return jsonify({'success': True, **_mesh_local_health()})
+
+
+@app.route('/api/mesh/alerts', methods=['GET'])
+def mesh_unit_alerts():
+    """This unit's recent Watchtower alerts, for mesh-wide correlation.
+
+    The second peer-readable route. Serving alerts is what lets any unit fuse
+    attack chains that cross sites — the same actor probing Jersey and
+    Stockholm is one incident, not two. Every unit does this for itself; there
+    is no central collector to lose.
+    """
+    try:
+        limit = max(1, min(500, int(request.args.get('limit', 50))))
+    except (TypeError, ValueError):
+        limit = 50
+    min_sev = request.args.get('min_severity') or None
+    alerts = []
+    try:
+        with _watchtower_lock:
+            # `raw` is the untouched source record — large, and of no use to a
+            # remote correlator that already gets the normalized fields.
+            alerts = [dict(a, raw=None) for a in
+                      _wt_get().recent(limit=limit, min_severity=min_sev)]
+    except Exception as exc:
+        logger.debug(f"[mesh] alert fetch failed: {exc}")
+    name = _mesh_unit_name()
+    unit_id = _mesh_unit_id()
+    # Stamp origin so the receiving unit can attribute every alert to a site.
+    for alert in alerts:
+        alert['mesh_unit'] = name
+        alert['mesh_unit_id'] = unit_id
+    return jsonify({'success': True, 'node': name, 'unit_id': unit_id,
+                    'alerts': alerts})
+
+
+# Canonical severity ladder for the fleet findings view. Kept local so the mesh
+# never hard-depends on watchtower's constants being importable.
+_MESH_SEV_RANK = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
+_MESH_SEV_ORDER = ('critical', 'high', 'medium', 'low', 'info')
+_MESH_SEV_ALIAS = {
+    'crit': 'critical', 'emergency': 'critical', 'fatal': 'critical',
+    'error': 'high', 'err': 'high', 'severe': 'high',
+    'warning': 'medium', 'warn': 'medium', 'moderate': 'medium', 'med': 'medium',
+    'notice': 'low', 'minor': 'low',
+    'informational': 'info', 'debug': 'info',
+}
+
+
+def _mesh_sev(value, default='medium'):
+    """Normalize any severity token to the canonical ladder."""
+    s = str(value or '').strip().lower()
+    s = _MESH_SEV_ALIAS.get(s, s)
+    return s if s in _MESH_SEV_RANK else default
+
+
+def _mesh_local_findings(limit=40):
+    """This unit's current security findings as one normalized, ranked list.
+
+    Flattens the four places Ragnar already records findings — the vulnerability
+    scanner, the network-integrity monitor, Watchtower, and the incident engine
+    — into a common shape, so a peer (or this unit's own Mesh tab) can show what
+    every box has found without opening four separate views on each of them.
+
+    Each finding: {category, severity, title, host, detail, ts, feature}, where
+    `feature` names the tab a launch button deep-links to for the full detail.
+    Read-only; computes nothing new, just reads existing state.
+    """
+    findings = []
+
+    # 1. Vulnerabilities — the finding an operator most wants across a fleet.
+    try:
+        ni = getattr(shared_data, 'network_intelligence', None)
+        if ni:
+            data = ni.get_active_findings_for_dashboard() or {}
+            for v in (data.get('vulnerabilities') or {}).values():
+                if not isinstance(v, dict):
+                    continue
+                port = v.get('port')
+                where = str(v.get('host', '?')) + (f":{port}" if port else '')
+                findings.append({
+                    'category': 'vulnerability',
+                    'severity': _mesh_sev(v.get('severity')),
+                    'title': v.get('vulnerability') or 'Vulnerability',
+                    'host': where,
+                    'detail': v.get('service') or '',
+                    'ts': v.get('last_confirmed') or v.get('discovered') or '',
+                    'feature': 'discovered',
+                })
+    except Exception as exc:
+        logger.debug(f"[mesh] vuln findings unavailable: {exc}")
+
+    # 2. Network integrity — any check whose verdict is a real problem.
+    try:
+        with _net_integrity_lock:
+            checks = dict(_net_integrity_state.get('checks') or {})
+        for name, chk in checks.items():
+            if not isinstance(chk, dict):
+                continue
+            verdict = str(chk.get('verdict', '')).lower()
+            rank = chk.get('rank', 0) or 0
+            if rank <= 0 and verdict in ('', 'ok', 'clean', 'pass', 'good',
+                                         'unknown', 'no-traffic', 'no_traffic'):
+                continue
+            sev = {4: 'critical', 3: 'high', 2: 'medium', 1: 'low'}.get(rank, 'medium')
+            reasons = chk.get('reasons') or []
+            findings.append({
+                'category': 'integrity',
+                'severity': sev,
+                'title': chk.get('label') or name,
+                'host': '',
+                'detail': ('; '.join(reasons) if isinstance(reasons, list)
+                           else str(reasons)),
+                'ts': chk.get('ts') or '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] integrity findings unavailable: {exc}")
+
+    # 3. Watchtower — top passive-watcher alerts, medium and up.
+    try:
+        with _watchtower_lock:
+            recent = _wt_get().recent(limit=limit, min_severity='medium')
+        for a in recent:
+            findings.append({
+                'category': 'watchtower',
+                'severity': _mesh_sev(a.get('severity')),
+                'title': (a.get('title') or ','.join(a.get('codes') or [])
+                          or a.get('source', 'alert')),
+                'host': a.get('src') or a.get('target') or '',
+                'detail': a.get('source') or '',
+                'ts': a.get('ts') or '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] watchtower findings unavailable: {exc}")
+
+    # 4. Incidents — named cross-signal campaigns (high value, low volume).
+    try:
+        with _watchtower_lock:
+            incs = _inc_get().incidents(min_severity='high')
+        for inc in incs:
+            if not inc.get('pattern'):
+                continue
+            findings.append({
+                'category': 'incident',
+                'severity': _mesh_sev(inc.get('severity')),
+                'title': inc.get('label') or inc.get('pattern'),
+                'host': '',
+                'detail': f"{inc.get('alert_count', 0)} alerts",
+                'ts': '',
+                'feature': 'network',
+            })
+    except Exception as exc:
+        logger.debug(f"[mesh] incident findings unavailable: {exc}")
+
+    # True vulnerability count, taken BEFORE the display truncation below — a
+    # node with 100 vulns must not report 40 just because the findings list is
+    # capped for transport. This is what the banner's "Vulns" tile shows.
+    vuln_total = sum(1 for f in findings if f['category'] == 'vulnerability')
+
+    findings.sort(key=lambda f: _MESH_SEV_RANK.get(f['severity'], 0), reverse=True)
+    findings = findings[:limit]
+
+    by_sev, by_cat = {}, {}
+    for f in findings:
+        by_sev[f['severity']] = by_sev.get(f['severity'], 0) + 1
+        by_cat[f['category']] = by_cat.get(f['category'], 0) + 1
+    worst = next((s for s in _MESH_SEV_ORDER if by_sev.get(s)), None)
+    return {'findings': findings,
+            'counts': {'total': len(findings), 'by_severity': by_sev,
+                       'by_category': by_cat, 'worst': worst,
+                       'vulnerabilities': vuln_total}}
+
+
+def _mesh_local_features():
+    """Per-feature live summaries a peer can display in its own popup.
+
+    One block per launch button — Traffic, Threats, Integrity, Watchtower — each
+    a small, already-computed summary of that subsystem. Read-only: it reports
+    what the feature already knows, and never starts anything. Every block is
+    guarded so a disabled or missing subsystem degrades to `available: False`
+    with a reason, never an exception.
+    """
+    cfg = shared_data.config
+    features = {}
+
+    # Traffic analyzer — the live capture's headline stats.
+    traffic = {'available': False, 'reason': 'Traffic analysis is not running.'}
+    try:
+        analyzer = get_traffic_analyzer()
+        if analyzer:
+            s = analyzer.get_summary() or {}
+            traffic = {
+                'available': bool(s.get('status') == 'running'),
+                'status': s.get('status', 'stopped'),
+                'interface': s.get('interface', ''),
+                'uptime_seconds': s.get('uptime_seconds', 0),
+                'total_packets': s.get('total_packets', 0),
+                'total_bytes_human': s.get('total_bytes_human', '0 B'),
+                'throughput_mbps': s.get('throughput_mbps', 0),
+                'packets_per_second': s.get('packets_per_second', 0),
+                'unique_hosts': s.get('unique_hosts', 0),
+                'active_connections': s.get('active_connections', 0),
+                'total_alerts': s.get('total_alerts', 0),
+                'alerts_by_severity': s.get('alerts_by_severity', {}),
+                'protocols': analyzer.get_protocol_distribution() or {},
+            }
+            if not traffic['available']:
+                traffic['reason'] = 'Traffic analysis is installed but stopped.'
+    except Exception as exc:
+        traffic['reason'] = f'unavailable ({exc})'
+    features['traffic'] = traffic
+
+    # External threat detection — threat-intel enrichment posture.
+    threats = {'available': False, 'reason': 'Threat intelligence is not configured.'}
+    try:
+        if threat_intelligence:
+            summary = threat_intelligence.get_enriched_findings_summary() or {}
+            threats = {
+                'available': True,
+                'total_enriched_findings': summary.get('total_enriched_findings', 0),
+                'critical_risk_findings': summary.get('critical_risk_findings', 0),
+                'high_risk_findings': summary.get('high_risk_findings', 0),
+                'known_exploited_vulnerabilities': summary.get('known_exploited_vulnerabilities', 0),
+                'threat_sources_enabled': summary.get('threat_sources_enabled', 0),
+                'last_intelligence_update': summary.get('last_intelligence_update', ''),
+            }
+    except Exception as exc:
+        threats['reason'] = f'unavailable ({exc})'
+    features['threats'] = threats
+
+    # Network integrity monitor — overall verdict + per-check state.
+    integrity = {'available': False, 'reason': 'Network integrity monitor is off.'}
+    try:
+        with _net_integrity_lock:
+            ni = dict(_net_integrity_state)
+        checks = ni.get('checks') or {}
+        integrity = {
+            'available': True,
+            'enabled': bool(cfg.get('net_integrity_monitor_enabled', False)),
+            'overall': ni.get('overall', 'unknown'),
+            'ts': ni.get('ts'),
+            'checks': [
+                {'name': name, 'label': (c or {}).get('label', name),
+                 'verdict': (c or {}).get('verdict', ''),
+                 'rank': (c or {}).get('rank', 0),
+                 'reasons': (c or {}).get('reasons', [])}
+                for name, c in checks.items() if isinstance(c, dict)
+            ],
+        }
+    except Exception as exc:
+        integrity['reason'] = f'unavailable ({exc})'
+    features['integrity'] = integrity
+
+    # Watchtower — unified watcher feed summary + recent alerts.
+    watchtower = {'available': False, 'reason': 'Watchtower is off.'}
+    try:
+        with _watchtower_lock:
+            wt_sum = _wt_get().summary()
+            recent = [dict(a, raw=None) for a in
+                      _wt_get().recent(limit=15, min_severity=None)]
+        watchtower = {
+            'available': True,
+            'enabled': bool(cfg.get('watchtower_enabled', False)),
+            'total': wt_sum.get('total', 0),
+            'by_severity': wt_sum.get('by_severity', {}),
+            'worst': wt_sum.get('worst'),
+            'sources': wt_sum.get('sources', []),
+            'recent': [
+                {'severity': _mesh_sev(a.get('severity')),
+                 'title': a.get('title') or ','.join(a.get('codes') or []) or a.get('source', ''),
+                 'source': a.get('source', ''),
+                 'host': a.get('src') or a.get('target') or ''}
+                for a in recent
+            ],
+        }
+    except Exception as exc:
+        watchtower['reason'] = f'unavailable ({exc})'
+    features['watchtower'] = watchtower
+
+    # Mark which subsystems a mesh peer may start/stop remotely, and each one's
+    # current running state, so a peer's popup can show a Start or a Stop button
+    # that reflects reality. "External threat detection" maps to the continuous
+    # threat monitor, which runs independently of threat-intel enrichment — so
+    # it is controllable even when the enrichment block reads unavailable.
+    try:
+        tm_running = bool(_threat_monitor_state.get('enabled'))
+    except Exception:
+        tm_running = False
+    features['traffic']['controllable'] = True
+    features['traffic']['running'] = bool(features['traffic'].get('available'))
+    features['threats']['controllable'] = True
+    features['threats']['running'] = tm_running
+    features['integrity']['controllable'] = True
+    features['integrity']['running'] = bool(features['integrity'].get('enabled'))
+    features['watchtower']['controllable'] = True
+    features['watchtower']['running'] = bool(features['watchtower'].get('enabled'))
+
+    return features
+
+
+# Exactly which subsystems a mesh peer (or the local operator, via the same
+# path) may start/stop remotely. An allowlist on purpose: a peer can toggle
+# these four monitors and nothing else — never an arbitrary route or command.
+_MESH_CONTROLLABLE = {
+    'traffic': 'Traffic analyzer',
+    'threats': 'External threat monitor',
+    'integrity': 'Network integrity monitor',
+    'watchtower': 'Watchtower',
+}
+
+
+def _mesh_apply_control(feature, action):
+    """Start or stop one local subsystem, for a mesh peer or the local operator.
+
+    Idempotent: starting a running feature (or stopping a stopped one) is a
+    success, not an error — a remote button press should converge to the asked
+    state, not fail because someone got there first. Returns a plain dict the
+    caller hands straight back as JSON. Only the four allowlisted monitors in
+    `_MESH_CONTROLLABLE` are reachable; anything else is rejected up front.
+    """
+    feature = (feature or '').strip().lower()
+    action = (action or '').strip().lower()
+    if feature not in _MESH_CONTROLLABLE:
+        return {'success': False, 'error': f'Unknown feature {feature!r}.'}
+    if action not in ('start', 'stop'):
+        return {'success': False, 'error': f'Unknown action {action!r}.'}
+    start = action == 'start'
+    label = _MESH_CONTROLLABLE[feature]
+    try:
+        if feature == 'traffic':
+            analyzer = get_traffic_analyzer()
+            if not analyzer:
+                return {'success': False, 'feature': feature,
+                        'error': 'Traffic analysis is not available on this unit.'}
+            if start:
+                if not analyzer.is_available():
+                    return {'success': False, 'feature': feature,
+                            'error': (analyzer.unavailable_reason()
+                                      or 'Traffic analysis is not available on this unit.')}
+                if (analyzer.get_summary() or {}).get('status') != 'running':
+                    analyzer.start()
+            else:
+                analyzer.stop()
+            running = (analyzer.get_summary() or {}).get('status') == 'running'
+
+        elif feature == 'threats':
+            # Mirror toggle_threat_monitor's start path, but idempotently.
+            with _threat_monitor_lock:
+                running = bool(_threat_monitor_state.get('enabled'))
+                if start and not running:
+                    _threat_monitor_state['enabled'] = True
+                    _threat_monitor_state['findings'] = []
+                    _threat_monitor_state['sweep_count'] = 0
+                    _threat_monitor_state['last_sweep'] = None
+                    t = threading.Thread(target=_threat_monitor_loop, daemon=True,
+                                         name='threat-monitor')
+                    _threat_monitor_state['thread'] = t
+                    t.start()
+                    running = True
+                elif not start and running:
+                    _threat_monitor_state['enabled'] = False
+                    running = False
+
+        else:  # integrity / watchtower — always-running loops gated by a config flag
+            key = ('net_integrity_monitor_enabled' if feature == 'integrity'
+                   else 'watchtower_enabled')
+            shared_data.config[key] = start
+            setattr(shared_data, key, start)
+            shared_data.save_config()
+            running = start
+
+        logger.info(f"[mesh] {label} {'started' if running else 'stopped'} via mesh control")
+        return {'success': True, 'feature': feature, 'label': label,
+                'action': action, 'running': bool(running),
+                'message': f'{label} {"started" if running else "stopped"}.'}
+    except Exception as exc:
+        logger.error(f"[mesh] control {feature}/{action} failed: {exc}")
+        return {'success': False, 'feature': feature, 'error': str(exc)}
+
+
+@app.route('/api/mesh/findings', methods=['GET'])
+def mesh_unit_findings():
+    """This unit's security findings, for a peer to display.
+
+    The third and last peer-readable route (with /unit and /alerts). Read-only:
+    it surfaces what this box already found — vulnerabilities, integrity issues,
+    watcher alerts, incidents — so the fleet view can show findings per unit.
+    """
+    try:
+        limit = max(1, min(200, int(request.args.get('limit', 40))))
+    except (TypeError, ValueError):
+        limit = 40
+    result = _mesh_local_findings(limit=limit)
+    return jsonify({'success': True, 'node': _mesh_unit_name(),
+                    'unit_id': _mesh_unit_id(),
+                    'features': _mesh_local_features(), **result})
+
+
+def _mesh_poll_once():
+    """Refresh cached peer health. Safe to call when Tailscale is absent."""
+    global _mesh_last_poll
+    if not _mesh_enabled():
+        return
+    state = mesh_manager.status()
+    if not state.get('available'):
+        return
+    try:
+        timeout = max(1, int(shared_data.config.get('mesh_poll_timeout', 6)))
+    except (TypeError, ValueError):
+        timeout = 6
+    # Only tagged peers are Ragnars. Polling every tailnet device would mean
+    # hammering the operator's laptop and phone with HTTP requests.
+    tag = _mesh_tag()
+    peers = [p for p in state.get('peers', []) if tag in p.get('tags', [])]
+    # Poll every tagged unit, even ones Tailscale currently marks offline: its
+    # Online flag lags real reachability, and skipping "offline" peers is what
+    # silently stopped data sharing once units went idle. The poll doubles as
+    # the keepalive that flips them back online.
+    try:
+        results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(),
+                                         timeout=timeout, include_offline=True)
+    except TypeError:
+        # Defends against a partial update: a stale mesh_manager whose poll_mesh
+        # predates the include_offline argument would otherwise raise here and
+        # kill ALL polling silently (every peer stuck on "Not polled") while the
+        # rest of Ragnar looks current. Fall back to the old signature so peers
+        # are still polled, and say loudly that the box needs a clean update.
+        logger.warning("[mesh] poll_mesh() rejected include_offline — stale "
+                       "mesh_manager.py (partial update). Polling online peers "
+                       "only; run a clean 'git pull' + restart on this unit.")
+        results = mesh_manager.poll_mesh(peers, port=_mesh_node_port(), timeout=timeout)
+    with _mesh_lock:
+        _mesh_peer_health.clear()
+        _mesh_peer_health.update(results)
+        _mesh_last_poll = time.time()
+    reachable = sum(1 for r in results.values() if r.get('reachable'))
+    logger.info(f"[mesh] polled {len(results)}/{len(peers)} tagged peer(s), "
+                f"{reachable} reachable")
+    _mesh_poll_state['last_ok_at'] = time.time()
+    _mesh_poll_state['last_error'] = ''
+    _mesh_poll_state['last_summary'] = (f"polled {len(results)}/{len(peers)} "
+                                        f"tagged peer(s), {reachable} reachable")
+
+    if shared_data.config.get('mesh_aggregate_alerts', True):
+        _mesh_ingest_peer_alerts(peers, results, timeout)
+
+    _mesh_poll_peer_findings(peers, results, timeout)
+
+
+def _mesh_poll_peer_findings(peers, health, timeout):
+    """Pull each reachable peer's security findings into the local cache.
+
+    Findings power the fleet view — vulnerabilities and alerts from every unit
+    on one pane. Only reachable peers are asked (an unreachable one already
+    shows as degraded), and one call per peer keeps it bounded.
+    """
+    try:
+        limit = max(1, min(200, int(shared_data.config.get('mesh_findings_limit', 40))))
+    except (TypeError, ValueError):
+        limit = 40
+    port = _mesh_node_port()
+    fresh = {}
+    for peer in peers:
+        if not (health.get(peer['id']) or {}).get('reachable'):
+            continue
+        payload = mesh_manager.poll_peer(peer, port=port, timeout=timeout,
+                                         path=f'/api/mesh/findings?limit={limit}')
+        if payload.get('reachable'):
+            fresh[peer['id']] = {
+                'findings': payload.get('findings') or [],
+                'counts': payload.get('counts') or {},
+                'features': payload.get('features') or {},
+            }
+    with _mesh_lock:
+        _mesh_peer_findings.clear()
+        _mesh_peer_findings.update(fresh)
+
+
+def _mesh_ingest_peer_alerts(peers, health, timeout):
+    """Pull peers' Watchtower alerts into this unit's incident engine.
+
+    This is the part Tailscale's console cannot do: the same actor probing two
+    sites is one campaign, and only something that sees both alert streams can
+    say so. Every unit does this independently — each holds its own correlated
+    view of the whole mesh, so there is no collector whose loss blinds everyone.
+    Alerts are ingested under the peer's unit name as a scope, so site-local
+    addresses stay separated while public IPs and MACs still fuse across sites
+    (see incident_engine.extract_entities).
+    """
+    try:
+        limit = max(1, min(500, int(shared_data.config.get('mesh_alert_limit', 50))))
+    except (TypeError, ValueError):
+        limit = 50
+    port = _mesh_node_port()
+
+    for peer in peers:
+        if not (health.get(peer['id']) or {}).get('reachable'):
+            continue        # unreachable peers were already counted as degraded
+        payload = mesh_manager.poll_peer(peer, port=port, timeout=timeout,
+                                          path=f'/api/mesh/alerts?limit={limit}')
+        if not payload.get('reachable'):
+            continue
+        scope = payload.get('node') or peer.get('short_name') or peer['id']
+        alerts = payload.get('alerts') or []
+        if not alerts:
+            continue
+
+        # Only ingest what we have not already folded in. Peers serve a rolling
+        # window, so every poll re-sends alerts we saw last cycle; without this
+        # the same event would inflate an incident's alert count on every tick.
+        seen = _mesh_alert_seen.setdefault(scope, set())
+        fresh = []
+        for alert in alerts:
+            key = alert.get('key') or f"{alert.get('ts')}|{alert.get('title')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            fresh.append(alert)
+        # Bound the per-peer memory: a long-running unit must not grow a
+        # set forever. The window is far larger than any single poll's payload.
+        if len(seen) > 4000:
+            _mesh_alert_seen[scope] = set(list(seen)[-2000:])
+        if not fresh:
+            continue
+
+        try:
+            with _watchtower_lock:
+                eng = _inc_get()
+                for alert in fresh:
+                    eng.ingest(alert, scope=scope)
+        except Exception as exc:
+            logger.debug(f"[mesh] correlating alerts from {scope} failed: {exc}")
+        else:
+            logger.debug(f"[mesh] correlated {len(fresh)} alert(s) from {scope}")
+
+
+def mesh_monitor_loop():
+    """Background poller keeping the mesh view warm."""
+    logger.info("[mesh] poll loop started")
+    _mesh_poll_state['loop_started'] = True
+    while not getattr(shared_data, 'webapp_should_exit', False):
+        if not _mesh_enabled():
+            time.sleep(10)
+            continue
+        try:
+            _mesh_poll_once()
+        except Exception as exc:
+            # A failure here means NO peer data flows — the whole "sees each other
+            # but never polls" symptom. It must be visible, not swallowed at
+            # debug, and the traceback names the cause (e.g. a stale mesh_manager
+            # whose poll_mesh() lacks a newer argument after a partial update).
+            import traceback
+            logger.error(f"[mesh] poll cycle failed: {type(exc).__name__}: {exc}")
+            logger.error("[mesh] " + traceback.format_exc().replace("\n", "\n[mesh] "))
+            _mesh_poll_state['last_error'] = f"{type(exc).__name__}: {exc}"
+        try:
+            interval = max(15, int(shared_data.config.get('mesh_poll_interval', 60)))
+        except (TypeError, ValueError):
+            interval = 60
+        for _ in range(interval // 5):
+            if getattr(shared_data, 'webapp_should_exit', False):
+                return
+            if not _mesh_enabled():
+                break
+            time.sleep(5)
+    logger.info("[mesh] poll loop exited")
+
+
+def _mesh_health_rollup(known, self_node):
+    """Aggregate one health posture for the whole mesh.
+
+    `known` is every Ragnar node in the mesh (this unit if tagged, plus tagged
+    peers). At fleet scale the per-node cards are useless for "is anything
+    wrong?" — this rolls the whole mesh into a handful of counts so the operator
+    sees the state of thousands of units at a glance. Computed here, server-side,
+    so the browser never iterates the fleet.
+
+    A node "needs attention" if it is unreachable, its node key is warning/
+    expired, it reports undervoltage, or it is carrying a high/critical finding.
+    """
+    roll = {
+        'total': len(known), 'reachable': 0, 'unreachable': 0, 'not_polled': 0,
+        'attention': 0, 'with_alerts': 0, 'alerts_total': 0,
+        'with_incidents': 0, 'incidents_total': 0,
+        'undervoltage': 0, 'key_issues': 0, 'published': 0,
+        'worst': None, 'by_severity': {s: 0 for s in _MESH_SEV_ORDER},
+    }
+    worst_rank = -1
+    for node in known:
+        is_self = node is self_node
+        health = node.get('health') or {}
+        polled = is_self or node.get('health') is not None
+        reachable = is_self or health.get('reachable') is True
+
+        if reachable:
+            roll['reachable'] += 1
+        elif not polled:
+            roll['not_polled'] += 1
+        else:
+            roll['unreachable'] += 1
+
+        wt = health.get('watchtower') or {}
+        inc = health.get('incidents') or {}
+        alerts = wt.get('total') or 0
+        incidents = inc.get('total') or 0
+        if alerts:
+            roll['with_alerts'] += 1
+            roll['alerts_total'] += alerts
+        if incidents:
+            roll['with_incidents'] += 1
+            roll['incidents_total'] += incidents
+
+        undervoltage = bool((health.get('power') or {}).get('undervoltage'))
+        if undervoltage:
+            roll['undervoltage'] += 1
+        key_bad = node.get('key_state') in ('warn', 'critical', 'expired')
+        if key_bad:
+            roll['key_issues'] += 1
+        if (health.get('serve') or {}).get('published'):
+            roll['published'] += 1
+
+        # Worst severity this node is carrying (its Watchtower + incident worst),
+        # tallied so the card can show the mesh-wide distribution and headline.
+        node_worst = None
+        node_rank = -1
+        for sev in (wt.get('worst'), inc.get('worst')):
+            if sev and _MESH_SEV_RANK.get(sev, -1) > node_rank:
+                node_rank = _MESH_SEV_RANK[sev]
+                node_worst = sev
+        if node_worst:
+            roll['by_severity'][node_worst] += 1
+            if node_rank > worst_rank:
+                worst_rank = node_rank
+                roll['worst'] = node_worst
+
+        if (reachable is False and polled) or (not is_self and not node.get('online') and not reachable) \
+                or key_bad or undervoltage or node_rank >= _MESH_SEV_RANK['high']:
+            roll['attention'] += 1
+
+    return roll
+
+
+@app.route('/api/mesh/status', methods=['GET'])
+def mesh_status():
+    """Whole-mesh view: tailnet state, this node, peers, and peer health."""
+    cfg = shared_data.config
+    if not mesh_available:
+        return jsonify({'success': True, 'enabled': False, 'installed': False,
+                        'reason': 'mesh_manager module is unavailable.',
+                        'self': None, 'peers': []})
+
+    state = mesh_manager.status()
+    tag = _mesh_tag()
+
+    # A caller can force a synchronous poll (the Refresh button); otherwise the
+    # cached result from the background loop is served instantly.
+    if request.args.get('refresh') == '1' and _mesh_enabled():
+        try:
+            _mesh_poll_once()
+        except Exception as exc:
+            logger.debug(f"[mesh] forced poll failed: {exc}")
+
+    with _mesh_lock:
+        health = dict(_mesh_peer_health)
+        findings = dict(_mesh_peer_findings)
+        last_poll = _mesh_last_poll
+
+    peers = []
+    for peer in state.get('peers', []):
+        node = dict(peer)
+        node['is_ragnar'] = tag in peer.get('tags', [])
+        node['health'] = health.get(peer['id'])
+        node['findings'] = findings.get(peer['id'])
+        # The unit number is reported by the unit itself, so it is only known
+        # for peers we could actually reach.
+        node['unit_id'] = (node['health'] or {}).get('unit_id', 0)
+        node['viking_name'] = (node['health'] or {}).get('viking_name', '')
+        node['label'] = ((node['health'] or {}).get('label')
+                         or peer.get('short_name', ''))
+        key_state, key_msg = mesh_manager.node_key_health(peer)
+        node['key_state'], node['key_message'] = key_state, key_msg
+        peers.append(node)
+
+    self_node = state.get('self')
+    self_tagged = False
+    if self_node:
+        self_node = dict(self_node)
+        # Is THIS unit tagged into the mesh? A unit can be fully on the tailnet
+        # (BackendState Running) yet carry no tag, which is the single most
+        # common reason two units "sense each other but don't share data": the
+        # whole mesh keys off the tag, and an interactive `tailscale up` login
+        # never applies one.
+        self_tagged = tag in self_node.get('tags', [])
+        self_node['is_ragnar'] = self_tagged
+        self_node['health'] = _mesh_local_health()
+        self_node['findings'] = dict(_mesh_local_findings(),
+                                     features=_mesh_local_features())
+        self_node['unit_id'] = _mesh_unit_id()
+        self_node['viking_name'] = _mesh_viking_name()
+        key_state, key_msg = mesh_manager.node_key_health(state.get('self'))
+        self_node['key_state'], self_node['key_message'] = key_state, key_msg
+        self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
+
+    ragnar_peers = [p for p in peers if p['is_ragnar']]
+
+    # Two units answering to the same number makes every report ambiguous
+    # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
+    # configured independently and there is no controller to arbitrate, so the
+    # mesh detects the clash and says so instead.
+    known = ([self_node] if self_node else []) + ragnar_peers
+    assigned = [u['unit_id'] for u in known if u.get('unit_id')]
+    duplicates = sorted({n for n in assigned if assigned.count(n) > 1})
+
+    # Viking names are derived from each machine's own identity with no central
+    # allocator, so two units can independently land on the same one. Rare, but
+    # a mesh where two boxes answer to "Bjorn Ironside" is exactly the confusion
+    # naming was meant to remove — surface it so one can be renamed.
+    names = [u['viking_name'] for u in known if u.get('viking_name')]
+    duplicate_names = sorted({n for n in names if names.count(n) > 1})
+    unnumbered = sum(1 for u in ([self_node] if self_node else []) + ragnar_peers
+                     if u.get('is_ragnar') is not False and not u.get('unit_id')
+                     and (u is self_node or (u.get('health') or {}).get('reachable')))
+
+    with _mesh_install_lock:
+        installing = _mesh_installing
+
+    health_rollup = _mesh_health_rollup(known, self_node)
+
+    return jsonify({
+        'success': True,
+        'enabled': bool(cfg.get('mesh_enabled')),
+        'installed': state.get('installed', False),
+        'installing': installing,
+        'available': state.get('available', False),
+        'reason': state.get('reason', ''),
+        'backend_state': state.get('backend_state', ''),
+        'auth_url': state.get('auth_url', ''),
+        'version': state.get('version', ''),
+        'magic_dns_suffix': state.get('magic_dns_suffix', ''),
+        'mesh_tag': tag,
+        # Whether THIS unit is tagged into the mesh. False + available means
+        # "on the tailnet but not in the mesh" — the state to explain loudly.
+        'self_tagged': self_tagged,
+        'unit_id': _mesh_unit_id(),
+        'unit_name': _mesh_unit_name(),
+        'viking_name': _mesh_viking_name(),
+        # Whether `tailscale serve --https` can actually work here. Reported so
+        # the UI can say so up front instead of offering a button that hangs.
+        'https_available': mesh_manager.https_available() if mesh_available else False,
+        'https_setup_url': mesh_manager.HTTPS_SETUP_URL if mesh_available else '',
+        # An access path that shares nothing with Tailscale — reported so an
+        # operator can confirm a second way in exists *before* needing it.
+        'pi_connect': (mesh_manager.pi_connect_status() if mesh_available
+                       else {'installed': False, 'running': False,
+                             'signed_in': False, 'detail': ''}),
+        'site_label': cfg.get('mesh_site_label', ''),
+        'node_port': _mesh_node_port(),
+        'last_poll': last_poll,
+        # How often the background poller refreshes peer data, so the UI can say
+        # the rate outright instead of leaving the operator guessing.
+        'poll_interval': max(15, int(cfg.get('mesh_poll_interval', 60) or 60)),
+        # Health of the poll LOOP, so the UI can distinguish "peers refuse me"
+        # (a peer problem — Diagnose says why) from "my poller never ran / keeps
+        # crashing" (a local problem — last_error names it).
+        'poll_status': dict(_mesh_poll_state),
+        'self': self_node,
+        # Only Ragnar mesh units are surfaced. Other tailnet devices (laptops,
+        # phones, unrelated services) are intentionally not listed — they are
+        # not the mesh's business and naming them just leaks the tailnet roster.
+        'peers': ragnar_peers,
+        'summary': {
+            'total': len(ragnar_peers) + (1 if self_node else 0),
+            'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
+            'online': sum(1 for p in ragnar_peers if p['online']),
+            'offline': sum(1 for p in ragnar_peers if not p['online']),
+            # Online in Tailscale but Ragnar not answering — i.e. actually
+            # polled and the poll failed. A peer that has not been polled yet
+            # (health is None) is NOT degraded; it shows "Not polled yet" on its
+            # card, and counting it here would contradict that.
+            'degraded': sum(1 for p in ragnar_peers if p['online']
+                            and p.get('health') is not None
+                            and not p['health'].get('reachable')),
+            'duplicate_unit_ids': duplicates,
+            'duplicate_names': duplicate_names,
+            'unnumbered_units': unnumbered,
+            # Mesh-wide health, rolled up server-side so a fleet of thousands is
+            # one small object here instead of the browser crunching every node.
+            'health': health_rollup,
+        },
+    })
+
+
+@app.route('/api/mesh/control', methods=['POST'])
+def mesh_control():
+    """Start/stop one of this unit's monitors — the mesh's write endpoint.
+
+    Reachable two ways, both trusted:
+      * a tagged peer Ragnar over the tailnet (the auth bypass in
+        check_authentication lets THIS one POST through on WireGuard identity);
+      * the local operator with a session (self-control, no network hop).
+
+    Everything actuable is allowlisted in `_mesh_apply_control`; there is no way
+    to reach an arbitrary route from here.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    result = _mesh_apply_control(data.get('feature'), data.get('action'))
+    return jsonify(result), (200 if result.get('success') else 400)
+
+
+@app.route('/api/mesh/peer-control', methods=['POST'])
+def mesh_peer_control():
+    """Operator-facing proxy: tell a *peer* unit to start/stop a monitor.
+
+    The browser can't dial a peer's tailnet IP (it isn't on the tailnet — that's
+    the whole reason peer data is pulled server-side), so this unit relays the
+    command over the tailnet on the operator's behalf, exactly as it relays
+    polls. A command aimed at THIS unit is applied directly with no network hop.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    if not _mesh_enabled():
+        return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
+    data = request.get_json(silent=True) or {}
+    feature = (data.get('feature') or '').strip().lower()
+    action = (data.get('action') or '').strip().lower()
+    node_id = (data.get('node_id') or '').strip()
+    if feature not in _MESH_CONTROLLABLE:
+        return jsonify({'success': False, 'error': f'Unknown feature {feature!r}.'}), 400
+    if action not in ('start', 'stop'):
+        return jsonify({'success': False, 'error': f'Unknown action {action!r}.'}), 400
+
+    # Everything below can touch Tailscale/the network, so guard it: this route
+    # must ALWAYS return JSON. A 500 HTML error page here is what surfaces in the
+    # browser as an opaque "SyntaxError: The string did not match the expected
+    # pattern" when the client tries to parse it, hiding the real cause.
+    try:
+        state = mesh_manager.status()
+        tag = _mesh_tag()
+
+        # Self? Apply locally — no need to loop back over the network.
+        self_node = state.get('self') or {}
+        if node_id and node_id == str(self_node.get('id', '')):
+            result = _mesh_apply_control(feature, action)
+            return jsonify(result), (200 if result.get('success') else 400)
+
+        peer = next((p for p in state.get('peers', [])
+                     if str(p.get('id', '')) == node_id and tag in p.get('tags', [])), None)
+        if not peer:
+            return jsonify({'success': False,
+                            'error': 'No such tagged mesh unit — refresh and try again.'}), 404
+
+        reply = mesh_manager.command_peer(peer, feature, action, port=_mesh_node_port())
+        if not reply.get('reachable'):
+            return jsonify({'success': False,
+                            'error': reply.get('error') or 'The peer did not answer.'}), 502
+        return jsonify(reply), (200 if reply.get('success') else 400)
+    except Exception as exc:
+        logger.error(f"[mesh] peer-control {feature}/{action} on {node_id!r} failed: {exc}")
+        return jsonify({'success': False, 'error': f'Mesh command failed: {exc}'}), 500
+
+
+@app.route('/api/mesh/join', methods=['POST'])
+def mesh_join():
+    """Join this node to a tailnet using a pre-authorized key."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    auth_key = (data.get('auth_key') or '').strip()
+    hostname = (data.get('hostname') or '').strip()
+    tags = data.get('tags') or [_mesh_tag()]
+    routes = [r.strip() for r in (data.get('advertise_routes') or []) if r.strip()]
+    ok, message = mesh_manager.join(
+        auth_key,
+        hostname=hostname,
+        tags=tags,
+        advertise_routes=routes,
+        enable_ssh=bool(data.get('enable_ssh', True)),
+        accept_routes=bool(data.get('accept_routes', False)),
+    )
+    if ok:
+        # Joining is the moment the operator has decided this box is mesh-managed.
+        shared_data.config['mesh_enabled'] = True
+        if hostname and not shared_data.config.get('mesh_site_label'):
+            shared_data.config['mesh_site_label'] = hostname
+        shared_data.save_config()
+        logger.success(f"[mesh] joined tailnet as {hostname or socket.gethostname()}")
+    else:
+        logger.warning(f"[mesh] join failed: {message}")
+    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+
+
+@app.route('/api/mesh/leave', methods=['POST'])
+def mesh_leave():
+    """Log this node out of its tailnet."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    ok, message = mesh_manager.leave()
+    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+
+
+@app.route('/api/mesh/diagnose', methods=['POST'])
+def mesh_diagnose():
+    """Probe a specific peer from this unit and classify why it does/doesn't
+    answer. Operator action (POST, session-gated) — turns a red "did not answer"
+    card into the actual cause (app down / wrong port / ACL / auth)."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    ip = (data.get('ip') or '').strip()
+    if not ip:
+        return jsonify({'success': False, 'message': 'No peer address to probe.'}), 400
+    try:
+        port = int(data.get('port') or _mesh_node_port())
+    except (TypeError, ValueError):
+        port = _mesh_node_port()
+    try:
+        timeout = max(2, int(shared_data.config.get('mesh_poll_timeout', 6)))
+    except (TypeError, ValueError):
+        timeout = 6
+    result = mesh_manager.diagnose_peer(ip, port=port, timeout=timeout,
+                                        mesh_tag=_mesh_tag())
+    return jsonify({'success': True, 'result': result})
+
+
+@app.route('/api/mesh/install', methods=['POST'])
+def mesh_install():
+    """Install the Tailscale client on this unit from the web UI.
+
+    A stock Ragnar does not ship Tailscale — the mesh is opt-in — and `update`
+    only installs it once a unit has opted in (auth key, boot config, or
+    mesh_enabled). This route is the third onboarding path: a fresh unit whose
+    operator opened the Mesh tab and wants to start here. Idempotent; the script
+    no-ops if Tailscale is already present.
+    """
+    global _mesh_installing
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    if mesh_manager.installed():
+        return jsonify({'success': True, 'message': 'Tailscale is already installed.',
+                        'installing': False})
+    if not os.path.isfile(MESH_INSTALL_SCRIPT):
+        return jsonify({'success': False,
+                        'message': 'scripts/setup_mesh.sh is missing — reinstall or update Ragnar.'}), 500
+    with _mesh_install_lock:
+        if _mesh_installing:
+            return jsonify({'success': True, 'message': 'Install already in progress.',
+                            'installing': True})
+        _mesh_installing = True
+    try:
+        open(MESH_INSTALL_LOG, 'w').close()  # fresh log per run
+    except OSError:
+        pass
+    threading.Thread(target=_run_mesh_install, daemon=True, name='mesh-install').start()
+    return jsonify({'success': True, 'message': 'Tailscale install started.',
+                    'installing': True})
+
+
+@app.route('/api/mesh/install-log', methods=['GET'])
+def mesh_install_log():
+    """Live install log plus whether Tailscale is now present. Polled by the tab."""
+    with _mesh_install_lock:
+        installing = _mesh_installing
+    log = ''
+    try:
+        with open(MESH_INSTALL_LOG, 'r') as fh:
+            log = fh.read()[-8000:]  # tail — the whole apt log is not useful
+    except OSError:
+        pass
+    return jsonify({'success': True, 'installing': installing,
+                    'installed': mesh_manager.installed() if mesh_available else False,
+                    'log': log})
+
+
+@app.route('/api/mesh/tunnel', methods=['POST'])
+def mesh_tunnel():
+    """Bring the tunnel up or down without logging out."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    ok, message = mesh_manager.set_running(bool(data.get('up', True)))
+    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+
+
+@app.route('/api/mesh/serve', methods=['POST'])
+def mesh_serve():
+    """Publish (or unpublish) this node's web UI to the tailnet over HTTPS."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    enable = bool(data.get('enable', True))
+    # HTTP is the default publish path: no certificate, works on every tailnet,
+    # and is how units are actually reached. HTTPS is opt-in.
+    use_https = bool(data.get('https', False))
+
+    # Refuse the one combination that silently disables authentication.
+    # `tailscale serve` proxies from tailscaled, so every request reaches Flask
+    # from 127.0.0.1 — and the kiosk bypass grants unauthenticated access to
+    # exactly that address. Together they would expose the full UI, no login, to
+    # every device on the tailnet. Neither setting is wrong alone; the pair is.
+    if enable and shared_data.config.get('kiosk_enabled'):
+        return jsonify({
+            'success': False,
+            'message': ('Kiosk mode is enabled, which grants unauthenticated '
+                        'access to loopback requests. Publishing over Tailscale '
+                        'Serve would route every tailnet visitor through '
+                        'loopback and bypass the login. Disable kiosk mode '
+                        'first, or reach this node directly on port '
+                        f'{_mesh_node_port()} instead.'),
+        }), 409
+
+    ok, message = mesh_manager.serve_web(port=_mesh_node_port(), enable=enable,
+                                         use_https=use_https)
+    return jsonify({'success': ok, 'message': message,
+                    'https_available': mesh_manager.https_available()}), (200 if ok else 400)
+
+
+@app.route('/api/mesh/routes', methods=['POST'])
+def mesh_routes():
+    """Advertise LAN subnets, making the node's whole local network reachable."""
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    routes = [r.strip() for r in (data.get('routes') or []) if r.strip()]
+    for route in routes:
+        try:
+            ipaddress.ip_network(route, strict=False)
+        except ValueError:
+            return jsonify({'success': False,
+                            'message': f'"{route}" is not a valid CIDR subnet.'}), 400
+    ok, message = mesh_manager.advertise_routes(routes)
+    if ok:
+        message += ('  Routes still need approving in the Tailscale admin '
+                    'console before peers can use them.')
+    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
 @app.route('/api/rusense/geofence', methods=['GET'])
@@ -20936,6 +22238,7 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(_rusense_notify_loop)
         socketio.start_background_task(net_integrity_monitor_loop)
         socketio.start_background_task(watchtower_monitor_loop)
+        socketio.start_background_task(mesh_monitor_loop)
 
         # Bring up the BLE provisioning peripheral if the user has enabled it.
         # Deferred so a slow/absent Bluetooth stack never delays the web server

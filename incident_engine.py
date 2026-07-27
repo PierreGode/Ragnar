@@ -79,16 +79,49 @@ _ENTITY_KEYS = ('src', 'target', 'station', 'bssid', 'sender_ip', 'server_ip',
 _SSID_KEYS = ('ssid',)
 
 
-def extract_entities(alert):
+def _is_site_local(kind, val):
+    """True when an entity's value is only meaningful inside one site's LAN.
+
+    Correlating a fleet means alerts arrive from several networks at once, and
+    those networks reuse the same address space: 192.168.1.1 is a different
+    machine in Jersey than it is in Stockholm, and "Guest WiFi" is a different
+    SSID at every site. Fusing on those would manufacture incidents out of
+    coincidence. Public IPs and MACs are the opposite case — the same public
+    scanner or the same NIC appearing at two sites is precisely the signal a
+    fleet exists to catch, so those stay globally comparable.
+    """
+    if kind == 'ssid':
+        return True
+    if kind != 'ip':
+        return False
+    try:
+        ip = ipaddress.ip_address(val)
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_link_local or ip.is_reserved
+
+
+def extract_entities(alert, scope=''):
     """Set of (kind, value) entities an alert is *about*. MAC/IP are strong
-    correlation keys; SSID is included only for wifi-identity detectors."""
+    correlation keys; SSID is included only for wifi-identity detectors.
+
+    `scope` names the site an alert came from (a fleet node label). When set,
+    site-local entities are namespaced to that site so they only correlate with
+    other alerts from the same place — see `_is_site_local`.
+    """
     ents = set()
     raw = alert.get('raw') or {}
+
+    def add(kind, val):
+        if scope and _is_site_local(kind, val):
+            val = f'{scope}/{val}'
+        ents.add((kind, val))
+
     for k in _ENTITY_KEYS:
         for src in (alert, raw):
             kind, val = _classify(src.get(k))
             if kind in ('mac', 'ip'):
-                ents.add((kind, val))
+                add(kind, val)
     # SSID entities: only from the detectors where the SSID *is* the target of
     # the attack (evil twin / PNL / downgrade), else a shared SSID over-merges.
     cats = categorize(alert)
@@ -97,7 +130,7 @@ def extract_entities(alert):
             for src in (alert, raw):
                 v = src.get(k)
                 if v:
-                    ents.add(('ssid', str(v)))
+                    add('ssid', str(v))
     return ents
 
 
@@ -296,11 +329,16 @@ class IncidentEngine:
     def _expired(self, inc, now):
         return (now - inc.last_ts) > self.window_s
 
-    def ingest(self, alert):
+    def ingest(self, alert, scope=''):
         """Fold one alert into the incident set. Returns the affected Incident,
-        or None if the alert carried no correlatable entity."""
+        or None if the alert carried no correlatable entity.
+
+        `scope` is the fleet site the alert came from; it namespaces site-local
+        entities so alerts from different networks do not fuse on coincidence.
+        Local alerts pass no scope and behave exactly as before.
+        """
         ts = float(alert.get('ts') or time.time())
-        ents = extract_entities(alert)
+        ents = extract_entities(alert, scope=scope)
         if not ents:
             return None
         cats = categorize(alert)

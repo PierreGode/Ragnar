@@ -506,6 +506,38 @@ if ! grep -qE '^SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null; then
 fi
 systemctl restart systemd-journald >/dev/null 2>&1 || true
 
+echo -e "${BLUE}Step 6.95: Checking Ragnar Mesh prerequisites...${NC}"
+# Mesh setup must run on the update path too, not only at install: most users
+# only ever update, so an installer-only change never reaches the units that
+# already exist. Strictly conditional — a unit that has not opted into the mesh
+# gets nothing installed, and one already joined is left alone.
+#
+# Also picks up an unattended re-provision: dropping /boot/ragnar-mesh.conf onto
+# a running unit and updating is a way to move a box onto the mesh with no
+# console access at all.
+_MESH_SCRIPT="$(dirname "$0")/scripts/setup_mesh.sh"
+_MESH_WANTED=false
+if [ -n "${RAGNAR_MESH_AUTHKEY:-}" ] || [ -f /boot/ragnar-mesh.conf ] \
+   || [ -f /boot/firmware/ragnar-mesh.conf ]; then
+    _MESH_WANTED=true
+elif grep -q '"mesh_enabled"[[:space:]]*:[[:space:]]*true' \
+        "$(dirname "$0")/config/shared_config.json" 2>/dev/null; then
+    _MESH_WANTED=true
+fi
+
+if [ "$_MESH_WANTED" = true ] && [ -f "$_MESH_SCRIPT" ]; then
+    chmod +x "$_MESH_SCRIPT" 2>/dev/null
+    if bash "$_MESH_SCRIPT" provision; then
+        echo -e "  ${GREEN}✓${NC} Mesh prerequisites in place"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Mesh setup reported a problem — check the Ragnar Mesh tab"
+    fi
+elif [ "$_MESH_WANTED" = true ]; then
+    echo -e "  ${YELLOW}⚠${NC} Mesh is enabled but scripts/setup_mesh.sh is missing"
+else
+    echo -e "  ${GREEN}✓${NC} Mesh not enabled on this unit — nothing to do"
+fi
+
 echo -e "${BLUE}Step 7: Starting ragnar service...${NC}"
 systemctl start ragnar.service
 
