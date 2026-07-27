@@ -2969,7 +2969,12 @@
 
             <!-- Onboarding: shown until this unit has joined a tailnet -->
             <div id="mesh-setup" class="glass rounded-xl p-6 mb-6 hidden">
-                <h3 class="text-xl font-semibold mb-2 text-Ragnar-400">Join this unit to the mesh</h3>
+                <div class="flex items-center gap-2 mb-2">
+                    <h3 class="text-xl font-semibold text-Ragnar-400">Join this unit to the mesh</h3>
+                    <button onclick="meshShowSetupHelp()" title="How to set up Tailscale for the mesh (tag, auth key, HTTPS)"
+                            aria-label="Tailscale setup help"
+                            class="flex-shrink-0 w-6 h-6 rounded-full border border-Ragnar-500 text-Ragnar-300 hover:bg-Ragnar-600 hover:text-white text-sm font-serif italic leading-none transition-colors">i</button>
+                </div>
                 <p id="mesh-setup-reason" class="text-sm text-gray-400 mb-4"></p>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -7277,7 +7282,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh25"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260727-ragnar-mesh26"></script>
 
 </body>
 </html>

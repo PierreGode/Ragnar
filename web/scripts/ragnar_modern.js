@@ -29998,6 +29998,76 @@ async function meshDiagnose(ip, port, btn) {
     }
 }
 
+// One-time Tailscale-console setup help, shown from the ⓘ button on the Join
+// panel. Mirrors docs/mesh.md "Tailscale console: one-time setup" so an operator
+// never has to leave the page to remember the order (tag first, then key).
+function meshShowSetupHelp() {
+    let modal = document.getElementById('mesh-help-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'mesh-help-modal';
+        document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-[70] bg-black/60 flex items-start justify-center p-4 overflow-auto';
+    modal.onclick = (e) => { if (e.target === modal) meshCloseSetupHelp(); };
+    modal.innerHTML = `
+        <div class="glass rounded-xl w-full max-w-2xl my-8 p-6 border border-slate-700">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <h3 class="text-xl font-bold">Tailscale console — one-time setup</h3>
+                <button onclick="meshCloseSetupHelp()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
+            </div>
+            <p class="text-sm text-gray-400 mb-4">Do this once per tailnet at
+                <a href="https://login.tailscale.com" target="_blank" rel="noopener noreferrer" class="text-cyan-400 underline">login.tailscale.com</a>,
+                before joining any unit.</p>
+
+            <div class="mb-4 p-3 rounded-lg bg-red-950/40 border border-red-800 text-sm text-red-200">
+                ⚠ Use the tag <code class="font-mono text-red-100">tag:ragnar-mesh</code> in
+                <strong>lowercase</strong> — Tailscale rejects uppercase, and it must match every
+                unit's <code class="font-mono">mesh_tag</code> exactly. <code class="font-mono">Ragnar-mesh</code> will not work.
+            </div>
+
+            <ol class="space-y-4 text-sm text-gray-300">
+                <li>
+                    <div class="font-semibold text-gray-100">1. Create the tag <span class="text-gray-500">(do this first)</span></div>
+                    <div class="text-gray-400">Access Controls → edit the policy → add it to <code class="font-mono">tagOwners</code>.
+                        The tag must exist before a key can carry it.</div>
+                    <pre class="mt-1 bg-slate-900 border border-slate-800 rounded p-2 text-[12px] overflow-x-auto"><code>{ "tagOwners": { "tag:ragnar-mesh": ["autogroup:admin"] } }</code></pre>
+                </li>
+                <li>
+                    <div class="font-semibold text-gray-100">2. Generate a tagged auth key</div>
+                    <div class="text-gray-400">Settings → Keys → Generate auth key. Assign tag
+                        <code class="font-mono">tag:ragnar-mesh</code> (makes the node key never expire),
+                        <strong>Ephemeral off</strong>, Reusable on if enrolling several units.
+                        Copy the <code class="font-mono">tskey-auth-…</code> — shown once.</div>
+                </li>
+                <li>
+                    <div class="font-semibold text-gray-100">3. HTTPS certificates <span class="text-gray-500">(optional)</span></div>
+                    <div class="text-gray-400">Only for the <em>Publish (HTTPS)</em> button — HTTP and all polling work without it.
+                        DNS → confirm MagicDNS is on → enable HTTPS Certificates.</div>
+                </li>
+                <li>
+                    <div class="font-semibold text-gray-100">4. Join the unit</div>
+                    <div class="text-gray-400">Don't run <code class="font-mono">tailscale up</code> by hand. Paste the
+                        <code class="font-mono">tskey-auth-…</code> into the <strong>Join</strong> form below (or a boot config /
+                        the installer) — Ragnar joins with the right tag and flags, and the unit appears in
+                        <strong>Machines</strong> already tagged.</div>
+                </li>
+            </ol>
+
+            <p class="text-[11px] text-gray-500 mt-4">A unit brought up interactively (no key) will be untagged —
+                fix it in Machines → device → ⋯ → Edit ACL tags → add <code class="font-mono">tag:ragnar-mesh</code>.</p>
+        </div>`;
+    document.addEventListener('keydown', _meshHelpEsc);
+}
+function _meshHelpEsc(e) { if (e.key === 'Escape') meshCloseSetupHelp(); }
+function meshCloseSetupHelp() {
+    const modal = document.getElementById('mesh-help-modal');
+    if (modal) modal.remove();
+    document.removeEventListener('keydown', _meshHelpEsc);
+}
+window.meshShowSetupHelp = meshShowSetupHelp;
+window.meshCloseSetupHelp = meshCloseSetupHelp;
+
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
 window.meshInstall = meshInstall;
