@@ -425,27 +425,28 @@ no Bluetooth path — it reaches units exclusively over the mesh, which is what
 makes one phone able to jump between a box on your desk and a box in a data
 centre without reconfiguration.
 
-**How it finds units.** The app asks the Tailscale API for every device in the
-tailnet and keeps the ones tagged `tag:ragnar-mesh` — i.e. every Ragnar unit.
-Each becomes a tappable entry; selecting one points the app at
-`http://<100.x>:8000`. Switching units is just picking a different entry.
+**How it finds units — and why it needs no Tailscale token.** The app never
+talks to the Tailscale API. It connects to one unit and reads that unit's
+[`/api/mesh/status`](#mesh-nodes-list-and-the-node-page), which already lists
+every peer (Viking name, `100.x` address, online state, tag) because the unit
+speaks to its own `tailscaled`. So a single login exposes the whole fleet, and
+switching units just repoints the app at another peer's `http://<100.x>:8000`.
 
 **What the operator needs, once:**
 
 1. **Tailscale connected on the phone**, signed into the same tailnet as the
    units. This is what makes the `100.x` addresses reachable.
-2. **A Tailscale API access token** pasted into the app (admin console →
-   **Settings → Keys → API access tokens**). Listing devices is an API
-   operation, so a token is required; tailnet membership alone cannot enumerate
-   the fleet. The token is stored on the device and never sent to a Ragnar unit.
+2. **One unit's Tailscale address** typed into the app — its MagicDNS name
+   (`bjorn.tailXXXX.ts.net`) or `100.x` — plus a normal Ragnar login. Every
+   other unit is then discovered from the mesh; nothing else is entered.
 
 **Why this is safe.** The app authenticates to each unit exactly as the web UI
 does — Ragnar's existing session login (`/api/auth/login`). The mesh reaching a
 unit is not the same as being authorized on it: an operator's phone is a real
 tailnet node and must still sign in, precisely as
 [the mesh security model](#unit-to-unit-authentication) requires of any
-non-unit caller. The Tailscale token only reads the device list; it grants no
-access to a unit's API.
+non-unit caller. Reading `/api/mesh/status` is a session-authenticated GET, the
+same as any other read the app makes.
 
 For units to answer the phone on port 8000, the tailnet ACL must permit it —
 the [suggested ACL shape](#suggested-acl-shape) already opens
