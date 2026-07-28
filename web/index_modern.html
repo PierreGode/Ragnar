@@ -6206,8 +6206,12 @@
                     </div>
                 </div>
 
-                <!-- Bluetooth Provisioning Section -->
-                <div id="ble-provisioning-section" class="mb-8">
+                <!-- Bluetooth Provisioning Section.
+                     Hidden: the Ragnar mobile app now connects over the mesh
+                     (Tailscale), not Bluetooth, so nothing consumes this. The
+                     ble_provisioning.py peripheral still exists for other
+                     clients; remove the `hidden` class to expose the UI again. -->
+                <div id="ble-provisioning-section" class="mb-8 hidden">
                     <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Bluetooth Provisioning</h3>
 
                     <div class="glass rounded-lg p-4 mb-4">
