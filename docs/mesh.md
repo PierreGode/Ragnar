@@ -31,6 +31,7 @@ be logged into renders the mesh; so would any other.
   - [Path 3 — later, from the web UI](#path-3--later-from-the-web-ui)
 - [Reaching the whole far-side LAN](#reaching-the-whole-far-side-lan)
 - [Backup access when Ragnar itself is wedged](#backup-access-when-ragnar-itself-is-wedged)
+- [The Ragnar Mobile app](#the-ragnar-mobile-app)
 - [Security model](#security-model)
 - [Cross-site incident correlation](#cross-site-incident-correlation)
 - [Configuration reference](#configuration-reference)
@@ -413,6 +414,44 @@ and both make the card *correct*, not wrong:
 > **Set this up before you ship the hardware.** Every one of these paths is
 > trivial to establish with the box on your desk and impossible to establish
 > once it is 1,500 km away and unreachable.
+
+---
+
+## The Ragnar Mobile app
+
+[Ragnar Mobile](https://github.com/PierreGode/Ragnarmobile) (iOS + Android) is a
+first-class mesh client. It does **not** connect to a unit by local IP and has
+no Bluetooth path — it reaches units exclusively over the mesh, which is what
+makes one phone able to jump between a box on your desk and a box in a data
+centre without reconfiguration.
+
+**How it finds units — and why it needs no Tailscale token.** The app never
+talks to the Tailscale API. It connects to one unit and reads that unit's
+[`/api/mesh/status`](#mesh-nodes-list-and-the-node-page), which already lists
+every peer (Viking name, `100.x` address, online state, tag) because the unit
+speaks to its own `tailscaled`. So a single login exposes the whole fleet, and
+switching units just repoints the app at another peer's `http://<100.x>:8000`.
+
+**What the operator needs, once:**
+
+1. **Tailscale connected on the phone**, signed into the same tailnet as the
+   units. This is what makes the `100.x` addresses reachable.
+2. **One unit's Tailscale address** typed into the app — its MagicDNS name
+   (`bjorn.tailXXXX.ts.net`) or `100.x` — plus a normal Ragnar login. Every
+   other unit is then discovered from the mesh; nothing else is entered.
+
+**Why this is safe.** The app authenticates to each unit exactly as the web UI
+does — Ragnar's existing session login (`/api/auth/login`). The mesh reaching a
+unit is not the same as being authorized on it: an operator's phone is a real
+tailnet node and must still sign in, precisely as
+[the mesh security model](#unit-to-unit-authentication) requires of any
+non-unit caller. Reading `/api/mesh/status` is a session-authenticated GET, the
+same as any other read the app makes.
+
+For units to answer the phone on port 8000, the tailnet ACL must permit it —
+the [suggested ACL shape](#suggested-acl-shape) already opens
+`tag:ragnar-mesh:8000` between mesh members; add the operator's user or device
+as a source there too if the phone is not itself tagged.
 
 ---
 

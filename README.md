@@ -56,12 +56,12 @@ The portal supports network scanning with signal strength, manual entry for hidd
 
 web will be down during wardrive without ap or wifi connection.
 
-**Mobile app + Bluetooth discovery** — the [Ragnar mobile app](https://github.com/PierreGode/Ragnarmobile)
-(iOS/Android) drives the box over your network. Optionally, a BlueZ GATT
-peripheral lets the phone *find* a box and read its IP over Bluetooth — it is
-provisioning only; all real traffic stays on Wi-Fi. Off by default (it shares
-the adapter with the BLE overlay scanner); enable it from the app's Box tab or
-`POST /api/ble/provisioning/toggle`. See [docs/ble_provisioning.md](docs/ble_provisioning.md).
+**Mobile app over the mesh** — the [Ragnar mobile app](https://github.com/PierreGode/Ragnarmobile)
+(iOS/Android) drives the box over the [Ragnar Mesh](docs/mesh.md). You bring
+Tailscale up on the phone, connect to one unit by its Tailscale address, and log
+in — the app then reads `/api/mesh/status` off that unit to list and switch
+between every other unit on the mesh. No Tailscale token, no local-IP or
+Bluetooth setup. See [The Ragnar Mobile app](docs/mesh.md#the-ragnar-mobile-app).
 
 ---
 

@@ -1,9 +1,13 @@
 # BLE Provisioning
 
-`ble_provisioning.py` is a BlueZ GATT peripheral that lets the **Ragnar mobile
-app** discover a box over Bluetooth and learn how to reach it over IP. It is
-the Pi side of the contract documented in the Ragnarmobile repo
-(`docs/PROTOCOL.md`).
+> **Note (deprecated client path).** The Ragnar mobile app no longer uses
+> Bluetooth to find a box — it connects over the [Ragnar Mesh](mesh.md)
+> (Tailscale) and selects units by their `tag:ragnar-mesh` tag. This BLE
+> peripheral still ships and works, but nothing currently consumes it; it is
+> kept for other provisioning clients and may be retired later.
+
+`ble_provisioning.py` is a BlueZ GATT peripheral that lets a client discover a
+box over Bluetooth and learn how to reach it over IP.
 
 ## What it is — and isn't
 
