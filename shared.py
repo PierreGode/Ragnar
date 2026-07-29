@@ -132,6 +132,7 @@ SIZE_KEY_TO_DEFAULT_DRIVER = {
     "2in9":     "epd2in9_V2",
     "3in7":     "epd3in7",
     "4in26":    "epd4in26",
+    "3in5_tft": "ili9486",
     "1in28_tft": "gc9a01",
     "1in44_lcd": "st7735s",
     "1in69_tft": "whisplay",
@@ -157,6 +158,11 @@ def resolve_epd_type(size_key, current_epd_type=None):
         if current_epd_type in DISPLAY_PROFILES:
             return current_epd_type
 
+    # The 3.5" TFT family has two non-"epd*" drivers (ILI9486/ILI9488); keep the
+    # user's current variant instead of always snapping back to the default.
+    if size_key == "3in5_tft" and current_epd_type in ("ili9486", "ili9488"):
+        return current_epd_type
+
     return default_driver
 
 DISPLAY_PROFILES = {
@@ -174,6 +180,11 @@ DISPLAY_PROFILES = {
     # vertical factor (480/250 = 1.92) dominates; we use that for the
     # horizontal reference too so that icons/text aren't stretched.
     "epd4in26":    {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
+    # Generic 3.5" SPI TFT (ILI9486 / ILI9488), 320x480 portrait. Uses DESIGN_REF
+    # so the scale-factor system uniformly scales the 122×250 layout up to fill
+    # the panel — same approach as the 4.26" e-paper.
+    "ili9486":     {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
+    "ili9488":     {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_HEIGHT, "default_flip": False},
     # GC9A01 1.28" 240x240 round colour TFT LCD
     "gc9a01":      {"ref_width": DESIGN_REF_WIDTH, "ref_height": DESIGN_REF_WIDTH, "default_flip": False},
     # Waveshare 1.44" LCD HAT — ST7735S 128x128 square colour TFT (with keys +

@@ -1168,7 +1168,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
     else
         log "INFO" "Installing display driver support for all screen types..."
 
-        # SPI transport: e-Paper, GC9A01 / ST7735S / Whisplay TFT, MAX7219.
+        # SPI transport: e-Paper, GC9A01 / ST7735S / ILI9486 3.5" / Whisplay TFT, MAX7219.
         pip3 install spidev --break-system-packages >/dev/null 2>&1 \
             && log "SUCCESS" "spidev installed (SPI displays)" \
             || log "WARNING" "spidev failed to install — SPI displays will not work"
@@ -1200,7 +1200,7 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         python3 -c "import smbus2" 2>/dev/null || unusable+=("I2C displays (smbus2)")
         python3 -c "import luma.led_matrix" 2>/dev/null || unusable+=("MAX7219 (luma.led_matrix)")
         python3 -c "from waveshare_epd import epd2in13_V4" 2>/dev/null || unusable+=("e-Paper (waveshare_epd)")
-        for drv in gc9a01 st7735s whisplay ssd1306 lcd1602 max7219; do
+        for drv in gc9a01 st7735s ili9486 whisplay ssd1306 lcd1602 max7219; do
             [ -f "$ragnar_PATH/resources/waveshare_epd/${drv}.py" ] \
                 || unusable+=("${drv} (driver file missing)")
         done
@@ -2016,29 +2016,33 @@ main() {
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
             echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
-            echo "3. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
-            echo "4. SSD1306     (0.96\" OLED 128x64)"
-            echo "5. LCD1602     (16x2 I2C Character LCD)"
-            echo "6. No display  (headless install)"
+            echo "3. ILI9486/9488 (3.5\" SPI TFT 320x480)"
+            echo "4. Whisplay    (1.69\" ST7789 240x280, PiSugar HAT)"
+            echo "5. SSD1306     (0.96\" OLED 128x64)"
+            echo "6. LCD1602     (16x2 I2C Character LCD)"
+            echo "7. No display  (headless install)"
             echo ""
             echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
+            echo -e "${YELLOW}The 3.5\" TFT targets pure-SPI ILI9486/9488 boards (Waveshare 3.5\" C, MHS-3.5);${NC}"
+            echo -e "${YELLOW}the older Waveshare 3.5\" (A/B) needs the vendor LCD-show/fbtft overlay instead.${NC}"
 
             # ST7735S was missing here, so the 1.44" LCD HAT could not be
             # selected on the TFT install path at all.
             while true; do
-                read -p "Enter your choice (1-6): " tft_choice
+                read -p "Enter your choice (1-7): " tft_choice
                 case $tft_choice in
                     1) EPD_VERSION="gc9a01"; break;;
                     2) EPD_VERSION="st7735s"; break;;
-                    3) EPD_VERSION="whisplay"; break;;
-                    4) EPD_VERSION="ssd1306"; break;;
-                    5) EPD_VERSION="lcd1602"; break;;
-                    6)
+                    3) EPD_VERSION="ili9486"; break;;
+                    4) EPD_VERSION="whisplay"; break;;
+                    5) EPD_VERSION="ssd1306"; break;;
+                    6) EPD_VERSION="lcd1602"; break;;
+                    7)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-6.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-7.${NC}";;
                 esac
             done
 
@@ -2196,27 +2200,30 @@ except:
             echo -e "${CYAN}  TFT LCD displays:${NC}"
             echo "11. GC9A01       (1.28\" Round 240x240)"
             echo "12. ST7735S      (1.44\" LCD HAT + joystick 128x128)"
-            echo "13. Whisplay     (1.69\" ST7789 240x280, PiSugar HAT)"
+            echo "13. ILI9486/9488 (3.5\" SPI TFT 320x480)"
+            echo "14. Whisplay     (1.69\" ST7789 240x280, PiSugar HAT)"
             echo ""
             echo -e "${CYAN}  OLED displays:${NC}"
-            echo "14. SSD1306      (0.96\" OLED 128x64)"
+            echo "15. SSD1306      (0.96\" OLED 128x64)"
             echo ""
             echo -e "${CYAN}  Character LCD:${NC}"
-            echo "15. LCD1602      (16x2 I2C Character LCD)"
+            echo "16. LCD1602      (16x2 I2C Character LCD)"
             echo ""
             echo -e "${CYAN}  LED Matrix displays:${NC}"
-            echo "16. MAX7219  (8 panels 64×8 LED matrix)"
-            echo "17. MAX7219  (4 panels 32×8 LED matrix)"
+            echo "17. MAX7219  (8 panels 64×8 LED matrix)"
+            echo "18. MAX7219  (4 panels 32×8 LED matrix)"
             echo ""
-            echo "18. No display (headless install)"
+            echo "19. No display (headless install)"
             echo ""
             echo -e "${YELLOW}You can change this later in the web UI under Config → Display.${NC}"
+            echo -e "${YELLOW}The 3.5\" TFT targets pure-SPI ILI9486/9488 boards (Waveshare 3.5\" C, MHS-3.5);${NC}"
+            echo -e "${YELLOW}the older Waveshare 3.5\" (A/B) needs the vendor LCD-show/fbtft overlay instead.${NC}"
 
             # Every profile in shared.py's DISPLAY_PROFILES is offered here.
             # ST7735S and Whisplay used to be missing, so owners of those two
             # screens had no way to pick them during install.
             while true; do
-                read -p "Enter your choice (1-18): " epd_choice
+                read -p "Enter your choice (1-19): " epd_choice
                 case $epd_choice in
                     1) EPD_VERSION="epd2in13"; break;;
                     2) EPD_VERSION="epd2in13_V2"; break;;
@@ -2230,17 +2237,18 @@ except:
                     10) EPD_VERSION="epd4in26"; break;;
                     11) EPD_VERSION="gc9a01"; break;;
                     12) EPD_VERSION="st7735s"; break;;
-                    13) EPD_VERSION="whisplay"; break;;
-                    14) EPD_VERSION="ssd1306"; break;;
-                    15) EPD_VERSION="lcd1602"; break;;
-                    16) EPD_VERSION="max7219_8panel"; break;;
-                    17) EPD_VERSION="max7219_4panel"; break;;
-                    18)
+                    13) EPD_VERSION="ili9486"; break;;
+                    14) EPD_VERSION="whisplay"; break;;
+                    15) EPD_VERSION="ssd1306"; break;;
+                    16) EPD_VERSION="lcd1602"; break;;
+                    17) EPD_VERSION="max7219_8panel"; break;;
+                    18) EPD_VERSION="max7219_4panel"; break;;
+                    19)
                         select_headless_variant
                         EPD_VERSION=""
                         break
                         ;;
-                    *) echo -e "${RED}Invalid choice. Please select 1-18.${NC}";;
+                    *) echo -e "${RED}Invalid choice. Please select 1-19.${NC}";;
                 esac
             done
 

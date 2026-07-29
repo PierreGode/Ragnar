@@ -13,7 +13,7 @@ Two HATs have controls:
 - **2.7" e‑Paper HAT** — 4 keys (`KEY1`–`KEY4`).
 - **1.44" ST7735S LCD HAT** — 3 keys (`KEY1`–`KEY3`) + a 5‑way joystick.
 
-> The smaller square/OLED panels (GC9A01, SSD1306) have no onboard buttons.
+> The other panels (GC9A01, SSD1306, the 3.5" SPI TFT) have no onboard buttons.
 
 ---
 
@@ -240,3 +240,64 @@ link's own gateway. The choice resets to Auto when the mode is switched on.
   the joystick tracks whichever is shown.
 - Headless installs (no display) accept the display toggles but have nothing to
   render on and no buttons to read.
+
+---
+
+## 3.5" SPI TFT (ILI9486 / ILI9488)
+
+A generic 3.5" SPI TFT (320×480) can show the standard Ragnar character
+dashboard, scaled up from the 122×250 layout to fill the panel. It has **no
+onboard buttons**, so it behaves like the other button-less panels — Default and
+Wardriving screens render, but there are no keys or joystick to drive Network
+Diagnostic mode from the panel (use the web UI toggles instead).
+
+Select **3.5" SPI TFT — ILI9486/ILI9488 (320×480)** under **Settings → Display**,
+or set `"epd_type": "ili9486"` (or `"ili9488"`) in the config, then let the
+service restart.
+
+### Which board works
+
+This is a **pure userspace SPI** driver. It works on boards where the ILI9486 is
+reachable directly over SPI0 with `RST`/`DC`/`BL` GPIOs — the Waveshare 3.5" RPi
+LCD **(C)**, the red **MHS-3.5** boards, and most generic ILI9486/ILI9488 HATs.
+
+The older Waveshare 3.5" RPi LCD **(A/B)** drives the ILI9486 through a 16-bit
+shift-register arrangement and can only be used via the vendor **fbtft/LCD-show**
+framebuffer overlay (`/dev/fb1`) — this SPI driver shows a blank or garbled panel
+on those. For that board, install LCD-show and use [Kiosk Mode](kiosk.md) against
+the framebuffer instead.
+
+### Wiring (Raspberry Pi 40-pin header)
+
+| Signal | GPIO (BCM) | Pin | Override env var |
+|--------|-----------|-----|------------------|
+| `VCC`  | 5V        | 2/4 | — |
+| `GND`  | GND       | 6   | — |
+| `DIN`  | GPIO10 / MOSI | 19 | — (SPI0) |
+| `CLK`  | GPIO11 / SCLK | 23 | — (SPI0) |
+| `CS`   | GPIO8 / CE0 | 24 | — (SPI0) |
+| `DC`   | GPIO24    | 18  | `RAGNAR_TFT_DC_PIN` |
+| `RST`  | GPIO25    | 22  | `RAGNAR_TFT_RST_PIN` |
+| `BL`   | GPIO18    | 12  | `RAGNAR_TFT_BL_PIN` (`-1` = no backlight pin) |
+
+SPI must be enabled (`raspi-config` → Interfaces → SPI, or `dtparam=spi=on`).
+
+### Per-board tuning (no code edits)
+
+Every 3.5" board wires things slightly differently. If the panel stays dark or
+shows noise, tune it with environment variables (settable in Ragnar's `.env`) —
+the defaults target the common ILI9486 320×480 HAT:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `RAGNAR_TFT_CONTROLLER` | `ili9486` | `ili9486` (16-bit RGB565) or `ili9488` (18-bit RGB666 — required for true ILI9488) |
+| `RAGNAR_TFT_WIDTH` / `RAGNAR_TFT_HEIGHT` | `320` / `480` | Panel resolution |
+| `RAGNAR_TFT_MADCTL` | `0x48` | Scan direction + colour order. Try `0x28`, `0x88`, `0xE8` if the image is mirrored/rotated or colours look swapped |
+| `RAGNAR_TFT_SPI_HZ` | `16000000` | SPI clock. Lower (e.g. `8000000`) if the panel is unstable on long wiring |
+| `RAGNAR_TFT_INVERT` | `0` | Set `1` if the panel shows a photo-negative image |
+| `RAGNAR_TFT_RST_PIN` / `RAGNAR_TFT_DC_PIN` / `RAGNAR_TFT_BL_PIN` | `25` / `24` / `18` | GPIO overrides for boards that wire these differently |
+
+> **Status:** the ILI9486/ILI9488 SPI driver is new and has not yet been
+> hardware-validated against every board variant. If your panel needs different
+> settings that worked, please open an issue with the board name and the env-var
+> values so the defaults can be improved.
