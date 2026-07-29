@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260729-airtime-sec-phy';
+const WIFIDEF_BUILD = '20260729-airtime-identity';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4412,8 +4412,15 @@ function wifidefRenderAirtime(d) {
             const phy = c.legacy
                 ? `<span class="text-red-300" title="Legacy DSSS — forces protection overhead">${c.phy}</span>`
                 : `<span class="text-gray-400">${c.phy || '—'}</span>`;
+            const name = c.hostname || c.device_label || c.vendor;
+            const sub = [c.hostname ? (c.device_label || c.vendor) : c.vendor, c.ip]
+                .filter(Boolean).join(' · ');
+            const device = name
+                ? `<span class="text-gray-200">${_esc(name)}</span>${sub ? ` <span class="text-gray-500 text-[10px]">${_esc(sub)}</span>` : ''}`
+                : '<span class="text-gray-600" title="Not in the host inventory — run a network scan on the connected radio to name it">unidentified</span>';
             return `<tr class="border-b border-slate-800/50 ${c.legacy ? 'bg-red-900/10' : ''}">
                 <td class="py-1 pr-2 font-mono text-[11px]">${c.client}</td>
+                <td class="py-1 pr-2 text-xs">${device}</td>
                 <td class="py-1 pr-2 text-xs">${phy}</td>
                 <td class="py-1 pr-2">${c.frames}</td>
                 <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%</td>

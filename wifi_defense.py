@@ -944,6 +944,38 @@ def analyze_airtime(events, seconds=None):
             "findings": findings, "frames": len(events), "seconds": seconds}
 
 
+def enrich_identity(clients, host_map=None, vendor_lookup=None):
+    """Join network-layer identity onto the radio-layer per-client rows by MAC.
+
+    The monitor radio sees WHO is 802.11b (by MAC); the connected radio's host
+    inventory knows WHAT each MAC is (ip / hostname / vendor / device type).
+    This fuses the two so a legacy client reads as e.g. "HP printer
+    (HP-LaserJet, 192.168.1.42)" instead of a bare MAC.
+
+    Pure: the caller supplies ``host_map`` (mac→record from the hosts DB) and an
+    optional ``vendor_lookup(mac)->str`` OUI fallback for MACs not yet in the
+    inventory. Mutates and returns ``clients``."""
+    host_map = host_map or {}
+    for c in clients:
+        mac = (c.get("client") or "").lower()
+        rec = host_map.get(mac) or {}
+        c["ip"] = rec.get("ip") or None
+        c["hostname"] = rec.get("hostname") or None
+        vendor = rec.get("vendor")
+        if not vendor and vendor_lookup:
+            try:
+                v = vendor_lookup(mac)
+                vendor = v if v and v != "Randomized" else None
+            except Exception:
+                vendor = None
+        c["vendor"] = vendor or None
+        c["device_type"] = rec.get("device_type") or None
+        c["device_label"] = rec.get("device_label") or None
+        # A device we could actually name from the network side.
+        c["identified"] = bool(c["hostname"] or c["ip"])
+    return clients
+
+
 # --------------------------------------------------------------------------
 # Client-isolation observer  (passive AP/mesh peer-traffic audit)
 # --------------------------------------------------------------------------
@@ -2025,6 +2057,24 @@ def selftest():
           _classify_ap_phy(False, False, False, False, [1.0, 2.0, 5.5, 11.0], True) == "802.11b (DSSS)"
           and _classify_ap_phy(False, False, False, False, [1.0, 11.0, 24.0], True) == "802.11g (OFDM)"
           and _classify_ap_phy(False, False, False, False, [], False) == "802.11a (OFDM)")
+    # --- Identity fusion (MAC-join of radio PHY + network host inventory) ---
+    _cl = [{"client": "20:30:40:00:00:02", "legacy": True},
+           {"client": "aa:bb:cc:dd:ee:ff", "legacy": False}]
+    _hosts = {"20:30:40:00:00:02": {"ip": "192.168.1.42", "hostname": "HP-LaserJet",
+                                    "vendor": "Hewlett Packard",
+                                    "device_type": "printer", "device_label": "Printer"}}
+    enrich_identity(_cl, _hosts, lambda m: "AcmeVendor")
+    check("identity: known MAC gets hostname/ip/type from host map",
+          _cl[0]["hostname"] == "HP-LaserJet" and _cl[0]["ip"] == "192.168.1.42"
+          and _cl[0]["device_type"] == "printer" and _cl[0]["identified"] is True)
+    check("identity: unknown MAC falls back to OUI vendor, stays unidentified",
+          _cl[1]["vendor"] == "AcmeVendor" and _cl[1]["hostname"] is None
+          and _cl[1]["identified"] is False)
+    _cl2 = [{"client": "de:ad:be:ef:00:01", "legacy": True}]
+    enrich_identity(_cl2, {}, lambda m: "Randomized")
+    check("identity: randomized OUI is not used as a vendor name",
+          _cl2[0]["vendor"] is None)
+
     check("security: weak_security finding raised for Open BSS",
           any(f["type"] == "weak_security"
               for f in analyze_airtime(
