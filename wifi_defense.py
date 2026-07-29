@@ -664,17 +664,22 @@ def _airtime_event(pkt):
         "bytes": len(bytes(d)),
         "rate_mbps": None, "rssi": None,
     }
-    # Beacons / probe responses name the BSS — lets the report show an SSID
-    # column instead of bare BSSIDs.
+    # Beacons / probe responses name the BSS and carry the ERP element — lets
+    # the report show an SSID column and, crucially, whether the AP has turned
+    # on protection because a legacy DSSS (802.11b) station is present.
     if d.type == 0 and d.subtype in (5, 8):
         el = pkt.getlayer(Dot11Elt)
         while el is not None and isinstance(el, Dot11Elt):
-            if el.ID == 0:
+            if el.ID == 0 and "ssid" not in ev:
                 try:
                     ev["ssid"] = el.info.decode(errors="replace") or None
                 except Exception:
                     pass
-                break
+            elif el.ID == 42 and el.info:
+                # ERP Information (1 byte): bit0 NonERP_Present, bit1 Use_Protection.
+                erp = el.info[0]
+                ev["erp_nonerp"] = bool(erp & 0x01)
+                ev["erp_protection"] = bool(erp & 0x02)
             el = el.payload.getlayer(Dot11Elt)
     try:
         from scapy.all import RadioTap
@@ -694,6 +699,23 @@ def _frame_airtime_us(ev):
     return (ev.get("bytes", 0) * 8) / rate + 50   # +~50us preamble+IFS
 
 
+# The DSSS/CCK rate set — a station transmitting only these is 802.11b, the
+# legacy client that forces ERP protection on the whole BSS.
+_DSSS_RATES = {1.0, 2.0, 5.5, 11.0}
+
+
+def _classify_phy(rate_min, rate_max):
+    """Best-effort PHY generation from a client's observed PHY-rate spread.
+    Returns a short label; None when we saw no rates."""
+    if rate_min is None:
+        return None
+    if rate_max <= 11.0 and rate_min in _DSSS_RATES:
+        return "802.11b (DSSS/CCK)"       # the airtime tax
+    if rate_max <= 54.0:
+        return "802.11a/g (OFDM)"
+    return "802.11n+ (HT/VHT/HE)"
+
+
 # Management subtypes that indicate a client (re)joining / roaming.
 _ROAM_SUBTYPES = {0: "assoc", 2: "reassoc", 11: "auth"}
 
@@ -704,13 +726,15 @@ def analyze_airtime(events, seconds=None):
     seconds = seconds or 1
     aps = {}
     roam = {}
+    clients = {}                             # per-transmitter (addr2) airtime
     for e in events:
         b = e.get("bssid")
         # Airtime/retry keyed on the AP (BSSID) for data + mgmt frames.
         if b:
             ap = aps.setdefault(b, {"bssid": b, "ssid": None, "frames": 0,
                                     "retries": 0, "airtime_us": 0.0, "rates": [],
-                                    "rssi": None, "data_frames": 0})
+                                    "rssi": None, "data_frames": 0,
+                                    "erp_protection": False, "erp_nonerp": False})
             ap["frames"] += 1
             if e.get("ssid"):
                 ap["ssid"] = e["ssid"]
@@ -723,6 +747,27 @@ def analyze_airtime(events, seconds=None):
                 ap["rates"].append(e["rate_mbps"])
             if e.get("rssi") is not None:
                 ap["rssi"] = e["rssi"]
+            # ERP is latched: once the AP announces protection in the window,
+            # a legacy client was present even if later beacons clear the bit.
+            if e.get("erp_protection"):
+                ap["erp_protection"] = True
+            if e.get("erp_nonerp"):
+                ap["erp_nonerp"] = True
+        # Per-client airtime attribution — the transmitting station (addr2) is
+        # who actually holds the medium. Only count frames a real STA sends
+        # (data + mgmt from a non-AP src); skip beacons the AP sends about itself.
+        src = e.get("src")
+        if src and not _is_group_mac(src) and e["type"] in (0, 2) and not (
+                e["type"] == 0 and e["subtype"] in (5, 8)):
+            c = clients.setdefault(src, {"client": src, "bssid": b, "frames": 0,
+                                         "airtime_us": 0.0, "rates": [], "rssi": None})
+            c["frames"] += 1
+            c["bssid"] = c["bssid"] or b
+            c["airtime_us"] += _frame_airtime_us(e)
+            if e.get("rate_mbps"):
+                c["rates"].append(e["rate_mbps"])
+            if e.get("rssi") is not None:
+                c["rssi"] = e["rssi"]
         # Roaming: a client (src) sending assoc/reassoc/auth frames.
         if e["type"] == 0 and e["subtype"] in _ROAM_SUBTYPES and e.get("src"):
             r = roam.setdefault(e["src"], {"client": e["src"], "assoc": 0,
@@ -741,11 +786,43 @@ def analyze_airtime(events, seconds=None):
         ap_list.append(ap)
     ap_list.sort(key=lambda a: -a["airtime_pct"])
 
+    client_list = []
+    for c in clients.values():
+        rates = c.pop("rates")
+        c["airtime_pct"] = round(c["airtime_us"] / (seconds * 1e6) * 100, 1)
+        c["rate_min"] = min(rates) if rates else None
+        c["rate_med"] = round(statistics.median(rates), 1) if rates else None
+        c["rate_max"] = max(rates) if rates else None
+        c["phy"] = _classify_phy(c["rate_min"], c["rate_max"])
+        c["legacy"] = c["phy"] == "802.11b (DSSS/CCK)"
+        c["airtime_us"] = round(c["airtime_us"])
+        client_list.append(c)
+    client_list.sort(key=lambda c: -c["airtime_pct"])
+
     # Roaming churn = a client re-associating/authing repeatedly.
     roam_list = [r for r in roam.values() if (r["reassoc"] + r["auth"]) >= 3]
     roam_list.sort(key=lambda r: -(r["reassoc"] + r["auth"]))
 
     findings = []
+    # BSS-wide "why is it slow": ERP protection turned on = a legacy DSSS client
+    # is imposing RTS/CTS overhead on every station in the cell.
+    for ap in ap_list:
+        if ap.get("erp_protection"):
+            name = ap["ssid"] or ap["bssid"]
+            findings.append({"type": "erp_protection", "bssid": ap["bssid"],
+                             "detail": f"{name} has ERP protection ON — a legacy "
+                                       "802.11b client is taxing the whole BSS "
+                                       "(RTS/CTS overhead on every frame)"})
+    # Pinpoint the culprit: a station transmitting at DSSS rates while eating
+    # real airtime is the device to move off the band / evict.
+    for c in client_list:
+        if c["legacy"] and (c["airtime_pct"] >= 5 or c["frames"] >= 20):
+            findings.append({"type": "slow_client", "client": c["client"],
+                             "detail": f"{c['client']} is 802.11b @ "
+                                       f"{c['rate_min']}–{c['rate_max']} Mbps, "
+                                       f"~{c['airtime_pct']}% airtime "
+                                       f"({c['frames']} frames) — the airtime tax; "
+                                       "move it to its own SSID or 5 GHz"})
     for ap in ap_list:
         if ap["retry_pct"] >= 30 and ap["frames"] >= 20:
             findings.append({"type": "high_retry", "bssid": ap["bssid"],
@@ -759,8 +836,8 @@ def analyze_airtime(events, seconds=None):
                          "detail": f"{r['client']} re-joined {r['reassoc'] + r['auth']}× "
                                    "(reassoc/auth) — roaming instability"})
 
-    return {"aps": ap_list, "roaming": roam_list, "findings": findings,
-            "frames": len(events), "seconds": seconds}
+    return {"aps": ap_list, "clients": client_list, "roaming": roam_list,
+            "findings": findings, "frames": len(events), "seconds": seconds}
 
 
 # --------------------------------------------------------------------------
@@ -1772,6 +1849,53 @@ def selftest():
           any(f["type"] == "roaming_churn" for f in at["findings"]))
     check("airtime: rate parse legacy (radiotap Rate=12 => 6 Mbps)",
           _frame_rate_mbps(type("R", (), {"Rate": 12, "MCS_index": None})()) == 6.0)
+
+    # --- Airtime starvation: per-client attribution + ERP protection ---
+    star = []
+    STAR_AP = "aa:bb:cc:00:00:0a"
+    FAST = "10:20:30:00:00:01"                    # unicast, Wi-Fi 6
+    PLUG = "20:30:40:00:00:02"                    # unicast, legacy 802.11b
+    # AP beacons announcing ERP protection ON (a legacy DSSS client is present).
+    for _ in range(10):
+        star.append({"type": 0, "subtype": 8, "retry": False, "src": STAR_AP,
+                     "dst": "ff:ff:ff:ff:ff:ff", "bssid": STAR_AP, "bytes": 120,
+                     "rate_mbps": 6.0, "rssi": -40, "ssid": "HomeNet",
+                     "erp_protection": True, "erp_nonerp": True})
+    # Fast client: many big frames at 130 Mbps (little airtime each).
+    for _ in range(300):
+        star.append({"type": 2, "subtype": 0, "retry": False, "src": FAST,
+                     "dst": STAR_AP, "bssid": STAR_AP, "bytes": 1500,
+                     "rate_mbps": 130.0, "rssi": -45})
+    # Legacy plug: few small frames at 1 Mbps (huge airtime per byte).
+    for _ in range(80):
+        star.append({"type": 2, "subtype": 0, "retry": False, "src": PLUG,
+                     "dst": STAR_AP, "bssid": STAR_AP, "bytes": 400,
+                     "rate_mbps": 1.0, "rssi": -60})
+    st = analyze_airtime(star, seconds=10)
+    plug = next((c for c in st["clients"] if c["client"] == PLUG), None)
+    fast = next((c for c in st["clients"] if c["client"] == FAST), None)
+    check("starvation: legacy client classified 802.11b",
+          plug is not None and plug["legacy"]
+          and plug["phy"] == "802.11b (DSSS/CCK)", json.dumps(plug))
+    check("starvation: fast client not flagged legacy",
+          fast is not None and not fast["legacy"])
+    check("starvation: legacy plug eats more airtime than fast client despite fewer frames",
+          plug["airtime_pct"] > fast["airtime_pct"] and plug["frames"] < fast["frames"])
+    check("starvation: ERP protection latched on AP",
+          any(a["bssid"] == STAR_AP and a["erp_protection"] for a in st["aps"]))
+    check("starvation: erp_protection finding raised",
+          any(f["type"] == "erp_protection" for f in st["findings"]),
+          json.dumps(st["findings"]))
+    check("starvation: slow_client finding names the culprit",
+          any(f["type"] == "slow_client" and f.get("client") == PLUG
+              for f in st["findings"]))
+    check("starvation: AP beacons excluded from per-client attribution",
+          all(c["client"] != STAR_AP for c in st["clients"]))
+    check("starvation: PHY classifier boundaries",
+          _classify_phy(1.0, 11.0) == "802.11b (DSSS/CCK)"
+          and _classify_phy(6.0, 54.0) == "802.11a/g (OFDM)"
+          and _classify_phy(6.5, 130.0) == "802.11n+ (HT/VHT/HE)"
+          and _classify_phy(None, None) is None)
 
     # --- Client-isolation observer (passive AP/mesh peer-traffic audit) ---
     from scapy.all import wrpcap

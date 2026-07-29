@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260718-airtime-ssid';
+const WIFIDEF_BUILD = '20260729-airtime-client-erp';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4371,6 +4371,8 @@ function wifidefRenderAirtime(d) {
     fnd.innerHTML = (d.findings || []).map(f => {
         const cls = f.type === 'roaming_churn' ? 'bg-amber-600/20 text-amber-300 border-amber-700/50'
             : f.type === 'airtime_hog' ? 'bg-orange-600/20 text-orange-300 border-orange-700/50'
+            : f.type === 'slow_client' ? 'bg-red-600/20 text-red-300 border-red-700/50'
+            : f.type === 'erp_protection' ? 'bg-fuchsia-600/20 text-fuchsia-300 border-fuchsia-700/50'
             : 'bg-red-600/20 text-red-300 border-red-700/50';
         return `<span class="px-2 py-1 rounded border ${cls}">${f.detail}</span>`;
     }).join('') || '<span class="text-green-400 text-xs">✓ No link-quality issues in this capture.</span>';
@@ -4382,7 +4384,7 @@ function wifidefRenderAirtime(d) {
         const airCol = a.airtime_pct >= 50 ? 'text-orange-400' : 'text-gray-300';
         const rate = a.rate_med != null ? `${a.rate_min}/${a.rate_med}/${a.rate_max}` : '—';
         return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
-            <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}</td>
+            <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}</td>
             <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
             <td class="py-1 pr-2">${a.frames} <span class="text-gray-600 text-[10px]">(${a.data_frames} data)</span></td>
             <td class="py-1 pr-2 ${retryCol}">${a.retry_pct}%</td>
@@ -4390,6 +4392,30 @@ function wifidefRenderAirtime(d) {
             <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
             <td class="py-1 pr-2">${a.rssi == null ? '—' : a.rssi + ' dBm'}</td></tr>`;
     }).join('');
+    // Per-client airtime attribution — pinpoints the offending device.
+    const cwrap = document.getElementById('wifidef-at-clients-wrap');
+    const ctb = document.getElementById('wifidef-at-clients-tbody');
+    const clients = d.clients || [];
+    if (clients.length) {
+        cwrap.classList.remove('hidden');
+        ctb.innerHTML = clients.map(c => {
+            const airCol = c.airtime_pct >= 20 ? 'text-orange-400' : 'text-gray-300';
+            const rate = c.rate_med != null ? `${c.rate_min}/${c.rate_med}/${c.rate_max}` : '—';
+            const phy = c.legacy
+                ? `<span class="text-red-300" title="Legacy DSSS — forces protection overhead">${c.phy}</span>`
+                : `<span class="text-gray-400">${c.phy || '—'}</span>`;
+            return `<tr class="border-b border-slate-800/50 ${c.legacy ? 'bg-red-900/10' : ''}">
+                <td class="py-1 pr-2 font-mono text-[11px]">${c.client}</td>
+                <td class="py-1 pr-2 text-xs">${phy}</td>
+                <td class="py-1 pr-2">${c.frames}</td>
+                <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%</td>
+                <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
+                <td class="py-1 pr-2">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
+        }).join('');
+    } else {
+        cwrap.classList.add('hidden');
+        ctb.innerHTML = '';
+    }
     const roam = document.getElementById('wifidef-at-roam');
     roam.innerHTML = (d.roaming && d.roaming.length)
         ? '<b class="text-gray-300">Roaming clients:</b> ' + d.roaming.map(r =>

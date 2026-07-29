@@ -163,6 +163,32 @@ re-associating/authing repeatedly). Findings flag high retry (≥30%), airtime
 hogs (≥50%) and unstable roaming. Route `GET /api/wifidef/airtime`; analysis is
 a pure function covered by selftest.
 
+### Airtime starvation / the "legacy client tax"
+
+On 2.4 GHz the medium is half-duplex CSMA/CA: airtime — not bandwidth — is the
+finite shared resource, and a single slow station consumes it out of all
+proportion to the bytes it moves. A client stuck at 1–11 Mbps DSSS (802.11b)
+needs enormously more time-on-air per frame than a Wi-Fi 6 client at hundreds of
+Mbps, and its mere presence makes the AP announce **ERP protection** (RTS /
+CTS-to-self) that every station in the BSS then pays on every frame. The cell
+looks "downgraded" but the mechanism is airtime starvation, not a rate drop.
+
+Ragnar pinpoints this two ways from the same passive capture:
+
+- **ERP protection detection** — the ERP Information element (ID 42) in beacons
+  carries a *Use_Protection* bit. When set, the AP is telling everyone a legacy
+  DSSS client is present; the AP row shows an **ERP** badge and an
+  `erp_protection` finding names the BSS.
+- **Per-client airtime attribution** — airtime is also bucketed by the
+  transmitting station (addr2), not just the AP. A station transmitting at DSSS
+  rates while eating real airtime is classified `802.11b (DSSS/CCK)` and raised
+  as a `slow_client` finding naming its MAC — the device to move to its own
+  SSID / 5 GHz, or to lock out by disabling the low basic rates on the AP.
+
+The per-client table (`clients[]` in the response) lists each station's PHY
+generation, frame count, airtime % and rate spread, with legacy rows
+highlighted.
+
 ## Client isolation observer
 
 A passive audit of whether an AP — or a whole mesh/ESS — actually enforces
