@@ -207,6 +207,12 @@ the device (e.g. *"HP-LaserJet (192.168.1.42) [aa:bb:…] is 802.11b …"*). MAC
 not in the inventory fall back to an OUI vendor and show as *unidentified* until
 a network scan records them; randomized MACs are left unnamed.
 
+Each client row also carries the **SSID** of the AP it is transmitting to
+(joined from the AP's `bssid`→`ssid` map; a client whose AP never beaconed in
+the capture falls back to showing the BSSID). The per-client table has an
+**SSID filter** dropdown so a multi-network capture can be narrowed to one
+network — you see exactly which clients belong to which SSID.
+
 **Recommended deployment (Pi Zero 2 W + one Alfa AWUS036AXM).** Legacy 802.11b
 is a 2.4 GHz-only phenomenon, so a 2.4-only onboard radio loses nothing here.
 Let the **Pi onboard radio stay connected** (managed mode) to the target 2.4 GHz

@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260729-airtime-identity';
+const WIFIDEF_BUILD = '20260729-airtime-ssid-filter';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4402,40 +4402,70 @@ function wifidefRenderAirtime(d) {
     }).join('');
     // Per-client airtime attribution — pinpoints the offending device.
     const cwrap = document.getElementById('wifidef-at-clients-wrap');
-    const ctb = document.getElementById('wifidef-at-clients-tbody');
-    const clients = d.clients || [];
-    if (clients.length) {
+    _wifidefClients = d.clients || [];
+    if (_wifidefClients.length) {
         cwrap.classList.remove('hidden');
-        ctb.innerHTML = clients.map(c => {
-            const airCol = c.airtime_pct >= 20 ? 'text-orange-400' : 'text-gray-300';
-            const rate = c.rate_med != null ? `${c.rate_min}/${c.rate_med}/${c.rate_max}` : '—';
-            const phy = c.legacy
-                ? `<span class="text-red-300" title="Legacy DSSS — forces protection overhead">${c.phy}</span>`
-                : `<span class="text-gray-400">${c.phy || '—'}</span>`;
-            const name = c.hostname || c.device_label || c.vendor;
-            const sub = [c.hostname ? (c.device_label || c.vendor) : c.vendor, c.ip]
-                .filter(Boolean).join(' · ');
-            const device = name
-                ? `<span class="text-gray-200">${_esc(name)}</span>${sub ? ` <span class="text-gray-500 text-[10px]">${_esc(sub)}</span>` : ''}`
-                : '<span class="text-gray-600" title="Not in the host inventory — run a network scan on the connected radio to name it">unidentified</span>';
-            return `<tr class="border-b border-slate-800/50 ${c.legacy ? 'bg-red-900/10' : ''}">
-                <td class="py-1 pr-2 font-mono text-[11px]">${c.client}</td>
-                <td class="py-1 pr-2 text-xs">${device}</td>
-                <td class="py-1 pr-2 text-xs">${phy}</td>
-                <td class="py-1 pr-2">${c.frames}</td>
-                <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%</td>
-                <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
-                <td class="py-1 pr-2">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
-        }).join('');
+        // Populate the SSID filter with the networks actually seen this capture.
+        const sel = document.getElementById('wifidef-at-client-filter');
+        const groups = new Map();               // key -> label (ssid, else BSSID)
+        _wifidefClients.forEach(c => {
+            const key = c.ssid || c.bssid || '';
+            if (key && !groups.has(key)) groups.set(key, c.ssid || c.bssid);
+        });
+        const prev = sel.value;
+        sel.innerHTML = '<option value="">All SSIDs</option>' +
+            [...groups.entries()].map(([k, label]) =>
+                `<option value="${_esc(k)}">${_esc(label)}</option>`).join('');
+        sel.value = [...groups.keys()].includes(prev) ? prev : '';
+        wifidefFilterClients();
     } else {
         cwrap.classList.add('hidden');
-        ctb.innerHTML = '';
+        document.getElementById('wifidef-at-clients-tbody').innerHTML = '';
     }
     const roam = document.getElementById('wifidef-at-roam');
     roam.innerHTML = (d.roaming && d.roaming.length)
         ? '<b class="text-gray-300">Roaming clients:</b> ' + d.roaming.map(r =>
             `<span class="font-mono">${r.client}</span> (${r.reassoc + r.auth}×)`).join(', ')
         : '';
+}
+
+// Clients from the last airtime scan, kept so the SSID filter can re-render.
+let _wifidefClients = [];
+
+function _wifidefClientRow(c) {
+    const airCol = c.airtime_pct >= 20 ? 'text-orange-400' : 'text-gray-300';
+    const rate = c.rate_med != null ? `${c.rate_min}/${c.rate_med}/${c.rate_max}` : '—';
+    const phy = c.legacy
+        ? `<span class="text-red-300" title="Legacy DSSS — forces protection overhead">${c.phy}</span>`
+        : `<span class="text-gray-400">${c.phy || '—'}</span>`;
+    const name = c.hostname || c.device_label || c.vendor;
+    const sub = [c.hostname ? (c.device_label || c.vendor) : c.vendor, c.ip]
+        .filter(Boolean).join(' · ');
+    const device = name
+        ? `<span class="text-gray-200">${_esc(name)}</span>${sub ? ` <span class="text-gray-500 text-[10px]">${_esc(sub)}</span>` : ''}`
+        : '<span class="text-gray-600" title="Not in the host inventory — run a network scan on the connected radio to name it">unidentified</span>';
+    const ssid = c.ssid ? _esc(c.ssid)
+        : (c.bssid ? `<span class="text-gray-600 font-mono text-[10px]" title="AP SSID not seen in this capture">${c.bssid}</span>` : '<span class="text-gray-600">—</span>');
+    return `<tr class="border-b border-slate-800/50 ${c.legacy ? 'bg-red-900/10' : ''}">
+        <td class="py-1 pr-2 font-mono text-[11px]">${c.client}</td>
+        <td class="py-1 pr-2 text-xs">${device}</td>
+        <td class="py-1 pr-2 text-xs">${ssid}</td>
+        <td class="py-1 pr-2 text-xs">${phy}</td>
+        <td class="py-1 pr-2">${c.frames}</td>
+        <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%</td>
+        <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
+        <td class="py-1 pr-2">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
+}
+
+// Re-render the per-client table filtered to the SSID chosen in the dropdown.
+function wifidefFilterClients() {
+    const sel = document.getElementById('wifidef-at-client-filter');
+    const key = sel ? sel.value : '';
+    const rows = _wifidefClients.filter(c => !key || (c.ssid || c.bssid) === key);
+    const ctb = document.getElementById('wifidef-at-clients-tbody');
+    ctb.innerHTML = rows.length
+        ? rows.map(_wifidefClientRow).join('')
+        : '<tr><td colspan="8" class="py-3 text-center text-gray-500">No clients on this SSID in the capture.</td></tr>';
 }
 
 // ---- Client-isolation observer (passive AP/mesh peer-traffic audit) --------

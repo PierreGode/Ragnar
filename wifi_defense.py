@@ -884,6 +884,9 @@ def analyze_airtime(events, seconds=None):
         ap_list.append(ap)
     ap_list.sort(key=lambda a: -a["airtime_pct"])
 
+    # Map each BSSID to its SSID so clients can show the network they're on.
+    ssid_by_bssid = {a["bssid"]: a["ssid"] for a in ap_list if a.get("ssid")}
+
     client_list = []
     for c in clients.values():
         rates = c.pop("rates")
@@ -893,6 +896,7 @@ def analyze_airtime(events, seconds=None):
         c["rate_max"] = max(rates) if rates else None
         c["phy"] = _classify_phy(c["rate_min"], c["rate_max"])
         c["legacy"] = c["phy"] == "802.11b (DSSS/CCK)"
+        c["ssid"] = ssid_by_bssid.get(c.get("bssid"))
         c["airtime_us"] = round(c["airtime_us"])
         client_list.append(c)
     client_list.sort(key=lambda c: -c["airtime_pct"])
@@ -2027,6 +2031,8 @@ def selftest():
               for f in st["findings"]))
     check("starvation: AP beacons excluded from per-client attribution",
           all(c["client"] != STAR_AP for c in st["clients"]))
+    check("starvation: client tagged with its AP's SSID",
+          plug is not None and plug.get("ssid") == "HomeNet")
     check("starvation: PHY classifier boundaries",
           _classify_phy(1.0, 11.0) == "802.11b (DSSS/CCK)"
           and _classify_phy(6.0, 54.0) == "802.11a/g (OFDM)"
