@@ -2648,7 +2648,7 @@
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
                     <div>
                         <h3 class="font-semibold text-sm">Airtime &amp; link quality <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in the Spectrum Analyzer</span></h3>
-                        <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Passive per-AP <strong>airtime %</strong>, <strong>retry rate</strong> and <strong>PHY-rate</strong> spread, plus roaming churn — the "why is it slow" view. Best on a <strong>fixed channel</strong> (airtime % is only meaningful when not hopping).</p>
+                        <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Passive per-AP <strong>airtime %</strong>, <strong>retry rate</strong> and <strong>PHY-rate</strong> spread, plus <strong>per-client airtime</strong> and <strong>ERP-protection</strong> detection — pinpoints a legacy <strong>802.11b</strong> device that's taxing the whole cell. Best on a <strong>fixed channel</strong> (airtime % is only meaningful when not hopping).</p>
                     </div>
                     <div class="flex flex-wrap items-end gap-2">
                         <label class="text-[11px] text-gray-400">Channel <input id="wifidef-at-channel" type="text" value="" placeholder="e.g. 6" class="w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" title="Fix a channel for meaningful airtime %; blank = hop (approximate)"></label>
@@ -2661,10 +2661,24 @@
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead><tr class="text-left text-gray-400 border-b border-slate-800">
-                            <th class="py-1 pr-2">SSID</th><th class="py-1 pr-2">BSSID</th><th class="py-1 pr-2">Frames</th><th class="py-1 pr-2">Retry %</th><th class="py-1 pr-2">Airtime %</th><th class="py-1 pr-2">Rate min/med/max</th><th class="py-1 pr-2">RSSI</th>
+                            <th class="py-1 pr-2">SSID</th><th class="py-1 pr-2">BSSID</th><th class="py-1 pr-2">Security</th><th class="py-1 pr-2">PHY</th><th class="py-1 pr-2">Frames</th><th class="py-1 pr-2">Retry %</th><th class="py-1 pr-2">Airtime %</th><th class="py-1 pr-2">Rate min/med/max</th><th class="py-1 pr-2">RSSI</th>
                         </tr></thead>
-                        <tbody id="wifidef-at-tbody"><tr><td colspan="7" class="py-4 text-center text-gray-500">Press <span class="text-gray-300">Analyze airtime</span> (needs monitor mode).</td></tr></tbody>
+                        <tbody id="wifidef-at-tbody"><tr><td colspan="9" class="py-4 text-center text-gray-500">Press <span class="text-gray-300">Analyze airtime</span> (needs monitor mode).</td></tr></tbody>
                     </table>
+                </div>
+                <div id="wifidef-at-clients-wrap" class="mt-4 hidden">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-1">
+                        <h4 class="text-xs font-semibold text-gray-300">Per-client airtime <span class="text-[10px] text-gray-500 font-normal">— who actually holds the medium; a legacy 802.11b station eats airtime out of all proportion to its traffic and forces protection overhead on the whole cell</span></h4>
+                        <label class="text-[11px] text-gray-400 whitespace-nowrap">SSID <select id="wifidef-at-client-filter" onchange="wifidefFilterClients()" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs"><option value="">All</option></select></label>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm">
+                            <thead><tr class="text-left text-gray-400 border-b border-slate-800">
+                                <th class="py-1 pr-2">Client</th><th class="py-1 pr-2">Device</th><th class="py-1 pr-2">SSID</th><th class="py-1 pr-2">PHY</th><th class="py-1 pr-2">Frames</th><th class="py-1 pr-2">Airtime %</th><th class="py-1 pr-2">Rate min/med/max</th><th class="py-1 pr-2">RSSI</th>
+                            </tr></thead>
+                            <tbody id="wifidef-at-clients-tbody"></tbody>
+                        </table>
+                    </div>
                 </div>
                 <div id="wifidef-at-roam" class="mt-2 text-xs text-gray-400"></div>
             </div>

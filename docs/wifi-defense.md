@@ -163,6 +163,81 @@ re-associating/authing repeatedly). Findings flag high retry (≥30%), airtime
 hogs (≥50%) and unstable roaming. Route `GET /api/wifidef/airtime`; analysis is
 a pure function covered by selftest.
 
+### Airtime starvation / the "legacy client tax"
+
+On 2.4 GHz the medium is half-duplex CSMA/CA: airtime — not bandwidth — is the
+finite shared resource, and a single slow station consumes it out of all
+proportion to the bytes it moves. A client stuck at 1–11 Mbps DSSS (802.11b)
+needs enormously more time-on-air per frame than a Wi-Fi 6 client at hundreds of
+Mbps, and its mere presence makes the AP announce **ERP protection** (RTS /
+CTS-to-self) that every station in the BSS then pays on every frame. The cell
+looks "downgraded" but the mechanism is airtime starvation, not a rate drop.
+
+Ragnar pinpoints this two ways from the same passive capture:
+
+- **ERP protection detection** — the ERP Information element (ID 42) in beacons
+  carries a *Use_Protection* bit. When set, the AP is telling everyone a legacy
+  DSSS client is present; the AP row shows an **ERP** badge and an
+  `erp_protection` finding names the BSS.
+- **Per-client airtime attribution** — airtime is also bucketed by the
+  transmitting station (addr2), not just the AP. A station transmitting at DSSS
+  rates while eating real airtime is classified `802.11b (DSSS/CCK)` and raised
+  as a `slow_client` finding naming its MAC — the device to move to its own
+  SSID / 5 GHz, or to lock out by disabling the low basic rates on the AP.
+
+The per-client table (`clients[]` in the response) lists each station's PHY
+generation, frame count, airtime % and rate spread, with legacy rows
+highlighted.
+
+#### Naming the device (radio + network fusion)
+
+The monitor radio only sees a client by **MAC** — it can say *"this MAC is
+802.11b"* but not *what the device is*. Device identity (hostname, vendor,
+printer/phone/TV) is a **network-layer** fact that needs an association to the
+AP, which a monitor interface never has. So the two layers are fused by MAC:
+
+- **radio layer** (monitor mode) → MAC → PHY / airtime (the `clients[]` rows);
+- **network layer** (the connected radio's host inventory: DHCP/mDNS/ARP + the
+  device classifier) → MAC → ip / hostname / vendor / device type.
+
+The `/api/wifidef/airtime` route joins the two on MAC (`enrich_identity()` +
+`_enrich_airtime_identity()`), so each client row also carries `hostname`, `ip`,
+`vendor`, `device_type` and `device_label`, and the `slow_client` finding names
+the device (e.g. *"HP-LaserJet (192.168.1.42) [aa:bb:…] is 802.11b …"*). MACs
+not in the inventory fall back to an OUI vendor and show as *unidentified* until
+a network scan records them; randomized MACs are left unnamed.
+
+Each client row also carries the **SSID** of the AP it is transmitting to
+(joined from the AP's `bssid`→`ssid` map; a client whose AP never beaconed in
+the capture falls back to showing the BSSID). The per-client table has an
+**SSID filter** dropdown so a multi-network capture can be narrowed to one
+network — you see exactly which clients belong to which SSID.
+
+**Recommended deployment (Pi Zero 2 W + one Alfa AWUS036AXM).** Legacy 802.11b
+is a 2.4 GHz-only phenomenon, so a 2.4-only onboard radio loses nothing here.
+Let the **Pi onboard radio stay connected** (managed mode) to the target 2.4 GHz
+SSID — it populates the host inventory (hostnames / device types) — and put the
+**Alfa in dedicated monitor mode on that same channel** for the PHY/airtime
+capture. One Alfa is enough; the onboard radio can't do monitor mode but does
+managed fine, and each radio does the one job it's suited to. (A single
+mt7921u Alfa can alternatively do both at once via a concurrent monitor vif
+pinned to the connected channel.)
+
+### Per-AP security & PHY generation
+
+Each AP row also reports two metrics read straight from its beacons (no active
+probing):
+
+- **Security** — `Open` / `WEP` / `WPA` / `WPA2` / `WPA2-Ent` / `WPA3` /
+  `WPA2/3` (transition) / `OWE`, decoded from the Privacy capability bit, the
+  RSN element (ID 48) and its AKM suites, and the legacy WPA v1 vendor element.
+  `Open` and `WEP` also raise a `weak_security` finding.
+- **PHY** — the 802.11 generation from the capability IEs: `802.11n (Wi-Fi 4)`,
+  `802.11ac (Wi-Fi 5)`, `802.11ax (Wi-Fi 6)`, `802.11be (Wi-Fi 7)`, or — when no
+  HT/VHT/HE/EHT IE is present — the legacy PHY split by band and rate set:
+  `802.11a`, `802.11g` (OFDM rates advertised) or `802.11b` (DSSS-only). The
+  b/g split is what the Spectrum Analyzer's coarser "legacy" label can't do.
+
 ## Client isolation observer
 
 A passive audit of whether an AP — or a whole mesh/ESS — actually enforces

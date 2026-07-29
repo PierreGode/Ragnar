@@ -14215,6 +14215,76 @@ def do_install_tool(tool):
     return {'success': True, 'tool': tool, 'message': f'Installed {pkg}.'}
 
 
+def _ports_to_list(ports):
+    """Best-effort port list from a hosts.ports cell (JSON array, or a
+    comma/space-separated string like '22/tcp,80')."""
+    if not ports:
+        return []
+    if isinstance(ports, (list, tuple)):
+        raw = ports
+    else:
+        try:
+            raw = json.loads(ports)
+            if not isinstance(raw, list):
+                raise ValueError
+        except (ValueError, TypeError):
+            raw = re.split(r'[,\s]+', str(ports))
+    out = []
+    for p in raw:
+        m = re.match(r'\s*(\d+)', str(p))
+        if m:
+            out.append(m.group(1))
+    return out
+
+
+def _enrich_airtime_identity(result):
+    """Join the hosts inventory (from the connected radio) onto the monitor-mode
+    per-client rows by MAC, so a legacy station reads as a named device. Fully
+    best-effort: any missing piece (no DB, no classifier) just leaves the row
+    with whatever OUI vendor we can derive. Also rewrites slow_client findings
+    to name the device instead of a bare MAC."""
+    clients = result.get('clients') or []
+    host_map = {}
+    try:
+        from init_shared import shared_data
+        db = getattr(shared_data, 'db', None)
+        hosts = db.get_all_hosts() if db is not None else []
+    except Exception:
+        hosts = []
+    try:
+        import device_classifier
+    except Exception:
+        device_classifier = None
+    for h in hosts or []:
+        mac = (h.get('mac') or '').strip().lower()
+        if not mac:
+            continue
+        vendor = h.get('vendor') or None
+        dtype = dlabel = None
+        if device_classifier is not None:
+            try:
+                cls = device_classifier.classify_device(
+                    vendor, _ports_to_list(h.get('ports')), device_ip=h.get('ip'))
+                dtype = cls.get('device_type')
+                dlabel = cls.get('label')
+            except Exception:
+                pass
+        host_map[mac] = {'ip': h.get('ip'), 'hostname': h.get('hostname'),
+                         'vendor': vendor, 'device_type': dtype,
+                         'device_label': dlabel}
+    wifi_defense.enrich_identity(clients, host_map, wifi_analyzer._oui_lookup)
+    # Give the slow_client findings a human name where we resolved one.
+    names = {}
+    for c in clients:
+        label = c.get('hostname') or c.get('device_label') or c.get('vendor')
+        if label:
+            names[c['client']] = label + (f" ({c['ip']})" if c.get('ip') else '')
+    for f in result.get('findings') or []:
+        if f.get('type') == 'slow_client' and f.get('client') in names:
+            f['detail'] = f"{names[f['client']]} [{f['client']}]" + \
+                f['detail'][len(f['client']):]
+
+
 # --------------------------------------------------------------------------
 # Route registration
 # --------------------------------------------------------------------------
@@ -15147,7 +15217,15 @@ def register_network_diagnostics(app, logger=None):
         ch = request.args.get('channel')
         channel = int(ch) if (ch and ch.isdigit()) else None
         _log(f"wifidef/airtime {iface} ch={channel}")
-        return jsonify(wifi_defense.do_airtime(iface, seconds=secs, channel=channel))
+        result = wifi_defense.do_airtime(iface, seconds=secs, channel=channel)
+        # Fuse radio-layer PHY (who is 802.11b, by MAC) with network-layer
+        # identity from the connected radio's host inventory (what each MAC is).
+        if isinstance(result, dict) and result.get('clients'):
+            try:
+                _enrich_airtime_identity(result)
+            except Exception as exc:                      # never fail the scan
+                _log(f"wifidef/airtime identity enrich skipped: {exc}")
+        return jsonify(result)
 
     @app.route('/api/wifidef/isolation', methods=['GET'])
     def wifidef_isolation():
