@@ -189,6 +189,21 @@ The per-client table (`clients[]` in the response) lists each station's PHY
 generation, frame count, airtime % and rate spread, with legacy rows
 highlighted.
 
+### Per-AP security & PHY generation
+
+Each AP row also reports two metrics read straight from its beacons (no active
+probing):
+
+- **Security** — `Open` / `WEP` / `WPA` / `WPA2` / `WPA2-Ent` / `WPA3` /
+  `WPA2/3` (transition) / `OWE`, decoded from the Privacy capability bit, the
+  RSN element (ID 48) and its AKM suites, and the legacy WPA v1 vendor element.
+  `Open` and `WEP` also raise a `weak_security` finding.
+- **PHY** — the 802.11 generation from the capability IEs: `802.11n (Wi-Fi 4)`,
+  `802.11ac (Wi-Fi 5)`, `802.11ax (Wi-Fi 6)`, `802.11be (Wi-Fi 7)`, or — when no
+  HT/VHT/HE/EHT IE is present — the legacy PHY split by band and rate set:
+  `802.11a`, `802.11g` (OFDM rates advertised) or `802.11b` (DSSS-only). The
+  b/g split is what the Spectrum Analyzer's coarser "legacy" label can't do.
+
 ## Client isolation observer
 
 A passive audit of whether an AP — or a whole mesh/ESS — actually enforces

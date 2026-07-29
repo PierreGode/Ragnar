@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260729-airtime-client-erp';
+const WIFIDEF_BUILD = '20260729-airtime-sec-phy';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4373,19 +4373,27 @@ function wifidefRenderAirtime(d) {
             : f.type === 'airtime_hog' ? 'bg-orange-600/20 text-orange-300 border-orange-700/50'
             : f.type === 'slow_client' ? 'bg-red-600/20 text-red-300 border-red-700/50'
             : f.type === 'erp_protection' ? 'bg-fuchsia-600/20 text-fuchsia-300 border-fuchsia-700/50'
+            : f.type === 'weak_security' ? 'bg-rose-600/20 text-rose-300 border-rose-700/50'
             : 'bg-red-600/20 text-red-300 border-red-700/50';
         return `<span class="px-2 py-1 rounded border ${cls}">${f.detail}</span>`;
     }).join('') || '<span class="text-green-400 text-xs">✓ No link-quality issues in this capture.</span>';
     const tb = document.getElementById('wifidef-at-tbody');
     const aps = d.aps || [];
-    if (!aps.length) { tb.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-gray-500">No frames captured (wrong channel? adapter idle?).</td></tr>'; }
+    if (!aps.length) { tb.innerHTML = '<tr><td colspan="9" class="py-4 text-center text-gray-500">No frames captured (wrong channel? adapter idle?).</td></tr>'; }
     else tb.innerHTML = aps.map(a => {
         const retryCol = a.retry_pct >= 30 ? 'text-red-400' : a.retry_pct >= 15 ? 'text-amber-400' : 'text-gray-300';
         const airCol = a.airtime_pct >= 50 ? 'text-orange-400' : 'text-gray-300';
         const rate = a.rate_med != null ? `${a.rate_min}/${a.rate_med}/${a.rate_max}` : '—';
+        const secCol = (a.security === 'Open' || a.security === 'WEP') ? 'text-red-400'
+            : (a.security === 'WPA') ? 'text-amber-400'
+            : a.security ? 'text-gray-300' : 'text-gray-600';
+        const legacyPhy = a.ap_phy && /802\.11[bg]|802\.11a /.test(a.ap_phy);
+        const phyCol = legacyPhy ? 'text-red-300' : a.ap_phy ? 'text-gray-300' : 'text-gray-600';
         return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
             <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}</td>
             <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
+            <td class="py-1 pr-2 text-xs ${secCol}">${a.security || '—'}</td>
+            <td class="py-1 pr-2 text-xs ${phyCol}">${a.ap_phy || '—'}</td>
             <td class="py-1 pr-2">${a.frames} <span class="text-gray-600 text-[10px]">(${a.data_frames} data)</span></td>
             <td class="py-1 pr-2 ${retryCol}">${a.retry_pct}%</td>
             <td class="py-1 pr-2 ${airCol}">${a.airtime_pct}%</td>
