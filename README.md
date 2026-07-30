@@ -76,7 +76,7 @@ web will be down during wardrive without ap or wifi connection.
 - **Network Scanning** — Identifies live hosts and open ports
 - **Vulnerability Assessment** — Scans using Nmap and other tools
 - **Multi-Source Threat Intelligence** — Real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE ATT&CK
-- **AI-Powered Analysis** — GPT-5 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
+- **AI-Powered Analysis** — GPT-5.4 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
 - **System Attacks** — Brute-force attacks on FTP, SSH, SMB, RDP, Telnet, SQL
 - **File Stealing** — Extracts data from vulnerable services
 - **Traffic Analysis** — Live `tcpdump` capture in its own web-UI tab: per-host bandwidth and top talkers, connection tracking, protocol mix, DNS logging, and detection of **port scans**, **DNS tunnelling** and **C2 beacons** (interval/size-regularity scoring). Also drives **passive host discovery** — firewalled hosts that never answer a scan still land in the hosts DB. **Detection-only**, it never sends a packet. Needs only `tcpdump`, so it runs on **any board**, Pi Zero included (measured: 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s); only the optional `tshark` JA3/IRC sidecars need a bigger board. See [Traffic Analysis](docs/traffic-analysis.md)

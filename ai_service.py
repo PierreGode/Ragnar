@@ -37,7 +37,7 @@ class AIService:
 
         # Configuration
         self.enabled = cfg.get("ai_enabled", False)
-        self.model = cfg.get("ai_model", "gpt-5.1")
+        self.model = cfg.get("ai_model", "gpt-5.4-nano")
 
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
@@ -491,6 +491,118 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
 
 
     # ===================================================================
+    #   WI-FI CONNECTION ANALYSIS  (professional tone, no persona)
+    # ===================================================================
+
+    def analyze_wifi_connection(self, context: Dict):
+        """Assess the user's current Wi-Fi connection and RF environment from a
+        spectrum scan + association info, and return prioritized, professional
+        recommendations. `context` is built by the /api/ai/wifi-analyze route."""
+        if not self.is_enabled():
+            return None
+
+        connected = (context or {}).get("connected")
+        key = self._cache_key("wifi_conn", {
+            "bssid": (connected or {}).get("bssid"),
+            "signal": (connected or {}).get("signal_dbm"),
+            "cochannel": (context or {}).get("co_channel_count"),
+            "aps": (context or {}).get("ap_total"),
+        })
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        data_json = json.dumps(context, indent=2, default=str)[:6000]
+        system = (
+            "You are a professional wireless network engineer. Analyze the user's "
+            "current Wi-Fi connection and the surrounding RF environment from the "
+            "scan data provided, and give clear, actionable recommendations to fix "
+            "or improve it. Use a neutral, professional tone — no personas, no "
+            "slang, no jokes. Base every statement strictly on the data provided; "
+            "do not invent SSIDs, channels or values that are not present. If the "
+            "user is not associated to a network, say so and analyze the "
+            "environment instead. Use short markdown sections and bullet points."
+        )
+        user = f"""Analyze this Wi-Fi connection and RF environment.
+
+Data (JSON):
+{data_json}
+
+Provide:
+
+**Connection summary** — the network the user is on: band, channel, channel
+width, security, Wi-Fi generation, signal strength and negotiated rate, in one
+short paragraph.
+
+**Issues found** — concrete problems supported by the data, e.g. co-channel or
+adjacent-channel congestion, 2.4 GHz use where 5 GHz is available, weak signal,
+legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, or a crowded
+channel. Only list issues the data supports.
+
+**Recommendations** — prioritized, specific actions (e.g. "move to 5 GHz",
+"change to channel 44", "widen to 80 MHz", "upgrade to WPA2/WPA3-CCMP",
+"relocate the AP / add an AP"). Say why each helps.
+
+If the environment is healthy, say so plainly. Keep it tight and practical."""
+
+        resp = self._ask(system, user)
+        if resp:
+            self._cache_set(key, resp)
+        return resp
+
+    # ===================================================================
+    #   SECURITY POSTURE  (Watchtower + Wi-Fi Defense passive monitoring)
+    # ===================================================================
+
+    def analyze_security_posture(self, posture: Dict):
+        """Summarize the passive-monitoring posture from Watchtower's aggregated
+        alert feed (which includes the Wi-Fi Defense family: wifiwatch,
+        legacywatch, wpswatch, ndpwatch, …). Professional tone."""
+        if not self.is_enabled():
+            return None
+
+        key = self._cache_key("posture", {
+            "total": (posture or {}).get("total_alerts"),
+            "worst": (posture or {}).get("worst"),
+            "by_sev": (posture or {}).get("by_severity"),
+        })
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        data_json = json.dumps(posture, indent=2, default=str)[:5000]
+        system = (
+            "You are a professional security operations analyst. Summarize the "
+            "current passive-monitoring posture from the alert data. Watchtower "
+            "aggregates Ragnar's passive watchers, including the Wi-Fi Defense "
+            "family (wifiwatch, legacywatch, wpswatch) and wired monitors "
+            "(ndpwatch, arp_guard, …). Use a neutral, professional tone. Base "
+            "every statement on the data; do not invent alerts. Be concise."
+        )
+        user = f"""Summarize this passive security-monitoring posture.
+
+Data (JSON):
+{data_json}
+
+Provide:
+
+**Posture** — one or two sentences on the overall state (quiet, elevated, or
+active incidents), grounded in the alert counts.
+
+**Top concerns** — the most important active findings (by severity and source),
+naming the finding codes/summaries present.
+
+**Recommended actions** — concrete next steps for the highest-severity items.
+
+If there are no alerts, state that the monitored surface is currently clean and
+note which watchers are reporting. Keep it short."""
+
+        resp = self._ask(system, user)
+        if resp:
+            self._cache_set(key, resp)
+        return resp
+
+    # ===================================================================
     #   PARALLEL BATCH PREP (FUTURE SUPPORT)
     # ===================================================================
 
@@ -506,18 +618,24 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
     #   COMBINED INSIGHTS FOR UI
     # ===================================================================
 
-    def generate_insights(self):
+    def generate_insights(self, posture: Optional[Dict] = None):
         output = {
             "enabled": self.is_enabled(),
             "timestamp": datetime.now().isoformat(),
             "network_summary": None,
             "vulnerability_analysis": None,
             "weakness_analysis": None,
+            "posture_analysis": None,
         }
 
         if not self.is_enabled():
             output["message"] = self.initialization_error or "AI disabled"
             return output
+
+        # Passive-monitoring posture (Watchtower + Wi-Fi Defense), if supplied by
+        # the caller — the route gathers it since the aggregator lives there.
+        if posture is not None:
+            output["posture_analysis"] = self.analyze_security_posture(posture)
 
         net = {
             "target_count": self.shared_data.targetnbr,

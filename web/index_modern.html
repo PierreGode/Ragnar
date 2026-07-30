@@ -1075,7 +1075,7 @@
                         <svg class="w-6 h-6 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                         </svg>
-                        AI Insights (GPT-5 Nano)
+                        AI Insights (GPT-5.4 Nano)
                     </span>
                     <button onclick="refreshAIInsights()" class="text-sm bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded transition-colors">
                         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1142,6 +1142,28 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Passive Monitoring & Wi-Fi Defense (Watchtower) -->
+                    <div id="ai-posture-section" class="p-4 bg-gradient-to-r from-cyan-900/30 to-teal-900/30 rounded-lg border border-cyan-500/30" style="display:none;">
+                        <div class="flex items-start space-x-3">
+                            <svg class="w-5 h-5 text-cyan-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <div class="flex-1">
+                                <div class="flex items-center justify-between mb-2">
+                                    <h3 class="text-sm font-semibold text-cyan-300">Passive Monitoring &amp; Wi-Fi Defense <span id="ai-posture-stat" class="text-[11px] text-gray-500 font-normal"></span></h3>
+                                    <button id="ai-posture-toggle" onclick="toggleAISection('posture')" class="text-xs text-cyan-300 hover:text-cyan-200 transition-colors flex items-center" style="display:none;">
+                                        <span id="ai-posture-toggle-text">Show More</span>
+                                        <svg id="ai-posture-toggle-icon" class="w-4 h-4 ml-1 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div id="ai-posture-summary" class="text-sm text-gray-300 leading-relaxed mb-2"></div>
+                                <div id="ai-posture-details" class="text-sm text-gray-300 leading-relaxed" style="display:none;"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- AI Status Footer -->
@@ -1149,7 +1171,7 @@
                     <div class="flex items-center justify-between text-xs text-gray-400">
                         <span>
                             Powered by 
-                            <span id="ai-model-name" class="text-purple-400 font-semibold">GPT-5 Nano</span>
+                            <span id="ai-model-name" class="text-purple-400 font-semibold">GPT-5.4 Nano</span>
                         </span>
                         <span id="ai-last-update" class="text-gray-500">Just now</span>
                     </div>
@@ -1163,7 +1185,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                     </svg>
                     <div class="flex-1">
-                        <h3 class="text-lg font-semibold text-white mb-2">AI Analysis Available (GPT-5 Nano)</h3>
+                        <h3 class="text-lg font-semibold text-white mb-2">AI Analysis Available (GPT-5.4 Nano)</h3>
                         <p class="text-sm text-gray-300 mb-3">
                             Enable AI-powered network analysis. Get intelligent insights about network weaknesses, vulnerability summaries, and security recommendations.
                         </p>
@@ -2345,6 +2367,10 @@
                             </div>
                         </div>
                         <button onclick="wifiScan()" id="wifi-scan-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm font-semibold">Scan</button>
+                        <button onclick="wifiAnalyzeAI()" id="wifi-ai-btn" title="Assess your current Wi-Fi connection and RF environment and get professional recommendations (uses the latest scan)" class="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-semibold">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            Analyze with AI
+                        </button>
                         <button onclick="wifiToggleFullscreen()" id="wifi-fs-btn" title="Full-screen analyzer — bigger spectrum, click any AP for the full record (Esc to exit)" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
                             Full screen
@@ -2368,6 +2394,19 @@
                     </div>
                     <p class="text-[11px] text-gray-500 mt-1">Hover a signal to identify it, click it to inspect — or open <span class="text-gray-300">Full screen</span> for the whole record.</p>
                     <div id="wifi-legend" class="flex flex-wrap gap-4 mt-2 text-xs text-gray-400"></div>
+                </div>
+
+                <!-- AI analysis of the current connection + RF environment -->
+                <div id="wifi-ai-panel" class="glass rounded-xl p-4 mb-5 border border-purple-500/30 hidden">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-sm font-semibold text-purple-300 flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            AI connection analysis
+                        </h3>
+                        <span id="wifi-ai-status" class="text-[11px] text-gray-500"></span>
+                    </div>
+                    <div id="wifi-ai-content" class="text-sm text-gray-300 leading-relaxed"></div>
+                    <p class="text-[10px] text-gray-600 mt-2">Assessment by GPT-5.4 Nano from the latest passive scan and your current association. Recommendations are advisory.</p>
                 </div>
 
                 <div id="wifi-changes" class="flex flex-wrap gap-2 mb-4 text-xs"></div>

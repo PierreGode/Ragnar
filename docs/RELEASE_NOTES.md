@@ -10,7 +10,7 @@
 - D3.js force-directed topology map with risk-colored nodes (critical/high/medium/low/info)
 - Click any node to open a slide-in host detail panel showing ports, credentials, attack history, and vulnerability summary
 - Zoom, pan, and drag support
-- AI-assisted device classification via GPT-5 Nano toggle (optional, requires API key)
+- AI-assisted device classification via GPT-5.4 Nano toggle (optional, requires API key)
 - Node labels prefer resolved hostname over raw IP
 - Legend auto-generated from live data
 

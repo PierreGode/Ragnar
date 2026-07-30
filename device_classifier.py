@@ -3,7 +3,7 @@
 Zero external dependencies for base classification — pure Python dict lookups.
 Designed for Pi Zero W2: classification takes <1ms per host.
 
-Optional AI-enhanced classification via GPT-5 Nano for low-confidence devices.
+Optional AI-enhanced classification via GPT-5.4 Nano for low-confidence devices.
 """
 
 
@@ -698,11 +698,11 @@ VALID_DEVICE_TYPES = set(DEVICE_TYPE_LABELS.keys())
 
 
 # ---------------------------------------------------------------------------
-# AI-enhanced classification via GPT-5 Nano (optional)
+# AI-enhanced classification via GPT-5.4 Nano (optional)
 # ---------------------------------------------------------------------------
 def classify_device_ai(vendor, ports, hostname, mac, ai_service=None,
                        gateway_ip=None, device_ip=None):
-    """Classify a device using rule-based logic first, then GPT-5 Nano if
+    """Classify a device using rule-based logic first, then GPT-5.4 Nano if
     confidence is below threshold.
 
     Args:
@@ -801,7 +801,7 @@ def classify_device_ai(vendor, ports, hostname, mac, ai_service=None,
 
 
 def _ask_ai_classify(ai_service, vendor, ports, hostname, mac):
-    """Ask GPT-5 Nano to classify a single device. Returns a device_type string or None."""
+    """Ask GPT-5.4 Nano to classify a single device. Returns a device_type string or None."""
     if not ai_service or not ai_service.ensure_ready():
         return None
 
@@ -821,10 +821,10 @@ def _ask_ai_classify(ai_service, vendor, ports, hostname, mac):
         f"Classify this device."
     )
 
-    # Use GPT-5 Nano for fast/cheap classification
+    # Use GPT-5.4 Nano for fast/cheap classification
     original_model = ai_service.model
     try:
-        ai_service.model = "gpt-5-nano"
+        ai_service.model = "gpt-5.4-nano"
         answer = ai_service._ask(system, user)
     finally:
         ai_service.model = original_model

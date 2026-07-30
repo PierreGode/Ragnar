@@ -1631,6 +1631,48 @@ function wifiScan() {
         }).catch(e => { busy(false); _wifiSetStatus('Scan failed'); });
 }
 
+// Professional AI assessment of the current connection + RF environment. Uses
+// the latest scan (runs one first if needed), then POSTs it to the AI route.
+async function wifiAnalyzeAI() {
+    const panel = document.getElementById('wifi-ai-panel');
+    const content = document.getElementById('wifi-ai-content');
+    const status = document.getElementById('wifi-ai-status');
+    const btn = document.getElementById('wifi-ai-btn');
+    panel.classList.remove('hidden');
+    if (btn) btn.disabled = true;
+    status.textContent = '';
+    try {
+        // Ensure we have scan data (the AI reasons over the AP list).
+        if (!_wifiState.data || !(_wifiState.data.aps || []).length) {
+            content.innerHTML = '<span class="text-gray-400">Scanning first…</span>';
+            const iface = _wifiState.iface || document.getElementById('wifi-iface').value;
+            const r = await fetch(`/api/net/wifi/scan?interface=${encodeURIComponent(iface)}&band=${_wifiState.band}`);
+            const d = await r.json();
+            if (!d.error) { _wifiState.data = d; wifiRender(); }
+        }
+        content.innerHTML = '<span class="text-gray-400">Analyzing your connection and the RF environment…</span>';
+        const resp = await fetch('/api/ai/wifi-analyze', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan: _wifiState.data || {} })
+        });
+        const d = await resp.json();
+        if (d.enabled === false) {
+            content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'AI is not enabled.') + '</span>';
+            return;
+        }
+        if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
+        content.innerHTML = formatAIText(d.analysis || 'No analysis returned.');
+        const c = d.connected;
+        status.textContent = c
+            ? `${c.ssid || c.bssid} · ${c.band || '?'} GHz ch ${c.channel ?? '?'} · ${d.context ? d.context.co_channel_count + ' co-channel' : ''}`
+            : 'not associated — analyzed the environment';
+    } catch (e) {
+        content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
 // Waterfall view streams on its own poll, so it's left alone here.
 function _wifiAutoTick() {
@@ -22204,6 +22246,29 @@ function displayAIInsights(insights) {
             }
         }
         
+        // Passive monitoring & Wi-Fi Defense posture (Watchtower-fed)
+        const postureSection = document.getElementById('ai-posture-section');
+        const postureSummary = document.getElementById('ai-posture-summary');
+        const postureDetails = document.getElementById('ai-posture-details');
+        const postureToggle = document.getElementById('ai-posture-toggle');
+        const postureStat = document.getElementById('ai-posture-stat');
+        if (postureSection && postureSummary && insights.posture_analysis) {
+            const { summary, details } = splitAIContent(insights.posture_analysis);
+            postureSummary.innerHTML = formatAIText(summary);
+            postureDetails.innerHTML = formatAIText(details);
+            if (postureToggle) postureToggle.style.display = details.trim() ? 'flex' : 'none';
+            const pd = insights.posture_data;
+            if (postureStat && pd) {
+                const bs = pd.by_severity || {};
+                postureStat.textContent = `— ${pd.total_alerts || 0} alert(s)`
+                    + (bs.critical ? ` · ${bs.critical} critical` : '')
+                    + (bs.warning ? ` · ${bs.warning} warning` : '');
+            }
+            postureSection.style.display = 'block';
+        } else if (postureSection) {
+            postureSection.style.display = 'none';
+        }
+
         // Update last update time
         const lastUpdate = document.getElementById('ai-last-update');
         if (lastUpdate && aiInsightsCache.timestamp) {
@@ -28606,7 +28671,7 @@ async function _checkMapAiStatus() {
         }
         const wrapper = document.getElementById('map-ai-toggle-wrapper');
         if (wrapper) {
-            wrapper.title = _mapAiAvailable ? 'Use GPT-5 Nano to improve device classification' : 'AI not available – enable in Settings';
+            wrapper.title = _mapAiAvailable ? 'Use GPT-5.4 Nano to improve device classification' : 'AI not available – enable in Settings';
         }
     } catch(e) { console.warn('AI status check failed:', e); _mapAiAvailable = false; }
 }

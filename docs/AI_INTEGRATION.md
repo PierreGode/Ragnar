@@ -1,6 +1,6 @@
 # AI Integration for Ragnar
 
-This document describes the AI integration feature added to Ragnar, which provides intelligent network analysis and vulnerability summaries using OpenAI's GPT-5 Nano.
+This document describes the AI integration feature added to Ragnar, which provides intelligent network analysis and vulnerability summaries using OpenAI's GPT-5.4 Nano.
 
 ## Overview
 
@@ -32,12 +32,12 @@ Identifies potential attack vectors and security gaps in your network:
 ### 1. Enable AI in Config Tab
 
 1. Navigate to the **Config** tab in the web interface
-2. Scroll to the **AI Integration (GPT-5 Nano)** section
+2. Scroll to the **AI Integration (GPT-5.4 Nano)** section
 3. Configure the following settings:
 
 - **ai_enabled**: Set to `true` to enable AI features
 - **openai_api_token**: Your OpenAI API token (required)
-- **ai_model**: Model to use (default: "gpt-5-nano")
+- **ai_model**: Model to use (default: "gpt-5.4-nano")
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
@@ -83,7 +83,7 @@ Returns AI service status and configuration
 {
   "enabled": true,
   "available": true,
-  "model": "gpt-5-nano",
+  "model": "gpt-5.4-nano",
   "capabilities": {
     "network_insights": true,
     "vulnerability_summaries": true
@@ -113,8 +113,25 @@ Returns vulnerability analysis only
 ### GET /api/ai/weaknesses
 Returns weakness analysis only
 
+### POST /api/ai/wifi-analyze
+Professional assessment of the **current Wi-Fi connection and RF environment**,
+used by the **WiFi Spectrum Analyzer → "Analyze with AI"** button. Body:
+`{"scan": <result of /api/net/wifi/scan>}`. The server determines the connected
+network itself (`iw dev … link`), enriches it from the scan (channel, width,
+security, Wi-Fi generation), computes the co-/adjacent-channel picture, and
+returns prioritized, plain-language recommendations (band/channel/width/security
+changes, AP placement). Neutral professional tone — no persona.
+
 ### POST /api/ai/clear-cache
 Clears the AI response cache
+
+### Dashboard posture analysis
+`GET /api/ai/insights` now also returns a `posture_analysis` field (and the
+`posture_data` it was built from): a professional summary of the **passive-
+monitoring posture** drawn from **Watchtower**, which aggregates the Wi-Fi
+Defense family (wifiwatch, legacywatch, wpswatch) and the wired watchers
+(ndpwatch, arp_guard, …). It surfaces on the dashboard as the "Passive
+Monitoring & Wi-Fi Defense" card.
 
 ## Technical Details
 

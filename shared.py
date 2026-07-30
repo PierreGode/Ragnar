@@ -343,7 +343,7 @@ class SharedData:
             logger.info("Attempting to initialize AI service...")
             self.ai_service = AIService(self)
             if self.ai_service.is_enabled():
-                logger.info("AI service initialized successfully with GPT-5 Nano")
+                logger.info("AI service initialized successfully with GPT-5.4 Nano")
             else:
                 init_error = getattr(self.ai_service, 'initialization_error', None)
                 if init_error:
@@ -831,10 +831,10 @@ class SharedData:
             "network_intelligence_enabled": True,
             "network_auto_resolution": True,
 
-            "__title_ai__": "AI Integration (GPT-5 Nano)",
+            "__title_ai__": "AI Integration (GPT-5.4 Nano)",
             "ai_enabled": False,
             "openai_api_token": "",
-            "ai_model": "gpt-5-nano",
+            "ai_model": "gpt-5.4-nano",
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,

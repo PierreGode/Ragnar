@@ -8408,7 +8408,7 @@ def get_network():
 
 
 def _batch_ai_classify(nodes, indices, ai_service, labels, valid_types):
-    """Classify multiple low-confidence devices in a SINGLE GPT-5 Nano call.
+    """Classify multiple low-confidence devices in a SINGLE GPT-5.4 Nano call.
 
     Mutates nodes in-place for the given indices.
     """
@@ -8439,7 +8439,7 @@ def _batch_ai_classify(nodes, indices, ai_service, labels, valid_types):
 
     original_model = ai_service.model
     try:
-        ai_service.model = "gpt-5-nano"
+        ai_service.model = "gpt-5.4-nano"
         answer = ai_service._ask(system, user)
     finally:
         ai_service.model = original_model
@@ -21472,14 +21472,147 @@ def get_ai_insights():
                 'enabled': False,
                 'message': 'AI service is not enabled. Configure OpenAI API token in settings.'
             })
-        
+
+        # Passive-monitoring posture from Watchtower (aggregates the Wi-Fi Defense
+        # family + wired watchers) — fed to the dashboard AI so it reports on the
+        # live security surface, not just the scan counts.
+        posture = _build_ai_posture()
+
         # Generate insights
-        insights = ai_service.generate_insights()
-        
+        insights = ai_service.generate_insights(posture=posture)
+        if posture is not None:
+            insights['posture_data'] = posture
+
         return jsonify(insights)
         
     except Exception as e:
         logger.error(f"Error getting AI insights: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _build_ai_posture():
+    """Compact passive-monitoring posture from Watchtower for the dashboard AI.
+    Returns None if the aggregator is unavailable/disabled with nothing to say."""
+    try:
+        cfg = shared_data.config
+        with _watchtower_lock:
+            wt = _wt_get()
+            summ = wt.summary()
+            recent = wt.recent(limit=12, min_severity=None)
+        if not summ.get('total') and not cfg.get('watchtower_enabled', False):
+            return None
+        return {
+            'total_alerts': summ.get('total', 0),
+            'worst': summ.get('worst'),
+            'by_severity': summ.get('by_severity', {}),
+            'by_source': summ.get('by_source', {}),
+            'reporting_sources': [s.get('label') or s.get('name')
+                                  for s in summ.get('sources', []) if s.get('present')],
+            'recent': [{'source': a.get('source'), 'severity': a.get('severity'),
+                        'codes': a.get('codes'), 'title': a.get('title')}
+                       for a in recent],
+        }
+    except Exception as exc:
+        logger.debug(f"[ai] posture build failed: {exc}")
+        return None
+
+
+def _connected_wifi():
+    """Best-effort current Wi-Fi association via `iw dev … link`, across all
+    wireless interfaces. Returns a dict or None if not associated."""
+    import subprocess
+    try:
+        dev = subprocess.run(['iw', 'dev'], capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return None
+    ifaces = re.findall(r'^\s*Interface\s+(\S+)', dev, re.M)
+    for iface in ifaces:
+        try:
+            out = subprocess.run(['iw', 'dev', iface, 'link'],
+                                 capture_output=True, text=True, timeout=5).stdout
+        except Exception:
+            continue
+        m = re.search(r'Connected to ([0-9a-fA-F:]{17})', out)
+        if not m:
+            continue
+        info = {'iface': iface, 'bssid': m.group(1).lower()}
+        for key, rx, cast in (
+            ('ssid', r'SSID:\s*(.+)', str),
+            ('freq_mhz', r'freq:\s*(\d+)', int),
+            ('signal_dbm', r'signal:\s*(-?\d+)', int),
+            ('tx_bitrate_mbps', r'tx bitrate:\s*([\d.]+)', float),
+            ('rx_bitrate_mbps', r'rx bitrate:\s*([\d.]+)', float),
+        ):
+            mm = re.search(rx, out)
+            if mm:
+                try:
+                    info[key] = cast(mm.group(1).strip())
+                except (ValueError, TypeError):
+                    pass
+        return info
+    return None
+
+
+def _wifi_ai_context(scan, connected):
+    """Assemble the compact context the Wi-Fi AI analysis reasons over: the
+    connected AP (enriched from the scan), and the co-/adjacent-channel picture."""
+    aps = (scan or {}).get('aps') or []
+    conn = dict(connected or {})
+    # Enrich the connected AP from the scan (channel/width/security/standard).
+    if conn.get('bssid'):
+        match = next((a for a in aps if (a.get('bssid') or '').lower() == conn['bssid']), None)
+        if match:
+            for k in ('ssid', 'channel', 'band', 'width', 'security', 'standard',
+                      'signal', 'max_phy_mbps', 'vendor'):
+                if match.get(k) is not None and conn.get(k) is None:
+                    conn[k] = match.get(k)
+    ch = conn.get('channel')
+    band = conn.get('band')
+    co = [a for a in aps if a.get('channel') == ch and (a.get('bssid') or '').lower() != conn.get('bssid')]
+    same_band = [a for a in aps if a.get('band') == band]
+    # Top interferers on our channel by signal.
+    interferers = sorted(
+        [{'ssid': a.get('ssid') or '(hidden)', 'bssid': a.get('bssid'),
+          'signal': a.get('signal'), 'security': a.get('security')} for a in co],
+        key=lambda x: (x['signal'] is None, -(x['signal'] or -999)))[:6]
+    # Band distribution across everything seen.
+    bands = {}
+    for a in aps:
+        bands[a.get('band') or '?'] = bands.get(a.get('band') or '?', 0) + 1
+    return {
+        'connected': conn if conn.get('bssid') else None,
+        'ap_total': len(aps),
+        'bands_seen': bands,
+        'co_channel_count': len(co),
+        'same_band_ap_count': len(same_band),
+        'top_co_channel_interferers': interferers,
+    }
+
+
+@app.route('/api/ai/wifi-analyze', methods=['POST'])
+def ai_wifi_analyze():
+    """Professional AI assessment of the current Wi-Fi connection + RF
+    environment. Body: {"scan": <do_scan result>}. Determines the connected
+    network server-side and returns prioritized recommendations."""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({'enabled': False,
+                            'message': 'AI service is not enabled. Configure an OpenAI API token in the Config tab.'})
+        body = request.get_json(silent=True) or {}
+        scan = body.get('scan') or {}
+        connected = _connected_wifi()
+        context = _wifi_ai_context(scan, connected)
+        analysis = ai_service.analyze_wifi_connection(context)
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'connected': context.get('connected'),
+            'context': {k: context[k] for k in
+                        ('ap_total', 'co_channel_count', 'same_band_ap_count', 'bands_seen')},
+        })
+    except Exception as e:
+        logger.error(f"Error in AI Wi-Fi analysis: {e}")
         return jsonify({'error': str(e)}), 500
 
 
