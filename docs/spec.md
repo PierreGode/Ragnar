@@ -21,7 +21,7 @@
 - **Vulnerability Scanner (`actions/nmap_vuln_scanner.py`)**: Incremental, NSE-driven scanning feeding Network Intelligence and the vulnerabilities view.
 - **Wi-Fi Manager (`wifi_manager.py`)**: Maintains station mode, auto AP fallback, captive portal lifecycle, connection analytics, and endless-loop watchdog.
 - **Web/API (`webapp_modern.py`, `web/`)**: Modern dashboard served on port 8000 with REST+WebSocket endpoints, config UI, AI insights, file browser, and Wi-Fi portal.
-- **AI Service (`ai_service.py`)**: GPT-5 Nano integration for insights, caching, and API exposure; sanitizes outbound data.
+- **AI Service (`ai_service.py`)**: GPT-5.4 Nano integration for insights, caching, and API exposure; sanitizes outbound data.
 - **Display Pipeline (`display.py`, `epd_helper.py`)**: Renders status, loot, telemetry, and gamification badges to the e-paper HAT with full/partial refresh control.
 - **Logging/Monitoring**: Central `logger.py`, action-specific logs, `/var/log` fallbacks, `data/logs` for audit trails, `resource_monitor.py` for CPU/MEM tracking.
 
@@ -232,7 +232,7 @@
 - Connection metrics (`clients_connected`) increment/decrement inside the `@socketio.on('connect'/'disconnect')` handlers, enabling UI banners warning when too many viewers are online.
 
 ## 12. AI Integration
-- `ai_service.py` initializes GPT-5 Nano via OpenAI SDK when `ai_enabled` and `openai_api_token` are set. Supports alternative models via `ai_model` value.
+- `ai_service.py` initializes GPT-5.4 Nano via OpenAI SDK when `ai_enabled` and `openai_api_token` are set. Supports alternative models via `ai_model` value.
 - Capabilities toggled via config: `ai_analysis_enabled`, `ai_vulnerability_summaries`, `ai_network_insights`, `ai_personality` (tone), `ai_max_tokens`, `ai_temperature`.
 - Cached responses (5 min TTL) stored in memory; optional disk cache (disabled by default) toggled with `ai_cache_to_disk` for offline review.
 - API surface:
@@ -516,6 +516,6 @@ _Ground truth: `webapp_modern.py` as of December 2025. Methods shown exactly as 
 ## 21. References
 - `README.md` – feature overview and quick start.
 - `INSTALL.md` – detailed installation walkthrough.
-- `AI_INTEGRATION.md` – instructions for GPT-5 Nano setup.
+- `AI_INTEGRATION.md` – instructions for GPT-5.4 Nano setup.
 - `KILL_SWITCH.md` – secure wipe procedure.
 - Source files referenced in this spec for deeper context.

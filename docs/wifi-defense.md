@@ -238,6 +238,60 @@ probing):
   `802.11a`, `802.11g` (OFDM rates advertised) or `802.11b` (DSSS-only). The
   b/g split is what the Spectrum Analyzer's coarser "legacy" label can't do.
 
+### Accuracy model (how PHY and airtime are attributed)
+
+The per-client analysis was hardened against the classic 802.11 attribution
+traps (mirroring the standalone `legacywatch` methodology):
+
+- **Both directions.** Airtime is keyed on the *station*, resolved from the
+  DS bits (`ToDS`/`FromDS`) — uplink `addr2`, downlink `addr1` — so a station's
+  downlink cost is counted for it, not misfiled onto the AP. Counting `addr2`
+  alone (uplink) understates a legacy station by ~half.
+- **PHY from data frames only.** Management/control frames (probe requests,
+  ACKs) are sent at basic rates even by modern clients, so they are excluded
+  from PHY-rate observation — otherwise a Wi-Fi 6 phone that probes at 1 Mbps
+  would be mislabeled `802.11b`.
+- **Declared beats observed.** A station's own (re)assoc/probe request declares
+  its capability directly: an HT/VHT/HE element present ⇒ `802.11n+` for
+  certain; absent ⇒ genuine pre-802.11n. Each client row carries a
+  `confidence` of `declared` (from the capability element) or `observed` (rates
+  only, weaker — a modern client at the cell edge can look legacy).
+- **Preamble-accurate airtime.** On-air time is PHY preamble + data-symbol time;
+  a 1 Mbps DSSS frame carries a 192 µs long preamble (1500 B ⇒ 12 192 µs), which
+  a flat overhead constant would miss.
+- **Disproportion.** Each client reports airtime-share ÷ byte-share — the number
+  that names the culprit: a station moving 2% of the bytes while eating 54% of
+  the airtime.
+
+### Cipher as a throughput problem
+
+The RSN cipher suites (group + pairwise) are parsed, because encryption choice
+is also a speed ceiling: a **TKIP group cipher** disables 802.11n rates for
+group-addressed frames BSS-wide (`cipher_tkip_group`), and **pairwise TKIP**
+hard-caps any client that selects it at 54 Mbps (`cipher_tkip_pairwise`). The
+beacon's **HT Operation** element is read too — `HT Protection = Non-HT Mixed`
+(`ht_protection_mixed`) means a pre-802.11n station is associated and 11n rates
+are protected for everyone.
+
+### WPS / Wi-Fi Simple Config posture
+
+The WSC element an AP advertises (WFA vendor element `00:50:F2:04`) describes
+its own enrollment surface in plaintext — no association, no keys. We parse:
+
+- **WPS State** (`0x1044`) — `Not Configured` ⇒ out-of-box enrollment open
+  (`wps_unconfigured`).
+- **AP Setup Locked** (`0x1057`) — clear ⇒ PIN attempts are not rate-limited.
+- **Config Methods** (`0x1008`) — Label/Display/Keypad = the external-registrar
+  **PIN** path (brute-forceable); PushButton needs physical presence.
+- **Version2 subelement** — its *absence* means **WSC 1.0**, which has no
+  mandatory lockout, so an online PIN brute force runs to completion.
+
+The headline finding is `wps_pin_open`: the PIN method is offered and the AP is
+not locked — an attacker in range can brute-force the 8-digit PIN (~11 000
+attempts). WSC 1.0 makes it worse (no lockout at all). The AP row shows a
+`WPS-PIN` / `WPS-1.0` badge (red when exposed) or a grey `WPS` badge for
+pushbutton-only / locked APs. This is detection only — nothing derives PINs.
+
 ## Client isolation observer
 
 A passive audit of whether an AP — or a whole mesh/ESS — actually enforces

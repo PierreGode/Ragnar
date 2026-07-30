@@ -272,6 +272,55 @@
             }
         }
 
+        /* Responsive cards for the Airtime & link-quality tables on phones */
+        @media (max-width: 640px) {
+            #wifidef-at-tbody, #wifidef-at-clients-tbody,
+            #wifidef-at-tbody tr, #wifidef-at-clients-tbody tr,
+            #wifidef-at-tbody td, #wifidef-at-clients-tbody td {
+                display: block;
+                width: 100%;
+            }
+            table:has(#wifidef-at-tbody) thead,
+            table:has(#wifidef-at-clients-tbody) thead {
+                display: none;
+            }
+            #wifidef-at-tbody > tr, #wifidef-at-clients-tbody > tr {
+                border: 1px solid rgba(148, 163, 184, 0.18);
+                border-radius: 0.5rem;
+                padding: 0.5rem 0.75rem;
+                margin-bottom: 0.75rem;
+                background: rgba(15, 23, 42, 0.35);
+            }
+            #wifidef-at-tbody > tr > td, #wifidef-at-clients-tbody > tr > td {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.75rem;
+                padding: 0.25rem 0;
+                text-align: right;
+            }
+            #wifidef-at-tbody > tr > td::before,
+            #wifidef-at-clients-tbody > tr > td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                text-transform: uppercase;
+                color: rgba(226, 232, 240, 0.7);
+                font-size: 0.65rem;
+                letter-spacing: 0.04em;
+                flex: 0 0 auto;
+            }
+            /* full-width placeholder rows ("No frames…") span the card */
+            #wifidef-at-tbody > tr > td[colspan],
+            #wifidef-at-clients-tbody > tr > td[colspan] {
+                display: block;
+                text-align: center;
+            }
+            #wifidef-at-tbody > tr > td[colspan]::before,
+            #wifidef-at-clients-tbody > tr > td[colspan]::before {
+                content: none;
+            }
+        }
+
         /* Toggle switch: show green when ON, regardless of Tailwind purge state */
         label.toggle-switch > input[type="checkbox"]:checked + div { background-color: #16a34a !important; }
         /* AI map toggle – uses Ragnar color, not green */
@@ -1026,7 +1075,7 @@
                         <svg class="w-6 h-6 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                         </svg>
-                        AI Insights (GPT-5 Nano)
+                        AI Insights (GPT-5.4 Nano)
                     </span>
                     <button onclick="refreshAIInsights()" class="text-sm bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded transition-colors">
                         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1093,6 +1142,28 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Passive Monitoring & Wi-Fi Defense (Watchtower) -->
+                    <div id="ai-posture-section" class="p-4 bg-gradient-to-r from-cyan-900/30 to-teal-900/30 rounded-lg border border-cyan-500/30" style="display:none;">
+                        <div class="flex items-start space-x-3">
+                            <svg class="w-5 h-5 text-cyan-400 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <div class="flex-1">
+                                <div class="flex items-center justify-between mb-2">
+                                    <h3 class="text-sm font-semibold text-cyan-300">Passive Monitoring &amp; Wi-Fi Defense <span id="ai-posture-stat" class="text-[11px] text-gray-500 font-normal"></span></h3>
+                                    <button id="ai-posture-toggle" onclick="toggleAISection('posture')" class="text-xs text-cyan-300 hover:text-cyan-200 transition-colors flex items-center" style="display:none;">
+                                        <span id="ai-posture-toggle-text">Show More</span>
+                                        <svg id="ai-posture-toggle-icon" class="w-4 h-4 ml-1 transform transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+                                        </svg>
+                                    </button>
+                                </div>
+                                <div id="ai-posture-summary" class="text-sm text-gray-300 leading-relaxed mb-2"></div>
+                                <div id="ai-posture-details" class="text-sm text-gray-300 leading-relaxed" style="display:none;"></div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 
                 <!-- AI Status Footer -->
@@ -1100,7 +1171,7 @@
                     <div class="flex items-center justify-between text-xs text-gray-400">
                         <span>
                             Powered by 
-                            <span id="ai-model-name" class="text-purple-400 font-semibold">GPT-5 Nano</span>
+                            <span id="ai-model-name" class="text-purple-400 font-semibold">GPT-5.4 Nano</span>
                         </span>
                         <span id="ai-last-update" class="text-gray-500">Just now</span>
                     </div>
@@ -1114,7 +1185,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                     </svg>
                     <div class="flex-1">
-                        <h3 class="text-lg font-semibold text-white mb-2">AI Analysis Available (GPT-5 Nano)</h3>
+                        <h3 class="text-lg font-semibold text-white mb-2">AI Analysis Available (GPT-5.4 Nano)</h3>
                         <p class="text-sm text-gray-300 mb-3">
                             Enable AI-powered network analysis. Get intelligent insights about network weaknesses, vulnerability summaries, and security recommendations.
                         </p>
@@ -2296,6 +2367,10 @@
                             </div>
                         </div>
                         <button onclick="wifiScan()" id="wifi-scan-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm font-semibold">Scan</button>
+                        <button onclick="wifiAnalyzeAI()" id="wifi-ai-btn" title="Assess your current Wi-Fi connection and RF environment and get professional recommendations (uses the latest scan)" class="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded text-sm font-semibold">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            Analyze with AI
+                        </button>
                         <button onclick="wifiToggleFullscreen()" id="wifi-fs-btn" title="Full-screen analyzer — bigger spectrum, click any AP for the full record (Esc to exit)" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
                             Full screen
@@ -2319,6 +2394,19 @@
                     </div>
                     <p class="text-[11px] text-gray-500 mt-1">Hover a signal to identify it, click it to inspect — or open <span class="text-gray-300">Full screen</span> for the whole record.</p>
                     <div id="wifi-legend" class="flex flex-wrap gap-4 mt-2 text-xs text-gray-400"></div>
+                </div>
+
+                <!-- AI analysis of the current connection + RF environment -->
+                <div id="wifi-ai-panel" class="glass rounded-xl p-4 mb-5 border border-purple-500/30 hidden">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-sm font-semibold text-purple-300 flex items-center gap-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            AI connection analysis
+                        </h3>
+                        <span id="wifi-ai-status" class="text-[11px] text-gray-500"></span>
+                    </div>
+                    <div id="wifi-ai-content" class="text-sm text-gray-300 leading-relaxed"></div>
+                    <p class="text-[10px] text-gray-600 mt-2">Assessment by GPT-5.4 Nano from the latest passive scan and your current association. Recommendations are advisory.</p>
                 </div>
 
                 <div id="wifi-changes" class="flex flex-wrap gap-2 mb-4 text-xs"></div>
@@ -2651,6 +2739,7 @@
                         <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Passive per-AP <strong>airtime %</strong>, <strong>retry rate</strong> and <strong>PHY-rate</strong> spread, plus <strong>per-client airtime</strong> and <strong>ERP-protection</strong> detection — pinpoints a legacy <strong>802.11b</strong> device that's taxing the whole cell. Best on a <strong>fixed channel</strong> (airtime % is only meaningful when not hopping).</p>
                     </div>
                     <div class="flex flex-wrap items-end gap-2">
+                        <label class="text-[11px] text-gray-400">Interface <select id="wifidef-at-iface" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" title="Wireless (wlan*) adapter to capture on"></select></label>
                         <label class="text-[11px] text-gray-400">Channel <input id="wifidef-at-channel" type="text" value="" placeholder="e.g. 6" class="w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" title="Fix a channel for meaningful airtime %; blank = hop (approximate)"></label>
                         <label class="text-[11px] text-gray-400">for <input id="wifidef-at-secs" type="number" value="10" min="3" max="60" class="w-14 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-xs"> s</label>
                         <button onclick="wifidefAirtime()" id="wifidef-at-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-xs font-semibold">Analyze airtime</button>
@@ -2691,6 +2780,7 @@
                         <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Audits whether an AP or mesh enforces <strong>client isolation</strong> — purely passively, from cleartext 802.11 headers (works on encrypted networks; payloads are never read). If the AP is seen <strong>relaying unicast frames between two of its own wireless clients</strong>, isolation is <strong>OFF</strong>; if clients address each other (or broadcast) but the AP relays nothing back, it's <strong>blocking</strong>. A multi-node SSID gets a mesh rollup incl. <strong>cross-node forwarding</strong>. Best on a <strong>fixed channel</strong> — catching a request <em>and</em> its relay needs to dwell on the BSS's channel.</p>
                     </div>
                     <div class="flex flex-wrap items-end gap-2">
+                        <label class="text-[11px] text-gray-400">Interface <select id="wifidef-iso-iface" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" title="Wireless (wlan*) adapter to capture on"></select></label>
                         <label class="text-[11px] text-gray-400">Channel <input id="wifidef-iso-channel" type="text" value="" placeholder="e.g. 6" class="w-16 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs" title="Fix the channel of the AP/mesh you're auditing; blank = hop (much weaker evidence)"></label>
                         <label class="text-[11px] text-gray-400">for <input id="wifidef-iso-secs" type="number" value="30" min="5" max="120" class="w-14 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-xs"> s</label>
                         <button onclick="wifidefIsolation()" id="wifidef-iso-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-xs font-semibold">Observe isolation</button>
@@ -7300,7 +7390,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260729-ili9486-tft"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260730-ai-wifi"></script>
 
 </body>
 </html>
