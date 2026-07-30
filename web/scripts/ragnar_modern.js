@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-panel-iface';
+const WIFIDEF_BUILD = '20260730-panel-iface2';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4187,13 +4187,16 @@ function _wifidefFillIfaces() {
 function _wifidefFillPanelIface(id, ifs) {
     const sel = document.getElementById(id);
     if (!sel) return;
-    const wlans = (ifs || []).filter(i => /^wlan/.test(i.iface));
+    // /api/wifidef/interfaces is already wireless-only (from `iw dev`), so every
+    // entry is a wlan* / wlx* / wlp* adapter or its monitor vif — list them all;
+    // a name filter would wrongly drop USB (wlxNNN) and PCI (wlpNNN) adapters.
+    const wlans = ifs || [];
     const prev = sel.value;
-    if (!wlans.length) { sel.innerHTML = '<option value="">No wlan* adapter</option>'; return; }
+    if (!wlans.length) { sel.innerHTML = '<option value="">No wireless adapter</option>'; return; }
     sel.innerHTML = wlans.map(i =>
         `<option value="${i.iface}"${i.monitor_capable ? '' : ' disabled'}>${i.iface}${i.monitor_capable ? '' : ' (no monitor)'}${i.is_monitor ? ' • MONITOR' : ''}</option>`).join('');
     // Keep the prior choice if still present, else fall back to the shared iface
-    // (if it's a wlan) or the first monitor-capable wlan.
+    // or the first monitor-capable adapter.
     const has = v => wlans.some(i => i.iface === v);
     sel.value = has(prev) ? prev
         : (has(_wifidef.iface) ? _wifidef.iface : (wlans.find(i => i.monitor_capable) || wlans[0]).iface);
