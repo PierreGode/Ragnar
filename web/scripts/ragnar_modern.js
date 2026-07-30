@@ -12679,6 +12679,11 @@ function initializePwnUI() {
         installBtn.addEventListener('click', handlePwnInstallClick);
     }
 
+    const repairBtn = document.getElementById('pwn-repair-btn');
+    if (repairBtn) {
+        repairBtn.addEventListener('click', handlePwnRepairClick);
+    }
+
     const swapToPwnBtn = document.getElementById('pwn-swap-to-pwn-btn');
     if (swapToPwnBtn) {
         swapToPwnBtn.addEventListener('click', () => handlePwnSwap('pwnagotchi'));
@@ -12798,11 +12803,92 @@ function updatePwnagotchiUI(status = {}) {
 
     updatePwnDiscoveredCard(pwnStatus, visuals);
     updatePwnButtons();
+    updatePwnHealthCard(pwnStatus);
     if (pwnStatus.installing && !wasInstalling) {
         resetPwnLogState('Installer output will stream here during installation.');
     }
     ensurePwnLogStreamingForStatus(pwnStatus);
     lastPwnState = pwnStatus.state;
+}
+
+function updatePwnHealthCard(status = {}) {
+    const card = document.getElementById('pwn-health-card');
+    if (!card) {
+        return;
+    }
+
+    const components = status.components || {};
+    const labels = status.component_labels || {};
+    const order = (status.component_order && status.component_order.length)
+        ? status.component_order
+        : Object.keys(labels);
+    const anyComponent = order.some(key => components[key]);
+
+    // Only meaningful once something is on disk; otherwise the Install card
+    // already tells the user Pwnagotchi isn't set up yet.
+    if (!(status.installed || anyComponent)) {
+        card.style.display = 'none';
+        return;
+    }
+    card.style.display = '';
+
+    const list = document.getElementById('pwn-health-list');
+    if (list) {
+        list.innerHTML = order.map(key => {
+            const ok = Boolean(components[key]);
+            const icon = ok
+                ? '<span class="text-green-400 font-bold">✓</span>'
+                : '<span class="text-red-400 font-bold">✗</span>';
+            const rowClass = ok ? 'text-gray-300' : 'text-red-300';
+            return `<li class="flex items-center gap-2 ${rowClass}">${icon}<span>${escapeHtml(labels[key] || key)}</span></li>`;
+        }).join('');
+    }
+
+    const missingCritical = status.missing_critical || [];
+    const missingOptional = status.missing_optional || [];
+    const anyMissing = missingCritical.length > 0 || missingOptional.length > 0;
+
+    const badge = document.getElementById('pwn-health-badge');
+    if (badge) {
+        badge.className = 'text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full self-start whitespace-nowrap';
+        if (!anyMissing) {
+            badge.textContent = 'Healthy';
+            badge.classList.add('bg-green-900/60', 'text-green-300');
+        } else if (missingCritical.length) {
+            badge.textContent = 'Needs Repair';
+            badge.classList.add('bg-red-900/60', 'text-red-300');
+        } else {
+            // Only recommended (non-critical) pieces missing — runs, but degraded.
+            badge.textContent = 'Degraded';
+            badge.classList.add('bg-amber-900/60', 'text-amber-300');
+        }
+    }
+
+    // Offer Repair whenever anything is missing — including non-critical drift
+    // such as the service ExecStart being reverted away from the launcher
+    // (e.g. by Pwnagotchi's own updater). Re-running the installer is idempotent.
+    const repair = document.getElementById('pwn-health-repair');
+    const showRepair = anyMissing && !status.installing;
+    if (repair) {
+        repair.classList.toggle('hidden', !showRepair);
+    }
+
+    const repairMsg = document.getElementById('pwn-health-repair-msg');
+    if (showRepair && repairMsg) {
+        const missing = missingCritical.concat(missingOptional);
+        repairMsg.textContent = missing.length
+            ? `Missing or broken: ${missing.join(', ')}.`
+            : 'Some components need attention. Re-run the installer to repair.';
+    }
+
+    const repairBtn = document.getElementById('pwn-repair-btn');
+    if (repairBtn) {
+        const busy = Boolean(status.installing);
+        repairBtn.disabled = busy;
+        repairBtn.textContent = busy ? 'Repairing…' : 'Repair Installation';
+        repairBtn.classList.toggle('opacity-70', busy);
+        repairBtn.classList.toggle('cursor-not-allowed', busy);
+    }
 }
 
 function updatePwnButtons() {
@@ -13556,11 +13642,13 @@ function formatPwnPhaseLabel(phase) {
     return phase.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
 }
 
-async function handlePwnInstallClick() {
+async function runPwnInstaller(isRepair) {
     if (pwnStatus.installing) {
         addConsoleMessage('Pwnagotchi installer already running', 'warning');
         return;
     }
+
+    const verb = isRepair ? 'Repair' : 'Install';
 
     const installBtn = document.getElementById('pwn-install-btn');
     if (installBtn) {
@@ -13568,26 +13656,42 @@ async function handlePwnInstallClick() {
         installBtn.textContent = 'Starting installer...';
         installBtn.classList.add('opacity-70', 'cursor-not-allowed');
     }
+    const repairBtn = document.getElementById('pwn-repair-btn');
+    if (repairBtn) {
+        repairBtn.disabled = true;
+        repairBtn.textContent = 'Starting repair…';
+        repairBtn.classList.add('opacity-70', 'cursor-not-allowed');
+    }
 
-    resetPwnLogState('Installer requested. Waiting for output...');
+    resetPwnLogState(isRepair
+        ? 'Repair requested. Waiting for output...'
+        : 'Installer requested. Waiting for output...');
     startPwnLogStreaming({ initial: true });
 
     try {
         const result = await postPwnAPI('/api/pwnagotchi/install', {});
-        addConsoleMessage('Pwnagotchi installer started', 'success');
+        addConsoleMessage(`Pwnagotchi ${verb.toLowerCase()} started`, 'success');
         if (result && result.status) {
             updatePwnagotchiUI(result.status);
         } else {
             refreshPwnagotchiStatus({ silent: true });
         }
     } catch (error) {
-        console.error('Failed to start Pwnagotchi installer:', error);
-        addConsoleMessage(`Install failed: ${error.message}`, 'error');
+        console.error(`Failed to start Pwnagotchi ${verb.toLowerCase()}:`, error);
+        addConsoleMessage(`${verb} failed: ${error.message}`, 'error');
         stopPwnLogStreaming();
         setPwnLogEmptyMessage('Installer failed to start. Check Ragnar logs for details.');
     } finally {
         updatePwnButtons();
     }
+}
+
+function handlePwnInstallClick() {
+    return runPwnInstaller(false);
+}
+
+function handlePwnRepairClick() {
+    return runPwnInstaller(true);
 }
 
 async function handlePwnSwap(targetMode) {

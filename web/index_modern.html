@@ -6623,6 +6623,27 @@
                         </div>
                     </div>
 
+                    <!-- Pwnagotchi Installation Check Card -->
+                    <div id="pwn-health-card" class="glass rounded-lg p-4 mt-4" style="display: none;">
+                        <div class="flex items-center justify-between mb-3">
+                            <div>
+                                <h4 class="font-medium text-lg">Installation Check</h4>
+                                <p class="text-xs text-gray-500 mt-1">Validates the files and services a working Pwnagotchi install needs.</p>
+                            </div>
+                            <span id="pwn-health-badge" class="text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full bg-slate-700 text-slate-200 self-start whitespace-nowrap">—</span>
+                        </div>
+                        <ul id="pwn-health-list" class="space-y-1.5 text-sm"></ul>
+                        <div id="pwn-health-repair" class="hidden mt-4">
+                            <div class="p-3 rounded-lg bg-amber-900/40 border border-amber-700/60 text-amber-200 text-xs mb-3">
+                                <p id="pwn-health-repair-msg">Some components are missing or broken.</p>
+                            </div>
+                            <button id="pwn-repair-btn" class="w-full bg-amber-600 hover:bg-amber-700 text-white py-2 px-4 rounded-lg transition-colors">
+                                Repair Installation
+                            </button>
+                            <p class="text-xs text-gray-500 mt-2">Re-runs the installer to restore missing pieces. Your captures and config are left untouched.</p>
+                        </div>
+                    </div>
+
                     <!-- Pwnagotchi Updates Card -->
                     <div id="pwn-update-card" class="glass rounded-lg p-4 mt-4" style="display: none;">
                         <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -7390,7 +7411,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260730-ai-wifi"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260731-pwn-healthcheck"></script>
 
 </body>
 </html>

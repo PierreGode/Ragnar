@@ -4390,6 +4390,69 @@ def _collect_pwnagotchi_discovery_summary() -> dict:
     return result
 
 
+def _pwn_service_execstart_ok() -> bool:
+    """True when pwnagotchi.service ExecStart points at the flag-aware launcher.
+
+    A unit that execs the pwnagotchi binary directly (older installs) still runs
+    but ignores the MANU/AUTO one-shot flags, so we flag it as needing repair.
+    """
+    try:
+        with open(PWN_SERVICE_FILE, 'r') as fh:
+            content = fh.read()
+    except OSError:
+        return False
+    return PWN_LAUNCHER_PATH in content
+
+
+# Components a working Ragnar-managed Pwnagotchi install needs. The bool marks
+# whether the piece is *critical* (a missing critical piece means the install is
+# broken); non-critical pieces are recommended but Pwnagotchi can still run.
+_PWN_COMPONENT_SPEC = (
+    ('repo_dir', '/opt/pwnagotchi clone', True),
+    ('repo_git', '/opt/pwnagotchi git metadata (needed for updates)', False),
+    ('service_file', 'pwnagotchi.service unit', True),
+    ('service_launcher', 'service wired to flag-aware launcher', False),
+    ('config_file', '/etc/pwnagotchi/config.toml', True),
+    ('launcher', 'pwnagotchi-launcher wrapper', True),
+    ('binary', 'pwnagotchi executable', True),
+)
+
+
+def _pwnagotchi_component_health() -> dict:
+    """Inspect the on-disk pieces of a Pwnagotchi install.
+
+    Returns per-component booleans plus derived health so the dashboard can tell
+    a clean install from a partial/broken one and offer a targeted Repair action
+    (re-running the idempotent installer) instead of assuming all-or-nothing.
+    """
+    repo_dir = os.path.isdir(PWN_REPO_PATH)
+    launcher_ok = os.path.isfile(PWN_LAUNCHER_PATH) and os.access(PWN_LAUNCHER_PATH, os.X_OK)
+    components = {
+        'repo_dir': repo_dir,
+        'repo_git': repo_dir and os.path.isdir(os.path.join(PWN_REPO_PATH, '.git')),
+        'service_file': os.path.exists(PWN_SERVICE_FILE),
+        'service_launcher': _pwn_service_execstart_ok(),
+        'config_file': os.path.exists(PWN_CONFIG_FILE),
+        'launcher': launcher_ok,
+        'binary': _resolve_pwnagotchi_binary() is not None,
+    }
+
+    labels = {key: label for key, label, _critical in _PWN_COMPONENT_SPEC}
+    missing_critical = [labels[k] for k, _l, crit in _PWN_COMPONENT_SPEC
+                        if crit and not components.get(k)]
+    missing_optional = [labels[k] for k, _l, crit in _PWN_COMPONENT_SPEC
+                        if not crit and not components.get(k)]
+
+    return {
+        'components': components,
+        'component_labels': labels,
+        'component_order': [k for k, _l, _c in _PWN_COMPONENT_SPEC],
+        'missing_critical': missing_critical,
+        'missing_optional': missing_optional,
+        'healthy': not missing_critical,
+    }
+
+
 def _build_pwnagotchi_status(persist: bool = True) -> dict:
     status = {
         'state': 'not_installed',
@@ -4535,6 +4598,19 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
         or status['service_active']
         or status['service_enabled']
         or service_file_exists
+    )
+
+    # Component-level validation: distinguish "fully installed" from a partial or
+    # broken install so the dashboard can offer a Repair button.
+    health = _pwnagotchi_component_health()
+    status['components'] = health['components']
+    status['component_labels'] = health['component_labels']
+    status['component_order'] = health['component_order']
+    status['missing_critical'] = health['missing_critical']
+    status['missing_optional'] = health['missing_optional']
+    status['healthy'] = health['healthy']
+    status['needs_repair'] = bool(
+        status['installed'] and not health['healthy'] and not status['installing']
     )
 
     config_updates = {}

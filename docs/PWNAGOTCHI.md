@@ -59,6 +59,48 @@ The script:
 
 Re-running is safe — already-installed packages are skipped.
 
+### Installation Check & Repair (dashboard)
+
+The **Pwnagotchi Bridge** settings section shows an **Installation Check** card that
+validates each piece of a working install independently rather than treating it as
+all-or-nothing:
+
+| Component | Path / check |
+| --- | --- |
+| `/opt/pwnagotchi clone` | `/opt/pwnagotchi` directory present |
+| git metadata | `/opt/pwnagotchi/.git` present (needed for in-app updates) |
+| `pwnagotchi.service` unit | `/etc/systemd/system/pwnagotchi.service` present |
+| service wired to launcher | unit's `ExecStart` points at `/usr/bin/pwnagotchi-launcher` (so MANU/AUTO flags work) |
+| `config.toml` | `/etc/pwnagotchi/config.toml` present |
+| launcher wrapper | `/usr/bin/pwnagotchi-launcher` present and executable |
+| pwnagotchi executable | real `pwnagotchi` binary resolvable |
+
+Each row shows ✓ / ✗. The badge reflects three states:
+
+- **Healthy** — everything present.
+- **Needs Repair** (red) — a *critical* piece is missing: the clone, service unit,
+  `config.toml`, launcher wrapper, or the executable.
+- **Degraded** (amber) — only recommended pieces are missing (git metadata, or the
+  service `ExecStart` no longer points at the launcher). Pwnagotchi still runs, but
+  updates or the MANU/AUTO flags may not work.
+
+Whenever anything is missing a **Repair Installation** button appears — it re-runs
+the idempotent installer to restore the missing pieces without touching your
+captures or config.
+
+### Does Pwnagotchi's own updater conflict with Ragnar's?
+
+It can. Pwnagotchi ships an `auto-update` plugin that pulls upstream releases on its
+own. Left enabled it would fight Ragnar's git updater over `/opt/pwnagotchi` (dirtying
+the clone) and can revert `pwnagotchi.service` `ExecStart` back to the raw binary —
+breaking the flag-aware launcher wiring (MANU/AUTO). The Ragnar installer therefore
+sets `main.plugins.auto-update.enabled = false`, making Ragnar the single update
+authority. If an older install drifted, the **Installation Check** card flags it and
+the `ragnar-pwn-migrate` boot unit + **Repair** both restore the launcher wiring.
+
+The check is exposed via `GET /api/pwnagotchi/status` under `components`,
+`missing_critical`, `missing_optional`, `healthy`, and `needs_repair`.
+
 ---
 
 ## 🔧 Configuration

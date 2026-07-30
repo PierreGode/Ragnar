@@ -413,6 +413,14 @@ enabled = false
 [main.plugins.fix_services]
 enabled = false
 
+# Disable Pwnagotchi's built-in self-updater. Ragnar is the single update
+# authority for /opt/pwnagotchi (see the dashboard "Pwnagotchi Updates" card).
+# Leaving auto-update on lets Pwnagotchi pull upstream releases behind our back,
+# which can dirty the git clone and revert pwnagotchi.service ExecStart back to
+# the raw binary — breaking the flag-aware launcher (MANU/AUTO) wiring.
+[main.plugins.auto-update]
+enabled = false
+
 [personality]
 advertise = false
 EOF
@@ -440,6 +448,9 @@ else
     # Disable fix_services — it is hardcoded to wlan0mon but we use mon0/wlan1.
     # The brcmfmac recovery logic does not apply to our mt76x2u setup.
     set_or_update_config_value "main.plugins.fix_services.enabled" "false"
+    # Disable Pwnagotchi's self-updater so it can't fight Ragnar's git updater
+    # or revert pwnagotchi.service ExecStart away from the flag-aware launcher.
+    set_or_update_config_value "main.plugins.auto-update.enabled" "false"
     echo "[INFO] Config updated"
 fi
 
