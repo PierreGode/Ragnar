@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-airtime-mobile';
+const WIFIDEF_BUILD = '20260730-panel-iface';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4176,8 +4176,27 @@ function _wifidefFillIfaces() {
             sel.value = _wifidef.iface;
             sel.onchange = () => { _wifidef.iface = sel.value; };
         }
+        // Per-panel wlan-only selectors (Airtime, Isolation) — independent of the
+        // shared adapter picker so each panel can target a different wlan*.
+        _wifidefFillPanelIface('wifidef-at-iface', ifs);
+        _wifidefFillPanelIface('wifidef-iso-iface', ifs);
         _wifidefUpdateMonBtn();
     }).catch(() => {});
+}
+
+function _wifidefFillPanelIface(id, ifs) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    const wlans = (ifs || []).filter(i => /^wlan/.test(i.iface));
+    const prev = sel.value;
+    if (!wlans.length) { sel.innerHTML = '<option value="">No wlan* adapter</option>'; return; }
+    sel.innerHTML = wlans.map(i =>
+        `<option value="${i.iface}"${i.monitor_capable ? '' : ' disabled'}>${i.iface}${i.monitor_capable ? '' : ' (no monitor)'}${i.is_monitor ? ' • MONITOR' : ''}</option>`).join('');
+    // Keep the prior choice if still present, else fall back to the shared iface
+    // (if it's a wlan) or the first monitor-capable wlan.
+    const has = v => wlans.some(i => i.iface === v);
+    sel.value = has(prev) ? prev
+        : (has(_wifidef.iface) ? _wifidef.iface : (wlans.find(i => i.monitor_capable) || wlans[0]).iface);
 }
 
 function _wifidefUpdateMonBtn() {
@@ -4346,7 +4365,8 @@ function wifidefResetBaseline() {
 }
 
 function wifidefAirtime() {
-    const iface = _wifidef.iface || document.getElementById('wifidef-iface').value;
+    const iface = (document.getElementById('wifidef-at-iface') || {}).value
+        || _wifidef.iface || document.getElementById('wifidef-iface').value;
     if (!iface) return;
     const secs = document.getElementById('wifidef-at-secs').value || 10;
     const chRaw = (document.getElementById('wifidef-at-channel').value || '').trim();
@@ -4502,7 +4522,8 @@ const _WIFIDEF_ISO_VERDICT = {
 };
 
 function wifidefIsolation() {
-    const iface = _wifidef.iface || document.getElementById('wifidef-iface').value;
+    const iface = (document.getElementById('wifidef-iso-iface') || {}).value
+        || _wifidef.iface || document.getElementById('wifidef-iface').value;
     if (!iface) return;
     const secs = document.getElementById('wifidef-iso-secs').value || 30;
     const chRaw = (document.getElementById('wifidef-iso-channel').value || '').trim();
