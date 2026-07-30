@@ -272,6 +272,55 @@
             }
         }
 
+        /* Responsive cards for the Airtime & link-quality tables on phones */
+        @media (max-width: 640px) {
+            #wifidef-at-tbody, #wifidef-at-clients-tbody,
+            #wifidef-at-tbody tr, #wifidef-at-clients-tbody tr,
+            #wifidef-at-tbody td, #wifidef-at-clients-tbody td {
+                display: block;
+                width: 100%;
+            }
+            table:has(#wifidef-at-tbody) thead,
+            table:has(#wifidef-at-clients-tbody) thead {
+                display: none;
+            }
+            #wifidef-at-tbody > tr, #wifidef-at-clients-tbody > tr {
+                border: 1px solid rgba(148, 163, 184, 0.18);
+                border-radius: 0.5rem;
+                padding: 0.5rem 0.75rem;
+                margin-bottom: 0.75rem;
+                background: rgba(15, 23, 42, 0.35);
+            }
+            #wifidef-at-tbody > tr > td, #wifidef-at-clients-tbody > tr > td {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 0.75rem;
+                padding: 0.25rem 0;
+                text-align: right;
+            }
+            #wifidef-at-tbody > tr > td::before,
+            #wifidef-at-clients-tbody > tr > td::before {
+                content: attr(data-label);
+                font-weight: 600;
+                text-transform: uppercase;
+                color: rgba(226, 232, 240, 0.7);
+                font-size: 0.65rem;
+                letter-spacing: 0.04em;
+                flex: 0 0 auto;
+            }
+            /* full-width placeholder rows ("No frames…") span the card */
+            #wifidef-at-tbody > tr > td[colspan],
+            #wifidef-at-clients-tbody > tr > td[colspan] {
+                display: block;
+                text-align: center;
+            }
+            #wifidef-at-tbody > tr > td[colspan]::before,
+            #wifidef-at-clients-tbody > tr > td[colspan]::before {
+                content: none;
+            }
+        }
+
         /* Toggle switch: show green when ON, regardless of Tailwind purge state */
         label.toggle-switch > input[type="checkbox"]:checked + div { background-color: #16a34a !important; }
         /* AI map toggle – uses Ragnar color, not green */

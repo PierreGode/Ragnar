@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-legacy-wps-accuracy';
+const WIFIDEF_BUILD = '20260730-airtime-mobile';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4408,15 +4408,15 @@ function wifidefRenderAirtime(d) {
         const htMix = a.ht_protection === 3
             ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="HT Protection = Non-HT Mixed: a pre-11n station is associated">MIXED</span>' : '';
         return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
-            <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}${wpsBadge}</td>
-            <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
-            <td class="py-1 pr-2 text-xs ${secCol}">${a.security || '—'}${cipher}</td>
-            <td class="py-1 pr-2 text-xs ${phyCol}">${a.ap_phy || '—'}${htMix}</td>
-            <td class="py-1 pr-2">${a.frames} <span class="text-gray-600 text-[10px]">(${a.data_frames} data)</span></td>
-            <td class="py-1 pr-2 ${retryCol}">${a.retry_pct}%</td>
-            <td class="py-1 pr-2 ${airCol}">${a.airtime_pct}%</td>
-            <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
-            <td class="py-1 pr-2">${a.rssi == null ? '—' : a.rssi + ' dBm'}</td></tr>`;
+            <td class="py-1 pr-2" data-label="SSID">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}${wpsBadge}</td>
+            <td class="py-1 pr-2 font-mono text-[11px]" data-label="BSSID">${a.bssid}</td>
+            <td class="py-1 pr-2 text-xs ${secCol}" data-label="Security">${a.security || '—'}${cipher}</td>
+            <td class="py-1 pr-2 text-xs ${phyCol}" data-label="PHY">${a.ap_phy || '—'}${htMix}</td>
+            <td class="py-1 pr-2" data-label="Frames">${a.frames} <span class="text-gray-600 text-[10px]">(${a.data_frames} data)</span></td>
+            <td class="py-1 pr-2 ${retryCol}" data-label="Retry %">${a.retry_pct}%</td>
+            <td class="py-1 pr-2 ${airCol}" data-label="Airtime %">${a.airtime_pct}%</td>
+            <td class="py-1 pr-2 text-xs" data-label="Rate min/med/max">${rate} <span class="text-gray-600">Mbps</span></td>
+            <td class="py-1 pr-2" data-label="RSSI">${a.rssi == null ? '—' : a.rssi + ' dBm'}</td></tr>`;
     }).join('');
     // Per-client airtime attribution — pinpoints the offending device.
     const cwrap = document.getElementById('wifidef-at-clients-wrap');
@@ -4472,14 +4472,14 @@ function _wifidefClientRow(c) {
     const ssid = c.ssid ? _esc(c.ssid)
         : (c.bssid ? `<span class="text-gray-600 font-mono text-[10px]" title="AP SSID not seen in this capture">${c.bssid}</span>` : '<span class="text-gray-600">—</span>');
     return `<tr class="border-b border-slate-800/50 ${c.legacy ? 'bg-red-900/10' : ''}">
-        <td class="py-1 pr-2 font-mono text-[11px]">${c.client}</td>
-        <td class="py-1 pr-2 text-xs">${device}</td>
-        <td class="py-1 pr-2 text-xs">${ssid}</td>
-        <td class="py-1 pr-2 text-xs">${phy}</td>
-        <td class="py-1 pr-2">${c.frames}</td>
-        <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%${disp}</td>
-        <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
-        <td class="py-1 pr-2">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
+        <td class="py-1 pr-2 font-mono text-[11px]" data-label="Client">${c.client}</td>
+        <td class="py-1 pr-2 text-xs" data-label="Device">${device}</td>
+        <td class="py-1 pr-2 text-xs" data-label="SSID">${ssid}</td>
+        <td class="py-1 pr-2 text-xs" data-label="PHY">${phy}</td>
+        <td class="py-1 pr-2" data-label="Frames">${c.frames}</td>
+        <td class="py-1 pr-2 ${airCol}" data-label="Airtime %">${c.airtime_pct}%${disp}</td>
+        <td class="py-1 pr-2 text-xs" data-label="Rate min/med/max">${rate} <span class="text-gray-600">Mbps</span></td>
+        <td class="py-1 pr-2" data-label="RSSI">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
 }
 
 // Re-render the per-client table filtered to the SSID chosen in the dropdown.
