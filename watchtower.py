@@ -87,6 +87,12 @@ DEFAULT_SOURCES = {
     'igmpwatch': {'label': 'IGMP Watch',
                   'paths': ['/var/log/ragnar/igmpwatch.jsonl',
                             '/var/log/igmpwatch/alerts.jsonl']},
+    'legacywatch': {'label': 'Legacy Watch (802.11 PHY/cipher/airtime)',
+                    'paths': ['/var/log/ragnar/legacywatch.jsonl',
+                              '/var/log/legacywatch/alerts.jsonl']},
+    'wpswatch':  {'label': 'WPS Watch',
+                  'paths': ['/var/log/ragnar/wpswatch.jsonl',
+                            '/var/log/wpswatch/alerts.jsonl']},
 }
 
 # Directories globbed for `*.jsonl`; the basename becomes the source name. This is

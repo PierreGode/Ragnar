@@ -113,13 +113,22 @@ sudo ip link set wlan1 up  && sudo iw dev wlan1 set channel 6
 sudo python3 python/legacywatch.py --iface wlan1 -o /var/log/ragnar/legacywatch-wlan1.jsonl
 ```
 
-## Status / not yet built
+## Validation & deployment
 
-Implemented: the detector, all 22 finding codes, raw-byte radiotap/802.11/IE
-parsing, both-direction airtime, declared-vs-observed PHY, cipher posture,
-identity resolution, the 3-segment station table, suppression, JSONL output,
-pcap replay, and the offline self-test (33/33).
+| Tier | Command | Result |
+|---|---|---|
+| self-test | `python3 python/legacywatch.py --self-test` | 33/33 |
+| conformance | `python3 python/legacywatch_conformance.py` | 35/35 |
+| replay (real Scapy path) | `lab/make_lab_pcap.py legacy … && --replay` | 10 codes observed |
+| live lab (hwsim) | `sudo lab/hwsim_lab.sh legacy` | written, hardware-gated (see `lab/LAB.md`) |
 
-Follow-on (not in this pass): a separate conformance harness, a `mac80211_hwsim`
-netns lab, a README-verifier, and systemd unit files. `LEG-005` (OBSS non-HT) is
-not implemented — it needs cross-BSS correlation better suited to `isowatch`.
+- **Watchtower**: emits JSONL to `/var/log/legacywatch/alerts.jsonl`, wired into
+  `watchtower.py` (`DEFAULT_SOURCES['legacywatch']`) so alerts land in the
+  unified feed.
+- **systemd**: `scripts/legacywatch.service` (dedicated `legacymon` user,
+  `CAP_NET_RAW` only, `systemd-analyze verify` clean); config
+  `python/legacywatch.example.json`.
+
+Not implemented: `LEG-005` (OBSS non-HT — needs cross-BSS correlation better
+suited to `isowatch`) and a README-verifier. The hwsim live lab is written but
+not yet run (the dev box has no wireless stack).

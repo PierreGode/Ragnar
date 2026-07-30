@@ -94,10 +94,20 @@ external hopper such as isowatch's, or lock a channel):
 sudo python3 python/wpswatch.py --iface wlan1 -o /var/log/ragnar/wpswatch-wlan1.jsonl
 ```
 
-## Status / not yet built
+## Validation & deployment
 
-Implemented: both evidence paths (WSC posture + EAP-WSC sessions), all 22
-finding codes, raw-byte parsing, alert suppression, baseline/known-enrollee
-handling, family screen, JSONL output, pcap replay, and the offline self-test
-(25/25). Follow-on: a separate conformance harness, a `mac80211_hwsim` netns
-lab, README-verifier and systemd unit files.
+| Tier | Command | Result |
+|---|---|---|
+| self-test | `python3 python/wpswatch.py --self-test` | 25/25 |
+| conformance | `python3 python/wpswatch_conformance.py` | 27/27 (incl. the Version2-vs-0x104A regression) |
+| replay (real Scapy path) | `lab/make_lab_pcap.py wps … && --replay` | 8 codes observed |
+| live lab (hwsim) | `sudo lab/hwsim_lab.sh wps` | written, hardware-gated (see `lab/LAB.md`) |
+
+- **Watchtower**: emits JSONL to `/var/log/wpswatch/alerts.jsonl`, wired into
+  `watchtower.py` (`DEFAULT_SOURCES['wpswatch']`).
+- **systemd**: `scripts/wpswatch.service` (dedicated `wpsmon` user,
+  `CAP_NET_RAW` only, `systemd-analyze verify` clean); config
+  `python/wpswatch.example.json`.
+
+Not implemented: a README-verifier. The hwsim live lab is written but not yet
+run (the dev box has no wireless stack).
