@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260729-airtime-ssid-filter"
+_BUILD = "20260730-legacy-wps-accuracy"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -690,6 +690,78 @@ def _classify_security(privacy, rsn_info, has_wpa1):
     return "Open"
 
 
+# RSN/WSC cipher suite selectors (last byte of the 00-0F-AC suite).
+_CIPHER_NAMES = {1: "WEP-40", 2: "TKIP", 4: "CCMP-128", 5: "WEP-104",
+                 8: "GCMP-128", 9: "GCMP-256", 10: "CCMP-256"}
+
+
+def _parse_rsn_ciphers(info):
+    """(group_cipher_type, {pairwise_cipher_types}) from an RSN element body."""
+    try:
+        i = 2                                  # version
+        group = info[i + 3]; i += 4            # group cipher suite (4th byte = type)
+        n_pw = info[i] | (info[i + 1] << 8); i += 2
+        pw = set()
+        for _ in range(n_pw):
+            pw.add(info[i + 3]); i += 4
+        return group, pw
+    except (IndexError, TypeError):
+        return None, set()
+
+
+# WSC (Wi-Fi Simple Config / WPS) attribute IDs, big-endian TLV.
+_WSC_STATE = 0x1044          # 1=Not Configured, 2=Configured
+_WSC_LOCKED = 0x1057         # AP Setup Locked: 1=locked
+_WSC_CONFIG_METHODS = 0x1008 # bitmask
+_WSC_SEL_REGISTRAR = 0x1041  # a registrar is active now
+_WSC_VENDOR_EXT = 0x1049     # WFA vendor extension; carries Version2
+# Config Methods bits that indicate the external-registrar PIN path (the
+# brute-forceable M3/M4 method), vs pushbutton which needs physical presence.
+_WSC_PIN_METHODS = 0x0004 | 0x0008 | 0x0100   # Label | Display | Keypad
+_WSC_PUSHBUTTON = 0x0080
+
+
+def _parse_wsc(data):
+    """Parse a WSC (WPS) element body into an AP-posture dict, or None.
+
+    Reads only the plaintext attributes an AP advertises about its own
+    enrollment surface — no association, no keys. The single most important
+    signal is the *absence* of a Version2 subelement (=> WSC 1.0, which has no
+    mandatory PIN-attempt lockout, so an online brute force runs to completion)."""
+    wps = {"present": True, "configured": None, "locked": None,
+           "pin_method": False, "pushbutton": False, "selected_registrar": False,
+           "version2": False}
+    i, n = 0, len(data)
+    while i + 4 <= n:
+        aid = (data[i] << 8) | data[i + 1]
+        ln = (data[i + 2] << 8) | data[i + 3]
+        i += 4
+        if i + ln > n:
+            break
+        val = data[i:i + ln]
+        i += ln
+        if aid == _WSC_STATE and ln >= 1:
+            wps["configured"] = val[0] == 2
+        elif aid == _WSC_LOCKED and ln >= 1:
+            wps["locked"] = val[0] == 1
+        elif aid == _WSC_CONFIG_METHODS and ln >= 2:
+            m = (val[0] << 8) | val[1]
+            wps["pin_method"] = bool(m & _WSC_PIN_METHODS)
+            wps["pushbutton"] = bool(m & _WSC_PUSHBUTTON)
+        elif aid == _WSC_SEL_REGISTRAR and ln >= 1:
+            wps["selected_registrar"] = val[0] == 1
+        elif aid == _WSC_VENDOR_EXT and ln >= 4 and val[:3] == b"\x00\x37\x2a":
+            # WFA vendor extension: subelements (1B id, 1B len, val). id 0=Version2.
+            j = 3
+            while j + 2 <= len(val):
+                sid, slen = val[j], val[j + 1]
+                j += 2
+                if sid == 0x00 and slen >= 1:
+                    wps["version2"] = True
+                j += slen
+    return wps
+
+
 def _classify_ap_phy(ht, vht, he, eht, rates, is_2ghz):
     """802.11 generation from a beacon's capability IEs (+ rate set for a/b/g)."""
     if eht:
@@ -714,15 +786,33 @@ def _airtime_event(pkt):
         return None
     d = pkt.getlayer(Dot11)
     fc = int(getattr(d, "FCfield", 0) or 0)
+    to_ds, from_ds = bool(fc & 0x01), bool(fc & 0x02)
+    a1 = (d.addr1 or "").lower() or None
+    a2 = (d.addr2 or "").lower() or None
+    a3 = (d.addr3 or "").lower() or None
     ev = {
         "type": int(d.type), "subtype": int(d.subtype),
         "retry": bool(fc & 0x08),
-        "src": (d.addr2 or "").lower() or None,
-        "dst": (d.addr1 or "").lower() or None,
-        "bssid": (d.addr3 or "").lower() or None,
+        "to_ds": to_ds, "from_ds": from_ds,
+        "src": a2, "dst": a1,
         "bytes": len(bytes(d)),
         "rate_mbps": None, "rssi": None,
     }
+    # Resolve the *station* (non-AP endpoint) and the BSSID from the DS bits,
+    # so airtime is attributed to the client in BOTH directions — counting only
+    # addr2 (uplink) understates a legacy station's real cost by ~half and
+    # misfiles its downlink airtime onto the AP.
+    #   ToDS  (STA->AP):  a1=BSSID a2=STA  a3=DA
+    #   FromDS(AP->STA):  a1=STA   a2=BSSID a3=SA
+    #   neither (IBSS/mgmt): a2=SA(STA) a1=DA  a3=BSSID
+    if to_ds and not from_ds:
+        ev["sta"], ev["bssid"] = a2, a1
+    elif from_ds and not to_ds:
+        ev["sta"], ev["bssid"] = a1, a2
+    elif not to_ds and not from_ds:
+        ev["sta"], ev["bssid"] = a2, a3
+    else:                                    # WDS/mesh (both APs) — no single STA
+        ev["sta"], ev["bssid"] = None, a3 or a1
     # Beacons / probe responses describe the BSS: SSID, ERP protection, the
     # security suite (Open/WEP/WPA/WPA2/WPA3) and the 802.11 generation — all
     # read straight from the management IEs, no active probing.
@@ -731,7 +821,9 @@ def _airtime_event(pkt):
         has_wpa1 = False
         ht = vht = he = eht = False
         rates = []
+        basic_cck = False
         ds_channel = None
+        wsc_data = b""
         el = pkt.getlayer(Dot11Elt)
         while el is not None and isinstance(el, Dot11Elt):
             eid, info = el.ID, (el.info or b"")
@@ -745,13 +837,23 @@ def _airtime_event(pkt):
                 ev["erp_nonerp"] = bool(info[0] & 0x01)
                 ev["erp_protection"] = bool(info[0] & 0x02)
             elif eid in (1, 50):                 # (Extended) Supported Rates
-                rates += [(b & 0x7f) * 0.5 for b in info]
+                for b in info:
+                    r = (b & 0x7f) * 0.5
+                    rates.append(r)
+                    if (b & 0x80) and r in _DSSS_RATES:   # basic-rate bit + CCK
+                        basic_cck = True
             elif eid == 3 and info:              # DS Parameter Set = primary channel
                 ds_channel = info[0]
+            elif eid == 61 and len(info) >= 2:   # HT Operation
+                # HT Protection = bits 0-1 of the HT Operation Information field
+                # (octet 1). Value 3 = Non-HT Mixed (a pre-11n STA is associated).
+                ev["ht_protection"] = info[1] & 0x03
             elif eid == 48:                      # RSN => WPA2/WPA3
                 rsn_info = info
             elif eid == 221 and info[:4] == b"\x00\x50\xf2\x01":
                 has_wpa1 = True                  # Microsoft WPA v1 vendor element
+            elif eid == 221 and info[:4] == b"\x00\x50\xf2\x04":
+                wsc_data = info[4:]              # WFA WSC (WPS) vendor element
             elif eid == 45:
                 ht = True
             elif eid == 191:
@@ -774,6 +876,30 @@ def _airtime_event(pkt):
         is_2ghz = ds_channel is None or ds_channel <= 14
         ev["security"] = _classify_security(privacy, rsn_info, has_wpa1)
         ev["ap_phy"] = _classify_ap_phy(ht, vht, he, eht, rates, is_2ghz)
+        ev["basic_cck"] = basic_cck              # BSS still admits 802.11b
+        if rsn_info is not None:
+            g, pw = _parse_rsn_ciphers(rsn_info)
+            ev["group_cipher"] = _CIPHER_NAMES.get(g)
+            ev["pairwise_ciphers"] = sorted(_CIPHER_NAMES.get(p, f"0x{p:02x}") for p in pw)
+        if wsc_data:
+            ev["wps"] = _parse_wsc(wsc_data)
+    # A station's own (re)assoc/probe REQUEST declares its capability directly:
+    # an HT Capabilities element (45) present => 802.11n+ for certain; absent =>
+    # a genuine pre-802.11n station. This "declared" signal is far stronger than
+    # guessing PHY from observed rates (a modern client at the cell edge sends
+    # only low rates and would otherwise look legacy).
+    elif d.type == 0 and d.subtype in (0, 2, 4):
+        has_ht = has_vht = has_he = False
+        el = pkt.getlayer(Dot11Elt)
+        while el is not None and isinstance(el, Dot11Elt):
+            if el.ID == 45:
+                has_ht = True
+            elif el.ID == 191:
+                has_vht = True
+            elif el.ID == 255 and el.info and el.info[0] == 35:
+                has_he = True
+            el = el.payload.getlayer(Dot11Elt)
+        ev["declared_ht"] = has_ht or has_vht or has_he
     try:
         from scapy.all import RadioTap
         if pkt.haslayer(RadioTap):
@@ -786,10 +912,23 @@ def _airtime_event(pkt):
 
 
 def _frame_airtime_us(ev):
-    """Approximate on-air time of a frame in microseconds (data bits / rate +
-    fixed PHY/MAC overhead). Unknown rate → assume a slow 6 Mbps floor."""
+    """Measured on-air (PPDU) time of a frame in microseconds: PHY preamble +
+    data-symbol time. Preamble depends on the PHY, which dominates for legacy
+    frames — a 1 Mbps DSSS frame carries a 192 µs long preamble, so a flat
+    overhead constant materially understates the legacy airtime tax.
+
+      DSSS/CCK (<=11 Mbps): 192 µs long preamble  (1500B@1M => 12192 µs)
+      OFDM (<=54 Mbps):      20 µs L-preamble+SIG
+      HT/VHT/HE (>54):      ~40 µs preamble
+    Unknown rate => assume a slow 6 Mbps OFDM floor."""
     rate = ev.get("rate_mbps") or 6.0
-    return (ev.get("bytes", 0) * 8) / rate + 50   # +~50us preamble+IFS
+    if rate <= 11.0:
+        preamble = 192.0
+    elif rate <= 54.0:
+        preamble = 20.0
+    else:
+        preamble = 40.0
+    return preamble + (ev.get("bytes", 0) * 8) / rate
 
 
 # The DSSS/CCK rate set — a station transmitting only these is 802.11b, the
@@ -807,6 +946,30 @@ def _classify_phy(rate_min, rate_max):
     if rate_max <= 54.0:
         return "802.11a/g (OFDM)"
     return "802.11n+ (HT/VHT/HE)"
+
+
+def _classify_client_phy(declared_ht, rate_min, rate_max):
+    """Classify a station's PHY generation, preferring its *declared* capability
+    (HT/VHT/HE element present in its assoc/probe request) over rates observed
+    on the air. Returns (label, is_pre_n_legacy, confidence).
+
+    Declared is definitive; observed is weaker because a modern station at the
+    cell edge transmits only low rates and can look legacy from rates alone."""
+    if declared_ht is True:
+        return ("802.11n+ (HT/VHT/HE)", False, "declared")
+    if declared_ht is False:
+        # Genuinely pre-802.11n. Split 11b (CCK) from 11a/g (OFDM) by data rates.
+        if rate_max is not None and rate_max <= 11.0:
+            return ("802.11b (DSSS/CCK)", True, "declared")
+        return ("802.11a/g (OFDM, pre-n)", True, "declared")
+    # No capability frame seen — fall back to observed data rates (weaker).
+    if rate_min is None:
+        return (None, False, None)
+    if rate_max <= 11.0 and rate_min in _DSSS_RATES:
+        return ("802.11b (DSSS/CCK)", True, "observed")
+    if rate_max <= 54.0:
+        return ("802.11a/g (OFDM)", True, "observed")
+    return ("802.11n+ (HT/VHT/HE)", False, "observed")
 
 
 # Management subtypes that indicate a client (re)joining / roaming.
@@ -828,7 +991,10 @@ def analyze_airtime(events, seconds=None):
                                     "retries": 0, "airtime_us": 0.0, "rates": [],
                                     "rssi": None, "data_frames": 0,
                                     "erp_protection": False, "erp_nonerp": False,
-                                    "security": None, "ap_phy": None})
+                                    "security": None, "ap_phy": None,
+                                    "group_cipher": None, "pairwise_ciphers": None,
+                                    "ht_protection": None, "basic_cck": False,
+                                    "wps": None})
             ap["frames"] += 1
             if e.get("ssid"):
                 ap["ssid"] = e["ssid"]
@@ -836,6 +1002,16 @@ def analyze_airtime(events, seconds=None):
                 ap["security"] = e["security"]
             if e.get("ap_phy"):
                 ap["ap_phy"] = e["ap_phy"]
+            if e.get("group_cipher"):
+                ap["group_cipher"] = e["group_cipher"]
+            if e.get("pairwise_ciphers"):
+                ap["pairwise_ciphers"] = e["pairwise_ciphers"]
+            if e.get("ht_protection") is not None:
+                ap["ht_protection"] = e["ht_protection"]
+            if e.get("basic_cck"):
+                ap["basic_cck"] = True
+            if e.get("wps"):
+                ap["wps"] = e["wps"]
             if e.get("retry"):
                 ap["retries"] += 1
             if e["type"] == 2:               # data
@@ -851,19 +1027,32 @@ def analyze_airtime(events, seconds=None):
                 ap["erp_protection"] = True
             if e.get("erp_nonerp"):
                 ap["erp_nonerp"] = True
-        # Per-client airtime attribution — the transmitting station (addr2) is
-        # who actually holds the medium. Only count frames a real STA sends
-        # (data + mgmt from a non-AP src); skip beacons the AP sends about itself.
-        src = e.get("src")
-        if src and not _is_group_mac(src) and e["type"] in (0, 2) and not (
-                e["type"] == 0 and e["subtype"] in (5, 8)):
-            c = clients.setdefault(src, {"client": src, "bssid": b, "frames": 0,
-                                         "airtime_us": 0.0, "rates": [], "rssi": None})
+        # Per-client airtime attribution keyed on the STATION (both directions),
+        # never the AP. Airtime counts every data/mgmt frame the station is an
+        # endpoint of; but PHY-rate observation uses DATA frames ONLY — mgmt and
+        # control frames are sent at basic rates even by modern clients, so
+        # mixing them in would mislabel a Wi-Fi 6 phone as 802.11b.
+        sta = e.get("sta")
+        if sta and not _is_group_mac(sta) and sta != e.get("bssid") and e["type"] in (0, 2):
+            c = clients.setdefault(sta, {"client": sta, "bssid": e.get("bssid"),
+                                         "frames": 0, "airtime_us": 0.0,
+                                         "data_bytes": 0, "rates": [], "rssi": None,
+                                         "declared_ht": None, "retries": 0})
             c["frames"] += 1
-            c["bssid"] = c["bssid"] or b
+            if not c["bssid"]:
+                c["bssid"] = e.get("bssid")
             c["airtime_us"] += _frame_airtime_us(e)
-            if e.get("rate_mbps"):
-                c["rates"].append(e["rate_mbps"])
+            if e.get("retry"):
+                c["retries"] += 1
+            if e["type"] == 2:                       # data frames only for PHY
+                c["data_bytes"] += e.get("bytes", 0)
+                if e.get("rate_mbps"):
+                    c["rates"].append(e["rate_mbps"])
+            dh = e.get("declared_ht")                # capability from (re)assoc/probe req
+            if dh is True:
+                c["declared_ht"] = True              # HT present wins definitively
+            elif dh is False and c["declared_ht"] is None:
+                c["declared_ht"] = False
             if e.get("rssi") is not None:
                 c["rssi"] = e["rssi"]
         # Roaming: a client (src) sending assoc/reassoc/auth frames.
@@ -888,14 +1077,26 @@ def analyze_airtime(events, seconds=None):
     ssid_by_bssid = {a["bssid"]: a["ssid"] for a in ap_list if a.get("ssid")}
 
     client_list = []
+    total_air = sum(c["airtime_us"] for c in clients.values()) or 1.0
+    total_bytes = sum(c["data_bytes"] for c in clients.values()) or 1
     for c in clients.values():
         rates = c.pop("rates")
         c["airtime_pct"] = round(c["airtime_us"] / (seconds * 1e6) * 100, 1)
         c["rate_min"] = min(rates) if rates else None
         c["rate_med"] = round(statistics.median(rates), 1) if rates else None
         c["rate_max"] = max(rates) if rates else None
-        c["phy"] = _classify_phy(c["rate_min"], c["rate_max"])
-        c["legacy"] = c["phy"] == "802.11b (DSSS/CCK)"
+        c["phy"], c["legacy"], c["confidence"] = _classify_client_phy(
+            c["declared_ht"], c["rate_min"], c["rate_max"])
+        c["is_11b"] = bool(c["phy"] and c["phy"].startswith("802.11b"))
+        c["retry_pct"] = round(c["retries"] / c["frames"] * 100, 1) if c["frames"] else 0
+        # Airtime-vs-bytes disproportion — the number that settles "who is
+        # making the cell slow": a station carrying few bytes but eating lots
+        # of airtime is the culprit. share_air / share_bytes.
+        air_share = c["airtime_us"] / total_air
+        byte_share = c["data_bytes"] / total_bytes
+        c["airtime_share_pct"] = round(air_share * 100, 1)
+        c["byte_share_pct"] = round(byte_share * 100, 1)
+        c["disproportion"] = round(air_share / byte_share, 1) if byte_share > 0 else None
         c["ssid"] = ssid_by_bssid.get(c.get("bssid"))
         c["airtime_us"] = round(c["airtime_us"])
         client_list.append(c)
@@ -921,16 +1122,66 @@ def analyze_airtime(events, seconds=None):
                              "detail": f"{name} has ERP protection ON — a legacy "
                                        "802.11b client is taxing the whole BSS "
                                        "(RTS/CTS overhead on every frame)"})
-    # Pinpoint the culprit: a station transmitting at DSSS rates while eating
-    # real airtime is the device to move off the band / evict.
+        if ap.get("ht_protection") == 3:
+            name = ap["ssid"] or ap["bssid"]
+            findings.append({"type": "ht_protection_mixed", "bssid": ap["bssid"],
+                             "detail": f"{name} HT Protection = Non-HT Mixed — a "
+                                       "pre-802.11n station is associated, so 11n "
+                                       "rates are protected BSS-wide"})
+        if ap.get("group_cipher") == "TKIP":
+            name = ap["ssid"] or ap["bssid"]
+            findings.append({"type": "cipher_tkip_group", "bssid": ap["bssid"],
+                             "detail": f"{name} group cipher is TKIP — 802.11n "
+                                       "rates are disabled for group-addressed "
+                                       "frames BSS-wide (a throughput cap, not just "
+                                       "a security issue)"})
+        elif ap.get("pairwise_ciphers") and "TKIP" in ap["pairwise_ciphers"]:
+            name = ap["ssid"] or ap["bssid"]
+            findings.append({"type": "cipher_tkip_pairwise", "bssid": ap["bssid"],
+                             "detail": f"{name} offers TKIP pairwise — any client "
+                                       "selecting it is hard-capped at 54 Mbps"})
+        # WPS posture — the 1-button / PIN enrollment surface.
+        w = ap.get("wps")
+        if w and w.get("present"):
+            name = ap["ssid"] or ap["bssid"]
+            if w.get("pin_method") and w.get("locked") is not True:
+                sev = "WSC 1.0 (no lockout — fully brute-forceable)" if not w.get("version2") \
+                    else "PIN method, not locked"
+                findings.append({"type": "wps_pin_open", "bssid": ap["bssid"],
+                                 "detail": f"{name} WPS PIN enrollment is exposed "
+                                           f"[{sev}] — an attacker in range can "
+                                           "brute-force the 8-digit PIN; disable WPS "
+                                           "or use pushbutton-only"})
+            elif w.get("pin_method") and not w.get("version2"):
+                findings.append({"type": "wps_v1", "bssid": ap["bssid"],
+                                 "detail": f"{name} advertises WSC 1.0 with the PIN "
+                                           "method — no mandatory attempt lockout"})
+            else:
+                findings.append({"type": "wps_enabled", "bssid": ap["bssid"],
+                                 "detail": f"{name} has WPS enabled"
+                                           + (" (pushbutton-only)" if w.get("pushbutton")
+                                              and not w.get("pin_method") else "")})
+            if w.get("configured") is False:
+                findings.append({"type": "wps_unconfigured", "bssid": ap["bssid"],
+                                 "detail": f"{name} WPS state is Not Configured — "
+                                           "out-of-box enrollment is open"})
+    # Pinpoint the culprit: an 802.11b (CCK) station eating airtime out of all
+    # proportion to the bytes it moves is what makes the cell slow. Disproportion
+    # (airtime share ÷ byte share) is the number that settles the argument.
     for c in client_list:
-        if c["legacy"] and (c["airtime_pct"] >= 5 or c["frames"] >= 20):
+        if c["is_11b"] and (c["airtime_pct"] >= 5 or c["frames"] >= 20):
+            disp = f", {c['disproportion']}× its byte share" if c.get("disproportion") else ""
             findings.append({"type": "slow_client", "client": c["client"],
                              "detail": f"{c['client']} is 802.11b @ "
-                                       f"{c['rate_min']}–{c['rate_max']} Mbps, "
-                                       f"~{c['airtime_pct']}% airtime "
-                                       f"({c['frames']} frames) — the airtime tax; "
+                                       f"{c['rate_min']}–{c['rate_max']} Mbps "
+                                       f"({c['confidence']}), ~{c['airtime_pct']}% airtime"
+                                       f"{disp} — the airtime tax; "
                                        "move it to its own SSID or 5 GHz"})
+        # Outdated but not the CCK tax: a/g (pre-802.11n) OFDM stations.
+        elif c["legacy"] and not c["is_11b"] and (c["airtime_pct"] >= 5 or c["frames"] >= 20):
+            findings.append({"type": "legacy_client", "client": c["client"],
+                             "detail": f"{c['client']} is {c['phy']} ({c['confidence']}) "
+                                       f"— pre-802.11n, ~{c['airtime_pct']}% airtime"})
     for ap in ap_list:
         if ap["retry_pct"] >= 30 and ap["frames"] >= 20:
             findings.append({"type": "high_retry", "bssid": ap["bssid"],
@@ -1995,32 +2246,54 @@ def selftest():
     STAR_AP = "aa:bb:cc:00:00:0a"
     FAST = "10:20:30:00:00:01"                    # unicast, Wi-Fi 6
     PLUG = "20:30:40:00:00:02"                    # unicast, legacy 802.11b
+
+    def _up(sta, **kw):                           # STA -> AP (ToDS)
+        e = {"type": 2, "subtype": 0, "retry": False, "to_ds": True,
+             "from_ds": False, "src": sta, "dst": STAR_AP, "sta": sta,
+             "bssid": STAR_AP, "rssi": -50}
+        e.update(kw); return e
+
+    def _down(sta, **kw):                          # AP -> STA (FromDS)
+        e = {"type": 2, "subtype": 0, "retry": False, "to_ds": False,
+             "from_ds": True, "src": STAR_AP, "dst": sta, "sta": sta,
+             "bssid": STAR_AP, "rssi": -50}
+        e.update(kw); return e
+
     # AP beacons announcing ERP protection ON (a legacy DSSS client is present).
     for _ in range(10):
         star.append({"type": 0, "subtype": 8, "retry": False, "src": STAR_AP,
-                     "dst": "ff:ff:ff:ff:ff:ff", "bssid": STAR_AP, "bytes": 120,
-                     "rate_mbps": 6.0, "rssi": -40, "ssid": "HomeNet",
+                     "dst": "ff:ff:ff:ff:ff:ff", "sta": None, "bssid": STAR_AP,
+                     "bytes": 120, "rate_mbps": 6.0, "rssi": -40, "ssid": "HomeNet",
                      "erp_protection": True, "erp_nonerp": True})
-    # Fast client: many big frames at 130 Mbps (little airtime each).
+    # Fast client: 300 big uplink frames at 130 Mbps, and — the fix-B trap — a
+    # handful of probe requests sent at 1 Mbps CCK. Those must NOT drag its PHY.
+    star.append({"type": 0, "subtype": 4, "retry": False, "to_ds": False,
+                 "from_ds": False, "src": FAST, "dst": "ff:ff:ff:ff:ff:ff",
+                 "sta": FAST, "bssid": "ff:ff:ff:ff:ff:ff", "bytes": 60,
+                 "rate_mbps": 1.0, "declared_ht": True, "rssi": -45})
     for _ in range(300):
-        star.append({"type": 2, "subtype": 0, "retry": False, "src": FAST,
-                     "dst": STAR_AP, "bssid": STAR_AP, "bytes": 1500,
-                     "rate_mbps": 130.0, "rssi": -45})
-    # Legacy plug: few small frames at 1 Mbps (huge airtime per byte).
-    for _ in range(80):
-        star.append({"type": 2, "subtype": 0, "retry": False, "src": PLUG,
-                     "dst": STAR_AP, "bssid": STAR_AP, "bytes": 400,
-                     "rate_mbps": 1.0, "rssi": -60})
+        star.append(_up(FAST, bytes=1500, rate_mbps=130.0))
+    # Legacy plug: 40 uplink + 40 downlink frames at 1 Mbps. Counting uplink
+    # only (the old bug) would halve its measured airtime.
+    for _ in range(40):
+        star.append(_up(PLUG, bytes=400, rate_mbps=1.0))
+    for _ in range(40):
+        star.append(_down(PLUG, bytes=400, rate_mbps=1.0))
     st = analyze_airtime(star, seconds=10)
     plug = next((c for c in st["clients"] if c["client"] == PLUG), None)
     fast = next((c for c in st["clients"] if c["client"] == FAST), None)
     check("starvation: legacy client classified 802.11b",
-          plug is not None and plug["legacy"]
+          plug is not None and plug["is_11b"]
           and plug["phy"] == "802.11b (DSSS/CCK)", json.dumps(plug))
-    check("starvation: fast client not flagged legacy",
-          fast is not None and not fast["legacy"])
+    check("starvation(fix B): fast client NOT mislabeled from 1 Mbps probe req",
+          fast is not None and not fast["legacy"] and fast["confidence"] == "declared",
+          json.dumps(fast))
+    check("starvation(fix A): plug airtime counts BOTH directions (80 frames)",
+          plug["frames"] == 80)
     check("starvation: legacy plug eats more airtime than fast client despite fewer frames",
           plug["airtime_pct"] > fast["airtime_pct"] and plug["frames"] < fast["frames"])
+    check("starvation: disproportion computed (airtime ≫ bytes for the plug)",
+          plug["disproportion"] is not None and plug["disproportion"] > fast["disproportion"])
     check("starvation: ERP protection latched on AP",
           any(a["bssid"] == STAR_AP and a["erp_protection"] for a in st["aps"]))
     check("starvation: erp_protection finding raised",
@@ -2029,10 +2302,75 @@ def selftest():
     check("starvation: slow_client finding names the culprit",
           any(f["type"] == "slow_client" and f.get("client") == PLUG
               for f in st["findings"]))
-    check("starvation: AP beacons excluded from per-client attribution",
+    check("starvation: AP not counted as its own client",
           all(c["client"] != STAR_AP for c in st["clients"]))
     check("starvation: client tagged with its AP's SSID",
           plug is not None and plug.get("ssid") == "HomeNet")
+    # Declared-capability classifier (fix C).
+    check("phy classifier: declared HT wins over low observed rates",
+          _classify_client_phy(True, 1.0, 1.0)[0].startswith("802.11n")
+          and _classify_client_phy(True, 1.0, 1.0)[2] == "declared")
+    check("phy classifier: declared no-HT => pre-n legacy",
+          _classify_client_phy(False, 6.0, 54.0)[1] is True
+          and _classify_client_phy(False, None, None)[0].startswith("802.11a/g"))
+    check("phy classifier: observed CCK => 11b at observed confidence",
+          _classify_client_phy(None, 1.0, 11.0) == ("802.11b (DSSS/CCK)", True, "observed"))
+
+    # --- Airtime PPDU model: legacy long preamble dominates ---
+    check("airtime: 1500B @ 1 Mbps CCK ~= 12192 us (long preamble)",
+          abs(_frame_airtime_us({"bytes": 1500, "rate_mbps": 1.0}) - 12192) < 1)
+    check("airtime: 1500B @ 54 Mbps OFDM ~= 242 us",
+          abs(_frame_airtime_us({"bytes": 1500, "rate_mbps": 54.0}) - 242) < 2)
+
+    # --- Cipher-as-throughput (fix E) ---
+    rsn_tkip_group = (bytes([1, 0]) + b"\x00\x0f\xac\x02"      # group = TKIP(2)
+                      + bytes([2, 0]) + b"\x00\x0f\xac\x04" + b"\x00\x0f\xac\x02"
+                      + bytes([1, 0]) + b"\x00\x0f\xac\x02" + bytes([0, 0]))
+    g, pw = _parse_rsn_ciphers(rsn_tkip_group)
+    check("cipher: RSN group=TKIP, pairwise={CCMP,TKIP} parsed",
+          g == 2 and pw == {4, 2})
+    tk_ev = {"type": 0, "subtype": 8, "retry": False, "src": "c0:00:00:00:00:01",
+             "dst": "ff:ff:ff:ff:ff:ff", "sta": None, "bssid": "c0:00:00:00:00:01",
+             "bytes": 100, "ssid": "TkipNet", "security": "WPA2",
+             "group_cipher": "TKIP", "pairwise_ciphers": ["CCMP-128", "TKIP"]}
+    tk = analyze_airtime([tk_ev], seconds=1)
+    check("cipher: TKIP group cipher raises throughput-cap finding",
+          any(f["type"] == "cipher_tkip_group" for f in tk["findings"]))
+
+    # --- HT Protection Non-HT Mixed (fix F) ---
+    htp_ev = {"type": 0, "subtype": 8, "retry": False, "src": "c1:00:00:00:00:01",
+              "dst": "ff:ff:ff:ff:ff:ff", "sta": None, "bssid": "c1:00:00:00:00:01",
+              "bytes": 100, "ssid": "MixedNet", "ht_protection": 3, "basic_cck": True}
+    htp = analyze_airtime([htp_ev], seconds=1)
+    check("ht: Non-HT Mixed protection raises finding",
+          any(f["type"] == "ht_protection_mixed" for f in htp["findings"]))
+
+    # --- WPS posture (the 1-button / PIN surface) ---
+    def _wsc(aid, val):
+        return bytes([aid >> 8, aid & 0xff, len(val) >> 8, len(val) & 0xff]) + val
+    # PIN method (keypad), not locked, Not Configured, no Version2 => WSC 1.0
+    wsc_open = (_wsc(0x1044, bytes([1])) + _wsc(0x1057, bytes([0]))
+                + _wsc(0x1008, bytes([0x01, 0x00])))
+    p_open = _parse_wsc(wsc_open)
+    check("wps: parse PIN-method/unlocked/unconfigured/WSC1.0",
+          p_open["pin_method"] and p_open["locked"] is False
+          and p_open["configured"] is False and p_open["version2"] is False)
+    # PushButton only + Version2 present => good posture
+    wsc_pbc = (_wsc(0x1044, bytes([2])) + _wsc(0x1057, bytes([1]))
+               + _wsc(0x1008, bytes([0x00, 0x80]))
+               + _wsc(0x1049, b"\x00\x37\x2a\x00\x01\x20"))
+    p_pbc = _parse_wsc(wsc_pbc)
+    check("wps: parse pushbutton-only + Version2 (good posture)",
+          p_pbc["pushbutton"] and not p_pbc["pin_method"]
+          and p_pbc["version2"] and p_pbc["locked"] is True)
+    wps_ev = {"type": 0, "subtype": 8, "retry": False, "src": "c2:00:00:00:00:01",
+              "dst": "ff:ff:ff:ff:ff:ff", "sta": None, "bssid": "c2:00:00:00:00:01",
+              "bytes": 100, "ssid": "WpsNet", "wps": p_open}
+    wr = analyze_airtime([wps_ev], seconds=1)
+    check("wps: exposed PIN enrollment raises wps_pin_open (+ unconfigured)",
+          any(f["type"] == "wps_pin_open" for f in wr["findings"])
+          and any(f["type"] == "wps_unconfigured" for f in wr["findings"]))
+
     check("starvation: PHY classifier boundaries",
           _classify_phy(1.0, 11.0) == "802.11b (DSSS/CCK)"
           and _classify_phy(6.0, 54.0) == "802.11a/g (OFDM)"

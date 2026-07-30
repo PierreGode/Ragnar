@@ -4148,7 +4148,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260729-airtime-ssid-filter';
+const WIFIDEF_BUILD = '20260730-legacy-wps-accuracy';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4372,8 +4372,10 @@ function wifidefRenderAirtime(d) {
         const cls = f.type === 'roaming_churn' ? 'bg-amber-600/20 text-amber-300 border-amber-700/50'
             : f.type === 'airtime_hog' ? 'bg-orange-600/20 text-orange-300 border-orange-700/50'
             : f.type === 'slow_client' ? 'bg-red-600/20 text-red-300 border-red-700/50'
-            : f.type === 'erp_protection' ? 'bg-fuchsia-600/20 text-fuchsia-300 border-fuchsia-700/50'
-            : f.type === 'weak_security' ? 'bg-rose-600/20 text-rose-300 border-rose-700/50'
+            : (f.type === 'erp_protection' || f.type === 'ht_protection_mixed') ? 'bg-fuchsia-600/20 text-fuchsia-300 border-fuchsia-700/50'
+            : (f.type === 'weak_security' || f.type.startsWith('cipher_')) ? 'bg-rose-600/20 text-rose-300 border-rose-700/50'
+            : f.type.startsWith('wps_') ? 'bg-purple-600/20 text-purple-300 border-purple-700/50'
+            : f.type === 'legacy_client' ? 'bg-amber-600/20 text-amber-300 border-amber-700/50'
             : 'bg-red-600/20 text-red-300 border-red-700/50';
         return `<span class="px-2 py-1 rounded border ${cls}">${f.detail}</span>`;
     }).join('') || '<span class="text-green-400 text-xs">✓ No link-quality issues in this capture.</span>';
@@ -4389,11 +4391,27 @@ function wifidefRenderAirtime(d) {
             : a.security ? 'text-gray-300' : 'text-gray-600';
         const legacyPhy = a.ap_phy && /802\.11[bg]|802\.11a /.test(a.ap_phy);
         const phyCol = legacyPhy ? 'text-red-300' : a.ap_phy ? 'text-gray-300' : 'text-gray-600';
+        // WPS posture badge: red when the PIN surface is exposed, grey otherwise.
+        const w = a.wps;
+        let wpsBadge = '';
+        if (w && w.present) {
+            const exposed = w.pin_method && w.locked !== true;
+            const label = exposed ? (w.version2 ? 'WPS-PIN' : 'WPS-1.0') : 'WPS';
+            const bcls = exposed ? 'bg-purple-600/30 text-purple-200 border-purple-500/60'
+                : 'bg-slate-700/40 text-gray-400 border-slate-600/50';
+            const tip = exposed ? 'WPS PIN enrollment exposed — brute-forceable' : 'WPS enabled';
+            wpsBadge = ` <span class="text-[9px] px-1 rounded border ${bcls}" title="${tip}">${label}</span>`;
+        }
+        // Cipher suffix on the security cell (TKIP is the throughput-relevant one).
+        const cipher = a.group_cipher && a.group_cipher !== 'CCMP-128'
+            ? ` <span class="text-[10px] ${a.group_cipher === 'TKIP' ? 'text-rose-400' : 'text-gray-500'}">${a.group_cipher}</span>` : '';
+        const htMix = a.ht_protection === 3
+            ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="HT Protection = Non-HT Mixed: a pre-11n station is associated">MIXED</span>' : '';
         return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Spectrum Analyzer" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
-            <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}</td>
+            <td class="py-1 pr-2">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}${wpsBadge}</td>
             <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
-            <td class="py-1 pr-2 text-xs ${secCol}">${a.security || '—'}</td>
-            <td class="py-1 pr-2 text-xs ${phyCol}">${a.ap_phy || '—'}</td>
+            <td class="py-1 pr-2 text-xs ${secCol}">${a.security || '—'}${cipher}</td>
+            <td class="py-1 pr-2 text-xs ${phyCol}">${a.ap_phy || '—'}${htMix}</td>
             <td class="py-1 pr-2">${a.frames} <span class="text-gray-600 text-[10px]">(${a.data_frames} data)</span></td>
             <td class="py-1 pr-2 ${retryCol}">${a.retry_pct}%</td>
             <td class="py-1 pr-2 ${airCol}">${a.airtime_pct}%</td>
@@ -4435,9 +4453,16 @@ let _wifidefClients = [];
 function _wifidefClientRow(c) {
     const airCol = c.airtime_pct >= 20 ? 'text-orange-400' : 'text-gray-300';
     const rate = c.rate_med != null ? `${c.rate_min}/${c.rate_med}/${c.rate_max}` : '—';
-    const phy = c.legacy
-        ? `<span class="text-red-300" title="Legacy DSSS — forces protection overhead">${c.phy}</span>`
-        : `<span class="text-gray-400">${c.phy || '—'}</span>`;
+    // Confidence: 'declared' (from the client's capability element) is strong;
+    // 'observed' (rates only) is a guess and marked with a ~.
+    const conf = c.confidence === 'observed' ? '<span class="text-gray-500" title="inferred from rates only — a modern client at the cell edge can look legacy">~</span>' : '';
+    const phyCls = c.is_11b ? 'text-red-300' : c.legacy ? 'text-amber-300' : 'text-gray-400';
+    const phyTip = c.is_11b ? 'title="802.11b CCK — forces protection overhead on the whole cell"' : '';
+    const phy = `<span class="${phyCls}" ${phyTip}>${conf}${c.phy || '—'}</span>`;
+    // Disproportion: airtime share ÷ byte share. >1 = eating more airtime than
+    // its traffic justifies; this is the number that names the culprit.
+    const disp = c.disproportion != null && c.disproportion >= 2
+        ? ` <span class="text-orange-400 text-[10px]" title="airtime share ÷ byte share">${c.disproportion}×</span>` : '';
     const name = c.hostname || c.device_label || c.vendor;
     const sub = [c.hostname ? (c.device_label || c.vendor) : c.vendor, c.ip]
         .filter(Boolean).join(' · ');
@@ -4452,7 +4477,7 @@ function _wifidefClientRow(c) {
         <td class="py-1 pr-2 text-xs">${ssid}</td>
         <td class="py-1 pr-2 text-xs">${phy}</td>
         <td class="py-1 pr-2">${c.frames}</td>
-        <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%</td>
+        <td class="py-1 pr-2 ${airCol}">${c.airtime_pct}%${disp}</td>
         <td class="py-1 pr-2 text-xs">${rate} <span class="text-gray-600">Mbps</span></td>
         <td class="py-1 pr-2">${c.rssi == null ? '—' : c.rssi + ' dBm'}</td></tr>`;
 }
