@@ -26270,6 +26270,7 @@ function renderWardrivingSessions(sessions) {
                 ${isActive ? '<span class="text-xs text-cyan-400">● viewing</span>' : ''}
             </div>
             <div class="flex gap-3 shrink-0">
+                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=report" target="_blank" rel="noopener" class="text-xs text-emerald-400 hover:text-emerald-300 whitespace-nowrap font-semibold" onclick="event.stopPropagation()">Report</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
             </div>

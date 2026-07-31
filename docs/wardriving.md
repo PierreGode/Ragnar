@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ragnar's wardriving engine collects WiFi networks, BLE devices, Zigbee / 802.15.4 devices, cell towers, and GPS positions while driving. Data is stored in SQLite per session and can be exported to WiGLE CSV or KML.
+Ragnar's wardriving engine collects WiFi networks, BLE devices, Zigbee / 802.15.4 devices, cell towers, and GPS positions while driving. Data is stored in SQLite per session and can be exported to WiGLE CSV, KML, or a printable HTML survey report.
 
 Ragnar supports **five operating modes**, in any combination — all five can run at the same time and merge into one session DB:
 
@@ -511,7 +511,7 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 | GET | `/api/wardriving/bluetooth` | List BLE devices |
 | GET | `/api/wardriving/cells` | List cell towers |
 | GET | `/api/wardriving/sessions` | List sessions |
-| GET | `/api/wardriving/export/<id>` | Export session (WiGLE CSV / KML) |
+| GET | `/api/wardriving/export/<id>` | Export session (`?format=wigle` CSV / `kml` / `report` HTML survey) |
 | POST | `/api/wardriving/import` | Import WiGLE CSV |
 | GET | `/api/wardriving/gps` | GPS status |
 | GET | `/api/wardriving/interfaces` | Available WiFi interfaces |
@@ -635,6 +635,26 @@ Standard format for uploading to wigle.net. Contains MAC, SSID, AuthMode, channe
 
 ### KML
 Google Earth format with network positions as markers.
+
+### Survey report (HTML → PDF)
+A self-contained, printable **Wi-Fi survey report** — the "Report" link on each
+saved session (or `?format=report` on the export endpoint). It opens in the
+browser and prints/saves to PDF as a shareable deliverable, generated
+automatically from the session instead of assembled by hand. It includes:
+
+- **Security posture grade (A–F)** based on the share of open + WEP networks,
+  with a per-scheme breakdown (Open / OWE / WEP / WPA / WPA2 / WPA3-SAE).
+- **Executive summary** stat cards (networks, exposure %, WPA3 count, cameras).
+- **Band distribution** (2.4 / 5 / 6 GHz) and a **channel-usage histogram**.
+- **Networks of concern** — every open and WEP network called out in a table.
+- **Cameras & surveillance devices** (when the heuristic flagged any).
+- **Strongest networks**, **per-adapter antenna coverage**, and a **GPS coverage**
+  summary (track points, distance, bounding box).
+- **Other radios** counts (Bluetooth/BLE, cell towers, Zigbee/802.15.4).
+
+All CSS is inlined and a print stylesheet is included, so it renders identically
+offline and prints cleanly to PDF. The report is informal — not a certified
+assessment.
 
 ---
 

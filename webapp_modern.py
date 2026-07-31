@@ -10984,6 +10984,15 @@ def wardriving_export(session_id):
                 content, mimetype='application/vnd.google-earth.kml+xml',
                 headers={'Content-Disposition': f'attachment; filename=ragnar_wardriving_{session_id}.kml'}
             )
+        elif fmt == 'report':
+            device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
+            content = session.export_report_html(device_name=device_name)
+            # Rendered inline so the browser can print/save-as-PDF; not a forced
+            # download, since the survey report is meant to be viewed first.
+            return app.response_class(
+                content, mimetype='text/html; charset=utf-8',
+                headers={'Content-Disposition': f'inline; filename=ragnar_survey_{session_id}.html'}
+            )
         else:
             device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
             include_zigbee = bool(shared_data.config.get('wardriving_wigle_include_zigbee', False))
