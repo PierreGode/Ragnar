@@ -595,6 +595,23 @@ else
 fi
 
 # -------------------------------------------------------------------
+# WEB SWAP-BACK PLUGIN (Return to Ragnar button on the :8080 UI)
+# -------------------------------------------------------------------
+echo "[INFO] Installing ragnar_return web plugin..."
+RAGNAR_PLUGIN_SRC="$REPO_ROOT/scripts/pwnagotchi_plugins/ragnar_return.py"
+if [[ -f "$RAGNAR_PLUGIN_SRC" ]]; then
+    chmod 644 "$RAGNAR_PLUGIN_SRC"
+    # Symlink (not copy) so a git pull of /opt/pwnagotchi's Ragnar checkout
+    # keeps the plugin current, matching how the swap button is deployed.
+    ln -sf "$RAGNAR_PLUGIN_SRC" "$CONFIG_DIR/custom_plugins/ragnar_return.py"
+    set_or_update_config_value "main.plugins.ragnar_return.enabled" "true"
+    echo "[INFO] ragnar_return plugin linked into custom_plugins and enabled"
+    echo "[INFO] Reach it at http://<host>:8080/plugins/ragnar_return"
+else
+    echo "[WARN] ragnar_return.py not found - skipping web swap-back plugin"
+fi
+
+# -------------------------------------------------------------------
 # BOOT-TIME MIGRATION SERVICE
 # -------------------------------------------------------------------
 echo "[INFO] Setting up migration service..."

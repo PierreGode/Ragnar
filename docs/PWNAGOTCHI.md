@@ -189,13 +189,27 @@ Adapt the exact commands to your nexmon version and kernel.
 
 ### Pwnagotchi → Ragnar
 
+**Via Web UI:** From the Pwnagotchi portal open `http://<ip>:8080/plugins/ragnar_return`
+→ **Return to Ragnar**. The page triggers the swap and then **redirects your
+browser to `http://<ip>:8000`** automatically once Ragnar is back — so the tab
+doesn't get stuck on the dead :8080 portal. It also follows Ragnar back if you
+trigger the swap with the hardware button while that page is open.
+
 **Via PiSugar button:** Double-tap or long-press
 
 **Via physical button:** Press KEY1 on the e-Paper HAT
 
+> **Why a plugin?** The :8080 portal is served by Pwnagotchi, not Ragnar, so only
+> a page served from :8080 can redirect that tab. The hardware button can move the
+> *service* to :8000 but has no way to move your *browser* — that's what the
+> `ragnar_return` web plugin adds. It's symlinked into
+> `/etc/pwnagotchi/custom_plugins/` and enabled (`main.plugins.ragnar_return.enabled = true`)
+> by the installer.
+
 **What happens internally:**
 
-1. `ragnar-swap-button.service` detects the button press (10-second cooldown)
+1. The button press (`ragnar-swap-button.service`, 10-second cooldown) **or** a POST
+   to `/plugins/ragnar_return/swap` from the web plugin triggers the swap
 2. A transient systemd unit (`pwnagotchi-to-ragnar-swap`) runs:
    ```
    systemctl stop pwnagotchi.service
