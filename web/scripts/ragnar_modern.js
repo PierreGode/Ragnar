@@ -12934,36 +12934,61 @@ function updatePwnButtons() {
 
             if (!swapToPwnBtn._countdownRunning && _pwnSwapRequestedThisSession) {
                 // Poll pwnagotchi portal directly - works even after Ragnar goes down.
-                // mode:'no-cors' gives an opaque response but won't throw, meaning server is up.
+                // mode:'no-cors' gives an opaque response but won't throw, meaning
+                // the server answered. But an opaque success only means the TCP
+                // listener + a minimal HTTP layer are up — bettercap/pwnagotchi
+                // often accept connections seconds before the web app can actually
+                // render the page and its assets. A single success therefore fires
+                // "ready" too early on slower boards, and the opened tab loads a
+                // blank/stalled page. Require several CONSECUTIVE successes (reset
+                // on any failure) so the app has had a stable window to finish
+                // coming up before we hand the user a link.
                 swapToPwnBtn._countdownRunning = true;
                 let elapsed = 0;
-                const MAX_WAIT = 60;
+                let consecutiveOk = 0;
+                const MAX_WAIT = 90;
+                const NEEDED_OK = 4; // ~4s of uninterrupted reachability
                 swapToPwnBtn.disabled = true;
                 swapToPwnBtn.textContent = `Waiting for Pwnagotchi... 0s`;
+
+                const markReady = (label) => {
+                    swapToPwnBtn.disabled = false;
+                    swapToPwnBtn.textContent = label;
+                    // Not a one-shot: leave it clickable so a blank/slow first
+                    // paint can just be re-opened without restarting the swap.
+                    swapToPwnBtn.onclick = function(e) {
+                        e.preventDefault();
+                        window.open(portalUrl, '_blank');
+                    };
+                    const hint = document.getElementById('pwn-swap-hint');
+                    if (hint) {
+                        hint.textContent = 'If the portal opens blank, give it a few more seconds and refresh — Pwnagotchi\'s web UI finishes loading shortly after the port opens.';
+                    }
+                };
+
                 const poll = setInterval(async () => {
                     elapsed++;
-                    swapToPwnBtn.textContent = `Waiting for Pwnagotchi... ${elapsed}s`;
                     try {
                         await fetch(portalUrl, { mode: 'no-cors', cache: 'no-store' });
-                        // Reached here = server responded (opaque ok)
-                        clearInterval(poll);
-                        swapToPwnBtn.disabled = false;
-                        swapToPwnBtn.textContent = 'Go to Pwnagotchi Portal';
-                        swapToPwnBtn.onclick = function(e) {
-                            e.preventDefault();
-                            window.open(portalUrl, '_blank');
-                        };
-                    } catch (_) {
-                        // Not up yet; fall through unless timeout
-                        if (elapsed >= MAX_WAIT) {
+                        // Opaque success — count it, but keep going until we've
+                        // seen the server answer consistently.
+                        consecutiveOk++;
+                        if (consecutiveOk >= NEEDED_OK) {
                             clearInterval(poll);
-                            swapToPwnBtn.disabled = false;
-                            swapToPwnBtn.textContent = 'Open Pwnagotchi Portal';
-                            swapToPwnBtn.onclick = function(e) {
-                                e.preventDefault();
-                                window.open(portalUrl, '_blank');
-                            };
+                            markReady('Go to Pwnagotchi Portal');
+                            return;
                         }
+                        swapToPwnBtn.textContent = `Pwnagotchi starting... ${elapsed}s`;
+                    } catch (_) {
+                        // Server flickered/not up — the streak must be unbroken.
+                        consecutiveOk = 0;
+                        swapToPwnBtn.textContent = `Waiting for Pwnagotchi... ${elapsed}s`;
+                    }
+                    if (elapsed >= MAX_WAIT) {
+                        clearInterval(poll);
+                        // Timed out waiting for a stable signal — still let the
+                        // user try the portal manually.
+                        markReady('Open Pwnagotchi Portal');
                     }
                 }, 1000);
             }
