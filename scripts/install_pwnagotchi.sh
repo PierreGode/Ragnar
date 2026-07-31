@@ -214,9 +214,11 @@ fi
 write_status "installing" "Starting Pwnagotchi installation" "preflight"
 echo "[INFO] Beginning Pwnagotchi installation..."
 
-# Clean reinstall: stop services and wipe the managed clone + config so the rest
-# of the installer regenerates them from scratch. Config is backed up first so a
-# customised name/whitelist can be recovered from the .bak file if needed.
+# Clean reinstall: stop services and wipe the managed clone so the rest of the
+# installer re-clones and rebuilds from scratch. The config is BACKED UP but left
+# in place — the config step below force-regenerates it when CLEAN_INSTALL=1. We
+# never delete it here: if the installer were interrupted between the delete and
+# the regenerate, the box would be left with no config at all (worse than before).
 if [[ "$CLEAN_INSTALL" == "1" ]]; then
     echo "[INFO] Clean reinstall requested — wiping existing Pwnagotchi state..."
     write_status "installing" "Clean reinstall: removing existing Pwnagotchi" "clean_wipe"
@@ -225,8 +227,7 @@ if [[ "$CLEAN_INSTALL" == "1" ]]; then
     rm -rf "$PWN_DIR"
     if [[ -f "$CONFIG_FILE" ]]; then
         cp -f "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%s)" 2>/dev/null || true
-        rm -f "$CONFIG_FILE"
-        echo "[INFO] Backed up and removed existing config.toml"
+        echo "[INFO] Backed up existing config.toml (regenerated fresh below)"
     fi
 fi
 
@@ -323,9 +324,13 @@ python3 -m pip install \
 # pydrive2 is a hard dependency (pwnagotchi crashes without it).
 # Force PyPI only - piwheels drops connections on large packages like google-api-python-client.
 # PIP_CONFIG_FILE=/dev/null ignores /etc/pip.conf which adds piwheels.
+# --ignore-installed: some pydrive2 deps (PyYAML, oauthlib, ...) may be apt-managed,
+# and pip cannot uninstall a Debian-owned package to upgrade it ("The package was
+# installed by debian..."). Ignoring installed copies lets pip put its own alongside.
 echo "[INFO] Installing pydrive2 from PyPI (required - may take a few minutes)..."
 PIP_CONFIG_FILE=/dev/null python3 -m pip install \
     --break-system-packages \
+    --ignore-installed \
     --index-url https://pypi.org/simple \
     --timeout 300 \
     --retries 5 \
@@ -333,11 +338,12 @@ PIP_CONFIG_FILE=/dev/null python3 -m pip install \
     echo "[WARN] pydrive2 first attempt failed. Retrying with no cache..."
     PIP_CONFIG_FILE=/dev/null python3 -m pip install \
         --break-system-packages \
+        --ignore-installed \
         --index-url https://pypi.org/simple \
         --timeout 600 \
         --retries 5 \
         --no-cache-dir \
-        pydrive2 2>&1 || echo "[ERROR] pydrive2 install failed. Run manually: sudo PIP_CONFIG_FILE=/dev/null pip3 install --break-system-packages --index-url https://pypi.org/simple pydrive2"
+        pydrive2 2>&1 || echo "[ERROR] pydrive2 install failed. Run manually: sudo PIP_CONFIG_FILE=/dev/null pip3 install --break-system-packages --ignore-installed --index-url https://pypi.org/simple pydrive2"
 }
 
 # -------------------------------------------------------------------
@@ -404,7 +410,10 @@ chmod 644 "$CONFIG_DIR/id_rsa.pub"
 # -------------------------------------------------------------------
 echo "[INFO] Configuring Pwnagotchi config file..."
 write_status "installing" "Creating configuration files" "config_files"
-if [[ ! -f "$CONFIG_FILE" ]]; then
+# Write a fresh config when it's missing, or always on a clean reinstall (the
+# old one was backed up above). Otherwise keep the user's file and just correct
+# the Ragnar-managed values.
+if [[ ! -f "$CONFIG_FILE" || "$CLEAN_INSTALL" == "1" ]]; then
     cat >"$CONFIG_FILE" <<EOF
 # Ragnar-managed Pwnagotchi config (pwnagotchiworking)
 
