@@ -38,6 +38,7 @@ import path_asymmetry
 import tls_watch
 import wifi_analyzer
 import wifi_defense
+import report_common
 import bt_scanner
 import sdr_spectrum
 import zigbee_scan
@@ -14905,6 +14906,21 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/wifi/scan {iface} band={band}")
         return jsonify(wifi_analyzer.do_scan(interface=iface, band=band, passive=True))
 
+    @app.route('/api/net/wifi/report', methods=['POST'])
+    def net_wifi_report():
+        """Render the on-screen spectrum scan as a printable HTML report.
+
+        Takes the scan JSON the client already has (same pattern as the AI
+        analysis) so it reports exactly what's shown, with no extra re-scan."""
+        data = request.get_json(silent=True) or {}
+        scan = data.get('scan') or {}
+        if not isinstance(scan, dict) or not scan.get('aps'):
+            return _bad('No scan data — run a spectrum scan first')
+        device = (data.get('device') or 'Ragnar').strip()[:64]
+        _log("net/wifi/report")
+        html = report_common.build_spectrum_report_html(scan, device_name=device)
+        return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
     @app.route('/api/net/wifi/radius', methods=['GET'])
     def net_wifi_radius():
         iface = (request.args.get('interface') or 'wlan0').strip()
@@ -15258,6 +15274,21 @@ def register_network_diagnostics(app, logger=None):
     def wifidef_selftest():
         _log("wifidef/selftest")
         return jsonify(wifi_defense.selftest())
+
+    @app.route('/api/wifidef/report', methods=['POST'])
+    def wifidef_report():
+        """Render the on-screen WIDS capture as a printable incident report.
+
+        Takes the last scan result the client is displaying so the report
+        matches the panel exactly and needs no fresh capture."""
+        data = request.get_json(silent=True) or {}
+        scan = data.get('scan') or {}
+        if not isinstance(scan, dict) or 'threat' not in scan:
+            return _bad('No capture data — run a WiFi Defense scan first')
+        device = (data.get('device') or 'Ragnar').strip()[:64]
+        _log("wifidef/report")
+        html = report_common.build_defense_report_html(scan, device_name=device)
+        return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
     @app.route('/api/net/isp', methods=['GET'])
     def net_isp():

@@ -134,6 +134,24 @@ From there you get the analyzer's full toolkit on the rogue: RSSI history,
 channel + width, vendor OUI, and the **signal-radius rings** to walk it down
 physically.
 
+### 📄 Incident report (HTML → PDF)
+
+The **Report** button turns the capture currently on screen into a
+self-contained, printable **WIDS incident report** — open it in the new tab and
+use the browser's *Save as PDF* for a shareable evidence artifact. It uses the
+panel's last scan (no fresh capture) and contains:
+
+- a **CLEAR / WARNING / CRITICAL** threat verdict;
+- a colour-coded **detections table** — deauth/disassoc floods, beacon floods,
+  evil twins / duplicate SSIDs, KARMA/MANA — each with its detail line;
+- **airspace posture**: distinct SSID/BSSID counts against the flood
+  thresholds, plus the randomized-MAC **LA-ratio** (high = spoofed frames);
+- the full **access-point inventory** (BSSID, SSID, channel, RSSI, beacons).
+
+The same shared report engine renders the Spectrum Analyzer and Wardriving
+reports, so all three are one visual family. Informal — not a certified
+assessment.
+
 ---
 
 ## API & CLI
@@ -149,6 +167,7 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET/POST /api/wifidef/thresholds` | get / set the beacon-flood thresholds (`{beacon_ssids, beacon_bssids}`) |
 | `GET /api/wifidef/airtime?interface=&seconds=&channel=` | passive airtime / retry / PHY-rate / roaming diagnostics |
 | `GET /api/wifidef/isolation?interface=&seconds=&channel=` | passive per-BSS client-isolation audit (+ mesh/ESS rollup) |
+| `POST /api/wifidef/report` | `{scan}` (the panel's last capture) → printable HTML incident report |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 
 ## Airtime & link quality

@@ -1629,74 +1629,19 @@ class WardrivingSession:
             f'</div>'
         )
 
-        html_doc = f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ragnar Wireless Survey Report — {esc(self.session_id)}</title>
-<style>
-:root {{ --fg:#0f172a; --muted:#64748b; --line:#e2e8f0; --bg:#ffffff; --accent:#4f46e5; --panel:#f8fafc; }}
-* {{ box-sizing:border-box; }}
-body {{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  color:var(--fg); background:#eef2f6; margin:0; line-height:1.5; }}
-.page {{ max-width:960px; margin:24px auto; background:var(--bg); padding:40px 44px;
-  box-shadow:0 1px 4px rgba(0,0,0,.08); border-radius:8px; }}
-h1 {{ font-size:26px; margin:0 0 4px; }}
-h2 {{ font-size:17px; margin:32px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--line); }}
-.sub {{ color:var(--muted); font-size:13px; }}
-.hdr {{ display:flex; justify-content:space-between; align-items:flex-start; gap:24px;
-  border-bottom:3px solid var(--accent); padding-bottom:16px; }}
-.brand {{ font-weight:700; color:var(--accent); letter-spacing:.5px; }}
-.grade {{ text-align:center; min-width:120px; }}
-.grade .g {{ font-size:52px; font-weight:800; line-height:1; color:{grade_color}; }}
-.grade .gl {{ font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px; }}
-.grid4 {{ display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }}
-.grid2 {{ display:grid; grid-template-columns:1fr 1fr; gap:28px; }}
-.card {{ background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }}
-.sc-val {{ font-size:24px; font-weight:700; }}
-.sc-lbl {{ font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }}
-.sc-sub {{ font-size:12px; color:var(--muted); margin-top:2px; }}
-.bar-row {{ display:flex; align-items:center; gap:10px; margin:7px 0; font-size:13px; }}
-.bar-lbl {{ width:160px; flex-shrink:0; }}
-.bar-track {{ flex:1; background:#eef2f6; border-radius:5px; height:14px; overflow:hidden; }}
-.bar-fill {{ display:block; height:100%; border-radius:5px; }}
-.bar-num {{ width:80px; text-align:right; flex-shrink:0; font-variant-numeric:tabular-nums; }}
-.muted {{ color:var(--muted); }}
-.chans {{ display:flex; align-items:flex-end; gap:6px; height:130px; padding-top:8px;
-  border-bottom:1px solid var(--line); }}
-.chan {{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; }}
-.chan-bar {{ width:60%; min-height:2px; background:var(--accent); border-radius:3px 3px 0 0; }}
-.chan-num {{ font-size:10px; color:var(--muted); margin-top:2px; }}
-.chan-lbl {{ font-size:11px; font-weight:600; }}
-table {{ width:100%; border-collapse:collapse; font-size:12.5px; margin-top:6px; }}
-th, td {{ text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }}
-th {{ color:var(--muted); text-transform:uppercase; font-size:11px; letter-spacing:.5px; }}
-td {{ font-variant-numeric:tabular-nums; }}
-tbody tr:nth-child(even) {{ background:var(--panel); }}
-.note {{ background:#fef2f2; border:1px solid #fecaca; color:#991b1b; padding:12px 16px;
-  border-radius:8px; font-size:13px; }}
-.foot {{ margin-top:36px; padding-top:14px; border-top:1px solid var(--line);
-  color:var(--muted); font-size:11px; display:flex; justify-content:space-between; }}
-@media print {{
-  body {{ background:#fff; }}
-  .page {{ box-shadow:none; margin:0; max-width:none; border-radius:0; padding:0 12px; }}
-  h2 {{ page-break-after:avoid; }}
-  table, .chans {{ page-break-inside:avoid; }}
-}}
-</style></head>
-<body><div class="page">
-<div class="hdr">
-  <div>
-    <div class="brand">RAGNAR · WIRELESS SURVEY</div>
-    <h1>Wi-Fi Survey Report</h1>
-    <div class="sub">Session <strong>{esc(self.session_id)}</strong> · Device {dn}</div>
-    <div class="sub">Coverage: {_fmt_dt(d['first_seen'])} → {_fmt_dt(d['last_seen'])}</div>
-  </div>
-  <div class="grade">
-    <div class="g">{grade}</div>
-    <div class="gl">Security posture</div>
-  </div>
-</div>
+        from report_common import page_shell
 
+        subtitle_html = (
+            f'<div class="sub">Session <strong>{esc(self.session_id)}</strong> · Device {dn}</div>'
+            f'<div class="sub">Coverage: {_fmt_dt(d["first_seen"])} → {_fmt_dt(d["last_seen"])}</div>'
+        )
+        concern_note = (
+            f'<div class="note bad">{exposed} network(s) offer no meaningful encryption. '
+            'Devices joining these are exposed to eavesdropping and interception.</div>'
+        ) if exposed else '<p class="muted">No open or WEP networks were observed.</p>'
+        cam_section = f'<h2>Cameras &amp; surveillance devices</h2>{cam_tbl}' if d['cameras'] else ''
+
+        body_html = f"""
 <h2>Executive summary</h2>
 <div class="grid4">
 {stat_card("Wi-Fi networks", total)}
@@ -1719,10 +1664,10 @@ tbody tr:nth-child(even) {{ background:var(--panel); }}
 {other_radio}
 
 <h2>Networks of concern (open &amp; WEP)</h2>
-{('<div class="note">' + str(exposed) + ' network(s) offer no meaningful encryption. Devices joining these are exposed to eavesdropping and interception.</div>') if exposed else '<p class="muted">No open or WEP networks were observed. </p>'}
+{concern_note}
 {risk_tbl}
 
-{('<h2>Cameras &amp; surveillance devices</h2>' + cam_tbl) if d['cameras'] else ''}
+{cam_section}
 
 <h2>Strongest networks</h2>
 {top_tbl}
@@ -1732,13 +1677,16 @@ tbody tr:nth-child(even) {{ background:var(--panel); }}
 
 <h2>GPS coverage</h2>
 {gps_html}
-
-<div class="foot">
-  <span>Generated by Ragnar · {esc(generated)}</span>
-  <span>Informal survey — not a certified assessment</span>
-</div>
-</div></body></html>"""
-        return html_doc
+"""
+        return page_shell(
+            title=f'Ragnar Wireless Survey Report — {self.session_id}',
+            brand='RAGNAR · WIRELESS SURVEY',
+            heading='Wi-Fi Survey Report',
+            subtitle_html=subtitle_html,
+            verdict=grade, verdict_label='Security posture', verdict_color=grade_color,
+            body=body_html, generated=generated,
+            footer_note='Informal survey — not a certified assessment',
+        )
 
     def import_wigle_csv(self, csv_path_or_stream):
         """Import a WiGLE-format CSV file into this session.
