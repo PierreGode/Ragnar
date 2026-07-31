@@ -1535,6 +1535,14 @@ class WardrivingEngine:
         self.shared_data = shared_data
         self.data_dir = getattr(shared_data, 'data_dir', 'data')
         self._running = False
+        # True while start() is bringing radios/GPS up but the scan loop isn't
+        # live yet. The display uses this to switch to wardriving mode (a
+        # "Starting..." screen) the instant a manual start is requested, instead
+        # of waiting out the several-second interface+GPS bring-up — matching how
+        # wardriving-on-boot already behaves. Auto-expires (see get_status) so a
+        # start() that dies mid-way can't strand the panel on "Starting...".
+        self._starting = False
+        self._start_ts = 0.0
         self._thread = None
         self._bt_thread = None
         self._cell_thread = None
@@ -1723,12 +1731,19 @@ class WardrivingEngine:
         if self._running:
             return {'error': 'Already running'}
 
+        # Flag the bring-up window so the display flips to wardriving mode right
+        # away (see __init__). Cleared once _running goes True, on early error
+        # returns, and auto-expires in get_status if start() raises.
+        self._starting = True
+        self._start_ts = time.time()
+
         # Device name from param or config
         self.device_name = device_name or self.shared_data.config.get('wardriving_device_name', '') or ''
 
         # Detect/validate interfaces
         self.interfaces = interfaces or self._detect_wifi_interfaces()
         if not self.interfaces:
+            self._starting = False
             return {'error': 'No WiFi interfaces found'}
 
         # Power check before spinning the radios up. USB Wi-Fi adapters are the
@@ -1791,6 +1806,7 @@ class WardrivingEngine:
         # Create session
         self.session = WardrivingSession(self.data_dir)
         self._running = True
+        self._starting = False
         self.error = None
         self.scans_completed = 0
         self.bt_count = 0
@@ -2035,6 +2051,7 @@ class WardrivingEngine:
             return {'error': 'Not running'}
 
         self._running = False
+        self._starting = False
         if self.session:
             self.session.close()
         if self._gps:
@@ -2562,8 +2579,14 @@ class WardrivingEngine:
                 'error': None if detected else 'No GPS device detected',
             }
 
+        # 'starting' is the bring-up window (start() called, scan loop not live
+        # yet). Capped so a start() that raised before setting _running can't
+        # leave the panel stuck on "Starting..." forever.
+        starting = bool(self._starting and not self._running
+                        and (time.time() - self._start_ts) < 45)
         result = {
             'running': self._running,
+            'starting': starting,
             'session_id': self.session.session_id if self.session else None,
             'interfaces': self.interfaces,
             'scans_completed': self.scans_completed,

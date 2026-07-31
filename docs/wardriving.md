@@ -537,6 +537,7 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
 ```json
 {
   "running": true,
+  "starting": false,
   "session_id": "20260520_122919",
   "interfaces": ["wlan0"],
   "scans_completed": 42,
@@ -576,6 +577,8 @@ Falls back to linear when either endpoint speed is NULL or both are zero. The ch
   "stats": { ... }
 }
 ```
+
+**`starting`** is `true` during a session's bring-up window — the few seconds `start()` spends unblocking radios, bringing interfaces up, and initialising GPS *before* the scan loop goes live and `running` flips to `true`. The hardware display treats `starting` the same as `running` and switches to the wardriving "Starting…" screen immediately, so a **manually started** session takes over the panel just as fast as `wardriving_on_boot` does — you no longer stare at the normal dashboard while the radios spin up. It auto-clears after 45 s if a start never completes, so a failed start can't strand the panel on "Starting…".
 
 ---
 
