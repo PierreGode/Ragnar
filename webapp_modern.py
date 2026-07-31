@@ -12797,18 +12797,33 @@ def install_pwnagotchi_from_dashboard():
         if not os.path.exists(PWN_INSTALL_SCRIPT):
             return jsonify({'success': False, 'error': 'Installer script not found', 'script': PWN_INSTALL_SCRIPT}), 404
 
+        payload = request.get_json(silent=True) or {}
+        clean = bool(payload.get('clean'))
+
         current_status = _build_pwnagotchi_status(persist=False)
         if current_status.get('installing'):
             if _pwn_install_process_running() and not _is_pwn_install_stale(current_status):
                 return jsonify({'success': False, 'error': 'Installation already in progress'}), 409
             logger.info('Previous Pwnagotchi install attempt appears stale. Restarting installer.')
 
-        logger.info("Launching Pwnagotchi installer from dashboard request")
-        _write_pwn_status_file('installing', 'Launching Pwnagotchi installer…', 'install')
+        mode = 'clean reinstall' if clean else 'install'
+        logger.info(f"Launching Pwnagotchi {mode} from dashboard request")
+        _write_pwn_status_file(
+            'installing',
+            'Launching clean Pwnagotchi reinstall…' if clean else 'Launching Pwnagotchi installer…',
+            'install'
+        )
+
+        cmd = ['sudo', '/bin/bash', PWN_INSTALL_SCRIPT]
+        if clean:
+            # --clean makes the installer wipe /opt/pwnagotchi + config and rebuild
+            # from scratch, so this path works even when the current install looks
+            # healthy. Passed as an arg (survives sudo, unlike an env var).
+            cmd.append('--clean')
 
         try:
             subprocess.Popen(
-                ['sudo', '/bin/bash', PWN_INSTALL_SCRIPT],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
