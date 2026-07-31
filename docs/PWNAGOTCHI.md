@@ -89,11 +89,16 @@ the idempotent installer to restore the missing pieces without touching your
 captures or config.
 
 A **Reinstall (clean)** button is **always** shown, even when Healthy. It runs the
-installer with `--clean`, which stops the services, wipes `/opt/pwnagotchi`, backs
-up and removes `config.toml`, then rebuilds everything from scratch — the
-guaranteed-fresh path for when Repair isn't enough. Handshakes/captures are left
-untouched, and the previous config is kept as `config.toml.bak.<timestamp>`.
+installer with `--clean`, which stops the services, wipes `/opt/pwnagotchi`, and
+regenerates `config.toml` fresh (the old one is copied to
+`config.toml.bak.<timestamp>` first — it is **never** left deleted, so an
+interrupted reinstall can't strand the box without a config), then rebuilds
+everything from scratch. Handshakes/captures are left untouched.
 (Manual equivalent: `sudo ./scripts/install_pwnagotchi.sh --clean`.)
+
+> During a clean reinstall the clone is briefly absent while it re-downloads, so
+> the Installation Check badge shows **Installing…** (not a red *Needs Repair*)
+> until it finishes.
 
 ### Does Pwnagotchi's own updater conflict with Ragnar's?
 

@@ -12856,7 +12856,12 @@ function updatePwnHealthCard(status = {}) {
     const badge = document.getElementById('pwn-health-badge');
     if (badge) {
         badge.className = 'text-xs font-semibold uppercase tracking-wide px-3 py-1 rounded-full self-start whitespace-nowrap';
-        if (!anyMissing) {
+        if (status.installing) {
+            // Mid-install the clone/config are transiently absent (especially on a
+            // clean reinstall) — don't alarm the user with a red "Needs Repair".
+            badge.textContent = 'Installing…';
+            badge.classList.add('bg-sky-900/60', 'text-sky-300');
+        } else if (!anyMissing) {
             badge.textContent = 'Healthy';
             badge.classList.add('bg-green-900/60', 'text-green-300');
         } else if (missingCritical.length) {
