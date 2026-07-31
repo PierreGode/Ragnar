@@ -6642,6 +6642,12 @@
                             </button>
                             <p class="text-xs text-gray-500 mt-2">Re-runs the installer to restore missing pieces. Your captures and config are left untouched.</p>
                         </div>
+                        <div id="pwn-reinstall-row" class="mt-4 pt-4 border-t border-slate-700/60">
+                            <button id="pwn-reinstall-btn" class="w-full bg-slate-700 hover:bg-red-800 text-white py-2 px-4 rounded-lg transition-colors">
+                                Reinstall (clean)
+                            </button>
+                            <p class="text-xs text-gray-500 mt-2">Always available. Wipes <code class="text-fuchsia-300">/opt/pwnagotchi</code> and reinstalls everything from scratch (config is backed up first). Use when Repair isn't enough.</p>
+                        </div>
                     </div>
 
                     <!-- Pwnagotchi Updates Card -->
@@ -7411,7 +7417,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260731-pwn-portal-ready"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260731-pwn-reinstall"></script>
 
 </body>
 </html>

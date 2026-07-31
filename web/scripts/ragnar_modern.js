@@ -12684,6 +12684,11 @@ function initializePwnUI() {
         repairBtn.addEventListener('click', handlePwnRepairClick);
     }
 
+    const reinstallBtn = document.getElementById('pwn-reinstall-btn');
+    if (reinstallBtn) {
+        reinstallBtn.addEventListener('click', handlePwnReinstallClick);
+    }
+
     const swapToPwnBtn = document.getElementById('pwn-swap-to-pwn-btn');
     if (swapToPwnBtn) {
         swapToPwnBtn.addEventListener('click', () => handlePwnSwap('pwnagotchi'));
@@ -12881,13 +12886,23 @@ function updatePwnHealthCard(status = {}) {
             : 'Some components need attention. Re-run the installer to repair.';
     }
 
+    const busy = Boolean(status.installing);
+
     const repairBtn = document.getElementById('pwn-repair-btn');
     if (repairBtn) {
-        const busy = Boolean(status.installing);
         repairBtn.disabled = busy;
         repairBtn.textContent = busy ? 'Repairing…' : 'Repair Installation';
         repairBtn.classList.toggle('opacity-70', busy);
         repairBtn.classList.toggle('cursor-not-allowed', busy);
+    }
+
+    // Reinstall is always offered (even when Healthy) as a guaranteed clean rebuild.
+    const reinstallBtn = document.getElementById('pwn-reinstall-btn');
+    if (reinstallBtn) {
+        reinstallBtn.disabled = busy;
+        reinstallBtn.textContent = busy ? 'Reinstalling…' : 'Reinstall (clean)';
+        reinstallBtn.classList.toggle('opacity-70', busy);
+        reinstallBtn.classList.toggle('cursor-not-allowed', busy);
     }
 }
 
@@ -13667,13 +13682,19 @@ function formatPwnPhaseLabel(phase) {
     return phase.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
 }
 
-async function runPwnInstaller(isRepair) {
+async function runPwnInstaller(kind) {
+    // kind: 'install' | 'repair' | 'reinstall'
     if (pwnStatus.installing) {
         addConsoleMessage('Pwnagotchi installer already running', 'warning');
         return;
     }
 
-    const verb = isRepair ? 'Repair' : 'Install';
+    const clean = kind === 'reinstall';
+    const verb = kind === 'repair' ? 'Repair' : (clean ? 'Reinstall' : 'Install');
+
+    if (clean && !confirm('Clean reinstall?\n\nThis wipes /opt/pwnagotchi and reinstalls Pwnagotchi from scratch. Your config.toml is backed up first, and captures/handshakes are left untouched. This can take 20–40 minutes.')) {
+        return;
+    }
 
     const installBtn = document.getElementById('pwn-install-btn');
     if (installBtn) {
@@ -13687,14 +13708,18 @@ async function runPwnInstaller(isRepair) {
         repairBtn.textContent = 'Starting repair…';
         repairBtn.classList.add('opacity-70', 'cursor-not-allowed');
     }
+    const reinstallBtn = document.getElementById('pwn-reinstall-btn');
+    if (reinstallBtn) {
+        reinstallBtn.disabled = true;
+        reinstallBtn.textContent = 'Starting reinstall…';
+        reinstallBtn.classList.add('opacity-70', 'cursor-not-allowed');
+    }
 
-    resetPwnLogState(isRepair
-        ? 'Repair requested. Waiting for output...'
-        : 'Installer requested. Waiting for output...');
+    resetPwnLogState(`${verb} requested. Waiting for output...`);
     startPwnLogStreaming({ initial: true });
 
     try {
-        const result = await postPwnAPI('/api/pwnagotchi/install', {});
+        const result = await postPwnAPI('/api/pwnagotchi/install', clean ? { clean: true } : {});
         addConsoleMessage(`Pwnagotchi ${verb.toLowerCase()} started`, 'success');
         if (result && result.status) {
             updatePwnagotchiUI(result.status);
@@ -13712,11 +13737,15 @@ async function runPwnInstaller(isRepair) {
 }
 
 function handlePwnInstallClick() {
-    return runPwnInstaller(false);
+    return runPwnInstaller('install');
 }
 
 function handlePwnRepairClick() {
-    return runPwnInstaller(true);
+    return runPwnInstaller('repair');
+}
+
+function handlePwnReinstallClick() {
+    return runPwnInstaller('reinstall');
 }
 
 async function handlePwnSwap(targetMode) {

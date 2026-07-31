@@ -13,6 +13,16 @@ CONFIG_FILE="$CONFIG_DIR/config.toml"
 TEMP_DIR="/home/ragnar/tmp_pwnagotchi_install"
 MIN_SPACE_MB=300
 
+# Clean reinstall mode: wipe the managed clone + config so the installer rebuilds
+# everything from scratch. Triggered by the dashboard "Reinstall" button, which
+# passes --clean (env var RAGNAR_PWN_CLEAN=1 also honoured as a fallback).
+CLEAN_INSTALL="${RAGNAR_PWN_CLEAN:-0}"
+for _arg in "$@"; do
+    case "$_arg" in
+        --clean) CLEAN_INSTALL=1 ;;
+    esac
+done
+
 mkdir -p "$LOG_DIR" "$REPO_ROOT/data" "$TEMP_DIR"
 
 export TMPDIR="$TEMP_DIR"
@@ -203,6 +213,22 @@ fi
 
 write_status "installing" "Starting Pwnagotchi installation" "preflight"
 echo "[INFO] Beginning Pwnagotchi installation..."
+
+# Clean reinstall: stop services and wipe the managed clone + config so the rest
+# of the installer regenerates them from scratch. Config is backed up first so a
+# customised name/whitelist can be recovered from the .bak file if needed.
+if [[ "$CLEAN_INSTALL" == "1" ]]; then
+    echo "[INFO] Clean reinstall requested — wiping existing Pwnagotchi state..."
+    write_status "installing" "Clean reinstall: removing existing Pwnagotchi" "clean_wipe"
+    timeout 15 systemctl stop pwnagotchi >/dev/null 2>&1 || true
+    timeout 15 systemctl stop bettercap >/dev/null 2>&1 || true
+    rm -rf "$PWN_DIR"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        cp -f "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%s)" 2>/dev/null || true
+        rm -f "$CONFIG_FILE"
+        echo "[INFO] Backed up and removed existing config.toml"
+    fi
+fi
 
 echo "[INFO] Checking disk space in $TEMP_DIR..."
 available_space=$(df -m "$TEMP_DIR" | awk 'NR==2 {print $4}')

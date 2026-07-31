@@ -4609,6 +4609,28 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     status['missing_critical'] = health['missing_critical']
     status['missing_optional'] = health['missing_optional']
     status['healthy'] = health['healthy']
+
+    # Self-heal a stuck status: if every component is present and no installer
+    # process is running, the install is done even when the status file was left
+    # mid-flight — e.g. the installer was killed right before writing its terminal
+    # "installed" state, or a stale file lingers. Without this the UI stays pinned
+    # to "installing" until the 10-minute stale timeout (and disables the swap).
+    if (
+        status['state'] in {'installing', 'error', 'not_installed'}
+        and health['healthy']
+        and not status['service_active']
+        and not _pwn_install_process_running()
+    ):
+        status['installing'] = False
+        status['state'] = 'installed'
+        status['phase'] = 'complete'
+        status['message'] = 'Pwnagotchi installed successfully. Use the Ragnar dashboard to launch.'
+        status['installed'] = True
+        _write_pwn_status_file('installed', status['message'], 'complete', {
+            'target_mode': status.get('target_mode', 'ragnar'),
+            'service_state': status.get('service_state'),
+        })
+
     status['needs_repair'] = bool(
         status['installed'] and not health['healthy'] and not status['installing']
     )
@@ -12775,18 +12797,33 @@ def install_pwnagotchi_from_dashboard():
         if not os.path.exists(PWN_INSTALL_SCRIPT):
             return jsonify({'success': False, 'error': 'Installer script not found', 'script': PWN_INSTALL_SCRIPT}), 404
 
+        payload = request.get_json(silent=True) or {}
+        clean = bool(payload.get('clean'))
+
         current_status = _build_pwnagotchi_status(persist=False)
         if current_status.get('installing'):
             if _pwn_install_process_running() and not _is_pwn_install_stale(current_status):
                 return jsonify({'success': False, 'error': 'Installation already in progress'}), 409
             logger.info('Previous Pwnagotchi install attempt appears stale. Restarting installer.')
 
-        logger.info("Launching Pwnagotchi installer from dashboard request")
-        _write_pwn_status_file('installing', 'Launching Pwnagotchi installer…', 'install')
+        mode = 'clean reinstall' if clean else 'install'
+        logger.info(f"Launching Pwnagotchi {mode} from dashboard request")
+        _write_pwn_status_file(
+            'installing',
+            'Launching clean Pwnagotchi reinstall…' if clean else 'Launching Pwnagotchi installer…',
+            'install'
+        )
+
+        cmd = ['sudo', '/bin/bash', PWN_INSTALL_SCRIPT]
+        if clean:
+            # --clean makes the installer wipe /opt/pwnagotchi + config and rebuild
+            # from scratch, so this path works even when the current install looks
+            # healthy. Passed as an arg (survives sudo, unlike an env var).
+            cmd.append('--clean')
 
         try:
             subprocess.Popen(
-                ['sudo', '/bin/bash', PWN_INSTALL_SCRIPT],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
