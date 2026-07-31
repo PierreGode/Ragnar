@@ -4609,6 +4609,28 @@ def _build_pwnagotchi_status(persist: bool = True) -> dict:
     status['missing_critical'] = health['missing_critical']
     status['missing_optional'] = health['missing_optional']
     status['healthy'] = health['healthy']
+
+    # Self-heal a stuck status: if every component is present and no installer
+    # process is running, the install is done even when the status file was left
+    # mid-flight — e.g. the installer was killed right before writing its terminal
+    # "installed" state, or a stale file lingers. Without this the UI stays pinned
+    # to "installing" until the 10-minute stale timeout (and disables the swap).
+    if (
+        status['state'] in {'installing', 'error', 'not_installed'}
+        and health['healthy']
+        and not status['service_active']
+        and not _pwn_install_process_running()
+    ):
+        status['installing'] = False
+        status['state'] = 'installed'
+        status['phase'] = 'complete'
+        status['message'] = 'Pwnagotchi installed successfully. Use the Ragnar dashboard to launch.'
+        status['installed'] = True
+        _write_pwn_status_file('installed', status['message'], 'complete', {
+            'target_mode': status.get('target_mode', 'ragnar'),
+            'service_state': status.get('service_state'),
+        })
+
     status['needs_repair'] = bool(
         status['installed'] and not health['healthy'] and not status['installing']
     )
