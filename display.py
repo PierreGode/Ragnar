@@ -831,8 +831,15 @@ class Display:
         through the wardriving screens redraws promptly instead of waiting out
         the full screen_delay.
         """
+        wd_active0 = self._wardriving_active_cheap()
         if not self.button_listener:
-            time.sleep(self.shared_data.screen_delay)
+            # Still poll so a wardriving start/stop flips the panel promptly
+            # instead of waiting out the full screen_delay.
+            steps = max(1, int(self.shared_data.screen_delay / 0.1))
+            for _ in range(steps):
+                if self._wardriving_active_cheap() != wd_active0:
+                    return  # Wardriving started/stopped — redraw now
+                time.sleep(0.1)
             return
         wd_page = getattr(self.button_listener, 'wardrive_page', 0)
         # Check every 0.1s if page changed, otherwise do full sleep
@@ -842,7 +849,27 @@ class Display:
                 return  # Page changed, skip remaining sleep
             if getattr(self.button_listener, 'wardrive_page', 0) != wd_page:
                 return  # Wardriving sub-page changed (joystick)
+            if self._wardriving_active_cheap() != wd_active0:
+                return  # Wardriving started/stopped — redraw now
             time.sleep(0.1)
+
+    def _wardriving_active_cheap(self):
+        """True if wardriving is running or in its start-up window.
+
+        Cheap enough to poll at 10 Hz from the sleep loop: reads the engine's
+        _running/_starting flags directly instead of the full get_status()
+        (which walks sysfs/GPS/DB). Never creates an engine — if none exists
+        yet, wardriving can't be active.
+        """
+        try:
+            import webapp_modern
+            eng = webapp_modern._wardriving_engine
+            if eng is None:
+                return False
+            return bool(getattr(eng, '_running', False)
+                        or getattr(eng, '_starting', False))
+        except Exception:
+            return False
 
     def _get_cached_page_data(self, key, fetch_fn, ttl=10):
         """Get cached page data, refreshing if older than ttl seconds."""
@@ -2364,7 +2391,8 @@ class Display:
         font = self.shared_data.font_arial9
         font_row = self.shared_data.font_arial11
         never_started = not (wd and wd.get('session_id'))
-        if self.shared_data.config.get('wardriving_on_boot', False) and never_started:
+        booting = self.shared_data.config.get('wardriving_on_boot', False) and never_started
+        if (wd and wd.get('starting')) or booting:
             msg1, msg2 = "Starting...", "Waiting for engine"
         else:
             msg1, msg2 = "Stopped", "Enable in WebUI"
@@ -2794,7 +2822,8 @@ class Display:
             # startup. Once a session has existed, fall back to "Stopped" so
             # a user who manually stopped doesn't see a misleading message.
             never_started = not (wd and wd.get('session_id'))
-            if self.shared_data.config.get('wardriving_on_boot', False) and never_started:
+            booting = self.shared_data.config.get('wardriving_on_boot', False) and never_started
+            if (wd and wd.get('starting')) or booting:
                 stats = [
                     ("Status", "Starting..."),
                     ("Tip", "Waiting for engine"),
@@ -3437,7 +3466,7 @@ class Display:
 
                 # Wardriving display override for GC9A01
                 wd_check = self._get_wardriving_data()
-                if wd_check and wd_check.get('running'):
+                if wd_check and (wd_check.get('running') or wd_check.get('starting')):
                     output = _render_wd_gc9a01()
                     output = output.transpose(_Image.Transpose.FLIP_LEFT_RIGHT)
                     self.epd_helper.display_partial(output)
@@ -3679,7 +3708,7 @@ class Display:
 
                 # — Wardriving display override for LCD1602 —
                 wd_lcd = self._get_wardriving_data()
-                if wd_lcd and wd_lcd.get('running'):
+                if wd_lcd and (wd_lcd.get('running') or wd_lcd.get('starting')):
                     st_lcd = wd_lcd.get('stats', {})
                     gps_lcd = wd_lcd.get('gps', {})
                     total_n = st_lcd.get('total_networks', 0)
@@ -3913,7 +3942,7 @@ class Display:
 
                 # Wardriving display override
                 wd_data = self._get_wardriving_data()
-                if wd_data and wd_data.get('running'):
+                if wd_data and (wd_data.get('running') or wd_data.get('starting')):
                     img = _render_wd()
                 else:
                     img = _render(_scroll_pos)
@@ -4078,7 +4107,7 @@ class Display:
         def _build_messages():
             # Wardriving display override for MAX7219
             wd_max = self._get_wardriving_data()
-            if wd_max and wd_max.get('running'):
+            if wd_max and (wd_max.get('running') or wd_max.get('starting')):
                 st_max = wd_max.get('stats', {})
                 gps_max = wd_max.get('gps', {})
                 total_n = st_max.get('total_networks', 0)
@@ -4272,8 +4301,12 @@ class Display:
                     wd_data = self._get_wardriving_data()
                     wd_boot = self.shared_data.config.get('wardriving_on_boot', False)
                     is_running = bool(wd_data and wd_data.get('running'))
+                    is_starting = bool(wd_data and wd_data.get('starting'))
                     never_started = not (wd_data and wd_data.get('session_id'))
-                    if is_running or (wd_boot and never_started):
+                    # is_starting covers a *manual* start's radio/GPS bring-up
+                    # window so the panel switches to wardriving mode instantly,
+                    # not only once the scan loop is live (matches on-boot).
+                    if is_running or is_starting or (wd_boot and never_started):
                         # KEY3 toggles a live map while wardriving is running.
                         show_map = (is_running and self.button_listener
                                     and getattr(self.button_listener, 'wardrive_map', False))
