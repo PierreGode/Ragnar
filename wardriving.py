@@ -1346,6 +1346,348 @@ class WardrivingSession:
         kml_parts.extend(['</Document>', '</kml>'])
         return '\n'.join(kml_parts)
 
+    # ------------------------------------------------------------------
+    # Survey report (self-contained, printable HTML → PDF)
+    # ------------------------------------------------------------------
+
+    def _report_collect(self):
+        """Gather everything a survey report needs in a single DB pass.
+
+        Returns a plain dict so export_report_html stays pure formatting.
+        Every table read is defensive: older session DBs may lack the
+        bluetooth/cell/zigbee tables, and a report must never fail because
+        an optional radio was never used."""
+        data = {
+            'session_id': self.session_id,
+            'security': {'open': 0, 'owe': 0, 'wep': 0, 'wpa': 0, 'wpa2': 0, 'wpa3': 0, 'other': 0},
+            'bands': {'2.4GHz': 0, '5GHz': 0, '6GHz': 0, 'other': 0},
+            'channels': {},          # channel -> count
+            'total_wifi': 0,
+            'top_networks': [],      # strongest signal
+            'risk_networks': [],     # open / WEP for the concern list
+            'cameras': [],
+            'bt_count': 0, 'cell_count': 0, 'zigbee_count': 0,
+            'coverage': self.get_coverage_stats(),
+            'gps': {'points': 0, 'lat_min': None, 'lat_max': None,
+                    'lon_min': None, 'lon_max': None, 'distance_km': 0.0},
+            'first_seen': None, 'last_seen': None,
+        }
+        with self._lock:
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute("SELECT * FROM networks").fetchall()
+                    for row in rows:
+                        r = dict(row)
+                        data['total_wifi'] += 1
+                        sec = (r.get('security') or '').upper()
+                        if not sec or sec in ('--',):
+                            data['security']['open'] += 1
+                        elif 'OWE' in sec:
+                            data['security']['owe'] += 1
+                        elif 'WEP' in sec:
+                            data['security']['wep'] += 1
+                        elif 'WPA3' in sec or 'SAE' in sec:
+                            data['security']['wpa3'] += 1
+                        elif 'WPA2' in sec or 'RSN' in sec:
+                            data['security']['wpa2'] += 1
+                        elif 'WPA' in sec:
+                            data['security']['wpa'] += 1
+                        else:
+                            data['security']['other'] += 1
+                        band = r.get('band') or 'other'
+                        data['bands'][band] = data['bands'].get(band, 0) + 1
+                        ch = r.get('channel') or 0
+                        if ch:
+                            data['channels'][ch] = data['channels'].get(ch, 0) + 1
+                        # Concern list: open (non-OWE) or WEP
+                        is_open = (not sec) or sec == '--'
+                        if is_open or 'WEP' in sec:
+                            data['risk_networks'].append(r)
+                        if r.get('is_camera'):
+                            data['cameras'].append(r)
+                        fs, ls = r.get('first_seen'), r.get('last_seen')
+                        if fs and (data['first_seen'] is None or fs < data['first_seen']):
+                            data['first_seen'] = fs
+                        if ls and (data['last_seen'] is None or ls > data['last_seen']):
+                            data['last_seen'] = ls
+                    # Strongest networks (top 25)
+                    data['top_networks'] = [dict(r) for r in conn.execute(
+                        "SELECT * FROM networks ORDER BY best_rssi DESC LIMIT 25"
+                    ).fetchall()]
+                    # Optional radios
+                    for tbl, key in (('bluetooth_devices', 'bt_count'),
+                                     ('cell_towers', 'cell_count'),
+                                     ('zigbee_devices', 'zigbee_count')):
+                        try:
+                            data[key] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                        except Exception:
+                            pass
+                    # GPS track summary
+                    try:
+                        track = conn.execute(
+                            "SELECT latitude, longitude FROM gps_track "
+                            "WHERE latitude IS NOT NULL ORDER BY timestamp"
+                        ).fetchall()
+                        data['gps']['points'] = len(track)
+                        prev = None
+                        import math
+                        for lat, lon in track:
+                            g = data['gps']
+                            g['lat_min'] = lat if g['lat_min'] is None else min(g['lat_min'], lat)
+                            g['lat_max'] = lat if g['lat_max'] is None else max(g['lat_max'], lat)
+                            g['lon_min'] = lon if g['lon_min'] is None else min(g['lon_min'], lon)
+                            g['lon_max'] = lon if g['lon_max'] is None else max(g['lon_max'], lon)
+                            if prev:
+                                # Haversine between consecutive fixes
+                                dlat = math.radians(lat - prev[0])
+                                dlon = math.radians(lon - prev[1])
+                                a = (math.sin(dlat / 2) ** 2 +
+                                     math.cos(math.radians(prev[0])) *
+                                     math.cos(math.radians(lat)) *
+                                     math.sin(dlon / 2) ** 2)
+                                g['distance_km'] += 6371.0 * 2 * math.asin(min(1.0, math.sqrt(a)))
+                            prev = (lat, lon)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Report collect error: {e}")
+        # Concern list: worst-signal-agnostic but stable ordering (open first, then WEP)
+        data['risk_networks'].sort(key=lambda r: (0 if not (r.get('security') or '') else 1,
+                                                  -(r.get('best_rssi') or -100)))
+        return data
+
+    def export_report_html(self, device_name='Ragnar'):
+        """Render a professional, self-contained Wi-Fi survey report as HTML.
+
+        The output inlines all CSS and has a print stylesheet, so the browser's
+        "Save as PDF" turns it into a shareable deliverable — the reporting
+        workflow that site-survey tools like Acrylic are used for, generated
+        automatically from the session instead of assembled by hand."""
+        import html as _html
+
+        d = self._report_collect()
+        esc = _html.escape
+
+        def _fmt_dt(v):
+            if not v:
+                return '—'
+            try:
+                if isinstance(v, (int, float)):
+                    return datetime.fromtimestamp(v).strftime('%Y-%m-%d %H:%M:%S')
+                return str(v)
+            except Exception:
+                return str(v)
+
+        total = d['total_wifi']
+        sec = d['security']
+        # Exposure = open + WEP as a share of all Wi-Fi networks seen
+        exposed = sec['open'] + sec['wep']
+        exposed_pct = (exposed / total * 100) if total else 0
+        if total == 0:
+            grade, grade_note = ('—', 'No Wi-Fi networks recorded.')
+        elif exposed_pct == 0:
+            grade, grade_note = ('A', 'No open or WEP networks observed in this survey.')
+        elif exposed_pct < 5:
+            grade, grade_note = ('B', 'A small number of weakly-protected networks were observed.')
+        elif exposed_pct < 15:
+            grade, grade_note = ('C', 'A notable share of networks use no or legacy encryption.')
+        elif exposed_pct < 30:
+            grade, grade_note = ('D', 'Many networks are open or use broken WEP encryption.')
+        else:
+            grade, grade_note = ('F', 'A majority of networks are open or use broken WEP encryption.')
+        grade_color = {'A': '#16a34a', 'B': '#65a30d', 'C': '#ca8a04',
+                       'D': '#ea580c', 'F': '#dc2626', '—': '#64748b'}[grade]
+
+        generated = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        dn = esc(device_name or 'Ragnar')
+
+        def stat_card(label, value, sub=''):
+            sub_html = f'<div class="sc-sub">{esc(str(sub))}</div>' if sub else ''
+            return (f'<div class="card"><div class="sc-val">{esc(str(value))}</div>'
+                    f'<div class="sc-lbl">{esc(str(label))}</div>{sub_html}</div>')
+
+        # --- Security posture bars ---
+        sec_rows = [
+            ('Open (no encryption)', sec['open'], '#dc2626'),
+            ('Enhanced Open (OWE)', sec['owe'], '#0891b2'),
+            ('WEP (broken)', sec['wep'], '#ea580c'),
+            ('WPA (legacy)', sec['wpa'], '#ca8a04'),
+            ('WPA2', sec['wpa2'], '#2563eb'),
+            ('WPA3 / SAE', sec['wpa3'], '#16a34a'),
+            ('Other / unknown', sec['other'], '#64748b'),
+        ]
+        sec_html = ''
+        for label, count, color in sec_rows:
+            pct = (count / total * 100) if total else 0
+            sec_html += (
+                f'<div class="bar-row"><span class="bar-lbl">{esc(label)}</span>'
+                f'<span class="bar-track"><span class="bar-fill" style="width:{pct:.1f}%;background:{color}"></span></span>'
+                f'<span class="bar-num">{count} <span class="muted">({pct:.0f}%)</span></span></div>'
+            )
+
+        # --- Band bars ---
+        band_rows = [('2.4 GHz', d['bands'].get('2.4GHz', 0), '#f59e0b'),
+                     ('5 GHz', d['bands'].get('5GHz', 0), '#3b82f6'),
+                     ('6 GHz', d['bands'].get('6GHz', 0), '#8b5cf6')]
+        band_html = ''
+        for label, count, color in band_rows:
+            pct = (count / total * 100) if total else 0
+            band_html += (
+                f'<div class="bar-row"><span class="bar-lbl">{esc(label)}</span>'
+                f'<span class="bar-track"><span class="bar-fill" style="width:{pct:.1f}%;background:{color}"></span></span>'
+                f'<span class="bar-num">{count} <span class="muted">({pct:.0f}%)</span></span></div>'
+            )
+
+        # --- Channel usage (top 14 by count) ---
+        chan_items = sorted(d['channels'].items(), key=lambda kv: (-kv[1], kv[0]))[:14]
+        chan_max = max((c for _, c in chan_items), default=1)
+        chan_html = ''
+        for ch, cnt in sorted(chan_items, key=lambda kv: kv[0]):
+            h = (cnt / chan_max * 100) if chan_max else 0
+            chan_html += (
+                f'<div class="chan"><span class="chan-bar" style="height:{h:.0f}%" '
+                f'title="Channel {ch}: {cnt}"></span><span class="chan-num">{cnt}</span>'
+                f'<span class="chan-lbl">{ch}</span></div>'
+            )
+        if not chan_html:
+            chan_html = '<p class="muted">No channel data.</p>'
+
+        def net_table(rows, cols):
+            if not rows:
+                return '<p class="muted">None.</p>'
+            head = ''.join(f'<th>{esc(c[0])}</th>' for c in cols)
+            body = ''
+            for r in rows:
+                cells = ''.join(f'<td>{esc(str(c[1](r)))}</td>' for c in cols)
+                body += f'<tr>{cells}</tr>'
+            return f'<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>'
+
+        net_cols = [
+            ('SSID', lambda r: r.get('ssid') or '<hidden>'),
+            ('BSSID', lambda r: r.get('bssid') or ''),
+            ('Security', lambda r: r.get('security') or 'Open'),
+            ('Band', lambda r: r.get('band') or ''),
+            ('Ch', lambda r: r.get('channel') or ''),
+            ('Signal', lambda r: f"{r.get('best_rssi', -100)} dBm"),
+        ]
+        cam_cols = [
+            ('SSID', lambda r: r.get('ssid') or '<hidden>'),
+            ('BSSID', lambda r: r.get('bssid') or ''),
+            ('Security', lambda r: r.get('security') or 'Open'),
+            ('Ch', lambda r: r.get('channel') or ''),
+            ('Signal', lambda r: f"{r.get('best_rssi', -100)} dBm"),
+        ]
+
+        top_tbl = net_table(d['top_networks'], net_cols)
+        risk_tbl = net_table(d['risk_networks'][:100], net_cols)
+        cam_tbl = net_table(d['cameras'][:100], cam_cols)
+
+        # --- Coverage (per-interface antenna comparison) ---
+        cov = d['coverage'].get('per_interface', {})
+        cov_html = ''
+        if cov:
+            cov_rows = ''
+            for iface, c in sorted(cov.items(), key=lambda kv: -kv[1]['unique']):
+                cov_rows += (
+                    f'<tr><td>{esc(iface)}</td><td>{c["unique"]}</td>'
+                    f'<td>{c["only_here"]}</td><td>{c["best_rssi_avg"]} dBm</td>'
+                    f'<td>{c["best_rssi_median"]} dBm</td></tr>'
+                )
+            cov_html = (
+                '<table><thead><tr><th>Interface</th><th>Unique BSSIDs</th>'
+                '<th>Only this adapter</th><th>Avg signal</th><th>Median signal</th>'
+                f'</tr></thead><tbody>{cov_rows}</tbody></table>'
+                f'<p class="muted">Networks seen by 2+ adapters (overlap): {d["coverage"].get("overlap", 0)}</p>'
+            )
+        else:
+            cov_html = '<p class="muted">Single-adapter session — no coverage comparison.</p>'
+
+        # --- GPS coverage ---
+        g = d['gps']
+        if g['points'] and g['lat_min'] is not None:
+            dist_s = '{:.2f} km'.format(g['distance_km'])
+            lat_s = '{:.5f} → {:.5f}'.format(g['lat_min'], g['lat_max'])
+            lon_s = '{:.5f} → {:.5f}'.format(g['lon_min'], g['lon_max'])
+            gps_html = (
+                '<div class="grid4">'
+                + stat_card('Track points', g['points'])
+                + stat_card('Distance', dist_s)
+                + stat_card('Lat span', lat_s)
+                + stat_card('Lon span', lon_s)
+                + '</div>'
+            )
+        else:
+            gps_html = '<p class="muted">No GPS track recorded for this session (stationary or no fix).</p>'
+
+        other_radio = (
+            f'<div class="grid4">'
+            f'{stat_card("Bluetooth / BLE", d["bt_count"])}'
+            f'{stat_card("Cell towers", d["cell_count"])}'
+            f'{stat_card("Zigbee / 802.15.4", d["zigbee_count"])}'
+            f'{stat_card("Cameras (heuristic)", len(d["cameras"]))}'
+            f'</div>'
+        )
+
+        from report_common import page_shell
+
+        subtitle_html = (
+            f'<div class="sub">Session <strong>{esc(self.session_id)}</strong> · Device {dn}</div>'
+            f'<div class="sub">Coverage: {_fmt_dt(d["first_seen"])} → {_fmt_dt(d["last_seen"])}</div>'
+        )
+        concern_note = (
+            f'<div class="note bad">{exposed} network(s) offer no meaningful encryption. '
+            'Devices joining these are exposed to eavesdropping and interception.</div>'
+        ) if exposed else '<p class="muted">No open or WEP networks were observed.</p>'
+        cam_section = f'<h2>Cameras &amp; surveillance devices</h2>{cam_tbl}' if d['cameras'] else ''
+
+        body_html = f"""
+<h2>Executive summary</h2>
+<div class="grid4">
+{stat_card("Wi-Fi networks", total)}
+{stat_card("Open + WEP", exposed, f"{exposed_pct:.0f}% of networks")}
+{stat_card("WPA3 / SAE", sec['wpa3'])}
+{stat_card("Cameras", len(d['cameras']))}
+</div>
+<p class="sub" style="margin-top:12px">{esc(grade_note)}</p>
+
+<h2>Security posture</h2>
+{sec_html}
+
+<h2>Band distribution</h2>
+{band_html}
+
+<h2>Channel usage</h2>
+<div class="chans">{chan_html}</div>
+
+<h2>Other radios</h2>
+{other_radio}
+
+<h2>Networks of concern (open &amp; WEP)</h2>
+{concern_note}
+{risk_tbl}
+
+{cam_section}
+
+<h2>Strongest networks</h2>
+{top_tbl}
+
+<h2>Antenna coverage</h2>
+{cov_html}
+
+<h2>GPS coverage</h2>
+{gps_html}
+"""
+        return page_shell(
+            title=f'Ragnar Wireless Survey Report — {self.session_id}',
+            brand='RAGNAR · WIRELESS SURVEY',
+            heading='Wi-Fi Survey Report',
+            subtitle_html=subtitle_html,
+            verdict=grade, verdict_label='Security posture', verdict_color=grade_color,
+            body=body_html, generated=generated,
+            footer_note='Informal survey — not a certified assessment',
+        )
+
     def import_wigle_csv(self, csv_path_or_stream):
         """Import a WiGLE-format CSV file into this session.
 

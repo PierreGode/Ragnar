@@ -69,6 +69,25 @@ BSSIDs that share an SSID into one logical network (bands, AP count, best
 signal). **Export CSV** dumps the full
 enriched inventory for offline analysis.
 
+### 📄 Spectrum & channel report (HTML → PDF)
+
+The **Report** button turns the current scan into a self-contained, printable
+**spectrum survey** — open it in the new tab and *Save as PDF* for a shareable
+deliverable (the site-survey output an Ekahau/Acrylic workflow produces,
+generated on-device). It uses the scan already on screen (no re-scan) and
+contains:
+
+- an overall **RF-congestion verdict** — CLEAR / MODERATE / CONGESTED;
+- **per-band** cards (2.4 / 5 / 6 GHz): AP count, **recommended channels**,
+  suggested channel width + reasoning, and a **per-channel congestion
+  histogram**;
+- **interference** counts (co-channel and adjacent/overlap groups);
+- **Networks** (SSID view) and **strongest access points** tables (band,
+  channel, width, signal, SNR, standard, security).
+
+The same shared report engine renders the WiFi Defense and Wardriving reports,
+so all three are one visual family. Informal — not a certified assessment.
+
 ---
 
 ## Change tracking (session history)
@@ -444,6 +463,7 @@ All endpoints are passive and read-only except the heatmap store.
 |----------|---------|
 | `GET /api/net/wifi/interfaces` | wireless interfaces + supported bands |
 | `GET /api/net/wifi/scan?interface=&band=` | passive survey + spectrum + interference + groups + change diff |
+| `POST /api/net/wifi/report` | `{scan}` (the panel's last survey) → printable HTML spectrum report |
 | `GET /api/net/wifi/radius?interface=&bssid=&tx=&ple=&rssi_offset=&antenna_gain=&cable_loss=&rssi0=` | signal-radius rings (with calibration) |
 | `GET /api/net/wifi/calibrate?d1=&rssi1=&d2=&rssi2=` | two-point path-loss fit (n + ref RSSI@1m) |
 | `GET/POST /api/net/wifi/heatmap` | get / add-sample / sample-live (optional `active` throughput) / `throughput` one-off / floorplan / clear |

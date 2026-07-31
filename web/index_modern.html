@@ -2371,6 +2371,10 @@
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
                             Analyze with AI
                         </button>
+                        <button onclick="wifiExportReport()" id="wifi-report-btn" title="Open a printable Wi-Fi spectrum & channel report (Save as PDF) from the latest scan" class="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded text-sm font-semibold">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                            Report
+                        </button>
                         <button onclick="wifiToggleFullscreen()" id="wifi-fs-btn" title="Full-screen analyzer — bigger spectrum, click any AP for the full record (Esc to exit)" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
                             Full screen
@@ -2707,6 +2711,10 @@
                     <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifidef-auto" class="accent-Ragnar-600"> Continuous</label>
                     <button onclick="wifidefTrust()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap" title="Add the currently-visible APs to the trusted baseline (accumulates) for evil-twin detection. Run a few times / across bands to capture every BSSID of each SSID.">Trust current APs</button>
                     <button onclick="wifidefResetBaseline()" class="bg-slate-800 hover:bg-slate-700 text-gray-400 px-3 py-2 rounded text-sm whitespace-nowrap" title="Clear the trusted-AP baseline and start over">Reset baseline</button>
+                    <button onclick="wifidefExportReport()" id="wifidef-report-btn" class="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-2 rounded text-sm font-semibold whitespace-nowrap" title="Open a printable WIDS incident report (Save as PDF) from the latest capture">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Report
+                    </button>
                     <span id="wifidef-status" class="text-xs text-gray-500 ml-auto"></span>
                 </div>
                 <p class="text-[11px] text-amber-300/80 mt-2" id="wifidef-mon-note">Enabling monitor mode adds a separate capture interface where the driver allows it; otherwise it takes the adapter off your network. Only run on an adapter you can dedicate to sensing.</p>
@@ -7417,7 +7425,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260731-pwn-reinstall2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260731-report-export3"></script>
 
 </body>
 </html>

@@ -1673,6 +1673,30 @@ async function wifiAnalyzeAI() {
     }
 }
 
+// Open a printable HTML report in a new tab. POSTs the scan data the panel
+// already holds to a render endpoint (no re-scan), then writes the returned
+// self-contained HTML into the new window so the user can Save-as-PDF.
+function _openScanReport(url, scan, emptyMsg) {
+    // A WIDS capture is valid even with zero APs (a genuinely clear airspace),
+    // so accept anything carrying a threat verdict; the spectrum survey needs APs.
+    const hasData = !!scan && (('threat' in scan) || (Array.isArray(scan.aps) && scan.aps.length > 0));
+    if (!hasData) { alert(emptyMsg); return; }
+    const w = window.open('', '_blank');
+    if (w) w.document.write('<!DOCTYPE html><title>Generating report…</title>'
+        + '<body style="font-family:system-ui,sans-serif;padding:2rem;color:#334">Generating report…</body>');
+    fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                 body: JSON.stringify({ scan }) })
+        .then(r => r.text())
+        .then(html => { if (w) { w.document.open(); w.document.write(html); w.document.close(); } })
+        .catch(() => { if (w) { try { w.document.body.textContent = 'Report generation failed.'; } catch (e) {} } });
+}
+
+// Printable Wi-Fi spectrum & channel report from the current scan.
+function wifiExportReport() {
+    _openScanReport('/api/net/wifi/report', _wifiState.data,
+        'Run a spectrum scan first, then export the report.');
+}
+
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
 // Waterfall view streams on its own poll, so it's left alone here.
 function _wifiAutoTick() {
@@ -4168,6 +4192,12 @@ function _wifidefLoop() {
     wifidefScan().finally(() => {
         if (_wifidef.continuous) _wifidef.timer = setTimeout(_wifidefLoop, 800);
     });
+}
+
+// Printable WIDS incident report from the latest capture.
+function wifidefExportReport() {
+    _openScanReport('/api/wifidef/report', _wifidef.data,
+        'Run a WiFi Defense scan first, then export the report.');
 }
 
 function wifidefStopContinuous() {
@@ -26270,6 +26300,7 @@ function renderWardrivingSessions(sessions) {
                 ${isActive ? '<span class="text-xs text-cyan-400">● viewing</span>' : ''}
             </div>
             <div class="flex gap-3 shrink-0">
+                <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=report" target="_blank" rel="noopener" class="text-xs text-emerald-400 hover:text-emerald-300 whitespace-nowrap font-semibold" onclick="event.stopPropagation()">Report</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=wigle" class="text-xs text-cyan-400 hover:text-cyan-300 whitespace-nowrap" onclick="event.stopPropagation()">WiGLE CSV</a>
                 <a href="/api/wardriving/export/${encodeURIComponent(s.session_id)}?format=kml" class="text-xs text-purple-400 hover:text-purple-300 whitespace-nowrap" onclick="event.stopPropagation()">KML</a>
             </div>
