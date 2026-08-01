@@ -14,7 +14,7 @@
   </tr>
 </table>
 
-Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including enhanced vulnerability scanning and parallel scanning.
+Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) project — a Tamagotchi-like autonomous network scanning, vulnerability assessment, and offensive security tool. It runs on a **Raspberry Pi** with a 2.13-inch e-Paper HAT, on the **M5Stack CardputerZero** (a Pi CM0 with a built-in 1.9" LCD and keyboard), as a **headless server** on Debian-based systems (AMD64/ARM/ARM64) with Ethernet-first connectivity, or on the **WiFi Pineapple Pager** with full-color LCD display. On servers with 8GB+ RAM, Ragnar unlocks advanced capabilities including enhanced vulnerability scanning and parallel scanning.
 
 > [!IMPORTANT]
 > **For educational and authorized testing purposes only.**

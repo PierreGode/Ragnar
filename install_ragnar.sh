@@ -35,6 +35,7 @@ HEADLESS_VARIANT_LABEL=""
 RAGNAR_ENTRYPOINT="Ragnar.py"
 SERVER_INSTALL=false
 TFT_MODE=false
+CARDPUTER_MODE=false
 GIT_WORKS=true
 
 # Platform detection variables
@@ -1851,6 +1852,7 @@ BANNER
         echo -e "   ${CYAN}*${YELLOW} 3)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 5)${CYAN} WiFi Pineapple Pager ${RED}(beta)                    ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 6)${CYAN} M5Stack CardputerZero ${RED}(built-in LCD + keyboard)${NC}"
     else
         echo -e "   ${CYAN}*${YELLOW} 1)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 2)${CYAN} Server install (headless, no display)           ${NC}"
@@ -1996,6 +1998,22 @@ main() {
                     log "INFO" "Server install (headless) selected on Raspberry Pi hardware"
                     break
                     ;;
+                6)
+                    # M5Stack CardputerZero — a Raspberry Pi CM0 (BCM2837) box,
+                    # so this is a normal Pi install pinned to its built-in 1.9"
+                    # ST7789V2 LCD + TCA8418 keyboard. TFT_MODE routes through the
+                    # SPI-display path; CARDPUTER_MODE short-circuits the panel
+                    # sub-menu to st7789v2 and prints the keyboard note.
+                    SERVER_INSTALL=false
+                    HEADLESS_MODE=false
+                    TFT_MODE=true
+                    CARDPUTER_MODE=true
+                    HEADLESS_VARIANT=""
+                    HEADLESS_VARIANT_LABEL=""
+                    RAGNAR_ENTRYPOINT="Ragnar.py"
+                    log "INFO" "M5Stack CardputerZero installation selected"
+                    break
+                    ;;
                 5)
                     log "INFO" "WiFi Pineapple Pager installation selected"
                     echo ""
@@ -2020,7 +2038,7 @@ main() {
                     clean_exit $pager_exit_code
                     ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, or 5.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, 5, or 6.${NC}"
                     sleep 1
                     ;;
             esac
@@ -2081,6 +2099,20 @@ main() {
             pip3 install spidev --break-system-packages >/dev/null 2>&1
             log "SUCCESS" "SPI dependencies installed for TFT display"
 
+            # M5Stack CardputerZero: display is fixed (built-in 1.9" ST7789V2),
+            # so skip the panel picker and go straight to its driver. The 46-key
+            # TCA8418 keyboard needs smbus2/I2C, both already installed + enabled
+            # by the common display-deps and raspi-config steps.
+            if [ "$CARDPUTER_MODE" = true ]; then
+                EPD_VERSION="st7789v2"
+                pip3 install smbus2 --break-system-packages >/dev/null 2>&1
+                echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789V2 LCD (320x170)${NC}"
+                echo -e "${CYAN}  Keyboard: 46-key TCA8418 @ I2C 0x34 — arrows navigate, Enter selects.${NC}"
+                echo -e "${YELLOW}  If keys don't respond, press each nav key and check the log for its${NC}"
+                echo -e "${YELLOW}  code, then map it in config/cardputer_keymap.json (see docs).${NC}"
+                log "INFO" "Display selected: st7789v2 (CardputerZero)"
+            else
+
             echo -e "\n${BLUE}Select your TFT/OLED display:${NC}"
             echo "1. GC9A01      (1.28\" Round 240x240)"
             echo "2. ST7735S     (1.44\" LCD HAT + joystick 128x128)"
@@ -2118,6 +2150,7 @@ main() {
                 echo -e "${GREEN}✓ Selected display: $EPD_VERSION${NC}"
                 log "INFO" "Display selected: $EPD_VERSION"
             fi
+            fi  # end CARDPUTER_MODE else (TFT panel picker)
 
         # ── E-Paper display path ──────────────────────────────────────────────
         else
