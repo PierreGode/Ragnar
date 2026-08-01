@@ -78,12 +78,12 @@ without reinstalling. The choice is written to `config/shared_config.json`, whic
 is gitignored — it survives both reboots and `update_ragnar.sh`, so the screen
 you select stays selected.
 
-All 17 profiles are offered in both places:
+All 18 profiles are offered in both places:
 
 | Type | Screens |
 |---|---|
 | e-Paper | `epd2in13`, `_V2`, `_V3`, `_V4`, `epd2in13b_V4`, `epd2in7`, `epd2in7_V2`, `epd2in9_V2`, `epd3in7`, `epd4in26` |
-| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `whisplay` (1.69" PiSugar) |
+| TFT | `gc9a01` (1.28" round), `st7735s` (1.44" HAT + joystick), `st7789v2` (1.9" M5Stack CardputerZero), `whisplay` (1.69" PiSugar) |
 | OLED | `ssd1306` (0.96") |
 | Character LCD | `lcd1602` (16×2 I2C) |
 | LED matrix | `max7219_8panel`, `max7219_4panel` |
@@ -96,6 +96,51 @@ rather than resetting it.
 If the install log ends with `These display types will NOT work until fixed:`,
 that names the dependency that failed — a screen of that type will stay blank
 until it is installed.
+
+#### M5Stack CardputerZero
+
+The [M5Stack CardputerZero](https://shop.m5stack.com/pages/m5-cardputerzero) is a
+Raspberry Pi Compute Module Zero (CM0 / BCM2837) in a pocket case with a built-in
+1.9" LCD and a 46-key keyboard — so from Ragnar's point of view it is just a
+Raspberry Pi with a screen and keys already attached. Pick **option 6** in the
+installer (`M5Stack CardputerZero`). That runs a normal Pi install pinned to the
+board's built-in display (`st7789v2`, 320×170 landscape) and wires up its keyboard.
+
+**Display.** The driver tries two transports, in order:
+
+1. **Linux framebuffer (preferred).** M5Stack ships the CardputerZero as a pocket
+   Linux computer, so its image drives the LCD as a framebuffer. Ragnar blits
+   frames straight to it — this is the most reliable path and needs no extra
+   wiring. Auto-detection only adopts a framebuffer whose resolution matches the
+   1.9" LCD (320×170 / 170×320), so it will never paint over an HDMI console. If
+   your LCD framebuffer reports an unexpected size, force it with
+   `RAGNAR_CARDPUTER_FB=/dev/fbN`.
+2. **Native SPI (fallback).** If no matching framebuffer exists, Ragnar drives the
+   ST7789V2 directly over SPI (CS on GPIO25, DC on GPIO8). Note the board's reset
+   and backlight sit behind M5Stack's I2C I/O expander, so this path relies on the
+   backlight being on by power-on default; if the panel stays dark, use the
+   framebuffer path.
+
+**Keyboard.** The 46-key keyboard is a TCA8418 matrix controller on I2C (`0x34`).
+Arrow keys page the display / navigate the on-device menus, Enter selects, and
+three edge keys stand in for the HAT buttons (mode toggle, rotate/reconnect,
+next-page / AP) — the same controls documented in [Display Controls](DISPLAY_CONTROLS.md).
+Because M5Stack has not published which physical key sits at which matrix
+position, the default key map is a best guess. To calibrate: press a key and read
+the log line `unmapped key code N`, then map the codes you want in
+`config/cardputer_keymap.json`:
+
+```json
+{ "31": "up", "41": "down", "40": "left", "42": "right", "43": "press",
+  "1": "key1", "11": "key2", "30": "key3" }
+```
+
+Valid actions are `up`, `down`, `left`, `right`, `press`, `key1`, `key2`, `key3`.
+The file is read at startup and overrides the defaults — no reinstall needed.
+
+> The CardputerZero support is new and has not yet been validated on the physical
+> device; the display offsets/rotation and the keyboard map may need on-device
+> tuning as above.
 
 ### 📶 Connecting Ragnar to a network
 

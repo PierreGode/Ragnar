@@ -210,6 +210,15 @@ class Display:
                 self.button_listener.start()
             except Exception as e:
                 logger.warning(f"LCD HAT input listener unavailable: {e}")
+        elif self.config.get("epd_type") == "st7789v2":
+            # M5Stack CardputerZero: 46-key TCA8418 keyboard drives the same
+            # page/net-diag/wardriving state as the LCD HAT joystick.
+            try:
+                from cardputer_input import CardputerInputListener
+                self.button_listener = CardputerInputListener(shared_data)
+                self.button_listener.start()
+            except Exception as e:
+                logger.warning(f"CardputerZero keyboard listener unavailable: {e}")
         elif self.is_wide and EPDButtonListener is not None:
             self.button_listener = EPDButtonListener(shared_data)
             self.button_listener.start()

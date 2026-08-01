@@ -19,6 +19,7 @@ KNOWN_EPD_TYPES = [
     "epd4in26",
     "gc9a01",
     "st7735s",
+    "st7789v2",
     "whisplay",
     "ssd1306",
     "max7219_4panel",
