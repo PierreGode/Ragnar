@@ -38,6 +38,21 @@ function syncState(offsetUs, stalenessMs, isLeader) {
   return { label: 'desynced', cls: 'badge-bad', key: 'desynced' };
 }
 
+// Fix #503 — Pi-anchored per-node sync classifier. `relOffUs` is this node's
+// Pi-anchored offset relative to the fleet (server_offset_us minus the fleet
+// minimum), i.e. how far it sits from the other nodes on the Pi's single
+// clock. Unlike the legacy mesh offset (which explodes to seconds when the
+// ESP-NOW leader election doesn't converge — the #503 symptom), this stays
+// tiny whenever the nodes actually reach the Pi together, which is all fusion
+// needs. Judged against the server's real fusion guard window.
+function piSyncState(relOffUs, stalenessMs, guardUs) {
+  const a = Math.abs(relOffUs || 0), st = stalenessMs || 0, g = guardUs || 200000;
+  if (st > 30000) return { label: 'stale sync', cls: 'badge-warn', key: 'syncing' };
+  if (a <= g) return { label: 'synced', cls: 'badge-ok', key: 'synced' };
+  if (a <= g * 3) return { label: 'syncing', cls: 'badge-warn', key: 'syncing' };
+  return { label: 'desynced', cls: 'badge-bad', key: 'desynced' };
+}
+
 function nodeRow(n, names = {}) {
   const h = nodeHealth(n.last_seen_ms);
   const nm = names[String(n.node_id)];
@@ -99,9 +114,11 @@ export default {
           <p id="mesh-verdict" class="text-sm text-ink-soft leading-snug">Reading mesh…</p>
           <div id="mesh-nodes" class="space-y-2"></div>
           <p class="text-xs text-ink-muted pt-1 border-t border-ink-3">
-            <strong>CSI</strong> = data path (node → Pi). <strong>sync</strong> = mesh time-sync between nodes;
-            it needs all nodes on the <em>same access point &amp; channel</em>. Watch <strong>offset</strong> fall
-            toward <span class="font-mono">µs</span> when the mesh is healthy.
+            <strong>CSI</strong> = data path (node → Pi). <strong>sync</strong> = frame alignment for
+            multi-node fusion. Ragnar timestamps every frame as it arrives, so a node's
+            <strong>lag</strong> — how far its latest frame trails the freshest node — is what matters; keep it
+            under the fusion window (~200&nbsp;ms) by putting all nodes on the <em>same AP &amp; channel</em>.
+            The old per-leader offset can read seconds even when fusion is fine.
           </p>
           <details class="text-xs">
             <summary class="text-ink-muted cursor-pointer select-none">Raw mesh JSON</summary>
@@ -133,11 +150,22 @@ export default {
       }
       const rssi = {}, lastSeen = {};
       for (const n of (nodeList || [])) { rssi[String(n.node_id)] = n.rssi_dbm; lastSeen[String(n.node_id)] = n.last_seen_ms; }
+      // Fix #503 — Pi-anchored fleet sync from host arrival-time spread
+      // (present once the rebuilt sensing-server is deployed; falls back to
+      // legacy mesh offsets on older binaries where these fields are absent).
+      const serverSkewUs = (mesh && mesh.server_skew_us != null) ? mesh.server_skew_us : null;
+      const guardUs = (mesh && mesh.guard_interval_us) || 200000;
+      const serverSynced = !!(mesh && mesh.synced === true);
       let desynced = 0, syncing = 0, dataOkAmongBad = 0;
       const badWeak = [], rebootIds = [], stalledIds = [];
       const rows = ids.map((id) => {
         const m = nodes[id] || {};
         const off = m.offset_us || 0, stale = m.staleness_ms || 0, seq = m.sequence || 0;
+        // Fix #503 — this node's host arrival lag vs the freshest node (how
+        // far its latest frame trailed the rest = its share of the fusion
+        // skew). Falls back to the legacy mesh offset on older binaries.
+        const relOff = (m.arrival_lag_us != null) ? m.arrival_lag_us : null;
+        const dispOff = (relOff != null) ? relOff : off;
         const prevSeq = seqPrev[id];
         if (prevSeq != null && seq < prevSeq - 2) rebootAt[id] = Date.now();
         const frozen = prevSeq != null && seq === prevSeq;   // sequence not advancing between polls
@@ -148,12 +176,13 @@ export default {
         if (stalled) stalledIds.push(id);
         let trend = '';
         if (offPrev[id] != null) {
-          const d = Math.abs(off) - Math.abs(offPrev[id]);
+          const d = Math.abs(dispOff) - Math.abs(offPrev[id]);
           if (d < -50000) trend = ' <span class="text-ok">\u2193 converging</span>';
           else if (d > 50000) trend = ' <span class="text-warn">\u2191 drifting</span>';
         }
-        offPrev[id] = off;
-        const ss = stalled ? { label: 'stalled', cls: 'badge-bad', key: 'stalled' } : syncState(off, stale, m.is_leader);
+        offPrev[id] = dispOff;
+        const ss = stalled ? { label: 'stalled', cls: 'badge-bad', key: 'stalled' }
+          : (relOff != null ? piSyncState(relOff, stale, guardUs) : syncState(off, stale, m.is_leader));
         if (ss.key === 'desynced') { desynced++; badWeak.push({ id, rssi: rssi[id], stale, off }); }
         else if (ss.key === 'syncing') syncing++;
         const ls = lastSeen[id];
@@ -168,7 +197,7 @@ export default {
             <span class="${ss.cls}">${ss.label}</span>
           </div>
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-x-3 gap-y-1 text-xs text-ink-muted">
-            <span>offset <span class="font-mono text-ink-soft">${fmtOffset(off)}</span>${trend}</span>
+            <span title="${relOff != null ? 'host arrival lag vs the freshest node — legacy mesh/leader offset was ' + fmtOffset(off) : 'mesh clock offset vs leader'}">${relOff != null ? 'lag' : 'offset'} <span class="font-mono text-ink-soft">${fmtOffset(dispOff)}</span>${trend}</span>
             <span>last sync <span class="font-mono text-ink-soft">${fmt.ago(stale / 1000)}</span></span>
             <span>CSI <span class="font-mono ${dataFlowing ? 'text-ok' : 'text-warn'}">${dataFlowing ? `${Math.round(m.csi_fps_ema || 0)} fps` : (ls != null ? fmt.ago(ls / 1000) : '—')}</span></span>
             <span>RSSI <span class="font-mono text-ink-soft">${rv != null ? `${Math.round(rv)} dBm` : '—'}</span></span>
@@ -191,6 +220,21 @@ export default {
       } else if (rebootIds.length) {
         badge = 'Rebooting'; bcls = 'badge-bad';
         msg = `Node(s) ${rebootIds.map((i) => '#' + i).join(', ')} reset their sequence — a reboot loop. Check power (ESP32-S3 browns out under WiFi TX spikes) or a weak/dropping AP.`;
+      } else if (serverSynced) {
+        // Fix #503 — the server re-bases every node onto the Pi's single clock,
+        // so the fleet is aligned for fusion regardless of the (flaky) ESP-NOW
+        // leader election. This is the normal healthy state now.
+        badge = 'Healthy'; bcls = 'badge-ok';
+        const skewMs = serverSkewUs != null ? (serverSkewUs / 1000).toFixed(1) : '<1';
+        msg = `All nodes are <strong>aligned on the Pi</strong> — their latest frames arrive within <strong>${skewMs} ms</strong> of each other, inside the ${Math.round(guardUs / 1000)} ms fusion window. Ragnar timestamps every frame as it lands, so multi-node fusion works no matter the boot order or whether the ESP-NOW leader election ever converges. Any large per-node “offset” you saw before was the legacy peer-sync figure — it no longer gates fusion.`;
+      } else if (serverSkewUs != null) {
+        // Pi-anchored data present but the fleet's arrival-time spread exceeds
+        // the fusion guard — a genuine alignment problem (a node on a slow/far
+        // hop), not the cosmetic ESP-NOW offset.
+        badge = 'Frames not aligned'; bcls = 'badge-warn';
+        const weakN = ids.map((id) => ({ id, rssi: rssi[id] })).filter((b) => b.rssi != null && b.rssi < -75).sort((a, b) => a.rssi - b.rssi)[0];
+        const weakHint = weakN ? ` Node #${weakN.id} is weak at ${Math.round(weakN.rssi)} dBm — likely on a far/slow AP hop.` : '';
+        msg = `Nodes reach the Pi, but their latest frames arrive <strong>${(serverSkewUs / 1000).toFixed(1)} ms</strong> apart — beyond the ${Math.round(guardUs / 1000)} ms fusion window — so multi-node fusion may drop frames. Per-node <strong>presence &amp; motion still work</strong>. Get every node onto <strong>one AP + a fixed channel</strong> and in good signal range so their packets arrive together.${weakHint}`;
       } else if (desynced) {
         // Read the evidence before blaming APs: a big offset with FRESH sync and
         // STRONG signal is the ESP-NOW clock not converging, NOT a far/other AP.

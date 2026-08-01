@@ -332,6 +332,26 @@ it was recorded in**.
   and steady once provisioned.
 - Vital-sign readings need a **still** subject; expect motion to dominate otherwise.
 
+### Node time-sync & the Mesh health card
+
+Multi-node **fusion** (people-count, coarse position) needs the nodes' frames to
+line up in time. Ragnar does this by **timestamping every frame the moment it
+reaches the Pi** — so all nodes are measured against the Pi's single clock, not
+their own. The fleet stays aligned **regardless of the order you power the nodes
+on**, and a node that loses power **re-syncs on its own** the instant it starts
+streaming again — you don't have to power them all up at the same time.
+
+The **Mesh health** card (Nodes tab) shows each node's **lag** — how far its latest
+frame trailed the freshest node — and a fleet **spread**. Healthy is a spread inside
+the fusion window (~200 ms); keep it there by putting every node on **one access
+point + a fixed channel** and in good signal range so their packets arrive together.
+(Nodes also run a legacy peer-to-peer clock sync; its per-leader "offset" can read
+**seconds** even when fusion is perfectly fine — it no longer gates fusion, so ignore
+it and watch **lag** instead.)
+
+> Per-node presence & motion don't need any of this — they work on a single node.
+> Only cross-node fusion cares about the clock spread.
+
 ---
 
 ## Credits
