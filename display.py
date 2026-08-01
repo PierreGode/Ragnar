@@ -1296,7 +1296,15 @@ class Display:
         font = self.shared_data.font_arial9
         pad_x = int(6 * sx)
         row_h = int(15 * sy)
-        name_w = int(46 * sx)          # left column reserved for the SSID
+        # Strongest SSID on top: the fast signal poll updates dBm in place
+        # without re-sorting, so guarantee the order here at draw time.
+        aps = sorted(aps, key=lambda a: -(a.get('signal') or -999))
+        # Give the SSID name the extra room by halving the signal bar's length
+        # relative to the old full-width layout (long names now fit on the
+        # narrow 1.44" panel).
+        full_bar = (w - pad_x) - (pad_x + int(46 * sx))
+        bar_w = max(int(24 * sx), full_bar // 2)
+        name_w = (w - pad_x) - bar_w - pad_x   # left column reserved for the SSID
         for ap in aps:
             ssid = ap.get('ssid') or 'hidden'
             s = ssid
