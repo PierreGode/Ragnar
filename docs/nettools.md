@@ -1933,11 +1933,16 @@ the question field techs live with: **why are clients dropping?** It decodes:
 
 **🧠 Explain with AI** — if the OpenAI integration is configured (see
 [AI Integration](AI_INTEGRATION.md)), one click hands the capture summary to the
-model (GPT-5-nano via the Responses API) with a senior-wireless-engineer prompt,
-and it returns a **Verdict / Evidence / Other factors / Fix it** root-cause
-analysis grounded in the actual reason codes and expert findings. Works for wired
-captures too. If AI isn't enabled, the tool still shows the full decoded
-breakdown — the AI just adds the interpretation.
+model (GPT-5-nano via the Responses API) with a senior-network-engineer prompt
+that diagnoses **what is wrong with the network across the whole stack** — L2
+issues (ARP/broadcast/multicast storms, duplicate IPs, spanning-tree churn), TCP
+health (retransmissions, resets, zero-windows, dup-ACKs, high RTT), DNS/DHCP
+failures, TLS/handshake errors, and — for 802.11 captures — deauth/disassoc
+reason codes and retry rates driving client drops. It returns a
+**Verdict / Evidence / Other factors / Fix it** root-cause analysis, ranked by
+impact and grounded in the actual counts, codes, and expert findings (it won't
+invent data that isn't in the summary). If AI isn't enabled, the tool still shows
+the full decoded breakdown — the AI just adds the interpretation.
 
 The upload is size-guarded (100 MB), magic-byte validated (real pcap/pcapng
 only), analyzed **read-only** with `tshark`, and the temp file is deleted
