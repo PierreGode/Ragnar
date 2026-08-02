@@ -74,12 +74,23 @@ all-or-nothing:
 | `config.toml` | `/etc/pwnagotchi/config.toml` present |
 | launcher wrapper | `/usr/bin/pwnagotchi-launcher` present and executable |
 | pwnagotchi executable | real `pwnagotchi` binary resolvable |
+| pwnagotchi + pydrive2 import | `import pwnagotchi, pydrive2` succeeds in a clean interpreter (the launcher will start instead of exit-coding) |
 
 Each row shows ✓ / ✗. The badge reflects three states:
 
 - **Healthy** — everything present.
 - **Needs Repair** (red) — a *critical* piece is missing: the clone, service unit,
-  `config.toml`, launcher wrapper, or the executable.
+  `config.toml`, launcher wrapper, the executable, or the **runtime import**.
+
+> **Why the runtime-import row exists:** the pip steps in the installer all swallow
+> their own errors so a flaky network never aborts an install. The cost was that a
+> reinstall could report success while the `pwnagotchi` package or its crash-on-start
+> dependency `pydrive2` never actually landed — the service is launched on demand, so
+> the breakage only surfaced as an exit code (status=127 for a missing binary, status=1
+> for a missing import) the moment you swapped. The installer now **verifies the runtime
+> before claiming success** (and fails with the real cause otherwise), and this row keeps
+> the dashboard honest so a half-installed box shows *Needs Repair* rather than a green
+> badge that exit-codes on launch.
 - **Degraded** (amber) — only recommended pieces are missing (git metadata, or the
   service `ExecStart` no longer points at the launcher). Pwnagotchi still runs, but
   updates or the MANU/AUTO flags may not work.
