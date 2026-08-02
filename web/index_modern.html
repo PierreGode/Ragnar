@@ -1911,9 +1911,9 @@
                         </div>
                         <div class="flex flex-wrap items-center gap-3 mt-2">
                             <label class="flex items-center gap-2 text-sm text-gray-400" title="Wi-Fi only: flip the adapter into monitor mode and capture raw 802.11 (beacons, deauths, nearby devices), then restore it. Best with a dedicated adapter like an Alfa — it drops that card's normal Wi-Fi link during the capture."><input id="pcap-cap-monitor" type="checkbox" onchange="document.getElementById('pcap-cap-chan-wrap').classList.toggle('hidden', !this.checked)" class="accent-Ragnar-500"> 📡 Monitor mode <span class="text-gray-600">(sniff 802.11, Wi-Fi adapter only)</span></label>
-                            <label id="pcap-cap-chan-wrap" class="hidden text-sm text-gray-400">Channel <span class="text-gray-600">(optional)</span> <input id="pcap-cap-chan" type="number" min="1" max="196" placeholder="e.g. 6" class="ml-1 w-20 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300"></label>
+                            <label id="pcap-cap-chan-wrap" class="hidden text-sm text-gray-400" title="Leave blank to sweep 2.4/5 GHz channels (survey of everything nearby). Set a channel to park there and focus on one AP.">Channel <span class="text-gray-600">(blank = sweep all)</span> <input id="pcap-cap-chan" type="number" min="1" max="196" placeholder="sweep" class="ml-1 w-20 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-300"></label>
                         </div>
-                        <p class="text-xs text-gray-500 mt-2">Records passively with tcpdump, then analyzes the result. The file is saved under Ragnar, so it also shows up in “Open stored pcap”. Monitor mode needs a Wi-Fi adapter that supports it and briefly takes that card off its network.</p>
+                        <p class="text-xs text-gray-500 mt-2">Records passively with tcpdump, then analyzes the result. The file is saved under Ragnar, so it also shows up in “Open stored pcap”. Monitor mode needs a Wi-Fi adapter that supports it and briefly takes that card off its network; leave the channel blank to sweep all channels, or set one to focus on a single AP.</p>
                     </div>
                     <div id="pcap-panel" class="hidden mt-3 text-sm"></div>
                     <div id="pcap-results" class="hidden mt-3 text-sm"></div>
@@ -7443,7 +7443,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260802-pcap-analyzing"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260802-pcap-chanhop"></script>
 
 </body>
 </html>

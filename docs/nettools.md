@@ -1928,7 +1928,9 @@ There are **three ways to feed it a capture**, all landing on the same analysis
 
    **📡 Monitor mode** (Wi-Fi adapters only) — tick it to capture raw **802.11**
    instead of the adapter's own managed traffic: beacons, deauth/disassoc, and
-   nearby devices' frames, with an optional **channel** to park on. Ragnar flips
+   nearby devices' frames. Leave **channel** blank to **sweep** 2.4/5 GHz
+   (hops 1/6/11 + common 5 GHz channels for a broad survey), or set a channel to
+   **park** there and focus on one AP. Ragnar flips
    the radio into monitor mode via the same primitive the Wi-Fi Defense tools use
    (a separate `ragmon0` vif where the driver allows it, otherwise switching the
    adapter itself) and **always restores it afterward**. The resulting 802.11
