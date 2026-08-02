@@ -13964,6 +13964,12 @@ def do_pcap_analyze(path):
     expert = {'errors': 0, 'warnings': 0, 'notes': 0, 'items': []}
     sev = None
     sev_key = {'Errors': 'errors', 'Warns': 'warnings', 'Notes': 'notes'}
+    # Normal TCP connection lifecycle (SYN establishment, FIN teardown) is
+    # surfaced by tshark as low-severity notes. It is NOT a fault — feeding it to
+    # the AI made routine teardown read as "instability" — so drop these items and
+    # discount them from the note total so the counts stay honest.
+    _normal_seq = ('the connection closing', 'connection establish request',
+                   'connection establish acknowledge')
     for line in _run(['tshark', '-r', path, '-q', '-z', 'expert'], timeout=90)['out'].splitlines():
         hm = re.match(r'^(Errors|Warns|Notes|Chats)\s*\((\d+)\)', line)
         if hm:
@@ -13973,9 +13979,14 @@ def do_pcap_analyze(path):
             continue
         rm = re.match(r'^\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+?)\s*$', line)
         if rm and sev and sev != 'Chats':
+            summary = rm.group(4).strip()
+            if any(p in summary.lower() for p in _normal_seq):
+                if sev in sev_key:      # keep the badge total consistent with items
+                    expert[sev_key[sev]] = max(0, expert[sev_key[sev]] - int(rm.group(1)))
+                continue
             expert['items'].append({'severity': sev_key.get(sev, sev.lower()),
                                     'count': int(rm.group(1)), 'protocol': rm.group(3),
-                                    'summary': rm.group(4).strip()})
+                                    'summary': summary})
     expert['items'].sort(key=lambda i: i['count'], reverse=True)
     expert['items'] = expert['items'][:20]
 

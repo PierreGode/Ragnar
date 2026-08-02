@@ -400,26 +400,37 @@ Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
 
         is_wifi = bool(wifi.get('is_wifi'))
         system = (
-            "You are a senior network engineer triaging a packet capture to find what is "
-            "WRONG with the network. Diagnose the ROOT CAUSE from the evidence and explain "
-            "it in plain language a field tech can act on. Reason across the whole stack: "
-            "L2 (ARP/broadcast/multicast storms, duplicate IPs, spanning-tree churn), "
+            "You are a senior network engineer triaging a packet capture. Decide whether the "
+            "network is HEALTHY or has a real problem, and if so diagnose the ROOT CAUSE from "
+            "the evidence in plain language a field tech can act on. Reason across the whole "
+            "stack: L2 (ARP/broadcast/multicast storms, duplicate IPs, spanning-tree churn), "
             "TCP health (retransmissions, resets, zero-windows, dup-ACKs, out-of-order, "
             "high RTT), DNS and DHCP failures/latency, TLS/handshake errors, and — for "
             "802.11 captures — deauth/disassoc reason codes and retry rates that drive "
-            "client drops. Be specific and quote the counts/codes. Do not invent data not "
-            "present in the summary. When you cite a Wireshark/tshark display filter or CLI "
-            "command, use only valid, real syntax (e.g. tcp.analysis.retransmission, "
-            "tcp.flags.reset==1, tcp.analysis.duplicate_ack); if you are unsure of the exact "
-            "filter, describe what to match in words rather than inventing a field name. "
-            "Use short markdown sections and bullet points."
+            "client drops. "
+            "CALIBRATE SEVERITY AGAINST VOLUME: a small number of RSTs, duplicate ACKs, "
+            "retransmissions, and normal FIN-based connection closes is EXPECTED, especially "
+            "for ordinary web/TLS browsing — judge by RATES relative to total packets/bytes "
+            "and to the number of conversations, not by raw counts. Normal connection teardown "
+            "(FIN / 'connection closing') is NOT a fault, and a few RSTs are how clients "
+            "routinely close sessions. Do not describe the network as 'unstable' or 'degraded' "
+            "unless the error rate is clearly disproportionate to the traffic. If the capture "
+            "looks healthy, SAY SO plainly (make that the Verdict) rather than manufacturing a "
+            "problem. "
+            "Be specific and quote the counts/codes. Do not invent data not present in the "
+            "summary. When you cite a Wireshark/tshark display filter or CLI command, use only "
+            "valid, real syntax (e.g. tcp.analysis.retransmission, tcp.flags.reset==1, "
+            "tcp.analysis.duplicate_ack) and parenthesize mixed AND/OR filters correctly; if "
+            "unsure of the exact filter, describe what to match in words rather than inventing "
+            "a field name. Use short markdown sections and bullet points."
         )
         focus = (
             "This is a Wi-Fi / access-point capture: pay special attention to WHY CLIENTS "
             "ARE DROPPING / DISCONNECTING (deauth/disassoc reason codes, retry %, AP "
             "behavior), but still flag any other network problems you see." if is_wifi else
             "Diagnose the most impactful problems in this capture across every layer — "
-            "not just one — and rank them by how much they hurt the network."
+            "not just one — and rank them by how much they hurt the network. If nothing "
+            "rises above normal background noise, say the capture looks healthy."
         )
         user = f"""{focus}
 
@@ -428,7 +439,7 @@ Packet-capture summary (JSON):
 
 Provide:
 
-**Verdict** - the single most likely root cause (1-2 sentences).
+**Verdict** - is the network healthy, or the single most likely root cause if not (1-2 sentences).
 
 **Evidence** - the specific counts / reason codes / status codes / expert
 findings that point to it, quoted from the summary.
