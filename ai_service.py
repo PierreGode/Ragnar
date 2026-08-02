@@ -347,12 +347,15 @@ Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
 
 
     # ===================================================================
-    #   PCAP ANALYSIS (Wi-Fi / AP client-drop diagnosis)
+    #   PCAP ANALYSIS (general network fault diagnosis)
     # ===================================================================
 
     def analyze_pcap(self, data: Dict):
-        """Interpret a PCAP-analysis summary (from network_diagnostics) — built
-        for Wi-Fi/AP captures, to explain why clients are dropping. `data` is the
+        """Interpret a PCAP-analysis summary (from network_diagnostics) and tell
+        the user what is WRONG with the network. Covers the whole stack — L2
+        (ARP/broadcast storms, duplicate IPs), TCP health (retransmits, resets,
+        zero-windows, dup-ACKs), DNS/DHCP, TLS handshakes — and treats Wi-Fi/AP
+        client-drops as a special case when it's an 802.11 capture. `data` is the
         dict returned by do_pcap_analyze (summary/protocols/talkers/expert/wifi).
         Returns a plain-language root-cause read, or None if AI is unavailable."""
         if not self.is_enabled():
@@ -360,11 +363,25 @@ Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
 
         wifi = (data or {}).get('wifi') or {}
         summary = (data or {}).get('summary') or {}
+        expert = (data or {}).get('expert') or {}
+        protos = (data or {}).get('protocols') or []
+        # Key the cache on what actually drives the verdict, not just packet count
+        # + Wi-Fi fields — otherwise two unrelated non-Wi-Fi captures with the same
+        # packet count collide and get served each other's analysis. The expert
+        # findings + protocol mix uniquely fingerprint what the AI will say.
         key = self._cache_key("pcap_analysis", {
             "pkts": summary.get('packets'),
-            "deauth": (wifi.get('deauth') or {}).get('total'),
-            "disassoc": (wifi.get('disassoc') or {}).get('total'),
-            "retry": wifi.get('retry_pct'),
+            "bytes": summary.get('data_size'),
+            "dur": summary.get('duration_s'),
+            "exp": (expert.get('errors'), expert.get('warnings'), expert.get('notes')),
+            "items": [(i.get('protocol'), i.get('summary'), i.get('count'))
+                      for i in (expert.get('items') or [])[:10]],
+            "protos": [(p.get('proto'), p.get('bytes')) for p in protos[:10]],
+            "wifi": {
+                "deauth": (wifi.get('deauth') or {}).get('total'),
+                "disassoc": (wifi.get('disassoc') or {}).get('total'),
+                "retry": wifi.get('retry_pct'),
+            } if wifi else None,
         })
         cached = self._cache_get(key)
         if cached:
@@ -383,16 +400,22 @@ Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
 
         is_wifi = bool(wifi.get('is_wifi'))
         system = (
-            "You are a senior network / wireless engineer reading a packet capture. "
-            "Diagnose the ROOT CAUSE from the evidence and explain it in plain language "
-            "a field tech can act on. Be specific about 802.11 reason/status codes and "
-            "TCP expert findings. Do not invent data not present in the summary. "
-            "Use short markdown sections and bullet points."
+            "You are a senior network engineer triaging a packet capture to find what is "
+            "WRONG with the network. Diagnose the ROOT CAUSE from the evidence and explain "
+            "it in plain language a field tech can act on. Reason across the whole stack: "
+            "L2 (ARP/broadcast/multicast storms, duplicate IPs, spanning-tree churn), "
+            "TCP health (retransmissions, resets, zero-windows, dup-ACKs, out-of-order, "
+            "high RTT), DNS and DHCP failures/latency, TLS/handshake errors, and — for "
+            "802.11 captures — deauth/disassoc reason codes and retry rates that drive "
+            "client drops. Be specific and quote the counts/codes. Do not invent data not "
+            "present in the summary. Use short markdown sections and bullet points."
         )
         focus = (
-            "This is a Wi-Fi / access-point capture and the goal is to explain WHY CLIENTS "
-            "ARE DROPPING / DISCONNECTING." if is_wifi else
-            "Explain what this capture shows and any problems in it."
+            "This is a Wi-Fi / access-point capture: pay special attention to WHY CLIENTS "
+            "ARE DROPPING / DISCONNECTING (deauth/disassoc reason codes, retry %, AP "
+            "behavior), but still flag any other network problems you see." if is_wifi else
+            "Diagnose the most impactful problems in this capture across every layer — "
+            "not just one — and rank them by how much they hurt the network."
         )
         user = f"""{focus}
 
