@@ -14204,6 +14204,45 @@ def _pcap_auto_iface(valid):
     return sorted(valid)[0] if valid else None
 
 
+def _wifi_link_state(iface):
+    """Best-effort {mode, connected} for a Wi-Fi interface via `iw`. `mode` is
+    'managed'/'monitor'/etc or None; `connected` is True/False/None (None when
+    unknown, e.g. iw missing). Used to explain a 0-packet capture on Wi-Fi."""
+    state = {'mode': None, 'connected': None}
+    if not _have('iw'):
+        return state
+    info = _run(['iw', 'dev', iface, 'info'], timeout=5)['out']
+    m = re.search(r'^\s*type\s+(\S+)', info, re.MULTILINE)
+    if m:
+        state['mode'] = m.group(1).lower()
+    link = _run(['iw', 'dev', iface, 'link'], timeout=5)['out']
+    if re.search(r'Connected to', link):
+        state['connected'] = True
+    elif re.search(r'Not connected', link):
+        state['connected'] = False
+    return state
+
+
+def _pcap_zero_note(iface, seconds):
+    """Human note explaining why a capture saw 0 packets, tailored to the
+    interface: an unassociated / monitor-mode Wi-Fi card is the usual reason a
+    Wi-Fi capture is empty, and that is NOT 'the wrong interface'."""
+    base = 'Capture ran for %ds but recorded 0 packets on %s' % (seconds, iface)
+    if _is_wireless(iface):
+        st = _wifi_link_state(iface)
+        if st.get('mode') == 'monitor':
+            return (base + ' — it is in monitor mode, so plain capture sees nothing. '
+                    'Use the Wi-Fi Defense / Spectrum tools for monitor-mode 802.11 '
+                    'sniffing.')
+        if st.get('connected') is False:
+            return (base + ' — this Wi-Fi interface is not associated to any network, '
+                    'so it carries no traffic. Connect it to an AP to capture its link, '
+                    'or use monitor mode (Wi-Fi tools) to sniff nearby 802.11 frames.')
+        return (base + ' — the Wi-Fi link looks idle; try a longer window or pick the '
+                'interface actually carrying traffic.')
+    return base + ' — wrong interface, the cable is down, or the filter matched nothing.'
+
+
 def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
     """Record live traffic on `interface` for `seconds` into a saved pcap (kept in
     the capture dir so it then shows up under 'stored'), and analyze it. Passive:
@@ -14260,9 +14299,7 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
         out['interface'] = interface
         out['seconds'] = seconds
         if out.get('success') and not (out.get('summary') or {}).get('packets'):
-            out['note'] = ('Capture ran for %ds but recorded 0 packets on %s — '
-                           'wrong interface, or the filter matched nothing.'
-                           % (seconds, interface))
+            out['note'] = _pcap_zero_note(interface, seconds)
     return out
 
 
