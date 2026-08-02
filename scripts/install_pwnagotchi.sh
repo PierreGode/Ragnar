@@ -711,6 +711,64 @@ if ! systemctl is-active ragnar >/dev/null 2>&1; then
     systemctl start ragnar
 fi
 
+# -------------------------------------------------------------------
+# RUNTIME VERIFICATION (must pass before we claim success)
+# -------------------------------------------------------------------
+# The pip steps above all swallow their own errors (|| true / || echo) so a
+# flaky network or a failed build never aborts the install. That is deliberate
+# — but it means the installer used to march straight to "installed" even when
+# the pwnagotchi package or a hard dependency never actually landed. The service
+# is disabled and launched on demand, so the breakage stayed invisible until the
+# user swapped to Pwnagotchi and the launcher exec'd a binary that either does
+# not exist (status=127) or crashes on a missing import like pydrive2 (status=1).
+#
+# Verify here exactly what the service will need at launch, and fail honestly
+# with the real cause instead of reporting a success that exit-codes on start.
+echo "[INFO] Verifying Pwnagotchi runtime..."
+write_status "installing" "Verifying Pwnagotchi runtime" "verify"
+
+verify_errors=()
+
+# 1. The pwnagotchi package must import (this is what the launcher runs).
+if ! import_err="$(python3 -c 'import pwnagotchi' 2>&1)"; then
+    verify_errors+=("pwnagotchi package does not import: ${import_err##*$'\n'}")
+fi
+
+# 2. pydrive2 is a hard dependency — pwnagotchi crashes on start without it.
+if ! python3 -c 'import pydrive2' 2>/dev/null; then
+    verify_errors+=("pydrive2 is missing (pwnagotchi crashes on start without it). Reinstall: sudo PIP_CONFIG_FILE=/dev/null pip3 install --break-system-packages --ignore-installed --index-url https://pypi.org/simple pydrive2")
+fi
+
+# 3. The real binary the launcher execs must exist and be executable. Mirror the
+#    launcher's own resolution: any pwnagotchi entry point that is NOT our shim.
+pwn_binary=""
+for candidate in "$(command -v pwnagotchi 2>/dev/null || true)" /usr/local/bin/pwnagotchi /usr/bin/pwnagotchi; do
+    if [[ -n "$candidate" && -x "$candidate" && "$candidate" != "/usr/bin/pwnagotchi-launcher" ]]; then
+        pwn_binary="$candidate"
+        break
+    fi
+done
+if [[ -z "$pwn_binary" ]]; then
+    verify_errors+=("pwnagotchi executable was not created (pip install -e . likely failed). The service would exit with status=127 on start.")
+fi
+
+if [[ ${#verify_errors[@]} -gt 0 ]]; then
+    # Drop the generic ERR handler so our specific status message is the one that
+    # reaches pwnagotchi_status.json / the dashboard, not "Installation failed".
+    trap - ERR
+    echo "[ERROR] Pwnagotchi runtime verification FAILED:"
+    for e in "${verify_errors[@]}"; do
+        echo "[ERROR]   - $e"
+    done
+    # Keep the message single-line + JSON-safe for the status file / dashboard.
+    fail_msg="Install incomplete: ${verify_errors[0]//\"/}"
+    write_status "error" "${fail_msg} Check ${LOG_FILE}." "verify"
+    echo "[ERROR] Not marking as installed — the service would exit-code on launch."
+    echo "[ERROR] Full log: ${LOG_FILE}"
+    exit 1
+fi
+echo "[INFO] Runtime verification passed (binary: ${pwn_binary})"
+
 write_status "installed" "Pwnagotchi installed successfully. Use Ragnar dashboard to launch." "complete"
 echo "[INFO] =========================================="
 echo "[INFO] Installation complete!"

@@ -4415,6 +4415,7 @@ _PWN_COMPONENT_SPEC = (
     ('config_file', '/etc/pwnagotchi/config.toml', True),
     ('launcher', 'pwnagotchi-launcher wrapper', True),
     ('binary', 'pwnagotchi executable', True),
+    ('runtime', 'pwnagotchi + pydrive2 import (launches without exit-code)', True),
 )
 
 
@@ -4427,6 +4428,11 @@ def _pwnagotchi_component_health() -> dict:
     """
     repo_dir = os.path.isdir(PWN_REPO_PATH)
     launcher_ok = os.path.isfile(PWN_LAUNCHER_PATH) and os.access(PWN_LAUNCHER_PATH, os.X_OK)
+    binary_ok = _resolve_pwnagotchi_binary() is not None
+    # Only probe the runtime once the binary exists — a missing binary is already
+    # a critical failure, and skipping the import subprocess in that case avoids a
+    # guaranteed-failing (and slow) probe on a half-installed box.
+    runtime_ok = _pwn_runtime_import_ok()[0] if binary_ok else False
     components = {
         'repo_dir': repo_dir,
         'repo_git': repo_dir and os.path.isdir(os.path.join(PWN_REPO_PATH, '.git')),
@@ -4434,7 +4440,8 @@ def _pwnagotchi_component_health() -> dict:
         'service_launcher': _pwn_service_execstart_ok(),
         'config_file': os.path.exists(PWN_CONFIG_FILE),
         'launcher': launcher_ok,
-        'binary': _resolve_pwnagotchi_binary() is not None,
+        'binary': binary_ok,
+        'runtime': runtime_ok,
     }
 
     labels = {key: label for key, label, _critical in _PWN_COMPONENT_SPEC}
@@ -4796,6 +4803,44 @@ def _resolve_pwnagotchi_binary() -> Optional[str]:
         if candidate and candidate != PWN_LAUNCHER_PATH and os.path.exists(candidate):
             return candidate
     return None
+
+
+# The pwnagotchi binary existing on disk does NOT mean it will start: a reinstall
+# whose pip step half-failed can leave the entry-point script in place while the
+# package or its crash-on-start dependency (pydrive2) never imports. The service
+# is launched on demand, so that only surfaces as an exit code the moment the user
+# swaps. Probe it the same way the launcher will — a clean-interpreter import —
+# and cache it: this runs on every status poll and a subprocess import per poll
+# would hammer a Pi Zero, while the result only changes across an install/repair.
+_PWN_RUNTIME_CACHE = {'ts': 0.0, 'ok': None, 'detail': ''}
+_PWN_RUNTIME_TTL = 30.0  # seconds
+
+
+def _invalidate_pwn_runtime_cache() -> None:
+    _PWN_RUNTIME_CACHE.update(ts=0.0, ok=None, detail='')
+
+
+def _pwn_runtime_import_ok() -> Tuple[bool, str]:
+    """(ok, detail) — whether `import pwnagotchi, pydrive2` succeeds in a fresh
+    interpreter, i.e. whether the launcher will actually start rather than exit
+    with a status code. Cached for _PWN_RUNTIME_TTL seconds."""
+    now = time.monotonic()
+    if _PWN_RUNTIME_CACHE['ok'] is not None and (now - _PWN_RUNTIME_CACHE['ts']) < _PWN_RUNTIME_TTL:
+        return _PWN_RUNTIME_CACHE['ok'], _PWN_RUNTIME_CACHE['detail']
+    ok, detail = True, ''
+    try:
+        proc = subprocess.run(
+            ['python3', '-c', 'import pwnagotchi, pydrive2'],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        if proc.returncode != 0:
+            ok = False
+            err_lines = [l.strip() for l in proc.stderr.splitlines() if l.strip()]
+            detail = err_lines[-1] if err_lines else 'pwnagotchi import failed'
+    except Exception as exc:  # pragma: no cover - best effort
+        ok, detail = False, f'runtime probe failed: {exc}'
+    _PWN_RUNTIME_CACHE.update(ts=now, ok=ok, detail=detail)
+    return ok, detail
 
 
 def _pwn_launcher_script(target: str) -> str:
@@ -12837,6 +12882,10 @@ def install_pwnagotchi_from_dashboard():
                 stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
+            # The install/repair will change what imports — drop the cached probe
+            # so the runtime component reflects the new state on the next poll
+            # instead of showing a stale ✓/✗ for up to _PWN_RUNTIME_TTL seconds.
+            _invalidate_pwn_runtime_cache()
         except Exception as exc:
             logger.error(f"Failed to spawn installer: {exc}")
             return jsonify({'success': False, 'error': f'Failed to start installer: {exc}'}), 500
