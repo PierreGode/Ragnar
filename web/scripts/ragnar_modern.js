@@ -5476,13 +5476,18 @@ function renderPcapResults(d, out) {
         ${stat('Rate', s.data_byte_rate != null ? _pcapBytes(s.data_byte_rate) + '/s' : '—')}
     </div>${s.start_time ? '<p class="text-xs text-gray-500 mb-3">' + escapeHtml(String(s.start_time)) + ' → ' + escapeHtml(String(s.end_time || '')) + ' · ' + escapeHtml(String(s.encapsulation || '')) + '</p>' : ''}`;
 
+    // Stacked flex rows (not a fixed 3-col table) so it fits a phone without
+    // horizontal scroll: indented protocol name breaks/wraps on the left, a
+    // compact "frames · bytes" stays on the right. Depth indent via &nbsp; (no
+    // per-depth Tailwind classes needed).
     const protoRows = (d.protocols || []).map(p =>
-        `<tr class="border-t border-slate-800"><td class="px-3 py-1 font-mono">${'&nbsp;'.repeat(p.depth * 3)}${escapeHtml(p.proto)}</td>
-         <td class="px-3 py-1 text-right">${p.frames}</td><td class="px-3 py-1 text-right text-gray-400">${_pcapBytes(p.bytes)}</td></tr>`).join('');
-    const protoTable = `<h4 class="text-sm font-semibold mt-1 mb-1">Protocol hierarchy</h4>
-        <table class="min-w-full text-sm text-gray-300"><thead><tr class="text-left text-xs uppercase text-gray-500">
-        <th class="px-3 py-1">Protocol</th><th class="px-3 py-1 text-right">Frames</th><th class="px-3 py-1 text-right">Bytes</th></tr></thead>
-        <tbody>${protoRows}</tbody></table>`;
+        `<div class="flex items-baseline justify-between gap-3 py-1 border-t border-slate-800">
+            <span class="font-mono text-sm min-w-0 break-all">${'&nbsp;'.repeat(p.depth * 2)}${escapeHtml(p.proto)}</span>
+            <span class="text-xs whitespace-nowrap shrink-0"><span class="text-gray-300">${p.frames}</span> <span class="text-gray-600">fr</span> · <span class="text-gray-400">${_pcapBytes(p.bytes)}</span></span>
+        </div>`).join('');
+    const protoTable = `<h4 class="text-sm font-semibold mt-1 mb-1">Protocol hierarchy
+        <span class="text-xs font-normal text-gray-500">— frames · bytes</span></h4>
+        <div class="text-gray-300">${protoRows}</div>`;
 
     const talkRows = (d.talkers || []).map(t =>
         `<tr class="border-t border-slate-800"><td class="px-3 py-1 font-mono">${escapeHtml(t.a)} <span class="text-gray-500">↔</span> ${escapeHtml(t.b)}</td>
