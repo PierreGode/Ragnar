@@ -1915,11 +1915,13 @@ There are **three ways to feed it a capture**, all landing on the same analysis
    those roots and magic-byte checked, so it can't be used to read arbitrary
    files off disk.
 3. **🎥 Capture live** — record fresh traffic yourself: pick an **interface**
-   (defaults to **Auto (wired first)** — the same link-up-wired-port preference
-   the L2/L3 Watch scanners use), a **duration** (3–60 s), and an optional **BPF
-   filter** (e.g. `tcp port 443 or host 10.0.0.5`). The interface list is
-   pre-populated on tab load, like every other picker in this section. Ragnar
-   runs a passive `tcpdump -w` for the window, saves the
+   (defaults to **Auto (wired first)**, which picks the best **link-up** NIC in
+   the order LAN → USB LAN → `wlan1` → `wlan0`, then falls back to the
+   default-route interface so it always resolves — even on a box whose cables
+   are down and that's managed over Wi-Fi), a **duration** (3–60 s), and an
+   optional **BPF filter** (e.g. `tcp port 443 or host 10.0.0.5`). The interface
+   list is pre-populated on tab load, like every other picker in this section.
+   Ragnar runs a passive `tcpdump -w` for the window, saves the
    pcap under `data/pcaps/` (so it also shows up in *Open stored pcap*), and
    analyzes it immediately. Capturing needs root — the Ragnar service already
    runs as root.
