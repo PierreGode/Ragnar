@@ -5409,6 +5409,7 @@ function _pcapBytes(n) {
 }
 
 let _lastPcap = null;
+let _lastPcapAI = null;   // AI analysis text for the current capture (for the PDF)
 
 function _pcapWifiHtml(w) {
     if (!w || !w.is_wifi) return '';
@@ -5450,6 +5451,7 @@ async function aiAnalyzePcap() {
             out.innerHTML = '<p class="text-sm text-red-400">AI returned no analysis — check the OpenAI token/model in Settings.</p>';
             return;
         }
+        _lastPcapAI = d.analysis;   // keep the raw text so Export as PDF can include it
         const html = (typeof formatAIText === 'function')
             ? formatAIText(d.analysis) : escapeHtml(d.analysis).replace(/\n/g, '<br>');
         out.innerHTML = '<div class="bg-slate-900/60 border border-slate-700 rounded-lg p-3 text-sm">' + html + '</div>';
@@ -5516,6 +5518,7 @@ function renderPcapResults(d, out) {
         <div id="pcap-ai-results" class="hidden mt-2 w-full"></div></div>`;
     out.innerHTML = srcNote + note + stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
     _lastPcap = d;
+    _lastPcapAI = null;   // new capture — drop any AI summary from a previous one
 }
 
 // Build a printable one-page report from the last analyzed capture and hand it
@@ -5582,6 +5585,32 @@ function pcapExportReport() {
         ? 'Captured ' + escapeHtml(d.captured_name) + ' on ' + escapeHtml(d.interface || '') + ' for ' + (d.seconds || '') + 's'
         : (d.source_name ? escapeHtml(d.source_name) : 'Uploaded capture');
 
+    // AI interpretation, if one was generated (🧠 Explain with AI). Rendered with
+    // a self-contained markdown pass — formatAIText emits Tailwind classes that
+    // don't exist in this standalone print window, so we map to the report's CSS.
+    let ai = '';
+    if (_lastPcapAI) {
+        const lines = escapeHtml(_lastPcapAI).split('\n');
+        const body = [];
+        let inList = false;
+        const closeList = () => { if (inList) { body.push('</ul>'); inList = false; } };
+        lines.forEach(raw => {
+            const line = raw.trim();
+            if (!line) { closeList(); return; }
+            let m;
+            if ((m = line.match(/^\*\*(.+?)\*\*:?$/))) { closeList(); body.push(`<h3>${m[1]}</h3>`); return; }
+            if ((m = line.match(/^[-*•]\s+(.+)$/))) {
+                if (!inList) { body.push('<ul>'); inList = true; }
+                body.push(`<li>${m[1].replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</li>`);
+                return;
+            }
+            closeList();
+            body.push(`<p>${line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</p>`);
+        });
+        closeList();
+        ai = `<h2>Analysis</h2><div class="ai">${body.join('')}</div>`;
+    }
+
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>PCAP Analysis Report</title>
 <style>
   body{font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}
@@ -5590,12 +5619,14 @@ function pcapExportReport() {
   table{border-collapse:collapse;width:100%;font-size:11.5px;margin-top:4px} th,td{border:1px solid #ddd;padding:3px 6px;text-align:left}
   th{background:#f4f4f5} td.num,th.num{text-align:right;white-space:nowrap} .mono{font-family:ui-monospace,monospace;font-size:10.5px}
   ul{margin:4px 0;padding-left:20px} .foot{margin-top:26px;color:#999;font-size:11px} @media print{body{margin:0}}
+  .ai{background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:2px 12px} .ai h3{color:#0369a1;margin:10px 0 3px} .ai p{margin:4px 0}
 </style></head><body>
   <h1>PCAP Analysis Report</h1>
   <div class="sub">${now.toLocaleString()} · ${srcLine}${d.note ? ' · ' + escapeHtml(d.note) : ''}</div>
   <h2>Summary</h2>
   ${window_}
   <table><tbody>${summRows}</tbody></table>
+  ${ai}
   ${protoTable}
   ${talkTable}
   ${wifi}
