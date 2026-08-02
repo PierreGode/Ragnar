@@ -4821,16 +4821,18 @@ def _invalidate_pwn_runtime_cache() -> None:
 
 
 def _pwn_runtime_import_ok() -> Tuple[bool, str]:
-    """(ok, detail) — whether `import pwnagotchi, pydrive2` succeeds in a fresh
-    interpreter, i.e. whether the launcher will actually start rather than exit
-    with a status code. Cached for _PWN_RUNTIME_TTL seconds."""
+    """(ok, detail) — whether the launcher will actually start rather than exit
+    with a status code. Imports `pwnagotchi.cli` (the real entry chain, which
+    pulls in pwnagotchi.plugins where undeclared deps like prctl bite — a bare
+    `import pwnagotchi` misses it) plus the crash-on-start dep pydrive2, in a
+    fresh interpreter. Cached for _PWN_RUNTIME_TTL seconds."""
     now = time.monotonic()
     if _PWN_RUNTIME_CACHE['ok'] is not None and (now - _PWN_RUNTIME_CACHE['ts']) < _PWN_RUNTIME_TTL:
         return _PWN_RUNTIME_CACHE['ok'], _PWN_RUNTIME_CACHE['detail']
     ok, detail = True, ''
     try:
         proc = subprocess.run(
-            ['python3', '-c', 'import pwnagotchi, pydrive2'],
+            ['python3', '-c', 'import pwnagotchi.cli, pydrive2'],
             capture_output=True, text=True, timeout=30, check=False,
         )
         if proc.returncode != 0:
