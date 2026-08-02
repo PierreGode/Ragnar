@@ -408,7 +408,11 @@ Tone: Direct, tactical Viking strategist. Use bullet points and clear sections.
             "high RTT), DNS and DHCP failures/latency, TLS/handshake errors, and — for "
             "802.11 captures — deauth/disassoc reason codes and retry rates that drive "
             "client drops. Be specific and quote the counts/codes. Do not invent data not "
-            "present in the summary. Use short markdown sections and bullet points."
+            "present in the summary. When you cite a Wireshark/tshark display filter or CLI "
+            "command, use only valid, real syntax (e.g. tcp.analysis.retransmission, "
+            "tcp.flags.reset==1, tcp.analysis.duplicate_ack); if you are unsure of the exact "
+            "filter, describe what to match in words rather than inventing a field name. "
+            "Use short markdown sections and bullet points."
         )
         focus = (
             "This is a Wi-Fi / access-point capture: pay special attention to WHY CLIENTS "
