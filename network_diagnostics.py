@@ -13979,14 +13979,14 @@ def do_pcap_analyze(path):
             continue
         rm = re.match(r'^\s+(\d+)\s+(\S+)\s+(\S+)\s+(.+?)\s*$', line)
         if rm and sev and sev != 'Chats':
-            summary = rm.group(4).strip()
-            if any(p in summary.lower() for p in _normal_seq):
+            desc = rm.group(4).strip()   # NB: not `summary` — that name holds the file-summary dict
+            if any(p in desc.lower() for p in _normal_seq):
                 if sev in sev_key:      # keep the badge total consistent with items
                     expert[sev_key[sev]] = max(0, expert[sev_key[sev]] - int(rm.group(1)))
                 continue
             expert['items'].append({'severity': sev_key.get(sev, sev.lower()),
                                     'count': int(rm.group(1)), 'protocol': rm.group(3),
-                                    'summary': summary})
+                                    'summary': desc})
     expert['items'].sort(key=lambda i: i['count'], reverse=True)
     expert['items'] = expert['items'][:20]
 
