@@ -4808,6 +4808,12 @@ function _ndBusy(btn, busy, busyLabel) {
     }
 }
 
+// Change the label of an already-busy button (keeps the spinner and the stored
+// original, so it still restores correctly on _ndBusy(btn,false)).
+function _ndBusyLabel(btn, label) {
+    if (btn && btn.disabled) btn.innerHTML = '<span class="inline-block animate-spin">⟳</span> ' + label;
+}
+
 async function _ndRunText(inputId, resultId, endpoint, verb, rerunFnName) {
     const input = document.getElementById(inputId);
     const out = document.getElementById(resultId);
@@ -5744,11 +5750,35 @@ function _pcapCapFillIfaces() {
         sel.dataset.filled = '1';
     }).catch(() => {});
 }
+// Grey out the "Monitor mode" checkbox unless some adapter's radio can actually
+// do monitor mode (reuses the Wi-Fi Defense capability probe). Re-checked each
+// time the form opens, so plugging in an Alfa later enables it without a reload.
+function _pcapCheckMonitorCapable() {
+    const cb = document.getElementById('pcap-cap-monitor');
+    if (!cb) return;
+    const label = cb.closest('label');
+    if (label && !label.dataset.origTitle) label.dataset.origTitle = label.title || '';
+    fetchAPI('/api/wifidef/interfaces').then(x => {
+        const ok = ((x && x.interfaces) || []).some(i => i.monitor_capable);
+        cb.disabled = !ok;
+        if (!ok) {
+            cb.checked = false;
+            const cw = document.getElementById('pcap-cap-chan-wrap');
+            if (cw) cw.classList.add('hidden');
+        }
+        if (label) {
+            label.classList.toggle('opacity-50', !ok);
+            label.title = ok ? (label.dataset.origTitle || '')
+                : 'No monitor-capable Wi-Fi adapter detected — plug in an adapter that supports monitor mode (e.g. an Alfa).';
+        }
+    }).catch(() => { /* probe failed — leave the checkbox as-is */ });
+}
 function pcapShowCapture() {
     const form = document.getElementById('pcap-capture-form');
     const panel = document.getElementById('pcap-panel');
     if (panel) panel.classList.add('hidden');   // hide the stored-pcap list if it was open
     _pcapCapFillIfaces();                        // no-op if already filled on tab load
+    _pcapCheckMonitorCapable();                  // grey out monitor mode if unsupported
     if (form) form.classList.toggle('hidden');
 }
 async function startPcapCapture() {
@@ -5767,6 +5797,14 @@ async function startPcapCapture() {
         + (monitor && channel ? ' ch ' + escapeHtml(channel) : '')
         + ' for ' + secs + 's… (this blocks for the capture window'
         + (monitor ? ', plus a moment to switch the radio in and out of monitor mode' : '') + ')</p>';
+    // Capture + analyze is one blocking request, so we can't be told exactly when
+    // the capture window ends — but we know it's `secs` long (plus a beat for the
+    // monitor-mode radio switch). Flip the button/status to "Analyzing…" then.
+    const analyzeAt = (secs + (monitor ? 2 : 0.4)) * 1000;
+    const toAnalyzing = setTimeout(() => {
+        _ndBusyLabel(btn, 'Analyzing…');
+        out.innerHTML = '<p class="text-sm text-gray-400">Capture complete — analyzing with tshark…</p>';
+    }, analyzeAt);
     try {
         const d = await postAPI('/api/net/pcap/capture', { interface: iface, seconds: secs, bpf: bpf, monitor: monitor, channel: channel });
         if (!d.success) {
@@ -5778,6 +5816,7 @@ async function startPcapCapture() {
     } catch (e) {
         out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
     } finally {
+        clearTimeout(toAnalyzing);
         _ndBusy(btn, false);
     }
 }
