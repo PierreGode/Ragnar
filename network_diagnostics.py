@@ -14154,6 +14154,10 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
     valid = set(_list_iface_names(include_virtual=True))
     if not valid:
         return {'success': False, 'error': 'no capturable interfaces found'}
+    # Empty selection means "Auto (wired first)" — resolve it the same way the
+    # L2/L3 Watch scanners do, so the PCAP capture picker behaves like the rest.
+    if not interface:
+        interface = _capture_iface()
     if not interface or interface not in valid:
         return {'success': False,
                 'error': 'unknown interface — pick one of: %s'

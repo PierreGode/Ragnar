@@ -1335,6 +1335,7 @@ function showNetworkSubtab(name) {
         _lldpFillIfaces();
         loadLldp();
         _arpScanFillIfaces();
+        _pcapCapFillIfaces();
         _locateFillIfaces();
         _l2FillIfaces();
         _dhcpFillIfaces();
@@ -5671,6 +5672,8 @@ async function analyzePcap() {
 async function pcapShowStored() {
     const panel = document.getElementById('pcap-panel');
     const btn = event && event.target ? event.target : null;
+    const capForm = document.getElementById('pcap-capture-form');
+    if (capForm) capForm.classList.add('hidden');   // don't show both at once
     panel.classList.remove('hidden');
     panel.innerHTML = '<p class="text-sm text-gray-400">Scanning for stored captures…</p>';
     _ndBusy(btn, true, 'Scanning…');
@@ -5722,26 +5725,30 @@ async function analyzeStoredPcap(el) {
     }
 }
 
-// PCAP source #3 — capture live traffic on an interface into a new pcap.
-function pcapShowCapture() {
-    const panel = document.getElementById('pcap-panel');
-    panel.classList.remove('hidden');
-    panel.innerHTML = `<div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2">
-        <label class="text-sm text-gray-400">Interface<br><select id="pcap-cap-iface" title="Interface to capture on — pick your WiFi or LAN NIC (monitor-mode interfaces are listed too)" class="mt-1 w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"></select></label>
-        <label class="text-sm text-gray-400">Seconds<br><input id="pcap-cap-secs" type="number" min="3" max="60" value="10" class="mt-1 w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"></label>
-        <label class="text-sm text-gray-400 sm:flex-1 sm:min-w-[12rem]">Filter <span class="text-gray-600">(optional BPF)</span><br><input id="pcap-cap-bpf" type="text" placeholder="e.g. tcp port 443 or host 10.0.0.5" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></label>
-        <button onclick="startPcapCapture()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Start capture</button>
-    </div><p class="text-xs text-gray-500 mt-2">Records passively with tcpdump, then analyzes the result. The file is saved under Ragnar, so it also shows up in “Open stored pcap”.</p>`;
+// PCAP source #3 — capture live traffic on an interface into a new pcap. The
+// interface <select> is static in the page (with "Auto (wired first)") and is
+// pre-filled on tab load like every other Switch & L2/L3 picker, so opening the
+// form just reveals it — no async populate.
+function _pcapCapFillIfaces() {
     const sel = document.getElementById('pcap-cap-iface');
-    fetchAPI('/api/net/interfaces?all=1').then(x => {
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
         (x.interfaces || []).forEach(i => {
             const o = document.createElement('option');
             o.value = i.name;
             const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
-            o.textContent = i.name + tag + (i.operstate && i.operstate !== 'up' ? ' — ' + i.operstate : '');
+            o.textContent = i.name + tag;
             sel.appendChild(o);
         });
+        sel.dataset.filled = '1';
     }).catch(() => {});
+}
+function pcapShowCapture() {
+    const form = document.getElementById('pcap-capture-form');
+    const panel = document.getElementById('pcap-panel');
+    if (panel) panel.classList.add('hidden');   // hide the stored-pcap list if it was open
+    _pcapCapFillIfaces();                        // no-op if already filled on tab load
+    if (form) form.classList.toggle('hidden');
 }
 async function startPcapCapture() {
     const iface = (document.getElementById('pcap-cap-iface') || {}).value || '';
@@ -5750,10 +5757,9 @@ async function startPcapCapture() {
     const bpf = ((document.getElementById('pcap-cap-bpf') || {}).value || '').trim();
     const out = document.getElementById('pcap-results');
     const btn = event && event.target ? event.target : null;
-    if (!iface) return;
     _ndBusy(btn, true, 'Capturing…');
     out.classList.remove('hidden');
-    out.innerHTML = '<p class="text-sm text-gray-400">Capturing on ' + escapeHtml(iface) + ' for ' + secs + 's… (this blocks for the capture window)</p>';
+    out.innerHTML = '<p class="text-sm text-gray-400">Capturing on ' + (iface ? escapeHtml(iface) : 'auto (wired first)') + ' for ' + secs + 's… (this blocks for the capture window)</p>';
     try {
         const d = await postAPI('/api/net/pcap/capture', { interface: iface, seconds: secs, bpf: bpf });
         if (!d.success) {
