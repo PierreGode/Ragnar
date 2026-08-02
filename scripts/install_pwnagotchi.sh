@@ -246,7 +246,7 @@ fi
 # -------------------------------------------------------------------
 packages=(
     git python3 python3-pip python3-setuptools python3-dev python3-venv
-    libpcap-dev libffi-dev libssl-dev libcap2-bin
+    gcc libpcap-dev libffi-dev libssl-dev libcap2-bin libcap-dev
     python3-smbus i2c-tools libglib2.0-dev pkg-config meson
 )
 
@@ -310,7 +310,15 @@ python3 -m pip install \
     --no-deps \
     -e . 2>&1 || true
 
-# Install dependencies separately with fallback to PyPI if piwheels fails
+# Install dependencies separately with fallback to PyPI if piwheels fails.
+# NOTE: we install with --no-deps above, so EVERY runtime dependency must be
+# listed here by hand — pip will not pull the package's own declared deps. And
+# some are needed but NOT declared in pwnagotchiworking's pyproject.toml:
+#   * python-prctl (import name "prctl") is imported unconditionally by
+#     pwnagotchi/plugins/__init__.py but missing from pyproject dependencies.
+#     Without it EVERY launch dies with "ModuleNotFoundError: No module named
+#     'prctl'" — the service exit-codes and restart-loops. It builds against
+#     libcap headers, hence libcap-dev in the apt list above.
 echo "[INFO] Installing Python dependencies..."
 python3 -m pip install \
     --break-system-packages \
@@ -319,7 +327,7 @@ python3 -m pip install \
     PyYAML dbus-python file-read-backwards flask flask-cors flask-wtf \
     gast gpiozero inky numpy pycryptodome python-dateutil requests \
     rpi-lgpio rpi_hardware_pwm scapy setuptools shimmy smbus2 spidev \
-    tomlkit toml tweepy websockets pisugar 2>&1 || true
+    tomlkit toml tweepy websockets pisugar python-prctl 2>&1 || true
 
 # pydrive2 is a hard dependency (pwnagotchi crashes without it).
 # Force PyPI only - piwheels drops connections on large packages like google-api-python-client.
@@ -729,9 +737,12 @@ write_status "installing" "Verifying Pwnagotchi runtime" "verify"
 
 verify_errors=()
 
-# 1. The pwnagotchi package must import (this is what the launcher runs).
-if ! import_err="$(python3 -c 'import pwnagotchi' 2>&1)"; then
-    verify_errors+=("pwnagotchi package does not import: ${import_err##*$'\n'}")
+# 1. Import the exact chain the launcher runs — pwnagotchi.cli pulls in
+#    pwnagotchi.elf → pwnagotchi.plugins, which is where undeclared deps like
+#    prctl bite. A bare `import pwnagotchi` (top package) does NOT touch plugins
+#    and would pass while the service still exit-codes on launch.
+if ! import_err="$(python3 -c 'import pwnagotchi.cli' 2>&1)"; then
+    verify_errors+=("pwnagotchi does not import (the service will exit-code on launch): ${import_err##*$'\n'}")
 fi
 
 # 2. pydrive2 is a hard dependency — pwnagotchi crashes on start without it.

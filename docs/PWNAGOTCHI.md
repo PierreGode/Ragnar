@@ -49,7 +49,14 @@ sudo ./scripts/install_pwnagotchi.sh
 The script:
 
 1. Clones [pwnagotchiworking](https://github.com/PierreGode/pwnagotchiworking) into `/opt/pwnagotchi`
-2. Installs Python dependencies (scapy, flask-cors, gpiozero, etc.)
+2. Installs Python dependencies (scapy, flask-cors, gpiozero, etc.). The package is
+   installed with `--no-deps`, so every runtime dependency is listed explicitly in
+   the installer — including **`python-prctl`** (imported as `prctl` by
+   `pwnagotchi/plugins/__init__.py` but *not* declared in the upstream
+   `pyproject.toml`). Without it every launch dies with
+   `ModuleNotFoundError: No module named 'prctl'` and `pwnagotchi.service`
+   exit-codes in a restart loop, so `libcap-dev`/`gcc` are also installed to build
+   its C extension when no prebuilt wheel is available.
 3. Patches Pillow 10+ compatibility (`ImageFont.getsize` shim)
 4. Detects the WiFi interface for monitor mode
 5. Generates `/usr/bin/monstart` and `/usr/bin/monstop`
