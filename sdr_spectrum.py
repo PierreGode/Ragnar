@@ -117,15 +117,30 @@ def detect():
     installed *and* a board actually answers — the exact condition under which
     the web UI un-greys the Waterfall button.
     """
-    tools = os.path.exists(_HACKRF_SWEEP) or _HACKRF_SWEEP == "hackrf_sweep"
-    tools_installed = (_run([_HACKRF_SWEEP, "-h"])[0] not in (127,)) and \
-        (_run([_HACKRF_INFO])[0] != 127)
-    if not tools_installed:
+    # Probe the board exactly ONCE. hackrf_info opens the USB device; opening it
+    # twice back-to-back (as this used to) often makes the second open fail with
+    # "hackrf_open() failed" because libusb hasn't released the first claim yet —
+    # which then reads as "no HackRF" and greys the Waterfall out on a board that
+    # is actually fine. hackrf_sweep -h only prints usage (no device open), so we
+    # use it purely to tell "tools missing" apart from "device problem".
+    if _run([_HACKRF_SWEEP, "-h"])[0] == 127:
         return {"available": False, "tools_installed": False,
                 "device_present": False,
                 "error": "hackrf tools not installed (apt install hackrf)"}
-    rc, out, err = _run([_HACKRF_INFO])
+    # First enumeration after boot / on a busy USB bus can be slow, so give the
+    # single probe generous headroom and treat a timeout as its own case rather
+    # than silently reporting the board absent.
+    rc, out, err = _run([_HACKRF_INFO], timeout=12)
     blob = (out or "") + (err or "")
+    if rc == 127:
+        return {"available": False, "tools_installed": False,
+                "device_present": False,
+                "error": "hackrf tools not installed (apt install hackrf)"}
+    if rc == 124:
+        return {"available": False, "tools_installed": True,
+                "device_present": False,
+                "error": "HackRF probe timed out — retry, or use a powered USB "
+                         "hub (the Pi's port may be under-powering the board)"}
     if rc != 0 or "No HackRF boards found" in blob or "hackrf_open" in blob:
         return {"available": False, "tools_installed": True,
                 "device_present": False,
