@@ -234,6 +234,10 @@ data/wardriving/
 *.original
 tools/
 
+# Live captures recorded by the PCAP Analyzer's "Capture live" button — runtime
+# artifacts, can be large, never commit.
+data/pcaps/
+
 # ── RuSense (WiFi-CSI) user data — captured/trained per install, never commit ──
 # raw CSI recordings (can be tens of MB+)
 data/recordings/

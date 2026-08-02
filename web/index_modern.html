@@ -2291,8 +2291,13 @@
                     </div>
                     <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
                         <input id="pcap-file" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap" class="w-full sm:w-auto sm:flex-1 sm:min-w-[14rem] max-w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:bg-slate-700 file:text-gray-200 hover:file:bg-slate-600">
-                        <button onclick="analyzePcap()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Analyze</button>
+                        <button onclick="analyzePcap()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Analyze upload</button>
                     </div>
+                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2">
+                        <button onclick="pcapShowStored()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">📁 Open stored pcap</button>
+                        <button onclick="pcapShowCapture()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">🎥 Capture live</button>
+                    </div>
+                    <div id="pcap-panel" class="hidden mt-3 text-sm"></div>
                     <div id="pcap-results" class="hidden mt-3 text-sm"></div>
                 </div>
             </div><!-- /#net-sub-switch -->

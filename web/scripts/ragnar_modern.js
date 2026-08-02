@@ -5460,6 +5460,64 @@ async function aiAnalyzePcap() {
     }
 }
 
+// Shared renderer for a do_pcap_analyze() result — used by all three sources
+// (upload / stored / live capture) so they look and behave identically, including
+// the "🧠 Explain with AI" button.
+function renderPcapResults(d, out) {
+    const s = d.summary || {};
+    const stat = (label, val) => `<div class="bg-slate-800 rounded-lg p-3 text-center">
+        <div class="text-lg font-bold text-Ragnar-400">${val}</div>
+        <div class="text-xs uppercase text-gray-500 mt-1">${label}</div></div>`;
+    const stats = `<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
+        ${stat('Packets', s.packets != null ? s.packets : '—')}
+        ${stat('Size', _pcapBytes(s.file_size))}
+        ${stat('Duration', s.duration_s != null ? s.duration_s + ' s' : '—')}
+        ${stat('Avg pkt', s.avg_packet_size != null ? Math.round(s.avg_packet_size) + ' B' : '—')}
+        ${stat('Rate', s.data_byte_rate != null ? _pcapBytes(s.data_byte_rate) + '/s' : '—')}
+    </div>${s.start_time ? '<p class="text-xs text-gray-500 mb-3">' + escapeHtml(String(s.start_time)) + ' → ' + escapeHtml(String(s.end_time || '')) + ' · ' + escapeHtml(String(s.encapsulation || '')) + '</p>' : ''}`;
+
+    // Stacked flex rows (not a fixed 3-col table) so it fits a phone without
+    // horizontal scroll: indented protocol name breaks/wraps on the left, a
+    // compact "frames · bytes" stays on the right. Depth indent via &nbsp; (no
+    // per-depth Tailwind classes needed).
+    const protoRows = (d.protocols || []).map(p =>
+        `<div class="flex items-baseline justify-between gap-3 py-1 border-t border-slate-800">
+            <span class="font-mono text-sm min-w-0 break-all">${'&nbsp;'.repeat(p.depth * 2)}${escapeHtml(p.proto)}</span>
+            <span class="text-xs whitespace-nowrap shrink-0"><span class="text-gray-300">${p.frames}</span> <span class="text-gray-600">fr</span> · <span class="text-gray-400">${_pcapBytes(p.bytes)}</span></span>
+        </div>`).join('');
+    const protoTable = `<h4 class="text-sm font-semibold mt-1 mb-1">Protocol hierarchy
+        <span class="text-xs font-normal text-gray-500">— frames · bytes</span></h4>
+        <div class="text-gray-300">${protoRows}</div>`;
+
+    const talkRows = (d.talkers || []).map(t =>
+        `<tr class="border-t border-slate-800"><td class="px-3 py-1 font-mono">${escapeHtml(t.a)} <span class="text-gray-500">↔</span> ${escapeHtml(t.b)}</td>
+         <td class="px-3 py-1 text-right">${t.frames}</td><td class="px-3 py-1 text-right text-gray-400">${_pcapBytes(t.bytes)}</td></tr>`).join('');
+    const talkTable = (d.talkers && d.talkers.length) ? `<h4 class="text-sm font-semibold mt-3 mb-1">Top talkers</h4>
+        <table class="min-w-full text-sm text-gray-300 whitespace-nowrap"><thead><tr class="text-left text-xs uppercase text-gray-500">
+        <th class="px-3 py-1">Conversation</th><th class="px-3 py-1 text-right">Frames</th><th class="px-3 py-1 text-right">Bytes</th></tr></thead>
+        <tbody>${talkRows}</tbody></table>` : '';
+
+    const ex = d.expert || {};
+    const sevColor = { errors: 'text-red-400', warnings: 'text-amber-300', notes: 'text-gray-400' };
+    const exItems = (ex.items || []).map(i =>
+        `<li class="${sevColor[i.severity] || ''}">×${i.count} <span class="text-gray-500">${escapeHtml(i.protocol)}</span> — ${escapeHtml(i.summary)}</li>`).join('');
+    const expert = `<h4 class="text-sm font-semibold mt-3 mb-1">Expert info
+        <span class="text-xs font-normal">— <span class="text-red-400">${ex.errors || 0} err</span> · <span class="text-amber-300">${ex.warnings || 0} warn</span> · <span class="text-gray-400">${ex.notes || 0} note</span></span></h4>
+        ${exItems ? '<ul class="space-y-0.5 text-sm">' + exItems + '</ul>' : '<p class="text-sm text-gray-500">No expert findings.</p>'}`;
+
+    // Where this capture came from (live capture / stored file), and any note.
+    const srcNote = d.captured_name
+        ? `<p class="text-xs text-green-400 mb-2">🎥 Captured <span class="font-mono">${escapeHtml(d.captured_name)}</span> on ${escapeHtml(d.interface || '')} for ${d.seconds || ''}s — saved to Ragnar (see “Open stored pcap”).</p>`
+        : (d.source_name ? `<p class="text-xs text-gray-400 mb-2">📁 <span class="font-mono">${escapeHtml(d.source_name)}</span></p>` : '');
+    const note = d.note ? `<p class="text-xs text-amber-300 mb-2">${escapeHtml(d.note)}</p>` : '';
+
+    const aiBtn = `<div class="mt-3"><button onclick="aiAnalyzePcap()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">🧠 Explain with AI</button>
+        <div id="pcap-ai-results" class="hidden mt-2"></div></div>`;
+    out.innerHTML = srcNote + note + stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
+    _lastPcap = d;
+}
+
+// PCAP source #1 — upload a capture from your machine.
 async function analyzePcap() {
     const fileEl = document.getElementById('pcap-file');
     const out = document.getElementById('pcap-results');
@@ -5479,46 +5537,109 @@ async function analyzePcap() {
                 : '<p class="text-sm text-red-400">Error: ' + escapeHtml(d.error || 'failed') + '</p>';
             return;
         }
-        const s = d.summary || {};
-        const stat = (label, val) => `<div class="bg-slate-800 rounded-lg p-3 text-center">
-            <div class="text-lg font-bold text-Ragnar-400">${val}</div>
-            <div class="text-xs uppercase text-gray-500 mt-1">${label}</div></div>`;
-        const stats = `<div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3">
-            ${stat('Packets', s.packets != null ? s.packets : '—')}
-            ${stat('Size', _pcapBytes(s.file_size))}
-            ${stat('Duration', s.duration_s != null ? s.duration_s + ' s' : '—')}
-            ${stat('Avg pkt', s.avg_packet_size != null ? Math.round(s.avg_packet_size) + ' B' : '—')}
-            ${stat('Rate', s.data_byte_rate != null ? _pcapBytes(s.data_byte_rate) + '/s' : '—')}
-        </div>${s.start_time ? '<p class="text-xs text-gray-500 mb-3">' + escapeHtml(String(s.start_time)) + ' → ' + escapeHtml(String(s.end_time || '')) + ' · ' + escapeHtml(String(s.encapsulation || '')) + '</p>' : ''}`;
+        renderPcapResults(d, out);
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
 
-        const protoRows = (d.protocols || []).map(p =>
-            `<tr class="border-t border-slate-800"><td class="px-3 py-1 font-mono">${'&nbsp;'.repeat(p.depth * 3)}${escapeHtml(p.proto)}</td>
-             <td class="px-3 py-1 text-right">${p.frames}</td><td class="px-3 py-1 text-right text-gray-400">${_pcapBytes(p.bytes)}</td></tr>`).join('');
-        const protoTable = `<h4 class="text-sm font-semibold mt-1 mb-1">Protocol hierarchy</h4>
-            <table class="min-w-full text-sm text-gray-300"><thead><tr class="text-left text-xs uppercase text-gray-500">
-            <th class="px-3 py-1">Protocol</th><th class="px-3 py-1 text-right">Frames</th><th class="px-3 py-1 text-right">Bytes</th></tr></thead>
-            <tbody>${protoRows}</tbody></table>`;
+// PCAP source #2 — browse captures already stored anywhere on the box.
+async function pcapShowStored() {
+    const panel = document.getElementById('pcap-panel');
+    const btn = event && event.target ? event.target : null;
+    panel.classList.remove('hidden');
+    panel.innerHTML = '<p class="text-sm text-gray-400">Scanning for stored captures…</p>';
+    _ndBusy(btn, true, 'Scanning…');
+    try {
+        const d = await fetchAPI('/api/net/pcap/stored');
+        const files = (d && d.files) || [];
+        if (!files.length) {
+            panel.innerHTML = '<p class="text-sm text-gray-400">No .pcap/.pcapng files found under ' +
+                escapeHtml(((d && d.roots) || []).join(', ')) + '.</p>';
+            return;
+        }
+        // Stacked list (not a wide table) so it reads well on a phone: name +
+        // meta break/wrap in a min-w-0 flex child, button goes full-width on
+        // mobile and inline on ≥sm.
+        const items = files.map(fl => `<div class="flex flex-col sm:flex-row sm:items-center gap-2 py-2 border-t border-slate-800">
+            <div class="min-w-0 flex-1">
+                <div class="font-mono text-sm text-gray-200 break-all">${fl.captured ? '🎥 ' : ''}${escapeHtml(fl.name)}</div>
+                <div class="text-xs text-gray-500 break-all">${escapeHtml(fl.dir)}</div>
+                <div class="text-xs text-gray-500 mt-0.5">${_pcapBytes(fl.size)} · ${new Date(fl.mtime * 1000).toLocaleString()}</div>
+            </div>
+            <button data-path="${encodeURIComponent(fl.path)}" onclick="analyzeStoredPcap(this)" class="w-full sm:w-auto shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">Analyze</button>
+        </div>`).join('');
+        panel.innerHTML = `<div>${items}</div>${d.truncated ? '<p class="text-xs text-gray-500 mt-2">Showing the newest ' + files.length + '.</p>' : ''}`;
+    } catch (e) {
+        panel.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+async function analyzeStoredPcap(el) {
+    const path = decodeURIComponent(el.getAttribute('data-path') || '');
+    const out = document.getElementById('pcap-results');
+    _ndBusy(el, true, 'Analyzing…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Analyzing capture…</p>';
+    try {
+        const d = await postAPI('/api/net/pcap/stored/analyze', { path: path });
+        if (!d.success) {
+            out.innerHTML = d.missing_tool ? _ndMissingTool(d, null)
+                : '<p class="text-sm text-red-400">Error: ' + escapeHtml(d.error || 'failed') + '</p>';
+            return;
+        }
+        renderPcapResults(d, out);
+        out.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(el, false);
+    }
+}
 
-        const talkRows = (d.talkers || []).map(t =>
-            `<tr class="border-t border-slate-800"><td class="px-3 py-1 font-mono">${escapeHtml(t.a)} <span class="text-gray-500">↔</span> ${escapeHtml(t.b)}</td>
-             <td class="px-3 py-1 text-right">${t.frames}</td><td class="px-3 py-1 text-right text-gray-400">${_pcapBytes(t.bytes)}</td></tr>`).join('');
-        const talkTable = (d.talkers && d.talkers.length) ? `<h4 class="text-sm font-semibold mt-3 mb-1">Top talkers</h4>
-            <table class="min-w-full text-sm text-gray-300 whitespace-nowrap"><thead><tr class="text-left text-xs uppercase text-gray-500">
-            <th class="px-3 py-1">Conversation</th><th class="px-3 py-1 text-right">Frames</th><th class="px-3 py-1 text-right">Bytes</th></tr></thead>
-            <tbody>${talkRows}</tbody></table>` : '';
-
-        const ex = d.expert || {};
-        const sevColor = { errors: 'text-red-400', warnings: 'text-amber-300', notes: 'text-gray-400' };
-        const exItems = (ex.items || []).map(i =>
-            `<li class="${sevColor[i.severity] || ''}">×${i.count} <span class="text-gray-500">${escapeHtml(i.protocol)}</span> — ${escapeHtml(i.summary)}</li>`).join('');
-        const expert = `<h4 class="text-sm font-semibold mt-3 mb-1">Expert info
-            <span class="text-xs font-normal">— <span class="text-red-400">${ex.errors || 0} err</span> · <span class="text-amber-300">${ex.warnings || 0} warn</span> · <span class="text-gray-400">${ex.notes || 0} note</span></span></h4>
-            ${exItems ? '<ul class="space-y-0.5 text-sm">' + exItems + '</ul>' : '<p class="text-sm text-gray-500">No expert findings.</p>'}`;
-
-        const aiBtn = `<div class="mt-3"><button onclick="aiAnalyzePcap()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">🧠 Explain with AI</button>
-            <div id="pcap-ai-results" class="hidden mt-2"></div></div>`;
-        out.innerHTML = stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
-        _lastPcap = d;
+// PCAP source #3 — capture live traffic on an interface into a new pcap.
+function pcapShowCapture() {
+    const panel = document.getElementById('pcap-panel');
+    panel.classList.remove('hidden');
+    panel.innerHTML = `<div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2">
+        <label class="text-sm text-gray-400">Interface<br><select id="pcap-cap-iface" class="mt-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></select></label>
+        <label class="text-sm text-gray-400">Seconds<br><input id="pcap-cap-secs" type="number" min="3" max="60" value="10" class="mt-1 w-20 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></label>
+        <label class="text-sm text-gray-400 sm:flex-1 sm:min-w-[12rem]">Filter <span class="text-gray-600">(optional BPF)</span><br><input id="pcap-cap-bpf" type="text" placeholder="e.g. tcp port 443 or host 10.0.0.5" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></label>
+        <button onclick="startPcapCapture()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Start capture</button>
+    </div><p class="text-xs text-gray-500 mt-2">Records passively with tcpdump, then analyzes the result. The file is saved under Ragnar, so it also shows up in “Open stored pcap”.</p>`;
+    const sel = document.getElementById('pcap-cap-iface');
+    fetchAPI('/api/net/interfaces?all=1').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag + (i.operstate && i.operstate !== 'up' ? ' — ' + i.operstate : '');
+            sel.appendChild(o);
+        });
+    }).catch(() => {});
+}
+async function startPcapCapture() {
+    const iface = (document.getElementById('pcap-cap-iface') || {}).value || '';
+    let secs = parseInt((document.getElementById('pcap-cap-secs') || {}).value, 10);
+    if (!Number.isFinite(secs)) secs = 10;
+    const bpf = ((document.getElementById('pcap-cap-bpf') || {}).value || '').trim();
+    const out = document.getElementById('pcap-results');
+    const btn = event && event.target ? event.target : null;
+    if (!iface) return;
+    _ndBusy(btn, true, 'Capturing…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Capturing on ' + escapeHtml(iface) + ' for ' + secs + 's… (this blocks for the capture window)</p>';
+    try {
+        const d = await postAPI('/api/net/pcap/capture', { interface: iface, seconds: secs, bpf: bpf });
+        if (!d.success) {
+            out.innerHTML = d.missing_tool ? _ndMissingTool(d, null)
+                : '<p class="text-sm text-red-400">Error: ' + escapeHtml(d.error || 'failed') + '</p>';
+            return;
+        }
+        renderPcapResults(d, out);
     } catch (e) {
         out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
     } finally {
