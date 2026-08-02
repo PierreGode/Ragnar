@@ -1889,6 +1889,22 @@
                     </div>
                     <div id="arp-scan-results" class="hidden mt-3 overflow-x-auto"></div>
                 </div>
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <div class="mb-3">
+                        <h3 class="text-lg font-semibold">PCAP Analyzer</h3>
+                        <p class="text-sm text-gray-400">Upload a <span class="font-mono">.pcap</span> / <span class="font-mono">.pcapng</span> capture (from Wireshark, tcpdump, the L2 scan, etc.) for instant triage — summary, protocol breakdown, top talkers, and tshark's expert findings (retransmissions, resets, dup-ACKs, malformed). Read-only; the file is deleted after analysis. Max 100&nbsp;MB.</p>
+                    </div>
+                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
+                        <input id="pcap-file" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap" class="w-full sm:w-auto sm:flex-1 sm:min-w-[14rem] max-w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:bg-slate-700 file:text-gray-200 hover:file:bg-slate-600">
+                        <button onclick="analyzePcap()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Analyze upload</button>
+                    </div>
+                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2">
+                        <button onclick="pcapShowStored()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">📁 Open stored pcap</button>
+                        <button onclick="pcapShowCapture()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">🎥 Capture live</button>
+                    </div>
+                    <div id="pcap-panel" class="hidden mt-3 text-sm"></div>
+                    <div id="pcap-results" class="hidden mt-3 text-sm"></div>
+                </div>
                 <!-- DHCP Guardian -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">DHCP Guardian</h3>
@@ -2283,22 +2299,6 @@
                         <button onclick="runL2Health()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan L2</button>
                     </div>
                     <div id="l2-results" class="hidden mt-3 text-sm"></div>
-                </div>
-                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
-                    <div class="mb-3">
-                        <h3 class="text-lg font-semibold">PCAP Analyzer</h3>
-                        <p class="text-sm text-gray-400">Upload a <span class="font-mono">.pcap</span> / <span class="font-mono">.pcapng</span> capture (from Wireshark, tcpdump, the L2 scan, etc.) for instant triage — summary, protocol breakdown, top talkers, and tshark's expert findings (retransmissions, resets, dup-ACKs, malformed). Read-only; the file is deleted after analysis. Max 100&nbsp;MB.</p>
-                    </div>
-                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2">
-                        <input id="pcap-file" type="file" accept=".pcap,.pcapng,.cap,application/vnd.tcpdump.pcap" class="w-full sm:w-auto sm:flex-1 sm:min-w-[14rem] max-w-full text-sm text-gray-300 file:mr-3 file:py-2 file:px-3 file:rounded file:border-0 file:text-sm file:bg-slate-700 file:text-gray-200 hover:file:bg-slate-600">
-                        <button onclick="analyzePcap()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Analyze upload</button>
-                    </div>
-                    <div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mt-2">
-                        <button onclick="pcapShowStored()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">📁 Open stored pcap</button>
-                        <button onclick="pcapShowCapture()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap">🎥 Capture live</button>
-                    </div>
-                    <div id="pcap-panel" class="hidden mt-3 text-sm"></div>
-                    <div id="pcap-results" class="hidden mt-3 text-sm"></div>
                 </div>
             </div><!-- /#net-sub-switch -->
 
