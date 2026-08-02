@@ -14243,6 +14243,23 @@ def _pcap_zero_note(iface, seconds):
     return base + ' — wrong interface, the cable is down, or the filter matched nothing.'
 
 
+# A broad 2.4 + 5 GHz sweep for monitor-mode surveys (non-overlapping 2.4 GHz +
+# common 5 GHz UNII channels). Channels the adapter can't tune just fail the `iw`
+# call harmlessly, so a 2.4-only card still works — it only dwells on 1/6/11.
+_PCAP_HOP_CHANNELS = [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]
+
+
+def _channel_hop(iface, stop, dwell=0.35):
+    """Round-robin the monitor interface across channels until `stop` is set, so a
+    survey capture sees APs/traffic on every band instead of one parked channel."""
+    i = 0
+    while not stop.is_set():
+        ch = _PCAP_HOP_CHANNELS[i % len(_PCAP_HOP_CHANNELS)]
+        _run(['iw', 'dev', iface, 'set', 'channel', str(ch)], timeout=3)
+        i += 1
+        stop.wait(dwell)
+
+
 def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
                     monitor=False, channel=None):
     """Record live traffic on `interface` for `seconds` into a saved pcap (kept in
@@ -14252,9 +14269,10 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
 
     With ``monitor=True`` on a Wi-Fi interface, flip the adapter into monitor
     mode (via wifi_defense.enable_monitor — a separate vif where the driver
-    allows it, else switching the adapter) and capture raw 802.11 with radiotap,
-    optionally parked on ``channel``. Monitor mode is always torn down afterward,
-    restoring the managed link."""
+    allows it, else switching the adapter) and capture raw 802.11 with radiotap.
+    With a ``channel`` it parks there (focus on one AP); with no channel it
+    channel-hops across 2.4/5 GHz for a broad survey. Monitor mode is always torn
+    down afterward, restoring the managed link."""
     if not _have('tcpdump'):
         return {'success': False, 'missing_tool': 'tcpdump',
                 'error': 'tcpdump is not installed. Click Install to add it.'}
@@ -14309,6 +14327,15 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
             except (ValueError, TypeError):
                 channel = None       # ignore a non-numeric channel
 
+    # No fixed channel on a monitor capture → sweep channels so the survey isn't
+    # stuck on one (which is why a parked capture only sees a few beacons).
+    hop_stop = hop_thread = None
+    if monitor and not channel:
+        hop_stop = threading.Event()
+        hop_thread = threading.Thread(target=_channel_hop, args=(cap_iface, hop_stop),
+                                      daemon=True)
+        hop_thread.start()
+
     try:
         # -U writes each packet as it arrives, so the file is a valid pcap even
         # though we stop tcpdump by killing it at the time window (it never
@@ -14326,6 +14353,10 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
         except Exception as exc:     # pragma: no cover - defensive
             return {'success': False, 'error': 'capture failed: %s' % exc}
     finally:
+        if hop_stop:                 # stop the channel hopper before teardown
+            hop_stop.set()
+            if hop_thread:
+                hop_thread.join(timeout=2)
         if mon_state:                # always restore the managed link
             try:
                 import wifi_defense
@@ -14345,14 +14376,20 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
         out['interface'] = interface
         out['seconds'] = seconds
         out['monitor'] = bool(monitor)
+        if monitor:
+            out['channel_mode'] = ('parked ch %s' % channel) if channel else 'swept 2.4/5 GHz'
         if warning:
             out['monitor_warning'] = warning
         if out.get('success') and not (out.get('summary') or {}).get('packets'):
-            if monitor:
-                out['note'] = ('Monitor capture saw 0 frames in %ds%s — the radio may '
-                               'be on a channel with no nearby APs. Set a channel with '
-                               'active traffic and retry.'
-                               % (seconds, (' on ch %s' % channel) if channel else ''))
+            if monitor and channel:
+                out['note'] = ('Monitor capture saw 0 frames in %ds on ch %s — no nearby '
+                               'AP/traffic on that channel. Try leaving the channel blank '
+                               'to sweep all channels.' % (seconds, channel))
+            elif monitor:
+                out['note'] = ('Monitor capture saw 0 frames in %ds while sweeping — no '
+                               '802.11 in range, or the adapter could not tune any channel. '
+                               'Check the antenna and that the card supports monitor mode.'
+                               % seconds)
             else:
                 out['note'] = _pcap_zero_note(interface, seconds)
     return out

@@ -5515,8 +5515,9 @@ function renderPcapResults(d, out) {
         ${exItems ? '<ul class="space-y-0.5 text-sm">' + exItems + '</ul>' : '<p class="text-sm text-gray-500">No expert findings.</p>'}`;
 
     // Where this capture came from (live capture / stored file), and any note.
+    const capMode = d.monitor ? ` · 📡 monitor (${escapeHtml(d.channel_mode || '802.11')})` : '';
     const srcNote = d.captured_name
-        ? `<p class="text-xs text-green-400 mb-2">🎥 Captured <span class="font-mono">${escapeHtml(d.captured_name)}</span> on ${escapeHtml(d.interface || '')} for ${d.seconds || ''}s — saved to Ragnar (see “Open stored pcap”).</p>`
+        ? `<p class="text-xs text-green-400 mb-2">🎥 Captured <span class="font-mono">${escapeHtml(d.captured_name)}</span> on ${escapeHtml(d.interface || '')} for ${d.seconds || ''}s${capMode} — saved to Ragnar (see “Open stored pcap”).</p>`
         : (d.source_name ? `<p class="text-xs text-gray-400 mb-2">📁 <span class="font-mono">${escapeHtml(d.source_name)}</span></p>` : '');
     const note = d.note ? `<p class="text-xs text-amber-300 mb-2">${escapeHtml(d.note)}</p>` : '';
     const monWarn = d.monitor_warning ? `<p class="text-xs text-amber-300 mb-2">📡 ${escapeHtml(d.monitor_warning)}</p>` : '';
