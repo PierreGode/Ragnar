@@ -1961,6 +1961,12 @@ impact and grounded in the actual counts, codes, and expert findings (it won't
 invent data that isn't in the summary). If AI isn't enabled, the tool still shows
 the full decoded breakdown — the AI just adds the interpretation.
 
+**📄 Export as PDF** — turn the current analysis into a printable one-page report
+(summary, protocol hierarchy, top talkers, Wi-Fi breakdown, and expert findings)
+and hand it to the browser's print dialog → *Save as PDF*. Runs entirely
+client-side (no external libraries, works offline on a Pi); allow pop-ups for the
+report window.
+
 The upload is size-guarded (100 MB), magic-byte validated (real pcap/pcapng
 only), analyzed **read-only** with `tshark`, and the temp file is deleted
 immediately after. Nothing is stored.
