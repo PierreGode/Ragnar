@@ -1902,9 +1902,26 @@ Notes and safety:
   `flap` uses `ip link`, `burst` uses a raw `AF_PACKET` socket
 
 ### PCAP Analyzer
-Upload a `.pcap` / `.pcapng` capture (from Wireshark, `tcpdump`, the L2 Link
-Health scan, a SPAN/mirror port, …) and get instant triage — the Wireshark
-*Statistics* menu in one click:
+Get instant triage of a capture — the Wireshark *Statistics* menu in one click.
+There are **three ways to feed it a capture**, all landing on the same analysis
+(and the same *Explain with AI* button):
+
+1. **Analyze upload** — upload a `.pcap` / `.pcapng` from your machine
+   (Wireshark, `tcpdump`, the L2 Link Health scan, a SPAN/mirror port, …).
+2. **📁 Open stored pcap** — browse captures **already on the box**. Ragnar does a
+   bounded scan of sensible locations (its own capture dir, the app tree, `/tmp`,
+   `/var/tmp`, home dirs) and lists every `.pcap`/`.pcapng`/`.cap` it finds,
+   newest first — pick one and analyze it in place. Selection is confined to
+   those roots and magic-byte checked, so it can't be used to read arbitrary
+   files off disk.
+3. **🎥 Capture live** — record fresh traffic yourself: pick an **interface**, a
+   **duration** (3–60 s), and an optional **BPF filter** (e.g. `tcp port 443 or
+   host 10.0.0.5`). Ragnar runs a passive `tcpdump -w` for the window, saves the
+   pcap under `data/pcaps/` (so it also shows up in *Open stored pcap*), and
+   analyzes it immediately. Capturing needs root — the Ragnar service already
+   runs as root.
+
+Every source then shows:
 
 - **Summary** — packets, size, duration, average packet size, data rate,
   capture start/end and encapsulation (via `capinfos`).
@@ -1943,8 +1960,12 @@ The upload is size-guarded (100 MB), magic-byte validated (real pcap/pcapng
 only), analyzed **read-only** with `tshark`, and the temp file is deleted
 immediately after. Nothing is stored.
 
-- Endpoints: `POST /api/net/pcap` (multipart `file`),
-  `POST /api/ai/pcap` (AI interpretation) · binary: `tshark` (+ `capinfos`)
+- Endpoints: `POST /api/net/pcap` (multipart `file` — upload),
+  `GET /api/net/pcap/stored` (list captures on the box),
+  `POST /api/net/pcap/stored/analyze` (analyze a chosen stored path),
+  `POST /api/net/pcap/capture` (`interface` / `seconds` / `bpf` — record + analyze),
+  `POST /api/ai/pcap` (AI interpretation) · binary: `tshark` (+ `capinfos`),
+  `tcpdump` (for live capture)
 
 ---
 

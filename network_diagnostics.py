@@ -14025,6 +14025,183 @@ def do_pcap_from_upload(file_storage, max_bytes=100 * 1024 * 1024):
 
 
 # --------------------------------------------------------------------------
+# PCAP sources beyond upload: browse captures already on the box, and record a
+# fresh one on an interface. Both feed the exact same do_pcap_analyze() path (and
+# therefore the "Explain with AI" button) — upload is just one of three sources.
+# --------------------------------------------------------------------------
+
+_PCAP_EXTS = ('.pcap', '.pcapng', '.cap')
+# Dirs never descended while hunting captures (cost / noise / privacy).
+_PCAP_SKIP_DIRS = {'.git', 'node_modules', '__pycache__', 'proc', 'sys', 'dev',
+                   'run', '.cache', 'site-packages', 'venv', '.venv',
+                   'snap', 'lost+found'}
+
+
+def _pcap_capture_dir():
+    """Directory where Ragnar-recorded captures are kept (and later browsable)."""
+    d = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'pcaps')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _pcap_search_roots():
+    """Curated roots scanned for stored captures — deliberately NOT a full-disk
+    walk. Ragnar's own capture dir, the app tree, temp dirs, and the running
+    user's / root's home cover where captures realistically land. Deduped by
+    realpath; existing directories only."""
+    roots = [
+        _pcap_capture_dir(),
+        os.path.dirname(os.path.abspath(__file__)),
+        '/tmp', '/var/tmp',
+        os.path.expanduser('~'),
+        '/home', '/root',
+        os.getcwd(),
+    ]
+    seen, out = set(), []
+    for r in roots:
+        try:
+            rp = os.path.realpath(r)
+        except OSError:
+            continue
+        if rp in seen or not os.path.isdir(rp):
+            continue
+        seen.add(rp)
+        out.append(rp)
+    return out
+
+
+def _pcap_under_roots(realpath, roots):
+    """True if `realpath` is one of, or lives under, an allowed root."""
+    return any(realpath == r or realpath.startswith(r.rstrip('/') + '/')
+               for r in roots)
+
+
+def do_pcap_list_stored(max_results=300, max_depth=5):
+    """Find capture files under the curated roots. Bounded walk (depth + count),
+    skips heavy/system dirs, opens nothing — metadata only. Newest first."""
+    cap_dir = os.path.realpath(_pcap_capture_dir())
+    found, seen_paths = [], set()
+    for root in _pcap_search_roots():
+        base_depth = root.rstrip('/').count('/')
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in _PCAP_SKIP_DIRS and not d.startswith('.')]
+            if dirpath.rstrip('/').count('/') - base_depth >= max_depth:
+                dirnames[:] = []
+            for fn in filenames:
+                if not fn.lower().endswith(_PCAP_EXTS):
+                    continue
+                rp = os.path.realpath(os.path.join(dirpath, fn))
+                if rp in seen_paths:
+                    continue
+                try:
+                    stt = os.stat(rp)
+                except OSError:
+                    continue
+                if not os.path.isfile(rp) or stt.st_size == 0:
+                    continue
+                seen_paths.add(rp)
+                found.append({
+                    'path': rp, 'name': fn, 'dir': os.path.dirname(rp),
+                    'size': stt.st_size, 'mtime': int(stt.st_mtime),
+                    'captured': rp.startswith(cap_dir),  # Ragnar-recorded
+                })
+            if len(found) >= max_results * 3:
+                break
+    found.sort(key=lambda f: f['mtime'], reverse=True)
+    return {'success': True, 'files': found[:max_results],
+            'roots': _pcap_search_roots(), 'capture_dir': cap_dir,
+            'truncated': len(found) > max_results}
+
+
+def do_pcap_analyze_path(path):
+    """Analyze a stored capture chosen from the browser. Confined to the same
+    curated roots we list from (no arbitrary path read), magic-byte checked, then
+    handed to the normal do_pcap_analyze()."""
+    if not path:
+        return {'success': False, 'error': 'no path given'}
+    rp = os.path.realpath(path)
+    if not os.path.isfile(rp):
+        return {'success': False, 'error': 'capture file not found'}
+    if not _pcap_under_roots(rp, _pcap_search_roots()):
+        return {'success': False,
+                'error': 'path is outside the allowed capture locations'}
+    try:
+        with open(rp, 'rb') as fh:
+            if fh.read(4) not in _PCAP_MAGICS:
+                return {'success': False,
+                        'error': 'not a valid pcap/pcapng capture (bad magic bytes)'}
+    except OSError as exc:
+        return {'success': False, 'error': 'cannot read file: %s' % exc}
+    out = do_pcap_analyze(rp)
+    if isinstance(out, dict):
+        out['source_file'] = rp
+        out['source_name'] = os.path.basename(rp)
+    return out
+
+
+def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
+    """Record live traffic on `interface` for `seconds` into a saved pcap (kept in
+    the capture dir so it then shows up under 'stored'), and analyze it. Passive:
+    a plain ``tcpdump -w`` with no injected traffic. Needs root for the capture
+    (the Ragnar service runs as root)."""
+    if not _have('tcpdump'):
+        return {'success': False, 'missing_tool': 'tcpdump',
+                'error': 'tcpdump is not installed. Click Install to add it.'}
+    valid = set(_list_iface_names(include_virtual=True))
+    if not valid:
+        return {'success': False, 'error': 'no capturable interfaces found'}
+    if not interface or interface not in valid:
+        return {'success': False,
+                'error': 'unknown interface — pick one of: %s'
+                         % ', '.join(sorted(valid))}
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        seconds = 10
+    seconds = max(3, min(max_seconds, seconds))
+
+    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+    safe_if = re.sub(r'[^A-Za-z0-9_.-]', '_', interface)
+    path = os.path.join(_pcap_capture_dir(), 'ragnar-%s-%s.pcap' % (safe_if, ts))
+
+    # -U writes each packet as it arrives, so the file is a valid pcap even though
+    # we stop tcpdump by killing it at the time window (it never self-terminates).
+    cmd = ['tcpdump', '-i', interface, '-w', path, '-s', '0', '-U', '-q']
+    if bpf:
+        bpf = str(bpf).strip()
+        if len(bpf) > 200:
+            return {'success': False, 'error': 'capture filter too long'}
+        cmd.append(bpf)          # tcpdump joins trailing args into the BPF filter
+    try:
+        subprocess.run(cmd, timeout=seconds, capture_output=True)
+    except subprocess.TimeoutExpired:
+        pass                     # expected: the timeout IS how we end the capture
+    except Exception as exc:     # pragma: no cover - defensive
+        return {'success': False, 'error': 'capture failed: %s' % exc}
+
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return {'success': False,
+                'error': 'capture produced no file — check that %s exists and the '
+                         'service can open it (needs root / a valid BPF filter)'
+                         % interface}
+    out = do_pcap_analyze(path)
+    if isinstance(out, dict):
+        out['captured_file'] = path
+        out['captured_name'] = os.path.basename(path)
+        out['interface'] = interface
+        out['seconds'] = seconds
+        if out.get('success') and not (out.get('summary') or {}).get('packets'):
+            out['note'] = ('Capture ran for %ds but recorded 0 packets on %s — '
+                           'wrong interface, or the filter matched nothing.'
+                           % (seconds, interface))
+    return out
+
+
+# --------------------------------------------------------------------------
 # Flow telemetry (per-connection RTT / retransmits) + PTP timing detection
 # --------------------------------------------------------------------------
 
@@ -15340,6 +15517,26 @@ def register_network_diagnostics(app, logger=None):
     def net_pcap():
         _log("net/pcap upload")
         return jsonify(do_pcap_from_upload(request.files.get('file')))
+
+    @app.route('/api/net/pcap/stored', methods=['GET'])
+    def net_pcap_stored():
+        _log("net/pcap stored list")
+        return jsonify(do_pcap_list_stored())
+
+    @app.route('/api/net/pcap/stored/analyze', methods=['POST'])
+    def net_pcap_stored_analyze():
+        data = request.get_json(silent=True) or {}
+        _log("net/pcap stored analyze")
+        return jsonify(do_pcap_analyze_path((data.get('path') or '').strip()))
+
+    @app.route('/api/net/pcap/capture', methods=['POST'])
+    def net_pcap_capture():
+        data = request.get_json(silent=True) or {}
+        _log("net/pcap capture")
+        return jsonify(do_pcap_capture(
+            interface=(data.get('interface') or '').strip() or None,
+            seconds=data.get('seconds', 10),
+            bpf=(data.get('bpf') or '').strip() or None))
 
     @app.route('/api/net/flows', methods=['GET'])
     def net_flows():
