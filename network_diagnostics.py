@@ -14243,11 +14243,18 @@ def _pcap_zero_note(iface, seconds):
     return base + ' — wrong interface, the cable is down, or the filter matched nothing.'
 
 
-def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
+def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60,
+                    monitor=False, channel=None):
     """Record live traffic on `interface` for `seconds` into a saved pcap (kept in
     the capture dir so it then shows up under 'stored'), and analyze it. Passive:
     a plain ``tcpdump -w`` with no injected traffic. Needs root for the capture
-    (the Ragnar service runs as root)."""
+    (the Ragnar service runs as root).
+
+    With ``monitor=True`` on a Wi-Fi interface, flip the adapter into monitor
+    mode (via wifi_defense.enable_monitor — a separate vif where the driver
+    allows it, else switching the adapter) and capture raw 802.11 with radiotap,
+    optionally parked on ``channel``. Monitor mode is always torn down afterward,
+    restoring the managed link."""
     if not _have('tcpdump'):
         return {'success': False, 'missing_tool': 'tcpdump',
                 'error': 'tcpdump is not installed. Click Install to add it.'}
@@ -14262,6 +14269,10 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
         return {'success': False,
                 'error': 'unknown interface — pick one of: %s'
                          % ', '.join(sorted(valid))}
+    if monitor and not _is_wireless(interface):
+        return {'success': False,
+                'error': '%s is not a Wi-Fi interface — monitor mode only applies '
+                         'to wireless adapters.' % interface}
     try:
         seconds = int(seconds)
     except (TypeError, ValueError):
@@ -14272,20 +14283,55 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
     safe_if = re.sub(r'[^A-Za-z0-9_.-]', '_', interface)
     path = os.path.join(_pcap_capture_dir(), 'ragnar-%s-%s.pcap' % (safe_if, ts))
 
-    # -U writes each packet as it arrives, so the file is a valid pcap even though
-    # we stop tcpdump by killing it at the time window (it never self-terminates).
-    cmd = ['tcpdump', '-i', interface, '-w', path, '-s', '0', '-U', '-q']
-    if bpf:
-        bpf = str(bpf).strip()
-        if len(bpf) > 200:
-            return {'success': False, 'error': 'capture filter too long'}
-        cmd.append(bpf)          # tcpdump joins trailing args into the BPF filter
+    # For monitor capture, put the radio into monitor mode first (and remember to
+    # restore it). cap_iface is what tcpdump actually listens on (a monitor vif
+    # like ragmon0, or the adapter itself in switch mode).
+    cap_iface = interface
+    mon_state = None
+    warning = None
+    if monitor:
+        try:
+            import wifi_defense
+        except Exception as exc:      # pragma: no cover - defensive
+            return {'success': False, 'error': 'monitor mode unavailable: %s' % exc}
+        res = wifi_defense.enable_monitor(interface)
+        if not isinstance(res, dict) or res.get('error'):
+            return {'success': False,
+                    'error': 'could not enable monitor mode: %s'
+                             % (res or {}).get('error', 'unknown')}
+        mon_state = res
+        cap_iface = res.get('mon_iface') or interface
+        warning = res.get('warning')
+        if channel:
+            try:
+                _run(['iw', 'dev', cap_iface, 'set', 'channel', str(int(channel))],
+                     timeout=5)
+            except (ValueError, TypeError):
+                channel = None       # ignore a non-numeric channel
+
     try:
-        subprocess.run(cmd, timeout=seconds, capture_output=True)
-    except subprocess.TimeoutExpired:
-        pass                     # expected: the timeout IS how we end the capture
-    except Exception as exc:     # pragma: no cover - defensive
-        return {'success': False, 'error': 'capture failed: %s' % exc}
+        # -U writes each packet as it arrives, so the file is a valid pcap even
+        # though we stop tcpdump by killing it at the time window (it never
+        # self-terminates).
+        cmd = ['tcpdump', '-i', cap_iface, '-w', path, '-s', '0', '-U', '-q']
+        if bpf:
+            bpf = str(bpf).strip()
+            if len(bpf) > 200:
+                return {'success': False, 'error': 'capture filter too long'}
+            cmd.append(bpf)          # tcpdump joins trailing args into the BPF filter
+        try:
+            subprocess.run(cmd, timeout=seconds, capture_output=True)
+        except subprocess.TimeoutExpired:
+            pass                     # expected: the timeout IS how we end the capture
+        except Exception as exc:     # pragma: no cover - defensive
+            return {'success': False, 'error': 'capture failed: %s' % exc}
+    finally:
+        if mon_state:                # always restore the managed link
+            try:
+                import wifi_defense
+                wifi_defense.disable_monitor(mon_state.get('mon_iface'))
+            except Exception:        # pragma: no cover - best-effort restore
+                pass
 
     if not os.path.isfile(path) or os.path.getsize(path) == 0:
         return {'success': False,
@@ -14298,8 +14344,17 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
         out['captured_name'] = os.path.basename(path)
         out['interface'] = interface
         out['seconds'] = seconds
+        out['monitor'] = bool(monitor)
+        if warning:
+            out['monitor_warning'] = warning
         if out.get('success') and not (out.get('summary') or {}).get('packets'):
-            out['note'] = _pcap_zero_note(interface, seconds)
+            if monitor:
+                out['note'] = ('Monitor capture saw 0 frames in %ds%s — the radio may '
+                               'be on a channel with no nearby APs. Set a channel with '
+                               'active traffic and retry.'
+                               % (seconds, (' on ch %s' % channel) if channel else ''))
+            else:
+                out['note'] = _pcap_zero_note(interface, seconds)
     return out
 
 
@@ -15638,7 +15693,9 @@ def register_network_diagnostics(app, logger=None):
         return jsonify(do_pcap_capture(
             interface=(data.get('interface') or '').strip() or None,
             seconds=data.get('seconds', 10),
-            bpf=(data.get('bpf') or '').strip() or None))
+            bpf=(data.get('bpf') or '').strip() or None,
+            monitor=bool(data.get('monitor')),
+            channel=(data.get('channel') or None)))
 
     @app.route('/api/net/flows', methods=['GET'])
     def net_flows():

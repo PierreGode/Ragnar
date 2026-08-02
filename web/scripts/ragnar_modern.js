@@ -5513,11 +5513,12 @@ function renderPcapResults(d, out) {
         ? `<p class="text-xs text-green-400 mb-2">🎥 Captured <span class="font-mono">${escapeHtml(d.captured_name)}</span> on ${escapeHtml(d.interface || '')} for ${d.seconds || ''}s — saved to Ragnar (see “Open stored pcap”).</p>`
         : (d.source_name ? `<p class="text-xs text-gray-400 mb-2">📁 <span class="font-mono">${escapeHtml(d.source_name)}</span></p>` : '');
     const note = d.note ? `<p class="text-xs text-amber-300 mb-2">${escapeHtml(d.note)}</p>` : '';
+    const monWarn = d.monitor_warning ? `<p class="text-xs text-amber-300 mb-2">📡 ${escapeHtml(d.monitor_warning)}</p>` : '';
 
     const aiBtn = `<div class="mt-3 flex flex-wrap gap-2"><button onclick="aiAnalyzePcap()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">🧠 Explain with AI</button>
         <button onclick="pcapExportReport()" title="Open a printable capture report (Save as PDF)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">📄 Export as PDF</button>
         <div id="pcap-ai-results" class="hidden mt-2 w-full"></div></div>`;
-    out.innerHTML = srcNote + note + stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
+    out.innerHTML = srcNote + note + monWarn + stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
     _lastPcap = d;
     _lastPcapAI = null;   // new capture — drop any AI summary from a previous one
 }
@@ -5755,13 +5756,19 @@ async function startPcapCapture() {
     let secs = parseInt((document.getElementById('pcap-cap-secs') || {}).value, 10);
     if (!Number.isFinite(secs)) secs = 10;
     const bpf = ((document.getElementById('pcap-cap-bpf') || {}).value || '').trim();
+    const monitor = !!(document.getElementById('pcap-cap-monitor') || {}).checked;
+    const channel = ((document.getElementById('pcap-cap-chan') || {}).value || '').trim();
     const out = document.getElementById('pcap-results');
     const btn = event && event.target ? event.target : null;
     _ndBusy(btn, true, 'Capturing…');
     out.classList.remove('hidden');
-    out.innerHTML = '<p class="text-sm text-gray-400">Capturing on ' + (iface ? escapeHtml(iface) : 'auto (wired first)') + ' for ' + secs + 's… (this blocks for the capture window)</p>';
+    out.innerHTML = '<p class="text-sm text-gray-400">' + (monitor ? '📡 Monitor-mode capturing 802.11 on ' : 'Capturing on ')
+        + (iface ? escapeHtml(iface) : 'auto (wired first)')
+        + (monitor && channel ? ' ch ' + escapeHtml(channel) : '')
+        + ' for ' + secs + 's… (this blocks for the capture window'
+        + (monitor ? ', plus a moment to switch the radio in and out of monitor mode' : '') + ')</p>';
     try {
-        const d = await postAPI('/api/net/pcap/capture', { interface: iface, seconds: secs, bpf: bpf });
+        const d = await postAPI('/api/net/pcap/capture', { interface: iface, seconds: secs, bpf: bpf, monitor: monitor, channel: channel });
         if (!d.success) {
             out.innerHTML = d.missing_tool ? _ndMissingTool(d, null)
                 : '<p class="text-sm text-red-400">Error: ' + escapeHtml(d.error || 'failed') + '</p>';
