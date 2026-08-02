@@ -1926,6 +1926,16 @@ There are **three ways to feed it a capture**, all landing on the same analysis
    analyzes it immediately. Capturing needs root — the Ragnar service already
    runs as root.
 
+   **📡 Monitor mode** (Wi-Fi adapters only) — tick it to capture raw **802.11**
+   instead of the adapter's own managed traffic: beacons, deauth/disassoc, and
+   nearby devices' frames, with an optional **channel** to park on. Ragnar flips
+   the radio into monitor mode via the same primitive the Wi-Fi Defense tools use
+   (a separate `ragmon0` vif where the driver allows it, otherwise switching the
+   adapter itself) and **always restores it afterward**. The resulting 802.11
+   capture feeds the analyzer's Wi-Fi/AP breakdown (deauth reasons, retries,
+   SSIDs). Best with a dedicated adapter (e.g. an Alfa) — monitor mode briefly
+   takes that card off its network. Needs a radio that supports monitor mode.
+
 Every source then shows:
 
 - **Summary** — packets, size, duration, average packet size, data rate,
