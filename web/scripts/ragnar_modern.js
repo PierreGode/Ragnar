@@ -5608,7 +5608,7 @@ function pcapExportReport() {
             body.push(`<p>${line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')}</p>`);
         });
         closeList();
-        ai = `<h2>AI analysis</h2><div class="ai">${body.join('')}</div>`;
+        ai = `<h2>Analysis</h2><div class="ai">${body.join('')}</div>`;
     }
 
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>PCAP Analysis Report</title>
