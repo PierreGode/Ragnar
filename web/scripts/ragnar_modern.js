@@ -5727,8 +5727,8 @@ function pcapShowCapture() {
     const panel = document.getElementById('pcap-panel');
     panel.classList.remove('hidden');
     panel.innerHTML = `<div class="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-2">
-        <label class="text-sm text-gray-400">Interface<br><select id="pcap-cap-iface" class="mt-1 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></select></label>
-        <label class="text-sm text-gray-400">Seconds<br><input id="pcap-cap-secs" type="number" min="3" max="60" value="10" class="mt-1 w-20 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></label>
+        <label class="text-sm text-gray-400">Interface<br><select id="pcap-cap-iface" title="Interface to capture on — pick your WiFi or LAN NIC (monitor-mode interfaces are listed too)" class="mt-1 w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"></select></label>
+        <label class="text-sm text-gray-400">Seconds<br><input id="pcap-cap-secs" type="number" min="3" max="60" value="10" class="mt-1 w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300"></label>
         <label class="text-sm text-gray-400 sm:flex-1 sm:min-w-[12rem]">Filter <span class="text-gray-600">(optional BPF)</span><br><input id="pcap-cap-bpf" type="text" placeholder="e.g. tcp port 443 or host 10.0.0.5" class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-sm text-gray-200"></label>
         <button onclick="startPcapCapture()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Start capture</button>
     </div><p class="text-xs text-gray-500 mt-2">Records passively with tcpdump, then analyzes the result. The file is saved under Ragnar, so it also shows up in “Open stored pcap”.</p>`;
