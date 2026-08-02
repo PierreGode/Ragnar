@@ -14143,6 +14143,56 @@ def do_pcap_analyze_path(path):
     return out
 
 
+def _pcap_auto_iface(valid):
+    """Resolve the 'Auto (wired first)' choice for live capture.
+
+    Among interfaces that are link-up (carrier==1), prefer in this order:
+      1. wired LAN (onboard Ethernet)
+      2. USB wired LAN (Ethernet via a USB adapter / gadget)
+      3. wlan1+ (e.g. an external USB Wi-Fi dongle)
+      4. wlan0 (onboard Wi-Fi)
+
+    Unlike _capture_iface() (which targets wired SPAN/mirror ports and skips
+    wireless, so it comes back empty on a WiFi-managed box whose cables are
+    down), this always falls back to any usable interface so Auto never errors.
+    """
+    skip = ('br-', 'veth', 'docker', 'tun', 'tap', 'wg', 'zt', 'tailscale')
+
+    def _up(name):
+        try:
+            with open('/sys/class/net/%s/carrier' % name) as f:
+                return f.read().strip() == '1'
+        except OSError:      # admin-down / no carrier file — treat as down
+            return False
+
+    def _is_usb(name):
+        try:
+            return '/usb' in os.path.realpath('/sys/class/net/%s' % name)
+        except OSError:
+            return False
+
+    def _rank(name):
+        if _is_wireless(name):
+            return 4 if name == 'wlan0' else 3
+        return 2 if _is_usb(name) else 1
+
+    cands = [n for n in _list_iface_names(include_virtual=False)
+             if n in valid and not n.startswith(skip)]
+    up = [n for n in cands if _up(n)]
+    if up:
+        up.sort(key=lambda n: (_rank(n), n))
+        return up[0]
+    # Nothing link-up: fall back to the default route, else the first real NIC,
+    # else anything capturable — so Auto still resolves to *something*.
+    dflt = _default_route_iface()
+    if dflt and dflt in valid:
+        return dflt
+    if cands:
+        cands.sort(key=lambda n: (_rank(n), n))
+        return cands[0]
+    return sorted(valid)[0] if valid else None
+
+
 def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
     """Record live traffic on `interface` for `seconds` into a saved pcap (kept in
     the capture dir so it then shows up under 'stored'), and analyze it. Passive:
@@ -14154,10 +14204,10 @@ def do_pcap_capture(interface=None, seconds=10, bpf=None, max_seconds=60):
     valid = set(_list_iface_names(include_virtual=True))
     if not valid:
         return {'success': False, 'error': 'no capturable interfaces found'}
-    # Empty selection means "Auto (wired first)" — resolve it the same way the
-    # L2/L3 Watch scanners do, so the PCAP capture picker behaves like the rest.
+    # Empty selection means "Auto (wired first)": pick the best link-up NIC
+    # (LAN > USB LAN > wlan1 > wlan0), falling back so it never errors.
     if not interface:
-        interface = _capture_iface()
+        interface = _pcap_auto_iface(valid)
     if not interface or interface not in valid:
         return {'success': False,
                 'error': 'unknown interface — pick one of: %s'
