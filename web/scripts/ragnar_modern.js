@@ -5511,10 +5511,101 @@ function renderPcapResults(d, out) {
         : (d.source_name ? `<p class="text-xs text-gray-400 mb-2">📁 <span class="font-mono">${escapeHtml(d.source_name)}</span></p>` : '');
     const note = d.note ? `<p class="text-xs text-amber-300 mb-2">${escapeHtml(d.note)}</p>` : '';
 
-    const aiBtn = `<div class="mt-3"><button onclick="aiAnalyzePcap()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">🧠 Explain with AI</button>
-        <div id="pcap-ai-results" class="hidden mt-2"></div></div>`;
+    const aiBtn = `<div class="mt-3 flex flex-wrap gap-2"><button onclick="aiAnalyzePcap()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">🧠 Explain with AI</button>
+        <button onclick="pcapExportReport()" title="Open a printable capture report (Save as PDF)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">📄 Export as PDF</button>
+        <div id="pcap-ai-results" class="hidden mt-2 w-full"></div></div>`;
     out.innerHTML = srcNote + note + stats + `<div class="overflow-x-auto">${protoTable}${talkTable}</div>` + _pcapWifiHtml(d.wifi) + expert + aiBtn;
     _lastPcap = d;
+}
+
+// Build a printable one-page report from the last analyzed capture and hand it
+// to the browser's print dialog (→ "Save as PDF"). Same pop-up + window.print()
+// pattern as wifiExportReport(); no external libraries, works offline on a Pi.
+function pcapExportReport() {
+    const d = _lastPcap;
+    if (!d) { alert('Analyze a capture first.'); return; }
+    const s = d.summary || {};
+    const now = new Date();
+
+    const summRows = [
+        ['Packets', s.packets != null ? s.packets : '—'],
+        ['Size', _pcapBytes(s.file_size)],
+        ['Duration', s.duration_s != null ? s.duration_s + ' s' : '—'],
+        ['Avg packet', s.avg_packet_size != null ? Math.round(s.avg_packet_size) + ' B' : '—'],
+        ['Data rate', s.data_byte_rate != null ? _pcapBytes(s.data_byte_rate) + '/s' : '—'],
+        ['Encapsulation', s.encapsulation ? escapeHtml(String(s.encapsulation)) : '—'],
+    ].map(r => `<tr><th>${r[0]}</th><td>${r[1]}</td></tr>`).join('');
+    const window_ = s.start_time
+        ? `<p class="sub">${escapeHtml(String(s.start_time))} → ${escapeHtml(String(s.end_time || ''))}</p>` : '';
+
+    const protoRows = (d.protocols || []).map(p =>
+        `<tr><td class="mono">${'&nbsp;&nbsp;'.repeat(p.depth)}${escapeHtml(p.proto)}</td>
+         <td class="num">${p.frames}</td><td class="num">${_pcapBytes(p.bytes)}</td></tr>`).join('');
+    const protoTable = protoRows ? `<h2>Protocol hierarchy</h2>
+        <table><thead><tr><th>Protocol</th><th class="num">Frames</th><th class="num">Bytes</th></tr></thead>
+        <tbody>${protoRows}</tbody></table>` : '';
+
+    const talkRows = (d.talkers || []).map(t =>
+        `<tr><td class="mono">${escapeHtml(t.a)} ↔ ${escapeHtml(t.b)}</td>
+         <td class="num">${t.frames}</td><td class="num">${_pcapBytes(t.bytes)}</td></tr>`).join('');
+    const talkTable = talkRows ? `<h2>Top talkers</h2>
+        <table><thead><tr><th>Conversation</th><th class="num">Frames</th><th class="num">Bytes</th></tr></thead>
+        <tbody>${talkRows}</tbody></table>` : '';
+
+    const ex = d.expert || {};
+    const exRows = (ex.items || []).map(i =>
+        `<li>×${i.count} <b>${escapeHtml(i.protocol)}</b> — ${escapeHtml(i.summary)} <i>(${escapeHtml(i.severity || '')})</i></li>`).join('');
+    const expert = `<h2>Expert info — ${ex.errors || 0} err · ${ex.warnings || 0} warn · ${ex.notes || 0} note</h2>
+        ${exRows ? '<ul>' + exRows + '</ul>' : '<p>No expert findings.</p>'}`;
+
+    // Wi-Fi section (only for 802.11 captures).
+    let wifi = '';
+    const w = d.wifi;
+    if (w && w.is_wifi) {
+        const codeTbl = (title, obj, keyName) => {
+            const rows = (obj && obj.by_reason || obj && obj.by_status || []).map(r =>
+                `<tr><td class="num">${r.code}</td><td>${escapeHtml(r.label)}</td><td class="num">${r.count}</td></tr>`).join('');
+            return (obj && obj.total) ? `<h3>${title} (${obj.total})</h3>
+                <table><thead><tr><th class="num">Code</th><th>Meaning</th><th class="num">Count</th></tr></thead>
+                <tbody>${rows}</tbody></table>` : '';
+        };
+        const findings = (w.findings || []).map(f => `<li>⚠ ${escapeHtml(f)}</li>`).join('');
+        wifi = `<h2>Wi-Fi / AP analysis</h2>
+            <p class="sub">${w.wlan_frames} 802.11 frames · retries ${w.retry_pct != null ? w.retry_pct + '%' : '—'} · EAPOL ${w.eapol_frames} · SSIDs: ${(w.ssids || []).map(escapeHtml).join(', ') || '—'}</p>
+            ${findings ? '<ul>' + findings + '</ul>' : ''}
+            ${codeTbl('Deauthentication reasons', w.deauth)}
+            ${codeTbl('Disassociation reasons', w.disassoc)}
+            ${codeTbl('Auth / Assoc failures', w.auth_assoc_failures)}`;
+    }
+
+    const srcLine = d.captured_name
+        ? 'Captured ' + escapeHtml(d.captured_name) + ' on ' + escapeHtml(d.interface || '') + ' for ' + (d.seconds || '') + 's'
+        : (d.source_name ? escapeHtml(d.source_name) : 'Uploaded capture');
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>PCAP Analysis Report</title>
+<style>
+  body{font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}
+  h1{font-size:22px;margin:0 0 2px} h2{font-size:15px;margin:22px 0 6px;border-bottom:1px solid #ddd;padding-bottom:3px}
+  h3{font-size:13px;margin:14px 0 4px} .sub{color:#666;font-size:12px;margin-bottom:14px}
+  table{border-collapse:collapse;width:100%;font-size:11.5px;margin-top:4px} th,td{border:1px solid #ddd;padding:3px 6px;text-align:left}
+  th{background:#f4f4f5} td.num,th.num{text-align:right;white-space:nowrap} .mono{font-family:ui-monospace,monospace;font-size:10.5px}
+  ul{margin:4px 0;padding-left:20px} .foot{margin-top:26px;color:#999;font-size:11px} @media print{body{margin:0}}
+</style></head><body>
+  <h1>PCAP Analysis Report</h1>
+  <div class="sub">${now.toLocaleString()} · ${srcLine}${d.note ? ' · ' + escapeHtml(d.note) : ''}</div>
+  <h2>Summary</h2>
+  ${window_}
+  <table><tbody>${summRows}</tbody></table>
+  ${protoTable}
+  ${talkTable}
+  ${wifi}
+  ${expert}
+  <div class="foot">Generated by Ragnar PCAP Analyzer (tshark/capinfos). Passive triage — read-only.</div>
+  <script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script>
+</body></html>`;
+    const win = window.open('', '_blank');
+    if (!win) { alert('Allow pop-ups to generate the report.'); return; }
+    win.document.open(); win.document.write(html); win.document.close();
 }
 
 // PCAP source #1 — upload a capture from your machine.
