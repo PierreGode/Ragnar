@@ -5555,14 +5555,18 @@ async function pcapShowStored() {
                 escapeHtml(((d && d.roots) || []).join(', ')) + '.</p>';
             return;
         }
-        const rows = files.map(fl => `<tr class="border-t border-slate-800">
-            <td class="px-3 py-1 font-mono text-xs">${fl.captured ? '🎥 ' : ''}${escapeHtml(fl.name)}<div class="text-gray-600">${escapeHtml(fl.dir)}</div></td>
-            <td class="px-3 py-1 text-right text-gray-400 whitespace-nowrap">${_pcapBytes(fl.size)}</td>
-            <td class="px-3 py-1 text-right text-gray-500 whitespace-nowrap">${new Date(fl.mtime * 1000).toLocaleString()}</td>
-            <td class="px-3 py-1 text-right"><button data-path="${encodeURIComponent(fl.path)}" onclick="analyzeStoredPcap(this)" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-2 py-1 rounded text-xs whitespace-nowrap">Analyze</button></td></tr>`).join('');
-        panel.innerHTML = `<div class="overflow-x-auto"><table class="min-w-full text-sm text-gray-300">
-            <thead><tr class="text-left text-xs uppercase text-gray-500"><th class="px-3 py-1">File</th><th class="px-3 py-1 text-right">Size</th><th class="px-3 py-1 text-right">Modified</th><th class="px-3 py-1"></th></tr></thead>
-            <tbody>${rows}</tbody></table></div>${d.truncated ? '<p class="text-xs text-gray-500 mt-1">Showing the newest ' + files.length + '.</p>' : ''}`;
+        // Stacked list (not a wide table) so it reads well on a phone: name +
+        // meta break/wrap in a min-w-0 flex child, button goes full-width on
+        // mobile and inline on ≥sm.
+        const items = files.map(fl => `<div class="flex flex-col sm:flex-row sm:items-center gap-2 py-2 border-t border-slate-800">
+            <div class="min-w-0 flex-1">
+                <div class="font-mono text-sm text-gray-200 break-all">${fl.captured ? '🎥 ' : ''}${escapeHtml(fl.name)}</div>
+                <div class="text-xs text-gray-500 break-all">${escapeHtml(fl.dir)}</div>
+                <div class="text-xs text-gray-500 mt-0.5">${_pcapBytes(fl.size)} · ${new Date(fl.mtime * 1000).toLocaleString()}</div>
+            </div>
+            <button data-path="${encodeURIComponent(fl.path)}" onclick="analyzeStoredPcap(this)" class="w-full sm:w-auto shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded text-sm whitespace-nowrap">Analyze</button>
+        </div>`).join('');
+        panel.innerHTML = `<div>${items}</div>${d.truncated ? '<p class="text-xs text-gray-500 mt-2">Showing the newest ' + files.length + '.</p>' : ''}`;
     } catch (e) {
         panel.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
     } finally {
