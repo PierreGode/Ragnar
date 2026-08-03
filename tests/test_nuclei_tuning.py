@@ -83,3 +83,36 @@ def test_disable_update_check_always_present(monkeypatch):
     for total, avail in [(0.42, 0.25), (1.0, 0.6), (8.0, 6.0)]:
         flags, _env, _sev, _note = _tuning(monkeypatch, total, avail)
         assert "-disable-update-check" in flags
+
+
+# --- memory pre-flight guard -------------------------------------------------
+
+def _scanner():
+    s = AdvancedVulnScanner.__new__(AdvancedVulnScanner)
+    s.shared_data = None
+    return s
+
+
+def test_precheck_refuses_when_free_ram_too_low(monkeypatch):
+    s = _scanner()
+    monkeypatch.setattr(s, "_available_mib", lambda: 120)
+    # 140MiB heap cap -> needs ~224MB; only 120 free -> refuse with numbers.
+    err = s._nuclei_memory_precheck({"GOMEMLIMIT": "140MiB"})
+    assert err and "120MB free" in err
+
+
+def test_precheck_allows_when_enough_free(monkeypatch):
+    s = _scanner()
+    monkeypatch.setattr(s, "_available_mib", lambda: 400)
+    assert s._nuclei_memory_precheck({"GOMEMLIMIT": "140MiB"}) is None
+
+
+def test_precheck_skips_unconstrained_boards():
+    # No GOMEMLIMIT => capable board => never guarded, even if we can't read RAM.
+    assert _scanner()._nuclei_memory_precheck({}) is None
+
+
+def test_precheck_does_not_block_when_memory_unreadable(monkeypatch):
+    s = _scanner()
+    monkeypatch.setattr(s, "_available_mib", lambda: None)
+    assert s._nuclei_memory_precheck({"GOMEMLIMIT": "140MiB"}) is None

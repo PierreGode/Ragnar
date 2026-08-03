@@ -20,6 +20,7 @@ import re
 import json
 import time
 import shutil
+import signal
 import threading
 import subprocess
 import tempfile
@@ -447,6 +448,10 @@ class AdvancedVulnScanner:
         # A list per scan_id because a Full scan runs several tools concurrently.
         self._scan_processes: Dict[str, List[subprocess.Popen]] = {}
         self._scan_processes_lock = threading.Lock()
+        # PIDs launched in their own session (start_new_session=True) so we can
+        # kill the whole process group — e.g. nuclei under a systemd-run scope,
+        # or nuclei plus the helpers it spawns — instead of just the leader.
+        self._session_leader_pids: set = set()
 
         # Cached result of the passwordless-sudo probe for nmap
         self._nmap_sudo_ok: Optional[bool] = None
@@ -1455,6 +1460,77 @@ class AdvancedVulnScanner:
 
         return flags, env, severity, note
 
+    @staticmethod
+    def _available_mib() -> Optional[int]:
+        """Free RAM right now, in MiB (None if it can't be read)."""
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available / (1024 * 1024))
+        except Exception:
+            pass
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemAvailable:'):
+                        return int(int(line.split()[1]) / 1024)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _memory_cgroup_available() -> bool:
+        """True when a hard memory cap via systemd-run will actually bite.
+
+        Needs systemd-run present and the cgroup-v2 memory controller enabled.
+        On Raspberry Pi the memory controller is often off until
+        `cgroup_enable=memory cgroup_memory=1` is added to the kernel cmdline,
+        so this can be False even with systemd — in which case we don't wrap
+        (the flag would be silently ignored anyway).
+        """
+        if not shutil.which('systemd-run'):
+            return False
+        try:
+            with open('/sys/fs/cgroup/cgroup.controllers') as f:
+                return 'memory' in f.read().split()
+        except Exception:
+            return False
+
+    def _nuclei_memory_precheck(self, nuclei_env: Dict[str, str]) -> Optional[str]:
+        """Return an error string if there isn't enough free RAM to run nuclei
+        safely under this tier, else None.
+
+        Only guards constrained tiers (those that set a GOMEMLIMIT). GOMEMLIMIT
+        is a soft cap, so on a small board that's already low on free memory,
+        starting nuclei can push it into swap thrash and lock the whole board
+        up — a clean refusal with the numbers is the right call.
+        """
+        m = re.match(r'(\d+)MiB', nuclei_env.get('GOMEMLIMIT', ''))
+        if not m:
+            return None  # unconstrained board — plenty of headroom
+        need_mib = int(int(m.group(1)) * 1.6)  # heap cap + parsing/runtime overhead
+        free_mib = self._available_mib()
+        if free_mib is None or free_mib >= need_mib:
+            return None
+        return (f"Not enough free memory to run Nuclei safely: {free_mib}MB free, "
+                f"need ~{need_mib}MB. Nuclei is memory-hungry and a 512MB board is "
+                f"borderline — stop other Ragnar features to free RAM, or run Nuclei "
+                f"from a larger unit. Refusing rather than risk locking up the board.")
+
+    def _hard_kill(self, process: subprocess.Popen) -> None:
+        """Kill a scan process — the whole group if we started it in its own
+        session, so children (and a systemd-run scope) go too."""
+        try:
+            pid = process.pid
+            if pid in self._session_leader_pids:
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    return
+                except Exception:
+                    pass
+            process.kill()
+        except Exception:
+            pass
+
     def _parse_nuclei_progress(self, stderr_path: str) -> Optional[int]:
         """Extract a 0-99 completion percentage from nuclei's -stats output.
 
@@ -1532,8 +1608,39 @@ class AdvancedVulnScanner:
         if tuning_note:
             self._scan_log(scan_id, 'info', f"Nuclei tuning — {tuning_note}")
 
+        # On a constrained board, refuse to start if free RAM is already too
+        # low — better a clean failure with the numbers than a locked-up Pi.
+        precheck_error = self._nuclei_memory_precheck(nuclei_env)
+        if precheck_error:
+            self._scan_log(scan_id, 'error', precheck_error)
+            progress.error_message = precheck_error
+            raise RuntimeError(precheck_error)
+
+        gomem_mib = None
+        _gm = re.match(r'(\d+)MiB', nuclei_env.get('GOMEMLIMIT', ''))
+        if _gm:
+            gomem_mib = int(_gm.group(1))
+
+        # If a GOMEMLIMIT tier applies and the kernel's memory cgroup is enabled,
+        # wrap nuclei in a systemd-run scope with a HARD MemoryMax and swap off,
+        # so a runaway is OOM-killed cleanly instead of taking the Pi with it.
+        cgroup_prefix = []
+        use_session = False
+        if gomem_mib and self._memory_cgroup_available():
+            hard_mib = int(gomem_mib * 1.5)
+            cgroup_prefix = [
+                'systemd-run', '--scope', '--quiet', '--collect',
+                '-p', f'MemoryMax={hard_mib}M',
+                '-p', 'MemorySwapMax=0',
+                '--',
+            ]
+            use_session = True
+            self._scan_log(scan_id, 'info',
+                           f"Nuclei hard memory cap: {hard_mib}MB (systemd-run, swap off)")
+
         try:
             cmd = [
+                *cgroup_prefix,
                 nuclei_path,
                 '-u', target,
                 '-jsonl',
@@ -1596,7 +1703,12 @@ class AdvancedVulnScanner:
                     stderr=errf,
                     text=True,
                     env={**os.environ, **nuclei_env},
+                    # New session when wrapped so we can kill the whole group
+                    # (systemd-run scope + nuclei) on cancel/timeout.
+                    start_new_session=use_session,
                 )
+                if use_session:
+                    self._session_leader_pids.add(process.pid)
                 self._register_scan_process(scan_id, process)
 
                 # Monitor progress with a hard runtime cap so a hung nuclei
@@ -1609,11 +1721,11 @@ class AdvancedVulnScanner:
                 while process.poll() is None:
                     time.sleep(2)
                     if self._is_scan_cancelled(scan_id):
-                        process.kill()
+                        self._hard_kill(process)
                         break
                     if time.monotonic() - start_time > max_runtime:
                         self._scan_log(scan_id, 'warning', f"Nuclei scan exceeded {max_runtime}s, terminating")
-                        process.kill()
+                        self._hard_kill(process)
                         break
                     # Drive the progress bar from nuclei's own -stats output
                     # (written to the stderr file). It prints a line ending in
@@ -1634,6 +1746,7 @@ class AdvancedVulnScanner:
                             progress.findings_count = len(lines)
             finally:
                 errf.close()
+                self._session_leader_pids.discard(process.pid)
 
             returncode = process.returncode
             stderr_text = ''
@@ -1643,10 +1756,24 @@ class AdvancedVulnScanner:
             except Exception:
                 pass
 
+            # A hard memory cap that fired shows up as SIGKILL (137 / -9) or an
+            # explicit OOM note. Say so plainly instead of a bare exit code, so
+            # the operator knows the board — not the target — is the limit.
+            oom_hit = (returncode in (137, -9)
+                       or 'signal: killed' in stderr_text.lower()
+                       or 'out of memory' in stderr_text.lower())
+            if oom_hit and not self._is_scan_cancelled(scan_id):
+                msg = ("Nuclei ran out of memory and was killed to protect the board. "
+                       "This Pi is too small for the selected scan — narrow the templates "
+                       "(severity high,critical), scan fewer paths, or run Nuclei from a "
+                       "larger unit.")
+                self._scan_log(scan_id, 'error', msg)
+                progress.error_message = msg
+
             # Surface nuclei's own diagnostics — previously these were discarded,
             # leaving "0 findings" indistinguishable from a hard failure.
             lower_err = stderr_text.lower()
-            if returncode not in (0, None) and not self._is_scan_cancelled(scan_id):
+            if returncode not in (0, None) and not oom_hit and not self._is_scan_cancelled(scan_id):
                 tail = stderr_text.strip()[-600:]
                 self._scan_log(scan_id, 'warning',
                                f"Nuclei exited with code {returncode}" + (f": {tail}" if tail else ""))
@@ -6282,7 +6409,7 @@ class AdvancedVulnScanner:
             for process in processes:
                 if process.poll() is None:
                     try:
-                        process.kill()
+                        self._hard_kill(process)
                         self._scan_log(scan_id, 'info', "Terminated scan process on cancel")
                     except Exception as e:
                         logger.debug(f"Error killing process for {scan_id}: {e}")
