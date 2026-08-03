@@ -19307,6 +19307,7 @@ def get_server_capabilities_api():
                 'traffic_analysis': False,
                 'traffic_sidecars': False,
                 'advanced_vuln_assessment': False,
+                'zap': False,
                 'parallel_scanning': False,
                 'local_ai': False,
                 'large_dictionaries': False,
@@ -19378,14 +19379,10 @@ def install_server_tools():
         data = request.get_json(silent=True) or {}
         feature = data.get('feature', '')
 
-        # Traffic Analysis runs on any board, so installing its tools (tcpdump)
-        # must work on any board too. Server-class features still need one.
-        if feature != 'traffic_analysis' and not caps.is_server_mode():
-            return jsonify({
-                'success': False,
-                'error': 'Server mode not available on this system'
-            }), 400
-
+        # Traffic Analysis and the Advanced Vuln CLI scanners (nmap/nuclei/
+        # nikto/sqlmap/whatweb) run on any board, so installing their tools must
+        # work on any board too. ZAP is not in this install set — it has its own
+        # RAM gate — so there is no longer a server-mode-only install path here.
         if feature not in ['traffic_analysis', 'advanced_vuln']:
             return jsonify({
                 'success': False,

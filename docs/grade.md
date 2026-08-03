@@ -64,9 +64,11 @@ auth layer that most hobby tools lack.
 
 1. **Breadth over depth** — every module trails its specialist (Zeek / Wazuh /
    Nessus / Burp) on depth, QA, and false-positive discipline.
-2. **8GB-gating** — advanced vuln scanning and the heavy intel features do not
-   run on the Pi Zero tier. (Traffic analysis used to be in this list; it is a
-   tcpdump pipe, so it now runs on any board — see
+2. **8GB-gating** — OWASP ZAP (a ~1GB+ Java daemon), parallel scanning, and the
+   heavy intel features do not run on the Pi Zero tier. (Two things used to be
+   in this list and no longer are: the rest of the Adv Scan tab — Nuclei /
+   Nikto / SQLMap / WhatWeb / Nmap — now runs on any board with `nmap`, and
+   Traffic Analysis, a tcpdump pipe, runs on any board — see
    [Traffic Analysis](traffic-analysis.md).)
 3. **Unverified claims** — e.g. the "predictive ML / threat attribution" in
    `threat_intelligence.py` is credited from docstrings, not confirmed behavior.

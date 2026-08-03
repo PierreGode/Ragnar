@@ -728,7 +728,7 @@
                             <span>Traffic</span>
                         </span>
                     </button>
-                    <button onclick="showTab('adv-vuln')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap server-mode-feature hidden" data-tab="adv-vuln">
+                    <button onclick="showTab('adv-vuln')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="adv-vuln">
                         <span class="flex items-center space-x-1">
                             <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
@@ -796,7 +796,7 @@
                 </button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
                 <button onclick="showTab('traffic')" data-tab="traffic" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 traffic-feature hidden">Traffic Analysis</button>
-                <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 server-mode-feature hidden">Adv Scan</button>
+                <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Adv Scan</button>
                 <button onclick="showTab('wardriving')" data-tab="wardriving" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 wardriving-feature hidden">Wardriving</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 requires-display">Display</button>
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
@@ -5187,7 +5187,6 @@
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                     <div class="flex items-center space-x-3">
                         <h2 class="text-lg sm:text-2xl font-bold">Advanced Vulnerability Scanning</h2>
-                        <span class="px-2 py-1 bg-cyan-600 bg-opacity-30 text-cyan-400 text-xs rounded-full whitespace-nowrap">Server Mode</span>
                     </div>
                     <button onclick="refreshAdvVulnData()" class="w-full sm:w-auto refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors text-sm sm:text-base">
                         <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -5485,7 +5484,7 @@
                                         <option value="nmap_vuln">Nmap Vuln Scripts</option>
                                         <option value="whatweb">WhatWeb (Fingerprint)</option>
                                     </optgroup>
-                                    <optgroup label="OWASP ZAP">
+                                    <optgroup label="OWASP ZAP" id="adv-vuln-zap-optgroup">
                                         <option value="zap_spider">ZAP Spider (Discovery)</option>
                                         <option value="zap_active">ZAP Active Scan</option>
                                         <option value="zap_full">ZAP Full Scan (Recommended)</option>
@@ -5814,17 +5813,18 @@
                     </div>
                 </div>
 
-                <!-- Server Mode Notice -->
+                <!-- Scanner unavailable notice -->
                 <div id="adv-vuln-not-available" class="hidden mt-6 p-4 bg-yellow-900 bg-opacity-30 border border-yellow-600 rounded-lg">
                     <div class="flex items-start">
                         <svg class="w-6 h-6 text-yellow-500 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                         </svg>
                         <div>
-                            <h4 class="font-semibold text-yellow-400">Server Mode Required</h4>
+                            <h4 class="font-semibold text-yellow-400">Scanner Unavailable</h4>
                             <p class="text-gray-300 text-sm mt-1">
-                                Advanced vulnerability scanning requires Server Mode (AMD64/ARM64 with 8GB+ RAM).
-                                This feature provides Nuclei, Nikto, SQLMap, and other enterprise-grade scanners.
+                                Advanced vulnerability scanning needs nmap, which isn't detected on this system.
+                                Nuclei, Nikto, SQLMap, WhatWeb and Nmap run on any board once installed. OWASP ZAP
+                                is the exception — it needs a server-class Ragnar (8GB+ RAM) and stays greyed out below.
                             </p>
                         </div>
                     </div>
@@ -7443,7 +7443,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260802-pcap-chanhop"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260803-advscan-zap-gate"></script>
 
 </body>
 </html>

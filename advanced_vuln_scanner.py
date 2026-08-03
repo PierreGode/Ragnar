@@ -493,8 +493,13 @@ class AdvancedVulnScanner:
         # Recover any interrupted scans on startup
         self._recover_interrupted_scans()
 
-        # Watchdog thread: auto-starts ZAP and keeps it alive
-        if self._tool_paths.get('zap'):
+        # Watchdog thread: auto-starts ZAP and keeps it alive.
+        # ZAP is the memory-hungry exception among the scanners, so it only
+        # runs on server-class boards (see SystemCapabilities.zap_enabled) -
+        # don't spin up its ~1GB Java daemon on a 4GB Pi where the rest of the
+        # Advanced Vuln tab still works fine.
+        self._zap_enabled = bool(caps.capabilities.zap_enabled)
+        if self._tool_paths.get('zap') and self._zap_enabled:
             threading.Thread(target=self._zap_watchdog, daemon=True).start()
 
         # Maintainer thread: auto-download nuclei templates if missing, refresh weekly
@@ -980,7 +985,13 @@ class AdvancedVulnScanner:
 
     def get_available_scanners(self) -> Dict[str, bool]:
         """Get status of available scanners"""
-        zap_available = self._tool_paths.get('zap') is not None
+        # ZAP counts as "available" only when it is both installed and this
+        # board has enough RAM to run it (zap_enabled). The frontend uses
+        # zap_installed / zap_ram_ok to tell "not installed" apart from
+        # "needs 8GB" so it can grey the panel with the right reason.
+        zap_installed = self._tool_paths.get('zap') is not None
+        zap_ram_ok = bool(getattr(self, '_zap_enabled', False))
+        zap_available = zap_installed and zap_ram_ok
         zap_running = self._is_zap_running() if zap_available else False
         return {
             'nuclei': self._tool_paths.get('nuclei') is not None,
@@ -989,6 +1000,8 @@ class AdvancedVulnScanner:
             'nmap_vuln': self._tool_paths.get('nmap') is not None,
             'whatweb': self._tool_paths.get('whatweb') is not None,
             'zap': zap_available,
+            'zap_installed': zap_installed,
+            'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
             'ajax_spider_browser': getattr(self, '_detected_browser', None),
         }
@@ -2270,6 +2283,14 @@ class AdvancedVulnScanner:
         freeing locked ports before attempting to start a fresh instance.
         Thread-safe: uses _zap_start_lock to prevent concurrent starts.
         """
+        # Hard gate: ZAP needs a server-class box (see zap_enabled). Refuse to
+        # launch its ~1GB Java daemon on smaller boards. This is the single
+        # chokepoint for /api/zap/start, the watchdog and every ZAP scan run.
+        if not getattr(self, '_zap_enabled', False):
+            logger.info("[ZAP-START] Skipped: ZAP needs a server-class board (8GB RAM); "
+                        "not enough memory on this system.")
+            return False
+
         # Serialize all startup attempts so the watchdog and scan flow
         # never race to start/kill ZAP concurrently.
         acquired = self._zap_start_lock.acquire(timeout=200)

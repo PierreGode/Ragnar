@@ -76,7 +76,8 @@ def test_gate_is_independent_of_full_server_mode():
     assert sc.capabilities.is_server_capable is False
     assert sc.capabilities.traffic_analysis_enabled is True
     assert sc.get_feature_status()['traffic_analysis'] is True
-    # Server-class features must not have leaked through with it.
+    # Advanced Vuln stays off here because this made-up board has no nmap
+    # (its gate), not because of server mode — see test_advscan_zap_gate.
     assert sc.capabilities.advanced_vuln_enabled is False
 
 
@@ -115,11 +116,16 @@ def test_tool_install_is_allowed_without_server_mode(feature, monkeypatch):
     assert 'Server mode' not in message
 
 
-def test_advanced_vuln_install_still_requires_server_mode():
+def test_advanced_vuln_install_is_allowed_without_server_mode(monkeypatch):
+    """The Advanced Vuln CLI scanners (nmap/nuclei/nikto/sqlmap/whatweb) run on
+    any board now, so installing them must not require server mode either. ZAP
+    is not in this install set — it keeps its own RAM gate — so nothing here is
+    server-mode-only anymore."""
     sc = caps_for(3.9, is_server_capable=False)
+    monkeypatch.setattr(sc, 'get_missing_tools', lambda f: [])
     ok, message = sc.install_missing_tools('advanced_vuln')
-    assert ok is False
-    assert 'Server mode' in message
+    assert ok is True
+    assert 'Server mode' not in message
 
 
 @pytest.mark.parametrize("ram_gb,expect_low", [

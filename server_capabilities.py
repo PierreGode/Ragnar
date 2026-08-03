@@ -57,6 +57,7 @@ class SystemCapabilities:
     traffic_analysis_enabled: bool = False
     traffic_sidecars_enabled: bool = False
     advanced_vuln_enabled: bool = False
+    zap_enabled: bool = False
     parallel_scanning_enabled: bool = False
     local_ai_enabled: bool = False
     large_dictionaries_enabled: bool = False
@@ -82,6 +83,12 @@ class ServerCapabilities:
     # Use 7.5GB to account for system reserved memory on 8GB devices
     MIN_RAM_GB = 7.5
     MIN_CORES = 2
+    # OWASP ZAP is a Java daemon that holds ~1GB+ resident on its own and
+    # spikes well past that during an active scan. It is the one Advanced Vuln
+    # scanner that genuinely needs a server-class box, so it keeps the 7.5GB
+    # RAM floor even though the lighter CLI scanners no longer do. (8GB devices
+    # report ~7.87GB after firmware/GPU reservations, hence 7.5 not 8.)
+    ZAP_MIN_RAM_GB = 7.5
     # The on-screen kiosk drives a full Chromium, which needs ~1GB resident on
     # its own. A Pi Zero 2 W has 512MB total, so the kiosk there thrashes swap
     # and the whole box crawls — Ragnar's own scanning included. Chromium runs
@@ -279,22 +286,30 @@ class ServerCapabilities:
             and caps.available_tools.get('tshark', False)
         )
 
+        # Advanced Vuln scanning splits into two tiers by memory cost:
+        #   * nuclei / nikto / sqlmap / nmap / whatweb are light CLI tools -
+        #     they run on any board that has them installed, a Pi Zero
+        #     included, so the tab is no longer tied to server mode.
+        #   * OWASP ZAP is the heavy exception (see ZAP_MIN_RAM_GB) and keeps
+        #     its own RAM floor, so it greys out on smaller boards while the
+        #     rest of the tab stays usable.
+        # Advanced Vuln needs nmap, which Ragnar already uses.
+        caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
+        caps.zap_enabled = caps.total_ram_gb >= self.ZAP_MIN_RAM_GB
+
         if caps.is_server_capable:
-            # Advanced Vuln: needs nmap (which Ragnar already uses)
-            caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
-            
             # Parallel scanning: enabled on multi-core systems
             caps.parallel_scanning_enabled = caps.cpu_cores >= 4
-            
+
             # Local AI: check for Ollama
             caps.local_ai_enabled = shutil.which('ollama') is not None
-            
+
             # Large dictionaries: enabled on 7.5GB+ RAM (8GB devices report ~7.87GB)
             caps.large_dictionaries_enabled = caps.total_ram_gb >= 7.5
         else:
-            # Server-class features stay off on Pi Zero / low-spec systems.
-            # Traffic Analysis is deliberately not in this list - see above.
-            caps.advanced_vuln_enabled = False
+            # Server-class-only features stay off on Pi Zero / low-spec systems.
+            # Advanced Vuln (minus ZAP) and Traffic Analysis are deliberately
+            # not in this list - see above.
             caps.parallel_scanning_enabled = False
             caps.local_ai_enabled = False
             caps.large_dictionaries_enabled = False
@@ -400,6 +415,7 @@ class ServerCapabilities:
             'traffic_analysis': caps.traffic_analysis_enabled,
             'traffic_sidecars': caps.traffic_sidecars_enabled,
             'advanced_vuln_assessment': caps.advanced_vuln_enabled,
+            'zap': caps.zap_enabled,
             'parallel_scanning': caps.parallel_scanning_enabled,
             'local_ai': caps.local_ai_enabled,
             'large_dictionaries': caps.large_dictionaries_enabled,
@@ -428,12 +444,11 @@ class ServerCapabilities:
     
     def install_missing_tools(self, feature: str) -> Tuple[bool, str]:
         """Attempt to install missing tools for a feature"""
-        # Traffic Analysis runs on any board, so its tools install on any board
-        # too - and this is the path that installs the missing tcpdump the gate
-        # is complaining about. Only server-class features need server mode.
-        if feature != 'traffic_analysis' and not self.capabilities.is_server_capable:
-            return False, "Server mode not available on this system"
-
+        # Traffic Analysis and the Advanced Vuln CLI scanners run on any board,
+        # so their tools install on any board too (this is the path that
+        # installs the missing tcpdump/nmap the gate complains about). ZAP is
+        # not in either install set - it has its own RAM gate - so nothing here
+        # is server-mode-only anymore.
         missing = self.get_missing_tools(feature)
         if not missing:
             return True, "All required tools are already installed"

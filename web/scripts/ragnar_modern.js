@@ -27616,18 +27616,22 @@ function updateScannerStatus(scanners, nucleiTemplates) {
             if (id === 'nuclei') {
                 updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache);
             } else if (id === 'zap') {
-                // ZAP has special status (installed vs running)
+                // ZAP has special status (running vs installed vs needs-RAM).
+                // zap_ram_ok === false means the tool may be present but this
+                // board is under the 8GB floor, so say so instead of "Not
+                // installed", which would send the user hunting for a package.
+                statusEl.classList.remove('text-gray-400', 'text-green-400', 'text-cyan-400', 'text-yellow-400');
                 if (scanners.zap_running) {
                     statusEl.textContent = 'Running';
-                    statusEl.classList.remove('text-gray-400', 'text-green-400');
                     statusEl.classList.add('text-cyan-400');
                 } else if (available) {
                     statusEl.textContent = 'Installed';
-                    statusEl.classList.remove('text-gray-400', 'text-cyan-400');
                     statusEl.classList.add('text-green-400');
+                } else if (scanners.zap_ram_ok === false) {
+                    statusEl.textContent = 'Needs 8GB RAM';
+                    statusEl.classList.add('text-yellow-400');
                 } else {
                     statusEl.textContent = 'Not installed';
-                    statusEl.classList.remove('text-green-400', 'text-cyan-400');
                     statusEl.classList.add('text-gray-400');
                 }
             } else {
@@ -28415,19 +28419,48 @@ function updateZapControlPanel(scanners) {
     const startBtn = document.getElementById('zap-start-btn');
     const stopBtn = document.getElementById('zap-stop-btn');
 
+    // Grey out the ZAP scan-type options in the scanner picker when ZAP is
+    // unavailable, and steer the selection back to a scanner that works.
+    const zapOptgroup = document.getElementById('adv-vuln-zap-optgroup');
+    if (zapOptgroup) {
+        const zapUp = !!scanners.zap;
+        zapOptgroup.disabled = !zapUp;
+        Array.from(zapOptgroup.querySelectorAll('option')).forEach(opt => {
+            opt.disabled = !zapUp;
+        });
+        const scannerSelect = document.getElementById('adv-vuln-scanner');
+        if (!zapUp && scannerSelect && scannerSelect.value.startsWith('zap_')) {
+            scannerSelect.value = 'nuclei';
+        }
+    }
+
     if (!panel) return;
 
-    // Show/hide panel based on ZAP availability
+    // Grey out the whole ZAP panel when ZAP is unavailable. Two distinct
+    // reasons: this board is under the 8GB RAM floor (zap_ram_ok === false),
+    // or ZAP simply isn't installed. Disable the controls in both cases and
+    // name the reason so the panel doesn't look broken.
     if (!scanners.zap) {
-        panel.classList.add('opacity-50');
+        const needsRam = scanners.zap_ram_ok === false;
+        panel.classList.add('opacity-50', 'pointer-events-none');
+        panel.setAttribute('aria-disabled', 'true');
+        panel.title = needsRam
+            ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
+            : 'OWASP ZAP is not installed on this system.';
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = true;
         if (daemonStatus) {
-            daemonStatus.textContent = 'Not Installed';
-            daemonStatus.className = 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
+            daemonStatus.textContent = needsRam ? 'Needs 8GB RAM' : 'Not Installed';
+            daemonStatus.className = needsRam
+                ? 'text-xs px-2 py-1 rounded-full bg-yellow-900 text-yellow-400'
+                : 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
         }
         return;
     }
 
-    panel.classList.remove('opacity-50');
+    panel.classList.remove('opacity-50', 'pointer-events-none');
+    panel.removeAttribute('aria-disabled');
+    panel.title = '';
 
     if (scanners.zap_running) {
         if (daemonStatus) {
