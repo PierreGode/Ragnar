@@ -1,0 +1,54 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Ragnar",
+        "description": "Enter your Ragnar unit's address. Leave username/password blank if the unit has no login configured.",
+        "data": {
+          "host": "Host or IP",
+          "port": "Port",
+          "username": "Username",
+          "password": "Password",
+          "ssl": "Use HTTPS",
+          "verify_ssl": "Verify SSL certificate"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Ragnar unit.",
+      "invalid_auth": "Invalid username or password.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This Ragnar unit is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Ragnar options",
+        "data": {
+          "scan_interval": "Poll interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "presence": { "name": "Presence" },
+      "security_alert": { "name": "Security alert" },
+      "sensing_health": { "name": "Sensing backend problem" }
+    },
+    "sensor": {
+      "people": { "name": "People" },
+      "heart_rate": { "name": "Heart rate" },
+      "breathing_rate": { "name": "Breathing rate" },
+      "alert_count": { "name": "Active alerts" },
+      "incident_count": { "name": "Active incidents" },
+      "vulnerability_count": { "name": "Vulnerabilities" }
+    },
+    "event": {
+      "security_alert": { "name": "Security alert" }
+    }
+  }
+}
