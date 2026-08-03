@@ -46,6 +46,57 @@ One HA **device** ("Ragnar") with fifteen entities:
 > and read `unknown` when the room is empty (there is no vital to report). The
 > presence, people and alert entities update every poll.
 
+## Where the entities show up
+
+All entities are plain sensors/controls, so **every one of them appears on the
+Ragnar device page** (**Settings → Devices & Services → Ragnar**) and is
+available to dashboards and automations — nothing is tucked into a hidden
+"Diagnostic" section.
+
+> Earlier versions tagged the connectivity / mesh / health entities as
+> `diagnostic`, which tidied the device page but made Home Assistant **hide them
+> from dashboards**. That was reverted — organise them with the dashboard card
+> below instead, which keeps everything visible.
+
+## A tidy dashboard card
+
+For a Lovelace dashboard, this **Entities** card lays the same entities out under
+labelled sections. Paste it via **Edit dashboard → Add card → Manual**:
+
+```yaml
+type: entities
+title: Ragnar
+show_header_toggle: false
+state_color: true
+entities:
+  - type: section
+    label: RuSense
+  - entity: binary_sensor.ragnar_presence
+  - entity: sensor.ragnar_people
+  - entity: sensor.ragnar_heart_rate
+  - entity: sensor.ragnar_breathing_rate
+  - type: section
+    label: Security
+  - entity: binary_sensor.ragnar_security_alert
+  - entity: sensor.ragnar_active_alerts
+  - entity: sensor.ragnar_active_incidents
+  - entity: sensor.ragnar_vulnerabilities
+  - type: section
+    label: Connectivity
+  - entity: binary_sensor.ragnar_wi_fi_connected
+  - entity: sensor.ragnar_connected_ssid
+  - entity: binary_sensor.ragnar_ethernet_connected
+  - type: section
+    label: Mesh & health
+  - entity: binary_sensor.ragnar_mesh_needs_attention
+  - entity: sensor.ragnar_mesh_nodes_reachable
+  - entity: binary_sensor.ragnar_sensing_backend_problem
+```
+
+> Entity IDs above assume the default `ragnar_` prefix; adjust if you renamed the
+> device or entities. The mesh rows show as *unavailable* unless the unit has the
+> [Ragnar Mesh](mesh.md) enabled — drop them on a single-unit setup.
+
 ## Install (HACS — recommended)
 
 1. In Home Assistant, open **HACS → ⋮ (top right) → Custom repositories**.

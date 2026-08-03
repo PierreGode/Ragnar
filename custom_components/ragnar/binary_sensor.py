@@ -98,7 +98,6 @@ class RagnarSensingHealthBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "sensing_health"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
-
     @property
     def unique_id(self) -> str:
         return f"{self._entry_id}_sensing_health"
@@ -116,7 +115,6 @@ class RagnarWifiConnectivityBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "wifi_connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-
     @property
     def unique_id(self) -> str:
         return f"{self._entry_id}_wifi_connected"
@@ -136,7 +134,6 @@ class RagnarEthernetConnectivityBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "ethernet_connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
-
     @property
     def unique_id(self) -> str:
         return f"{self._entry_id}_ethernet_connected"
@@ -175,7 +172,6 @@ class RagnarMeshAttentionBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "mesh_attention"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
-
     @property
     def unique_id(self) -> str:
         return f"{self._entry_id}_mesh_attention"
