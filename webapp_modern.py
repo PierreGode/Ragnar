@@ -2765,7 +2765,8 @@ try:
 except Exception:  # pragma: no cover
     mesh_scan = None
 
-_mesh_scan_cap_cache = {'ts': 0.0, 'data': {}}
+_mesh_scan_cap_cache = {'ts': 0.0, 'data': {}, 'refreshing': False}
+_mesh_scan_cap_lock = threading.Lock()
 
 
 def _peer_scan_port():
@@ -2790,25 +2791,49 @@ def _build_peer_io(node, target, scan_type, options):
     }
 
 
-def _mesh_scan_capability_cached(ttl=20):
-    """Which heavy scanners the mesh can run for us, as
-    {'nuclei': {available, viking, node_id}, 'zap': {...}}. Cached because
-    discovery polls every peer over HTTP; the status endpoint calls this."""
-    now = time.time()
-    if now - _mesh_scan_cap_cache['ts'] < ttl and _mesh_scan_cap_cache['data']:
-        return _mesh_scan_cap_cache['data']
+def _refresh_mesh_scan_capability():
+    """Poll peers and update the mesh-scan capability cache. Blocking; runs in a
+    background thread so the status request never waits on peer discovery."""
     out = {'nuclei': {'available': False, 'viking': '', 'node_id': ''},
            'zap': {'available': False, 'viking': '', 'node_id': ''}}
-    if mesh_scan and _mesh_enabled():
-        roster = mesh_scan.build_roster(_discover_scan_roster())
-        for need in ('nuclei', 'zap'):
-            d = mesh_scan.pick_delegate(roster, need)
-            if d:
-                out[need] = {'available': True, 'viking': d['viking'],
-                             'node_id': d['node_id']}
-    _mesh_scan_cap_cache['ts'] = now
-    _mesh_scan_cap_cache['data'] = out
-    return out
+    try:
+        if mesh_scan and _mesh_enabled():
+            roster = mesh_scan.build_roster(_discover_scan_roster())
+            for need in ('nuclei', 'zap'):
+                d = mesh_scan.pick_delegate(roster, need)
+                if d:
+                    out[need] = {'available': True, 'viking': d['viking'],
+                                 'node_id': d['node_id']}
+    except Exception as e:
+        logger.debug(f"mesh scan capability refresh failed: {e}")
+    finally:
+        _mesh_scan_cap_cache['ts'] = time.time()
+        _mesh_scan_cap_cache['data'] = out
+        _mesh_scan_cap_cache['refreshing'] = False
+
+
+def _mesh_scan_capability_cached(ttl=20, blocking=False):
+    """Which heavy scanners the mesh can run for us:
+    {'nuclei': {available, viking, node_id}, 'zap': {...}}.
+
+    Non-blocking by default: returns the last cached value immediately and
+    refreshes in the background when stale, because discovery polls every peer
+    over HTTP and the status endpoint (which calls this every couple of seconds)
+    must stay fast. `blocking=True` (used by the scan action) refreshes inline
+    when the cache is empty/stale, so a delegation decision always sees a fresh
+    roster — worth the one-time wait on a user click.
+    """
+    now = time.time()
+    stale = now - _mesh_scan_cap_cache['ts'] >= ttl
+    if blocking and (stale or not _mesh_scan_cap_cache['data']):
+        _refresh_mesh_scan_capability()
+    elif stale and not _mesh_scan_cap_cache['refreshing']:
+        with _mesh_scan_cap_lock:
+            if not _mesh_scan_cap_cache['refreshing']:
+                _mesh_scan_cap_cache['refreshing'] = True
+                threading.Thread(target=_refresh_mesh_scan_capability,
+                                 daemon=True).start()
+    return _mesh_scan_cap_cache['data'] or {}
 
 
 def _local_scan_capability():
@@ -20183,7 +20208,8 @@ def start_advanced_vuln_scan():
             delegate = None
             try:
                 if _mesh_enabled():
-                    delegate = _mesh_scan_capability_cached().get(need)
+                    # Block once so a fresh scan always sees the current roster.
+                    delegate = _mesh_scan_capability_cached(blocking=True).get(need)
             except Exception as e:
                 logger.debug(f"mesh delegate lookup failed: {e}")
             if delegate and delegate.get('available'):

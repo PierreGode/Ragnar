@@ -140,6 +140,7 @@ class ScanProgress:
     error_message: str = ""
     auth_type: str = ""  # Auth type used for this scan (cookie, bearer_token, etc.)
     auth_status: str = ""  # Auth validation status (applied, verified, failed)
+    delegated_to: str = ""  # Viking name of the mesh peer running this scan (delegated scans)
     log_entries: List[Dict[str, str]] = field(default_factory=list)  # Buffered scan log entries
 
     def to_dict(self) -> Dict[str, Any]:
@@ -156,6 +157,7 @@ class ScanProgress:
             'error_message': self.error_message,
             'auth_type': self.auth_type,
             'auth_status': self.auth_status,
+            'delegated_to': self.delegated_to,
             'duration_seconds': (
                 (self.completed_at or datetime.now()) - self.started_at
             ).total_seconds() if self.started_at else 0
@@ -1094,6 +1096,7 @@ class AdvancedVulnScanner:
             scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
         progress = ScanProgress(scan_id=scan_id, scan_type=scan_type, target=target,
                                 status='running', started_at=datetime.now(),
+                                delegated_to=viking,
                                 current_check=f"Delegated to {viking}…")
         self.active_scans[scan_id] = progress
         self.scan_results[scan_id] = []

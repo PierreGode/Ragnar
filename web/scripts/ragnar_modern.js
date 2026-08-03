@@ -27163,7 +27163,10 @@ function updateActiveScans(scans, options = {}) {
                      onclick="toggleAdvVulnScanFindings('${scanId}')">
                     <div class="flex items-start justify-between gap-3">
                         <div>
-                            <div class="text-sm font-semibold text-white">${escapeHtml(formatScanType(scan.scan_type))}</div>
+                            <div class="text-sm font-semibold text-white flex items-center gap-1.5">
+                                ${escapeHtml(formatScanType(scan.scan_type))}
+                                ${scan.delegated_to ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-900/60 text-cyan-300 font-medium">🛰️ ${escapeHtml(scan.delegated_to)}</span>` : ''}
+                            </div>
                             <div class="text-xs text-gray-400 mt-1">${escapeHtml(scan.target || 'Unknown target')}</div>
                         </div>
                         <span class="text-[11px] uppercase px-2 py-1 rounded-full bg-slate-700 text-gray-300">${escapeHtml(statusLabels[status] || status)}</span>
@@ -28164,7 +28167,8 @@ async function startAdvancedScan() {
                 : `Started ${scanType} scan: ${data.scan_id}`, 'success');
             targetInput.value = '';
 
-            // Start polling for updates
+            // Show the new scan's card immediately, then poll for updates.
+            refreshAdvVulnData();
             startAdvVulnPolling();
 
         } else {
@@ -28552,14 +28556,29 @@ const MESH_LABEL = { nuclei: 'Nuclei', zap: 'ZAP' };
 function renderMeshScanFlag(mesh) {
     const el = document.getElementById('mesh-scan-flag');
     if (!el) return;
-    const parts = [];
-    ['nuclei', 'zap'].forEach(s => {
-        const d = mesh && mesh[s];
-        if (d && d.available && d.viking) parts.push(`${MESH_LABEL[s]} → ${d.viking}`);
+    mesh = mesh || {};
+    const sc = advVulnScannersStatusCache || {};
+
+    // Heavy scanners this board can't run locally but a mesh peer can — those
+    // scans are transparently forwarded. (If a scanner is gated with no capable
+    // peer it just stays greyed; it isn't mentioned here.)
+    const forwarded = [];
+    const vikings = [];
+    [['nuclei', 'Nuclei'], ['zap', 'ZAP']].forEach(([key, label]) => {
+        const d = mesh[key];
+        if (d && d.available && !sc[key]) {
+            forwarded.push(label);
+            if (d.viking && !vikings.includes(d.viking)) vikings.push(d.viking);
+        }
     });
-    if (!parts.length) { el.classList.add('hidden'); return; }
+    if (!forwarded.length) { el.classList.add('hidden'); return; }
     el.classList.remove('hidden');
-    el.innerHTML = `🛰️ <span class="font-semibold">Mesh ready</span> — this board can't run ${parts.length === 2 ? 'these' : 'this'} locally, so scans run on a peer and the results come back here: ${parts.map(escapeHtml).join(' · ')}.`;
+    const scanners = forwarded.length === 2 ? 'Nuclei and ZAP' : forwarded[0];
+    const dest = vikings.join(' / ');
+    el.innerHTML =
+        `🛰️ <span class="font-semibold">This device doesn't have enough memory to run ${escapeHtml(scanners)} locally.</span> ` +
+        `${forwarded.length > 1 ? 'These scans' : 'This scan'} will be forwarded to a compatible Ragnar in the mesh — ` +
+        `<span class="font-semibold">${escapeHtml(dest)}</span> — and the results come back here. Just start your scan as usual.`;
 }
 
 // ============================================================================
