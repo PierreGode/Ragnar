@@ -28443,7 +28443,7 @@ async function handoffReconToZap(force) {
             showReconError(data.error || 'Handoff failed');
             return;
         }
-        showNotification(`Handed off ${data.zap_scans.length} ZAP scan(s)`, 'success');
+        showNotification(`Handed off ${data.zap_scans.length} scan(s)`, 'success');
         resetReconCard();
         if (typeof startAdvVulnPolling === 'function') startAdvVulnPolling();
     } catch (err) {

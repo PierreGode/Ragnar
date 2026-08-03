@@ -5337,13 +5337,13 @@
 
                         <!-- State 3: handoff gate -->
                         <div id="recon-state-handoff" class="hidden space-y-3">
-                            <p class="text-xs text-gray-400">Pick what to scan with ZAP. Unchecked items will be ignored.</p>
+                            <p class="text-xs text-gray-400">Pick what to scan. Unchecked items will be ignored — the scan uses the scanner selected above.</p>
                             <div id="recon-subdomains-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-paths-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-scope-warning" class="hidden p-2 bg-red-900/40 border border-red-500/50 rounded text-xs text-red-300"></div>
                             <div class="flex gap-2">
                                 <button onclick="handoffReconToZap(false)" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors">
-                                    Hand off to ZAP scan
+                                    Hand off to scan
                                 </button>
                                 <button onclick="resetReconCard()" class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm rounded-lg transition-colors">
                                     Reset
@@ -7444,7 +7444,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260803-advscan-zap-gate4"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260803-advscan-zap-gate5"></script>
 
 </body>
 </html>
