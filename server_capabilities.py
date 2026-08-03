@@ -58,6 +58,7 @@ class SystemCapabilities:
     traffic_sidecars_enabled: bool = False
     advanced_vuln_enabled: bool = False
     zap_enabled: bool = False
+    nuclei_enabled: bool = False
     parallel_scanning_enabled: bool = False
     local_ai_enabled: bool = False
     large_dictionaries_enabled: bool = False
@@ -89,6 +90,11 @@ class ServerCapabilities:
     # RAM floor even though the lighter CLI scanners no longer do. (8GB devices
     # report ~7.87GB after firmware/GPU reservations, hence 7.5 not 8.)
     ZAP_MIN_RAM_GB = 7.5
+    # Nuclei loads its whole template corpus into memory (~500MB-1GB RSS in
+    # practice) and OOMs a 512MB Pi Zero 2 W no matter how it's tuned. It runs
+    # fine from ~1GB up (a 1GB Pi 3 handles it), so it greys out below this
+    # floor and small boards are steered to run it from a larger mesh unit.
+    NUCLEI_MIN_RAM_MB = 950
     # The on-screen kiosk drives a full Chromium, which needs ~1GB resident on
     # its own. A Pi Zero 2 W has 512MB total, so the kiosk there thrashes swap
     # and the whole box crawls — Ragnar's own scanning included. Chromium runs
@@ -296,6 +302,9 @@ class ServerCapabilities:
         # Advanced Vuln needs nmap, which Ragnar already uses.
         caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
         caps.zap_enabled = caps.total_ram_gb >= self.ZAP_MIN_RAM_GB
+        # Nuclei is the other memory-hungry scanner: greys out below ~950MB so
+        # a Pi Zero 2 W can't crash on it (see NUCLEI_MIN_RAM_MB).
+        caps.nuclei_enabled = (caps.total_ram_gb * 1024) >= self.NUCLEI_MIN_RAM_MB
 
         if caps.is_server_capable:
             # Parallel scanning: enabled on multi-core systems
@@ -416,6 +425,7 @@ class ServerCapabilities:
             'traffic_sidecars': caps.traffic_sidecars_enabled,
             'advanced_vuln_assessment': caps.advanced_vuln_enabled,
             'zap': caps.zap_enabled,
+            'nuclei': caps.nuclei_enabled,
             'parallel_scanning': caps.parallel_scanning_enabled,
             'local_ai': caps.local_ai_enabled,
             'large_dictionaries': caps.large_dictionaries_enabled,

@@ -19308,6 +19308,7 @@ def get_server_capabilities_api():
                 'traffic_sidecars': False,
                 'advanced_vuln_assessment': False,
                 'zap': False,
+                'nuclei': False,
                 'parallel_scanning': False,
                 'local_ai': False,
                 'large_dictionaries': False,
@@ -19868,7 +19869,13 @@ def install_nuclei_binary():
         if not scanner:
             return jsonify({'success': False, 'error': 'Scanner not available'}), 503
 
-        if scanner.get_available_scanners().get('nuclei'):
+        # Don't install nuclei on a board where it's RAM-gated off — it would
+        # only OOM. Steer to a larger mesh unit instead.
+        if not getattr(scanner, '_nuclei_enabled', False):
+            return jsonify({'success': False, 'error': scanner.NUCLEI_MESH_STEER}), 400
+
+        scanners = scanner.get_available_scanners()
+        if scanners.get('nuclei_installed'):
             return jsonify({'success': True, 'message': 'Nuclei is already installed'})
 
         if getattr(scanner, '_nuclei_installing', False):

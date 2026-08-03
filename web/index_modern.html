@@ -5236,6 +5236,23 @@
                     </div>
                 </div>
 
+                <!-- Nuclei RAM-gate steer (small boards) -->
+                <div id="nuclei-mesh-steer" class="hidden mb-6 p-3 sm:p-4 bg-yellow-900/25 border border-yellow-600/50 rounded-lg">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div class="flex items-start gap-2">
+                            <span class="text-lg">🔬</span>
+                            <p class="text-xs sm:text-sm text-yellow-200">
+                                <span class="font-semibold">Nuclei is disabled on this board</span> — it needs at least
+                                <span class="font-semibold">950&nbsp;MB RAM</span> and would crash a smaller Pi. The other
+                                scanners here still work; run Nuclei from a larger Ragnar Mesh unit.
+                            </p>
+                        </div>
+                        <button onclick="showTab('mesh')" class="shrink-0 bg-yellow-600 hover:bg-yellow-500 text-white text-xs sm:text-sm py-2 px-3 rounded-lg font-medium transition-colors whitespace-nowrap">
+                            Open Mesh →
+                        </button>
+                    </div>
+                </div>
+
                 <!-- OWASP ZAP Control Panel -->
                 <div class="glass-card p-3 sm:p-4 mb-6" id="zap-control-panel">
                     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
@@ -5479,7 +5496,7 @@
                                 <label class="block text-xs sm:text-sm text-gray-400 mb-1">Scanner</label>
                                 <select id="adv-vuln-scanner" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg focus:ring-2 focus:ring-Ragnar-500 text-sm">
                                     <optgroup label="Traditional Scanners">
-                                        <option value="nuclei">Nuclei (Templates)</option>
+                                        <option value="nuclei" id="adv-vuln-nuclei-option">Nuclei (Templates)</option>
                                         <option value="nikto">Nikto (Web Server)</option>
                                         <option value="sqlmap">SQLMap (SQL Injection)</option>
                                         <option value="nmap_vuln">Nmap Vuln Scripts</option>
@@ -7444,7 +7461,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260803-advscan-zap-gate5"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260803-advscan-nuclei-gate"></script>
 
 </body>
 </html>

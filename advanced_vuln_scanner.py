@@ -504,6 +504,9 @@ class AdvancedVulnScanner:
         # don't spin up its ~1GB Java daemon on a 4GB Pi where the rest of the
         # Advanced Vuln tab still works fine.
         self._zap_enabled = bool(caps.capabilities.zap_enabled)
+        # Nuclei greys out below ~950MB (see NUCLEI_MIN_RAM_MB) so a tiny board
+        # can't crash on it; those boards are steered to a larger mesh unit.
+        self._nuclei_enabled = bool(caps.capabilities.nuclei_enabled)
         if self._tool_paths.get('zap') and self._zap_enabled:
             threading.Thread(target=self._zap_watchdog, daemon=True).start()
 
@@ -998,8 +1001,14 @@ class AdvancedVulnScanner:
         zap_ram_ok = bool(getattr(self, '_zap_enabled', False))
         zap_available = zap_installed and zap_ram_ok
         zap_running = self._is_zap_running() if zap_available else False
+        # Nuclei, like ZAP, is gated on RAM: installed AND enough memory. The
+        # frontend uses nuclei_installed / nuclei_ram_ok to grey it with the
+        # right reason ("needs 950MB") and steer to a mesh unit.
+        nuclei_installed = self._tool_paths.get('nuclei') is not None
+        nuclei_ram_ok = bool(getattr(self, '_nuclei_enabled', False))
+        nuclei_available = nuclei_installed and nuclei_ram_ok
         return {
-            'nuclei': self._tool_paths.get('nuclei') is not None,
+            'nuclei': nuclei_available,
             'nikto': self._tool_paths.get('nikto') is not None,
             'sqlmap': self._tool_paths.get('sqlmap') is not None,
             'nmap_vuln': self._tool_paths.get('nmap') is not None,
@@ -1008,6 +1017,8 @@ class AdvancedVulnScanner:
             'zap_installed': zap_installed,
             'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
+            'nuclei_installed': nuclei_installed,
+            'nuclei_ram_ok': nuclei_ram_ok,
             'nuclei_installing': bool(getattr(self, '_nuclei_installing', False)),
             'nuclei_templates_updating': (self._nuclei_update_lock.locked()
                                           or bool(getattr(self, '_nuclei_autofetch_active', False))),
@@ -1220,6 +1231,8 @@ class AdvancedVulnScanner:
         """
         if not self._tool_paths.get('nuclei'):
             return
+        if not getattr(self, '_nuclei_enabled', False):
+            return  # nuclei greyed out on this board — don't fetch templates
         if self._nuclei_update_lock.locked():
             return  # a download/update is already running
         now = time.time()
@@ -1573,12 +1586,24 @@ class AdvancedVulnScanner:
             logger.debug(f"Could not parse nuclei progress: {e}")
         return None
 
+    NUCLEI_MESH_STEER = ("Nuclei needs at least 950MB RAM and is disabled on this board — "
+                         "it would OOM and crash the Pi. Run it from a larger Ragnar Mesh "
+                         "unit (Mesh tab) instead; the lighter scanners still work here.")
+
     def _run_nuclei_scan(self, scan_id: str, target: str, options: Dict):
         """Run Nuclei template-based scan"""
         nuclei_path = self._tool_paths.get('nuclei')
         if not nuclei_path:
             raise RuntimeError("Nuclei not installed")
-        
+
+        # Hard gate: nuclei is greyed out below ~950MB (see NUCLEI_MIN_RAM_MB).
+        # Refuse rather than let it crash a tiny board, and point at the mesh.
+        if not getattr(self, '_nuclei_enabled', False):
+            progress = self.active_scans[scan_id]
+            self._scan_log(scan_id, 'error', self.NUCLEI_MESH_STEER)
+            progress.error_message = self.NUCLEI_MESH_STEER
+            raise RuntimeError(self.NUCLEI_MESH_STEER)
+
         progress = self.active_scans[scan_id]
         
         # Build command

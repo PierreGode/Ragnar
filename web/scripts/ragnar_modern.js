@@ -27623,7 +27623,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         if (statusEl) {
             const available = scanners[id];
             if (id === 'nuclei') {
-                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating);
+                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating, scanners.nuclei_ram_ok);
             } else if (id === 'zap') {
                 // ZAP has special status (running vs installed vs needs-RAM).
                 // zap_ram_ok === false means the tool may be present but this
@@ -27655,6 +27655,29 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         }
     });
 
+    // Disable the Nuclei scan-type option when it's unavailable (RAM-gated on
+    // a small board, or not installed), and steer the selection elsewhere so
+    // the user can't launch a scan that will only be refused.
+    // Show the "run Nuclei from a mesh unit" banner only when it's RAM-gated.
+    const meshSteer = document.getElementById('nuclei-mesh-steer');
+    if (meshSteer) meshSteer.classList.toggle('hidden', scanners.nuclei_ram_ok !== false);
+
+    const nucleiOption = document.getElementById('adv-vuln-nuclei-option');
+    if (nucleiOption) {
+        nucleiOption.disabled = !scanners.nuclei;
+        if (scanners.nuclei_ram_ok === false) {
+            nucleiOption.textContent = 'Nuclei (needs 950MB RAM)';
+        } else {
+            nucleiOption.textContent = 'Nuclei (Templates)';
+        }
+        const sel = document.getElementById('adv-vuln-scanner');
+        if (!scanners.nuclei && sel && sel.value === 'nuclei') {
+            // Prefer another installed traditional scanner.
+            const fallback = ['nikto', 'sqlmap', 'nmap_vuln', 'whatweb'].find(k => scanners[k]);
+            sel.value = fallback === 'nmap_vuln' ? 'nmap_vuln' : (fallback || 'full');
+        }
+    }
+
     // Update ZAP control panel visibility and status
     updateZapControlPanel(scanners);
 
@@ -27681,7 +27704,7 @@ let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
 let nucleiInstallPollTimer = null;
 
-function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating) {
+function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating, ramOk) {
     statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
     statusEl.onclick = null;
     statusEl.style.cursor = '';
@@ -27691,6 +27714,17 @@ function updateNucleiCardStatus(statusEl, available, templates, installing, temp
     // mobile too, unlike the sm-only status line). Show it only when the
     // binary is missing.
     const installBtn = document.getElementById('nuclei-install-btn');
+
+    // RAM-gated off (board under 950MB): grey out with the reason and steer to
+    // the mesh. No install button — installing it here would only OOM.
+    if (ramOk === false) {
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'Needs 950MB RAM';
+        statusEl.classList.add('text-yellow-400');
+        statusEl.title = 'Nuclei is memory-hungry — run it from a larger Ragnar Mesh unit';
+        if (installBtn) installBtn.classList.add('hidden');
+        return;
+    }
 
     if (!available) {
         if (installing) {
