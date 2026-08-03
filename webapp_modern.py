@@ -19981,6 +19981,12 @@ def get_advanced_vuln_status():
         # having to click "install templates".
         scanner.maybe_autofetch_nuclei_templates()
 
+        # Self-heal: if scanning looks unavailable (e.g. nmap not detected at
+        # startup), re-detect tools now — the operator may have just installed
+        # it. Cheap, and only runs while still unavailable.
+        if not scanner.is_available():
+            scanner.refresh_tools()
+
         scanners = scanner.get_available_scanners()
         # Only look to the mesh when a heavy scanner is gated off locally — a
         # capable board never pays the peer-discovery cost. Result is cached.

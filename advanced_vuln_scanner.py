@@ -877,16 +877,32 @@ class AdvancedVulnScanner:
             pass
         return key
     
+    # Bin dirs to check when a tool isn't on PATH — a systemd service can run
+    # with a thin PATH that misses /usr/bin, hiding an apt-installed nmap.
+    _TOOL_BIN_DIRS = ('/usr/bin', '/usr/local/bin', '/usr/sbin', '/bin',
+                      '/sbin', '/snap/bin')
+
+    def _resolve_tool(self, tool):
+        """Absolute path to `tool` via PATH, or a common bin dir, else None."""
+        path = shutil.which(tool)
+        if path:
+            return path
+        for d in self._TOOL_BIN_DIRS:
+            cand = os.path.join(d, tool)
+            if os.path.exists(cand):
+                return cand
+        return None
+
     def _detect_tools(self):
         """Detect available security tools"""
         tools = ['nuclei', 'nikto', 'sqlmap', 'nmap', 'whatweb']
         for tool in tools:
-            path = shutil.which(tool)
+            path = self._resolve_tool(tool)
             self._tool_paths[tool] = path
             if path:
                 logger.info(f"Found {tool} at {path}")
             else:
-                logger.debug(f"{tool} not found in PATH")
+                logger.debug(f"{tool} not found in PATH or common bin dirs")
 
         # Detect ZAP - check multiple possible locations
         # Priority: Ragnar tools dir > /opt > standard locations > PATH
@@ -996,6 +1012,20 @@ class AdvancedVulnScanner:
     def is_available(self) -> bool:
         """Check if advanced vuln scanning is available"""
         return get_server_capabilities().capabilities.advanced_vuln_enabled
+
+    def refresh_tools(self):
+        """Re-detect tools and re-read RAM gates so a tool installed after
+        startup (e.g. `apt install nmap`) is picked up without a service
+        restart. Cheap; called from the status endpoint when nothing is
+        available yet."""
+        try:
+            self._detect_tools()
+            caps = get_server_capabilities(self.shared_data)
+            caps.recheck_tools()
+            self._nuclei_enabled = bool(caps.capabilities.nuclei_enabled)
+            self._zap_enabled = bool(caps.capabilities.zap_enabled)
+        except Exception as e:
+            logger.debug(f"refresh_tools failed: {e}")
 
     def get_available_scanners(self) -> Dict[str, bool]:
         """Get status of available scanners"""

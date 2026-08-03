@@ -27027,14 +27027,19 @@ async function loadAdvancedVulnData() {
             return;
         }
         if (!data.available) {
-            // Not usable locally yet. If mesh discovery is still running, a peer
-            // may enable this tab — retry shortly instead of declaring it dead.
+            // Not usable yet. If mesh discovery is still running a peer may
+            // enable this tab; otherwise the operator may have just installed a
+            // tool (nmap) — the server re-detects on each poll, so keep checking
+            // while the tab is open instead of declaring it permanently dead.
+            clearTimeout(_meshPendingRetry);
             if (data.mesh_pending) {
                 hideAdvVulnNotAvailable();
-                clearTimeout(_meshPendingRetry);
                 _meshPendingRetry = setTimeout(loadAdvancedVulnData, 2000);
             } else {
                 showAdvVulnNotAvailable();
+                if (currentTab === 'adv-vuln') {
+                    _meshPendingRetry = setTimeout(loadAdvancedVulnData, 5000);
+                }
             }
             return;
         }

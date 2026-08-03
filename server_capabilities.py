@@ -266,13 +266,43 @@ class ServerCapabilities:
         self.capabilities.os_version = platform.release()
         self.capabilities.kernel_version = platform.version()
     
+    # Common locations a package-manager install drops binaries, checked when
+    # they aren't on PATH — a systemd service can run with a thin PATH that
+    # misses /usr/bin, which would hide an apt-installed nmap.
+    _TOOL_BIN_DIRS = ('/usr/bin', '/usr/local/bin', '/usr/sbin', '/bin',
+                      '/sbin', '/snap/bin')
+
+    @classmethod
+    def _tool_present(cls, tool_name):
+        """True if `tool_name` is on PATH or in a common bin dir."""
+        if shutil.which(tool_name):
+            return True
+        return any(os.path.exists(os.path.join(d, tool_name))
+                   for d in cls._TOOL_BIN_DIRS)
+
     def _check_tool_availability(self):
         """Check which security tools are available"""
         all_tools = {**self.TRAFFIC_ANALYSIS_TOOLS, **self.VULN_ASSESSMENT_TOOLS}
-        
+
         for tool_name in all_tools:
-            self.capabilities.available_tools[tool_name] = shutil.which(tool_name) is not None
-    
+            self.capabilities.available_tools[tool_name] = self._tool_present(tool_name)
+
+    def recheck_tools(self):
+        """Re-detect installed tools and recompute feature flags.
+
+        Capabilities are detected once at startup and cached, so a tool
+        installed afterwards (e.g. `apt install nmap`) stays invisible until a
+        restart. Callers hit this to self-heal without one. Cheap: a handful of
+        PATH/stat lookups.
+        """
+        with self._lock:
+            try:
+                self._check_tool_availability()
+                self._determine_feature_flags()
+            except Exception as e:
+                logger.debug(f"recheck_tools failed: {e}")
+        return self.capabilities
+
     def _determine_feature_flags(self):
         """Determine which advanced features can be enabled"""
         caps = self.capabilities
