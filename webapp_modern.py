@@ -19855,6 +19855,37 @@ def update_nuclei_templates():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/vuln-advanced/nuclei/install', methods=['POST'])
+def install_nuclei_binary():
+    """Download and install the nuclei binary on demand, in the background."""
+    try:
+        scanner = get_advanced_vuln_scanner()
+        if not scanner:
+            return jsonify({'success': False, 'error': 'Scanner not available'}), 503
+
+        if scanner.get_available_scanners().get('nuclei'):
+            return jsonify({'success': True, 'message': 'Nuclei is already installed'})
+
+        if getattr(scanner, '_nuclei_installing', False):
+            return jsonify({'success': True, 'message': 'Nuclei install already in progress'})
+
+        def _worker():
+            scanner._nuclei_installing = True
+            try:
+                ok, msg = scanner.install_nuclei()
+                logger.info(f"[NUCLEI-INSTALL] {'OK' if ok else 'FAILED'}: {msg}")
+            except Exception as e:
+                logger.error(f"[NUCLEI-INSTALL] worker crashed: {e}")
+            finally:
+                scanner._nuclei_installing = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return jsonify({'success': True, 'message': 'Nuclei install started in background'})
+    except Exception as e:
+        logger.error(f"Error installing nuclei: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/vuln-advanced/scan', methods=['POST'])
 def start_advanced_vuln_scan():
     """Start an advanced vulnerability scan"""

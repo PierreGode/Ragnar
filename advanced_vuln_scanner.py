@@ -1003,6 +1003,7 @@ class AdvancedVulnScanner:
             'zap_installed': zap_installed,
             'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
+            'nuclei_installing': bool(getattr(self, '_nuclei_installing', False)),
             'ajax_spider_browser': getattr(self, '_detected_browser', None),
         }
     
@@ -1235,6 +1236,73 @@ class AdvancedVulnScanner:
 
         new_info = self.get_nuclei_template_info(force=True)
         return {'installed': new_info['count'] > 0, 'updated': ok, 'count': new_info['count']}
+
+    def install_nuclei(self) -> Tuple[bool, str]:
+        """Download and install the nuclei binary on demand.
+
+        Mirrors the direct-binary path in scripts/install_advanced_tools.sh:
+        pick the release matching this arch, fetch it from GitHub, drop the
+        binary in /usr/local/bin. The service runs as root so the move works.
+        Safe to call when nuclei is already present. Kicks off a one-shot
+        template download afterwards so the scanner is usable straight away.
+        """
+        if self._tool_paths.get('nuclei'):
+            return True, "Nuclei is already installed"
+
+        import platform as _plat
+        import zipfile
+        arch_map = {
+            'x86_64': 'amd64', 'amd64': 'amd64',
+            'aarch64': 'arm64', 'arm64': 'arm64',
+            'armv7l': 'armv6', 'armv8l': 'armv6',
+        }
+        nuclei_arch = arch_map.get(_plat.machine())
+        if not nuclei_arch:
+            return False, f"Unsupported architecture for nuclei: {_plat.machine()}"
+
+        # Serialize with template updates so we don't race the maintainer.
+        if not self._nuclei_update_lock.acquire(blocking=False):
+            return False, "A nuclei install/update is already in progress"
+        try:
+            version = '3.3.7'  # fallback if the GitHub API is unreachable
+            try:
+                api = 'https://api.github.com/repos/projectdiscovery/nuclei/releases/latest'
+                with urllib.request.urlopen(api, timeout=15) as r:
+                    tag = json.loads(r.read().decode()).get('tag_name', '')
+                    if tag.lstrip('v'):
+                        version = tag.lstrip('v')
+            except Exception as e:
+                logger.warning(f"[NUCLEI-INSTALL] GitHub API lookup failed, using {version}: {e}")
+
+            url = (f"https://github.com/projectdiscovery/nuclei/releases/download/"
+                   f"v{version}/nuclei_{version}_linux_{nuclei_arch}.zip")
+            logger.info(f"[NUCLEI-INSTALL] Downloading nuclei {version} ({nuclei_arch}) from {url}")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                zip_path = os.path.join(tmp, 'nuclei.zip')
+                urllib.request.urlretrieve(url, zip_path)
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extract('nuclei', tmp)
+                bin_path = os.path.join(tmp, 'nuclei')
+                os.chmod(bin_path, 0o755)
+                dest = '/usr/local/bin/nuclei'
+                shutil.move(bin_path, dest)
+                os.chmod(dest, 0o755)
+        except Exception as e:
+            logger.error(f"[NUCLEI-INSTALL] Failed: {e}")
+            return False, f"Nuclei install failed: {e}"
+        finally:
+            self._nuclei_update_lock.release()
+
+        # Re-detect so get_available_scanners() flips nuclei to available.
+        self._detect_tools()
+        if not self._tool_paths.get('nuclei'):
+            return False, "Nuclei downloaded but was not detected on PATH afterwards"
+
+        # Pull templates in the background so the button returns promptly.
+        threading.Thread(target=self.ensure_nuclei_templates, daemon=True).start()
+        logger.info(f"[NUCLEI-INSTALL] Nuclei {version} installed at {self._tool_paths['nuclei']}")
+        return True, f"Nuclei {version} installed"
 
     def _nuclei_template_maintainer(self):
         """Background thread: download templates if missing at startup, refresh weekly."""

@@ -27614,7 +27614,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         if (statusEl) {
             const available = scanners[id];
             if (id === 'nuclei') {
-                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache);
+                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing);
             } else if (id === 'zap') {
                 // ZAP has special status (running vs installed vs needs-RAM).
                 // zap_ram_ok === false means the tool may be present but this
@@ -27671,15 +27671,26 @@ function updateScannerStatus(scanners, nucleiTemplates) {
 let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
 
-function updateNucleiCardStatus(statusEl, available, templates) {
-    statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400');
+function updateNucleiCardStatus(statusEl, available, templates, installing) {
+    statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
     statusEl.onclick = null;
     statusEl.style.cursor = '';
     statusEl.title = '';
 
     if (!available) {
-        statusEl.textContent = 'Not installed';
-        statusEl.classList.add('text-gray-400');
+        if (installing) {
+            statusEl.textContent = 'Installing…';
+            statusEl.classList.add('text-cyan-400');
+            statusEl.title = 'Downloading the nuclei binary';
+            return;
+        }
+        // Binary missing — offer a one-click install (downloads the nuclei
+        // release matching this board's arch). Templates follow automatically.
+        statusEl.textContent = '⤓ Install';
+        statusEl.classList.add('text-yellow-400');
+        statusEl.style.cursor = 'pointer';
+        statusEl.title = 'Click to download and install nuclei';
+        statusEl.onclick = installNuclei;
         return;
     }
 
@@ -27697,6 +27708,30 @@ function updateNucleiCardStatus(statusEl, available, templates) {
         statusEl.style.cursor = 'pointer';
         statusEl.title = 'Click to download nuclei templates';
         statusEl.onclick = () => updateNucleiTemplates(false);
+    }
+}
+
+async function installNuclei() {
+    try {
+        const resp = await fetch('/api/vuln-advanced/nuclei/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showNotification('Installing nuclei in the background — this can take a minute', 'success');
+            // Reflect "Installing…" immediately, then poll for completion.
+            if (advVulnScannersStatusCache) {
+                advVulnScannersStatusCache.nuclei_installing = true;
+                updateScannerStatus(advVulnScannersStatusCache, advVulnNucleiTemplatesCache);
+            }
+            setTimeout(refreshAdvVulnData, 15000);
+        } else {
+            showNotification(data.error || 'Failed to start nuclei install', 'error');
+        }
+    } catch (e) {
+        console.error('Error installing nuclei:', e);
+        showNotification('Failed to start nuclei install', 'error');
     }
 }
 
@@ -28436,17 +28471,22 @@ function updateZapControlPanel(scanners) {
 
     if (!panel) return;
 
-    // Grey out the whole ZAP panel when ZAP is unavailable. Two distinct
-    // reasons: this board is under the 8GB RAM floor (zap_ram_ok === false),
-    // or ZAP simply isn't installed. Disable the controls in both cases and
-    // name the reason so the panel doesn't look broken.
+    // IMPORTANT: #zap-control-panel wraps the *whole* scan form (target,
+    // scanner picker, Start Scan), so it must never be greyed as a unit -
+    // that would disable every scanner, not just ZAP. Grey only the ZAP
+    // daemon-specific controls (stats / clear session / report), and disable
+    // the ZAP scan-type options (done above). Everything else stays usable.
+    const daemonControls = document.getElementById('zap-daemon-controls');
+
     if (!scanners.zap) {
         const needsRam = scanners.zap_ram_ok === false;
-        panel.classList.add('opacity-50', 'pointer-events-none');
-        panel.setAttribute('aria-disabled', 'true');
-        panel.title = needsRam
-            ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
-            : 'OWASP ZAP is not installed on this system.';
+        if (daemonControls) {
+            daemonControls.classList.add('opacity-50', 'pointer-events-none');
+            daemonControls.setAttribute('aria-disabled', 'true');
+            daemonControls.title = needsRam
+                ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
+                : 'OWASP ZAP is not installed on this system.';
+        }
         if (startBtn) startBtn.disabled = true;
         if (stopBtn) stopBtn.disabled = true;
         if (daemonStatus) {
@@ -28458,9 +28498,11 @@ function updateZapControlPanel(scanners) {
         return;
     }
 
-    panel.classList.remove('opacity-50', 'pointer-events-none');
-    panel.removeAttribute('aria-disabled');
-    panel.title = '';
+    if (daemonControls) {
+        daemonControls.classList.remove('opacity-50', 'pointer-events-none');
+        daemonControls.removeAttribute('aria-disabled');
+        daemonControls.title = '';
+    }
 
     if (scanners.zap_running) {
         if (daemonStatus) {
