@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed  # kept for _run
 from queue import Queue, Empty
 
 from logger import Logger
-from server_capabilities import get_server_capabilities, is_server_mode
+from server_capabilities import get_server_capabilities
 
 logger = Logger(name="advanced_vuln_scanner", level=logging.INFO)
 
