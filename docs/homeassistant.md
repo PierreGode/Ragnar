@@ -46,20 +46,17 @@ One HA **device** ("Ragnar") with fifteen entities:
 > and read `unknown` when the room is empty (there is no vital to report). The
 > presence, people and alert entities update every poll.
 
-## How the device card is organised
+## Where the entities show up
 
-The integration tags entities with Home Assistant **entity categories** so the
-auto-generated device page (**Settings → Devices & Services → Ragnar**) is not a
-flat list. Two groups:
+All entities are plain sensors/controls, so **every one of them appears on the
+Ragnar device page** (**Settings → Devices & Services → Ragnar**) and is
+available to dashboards and automations — nothing is tucked into a hidden
+"Diagnostic" section.
 
-- **Sensors / controls** — the signals you actually watch and automate on:
-  presence, people, heart rate, breathing rate, the security-alert flag, active
-  alert/incident counts, and the security-alert event.
-- **Diagnostic** (collapsed by HA into its own section) — the supporting status:
-  Wi-Fi/Ethernet connectivity, connected SSID, mesh attention + reachable nodes,
-  the sensing-backend problem flag, and the vulnerability count.
-
-That grouping happens automatically — no configuration needed.
+> Earlier versions tagged the connectivity / mesh / health entities as
+> `diagnostic`, which tidied the device page but made Home Assistant **hide them
+> from dashboards**. That was reverted — organise them with the dashboard card
+> below instead, which keeps everything visible.
 
 ## A tidy dashboard card
 

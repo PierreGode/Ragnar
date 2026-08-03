@@ -12,7 +12,6 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -87,14 +86,12 @@ SENSORS: tuple[RagnarSensorDescription, ...] = (
         translation_key="vulnerability_count",
         icon="mdi:bug",
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: (d.get("status") or {}).get("vulnerability_count"),
     ),
     RagnarSensorDescription(
         key="ssid",
         translation_key="ssid",
         icon="mdi:wifi",
-        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: (d.get("status") or {}).get("current_ssid") or None,
     ),
     RagnarSensorDescription(
@@ -102,7 +99,6 @@ SENSORS: tuple[RagnarSensorDescription, ...] = (
         translation_key="mesh_reachable",
         icon="mdi:server-network",
         state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=_mesh_reachable,
         available_fn=lambda d: bool((d.get("mesh") or {}).get("enabled")),
     ),
