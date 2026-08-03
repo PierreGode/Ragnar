@@ -2829,11 +2829,14 @@ def _mesh_tagged_peers():
     return [p for p in state.get('peers', []) if tag in p.get('tags', [])]
 
 
-def _resolve_delegate_node(viking):
-    """Find a tagged peer node by its Viking short name (case-insensitive)."""
-    viking = (viking or '').strip().lower()
+def _resolve_delegate_node(node_id):
+    """Find a tagged peer node by its stable Tailscale node id.
+
+    Resolve by id, not by Viking name: a unit's Viking name (mesh_viking_name)
+    is independent of its tailnet hostname, so name-matching would miss.
+    """
     for p in _mesh_tagged_peers():
-        if (p.get('short_name') or '').lower() == viking:
+        if p.get('id') and p.get('id') == node_id:
             return p
     return None
 
@@ -2975,7 +2978,7 @@ def mesh_scan_delegate():
         return jsonify({'success': False,
                         'error': f'No mesh unit can run {need} right now'}), 409
 
-    node = _resolve_delegate_node(delegate['viking'])
+    node = _resolve_delegate_node(delegate.get('node_id'))
     if not node:
         return jsonify({'success': False, 'error': 'delegate is no longer reachable'}), 409
 
@@ -3000,7 +3003,7 @@ def mesh_scan_job_cancel(local_id):
     delegator = get_mesh_scan_delegator()
     if not delegator:
         return jsonify({'success': False, 'error': 'Mesh delegation unavailable'}), 503
-    return jsonify(delegator.cancel(local_id, _resolve_delegate_node))
+    return jsonify(delegator.cancel(local_id))
 
 
 def _mesh_poll_once():

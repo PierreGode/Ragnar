@@ -181,6 +181,7 @@ class MeshScanDelegator:
         rec = {
             "delegated_id": local_id,
             "remote_scan_id": reply["scan_id"],
+            "_node": node,  # kept so relay + cancel reach the same peer
             "viking": viking, "target": target, "scan_type": scan_type,
             "status": "running", "progress_percent": 0,
             "current_check": f"Delegated to {viking}…",
@@ -245,15 +246,14 @@ class MeshScanDelegator:
                     rec["status"] = status
                 rec["updated_at"] = time.time()
 
-    def cancel(self, local_id: str, node_lookup: Callable[[str], Optional[Dict]]) -> Dict:
+    def cancel(self, local_id: str) -> Dict:
         with self._lock:
             rec = self._scans.get(local_id)
             if rec is None:
                 return {"success": False, "error": "unknown delegated scan"}
-            remote_id, viking = rec["remote_scan_id"], rec["viking"]
-        node = node_lookup(viking)
-        if node is None:
-            return {"success": False, "error": "delegate no longer in mesh"}
+            remote_id, node = rec["remote_scan_id"], rec.get("_node")
+        if not node:
+            return {"success": False, "error": "delegate no longer reachable"}
         reply = self._cancel_fn(node, remote_id)
         if reply.get("success"):
             with self._lock:
@@ -263,21 +263,24 @@ class MeshScanDelegator:
         return {"success": bool(reply.get("success")),
                 "error": reply.get("error", "")}
 
+    @staticmethod
+    def _public(rec: Dict, include_findings: bool) -> Dict:
+        d = dict(rec)
+        d.pop("_node", None)  # never serialise the peer node object
+        if not include_findings:
+            d.pop("findings", None)
+        return d
+
     def list_scans(self, include_findings: bool = False) -> List[Dict]:
         with self._lock:
-            out = []
-            for rec in self._scans.values():
-                d = dict(rec)
-                if not include_findings:
-                    d.pop("findings", None)
-                out.append(d)
+            out = [self._public(rec, include_findings) for rec in self._scans.values()]
         out.sort(key=lambda r: r["started_at"], reverse=True)
         return out
 
     def get_scan(self, local_id: str) -> Optional[Dict]:
         with self._lock:
             rec = self._scans.get(local_id)
-            return dict(rec) if rec else None
+            return self._public(rec, include_findings=True) if rec else None
 
     def prune(self, keep: int = 40):
         """Drop the oldest finished scans so the table doesn't grow forever."""

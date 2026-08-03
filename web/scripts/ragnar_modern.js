@@ -28655,6 +28655,11 @@ function renderMeshDelegatedScans(jobs) {
                 <span class="shrink-0">${pct}% · ${j.findings_count || 0} findings</span>
             </div>
             ${j.error_message ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(j.error_message)}</div>` : ''}
+            ${(j.status === 'completed' && (j.findings_count || 0) > 0) ? `
+            <button onclick="toggleMeshFindings('${j.delegated_id}')" class="mt-2 text-xs text-cyan-400 hover:text-cyan-300">
+                View ${j.findings_count} findings ▾
+            </button>
+            <div id="mesh-findings-${j.delegated_id}" class="hidden mt-2 space-y-1"></div>` : ''}
         </div>`;
     }).join('');
 
@@ -28665,6 +28670,42 @@ function renderMeshDelegatedScans(jobs) {
     } else if (!anyRunning && _meshDelegatePollTimer) {
         clearInterval(_meshDelegatePollTimer);
         _meshDelegatePollTimer = null;
+    }
+}
+
+const MESH_SEV_COLOR = {
+    critical: 'text-red-400 border-red-500/40 bg-red-900/20',
+    high: 'text-orange-400 border-orange-500/40 bg-orange-900/20',
+    medium: 'text-yellow-400 border-yellow-500/40 bg-yellow-900/20',
+    low: 'text-blue-400 border-blue-500/40 bg-blue-900/20',
+    info: 'text-gray-400 border-slate-500/40 bg-slate-800/40',
+};
+
+async function toggleMeshFindings(localId) {
+    const box = document.getElementById(`mesh-findings-${localId}`);
+    if (!box) return;
+    if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-xs text-gray-400">Loading…</div>';
+    try {
+        const r = await fetch('/api/mesh/scan/jobs?findings=1');
+        const d = await r.json();
+        const job = (d.jobs || []).find(j => j.delegated_id === localId);
+        const findings = (job && job.findings) || [];
+        if (!findings.length) { box.innerHTML = '<div class="text-xs text-gray-400">No findings returned.</div>'; return; }
+        box.innerHTML = findings.map(f => {
+            const sev = (f.severity || 'info').toLowerCase();
+            const cls = MESH_SEV_COLOR[sev] || MESH_SEV_COLOR.info;
+            const loc = f.host ? `${f.host}${f.port ? ':' + f.port : ''}` : (f.matched_at || '');
+            const cve = (f.cve_ids && f.cve_ids.length) ? ` · ${escapeHtml(f.cve_ids.join(', '))}` : '';
+            return `<div class="text-xs border rounded px-2 py-1 ${cls}">
+                <span class="font-semibold uppercase">${escapeHtml(sev)}</span>
+                <span class="text-gray-200">${escapeHtml(f.title || f.template_id || 'finding')}</span>
+                ${loc ? `<span class="text-gray-400">— ${escapeHtml(loc)}</span>` : ''}${cve}
+            </div>`;
+        }).join('');
+    } catch (e) {
+        box.innerHTML = '<div class="text-xs text-red-400">Could not load findings.</div>';
     }
 }
 

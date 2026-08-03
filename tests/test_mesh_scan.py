@@ -145,3 +145,32 @@ def test_delegator_start_failure_surfaces_error():
     d = MeshScanDelegator(start_fn, lambda *a: {}, lambda *a: {}, lambda *a: {})
     res = d.start({"ip": "x"}, "ylva", "http://t", "nuclei")
     assert res["success"] is False and "refused" in res["error"]
+
+
+def test_delegator_cancel_uses_stored_node_and_hides_it():
+    seen = {}
+
+    def start_fn(node, target, scan_type, options):
+        return {"success": True, "scan_id": "AVS-9"}
+
+    def status_fn(node, remote_id):
+        return {"reachable": True, "scan": {"status": "running", "progress_percent": 5}}
+
+    def cancel_fn(node, remote_id):
+        seen["node"] = node
+        seen["remote_id"] = remote_id
+        return {"success": True}
+
+    d = MeshScanDelegator(start_fn, status_fn, lambda *a: {}, cancel_fn)
+    d.POLL_INTERVAL = 5  # don't let the relay reach terminal during the test
+    node = {"ip": "100.0.0.9", "id": "nHARALD"}
+    local_id = d.start(node, "harald", "http://t", "zap_full")["delegated_id"]
+
+    out = d.cancel(local_id)
+    assert out["success"] is True
+    # cancel reached the same peer node we started on…
+    assert seen["node"] == node and seen["remote_id"] == "AVS-9"
+    # …but the node object is never exposed in the serialised job.
+    job = d.list_scans(include_findings=True)[0]
+    assert "_node" not in job
+    assert d.get_scan(local_id) is not None and "_node" not in d.get_scan(local_id)
