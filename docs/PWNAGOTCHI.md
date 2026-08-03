@@ -1,6 +1,6 @@
 # 🐝 Pwnagotchi Bridge — Setup, Switching & Troubleshooting
 
-Ragnar includes a built-in bridge that lets you swap between Ragnar and [Pwnagotchi](https://github.com/PierreGode/pwnagotchiworking) on the same device. Both share the e-paper display and GPIO pins, so only one can run at a time. The swap is handled through systemd service orchestration.
+Ragnar includes a built-in bridge that lets you swap between Ragnar and [Pwnagotchi](https://github.com/PierreGode/pwnagotchiworking) on the same device. On a display build both share the e-paper HAT and GPIO pins, so only one can run at a time; on a **headless** build Pwnagotchi installs too and runs via its web UI only (its e-paper face is disabled). The swap is handled through systemd service orchestration.
 
 ---
 
@@ -9,7 +9,7 @@ Ragnar includes a built-in bridge that lets you swap between Ragnar and [Pwnagot
 | Component | Details |
 |-----------|---------|
 | **Board** | Raspberry Pi Zero 2 W (or any Pi with wireless) |
-| **Display** | Waveshare 2.13" e-Paper HAT (V4 preferred, V2 supported) |
+| **Display** | **Optional.** Waveshare 2.13" e-Paper HAT (V4 preferred, V2 supported) for the Pwnagotchi face. On a headless Ragnar, Pwnagotchi installs and runs via its web UI only (no e-paper face) |
 | **WiFi for monitor mode** | USB WiFi adapter on `wlan1` **or** onboard WiFi with nexmon (see below) |
 | **Disk space** | ≥ 300 MB free |
 | **Swap button (optional)** | PiSugar 3 (double-tap or long-press to swap modes) |

@@ -14459,6 +14459,9 @@ function _bindPwnUpdateButtons() {
 }
 
 function updatePwnToggleAvailability(isHeadless) {
+    // Pwnagotchi now installs on headless too — it runs fine with just its web
+    // UI (no e-paper face). So the toggle is always enabled; we only note that
+    // the display face is unavailable on a headless box.
     headlessMode = Boolean(isHeadless);
     const checkbox = document.getElementById('pwnagotchi-enabled');
     if (!checkbox) {
@@ -14468,29 +14471,13 @@ function updatePwnToggleAvailability(isHeadless) {
     const wrapper = document.getElementById('pwn-toggle-wrapper');
     const warning = document.getElementById('pwn-headless-warning');
 
-    if (headlessMode) {
-        if (checkbox.checked) {
-            checkbox.checked = false;
-            localStorage.setItem('pwnagotchi-enabled', 'false');
-            applyPwnVisibilityPreference(false);
-        }
-        checkbox.disabled = true;
-        checkbox.setAttribute('aria-disabled', 'true');
-        if (wrapper) {
-            wrapper.classList.add('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
-        }
-        if (warning) {
-            warning.classList.remove('hidden');
-        }
-    } else {
-        checkbox.disabled = false;
-        checkbox.removeAttribute('aria-disabled');
-        if (wrapper) {
-            wrapper.classList.remove('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
-        }
-        if (warning) {
-            warning.classList.add('hidden');
-        }
+    checkbox.disabled = false;
+    checkbox.removeAttribute('aria-disabled');
+    if (wrapper) {
+        wrapper.classList.remove('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
+    }
+    if (warning) {
+        warning.classList.toggle('hidden', !headlessMode);
     }
 }
 
