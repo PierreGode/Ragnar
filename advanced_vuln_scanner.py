@@ -452,6 +452,10 @@ class AdvancedVulnScanner:
         # kill the whole process group — e.g. nuclei under a systemd-run scope,
         # or nuclei plus the helpers it spawns — instead of just the leader.
         self._session_leader_pids: set = set()
+        # Delegated (mesh) scans: scan_id -> {'peer_io':..., 'remote_id':...}.
+        # These run on a capable peer but appear in active_scans/scan_results
+        # exactly like a local scan, so the whole UI treats them the same.
+        self._delegated_scans: Dict[str, Dict] = {}
 
         # Cached result of the passwordless-sudo probe for nmap
         self._nmap_sudo_ok: Optional[bool] = None
@@ -1064,7 +1068,117 @@ class AdvancedVulnScanner:
 
         logger.info(f"Started {scan_type.value} scan {scan_id} against {target}")
         return scan_id
-    
+
+    # ------------------------------------------------------------------
+    # Delegated (mesh) scans — run on a capable peer, mirrored in locally
+    # ------------------------------------------------------------------
+    DELEGATE_POLL_INTERVAL = 2.0
+    DELEGATE_MAX_SECONDS = 3 * 3600
+
+    def start_delegated_scan(self, target: str, scan_type: ScanType, viking: str,
+                             peer_io: Dict) -> str:
+        """Register a scan that actually runs on mesh peer `viking`, relaying its
+        progress + findings into this unit's normal scan state.
+
+        `peer_io` is a dict of callables (injected by the caller so this stays
+        transport-agnostic):
+          start()        -> {'success', 'scan_id'|'error'}
+          status(rid)    -> {'reachable', 'scan': {...}}
+          findings(rid)  -> {'findings': [...]}
+          cancel(rid)    -> {'success': bool}
+        Returns a normal scan_id — callers use the same status/findings/cancel
+        paths as any local scan.
+        """
+        with self._lock:
+            self._scan_counter += 1
+            scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
+        progress = ScanProgress(scan_id=scan_id, scan_type=scan_type, target=target,
+                                status='running', started_at=datetime.now(),
+                                current_check=f"Delegated to {viking}…")
+        self.active_scans[scan_id] = progress
+        self.scan_results[scan_id] = []
+        self.scan_history.append(progress)
+        self._delegated_scans[scan_id] = {'peer_io': peer_io, 'remote_id': None,
+                                          'viking': viking}
+        self._save_scan_to_db(scan_id, progress)
+        threading.Thread(target=self._run_delegated_scan,
+                         args=(scan_id, viking, peer_io),
+                         name=f"avs-mesh-{scan_id}", daemon=True).start()
+        logger.info(f"[MESH-SCAN] Delegated {scan_type.value} scan {scan_id} to {viking} for {target}")
+        return scan_id
+
+    def _run_delegated_scan(self, scan_id: str, viking: str, peer_io: Dict):
+        progress = self.active_scans.get(scan_id)
+        if not progress:
+            return
+        try:
+            reply = peer_io['start']()
+        except Exception as e:
+            reply = {'success': False, 'error': f'{type(e).__name__}: {e}'}
+        if not reply.get('success') or not reply.get('scan_id'):
+            progress.status = 'failed'
+            progress.error_message = f"{viking} refused the scan: {reply.get('error') or 'unknown error'}"
+            progress.completed_at = datetime.now()
+            self._save_scan_to_db(scan_id, progress)
+            self._delegated_scans.pop(scan_id, None)
+            return
+        remote_id = reply['scan_id']
+        self._delegated_scans[scan_id]['remote_id'] = remote_id
+
+        deadline = time.time() + self.DELEGATE_MAX_SECONDS
+        terminal = None
+        while time.time() < deadline:
+            time.sleep(self.DELEGATE_POLL_INTERVAL)
+            if progress.status == 'cancelled':
+                try:
+                    peer_io['cancel'](remote_id)
+                except Exception:
+                    pass
+                terminal = 'cancelled'
+                break
+            try:
+                sr = peer_io['status'](remote_id)
+            except Exception:
+                sr = {'reachable': False}
+            if not sr.get('reachable'):
+                progress.current_check = f"{viking} unreachable — retrying…"
+                continue
+            scan = sr.get('scan') or {}
+            progress.progress_percent = scan.get('progress_percent', progress.progress_percent)
+            progress.current_check = scan.get('current_check', progress.current_check) or progress.current_check
+            progress.findings_count = scan.get('findings_count', progress.findings_count)
+            if scan.get('error_message'):
+                progress.error_message = scan['error_message']
+            st = scan.get('status')
+            if st in ('completed', 'failed', 'cancelled'):
+                terminal = st
+                break
+        if terminal is None:
+            terminal = 'failed'
+            progress.error_message = f"Relay to {viking} timed out."
+
+        if terminal == 'completed':
+            try:
+                fr = peer_io['findings'](remote_id)
+                for fd in (fr or {}).get('findings', []) or []:
+                    try:
+                        finding = self._dict_to_finding(fd)
+                        self.scan_results[scan_id].append(finding)
+                        self._save_finding_to_db(finding, scan_id)
+                    except Exception as e:
+                        logger.debug(f"[MESH-SCAN] bad finding from {viking}: {e}")
+                progress.findings_count = len(self.scan_results.get(scan_id, []))
+                progress.progress_percent = 100
+            except Exception as e:
+                logger.warning(f"[MESH-SCAN] could not fetch findings from {viking}: {e}")
+
+        if progress.status != 'cancelled':
+            progress.status = terminal
+        progress.completed_at = datetime.now()
+        self._save_scan_to_db(scan_id, progress)
+        self._delegated_scans.pop(scan_id, None)
+        logger.info(f"[MESH-SCAN] Delegated scan {scan_id} on {viking} finished: {terminal}")
+
     def _run_scan(self, scan_id: str, target: str, scan_type: ScanType, options: Dict):
         """Execute the vulnerability scan"""
         progress = self.active_scans.get(scan_id)
@@ -6438,6 +6552,15 @@ class AdvancedVulnScanner:
                         self._scan_log(scan_id, 'info', "Terminated scan process on cancel")
                     except Exception as e:
                         logger.debug(f"Error killing process for {scan_id}: {e}")
+
+            # Delegated scan: also tell the peer to stop (the relay loop will
+            # see the cancelled status too, but this is immediate).
+            deleg = self._delegated_scans.get(scan_id)
+            if deleg and deleg.get('remote_id'):
+                try:
+                    deleg['peer_io']['cancel'](deleg['remote_id'])
+                except Exception as e:
+                    logger.debug(f"Error cancelling delegated scan {scan_id}: {e}")
 
         return cancelled
 

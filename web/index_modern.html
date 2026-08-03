@@ -5236,24 +5236,8 @@
                     </div>
                 </div>
 
-                <!-- Nuclei/ZAP RAM-gate steer + mesh delegation (small boards) -->
-                <div id="nuclei-mesh-steer" class="hidden mb-6 p-3 sm:p-4 bg-yellow-900/25 border border-yellow-600/50 rounded-lg">
-                    <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-                        <div class="flex items-start gap-2">
-                            <span class="text-lg">🔬</span>
-                            <p id="mesh-steer-text" class="text-xs sm:text-sm text-yellow-200"></p>
-                        </div>
-                        <div id="mesh-steer-actions" class="flex flex-wrap gap-2 shrink-0"></div>
-                    </div>
-                </div>
-
-                <!-- Delegated scans running on mesh peers (progress relayed home) -->
-                <div id="mesh-delegated-scans" class="hidden mb-6">
-                    <h3 class="text-sm sm:text-base font-semibold mb-2 flex items-center gap-2">
-                        <span>🛰️</span> Delegated scans <span class="text-xs text-gray-400 font-normal">(running on mesh units)</span>
-                    </h3>
-                    <div id="mesh-delegated-list" class="space-y-2"></div>
-                </div>
+                <!-- Mesh availability flag: a peer can run a scanner this board can't -->
+                <div id="mesh-scan-flag" class="hidden mb-4 px-3 py-2 bg-cyan-900/20 border border-cyan-700/40 rounded-lg text-xs sm:text-sm text-cyan-200"></div>
 
                 <!-- OWASP ZAP Control Panel -->
                 <div class="glass-card p-3 sm:p-4 mb-6" id="zap-control-panel">
@@ -7463,7 +7447,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260803-mesh-scan-delegate2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260803-mesh-scan-transparent"></script>
 
 </body>
 </html>

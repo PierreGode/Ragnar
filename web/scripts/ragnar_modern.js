@@ -27041,11 +27041,10 @@ async function loadAdvancedVulnData() {
         }
 
         hideAdvVulnNotAvailable();
+        advVulnMeshScan = data.mesh_scan || {};
         updateScannerStatus(data.scanners, data.nuclei_templates);
         updateVulnSummary(data.summary);
-
-        // Surface any delegated scans still running on mesh peers.
-        refreshMeshDelegatedScans();
+        renderMeshScanFlag(advVulnMeshScan);
 
         // Parse findings (already fetched in parallel)
         try {
@@ -27617,6 +27616,11 @@ function updateScannerStatus(scanners, nucleiTemplates) {
     advVulnScannersStatusCache = scanners;
     if (nucleiTemplates !== undefined) advVulnNucleiTemplatesCache = nucleiTemplates;
 
+    // A heavy scanner is usable if THIS board can run it OR a mesh peer can.
+    const _mesh = advVulnMeshScan || {};
+    const meshZap = !!(_mesh.zap && _mesh.zap.available);
+    const meshZapViking = meshZap ? _mesh.zap.viking : '';
+
     const scannerIds = ['nuclei', 'nikto', 'sqlmap', 'nmap_vuln', 'whatweb', 'zap'];
 
     scannerIds.forEach(id => {
@@ -27626,7 +27630,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         if (statusEl) {
             const available = scanners[id];
             if (id === 'nuclei') {
-                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating, scanners.nuclei_ram_ok);
+                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating, scanners.nuclei_ram_ok, (advVulnMeshScan || {}).nuclei);
             } else if (id === 'zap') {
                 // ZAP has special status (running vs installed vs needs-RAM).
                 // zap_ram_ok === false means the tool may be present but this
@@ -27639,6 +27643,11 @@ function updateScannerStatus(scanners, nucleiTemplates) {
                 } else if (available) {
                     statusEl.textContent = 'Installed';
                     statusEl.classList.add('text-green-400');
+                } else if (meshZap) {
+                    // Can't run locally, but a mesh peer can — scans delegate there.
+                    statusEl.textContent = `via ${meshZapViking}`;
+                    statusEl.classList.add('text-cyan-400');
+                    statusEl.title = `ZAP runs on ${meshZapViking} in the mesh; results come back here`;
                 } else if (scanners.zap_ram_ok === false) {
                     statusEl.textContent = 'Needs 8GB RAM';
                     statusEl.classList.add('text-yellow-400');
@@ -27658,31 +27667,33 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         }
     });
 
-    // Disable the Nuclei scan-type option when it's unavailable (RAM-gated on
-    // a small board, or not installed), and steer the selection elsewhere so
-    // the user can't launch a scan that will only be refused.
-    // When a heavy scanner is RAM-gated here, discover which mesh peers can run
-    // it and offer to delegate. Throttled; hides itself when nothing is gated.
-    refreshMeshScanOptions(scanners);
+    // A heavy scanner is "usable" if THIS board can run it OR a mesh peer can
+    // (delegation is transparent). Reflect that in the cards + scan-type
+    // options so the operator just picks and scans as usual. (_mesh/meshZap
+    // computed at the top of this function.)
+    const meshNuclei = !!(_mesh.nuclei && _mesh.nuclei.available);
+    const nucleiEff = !!scanners.nuclei || meshNuclei;
+    const zapEff = !!scanners.zap || meshZap;
+
+    // Card dimming follows effective (local-or-mesh) availability.
+    document.getElementById('scanner-nuclei')?.classList.toggle('opacity-50', !nucleiEff);
+    document.getElementById('scanner-zap')?.classList.toggle('opacity-50', !zapEff);
 
     const nucleiOption = document.getElementById('adv-vuln-nuclei-option');
     if (nucleiOption) {
-        nucleiOption.disabled = !scanners.nuclei;
-        if (scanners.nuclei_ram_ok === false) {
-            nucleiOption.textContent = 'Nuclei (needs 950MB RAM)';
-        } else {
-            nucleiOption.textContent = 'Nuclei (Templates)';
-        }
+        nucleiOption.disabled = !nucleiEff;
+        nucleiOption.textContent = scanners.nuclei ? 'Nuclei (Templates)'
+            : meshNuclei ? `Nuclei (via ${_mesh.nuclei.viking})`
+            : 'Nuclei (needs 950MB RAM)';
         const sel = document.getElementById('adv-vuln-scanner');
-        if (!scanners.nuclei && sel && sel.value === 'nuclei') {
-            // Prefer another installed traditional scanner.
+        if (!nucleiEff && sel && sel.value === 'nuclei') {
             const fallback = ['nikto', 'sqlmap', 'nmap_vuln', 'whatweb'].find(k => scanners[k]);
-            sel.value = fallback === 'nmap_vuln' ? 'nmap_vuln' : (fallback || 'full');
+            sel.value = fallback || 'full';
         }
     }
 
     // Update ZAP control panel visibility and status
-    updateZapControlPanel(scanners);
+    updateZapControlPanel(scanners, meshZap, mesh.zap && mesh.zap.viking);
 
     // Show AJAX spider browser warning if no real browser detected
     const browserWarning = document.getElementById('ajax-spider-browser-warning');
@@ -27706,8 +27717,9 @@ function updateScannerStatus(scanners, nucleiTemplates) {
 let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
 let nucleiInstallPollTimer = null;
+let advVulnMeshScan = {};  // {nuclei:{available,viking}, zap:{...}} from status poll
 
-function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating, ramOk) {
+function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating, ramOk, meshNuclei) {
     statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
     statusEl.onclick = null;
     statusEl.style.cursor = '';
@@ -27718,14 +27730,20 @@ function updateNucleiCardStatus(statusEl, available, templates, installing, temp
     // binary is missing.
     const installBtn = document.getElementById('nuclei-install-btn');
 
-    // RAM-gated off (board under 950MB): grey out with the reason and steer to
-    // the mesh. No install button — installing it here would only OOM.
+    // RAM-gated off (board under 950MB). If a mesh peer can run it, say so
+    // (scans delegate transparently); otherwise show the RAM requirement.
     if (ramOk === false) {
         statusEl.classList.remove('hidden');
-        statusEl.textContent = 'Needs 950MB RAM';
-        statusEl.classList.add('text-yellow-400');
-        statusEl.title = 'Nuclei is memory-hungry — run it from a larger Ragnar Mesh unit';
         if (installBtn) installBtn.classList.add('hidden');
+        if (meshNuclei && meshNuclei.available) {
+            statusEl.textContent = `via ${meshNuclei.viking}`;
+            statusEl.classList.add('text-cyan-400');
+            statusEl.title = `Runs on ${meshNuclei.viking} in the mesh; results come back here`;
+        } else {
+            statusEl.textContent = 'Needs 950MB RAM';
+            statusEl.classList.add('text-yellow-400');
+            statusEl.title = 'Nuclei is memory-hungry — run it from a larger Ragnar Mesh unit';
+        }
         return;
     }
 
@@ -28141,7 +28159,9 @@ async function startAdvancedScan() {
         const data = await response.json();
 
         if (data.success) {
-            showNotification(`Started ${scanType} scan: ${data.scan_id}`, 'success');
+            showNotification(data.delegated_to
+                ? `Running ${scanType} on ${data.delegated_to} (mesh) — progress shows here`
+                : `Started ${scanType} scan: ${data.scan_id}`, 'success');
             targetInput.value = '';
 
             // Start polling for updates
@@ -28522,226 +28542,51 @@ async function refreshAdvVulnData() {
 }
 
 // ============================================================================
-// MESH SCAN DELEGATION — run Nuclei/ZAP on a capable peer, relay progress home
+// MESH SCAN FLAG — a peer can run a scanner this board can't; delegation is
+// transparent (the server routes /api/vuln-advanced/scan to the peer and the
+// delegated scan shows up in the normal active-scans list). This just renders
+// the "handled by <viking>" flag. See advVulnMeshScan (from the status poll).
 // ============================================================================
-let _meshScanOptionsTs = 0;
-let _meshDelegatePollTimer = null;
-const MESH_SCANTYPE = { nuclei: 'nuclei', zap: 'zap_full' };
 const MESH_LABEL = { nuclei: 'Nuclei', zap: 'ZAP' };
 
-async function refreshMeshScanOptions(scanners) {
-    const banner = document.getElementById('nuclei-mesh-steer');
-    const gated = scanners && (scanners.nuclei_ram_ok === false || scanners.zap_ram_ok === false);
-    if (!gated) {
-        if (banner) banner.classList.add('hidden');
-        return;
-    }
-    // Polling peers is real network I/O — throttle to every 15s.
-    const now = Date.now();
-    if (now - _meshScanOptionsTs < 15000) return;
-    _meshScanOptionsTs = now;
-    try {
-        const r = await fetch('/api/mesh/scan/options');
-        const d = await r.json();
-        renderMeshSteer(d);
-    } catch (e) {
-        // keep whatever was shown
-    }
-}
-
-function renderMeshSteer(data) {
-    const banner = document.getElementById('nuclei-mesh-steer');
-    const textEl = document.getElementById('mesh-steer-text');
-    const actions = document.getElementById('mesh-steer-actions');
-    if (!banner || !textEl || !actions) return;
-
-    const b = (data && data.banner) || { show: false };
-    if (!b.show) { banner.classList.add('hidden'); return; }
-    banner.classList.remove('hidden');
-    textEl.textContent = b.text || '';
-    actions.innerHTML = '';
-
-    if (b.kind === 'delegate' && b.delegates) {
-        // One button per heavy scanner this board is missing but a peer can run.
-        (b.missing || []).forEach(scanner => {
-            const d = b.delegates[scanner];
-            if (!d) return;
-            const btn = document.createElement('button');
-            btn.className = 'bg-yellow-600 hover:bg-yellow-500 text-white text-xs sm:text-sm py-2 px-3 rounded-lg font-medium transition-colors whitespace-nowrap';
-            btn.textContent = `Run ${MESH_LABEL[scanner]} on ${d.viking}`;
-            btn.onclick = () => delegateScan(scanner, d.viking);
-            actions.appendChild(btn);
-        });
-    } else {
-        // Nothing capable found — just offer the Mesh tab.
-        const link = document.createElement('button');
-        link.className = 'bg-slate-600 hover:bg-slate-500 text-white text-xs sm:text-sm py-2 px-3 rounded-lg font-medium transition-colors whitespace-nowrap';
-        link.textContent = 'Open Mesh →';
-        link.onclick = () => showTab('mesh');
-        actions.appendChild(link);
-    }
-}
-
-async function delegateScan(scanner, viking) {
-    const target = (document.getElementById('adv-vuln-target')?.value || '').trim();
-    if (!target) { showNotification('Enter a target first', 'error'); return; }
-    const scanType = MESH_SCANTYPE[scanner] || 'nuclei';
-    try {
-        const r = await fetch('/api/mesh/scan/delegate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ target, scan_type: scanType, viking })
-        });
-        const d = await r.json();
-        if (d.success) {
-            showNotification(`${MESH_LABEL[scanner]} scan delegated to ${viking} — progress will appear below`, 'success');
-            startMeshDelegatePolling();
-        } else {
-            showNotification(d.error || 'Delegation failed', 'error');
-        }
-    } catch (e) {
-        showNotification('Delegation failed', 'error');
-    }
-}
-
-function startMeshDelegatePolling() {
-    refreshMeshDelegatedScans();
-    if (_meshDelegatePollTimer) return;
-    _meshDelegatePollTimer = setInterval(refreshMeshDelegatedScans, 2500);
-}
-
-async function refreshMeshDelegatedScans() {
-    try {
-        const r = await fetch('/api/mesh/scan/jobs');
-        const d = await r.json();
-        renderMeshDelegatedScans(d.jobs || []);
-    } catch (e) {
-        // non-fatal
-    }
-}
-
-function renderMeshDelegatedScans(jobs) {
-    const wrap = document.getElementById('mesh-delegated-scans');
-    const list = document.getElementById('mesh-delegated-list');
-    if (!wrap || !list) return;
-    if (!jobs.length) { wrap.classList.add('hidden'); return; }
-    wrap.classList.remove('hidden');
-
-    const statusColor = { running: 'text-cyan-400', completed: 'text-green-400',
-                          failed: 'text-red-400', cancelled: 'text-gray-400' };
-    list.innerHTML = jobs.map(j => {
-        const pct = Math.max(0, Math.min(100, j.progress_percent || 0));
-        const color = statusColor[j.status] || 'text-gray-400';
-        const canCancel = j.status === 'running';
-        return `
-        <div class="glass-card p-3">
-            <div class="flex items-center justify-between gap-2 mb-1">
-                <div class="text-xs sm:text-sm truncate">
-                    <span class="font-medium">${escapeHtml(j.scan_type)}</span>
-                    <span class="text-gray-400">on</span>
-                    <span class="font-medium">🛰️ ${escapeHtml(j.viking)}</span>
-                    <span class="text-gray-400">→ ${escapeHtml(j.target)}</span>
-                </div>
-                <div class="flex items-center gap-2 shrink-0">
-                    <span class="text-xs ${color}">${escapeHtml(j.status)}</span>
-                    ${canCancel ? `<button onclick="cancelMeshDelegatedScan('${j.delegated_id}')" class="text-xs text-red-400 hover:text-red-300">Cancel</button>` : ''}
-                </div>
-            </div>
-            <div class="w-full bg-slate-700 rounded-full h-2">
-                <div class="bg-cyan-500 h-2 rounded-full transition-all" style="width:${pct}%"></div>
-            </div>
-            <div class="flex items-center justify-between mt-1 text-xs text-gray-400">
-                <span class="truncate">${escapeHtml(j.current_check || '')}</span>
-                <span class="shrink-0">${pct}% · ${j.findings_count || 0} findings</span>
-            </div>
-            ${j.error_message ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(j.error_message)}</div>` : ''}
-            ${(j.status === 'completed' && (j.findings_count || 0) > 0) ? `
-            <button onclick="toggleMeshFindings('${j.delegated_id}')" class="mt-2 text-xs text-cyan-400 hover:text-cyan-300">
-                View ${j.findings_count} findings ▾
-            </button>
-            <div id="mesh-findings-${j.delegated_id}" class="hidden mt-2 space-y-1"></div>` : ''}
-        </div>`;
-    }).join('');
-
-    // Keep polling while anything runs; stop once all terminal.
-    const anyRunning = jobs.some(j => j.status === 'running');
-    if (anyRunning && !_meshDelegatePollTimer) {
-        _meshDelegatePollTimer = setInterval(refreshMeshDelegatedScans, 2500);
-    } else if (!anyRunning && _meshDelegatePollTimer) {
-        clearInterval(_meshDelegatePollTimer);
-        _meshDelegatePollTimer = null;
-    }
-}
-
-const MESH_SEV_COLOR = {
-    critical: 'text-red-400 border-red-500/40 bg-red-900/20',
-    high: 'text-orange-400 border-orange-500/40 bg-orange-900/20',
-    medium: 'text-yellow-400 border-yellow-500/40 bg-yellow-900/20',
-    low: 'text-blue-400 border-blue-500/40 bg-blue-900/20',
-    info: 'text-gray-400 border-slate-500/40 bg-slate-800/40',
-};
-
-async function toggleMeshFindings(localId) {
-    const box = document.getElementById(`mesh-findings-${localId}`);
-    if (!box) return;
-    if (!box.classList.contains('hidden')) { box.classList.add('hidden'); return; }
-    box.classList.remove('hidden');
-    box.innerHTML = '<div class="text-xs text-gray-400">Loading…</div>';
-    try {
-        const r = await fetch('/api/mesh/scan/jobs?findings=1');
-        const d = await r.json();
-        const job = (d.jobs || []).find(j => j.delegated_id === localId);
-        const findings = (job && job.findings) || [];
-        if (!findings.length) { box.innerHTML = '<div class="text-xs text-gray-400">No findings returned.</div>'; return; }
-        box.innerHTML = findings.map(f => {
-            const sev = (f.severity || 'info').toLowerCase();
-            const cls = MESH_SEV_COLOR[sev] || MESH_SEV_COLOR.info;
-            const loc = f.host ? `${f.host}${f.port ? ':' + f.port : ''}` : (f.matched_at || '');
-            const cve = (f.cve_ids && f.cve_ids.length) ? ` · ${escapeHtml(f.cve_ids.join(', '))}` : '';
-            return `<div class="text-xs border rounded px-2 py-1 ${cls}">
-                <span class="font-semibold uppercase">${escapeHtml(sev)}</span>
-                <span class="text-gray-200">${escapeHtml(f.title || f.template_id || 'finding')}</span>
-                ${loc ? `<span class="text-gray-400">— ${escapeHtml(loc)}</span>` : ''}${cve}
-            </div>`;
-        }).join('');
-    } catch (e) {
-        box.innerHTML = '<div class="text-xs text-red-400">Could not load findings.</div>';
-    }
-}
-
-async function cancelMeshDelegatedScan(localId) {
-    try {
-        const r = await fetch(`/api/mesh/scan/jobs/${localId}/cancel`, { method: 'POST' });
-        const d = await r.json();
-        if (d.success) showNotification('Delegated scan cancelled', 'info');
-        else showNotification(d.error || 'Cancel failed', 'error');
-        refreshMeshDelegatedScans();
-    } catch (e) {
-        showNotification('Cancel failed', 'error');
-    }
+function renderMeshScanFlag(mesh) {
+    const el = document.getElementById('mesh-scan-flag');
+    if (!el) return;
+    const parts = [];
+    ['nuclei', 'zap'].forEach(s => {
+        const d = mesh && mesh[s];
+        if (d && d.available && d.viking) parts.push(`${MESH_LABEL[s]} → ${d.viking}`);
+    });
+    if (!parts.length) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    el.innerHTML = `🛰️ <span class="font-semibold">Mesh ready</span> — this board can't run ${parts.length === 2 ? 'these' : 'this'} locally, so scans run on a peer and the results come back here: ${parts.map(escapeHtml).join(' · ')}.`;
 }
 
 // ============================================================================
 // OWASP ZAP CONTROL FUNCTIONS
 // ============================================================================
 
-function updateZapControlPanel(scanners) {
+function updateZapControlPanel(scanners, meshZap, meshZapViking) {
     const panel = document.getElementById('zap-control-panel');
     const daemonStatus = document.getElementById('zap-daemon-status');
     const startBtn = document.getElementById('zap-start-btn');
     const stopBtn = document.getElementById('zap-stop-btn');
 
-    // Grey out the ZAP scan-type options in the scanner picker when ZAP is
-    // unavailable, and steer the selection back to a scanner that works.
+    // ZAP scan-type options are usable if THIS board runs ZAP or a mesh peer
+    // can (delegation is transparent). The local daemon panel below still only
+    // reflects/controls a *local* ZAP — a delegated ZAP has no local daemon.
+    const zapUsable = !!scanners.zap || !!meshZap;
     const zapOptgroup = document.getElementById('adv-vuln-zap-optgroup');
     if (zapOptgroup) {
-        const zapUp = !!scanners.zap;
-        zapOptgroup.disabled = !zapUp;
+        zapOptgroup.disabled = !zapUsable;
         Array.from(zapOptgroup.querySelectorAll('option')).forEach(opt => {
-            opt.disabled = !zapUp;
+            opt.disabled = !zapUsable;
+            if (meshZap && !scanners.zap && opt.value === 'zap_full') {
+                opt.textContent = `ZAP Full Scan (via ${meshZapViking})`;
+            }
         });
         const scannerSelect = document.getElementById('adv-vuln-scanner');
-        if (!zapUp && scannerSelect && scannerSelect.value.startsWith('zap_')) {
+        if (!zapUsable && scannerSelect && scannerSelect.value.startsWith('zap_')) {
             scannerSelect.value = 'nuclei';
         }
     }
@@ -28760,17 +28605,24 @@ function updateZapControlPanel(scanners) {
         if (daemonControls) {
             daemonControls.classList.add('opacity-50', 'pointer-events-none');
             daemonControls.setAttribute('aria-disabled', 'true');
-            daemonControls.title = needsRam
-                ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
-                : 'OWASP ZAP is not installed on this system.';
+            daemonControls.title = meshZap
+                ? `ZAP runs on ${meshZapViking} in the mesh; there's no local ZAP daemon here.`
+                : needsRam
+                    ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
+                    : 'OWASP ZAP is not installed on this system.';
         }
         if (startBtn) startBtn.disabled = true;
         if (stopBtn) stopBtn.disabled = true;
         if (daemonStatus) {
-            daemonStatus.textContent = needsRam ? 'Needs 8GB RAM' : 'Not Installed';
-            daemonStatus.className = needsRam
-                ? 'text-xs px-2 py-1 rounded-full bg-yellow-900 text-yellow-400'
-                : 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
+            if (meshZap) {
+                daemonStatus.textContent = `via ${meshZapViking}`;
+                daemonStatus.className = 'text-xs px-2 py-1 rounded-full bg-cyan-900 text-cyan-300';
+            } else {
+                daemonStatus.textContent = needsRam ? 'Needs 8GB RAM' : 'Not Installed';
+                daemonStatus.className = needsRam
+                    ? 'text-xs px-2 py-1 rounded-full bg-yellow-900 text-yellow-400'
+                    : 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
+            }
         }
         return;
     }
