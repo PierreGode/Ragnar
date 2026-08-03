@@ -1394,6 +1394,48 @@ class AdvancedVulnScanner:
                     break
         return resolved
 
+    def _parse_nuclei_progress(self, stderr_path: str) -> Optional[int]:
+        """Extract a 0-99 completion percentage from nuclei's -stats output.
+
+        With -jsonl, nuclei -stats writes periodic JSON stats lines to stderr,
+        e.g. {"duration":"0:00:30","percent":"4","requests":"759","total":
+        "18629",...}. Read the tail of the stderr file and take the most recent
+        "percent" (falling back to requests/total, or the human-readable
+        "(N%)" token some configs emit). Returns None when no stats line is
+        present yet (before the first -si interval) so the caller can leave the
+        bar where it is rather than resetting it.
+        """
+        try:
+            if not os.path.exists(stderr_path):
+                return None
+            with open(stderr_path, 'r', errors='replace') as f:
+                # Stats lines are short; the tail is all we need.
+                try:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - 8192))
+                except Exception:
+                    pass
+                text = f.read()
+            if not text:
+                return None
+            # Preferred: the JSON "percent" field (string or number), latest.
+            pcts = re.findall(r'"percent"\s*:\s*"?(\d{1,3})"?', text)
+            if pcts:
+                return max(0, min(99, int(pcts[-1])))
+            # Fall back to JSON requests/total on the last stats line.
+            reqs = re.findall(r'"requests"\s*:\s*"?(\d+)"?', text)
+            totals = re.findall(r'"total"\s*:\s*"?(\d+)"?', text)
+            if reqs and totals and int(totals[-1]) > 0:
+                return max(0, min(99, int(int(reqs[-1]) * 100 / int(totals[-1]))))
+            # Human-readable "(N%)" token, if stats aren't JSON.
+            paren = re.findall(r'\((\d{1,3})%\)', text)
+            if paren:
+                return max(0, min(99, int(paren[-1])))
+        except Exception as e:
+            logger.debug(f"Could not parse nuclei progress: {e}")
+        return None
+
     def _run_nuclei_scan(self, scan_id: str, target: str, options: Dict):
         """Run Nuclei template-based scan"""
         nuclei_path = self._tool_paths.get('nuclei')
@@ -1430,7 +1472,7 @@ class AdvancedVulnScanner:
                 '-o', output_path,
                 '-severity', severity_filter,
                 '-rate-limit', str(rate_limit),
-                '-stats', '-si', '30',
+                '-stats', '-si', '5',
                 '-no-color'
             ]
 
@@ -1492,6 +1534,9 @@ class AdvancedVulnScanner:
                 # process cannot block the scan thread indefinitely.
                 max_runtime = int(options.get('max_runtime', 1800))
                 start_time = time.monotonic()
+                # Small initial bump so the bar isn't frozen at 0 before
+                # nuclei's first stats line (which -si 5 emits after ~5s).
+                progress.progress_percent = max(progress.progress_percent, 3)
                 while process.poll() is None:
                     time.sleep(2)
                     if self._is_scan_cancelled(scan_id):
@@ -1501,7 +1546,18 @@ class AdvancedVulnScanner:
                         self._scan_log(scan_id, 'warning', f"Nuclei scan exceeded {max_runtime}s, terminating")
                         process.kill()
                         break
-                    progress.current_check = "Scanning with Nuclei templates..."
+                    # Drive the progress bar from nuclei's own -stats output
+                    # (written to the stderr file). It prints a line ending in
+                    # "Requests: A/B (N%)"; use N, or A/B if the percent token
+                    # isn't present. Never let the bar go backwards, and cap at
+                    # 99 so only completion shows 100.
+                    pct = self._parse_nuclei_progress(stderr_path)
+                    if pct is not None:
+                        progress.progress_percent = min(99, max(progress.progress_percent, pct))
+                    progress.current_check = (
+                        f"Scanning with Nuclei templates... {progress.progress_percent}%"
+                        if pct is not None else "Scanning with Nuclei templates..."
+                    )
                     # Update findings count from output file
                     if os.path.exists(output_path):
                         with open(output_path, 'r') as f:
