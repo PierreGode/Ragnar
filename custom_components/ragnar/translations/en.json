@@ -37,7 +37,10 @@
     "binary_sensor": {
       "presence": { "name": "Presence" },
       "security_alert": { "name": "Security alert" },
-      "sensing_health": { "name": "Sensing backend problem" }
+      "sensing_health": { "name": "Sensing backend problem" },
+      "wifi_connected": { "name": "Wi-Fi connected" },
+      "ethernet_connected": { "name": "Ethernet connected" },
+      "mesh_attention": { "name": "Mesh needs attention" }
     },
     "sensor": {
       "people": { "name": "People" },
@@ -45,7 +48,9 @@
       "breathing_rate": { "name": "Breathing rate" },
       "alert_count": { "name": "Active alerts" },
       "incident_count": { "name": "Active incidents" },
-      "vulnerability_count": { "name": "Vulnerabilities" }
+      "vulnerability_count": { "name": "Vulnerabilities" },
+      "ssid": { "name": "Connected SSID" },
+      "mesh_reachable": { "name": "Mesh nodes reachable" }
     },
     "event": {
       "security_alert": { "name": "Security alert" }

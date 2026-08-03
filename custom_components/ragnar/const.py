@@ -27,6 +27,7 @@ API_SENSING_STATUS = "/api/sensing/status"
 API_WATCHTOWER = "/api/net/watchtower"
 API_INCIDENTS = "/api/net/incidents"
 API_STATUS = "/api/status"
+API_MESH_STATUS = "/api/mesh/status"
 
 # Event fired on the HA bus for each new security alert
 EVENT_SECURITY_ALERT = f"{DOMAIN}_security_alert"

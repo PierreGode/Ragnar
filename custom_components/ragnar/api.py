@@ -18,6 +18,7 @@ from .const import (
     API_AUTH_LOGIN,
     API_AUTH_STATUS,
     API_INCIDENTS,
+    API_MESH_STATUS,
     API_RUSENSE_PRESENCE,
     API_RUSENSE_VITALS,
     API_SENSING_STATUS,
@@ -136,3 +137,6 @@ class RagnarApiClient:
 
     async def async_status(self) -> dict[str, Any]:
         return await self._get_json(API_STATUS)
+
+    async def async_mesh(self) -> dict[str, Any]:
+        return await self._get_json(API_MESH_STATUS)

@@ -15,7 +15,7 @@ client that talks to the same web API the Ragnar UI already serves (default
 
 ## What you get
 
-One HA **device** ("Ragnar") with ten entities:
+One HA **device** ("Ragnar") with fifteen entities:
 
 | Entity | Type | Ragnar endpoint | Meaning |
 |--------|------|-----------------|---------|
@@ -28,7 +28,18 @@ One HA **device** ("Ragnar") with ten entities:
 | `sensor.ragnar_active_incidents` | measurement | `/api/net/incidents` | Count of correlated attack-chain [incidents](incident-correlation.md). |
 | `sensor.ragnar_vulnerabilities` | measurement | `/api/status` | Open vulnerability count from the dashboard status. |
 | `binary_sensor.ragnar_sensing_backend_problem` | problem | `/api/sensing/status` | On when the bundled sensing backend is **installed but not running** (a silent-failure tell). |
+| `binary_sensor.ragnar_wifi_connected` | connectivity | `/api/status` | On when the unit's Wi-Fi is connected. Attribute `ssid`. |
+| `binary_sensor.ragnar_ethernet_connected` | connectivity | `/api/status` | On when the unit's Ethernet is connected. Attributes `interface`, `ip`. |
+| `sensor.ragnar_connected_ssid` | — | `/api/status` | The Wi-Fi SSID the unit is joined to. |
+| `binary_sensor.ragnar_mesh_needs_attention` | problem | `/api/mesh/status` | On when any [Ragnar Mesh](mesh.md) node needs attention (unreachable, node-key warning/expired, undervoltage, or high/critical finding). Attributes carry the reachable/unreachable/total roll and worst severity. **Unavailable** unless the mesh is enabled. |
+| `sensor.ragnar_mesh_nodes_reachable` | measurement | `/api/mesh/status` | Count of reachable mesh nodes. **Unavailable** unless the mesh is enabled. |
 | `event.ragnar_security_alert` | event | `/api/net/watchtower` | Fires once per **new** Watchtower alert. Event data: `severity`, `source`, `title`, `key`, `ts`. |
+
+> **Wireless-attack alerts** (deauth floods, evil twins, KARMA) are **not** a
+> separate entity: when a monitor-mode adapter is running the WiFi Defense /
+> `wifiwatch` monitor, those detections flow into Watchtower and therefore
+> already surface through `binary_sensor.ragnar_security_alert` and the
+> `event.ragnar_security_alert` event above.
 
 > **Note on vitals cadence.** Heart rate and breathing rate come from RuSense's
 > 5-minute vitals-history buckets, so those two sensors update on that cadence
@@ -92,6 +103,26 @@ automation:
         data:
           title: "Ragnar: {{ trigger.event.data.severity | upper }}"
           message: "{{ trigger.event.data.source }}: {{ trigger.event.data.title }}"
+```
+
+Warn when a mesh node drops or needs attention:
+
+```yaml
+automation:
+  - alias: Notify when a Ragnar mesh node needs attention
+    trigger:
+      - platform: state
+        entity_id: binary_sensor.ragnar_mesh_needs_attention
+        to: "on"
+        for: "00:02:00"
+    action:
+      - service: notify.mobile_app_myphone
+        data:
+          title: Ragnar mesh
+          message: >
+            A node needs attention —
+            {{ state_attr('binary_sensor.ragnar_mesh_needs_attention', 'unreachable') }}
+            of {{ state_attr('binary_sensor.ragnar_mesh_needs_attention', 'total') }} unreachable.
 ```
 
 Presence-driven lighting:
