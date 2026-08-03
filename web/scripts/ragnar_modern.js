@@ -27044,6 +27044,9 @@ async function loadAdvancedVulnData() {
         updateScannerStatus(data.scanners, data.nuclei_templates);
         updateVulnSummary(data.summary);
 
+        // Surface any delegated scans still running on mesh peers.
+        refreshMeshDelegatedScans();
+
         // Parse findings (already fetched in parallel)
         try {
             const findingsData = await findingsResponse.json();
@@ -27658,9 +27661,9 @@ function updateScannerStatus(scanners, nucleiTemplates) {
     // Disable the Nuclei scan-type option when it's unavailable (RAM-gated on
     // a small board, or not installed), and steer the selection elsewhere so
     // the user can't launch a scan that will only be refused.
-    // Show the "run Nuclei from a mesh unit" banner only when it's RAM-gated.
-    const meshSteer = document.getElementById('nuclei-mesh-steer');
-    if (meshSteer) meshSteer.classList.toggle('hidden', scanners.nuclei_ram_ok !== false);
+    // When a heavy scanner is RAM-gated here, discover which mesh peers can run
+    // it and offer to delegate. Throttled; hides itself when nothing is gated.
+    refreshMeshScanOptions(scanners);
 
     const nucleiOption = document.getElementById('adv-vuln-nuclei-option');
     if (nucleiOption) {
@@ -28516,6 +28519,165 @@ function startAdvVulnPolling() {
 
 async function refreshAdvVulnData() {
     await loadAdvancedVulnData();
+}
+
+// ============================================================================
+// MESH SCAN DELEGATION — run Nuclei/ZAP on a capable peer, relay progress home
+// ============================================================================
+let _meshScanOptionsTs = 0;
+let _meshDelegatePollTimer = null;
+const MESH_SCANTYPE = { nuclei: 'nuclei', zap: 'zap_full' };
+const MESH_LABEL = { nuclei: 'Nuclei', zap: 'ZAP' };
+
+async function refreshMeshScanOptions(scanners) {
+    const banner = document.getElementById('nuclei-mesh-steer');
+    const gated = scanners && (scanners.nuclei_ram_ok === false || scanners.zap_ram_ok === false);
+    if (!gated) {
+        if (banner) banner.classList.add('hidden');
+        return;
+    }
+    // Polling peers is real network I/O — throttle to every 15s.
+    const now = Date.now();
+    if (now - _meshScanOptionsTs < 15000) return;
+    _meshScanOptionsTs = now;
+    try {
+        const r = await fetch('/api/mesh/scan/options');
+        const d = await r.json();
+        renderMeshSteer(d);
+    } catch (e) {
+        // keep whatever was shown
+    }
+}
+
+function renderMeshSteer(data) {
+    const banner = document.getElementById('nuclei-mesh-steer');
+    const textEl = document.getElementById('mesh-steer-text');
+    const actions = document.getElementById('mesh-steer-actions');
+    if (!banner || !textEl || !actions) return;
+
+    const b = (data && data.banner) || { show: false };
+    if (!b.show) { banner.classList.add('hidden'); return; }
+    banner.classList.remove('hidden');
+    textEl.textContent = b.text || '';
+    actions.innerHTML = '';
+
+    if (b.kind === 'delegate' && b.delegates) {
+        // One button per heavy scanner this board is missing but a peer can run.
+        (b.missing || []).forEach(scanner => {
+            const d = b.delegates[scanner];
+            if (!d) return;
+            const btn = document.createElement('button');
+            btn.className = 'bg-yellow-600 hover:bg-yellow-500 text-white text-xs sm:text-sm py-2 px-3 rounded-lg font-medium transition-colors whitespace-nowrap';
+            btn.textContent = `Run ${MESH_LABEL[scanner]} on ${d.viking}`;
+            btn.onclick = () => delegateScan(scanner, d.viking);
+            actions.appendChild(btn);
+        });
+    } else {
+        // Nothing capable found — just offer the Mesh tab.
+        const link = document.createElement('button');
+        link.className = 'bg-slate-600 hover:bg-slate-500 text-white text-xs sm:text-sm py-2 px-3 rounded-lg font-medium transition-colors whitespace-nowrap';
+        link.textContent = 'Open Mesh →';
+        link.onclick = () => showTab('mesh');
+        actions.appendChild(link);
+    }
+}
+
+async function delegateScan(scanner, viking) {
+    const target = (document.getElementById('adv-vuln-target')?.value || '').trim();
+    if (!target) { showNotification('Enter a target first', 'error'); return; }
+    const scanType = MESH_SCANTYPE[scanner] || 'nuclei';
+    try {
+        const r = await fetch('/api/mesh/scan/delegate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target, scan_type: scanType, viking })
+        });
+        const d = await r.json();
+        if (d.success) {
+            showNotification(`${MESH_LABEL[scanner]} scan delegated to ${viking} — progress will appear below`, 'success');
+            startMeshDelegatePolling();
+        } else {
+            showNotification(d.error || 'Delegation failed', 'error');
+        }
+    } catch (e) {
+        showNotification('Delegation failed', 'error');
+    }
+}
+
+function startMeshDelegatePolling() {
+    refreshMeshDelegatedScans();
+    if (_meshDelegatePollTimer) return;
+    _meshDelegatePollTimer = setInterval(refreshMeshDelegatedScans, 2500);
+}
+
+async function refreshMeshDelegatedScans() {
+    try {
+        const r = await fetch('/api/mesh/scan/jobs');
+        const d = await r.json();
+        renderMeshDelegatedScans(d.jobs || []);
+    } catch (e) {
+        // non-fatal
+    }
+}
+
+function renderMeshDelegatedScans(jobs) {
+    const wrap = document.getElementById('mesh-delegated-scans');
+    const list = document.getElementById('mesh-delegated-list');
+    if (!wrap || !list) return;
+    if (!jobs.length) { wrap.classList.add('hidden'); return; }
+    wrap.classList.remove('hidden');
+
+    const statusColor = { running: 'text-cyan-400', completed: 'text-green-400',
+                          failed: 'text-red-400', cancelled: 'text-gray-400' };
+    list.innerHTML = jobs.map(j => {
+        const pct = Math.max(0, Math.min(100, j.progress_percent || 0));
+        const color = statusColor[j.status] || 'text-gray-400';
+        const canCancel = j.status === 'running';
+        return `
+        <div class="glass-card p-3">
+            <div class="flex items-center justify-between gap-2 mb-1">
+                <div class="text-xs sm:text-sm truncate">
+                    <span class="font-medium">${escapeHtml(j.scan_type)}</span>
+                    <span class="text-gray-400">on</span>
+                    <span class="font-medium">🛰️ ${escapeHtml(j.viking)}</span>
+                    <span class="text-gray-400">→ ${escapeHtml(j.target)}</span>
+                </div>
+                <div class="flex items-center gap-2 shrink-0">
+                    <span class="text-xs ${color}">${escapeHtml(j.status)}</span>
+                    ${canCancel ? `<button onclick="cancelMeshDelegatedScan('${j.delegated_id}')" class="text-xs text-red-400 hover:text-red-300">Cancel</button>` : ''}
+                </div>
+            </div>
+            <div class="w-full bg-slate-700 rounded-full h-2">
+                <div class="bg-cyan-500 h-2 rounded-full transition-all" style="width:${pct}%"></div>
+            </div>
+            <div class="flex items-center justify-between mt-1 text-xs text-gray-400">
+                <span class="truncate">${escapeHtml(j.current_check || '')}</span>
+                <span class="shrink-0">${pct}% · ${j.findings_count || 0} findings</span>
+            </div>
+            ${j.error_message ? `<div class="text-xs text-red-400 mt-1">${escapeHtml(j.error_message)}</div>` : ''}
+        </div>`;
+    }).join('');
+
+    // Keep polling while anything runs; stop once all terminal.
+    const anyRunning = jobs.some(j => j.status === 'running');
+    if (anyRunning && !_meshDelegatePollTimer) {
+        _meshDelegatePollTimer = setInterval(refreshMeshDelegatedScans, 2500);
+    } else if (!anyRunning && _meshDelegatePollTimer) {
+        clearInterval(_meshDelegatePollTimer);
+        _meshDelegatePollTimer = null;
+    }
+}
+
+async function cancelMeshDelegatedScan(localId) {
+    try {
+        const r = await fetch(`/api/mesh/scan/jobs/${localId}/cancel`, { method: 'POST' });
+        const d = await r.json();
+        if (d.success) showNotification('Delegated scan cancelled', 'info');
+        else showNotification(d.error || 'Cancel failed', 'error');
+        refreshMeshDelegatedScans();
+    } catch (e) {
+        showNotification('Cancel failed', 'error');
+    }
 }
 
 // ============================================================================

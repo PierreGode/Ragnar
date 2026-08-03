@@ -430,7 +430,15 @@ def check_authentication():
     if shared_data.config.get('mesh_enabled'):
         peer_read = request.method == 'GET' and path.startswith('/api/mesh/')
         peer_control = request.method == 'POST' and path == '/api/mesh/control'
-        if (peer_read or peer_control) and _is_mesh_peer_request():
+        # Scan delegation writes a peer may make: start a scan on this unit, and
+        # cancel one it started. Both exact-path allowlisted (cancel by prefix +
+        # id). The cockpit-side routes (/scan/delegate, /scan/jobs/*) are NOT
+        # here, so they stay session-only — a peer can be a scan *worker* but
+        # can't drive this unit's UI orchestration.
+        peer_scan_write = request.method == 'POST' and (
+            path == '/api/mesh/scan/start'
+            or path.startswith('/api/mesh/scan/cancel/'))
+        if (peer_read or peer_control or peer_scan_write) and _is_mesh_peer_request():
             return
 
     # Check if user is authenticated via Flask session
@@ -2745,6 +2753,254 @@ def mesh_unit_findings():
     return jsonify({'success': True, 'node': _mesh_unit_name(),
                     'unit_id': _mesh_unit_id(),
                     'features': _mesh_local_features(), **result})
+
+
+# ============================================================================
+# MESH SCAN DELEGATION
+# A small board (Pi Zero) can't run Nuclei/ZAP, so it delegates those scans to
+# a capable mesh peer and relays the progress + findings back. See mesh_scan.py.
+# ============================================================================
+try:
+    import mesh_scan
+except Exception:  # pragma: no cover
+    mesh_scan = None
+
+_mesh_scan_delegator = None
+_mesh_scan_delegator_lock = threading.Lock()
+
+
+def _peer_scan_port():
+    return _mesh_node_port()
+
+
+def get_mesh_scan_delegator():
+    """Lazily build the delegator, wiring its peer I/O through mesh_manager."""
+    global _mesh_scan_delegator
+    if _mesh_scan_delegator is not None:
+        return _mesh_scan_delegator
+    with _mesh_scan_delegator_lock:
+        if _mesh_scan_delegator is not None:
+            return _mesh_scan_delegator
+        if not mesh_scan or not mesh_available:
+            return None
+        port = _peer_scan_port()
+
+        def start_fn(node, target, scan_type, options):
+            return mesh_manager.post_peer(node, '/api/mesh/scan/start',
+                                          {'target': target, 'scan_type': scan_type,
+                                           'options': options}, port=port, timeout=25)
+
+        def status_fn(node, remote_id):
+            return mesh_manager.poll_peer(node, port=port, timeout=8,
+                                          path=f'/api/mesh/scan/status/{remote_id}')
+
+        def findings_fn(node, remote_id):
+            return mesh_manager.poll_peer(node, port=port, timeout=12,
+                                          path=f'/api/mesh/scan/findings/{remote_id}')
+
+        def cancel_fn(node, remote_id):
+            return mesh_manager.post_peer(node, f'/api/mesh/scan/cancel/{remote_id}',
+                                          {}, port=port, timeout=12)
+
+        _mesh_scan_delegator = mesh_scan.MeshScanDelegator(
+            start_fn, status_fn, findings_fn, cancel_fn)
+    return _mesh_scan_delegator
+
+
+def _local_scan_capability():
+    """This unit's can-run flags for the RAM-gated scanners (installed AND
+    above the RAM gate), from the advanced vuln scanner."""
+    try:
+        scanner = get_advanced_vuln_scanner()
+        s = scanner.get_available_scanners() if scanner else {}
+        return {'nuclei': bool(s.get('nuclei')), 'zap': bool(s.get('zap'))}
+    except Exception:
+        return {'nuclei': False, 'zap': False}
+
+
+def _mesh_tagged_peers():
+    """Online-or-not tagged peer nodes (the Ragnars in our mesh)."""
+    if not _mesh_enabled():
+        return []
+    state = mesh_manager.status()
+    if not state.get('available'):
+        return []
+    tag = _mesh_tag()
+    return [p for p in state.get('peers', []) if tag in p.get('tags', [])]
+
+
+def _resolve_delegate_node(viking):
+    """Find a tagged peer node by its Viking short name (case-insensitive)."""
+    viking = (viking or '').strip().lower()
+    for p in _mesh_tagged_peers():
+        if (p.get('short_name') or '').lower() == viking:
+            return p
+    return None
+
+
+def _discover_scan_roster():
+    """Ask each tagged peer what heavy scanners it can run. Returns a list of
+    clean capability dicts (no node objects — resolve those at delegate time)."""
+    roster = []
+    port = _peer_scan_port()
+    for node in _mesh_tagged_peers():
+        rep = mesh_manager.poll_peer(node, port=port, timeout=6,
+                                     path='/api/mesh/scan/capabilities')
+        if not rep.get('reachable') or not rep.get('success'):
+            continue
+        roster.append(mesh_scan.capability(
+            viking=rep.get('viking') or node.get('short_name') or '',
+            unit_id=int(rep.get('unit_id') or 0),
+            ram_gb=float(rep.get('ram_gb') or 0),
+            nuclei=bool(rep.get('nuclei')), zap=bool(rep.get('zap')),
+            node_id=node.get('id', ''), ip=node.get('ip', ''), reachable=True))
+    return roster
+
+
+# --- Peer-facing endpoints (another Ragnar calls these; peer-auth) ----------
+
+@app.route('/api/mesh/scan/capabilities', methods=['GET'])
+def mesh_scan_capabilities():
+    """Advertise which heavy scanners this unit can run, for delegation."""
+    cap = _local_scan_capability()
+    ram_gb = 0.0
+    try:
+        from server_capabilities import get_server_capabilities
+        ram_gb = get_server_capabilities(shared_data).capabilities.total_ram_gb or 0.0
+    except Exception:
+        pass
+    return jsonify({'success': True, 'viking': _mesh_viking_name(),
+                    'unit_id': _mesh_unit_id(), 'ram_gb': round(ram_gb, 2),
+                    'nuclei': cap['nuclei'], 'zap': cap['zap']})
+
+
+@app.route('/api/mesh/scan/start', methods=['POST'])
+def mesh_scan_start():
+    """Run a delegated scan locally on behalf of a peer. Peer-write allowlisted."""
+    try:
+        scanner = get_advanced_vuln_scanner()
+        if not scanner or not scanner.is_available():
+            return jsonify({'success': False, 'error': 'Scanner not available on this unit'}), 503
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target') or '').strip()
+        if not target:
+            return jsonify({'success': False, 'error': 'target required'}), 400
+        from advanced_vuln_scanner import ScanType
+        try:
+            scan_type = ScanType(data.get('scan_type', 'nuclei'))
+        except ValueError:
+            return jsonify({'success': False, 'error': f"invalid scan_type: {data.get('scan_type')}"}), 400
+        options = data.get('options') or {}
+        scan_id = scanner.start_scan(target, scan_type, options)
+        logger.info(f"[MESH-SCAN] Accepted delegated {scan_type.value} scan {scan_id} for {target}")
+        return jsonify({'success': True, 'scan_id': scan_id})
+    except RuntimeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"[MESH-SCAN] start failed: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/scan/status/<scan_id>', methods=['GET'])
+def mesh_scan_status(scan_id):
+    """Progress of a delegated scan, for the delegating unit to relay."""
+    scanner = get_advanced_vuln_scanner()
+    if not scanner:
+        return jsonify({'success': False, 'error': 'Scanner not available'}), 503
+    scan = scanner.get_scan_status(scan_id)
+    if not scan:
+        return jsonify({'success': False, 'error': 'scan not found'}), 404
+    return jsonify({'success': True, 'scan': scan})
+
+
+@app.route('/api/mesh/scan/findings/<scan_id>', methods=['GET'])
+def mesh_scan_findings(scan_id):
+    """Findings for a delegated scan, pulled home on completion."""
+    scanner = get_advanced_vuln_scanner()
+    if not scanner:
+        return jsonify({'success': False, 'error': 'Scanner not available'}), 503
+    try:
+        with scanner._lock:
+            findings = [f.to_dict() for f in scanner.scan_results.get(scan_id, [])]
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': True, 'findings': findings})
+
+
+@app.route('/api/mesh/scan/cancel/<scan_id>', methods=['POST'])
+def mesh_scan_cancel_remote(scan_id):
+    """Cancel a delegated scan running on this unit. Peer-write allowlisted."""
+    scanner = get_advanced_vuln_scanner()
+    if not scanner:
+        return jsonify({'success': False, 'error': 'Scanner not available'}), 503
+    return jsonify({'success': bool(scanner.cancel_scan(scan_id))})
+
+
+# --- Cockpit-facing endpoints (this unit's browser calls these; session-auth) -
+
+@app.route('/api/mesh/scan/options', methods=['GET'])
+def mesh_scan_options():
+    """Roster of capable peers + the banner text for the Adv Scan tab."""
+    if not mesh_scan:
+        return jsonify({'success': True, 'banner': {'show': False}, 'roster': []})
+    local = _local_scan_capability()
+    roster = _discover_scan_roster() if _mesh_enabled() else []
+    banner = mesh_scan.build_banner(local, roster)
+    return jsonify({'success': True, 'local': local, 'roster': roster, 'banner': banner})
+
+
+@app.route('/api/mesh/scan/delegate', methods=['POST'])
+def mesh_scan_delegate():
+    """Delegate a scan to a capable peer and start relaying it home."""
+    delegator = get_mesh_scan_delegator()
+    if not delegator or not mesh_scan:
+        return jsonify({'success': False, 'error': 'Mesh delegation unavailable'}), 503
+    data = request.get_json(silent=True) or {}
+    target = (data.get('target') or '').strip()
+    scan_type = data.get('scan_type', 'nuclei')
+    if not target:
+        return jsonify({'success': False, 'error': 'target required'}), 400
+    need = mesh_scan.required_tool(scan_type)
+    if not need:
+        return jsonify({'success': False, 'error': f'{scan_type} runs locally — no need to delegate'}), 400
+
+    roster = _discover_scan_roster()
+    override = (data.get('viking') or '').strip()
+    if override:
+        delegate = next((c for c in roster if (c['viking'] or '').lower() == override.lower()
+                         and c.get(need)), None)
+    else:
+        delegate = mesh_scan.pick_delegate(mesh_scan.build_roster(roster), need)
+    if not delegate:
+        return jsonify({'success': False,
+                        'error': f'No mesh unit can run {need} right now'}), 409
+
+    node = _resolve_delegate_node(delegate['viking'])
+    if not node:
+        return jsonify({'success': False, 'error': 'delegate is no longer reachable'}), 409
+
+    res = delegator.start(node, delegate['viking'], target, scan_type, data.get('options') or {})
+    delegator.prune()
+    code = 200 if res.get('success') else 502
+    return jsonify(res), code
+
+
+@app.route('/api/mesh/scan/jobs', methods=['GET'])
+def mesh_scan_jobs():
+    """Delegated scans this unit is running on peers, with relayed progress."""
+    delegator = get_mesh_scan_delegator()
+    if not delegator:
+        return jsonify({'success': True, 'jobs': []})
+    want_findings = request.args.get('findings') == '1'
+    return jsonify({'success': True, 'jobs': delegator.list_scans(include_findings=want_findings)})
+
+
+@app.route('/api/mesh/scan/jobs/<local_id>/cancel', methods=['POST'])
+def mesh_scan_job_cancel(local_id):
+    delegator = get_mesh_scan_delegator()
+    if not delegator:
+        return jsonify({'success': False, 'error': 'Mesh delegation unavailable'}), 503
+    return jsonify(delegator.cancel(local_id, _resolve_delegate_node))
 
 
 def _mesh_poll_once():
