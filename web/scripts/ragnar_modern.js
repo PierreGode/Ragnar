@@ -27677,22 +27677,39 @@ function updateNucleiCardStatus(statusEl, available, templates, installing) {
     statusEl.style.cursor = '';
     statusEl.title = '';
 
+    // The real, always-visible install button lives in the card (works on
+    // mobile too, unlike the sm-only status line). Show it only when the
+    // binary is missing.
+    const installBtn = document.getElementById('nuclei-install-btn');
+
     if (!available) {
         if (installing) {
+            statusEl.classList.remove('hidden');
             statusEl.textContent = 'Installing…';
             statusEl.classList.add('text-cyan-400');
             statusEl.title = 'Downloading the nuclei binary';
+            if (installBtn) {
+                installBtn.classList.remove('hidden');
+                installBtn.disabled = true;
+                installBtn.textContent = 'Installing…';
+            }
             return;
         }
         // Binary missing — offer a one-click install (downloads the nuclei
         // release matching this board's arch). Templates follow automatically.
-        statusEl.textContent = '⤓ Install';
-        statusEl.classList.add('text-yellow-400');
-        statusEl.style.cursor = 'pointer';
-        statusEl.title = 'Click to download and install nuclei';
-        statusEl.onclick = installNuclei;
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'Not installed';
+        statusEl.classList.add('text-gray-400');
+        if (installBtn) {
+            installBtn.classList.remove('hidden');
+            installBtn.disabled = false;
+            installBtn.textContent = '⤓ Install';
+        }
         return;
     }
+
+    // Installed — hide the install button.
+    if (installBtn) installBtn.classList.add('hidden');
 
     const count = templates?.count || 0;
     if (count > 0) {
