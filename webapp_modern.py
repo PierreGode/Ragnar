@@ -19985,13 +19985,16 @@ def get_advanced_vuln_status():
         # Only look to the mesh when a heavy scanner is gated off locally — a
         # capable board never pays the peer-discovery cost. Result is cached.
         mesh_cap = {}
+        mesh_pending = False
         try:
             if _mesh_enabled() and (not scanners.get('nuclei') or not scanners.get('zap')):
-                # Block only on the very first lookup (empty cache) so availability
-                # is correct on tab open — a no-nmap board depends on it. After
-                # that it's cached and refreshed in the background (never blocks).
-                first = not bool(_mesh_scan_cap_cache['data'])
-                mesh_cap = _mesh_scan_capability_cached(blocking=first)
+                # NON-blocking: returns the cached roster immediately and refreshes
+                # in the background. The local gated state ("Needs 950MB RAM") thus
+                # renders instantly; the "via <peer>" banner follows within a poll
+                # once discovery finishes — no multi-second stall on tab open.
+                mesh_cap = _mesh_scan_capability_cached()
+                mesh_pending = (not _mesh_scan_cap_cache['data']
+                                or _mesh_scan_cap_cache['refreshing'])
         except Exception as e:
             logger.debug(f"mesh scan capability lookup failed: {e}")
 
@@ -20004,6 +20007,7 @@ def get_advanced_vuln_status():
             'success': True,
             'available': scanner.is_available() or mesh_usable,
             'local_available': scanner.is_available(),
+            'mesh_pending': mesh_pending,
             'scanners': scanners,
             'mesh_scan': mesh_cap,
             'nuclei_templates': scanner.get_nuclei_template_info(),

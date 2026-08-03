@@ -27022,8 +27022,20 @@ async function loadAdvancedVulnData() {
         ]);
         const data = await statusResponse.json();
 
-        if (!data.success || !data.available) {
+        if (!data.success) {
             showAdvVulnNotAvailable();
+            return;
+        }
+        if (!data.available) {
+            // Not usable locally yet. If mesh discovery is still running, a peer
+            // may enable this tab — retry shortly instead of declaring it dead.
+            if (data.mesh_pending) {
+                hideAdvVulnNotAvailable();
+                clearTimeout(_meshPendingRetry);
+                _meshPendingRetry = setTimeout(loadAdvancedVulnData, 2000);
+            } else {
+                showAdvVulnNotAvailable();
+            }
             return;
         }
 
@@ -27061,6 +27073,14 @@ async function loadAdvancedVulnData() {
         if (s.nuclei_installing || s.nuclei_templates_updating) {
             clearTimeout(nucleiInstallPollTimer);
             nucleiInstallPollTimer = setTimeout(refreshAdvVulnData, 8000);
+        }
+
+        // Mesh discovery runs in the background; re-poll once it's done so the
+        // "forwarded to <peer>" banner + "via <peer>" cards fill in shortly
+        // after the tab has already rendered its local (gated) state.
+        if (data.mesh_pending) {
+            clearTimeout(_meshPendingRetry);
+            _meshPendingRetry = setTimeout(refreshAdvVulnData, 2500);
         }
 
     } catch (error) {
@@ -27708,6 +27728,7 @@ let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
 let nucleiInstallPollTimer = null;
 let advVulnMeshScan = {};  // {nuclei:{available,viking}, zap:{...}} from status poll
+let _meshPendingRetry = null;  // one-shot re-poll while mesh discovery is in flight
 
 function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating, ramOk, meshNuclei) {
     statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
