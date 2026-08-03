@@ -1,0 +1,12 @@
+{
+  "domain": "ragnar",
+  "name": "Ragnar",
+  "codeowners": ["@PierreGode"],
+  "config_flow": true,
+  "documentation": "https://github.com/PierreGode/Ragnar/tree/main/custom_components/ragnar",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/PierreGode/Ragnar/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

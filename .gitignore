@@ -254,3 +254,6 @@ nuclei-templates/
 data/networks/.last_ssid
 # runtime logs (nmap.log etc.)
 var/log/
+
+# HA integration bytecode
+custom_components/**/__pycache__/
