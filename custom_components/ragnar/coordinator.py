@@ -36,7 +36,7 @@ class RagnarCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         try:
             # Fan out; a single slow/failed feature shouldn't drop the rest.
-            presence, vitals, sensing, watchtower, incidents, status = (
+            presence, vitals, sensing, watchtower, incidents, status, mesh = (
                 await asyncio.gather(
                     self.client.async_presence(),
                     self.client.async_vitals(),
@@ -44,6 +44,7 @@ class RagnarCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.client.async_watchtower(),
                     self.client.async_incidents(),
                     self.client.async_status(),
+                    self.client.async_mesh(),
                     return_exceptions=True,
                 )
             )
@@ -62,4 +63,5 @@ class RagnarCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "watchtower": ok(watchtower),
             "incidents": ok(incidents),
             "status": ok(status),
+            "mesh": ok(mesh),
         }

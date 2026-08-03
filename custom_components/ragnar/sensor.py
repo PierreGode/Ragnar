@@ -28,11 +28,20 @@ def _latest_vital(data: dict[str, Any], key: str) -> float | None:
     return None
 
 
+def _mesh_reachable(data: dict[str, Any]) -> int | None:
+    """Reachable Ragnar-node count, or None when the mesh is off/unavailable."""
+    mesh = data.get("mesh") or {}
+    if not mesh.get("enabled"):
+        return None
+    return ((mesh.get("summary") or {}).get("health") or {}).get("reachable")
+
+
 @dataclass(frozen=True, kw_only=True)
 class RagnarSensorDescription(SensorEntityDescription):
     """Sensor description with a value extractor over the coordinator data."""
 
     value_fn: Callable[[dict[str, Any]], Any]
+    available_fn: Callable[[dict[str, Any]], bool] | None = None
 
 
 SENSORS: tuple[RagnarSensorDescription, ...] = (
@@ -79,6 +88,20 @@ SENSORS: tuple[RagnarSensorDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         value_fn=lambda d: (d.get("status") or {}).get("vulnerability_count"),
     ),
+    RagnarSensorDescription(
+        key="ssid",
+        translation_key="ssid",
+        icon="mdi:wifi",
+        value_fn=lambda d: (d.get("status") or {}).get("current_ssid") or None,
+    ),
+    RagnarSensorDescription(
+        key="mesh_reachable",
+        translation_key="mesh_reachable",
+        icon="mdi:server-network",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_mesh_reachable,
+        available_fn=lambda d: bool((d.get("mesh") or {}).get("enabled")),
+    ),
 )
 
 
@@ -107,3 +130,10 @@ class RagnarSensor(RagnarEntity, SensorEntity):
     @property
     def native_value(self) -> Any:
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        avail_fn = self.entity_description.available_fn
+        return avail_fn(self.coordinator.data) if avail_fn else True
