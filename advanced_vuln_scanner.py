@@ -1394,6 +1394,67 @@ class AdvancedVulnScanner:
                     break
         return resolved
 
+    def _nuclei_resource_tuning(self, rate_limit: int, severity: str):
+        """Scale nuclei's footprint to this board's RAM.
+
+        Nuclei loads its whole matched template set into memory and runs 25
+        templates concurrently by default. On a 512MB Pi Zero 2 W that blows
+        past the ~250MB of usable RAM left after the OS and Ragnar itself, and
+        the board thrashes swap until it locks up rather than failing cleanly.
+
+        Returns (perf_flags, env_overrides, severity, note):
+          - perf_flags: concurrency / bulk-size / rate-limit / timeout flags
+          - env_overrides: GOMEMLIMIT/GOGC/GOMAXPROCS to bound the Go runtime
+          - severity: possibly tightened to cut how many templates load
+          - note: a human line for the scan log (empty on capable boards)
+        """
+        try:
+            caps = get_server_capabilities(self.shared_data)
+            total = caps.capabilities.total_ram_gb or 0.0
+            avail = caps.capabilities.available_ram_gb or total
+        except Exception:
+            total, avail = 0.0, 0.0
+
+        # Skip update checks everywhere — it's a startup network hit and a bit
+        # of memory for no scan value.
+        flags = ['-disable-update-check']
+        env = {}
+        note = ''
+
+        def _gomemlimit_mib(fraction, floor=96):
+            budget = (avail or total) * 1024.0
+            return max(floor, int(budget * fraction))
+
+        if total and total < 1.0:
+            # Pi Zero 2 W tier (512MB, ~0.42GB reported). Aggressive limits and
+            # a hard Go heap cap so nuclei self-limits instead of taking the
+            # board down. Also drop interactsh (OOB polling) and the low/info
+            # severities so far fewer templates load.
+            flags += ['-c', '8', '-bulk-size', '5',
+                      '-rate-limit', str(min(rate_limit, 50)),
+                      '-timeout', '8', '-no-interactsh',
+                      # cap the load-phase concurrency too — parsing the whole
+                      # template tree 50-wide is a memory spike on its own.
+                      '-template-loading-concurrency', '5',
+                      '-payload-concurrency', '5']
+            env = {'GOMEMLIMIT': f'{_gomemlimit_mib(0.55)}MiB',
+                   'GOGC': '40', 'GOMAXPROCS': '2'}
+            if severity == 'low,medium,high,critical':  # i.e. caller's default
+                severity = 'high,critical'
+            note = ('low-memory board (<1GB): nuclei concurrency 8, heap capped '
+                    f"({env['GOMEMLIMIT']}), severity limited to {severity}")
+        elif total and total < 2.0:
+            # 1GB boards (Pi 3 A+/Zero-class-with-1GB). Moderate.
+            flags += ['-c', '15', '-bulk-size', '10',
+                      '-rate-limit', str(min(rate_limit, 100)),
+                      '-template-loading-concurrency', '15']
+            env = {'GOMEMLIMIT': f'{_gomemlimit_mib(0.6)}MiB', 'GOGC': '60'}
+            note = f"small board (<2GB): nuclei concurrency 15, heap capped ({env['GOMEMLIMIT']})"
+        else:
+            flags += ['-c', '25', '-rate-limit', str(rate_limit)]
+
+        return flags, env, severity, note
+
     def _parse_nuclei_progress(self, stderr_path: str) -> Optional[int]:
         """Extract a 0-99 completion percentage from nuclei's -stats output.
 
@@ -1464,6 +1525,13 @@ class AdvancedVulnScanner:
             output_path = output_file.name
         stderr_path = output_path + '.err'
 
+        # Scale nuclei's memory/CPU footprint to the board so a small one
+        # (e.g. a 512MB Pi Zero 2 W) doesn't OOM and lock up.
+        perf_flags, nuclei_env, severity_filter, tuning_note = \
+            self._nuclei_resource_tuning(rate_limit, severity_filter)
+        if tuning_note:
+            self._scan_log(scan_id, 'info', f"Nuclei tuning — {tuning_note}")
+
         try:
             cmd = [
                 nuclei_path,
@@ -1471,9 +1539,9 @@ class AdvancedVulnScanner:
                 '-jsonl',
                 '-o', output_path,
                 '-severity', severity_filter,
-                '-rate-limit', str(rate_limit),
                 '-stats', '-si', '5',
-                '-no-color'
+                '-no-color',
+                *perf_flags,
             ]
 
             # Resolve template categories against the installed layout (v9.6+
@@ -1526,7 +1594,8 @@ class AdvancedVulnScanner:
                     cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=errf,
-                    text=True
+                    text=True,
+                    env={**os.environ, **nuclei_env},
                 )
                 self._register_scan_process(scan_id, process)
 
