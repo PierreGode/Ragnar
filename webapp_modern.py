@@ -2803,7 +2803,7 @@ def _refresh_mesh_scan_capability():
                 d = mesh_scan.pick_delegate(roster, need)
                 if d:
                     out[need] = {'available': True, 'viking': d['viking'],
-                                 'node_id': d['node_id']}
+                                 'node_id': d['node_id'], 'ip': d.get('ip', '')}
     except Exception as e:
         logger.debug(f"mesh scan capability refresh failed: {e}")
     finally:
@@ -19987,13 +19987,23 @@ def get_advanced_vuln_status():
         mesh_cap = {}
         try:
             if _mesh_enabled() and (not scanners.get('nuclei') or not scanners.get('zap')):
-                mesh_cap = _mesh_scan_capability_cached()
+                # Block only on the very first lookup (empty cache) so availability
+                # is correct on tab open — a no-nmap board depends on it. After
+                # that it's cached and refreshed in the background (never blocks).
+                first = not bool(_mesh_scan_cap_cache['data'])
+                mesh_cap = _mesh_scan_capability_cached(blocking=first)
         except Exception as e:
             logger.debug(f"mesh scan capability lookup failed: {e}")
 
+        # The tab is usable if this board can scan locally (nmap) OR a mesh peer
+        # can run a scan for us — otherwise a Zero without nmap shows "Scanner
+        # Unavailable" and never renders the (delegated) active-scans list.
+        mesh_usable = any(v.get('available') for v in mesh_cap.values())
+
         return jsonify({
             'success': True,
-            'available': scanner.is_available(),
+            'available': scanner.is_available() or mesh_usable,
+            'local_available': scanner.is_available(),
             'scanners': scanners,
             'mesh_scan': mesh_cap,
             'nuclei_templates': scanner.get_nuclei_template_info(),
@@ -20138,11 +20148,9 @@ def start_advanced_vuln_scan():
         if not scanner:
             return jsonify({'success': False, 'error': 'Advanced vuln scanner not available'}), 503
 
-        if not scanner.is_available():
-            return jsonify({
-                'success': False,
-                'error': 'Advanced vulnerability scanning not available - check system requirements'
-            }), 400
+        # NOTE: is_available() (needs local nmap) is NOT gated here — a delegated
+        # Nuclei/ZAP scan runs entirely on a mesh peer, so it must work even on a
+        # board that can't scan locally. The local-scan path re-checks it below.
 
         data = request.get_json(silent=True) or {}
         target = data.get('target')
@@ -20213,16 +20221,31 @@ def start_advanced_vuln_scan():
             except Exception as e:
                 logger.debug(f"mesh delegate lookup failed: {e}")
             if delegate and delegate.get('available'):
+                # Resolve the live peer node by stable id; fall back to the IP
+                # captured during discovery so a cache/id mismatch can't block it.
                 node = _resolve_delegate_node(delegate.get('node_id'))
+                if not node and delegate.get('ip'):
+                    node = {'ip': delegate['ip'], 'id': delegate.get('node_id', '')}
                 if node:
                     peer_io = _build_peer_io(node, target, scan_type, options)
                     scan_id = scanner.start_delegated_scan(
                         target, scan_type_enum, delegate['viking'], peer_io)
+                    logger.info(f"[MESH-SCAN] Delegated {scan_type} to {delegate['viking']} "
+                                f"({node.get('ip')}) as local scan {scan_id}")
                     return jsonify({'success': True, 'scan_id': scan_id,
                                     'delegated_to': delegate['viking'],
                                     'message': f'Delegated {scan_type} scan to {delegate["viking"]}'})
+                logger.warning(f"[MESH-SCAN] delegate {delegate.get('viking')} had no reachable address")
+            logger.info(f"[MESH-SCAN] no delegate for {need}: delegate={delegate}")
             return jsonify({'success': False,
                             'error': f'{need.upper()} is not available on this board or in the mesh'}), 400
+
+        # Local scan path: this genuinely needs the board to be able to scan.
+        if not scanner.is_available():
+            return jsonify({
+                'success': False,
+                'error': 'Advanced vulnerability scanning not available - check system requirements (nmap not detected)'
+            }), 400
 
         scan_id = scanner.start_scan(target, scan_type_enum, options)
 
