@@ -46,6 +46,60 @@ One HA **device** ("Ragnar") with fifteen entities:
 > and read `unknown` when the room is empty (there is no vital to report). The
 > presence, people and alert entities update every poll.
 
+## How the device card is organised
+
+The integration tags entities with Home Assistant **entity categories** so the
+auto-generated device page (**Settings → Devices & Services → Ragnar**) is not a
+flat list. Two groups:
+
+- **Sensors / controls** — the signals you actually watch and automate on:
+  presence, people, heart rate, breathing rate, the security-alert flag, active
+  alert/incident counts, and the security-alert event.
+- **Diagnostic** (collapsed by HA into its own section) — the supporting status:
+  Wi-Fi/Ethernet connectivity, connected SSID, mesh attention + reachable nodes,
+  the sensing-backend problem flag, and the vulnerability count.
+
+That grouping happens automatically — no configuration needed.
+
+## A tidy dashboard card
+
+For a Lovelace dashboard, this **Entities** card lays the same entities out under
+labelled sections. Paste it via **Edit dashboard → Add card → Manual**:
+
+```yaml
+type: entities
+title: Ragnar
+show_header_toggle: false
+state_color: true
+entities:
+  - type: section
+    label: RuSense
+  - entity: binary_sensor.ragnar_presence
+  - entity: sensor.ragnar_people
+  - entity: sensor.ragnar_heart_rate
+  - entity: sensor.ragnar_breathing_rate
+  - type: section
+    label: Security
+  - entity: binary_sensor.ragnar_security_alert
+  - entity: sensor.ragnar_active_alerts
+  - entity: sensor.ragnar_active_incidents
+  - entity: sensor.ragnar_vulnerabilities
+  - type: section
+    label: Connectivity
+  - entity: binary_sensor.ragnar_wi_fi_connected
+  - entity: sensor.ragnar_connected_ssid
+  - entity: binary_sensor.ragnar_ethernet_connected
+  - type: section
+    label: Mesh & health
+  - entity: binary_sensor.ragnar_mesh_needs_attention
+  - entity: sensor.ragnar_mesh_nodes_reachable
+  - entity: binary_sensor.ragnar_sensing_backend_problem
+```
+
+> Entity IDs above assume the default `ragnar_` prefix; adjust if you renamed the
+> device or entities. The mesh rows show as *unavailable* unless the unit has the
+> [Ragnar Mesh](mesh.md) enabled — drop them on a single-unit setup.
+
 ## Install (HACS — recommended)
 
 1. In Home Assistant, open **HACS → ⋮ (top right) → Custom repositories**.

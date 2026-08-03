@@ -6,6 +6,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
     BinarySensorEntity,
 )
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -98,6 +99,7 @@ class RagnarSensingHealthBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "sensing_health"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def unique_id(self) -> str:
@@ -116,6 +118,7 @@ class RagnarWifiConnectivityBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "wifi_connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def unique_id(self) -> str:
@@ -136,6 +139,7 @@ class RagnarEthernetConnectivityBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "ethernet_connected"
     _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def unique_id(self) -> str:
@@ -175,6 +179,7 @@ class RagnarMeshAttentionBinarySensor(RagnarEntity, BinarySensorEntity):
 
     _attr_translation_key = "mesh_attention"
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     @property
     def unique_id(self) -> str:
