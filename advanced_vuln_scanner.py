@@ -1004,7 +1004,8 @@ class AdvancedVulnScanner:
             'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
             'nuclei_installing': bool(getattr(self, '_nuclei_installing', False)),
-            'nuclei_templates_updating': self._nuclei_update_lock.locked(),
+            'nuclei_templates_updating': (self._nuclei_update_lock.locked()
+                                          or bool(getattr(self, '_nuclei_autofetch_active', False))),
             'ajax_spider_browser': getattr(self, '_detected_browser', None),
         }
     
@@ -1198,6 +1199,46 @@ class AdvancedVulnScanner:
             self._nuclei_template_cache = info
             self._nuclei_template_cache_ts = now
             return info
+
+    # Don't retry a failing template auto-fetch more than once per this window
+    # (e.g. the box is offline) so status polling can't hammer the download.
+    NUCLEI_AUTOFETCH_COOLDOWN = 300  # seconds
+
+    def maybe_autofetch_nuclei_templates(self) -> None:
+        """Kick off a template download if nuclei is installed but has none.
+
+        The startup maintainer handles the boot case, but this covers nuclei
+        that was installed after boot (e.g. via the Install button or apt) or
+        an initial fetch that failed while the box was offline. Called from the
+        status poll, so it is throttled: at most one attempt per cooldown, and
+        never while a download is already in flight.
+        """
+        if not self._tool_paths.get('nuclei'):
+            return
+        if self._nuclei_update_lock.locked():
+            return  # a download/update is already running
+        now = time.time()
+        if now - getattr(self, '_last_template_autofetch', 0) < self.NUCLEI_AUTOFETCH_COOLDOWN:
+            return
+        try:
+            if self.get_nuclei_template_info().get('count', 0) > 0:
+                return  # templates already present
+        except Exception:
+            return
+        self._last_template_autofetch = now
+        # Set the flag synchronously (before the worker races to grab the lock)
+        # so the same status response already reports the download as running —
+        # that keeps the frontend polling through to completion.
+        self._nuclei_autofetch_active = True
+        logger.info("[NUCLEI] Templates missing — auto-fetching in the background")
+
+        def _worker():
+            try:
+                self.ensure_nuclei_templates()
+            finally:
+                self._nuclei_autofetch_active = False
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def ensure_nuclei_templates(self, force_update: bool = False) -> Dict[str, Any]:
         """Ensure nuclei templates are present, downloading them if missing.

@@ -19754,6 +19754,11 @@ def get_advanced_vuln_status():
                 'error': 'Advanced vulnerability scanner not available'
             })
 
+        # If nuclei is installed but has no templates, start a background
+        # download (throttled). This makes the card self-heal without the user
+        # having to click "install templates".
+        scanner.maybe_autofetch_nuclei_templates()
+
         return jsonify({
             'success': True,
             'available': scanner.is_available(),
