@@ -1004,6 +1004,7 @@ class AdvancedVulnScanner:
             'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
             'nuclei_installing': bool(getattr(self, '_nuclei_installing', False)),
+            'nuclei_templates_updating': self._nuclei_update_lock.locked(),
             'ajax_spider_browser': getattr(self, '_detected_browser', None),
         }
     

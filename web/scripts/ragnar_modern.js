@@ -27065,6 +27065,15 @@ async function loadAdvancedVulnData() {
             startAdvVulnPolling();
         }
 
+        // Keep refreshing while a nuclei install / template download is in
+        // flight so the card advances Installing… → Downloading templates… →
+        // N templates without the user having to reload the page.
+        const s = data.scanners || {};
+        if (s.nuclei_installing || s.nuclei_templates_updating) {
+            clearTimeout(nucleiInstallPollTimer);
+            nucleiInstallPollTimer = setTimeout(refreshAdvVulnData, 8000);
+        }
+
     } catch (error) {
         console.error('Error loading advanced vuln data:', error);
         showAdvVulnNotAvailable();
@@ -27614,7 +27623,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         if (statusEl) {
             const available = scanners[id];
             if (id === 'nuclei') {
-                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing);
+                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating);
             } else if (id === 'zap') {
                 // ZAP has special status (running vs installed vs needs-RAM).
                 // zap_ram_ok === false means the tool may be present but this
@@ -27670,8 +27679,9 @@ function updateScannerStatus(scanners, nucleiTemplates) {
 
 let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
+let nucleiInstallPollTimer = null;
 
-function updateNucleiCardStatus(statusEl, available, templates, installing) {
+function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating) {
     statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
     statusEl.onclick = null;
     statusEl.style.cursor = '';
@@ -27712,6 +27722,16 @@ function updateNucleiCardStatus(statusEl, available, templates, installing) {
     if (installBtn) installBtn.classList.add('hidden');
 
     const count = templates?.count || 0;
+    // Right after a fresh install the binary is present but templates are
+    // still downloading in the background — show that instead of prompting
+    // for a manual template install the user didn't ask for.
+    if (count === 0 && templatesUpdating) {
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'Downloading templates…';
+        statusEl.classList.add('text-cyan-400');
+        statusEl.title = 'Fetching the nuclei template set';
+        return;
+    }
     if (count > 0) {
         statusEl.textContent = `${count.toLocaleString()} templates`;
         statusEl.classList.add('text-green-400');
@@ -27742,7 +27762,10 @@ async function installNuclei() {
                 advVulnScannersStatusCache.nuclei_installing = true;
                 updateScannerStatus(advVulnScannersStatusCache, advVulnNucleiTemplatesCache);
             }
-            setTimeout(refreshAdvVulnData, 15000);
+            // Kick the poll loop; loadAdvancedVulnData keeps refreshing while
+            // the install / template download is in flight.
+            clearTimeout(nucleiInstallPollTimer);
+            nucleiInstallPollTimer = setTimeout(refreshAdvVulnData, 5000);
         } else {
             showNotification(data.error || 'Failed to start nuclei install', 'error');
         }
