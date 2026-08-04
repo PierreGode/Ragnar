@@ -30,6 +30,16 @@ static constexpr uint32_t SERIAL_BAUD   = 460800;
 static constexpr uint8_t  ESPNOW_CH     = 6;
 static constexpr uint16_t MAX_PAYLOAD   = 250;
 
+// ── Antenna (Seeed XIAO ESP32-C6 only) ──────────────────────────────────────────
+// The XIAO ESP32-C6 has a software RF switch feeding either the on-board ceramic
+// antenna or the external u.FL/IPEX socket. Set to 1 to use the EXTERNAL antenna,
+// 0 for the on-board one. This is XIAO-C6-specific hardware (GPIO3 powers the
+// switch, GPIO14 selects the path) and is only compiled on an ESP32-C6 target,
+// so it's a harmless no-op on WROOM/S3/C3 bridges.
+//   NOTE: only helps with an antenna actually screwed onto the u.FL connector —
+//   selecting external with nothing attached is worse than the on-board antenna.
+#define XIAO_C6_USE_EXTERNAL_ANTENNA  1
+
 // ── Frame command bytes ────────────────────────────────────────────────────────
 static constexpr uint8_t CMD_RX    = 0x01;
 static constexpr uint8_t CMD_TX    = 0x02;
@@ -150,6 +160,20 @@ static void parse_host_byte(uint8_t b)
 }
 
 // ── Arduino setup ─────────────────────────────────────────────────────────────
+// Select the antenna on a XIAO ESP32-C6. Must run BEFORE the radio starts, so
+// the very first RF activity already uses the chosen path. No-op on any other
+// board (guarded on the C6 IDF target).
+static void select_c6_antenna()
+{
+#if defined(CONFIG_IDF_TARGET_ESP32C6)
+    pinMode(3, OUTPUT);
+    digitalWrite(3, LOW);                         // power/enable the RF switch
+    delay(100);
+    pinMode(14, OUTPUT);
+    digitalWrite(14, XIAO_C6_USE_EXTERNAL_ANTENNA ? HIGH : LOW);  // HIGH = external u.FL
+#endif
+}
+
 void setup()
 {
     Serial.begin(SERIAL_BAUD);
@@ -157,6 +181,9 @@ void setup()
     // Print text identification line so Ragnar's boot-banner detector finds it
     Serial.println("RagnarBridge ready");
     delay(50);
+
+    // Pick the antenna before any radio init (XIAO ESP32-C6 only).
+    select_c6_antenna();
 
     WiFi.mode(WIFI_STA);
     WiFi.disconnect();
