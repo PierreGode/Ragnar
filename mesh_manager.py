@@ -718,6 +718,8 @@ def join(auth_key, hostname='', tags=None, advertise_routes=None,
         args += ['--advertise-tags', ','.join(tags)]
     if advertise_routes:
         args += ['--advertise-routes', ','.join(advertise_routes)]
+        # A subnet router is useless without IP forwarding — enable it up front.
+        ensure_ip_forwarding()
     if enable_ssh:
         # Tailscale SSH is the out-of-band way back in when Ragnar's own web UI
         # is wedged — the reason to deploy a Pi as a remote hands device at all.
@@ -917,20 +919,66 @@ def _explain_serve_failure(rc, detail, use_https):
     return detail or f'tailscale serve failed (exit {rc}).'
 
 
+FORWARDING_SYSCTL_FILE = '/etc/sysctl.d/99-ragnar-tailscale-forwarding.conf'
+
+
+def ensure_ip_forwarding():
+    """Enable (and persist) IPv4/IPv6 forwarding so this node can actually route
+    for the subnets it advertises.
+
+    A Tailscale subnet router with forwarding OFF is the classic silent failure:
+    `tailscale up --advertise-routes` warns, the route shows in the admin
+    console, peers route to it — and every forwarded packet is dropped. So we
+    turn it on whenever routes are advertised. Best-effort (needs root); returns
+    True on success. AP mode does not use forwarding, so enabling it is safe.
+    """
+    content = ("# Managed by Ragnar — required for Tailscale subnet routing\n"
+               "net.ipv4.ip_forward = 1\n"
+               "net.ipv6.conf.all.forwarding = 1\n")
+    ok = True
+    try:
+        try:
+            existing = open(FORWARDING_SYSCTL_FILE).read()
+        except FileNotFoundError:
+            existing = None
+        if existing != content:
+            with open(FORWARDING_SYSCTL_FILE, 'w') as fh:
+                fh.write(content)
+    except Exception:
+        ok = False
+    # Apply immediately without waiting for a reboot.
+    for key in ('net.ipv4.ip_forward=1', 'net.ipv6.conf.all.forwarding=1'):
+        try:
+            subprocess.run(['sysctl', '-w', key], capture_output=True, timeout=10)
+        except Exception:
+            ok = False
+    return ok
+
+
 def advertise_routes(routes, timeout=30):
     """Advertise LAN subnets so the tailnet can reach the node's local network.
 
     This is what turns a remote Ragnar into a way into the whole site: with the
     route approved in the admin console, every device on the far-side LAN
     becomes addressable by its real IP from anywhere on the tailnet.
+
+    Advertising a route is useless without IP forwarding, so we enable it here
+    (persistently) whenever a non-empty route set is advertised.
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
     value = ','.join(routes) if routes else ''
+    fwd_ok = ensure_ip_forwarding() if routes else True
     rc, out, err = _run(['set', f'--advertise-routes={value}'], timeout=timeout)
     invalidate_cache()
     if rc == 0:
-        return True, ('Advertising ' + value) if value else 'Stopped advertising subnet routes.'
+        if not value:
+            return True, 'Stopped advertising subnet routes.'
+        msg = 'Advertising ' + value
+        if not fwd_ok:
+            msg += ' (warning: could not enable IP forwarding — packets may not route)'
+        msg += '. Approve the route in the Tailscale admin console for peers to use it.'
+        return True, msg
     return False, (err or out or f'tailscale set failed (exit {rc}).').strip()
 
 

@@ -3143,8 +3143,10 @@
                         <input id="mesh-routes-input" type="text" placeholder="10.20.0.0/24, 192.168.50.0/24"
                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
                         <p class="text-[11px] text-gray-500 mt-1">
-                            Makes this unit a way into its whole local network. Routes still need approving
-                            in the admin console.
+                            Makes this unit a way into its whole local network — e.g. an off-site Ragnar can
+                            scan these internal subnets over the tunnel. Ragnar enables IP forwarding
+                            automatically; the routes still need <strong>approving in the Tailscale admin
+                            console</strong> before peers can use them.
                         </p>
                     </div>
                     <div class="md:col-span-2 flex flex-wrap items-center gap-4">
