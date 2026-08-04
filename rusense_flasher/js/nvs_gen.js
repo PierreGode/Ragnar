@@ -85,7 +85,7 @@ function buildNvsPartition(size, keys) {
 // written right after target_port). node_id gives each node a unique identity;
 // without it every node falls back to the firmware default (1) and they collide
 // -- the server then only ever shows one node at a time.
-function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id, edge_tier = 0 }) {
+function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id, edge_tier = 0, ext_antenna }) {
   const keys = [
     { type: 'namespace', key: 'csi_cfg', value: 1 },
     { type: 'string', key: 'ssid', value: ssid },
@@ -95,6 +95,12 @@ function buildCsiCfgNvs({ ssid, password, target_ip, target_port = 5005, node_id
   ];
   if (node_id !== undefined && node_id !== null) {
     keys.push({ type: 'u8', key: 'node_id', value: node_id & 0xFF });
+  }
+  // XIAO ESP32-C6 antenna select (u8 'ext_ant'): 1 = external u.FL, 0 = on-board.
+  // Read by the firmware in app_main before the radio starts. Only meaningful on
+  // a XIAO-C6; harmless on S3 (the firmware guards it on the C6 target).
+  if (ext_antenna !== undefined && ext_antenna !== null) {
+    keys.push({ type: 'u8', key: 'ext_ant', value: ext_antenna ? 1 : 0 });
   }
   // edge_tier (u8) selects the node's OUTPUT MODE. The RuSense/RuView server does
   // server-side multistatic fusion, so it needs RAW CSI frames: edge_tier=0

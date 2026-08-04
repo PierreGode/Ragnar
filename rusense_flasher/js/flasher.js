@@ -252,7 +252,9 @@ window.provisionDevice = async function () {
     const { ESPLoader, Transport } = await getEsptool();
 
     setStatus("Building provisioning data…");
-    const nvs = window.buildCsiCfgNvs({ ssid, password, target_ip: targetIp, target_port: targetPort, node_id: nodeId });
+    const extAntenna = !!($("prov-ext-ant") && $("prov-ext-ant").checked);
+    const nvs = window.buildCsiCfgNvs({ ssid, password, target_ip: targetIp, target_port: targetPort, node_id: nodeId, ext_antenna: extAntenna });
+    log("Antenna   : " + (extAntenna ? "external u.FL (XIAO C6)" : "on-board"));
     log("WiFi SSID : " + ssid);
     log("Server    : " + targetIp + ":" + targetPort);
     if (strippedPort) {
