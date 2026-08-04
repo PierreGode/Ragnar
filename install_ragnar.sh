@@ -577,7 +577,19 @@ install_dependencies() {
         "sqlmap"
         "whatweb"
         "ffuf"
+        # tshark powers the Traffic Analysis JA3/IRC sidecars (and is granted in
+        # sudoers). Optional/best-effort — the sidecars are RAM-gated anyway, so
+        # a miss just leaves them off. Preseeded below so its debconf question
+        # can't stall a noninteractive install.
+        "tshark"
     )
+
+    # tshark (wireshark-common) asks whether non-root users may capture; a
+    # noninteractive apt would otherwise pick a default silently or, on some
+    # suites, prompt. Ragnar runs tshark via sudo, so the setuid helper isn't
+    # needed — answer no, deterministically, before installing.
+    echo "wireshark-common wireshark-common/install-setuid boolean false" \
+        | debconf-set-selections 2>/dev/null || true
 
     # Collect misses instead of letting them scroll past in a 2000-line log, so
     # the end of the install answers "which packages didn't make it?" directly.

@@ -35,7 +35,6 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from logger import Logger
-from server_capabilities import get_server_capabilities, is_server_mode
 from advanced_vuln_scanner import VulnerabilityFinding, VulnSeverity
 
 logger = Logger(name="recon_engine", level=logging.INFO)
@@ -144,12 +143,13 @@ class ReconEngine:
         threading.Thread(target=self._reaper_loop, daemon=True, name="recon-reaper").start()
 
     def is_available(self) -> bool:
-        try:
-            caps = get_server_capabilities(self.shared_data)
-            return bool(caps and caps.is_server_mode())
-        except Exception as exc:
-            logger.warning(f"is_available check failed: {exc}")
-            return False
+        # Pre-flight recon is lightweight network work — a TLS handshake, DNS
+        # lookups and (optionally) an ffuf content sweep — the same class as
+        # the CLI vuln scanners, which run on any board. It used to require
+        # server mode (8GB RAM), which was the wrong bar and hid it on smaller
+        # boards where the rest of the Adv Scan tab now works. It runs anywhere;
+        # content discovery degrades to status=error if ffuf isn't installed.
+        return True
 
     def _detect_tools(self) -> None:
         for tool in ("ffuf",):
@@ -167,7 +167,7 @@ class ReconEngine:
         timeout: int = DEFAULT_ENGINE_TIMEOUT,
     ) -> str:
         if not self.is_available():
-            raise RuntimeError("Recon engine requires server mode")
+            raise RuntimeError("Recon engine is not available")
         if not recon_types:
             raise ValueError("recon_types must not be empty")
 

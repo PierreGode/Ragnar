@@ -14459,6 +14459,9 @@ function _bindPwnUpdateButtons() {
 }
 
 function updatePwnToggleAvailability(isHeadless) {
+    // Pwnagotchi now installs on headless too — it runs fine with just its web
+    // UI (no e-paper face). So the toggle is always enabled; we only note that
+    // the display face is unavailable on a headless box.
     headlessMode = Boolean(isHeadless);
     const checkbox = document.getElementById('pwnagotchi-enabled');
     if (!checkbox) {
@@ -14468,29 +14471,13 @@ function updatePwnToggleAvailability(isHeadless) {
     const wrapper = document.getElementById('pwn-toggle-wrapper');
     const warning = document.getElementById('pwn-headless-warning');
 
-    if (headlessMode) {
-        if (checkbox.checked) {
-            checkbox.checked = false;
-            localStorage.setItem('pwnagotchi-enabled', 'false');
-            applyPwnVisibilityPreference(false);
-        }
-        checkbox.disabled = true;
-        checkbox.setAttribute('aria-disabled', 'true');
-        if (wrapper) {
-            wrapper.classList.add('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
-        }
-        if (warning) {
-            warning.classList.remove('hidden');
-        }
-    } else {
-        checkbox.disabled = false;
-        checkbox.removeAttribute('aria-disabled');
-        if (wrapper) {
-            wrapper.classList.remove('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
-        }
-        if (warning) {
-            warning.classList.add('hidden');
-        }
+    checkbox.disabled = false;
+    checkbox.removeAttribute('aria-disabled');
+    if (wrapper) {
+        wrapper.classList.remove('cursor-not-allowed', 'opacity-60', 'pointer-events-none');
+    }
+    if (warning) {
+        warning.classList.toggle('hidden', !headlessMode);
     }
 }
 
@@ -27035,14 +27022,33 @@ async function loadAdvancedVulnData() {
         ]);
         const data = await statusResponse.json();
 
-        if (!data.success || !data.available) {
+        if (!data.success) {
             showAdvVulnNotAvailable();
+            return;
+        }
+        if (!data.available) {
+            // Not usable yet. If mesh discovery is still running a peer may
+            // enable this tab; otherwise the operator may have just installed a
+            // tool (nmap) — the server re-detects on each poll, so keep checking
+            // while the tab is open instead of declaring it permanently dead.
+            clearTimeout(_meshPendingRetry);
+            if (data.mesh_pending) {
+                hideAdvVulnNotAvailable();
+                _meshPendingRetry = setTimeout(loadAdvancedVulnData, 2000);
+            } else {
+                showAdvVulnNotAvailable();
+                if (currentTab === 'adv-vuln') {
+                    _meshPendingRetry = setTimeout(loadAdvancedVulnData, 5000);
+                }
+            }
             return;
         }
 
         hideAdvVulnNotAvailable();
+        advVulnMeshScan = data.mesh_scan || {};
         updateScannerStatus(data.scanners, data.nuclei_templates);
         updateVulnSummary(data.summary);
+        renderMeshScanFlag(advVulnMeshScan);
 
         // Parse findings (already fetched in parallel)
         try {
@@ -27065,9 +27071,30 @@ async function loadAdvancedVulnData() {
             startAdvVulnPolling();
         }
 
+        // Keep refreshing while a nuclei install / template download is in
+        // flight so the card advances Installing… → Downloading templates… →
+        // N templates without the user having to reload the page.
+        const s = data.scanners || {};
+        if (s.nuclei_installing || s.nuclei_templates_updating) {
+            clearTimeout(nucleiInstallPollTimer);
+            nucleiInstallPollTimer = setTimeout(refreshAdvVulnData, 8000);
+        }
+
+        // Mesh discovery runs in the background; re-poll once it's done so the
+        // "forwarded to <peer>" banner + "via <peer>" cards fill in shortly
+        // after the tab has already rendered its local (gated) state.
+        if (data.mesh_pending) {
+            clearTimeout(_meshPendingRetry);
+            _meshPendingRetry = setTimeout(refreshAdvVulnData, 2500);
+        }
+
     } catch (error) {
+        // Don't flip the tab to "Scanner Unavailable" here — that notice means
+        // "nmap not detected", but this catch also fires on a transient fetch
+        // error or a render bug, which has nothing to do with availability.
+        // Log and keep the last good state; availability is decided above from
+        // the status response only.
         console.error('Error loading advanced vuln data:', error);
-        showAdvVulnNotAvailable();
     }
 }
 
@@ -27152,7 +27179,10 @@ function updateActiveScans(scans, options = {}) {
                      onclick="toggleAdvVulnScanFindings('${scanId}')">
                     <div class="flex items-start justify-between gap-3">
                         <div>
-                            <div class="text-sm font-semibold text-white">${escapeHtml(formatScanType(scan.scan_type))}</div>
+                            <div class="text-sm font-semibold text-white flex items-center gap-1.5">
+                                ${escapeHtml(formatScanType(scan.scan_type))}
+                                ${scan.delegated_to ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-900/60 text-cyan-300 font-medium">🛰️ ${escapeHtml(scan.delegated_to)}</span>` : ''}
+                            </div>
                             <div class="text-xs text-gray-400 mt-1">${escapeHtml(scan.target || 'Unknown target')}</div>
                         </div>
                         <span class="text-[11px] uppercase px-2 py-1 rounded-full bg-slate-700 text-gray-300">${escapeHtml(statusLabels[status] || status)}</span>
@@ -27605,6 +27635,11 @@ function updateScannerStatus(scanners, nucleiTemplates) {
     advVulnScannersStatusCache = scanners;
     if (nucleiTemplates !== undefined) advVulnNucleiTemplatesCache = nucleiTemplates;
 
+    // A heavy scanner is usable if THIS board can run it OR a mesh peer can.
+    const _mesh = advVulnMeshScan || {};
+    const meshZap = !!(_mesh.zap && _mesh.zap.available);
+    const meshZapViking = meshZap ? _mesh.zap.viking : '';
+
     const scannerIds = ['nuclei', 'nikto', 'sqlmap', 'nmap_vuln', 'whatweb', 'zap'];
 
     scannerIds.forEach(id => {
@@ -27614,20 +27649,29 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         if (statusEl) {
             const available = scanners[id];
             if (id === 'nuclei') {
-                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache);
+                updateNucleiCardStatus(statusEl, available, advVulnNucleiTemplatesCache, scanners.nuclei_installing, scanners.nuclei_templates_updating, scanners.nuclei_ram_ok, (advVulnMeshScan || {}).nuclei);
             } else if (id === 'zap') {
-                // ZAP has special status (installed vs running)
+                // ZAP has special status (running vs installed vs needs-RAM).
+                // zap_ram_ok === false means the tool may be present but this
+                // board is under the 8GB floor, so say so instead of "Not
+                // installed", which would send the user hunting for a package.
+                statusEl.classList.remove('text-gray-400', 'text-green-400', 'text-cyan-400', 'text-yellow-400');
                 if (scanners.zap_running) {
                     statusEl.textContent = 'Running';
-                    statusEl.classList.remove('text-gray-400', 'text-green-400');
                     statusEl.classList.add('text-cyan-400');
                 } else if (available) {
                     statusEl.textContent = 'Installed';
-                    statusEl.classList.remove('text-gray-400', 'text-cyan-400');
                     statusEl.classList.add('text-green-400');
+                } else if (meshZap) {
+                    // Can't run locally, but a mesh peer can — scans delegate there.
+                    statusEl.textContent = `via ${meshZapViking}`;
+                    statusEl.classList.add('text-cyan-400');
+                    statusEl.title = `ZAP runs on ${meshZapViking} in the mesh; results come back here`;
+                } else if (scanners.zap_ram_ok === false) {
+                    statusEl.textContent = 'Needs 8GB RAM';
+                    statusEl.classList.add('text-yellow-400');
                 } else {
                     statusEl.textContent = 'Not installed';
-                    statusEl.classList.remove('text-green-400', 'text-cyan-400');
                     statusEl.classList.add('text-gray-400');
                 }
             } else {
@@ -27642,8 +27686,33 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         }
     });
 
+    // A heavy scanner is "usable" if THIS board can run it OR a mesh peer can
+    // (delegation is transparent). Reflect that in the cards + scan-type
+    // options so the operator just picks and scans as usual. (_mesh/meshZap
+    // computed at the top of this function.)
+    const meshNuclei = !!(_mesh.nuclei && _mesh.nuclei.available);
+    const nucleiEff = !!scanners.nuclei || meshNuclei;
+    const zapEff = !!scanners.zap || meshZap;
+
+    // Card dimming follows effective (local-or-mesh) availability.
+    document.getElementById('scanner-nuclei')?.classList.toggle('opacity-50', !nucleiEff);
+    document.getElementById('scanner-zap')?.classList.toggle('opacity-50', !zapEff);
+
+    const nucleiOption = document.getElementById('adv-vuln-nuclei-option');
+    if (nucleiOption) {
+        nucleiOption.disabled = !nucleiEff;
+        nucleiOption.textContent = scanners.nuclei ? 'Nuclei (Templates)'
+            : meshNuclei ? `Nuclei (via ${_mesh.nuclei.viking})`
+            : 'Nuclei (needs 900MB RAM)';
+        const sel = document.getElementById('adv-vuln-scanner');
+        if (!nucleiEff && sel && sel.value === 'nuclei') {
+            const fallback = ['nikto', 'sqlmap', 'nmap_vuln', 'whatweb'].find(k => scanners[k]);
+            sel.value = fallback || 'full';
+        }
+    }
+
     // Update ZAP control panel visibility and status
-    updateZapControlPanel(scanners);
+    updateZapControlPanel(scanners, meshZap, meshZapViking);
 
     // Show AJAX spider browser warning if no real browser detected
     const browserWarning = document.getElementById('ajax-spider-browser-warning');
@@ -27666,20 +27735,78 @@ function updateScannerStatus(scanners, nucleiTemplates) {
 
 let advVulnScannersStatusCache = null;
 let advVulnNucleiTemplatesCache = null;
+let nucleiInstallPollTimer = null;
+let advVulnMeshScan = {};  // {nuclei:{available,viking}, zap:{...}} from status poll
+let _meshPendingRetry = null;  // one-shot re-poll while mesh discovery is in flight
 
-function updateNucleiCardStatus(statusEl, available, templates) {
-    statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400');
+function updateNucleiCardStatus(statusEl, available, templates, installing, templatesUpdating, ramOk, meshNuclei) {
+    statusEl.classList.remove('text-green-400', 'text-gray-400', 'text-yellow-400', 'text-cyan-400');
     statusEl.onclick = null;
     statusEl.style.cursor = '';
     statusEl.title = '';
 
-    if (!available) {
-        statusEl.textContent = 'Not installed';
-        statusEl.classList.add('text-gray-400');
+    // The real, always-visible install button lives in the card (works on
+    // mobile too, unlike the sm-only status line). Show it only when the
+    // binary is missing.
+    const installBtn = document.getElementById('nuclei-install-btn');
+
+    // RAM-gated off (board under 900MB). If a mesh peer can run it, say so
+    // (scans delegate transparently); otherwise show the RAM requirement.
+    if (ramOk === false) {
+        statusEl.classList.remove('hidden');
+        if (installBtn) installBtn.classList.add('hidden');
+        if (meshNuclei && meshNuclei.available) {
+            statusEl.textContent = `via ${meshNuclei.viking}`;
+            statusEl.classList.add('text-cyan-400');
+            statusEl.title = `Runs on ${meshNuclei.viking} in the mesh; results come back here`;
+        } else {
+            statusEl.textContent = 'Needs 900MB RAM';
+            statusEl.classList.add('text-yellow-400');
+            statusEl.title = 'Nuclei is memory-hungry — run it from a larger Ragnar Mesh unit';
+        }
         return;
     }
 
+    if (!available) {
+        if (installing) {
+            statusEl.classList.remove('hidden');
+            statusEl.textContent = 'Installing…';
+            statusEl.classList.add('text-cyan-400');
+            statusEl.title = 'Downloading the nuclei binary';
+            if (installBtn) {
+                installBtn.classList.remove('hidden');
+                installBtn.disabled = true;
+                installBtn.textContent = 'Installing…';
+            }
+            return;
+        }
+        // Binary missing — offer a one-click install (downloads the nuclei
+        // release matching this board's arch). Templates follow automatically.
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'Not installed';
+        statusEl.classList.add('text-gray-400');
+        if (installBtn) {
+            installBtn.classList.remove('hidden');
+            installBtn.disabled = false;
+            installBtn.textContent = '⤓ Install';
+        }
+        return;
+    }
+
+    // Installed — hide the install button.
+    if (installBtn) installBtn.classList.add('hidden');
+
     const count = templates?.count || 0;
+    // Right after a fresh install the binary is present but templates are
+    // still downloading in the background — show that instead of prompting
+    // for a manual template install the user didn't ask for.
+    if (count === 0 && templatesUpdating) {
+        statusEl.classList.remove('hidden');
+        statusEl.textContent = 'Downloading templates…';
+        statusEl.classList.add('text-cyan-400');
+        statusEl.title = 'Fetching the nuclei template set';
+        return;
+    }
     if (count > 0) {
         statusEl.textContent = `${count.toLocaleString()} templates`;
         statusEl.classList.add('text-green-400');
@@ -27693,6 +27820,33 @@ function updateNucleiCardStatus(statusEl, available, templates) {
         statusEl.style.cursor = 'pointer';
         statusEl.title = 'Click to download nuclei templates';
         statusEl.onclick = () => updateNucleiTemplates(false);
+    }
+}
+
+async function installNuclei() {
+    try {
+        const resp = await fetch('/api/vuln-advanced/nuclei/install', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data.success) {
+            showNotification('Installing nuclei in the background — this can take a minute', 'success');
+            // Reflect "Installing…" immediately, then poll for completion.
+            if (advVulnScannersStatusCache) {
+                advVulnScannersStatusCache.nuclei_installing = true;
+                updateScannerStatus(advVulnScannersStatusCache, advVulnNucleiTemplatesCache);
+            }
+            // Kick the poll loop; loadAdvancedVulnData keeps refreshing while
+            // the install / template download is in flight.
+            clearTimeout(nucleiInstallPollTimer);
+            nucleiInstallPollTimer = setTimeout(refreshAdvVulnData, 5000);
+        } else {
+            showNotification(data.error || 'Failed to start nuclei install', 'error');
+        }
+    } catch (e) {
+        console.error('Error installing nuclei:', e);
+        showNotification('Failed to start nuclei install', 'error');
     }
 }
 
@@ -28025,10 +28179,13 @@ async function startAdvancedScan() {
         const data = await response.json();
 
         if (data.success) {
-            showNotification(`Started ${scanType} scan: ${data.scan_id}`, 'success');
+            showNotification(data.delegated_to
+                ? `Running ${scanType} on ${data.delegated_to} (mesh) — progress shows here`
+                : `Started ${scanType} scan: ${data.scan_id}`, 'success');
             targetInput.value = '';
 
-            // Start polling for updates
+            // Show the new scan's card immediately, then poll for updates.
+            refreshAdvVulnData();
             startAdvVulnPolling();
 
         } else {
@@ -28364,7 +28521,7 @@ async function handoffReconToZap(force) {
             showReconError(data.error || 'Handoff failed');
             return;
         }
-        showNotification(`Handed off ${data.zap_scans.length} ZAP scan(s)`, 'success');
+        showNotification(`Handed off ${data.zap_scans.length} scan(s)`, 'success');
         resetReconCard();
         if (typeof startAdvVulnPolling === 'function') startAdvVulnPolling();
     } catch (err) {
@@ -28406,28 +28563,111 @@ async function refreshAdvVulnData() {
 }
 
 // ============================================================================
+// MESH SCAN FLAG — a peer can run a scanner this board can't; delegation is
+// transparent (the server routes /api/vuln-advanced/scan to the peer and the
+// delegated scan shows up in the normal active-scans list). This just renders
+// the "handled by <viking>" flag. See advVulnMeshScan (from the status poll).
+// ============================================================================
+const MESH_LABEL = { nuclei: 'Nuclei', zap: 'ZAP' };
+
+function renderMeshScanFlag(mesh) {
+    const el = document.getElementById('mesh-scan-flag');
+    if (!el) return;
+    mesh = mesh || {};
+    const sc = advVulnScannersStatusCache || {};
+
+    // Heavy scanners this board can't run locally but a mesh peer can — those
+    // scans are transparently forwarded. (If a scanner is gated with no capable
+    // peer it just stays greyed; it isn't mentioned here.)
+    const forwarded = [];
+    const vikings = [];
+    [['nuclei', 'Nuclei'], ['zap', 'ZAP']].forEach(([key, label]) => {
+        const d = mesh[key];
+        if (d && d.available && !sc[key]) {
+            forwarded.push(label);
+            if (d.viking && !vikings.includes(d.viking)) vikings.push(d.viking);
+        }
+    });
+    if (!forwarded.length) { el.classList.add('hidden'); return; }
+    el.classList.remove('hidden');
+    const scanners = forwarded.length === 2 ? 'Nuclei and ZAP' : forwarded[0];
+    const dest = vikings.join(' / ');
+    el.innerHTML =
+        `🛰️ <span class="font-semibold">This device doesn't have enough memory to run ${escapeHtml(scanners)} locally.</span> ` +
+        `${forwarded.length > 1 ? 'These scans' : 'This scan'} will be forwarded to a compatible Ragnar in the mesh — ` +
+        `<span class="font-semibold">${escapeHtml(dest)}</span> — and the results come back here. Just start your scan as usual.`;
+}
+
+// ============================================================================
 // OWASP ZAP CONTROL FUNCTIONS
 // ============================================================================
 
-function updateZapControlPanel(scanners) {
+function updateZapControlPanel(scanners, meshZap, meshZapViking) {
     const panel = document.getElementById('zap-control-panel');
     const daemonStatus = document.getElementById('zap-daemon-status');
     const startBtn = document.getElementById('zap-start-btn');
     const stopBtn = document.getElementById('zap-stop-btn');
 
+    // ZAP scan-type options are usable if THIS board runs ZAP or a mesh peer
+    // can (delegation is transparent). The local daemon panel below still only
+    // reflects/controls a *local* ZAP — a delegated ZAP has no local daemon.
+    const zapUsable = !!scanners.zap || !!meshZap;
+    const zapOptgroup = document.getElementById('adv-vuln-zap-optgroup');
+    if (zapOptgroup) {
+        zapOptgroup.disabled = !zapUsable;
+        Array.from(zapOptgroup.querySelectorAll('option')).forEach(opt => {
+            opt.disabled = !zapUsable;
+            if (meshZap && !scanners.zap && opt.value === 'zap_full') {
+                opt.textContent = `ZAP Full Scan (via ${meshZapViking})`;
+            }
+        });
+        const scannerSelect = document.getElementById('adv-vuln-scanner');
+        if (!zapUsable && scannerSelect && scannerSelect.value.startsWith('zap_')) {
+            scannerSelect.value = 'nuclei';
+        }
+    }
+
     if (!panel) return;
 
-    // Show/hide panel based on ZAP availability
+    // IMPORTANT: #zap-control-panel wraps the *whole* scan form (target,
+    // scanner picker, Start Scan), so it must never be greyed as a unit -
+    // that would disable every scanner, not just ZAP. Grey only the ZAP
+    // daemon-specific controls (stats / clear session / report), and disable
+    // the ZAP scan-type options (done above). Everything else stays usable.
+    const daemonControls = document.getElementById('zap-daemon-controls');
+
     if (!scanners.zap) {
-        panel.classList.add('opacity-50');
+        const needsRam = scanners.zap_ram_ok === false;
+        if (daemonControls) {
+            daemonControls.classList.add('opacity-50', 'pointer-events-none');
+            daemonControls.setAttribute('aria-disabled', 'true');
+            daemonControls.title = meshZap
+                ? `ZAP runs on ${meshZapViking} in the mesh; there's no local ZAP daemon here.`
+                : needsRam
+                    ? 'OWASP ZAP needs a server-class Ragnar (8GB RAM). The other scanners on this tab still work.'
+                    : 'OWASP ZAP is not installed on this system.';
+        }
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = true;
         if (daemonStatus) {
-            daemonStatus.textContent = 'Not Installed';
-            daemonStatus.className = 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
+            if (meshZap) {
+                daemonStatus.textContent = `via ${meshZapViking}`;
+                daemonStatus.className = 'text-xs px-2 py-1 rounded-full bg-cyan-900 text-cyan-300';
+            } else {
+                daemonStatus.textContent = needsRam ? 'Needs 8GB RAM' : 'Not Installed';
+                daemonStatus.className = needsRam
+                    ? 'text-xs px-2 py-1 rounded-full bg-yellow-900 text-yellow-400'
+                    : 'text-xs px-2 py-1 rounded-full bg-gray-700 text-gray-400';
+            }
         }
         return;
     }
 
-    panel.classList.remove('opacity-50');
+    if (daemonControls) {
+        daemonControls.classList.remove('opacity-50', 'pointer-events-none');
+        daemonControls.removeAttribute('aria-disabled');
+        daemonControls.title = '';
+    }
 
     if (scanners.zap_running) {
         if (daemonStatus) {
@@ -30441,11 +30681,63 @@ async function refreshMesh(force) {
         const resp = await fetch('/api/mesh/status' + (force ? '?refresh=1' : ''));
         const data = await resp.json();
         renderMesh(data);
+        applyHeaderBrand(data);
     } catch (err) {
         console.warn('Mesh refresh failed:', err);
     } finally {
         meshRefreshInFlight = false;
     }
+}
+
+// Header branding: default "Ragnar", but once this unit is on the tailnet with
+// a mesh (Viking) name, show that name in the upper-left corner so each unit is
+// identifiable at a glance.
+function applyHeaderBrand(data) {
+    const el = document.getElementById('header-brand-name');
+    const img = document.getElementById('header-brand-img');
+    if (!data) return;
+    const onMesh = !!data.available;               // BackendState == Running
+    const name = (data.viking_name || '').trim();
+    if (el) {
+        if (onMesh && name) {
+            el.textContent = name;
+            el.title = data.unit_name || name;     // full "Name (Unit NN)" on hover
+        } else {
+            el.textContent = 'Ragnar';
+            el.title = '';
+        }
+    }
+    // A unit renamed to a shieldmaiden (woman's Viking name) shows the female
+    // Ragnar portrait; everyone else keeps the default icon.
+    if (img) {
+        if (onMesh && name && data.viking_female) {
+            img.src = '/web/images/ragnar_female.png';
+            img.alt = name;
+            img.className = 'h-12 w-auto object-contain';
+        } else {
+            img.src = '/web/images/ragnar.ico';
+            img.alt = 'Ragnar';
+            img.className = 'h-12 w-9 object-contain';
+        }
+    }
+}
+
+// Set the header name/portrait on load even if the operator never opens the
+// Mesh tab.
+async function updateHeaderBrand() {
+    try {
+        const resp = await fetch('/api/mesh/status');
+        applyHeaderBrand(await resp.json());
+    } catch (err) {
+        /* keep default "Ragnar" */
+    }
+}
+// This script is loaded at the end of <body>, so DOMContentLoaded may already
+// have fired by the time we get here — run immediately in that case.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', updateHeaderBrand);
+} else {
+    updateHeaderBrand();
 }
 
 // Installing Tailscale from the tab. A stock Ragnar ships without it and

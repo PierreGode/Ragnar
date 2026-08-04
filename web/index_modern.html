@@ -673,8 +673,8 @@
                 <!-- Logo -->
                 <div class="flex items-center space-x-3">
                     <a href="/web/index_modern.html" aria-label="Go to main dashboard" class="flex items-center space-x-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-Ragnar-400">
-                        <img src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9">
-                        <span class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent">
+                        <img id="header-brand-img" src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9 object-contain">
+                        <span id="header-brand-name" class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent whitespace-nowrap" title="">
                             Ragnar
                         </span>
                     </a>
@@ -728,7 +728,7 @@
                             <span>Traffic</span>
                         </span>
                     </button>
-                    <button onclick="showTab('adv-vuln')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap server-mode-feature hidden" data-tab="adv-vuln">
+                    <button onclick="showTab('adv-vuln')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="adv-vuln">
                         <span class="flex items-center space-x-1">
                             <svg class="w-4 h-4 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
@@ -796,7 +796,7 @@
                 </button>
                 <button onclick="showTab('threat-intel')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Threat Intel</button>
                 <button onclick="showTab('traffic')" data-tab="traffic" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 traffic-feature hidden">Traffic Analysis</button>
-                <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 server-mode-feature hidden">Adv Scan</button>
+                <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Adv Scan</button>
                 <button onclick="showTab('wardriving')" data-tab="wardriving" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 wardriving-feature hidden">Wardriving</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 requires-display">Display</button>
                 <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
@@ -5187,7 +5187,6 @@
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                     <div class="flex items-center space-x-3">
                         <h2 class="text-lg sm:text-2xl font-bold">Advanced Vulnerability Scanning</h2>
-                        <span class="px-2 py-1 bg-cyan-600 bg-opacity-30 text-cyan-400 text-xs rounded-full whitespace-nowrap">Server Mode</span>
                     </div>
                     <button onclick="refreshAdvVulnData()" class="w-full sm:w-auto refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors text-sm sm:text-base">
                         <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -5203,6 +5202,7 @@
                         <div class="text-lg sm:text-2xl mb-1">🔬</div>
                         <div class="text-xs sm:text-sm font-medium">Nuclei</div>
                         <div class="text-xs text-gray-400 hidden sm:block" id="scanner-nuclei-status">Checking...</div>
+                        <button id="nuclei-install-btn" onclick="installNuclei()" class="hidden mt-1 w-full px-2 py-1 bg-yellow-600 hover:bg-yellow-500 text-white text-xs rounded transition-colors">⤓ Install</button>
                     </div>
                     <div class="glass-card p-2 sm:p-3 text-center" id="scanner-nikto">
                         <div class="text-lg sm:text-2xl mb-1">🌐</div>
@@ -5236,6 +5236,9 @@
                     </div>
                 </div>
 
+                <!-- Mesh forwarding banner: this board can't run a heavy scanner, a peer can -->
+                <div id="mesh-scan-flag" class="hidden mb-6 p-3 sm:p-4 bg-cyan-900/25 border border-cyan-600/50 rounded-lg text-xs sm:text-sm text-cyan-100 leading-relaxed"></div>
+
                 <!-- OWASP ZAP Control Panel -->
                 <div class="glass-card p-3 sm:p-4 mb-6" id="zap-control-panel">
                     <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
@@ -5250,7 +5253,7 @@
                         </div>
                     </div>
 
-                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4" id="zap-daemon-controls">
                         <!-- ZAP Stats -->
                         <div class="bg-slate-700 bg-opacity-50 rounded-lg p-2 sm:p-3">
                             <div class="text-xs sm:text-sm text-gray-400 mb-2">Session Stats</div>
@@ -5337,13 +5340,13 @@
 
                         <!-- State 3: handoff gate -->
                         <div id="recon-state-handoff" class="hidden space-y-3">
-                            <p class="text-xs text-gray-400">Pick what to scan with ZAP. Unchecked items will be ignored.</p>
+                            <p class="text-xs text-gray-400">Pick what to scan. Unchecked items will be ignored — the scan uses the scanner selected above.</p>
                             <div id="recon-subdomains-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-paths-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-scope-warning" class="hidden p-2 bg-red-900/40 border border-red-500/50 rounded text-xs text-red-300"></div>
                             <div class="flex gap-2">
                                 <button onclick="handoffReconToZap(false)" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-3 rounded-lg text-sm font-medium transition-colors">
-                                    Hand off to ZAP scan
+                                    Hand off to scan
                                 </button>
                                 <button onclick="resetReconCard()" class="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-gray-200 text-sm rounded-lg transition-colors">
                                     Reset
@@ -5479,13 +5482,13 @@
                                 <label class="block text-xs sm:text-sm text-gray-400 mb-1">Scanner</label>
                                 <select id="adv-vuln-scanner" class="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg focus:ring-2 focus:ring-Ragnar-500 text-sm">
                                     <optgroup label="Traditional Scanners">
-                                        <option value="nuclei">Nuclei (Templates)</option>
+                                        <option value="nuclei" id="adv-vuln-nuclei-option">Nuclei (Templates)</option>
                                         <option value="nikto">Nikto (Web Server)</option>
                                         <option value="sqlmap">SQLMap (SQL Injection)</option>
                                         <option value="nmap_vuln">Nmap Vuln Scripts</option>
                                         <option value="whatweb">WhatWeb (Fingerprint)</option>
                                     </optgroup>
-                                    <optgroup label="OWASP ZAP">
+                                    <optgroup label="OWASP ZAP" id="adv-vuln-zap-optgroup">
                                         <option value="zap_spider">ZAP Spider (Discovery)</option>
                                         <option value="zap_active">ZAP Active Scan</option>
                                         <option value="zap_full">ZAP Full Scan (Recommended)</option>
@@ -5814,17 +5817,18 @@
                     </div>
                 </div>
 
-                <!-- Server Mode Notice -->
+                <!-- Scanner unavailable notice -->
                 <div id="adv-vuln-not-available" class="hidden mt-6 p-4 bg-yellow-900 bg-opacity-30 border border-yellow-600 rounded-lg">
                     <div class="flex items-start">
                         <svg class="w-6 h-6 text-yellow-500 mr-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                         </svg>
                         <div>
-                            <h4 class="font-semibold text-yellow-400">Server Mode Required</h4>
+                            <h4 class="font-semibold text-yellow-400">Scanner Unavailable</h4>
                             <p class="text-gray-300 text-sm mt-1">
-                                Advanced vulnerability scanning requires Server Mode (AMD64/ARM64 with 8GB+ RAM).
-                                This feature provides Nuclei, Nikto, SQLMap, and other enterprise-grade scanners.
+                                Advanced vulnerability scanning needs nmap, which isn't detected on this system.
+                                Nuclei, Nikto, SQLMap, WhatWeb and Nmap run on any board once installed. OWASP ZAP
+                                is the exception — it needs a server-class Ragnar (8GB+ RAM) and stays greyed out below.
                             </p>
                         </div>
                     </div>
@@ -6175,7 +6179,7 @@
                                 Toggle to show/hide Pwnagotchi Bridge configuration options below
                             </div>
                             <div id="pwn-headless-warning" class="text-xs text-amber-300 mt-2 hidden">
-                                Disabled for headless installations. Pwnagotchi requires a display.
+                                Headless install: Pwnagotchi runs via its web UI only (no e-paper face).
                             </div>
                         </div>
 
@@ -7443,7 +7447,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260802-pcap-chanhop"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260804-female-portrait2"></script>
 
 </body>
 </html>

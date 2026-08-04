@@ -93,6 +93,24 @@ VIKING_NAMES = (
     'Nanna', 'Signy',
 )
 
+# The women's names within VIKING_NAMES — used to pick the matching header
+# portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
+VIKING_FEMALE_NAMES = frozenset({
+    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
+    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
+    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
+    'Nanna', 'Signy',
+})
+
+
+def is_female_viking(name):
+    """True if the Viking name (full 'Yrsa Wolfsbane' or bare 'Yrsa') is one of
+    the women's names."""
+    if not name:
+        return False
+    return name.strip().split(' ', 1)[0] in VIKING_FEMALE_NAMES
+
+
 VIKING_EPITHETS = (
     'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
@@ -1105,6 +1123,43 @@ def poll_mesh(nodes, port=DEFAULT_NODE_PORT, timeout=6, max_workers=8,
         for t in threads:
             t.join(timeout=timeout + 3)
     return results
+
+
+def post_peer(node, path, payload, port=DEFAULT_NODE_PORT, timeout=20):
+    """POST a JSON body to an arbitrary mesh endpoint on a peer.
+
+    The generic write helper (command_peer is the monitor-toggle special case).
+    Used by scan delegation to start/cancel a scan on a capable peer. Same
+    WireGuard-identity auth as every other mesh call — the peer authorises the
+    caller by mesh tag. Returns the peer's JSON reply plus `reachable`.
+    """
+    url = peer_url(node, port, path)
+    if not url:
+        return {'reachable': False, 'success': False, 'error': 'no address'}
+    body = json.dumps(payload or {}).encode('utf-8')
+    try:
+        import urllib.error
+        import urllib.request
+        req = urllib.request.Request(
+            url, data=body, method='POST',
+            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            reply = json.loads(resp.read().decode('utf-8'))
+        reply['reachable'] = True
+        return reply
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {'reachable': False, 'success': False,
+                    'error': 'not authorized by peer — check the mesh tag'}
+        try:
+            reply = json.loads(exc.read().decode('utf-8'))
+            reply.setdefault('success', False)
+            reply['reachable'] = True
+            return reply
+        except Exception:
+            return {'reachable': False, 'success': False, 'error': f'HTTP {exc.code}'}
+    except Exception as exc:
+        return {'reachable': False, 'success': False, 'error': type(exc).__name__}
 
 
 def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):

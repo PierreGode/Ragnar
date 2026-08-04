@@ -20,6 +20,7 @@ import re
 import json
 import time
 import shutil
+import signal
 import threading
 import subprocess
 import tempfile
@@ -36,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed  # kept for _run
 from queue import Queue, Empty
 
 from logger import Logger
-from server_capabilities import get_server_capabilities, is_server_mode
+from server_capabilities import get_server_capabilities
 
 logger = Logger(name="advanced_vuln_scanner", level=logging.INFO)
 
@@ -139,6 +140,7 @@ class ScanProgress:
     error_message: str = ""
     auth_type: str = ""  # Auth type used for this scan (cookie, bearer_token, etc.)
     auth_status: str = ""  # Auth validation status (applied, verified, failed)
+    delegated_to: str = ""  # Viking name of the mesh peer running this scan (delegated scans)
     log_entries: List[Dict[str, str]] = field(default_factory=list)  # Buffered scan log entries
 
     def to_dict(self) -> Dict[str, Any]:
@@ -155,6 +157,7 @@ class ScanProgress:
             'error_message': self.error_message,
             'auth_type': self.auth_type,
             'auth_status': self.auth_status,
+            'delegated_to': self.delegated_to,
             'duration_seconds': (
                 (self.completed_at or datetime.now()) - self.started_at
             ).total_seconds() if self.started_at else 0
@@ -447,6 +450,14 @@ class AdvancedVulnScanner:
         # A list per scan_id because a Full scan runs several tools concurrently.
         self._scan_processes: Dict[str, List[subprocess.Popen]] = {}
         self._scan_processes_lock = threading.Lock()
+        # PIDs launched in their own session (start_new_session=True) so we can
+        # kill the whole process group — e.g. nuclei under a systemd-run scope,
+        # or nuclei plus the helpers it spawns — instead of just the leader.
+        self._session_leader_pids: set = set()
+        # Delegated (mesh) scans: scan_id -> {'peer_io':..., 'remote_id':...}.
+        # These run on a capable peer but appear in active_scans/scan_results
+        # exactly like a local scan, so the whole UI treats them the same.
+        self._delegated_scans: Dict[str, Dict] = {}
 
         # Cached result of the passwordless-sudo probe for nmap
         self._nmap_sudo_ok: Optional[bool] = None
@@ -493,8 +504,16 @@ class AdvancedVulnScanner:
         # Recover any interrupted scans on startup
         self._recover_interrupted_scans()
 
-        # Watchdog thread: auto-starts ZAP and keeps it alive
-        if self._tool_paths.get('zap'):
+        # Watchdog thread: auto-starts ZAP and keeps it alive.
+        # ZAP is the memory-hungry exception among the scanners, so it only
+        # runs on server-class boards (see SystemCapabilities.zap_enabled) -
+        # don't spin up its ~1GB Java daemon on a 4GB Pi where the rest of the
+        # Advanced Vuln tab still works fine.
+        self._zap_enabled = bool(caps.capabilities.zap_enabled)
+        # Nuclei greys out below ~900MB (see NUCLEI_MIN_RAM_MB) so a tiny board
+        # can't crash on it; those boards are steered to a larger mesh unit.
+        self._nuclei_enabled = bool(caps.capabilities.nuclei_enabled)
+        if self._tool_paths.get('zap') and self._zap_enabled:
             threading.Thread(target=self._zap_watchdog, daemon=True).start()
 
         # Maintainer thread: auto-download nuclei templates if missing, refresh weekly
@@ -858,16 +877,32 @@ class AdvancedVulnScanner:
             pass
         return key
     
+    # Bin dirs to check when a tool isn't on PATH — a systemd service can run
+    # with a thin PATH that misses /usr/bin, hiding an apt-installed nmap.
+    _TOOL_BIN_DIRS = ('/usr/bin', '/usr/local/bin', '/usr/sbin', '/bin',
+                      '/sbin', '/snap/bin')
+
+    def _resolve_tool(self, tool):
+        """Absolute path to `tool` via PATH, or a common bin dir, else None."""
+        path = shutil.which(tool)
+        if path:
+            return path
+        for d in self._TOOL_BIN_DIRS:
+            cand = os.path.join(d, tool)
+            if os.path.exists(cand):
+                return cand
+        return None
+
     def _detect_tools(self):
         """Detect available security tools"""
         tools = ['nuclei', 'nikto', 'sqlmap', 'nmap', 'whatweb']
         for tool in tools:
-            path = shutil.which(tool)
+            path = self._resolve_tool(tool)
             self._tool_paths[tool] = path
             if path:
                 logger.info(f"Found {tool} at {path}")
             else:
-                logger.debug(f"{tool} not found in PATH")
+                logger.debug(f"{tool} not found in PATH or common bin dirs")
 
         # Detect ZAP - check multiple possible locations
         # Priority: Ragnar tools dir > /opt > standard locations > PATH
@@ -978,18 +1013,51 @@ class AdvancedVulnScanner:
         """Check if advanced vuln scanning is available"""
         return get_server_capabilities().capabilities.advanced_vuln_enabled
 
+    def refresh_tools(self):
+        """Re-detect tools and re-read RAM gates so a tool installed after
+        startup (e.g. `apt install nmap`) is picked up without a service
+        restart. Cheap; called from the status endpoint when nothing is
+        available yet."""
+        try:
+            self._detect_tools()
+            caps = get_server_capabilities(self.shared_data)
+            caps.recheck_tools()
+            self._nuclei_enabled = bool(caps.capabilities.nuclei_enabled)
+            self._zap_enabled = bool(caps.capabilities.zap_enabled)
+        except Exception as e:
+            logger.debug(f"refresh_tools failed: {e}")
+
     def get_available_scanners(self) -> Dict[str, bool]:
         """Get status of available scanners"""
-        zap_available = self._tool_paths.get('zap') is not None
+        # ZAP counts as "available" only when it is both installed and this
+        # board has enough RAM to run it (zap_enabled). The frontend uses
+        # zap_installed / zap_ram_ok to tell "not installed" apart from
+        # "needs 8GB" so it can grey the panel with the right reason.
+        zap_installed = self._tool_paths.get('zap') is not None
+        zap_ram_ok = bool(getattr(self, '_zap_enabled', False))
+        zap_available = zap_installed and zap_ram_ok
         zap_running = self._is_zap_running() if zap_available else False
+        # Nuclei, like ZAP, is gated on RAM: installed AND enough memory. The
+        # frontend uses nuclei_installed / nuclei_ram_ok to grey it with the
+        # right reason ("needs 900MB") and steer to a mesh unit.
+        nuclei_installed = self._tool_paths.get('nuclei') is not None
+        nuclei_ram_ok = bool(getattr(self, '_nuclei_enabled', False))
+        nuclei_available = nuclei_installed and nuclei_ram_ok
         return {
-            'nuclei': self._tool_paths.get('nuclei') is not None,
+            'nuclei': nuclei_available,
             'nikto': self._tool_paths.get('nikto') is not None,
             'sqlmap': self._tool_paths.get('sqlmap') is not None,
             'nmap_vuln': self._tool_paths.get('nmap') is not None,
             'whatweb': self._tool_paths.get('whatweb') is not None,
             'zap': zap_available,
+            'zap_installed': zap_installed,
+            'zap_ram_ok': zap_ram_ok,
             'zap_running': zap_running,
+            'nuclei_installed': nuclei_installed,
+            'nuclei_ram_ok': nuclei_ram_ok,
+            'nuclei_installing': bool(getattr(self, '_nuclei_installing', False)),
+            'nuclei_templates_updating': (self._nuclei_update_lock.locked()
+                                          or bool(getattr(self, '_nuclei_autofetch_active', False))),
             'ajax_spider_browser': getattr(self, '_detected_browser', None),
         }
     
@@ -1032,7 +1100,118 @@ class AdvancedVulnScanner:
 
         logger.info(f"Started {scan_type.value} scan {scan_id} against {target}")
         return scan_id
-    
+
+    # ------------------------------------------------------------------
+    # Delegated (mesh) scans — run on a capable peer, mirrored in locally
+    # ------------------------------------------------------------------
+    DELEGATE_POLL_INTERVAL = 2.0
+    DELEGATE_MAX_SECONDS = 3 * 3600
+
+    def start_delegated_scan(self, target: str, scan_type: ScanType, viking: str,
+                             peer_io: Dict) -> str:
+        """Register a scan that actually runs on mesh peer `viking`, relaying its
+        progress + findings into this unit's normal scan state.
+
+        `peer_io` is a dict of callables (injected by the caller so this stays
+        transport-agnostic):
+          start()        -> {'success', 'scan_id'|'error'}
+          status(rid)    -> {'reachable', 'scan': {...}}
+          findings(rid)  -> {'findings': [...]}
+          cancel(rid)    -> {'success': bool}
+        Returns a normal scan_id — callers use the same status/findings/cancel
+        paths as any local scan.
+        """
+        with self._lock:
+            self._scan_counter += 1
+            scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
+        progress = ScanProgress(scan_id=scan_id, scan_type=scan_type, target=target,
+                                status='running', started_at=datetime.now(),
+                                delegated_to=viking,
+                                current_check=f"Delegated to {viking}…")
+        self.active_scans[scan_id] = progress
+        self.scan_results[scan_id] = []
+        self.scan_history.append(progress)
+        self._delegated_scans[scan_id] = {'peer_io': peer_io, 'remote_id': None,
+                                          'viking': viking}
+        self._save_scan_to_db(scan_id, progress)
+        threading.Thread(target=self._run_delegated_scan,
+                         args=(scan_id, viking, peer_io),
+                         name=f"avs-mesh-{scan_id}", daemon=True).start()
+        logger.info(f"[MESH-SCAN] Delegated {scan_type.value} scan {scan_id} to {viking} for {target}")
+        return scan_id
+
+    def _run_delegated_scan(self, scan_id: str, viking: str, peer_io: Dict):
+        progress = self.active_scans.get(scan_id)
+        if not progress:
+            return
+        try:
+            reply = peer_io['start']()
+        except Exception as e:
+            reply = {'success': False, 'error': f'{type(e).__name__}: {e}'}
+        if not reply.get('success') or not reply.get('scan_id'):
+            progress.status = 'failed'
+            progress.error_message = f"{viking} refused the scan: {reply.get('error') or 'unknown error'}"
+            progress.completed_at = datetime.now()
+            self._save_scan_to_db(scan_id, progress)
+            self._delegated_scans.pop(scan_id, None)
+            return
+        remote_id = reply['scan_id']
+        self._delegated_scans[scan_id]['remote_id'] = remote_id
+
+        deadline = time.time() + self.DELEGATE_MAX_SECONDS
+        terminal = None
+        while time.time() < deadline:
+            time.sleep(self.DELEGATE_POLL_INTERVAL)
+            if progress.status == 'cancelled':
+                try:
+                    peer_io['cancel'](remote_id)
+                except Exception:
+                    pass
+                terminal = 'cancelled'
+                break
+            try:
+                sr = peer_io['status'](remote_id)
+            except Exception:
+                sr = {'reachable': False}
+            if not sr.get('reachable'):
+                progress.current_check = f"{viking} unreachable — retrying…"
+                continue
+            scan = sr.get('scan') or {}
+            progress.progress_percent = scan.get('progress_percent', progress.progress_percent)
+            progress.current_check = scan.get('current_check', progress.current_check) or progress.current_check
+            progress.findings_count = scan.get('findings_count', progress.findings_count)
+            if scan.get('error_message'):
+                progress.error_message = scan['error_message']
+            st = scan.get('status')
+            if st in ('completed', 'failed', 'cancelled'):
+                terminal = st
+                break
+        if terminal is None:
+            terminal = 'failed'
+            progress.error_message = f"Relay to {viking} timed out."
+
+        if terminal == 'completed':
+            try:
+                fr = peer_io['findings'](remote_id)
+                for fd in (fr or {}).get('findings', []) or []:
+                    try:
+                        finding = self._dict_to_finding(fd)
+                        self.scan_results[scan_id].append(finding)
+                        self._save_finding_to_db(finding, scan_id)
+                    except Exception as e:
+                        logger.debug(f"[MESH-SCAN] bad finding from {viking}: {e}")
+                progress.findings_count = len(self.scan_results.get(scan_id, []))
+                progress.progress_percent = 100
+            except Exception as e:
+                logger.warning(f"[MESH-SCAN] could not fetch findings from {viking}: {e}")
+
+        if progress.status != 'cancelled':
+            progress.status = terminal
+        progress.completed_at = datetime.now()
+        self._save_scan_to_db(scan_id, progress)
+        self._delegated_scans.pop(scan_id, None)
+        logger.info(f"[MESH-SCAN] Delegated scan {scan_id} on {viking} finished: {terminal}")
+
     def _run_scan(self, scan_id: str, target: str, scan_type: ScanType, options: Dict):
         """Execute the vulnerability scan"""
         progress = self.active_scans.get(scan_id)
@@ -1184,6 +1363,48 @@ class AdvancedVulnScanner:
             self._nuclei_template_cache_ts = now
             return info
 
+    # Don't retry a failing template auto-fetch more than once per this window
+    # (e.g. the box is offline) so status polling can't hammer the download.
+    NUCLEI_AUTOFETCH_COOLDOWN = 300  # seconds
+
+    def maybe_autofetch_nuclei_templates(self) -> None:
+        """Kick off a template download if nuclei is installed but has none.
+
+        The startup maintainer handles the boot case, but this covers nuclei
+        that was installed after boot (e.g. via the Install button or apt) or
+        an initial fetch that failed while the box was offline. Called from the
+        status poll, so it is throttled: at most one attempt per cooldown, and
+        never while a download is already in flight.
+        """
+        if not self._tool_paths.get('nuclei'):
+            return
+        if not getattr(self, '_nuclei_enabled', False):
+            return  # nuclei greyed out on this board — don't fetch templates
+        if self._nuclei_update_lock.locked():
+            return  # a download/update is already running
+        now = time.time()
+        if now - getattr(self, '_last_template_autofetch', 0) < self.NUCLEI_AUTOFETCH_COOLDOWN:
+            return
+        try:
+            if self.get_nuclei_template_info().get('count', 0) > 0:
+                return  # templates already present
+        except Exception:
+            return
+        self._last_template_autofetch = now
+        # Set the flag synchronously (before the worker races to grab the lock)
+        # so the same status response already reports the download as running —
+        # that keeps the frontend polling through to completion.
+        self._nuclei_autofetch_active = True
+        logger.info("[NUCLEI] Templates missing — auto-fetching in the background")
+
+        def _worker():
+            try:
+                self.ensure_nuclei_templates()
+            finally:
+                self._nuclei_autofetch_active = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def ensure_nuclei_templates(self, force_update: bool = False) -> Dict[str, Any]:
         """Ensure nuclei templates are present, downloading them if missing.
 
@@ -1222,6 +1443,73 @@ class AdvancedVulnScanner:
 
         new_info = self.get_nuclei_template_info(force=True)
         return {'installed': new_info['count'] > 0, 'updated': ok, 'count': new_info['count']}
+
+    def install_nuclei(self) -> Tuple[bool, str]:
+        """Download and install the nuclei binary on demand.
+
+        Mirrors the direct-binary path in scripts/install_advanced_tools.sh:
+        pick the release matching this arch, fetch it from GitHub, drop the
+        binary in /usr/local/bin. The service runs as root so the move works.
+        Safe to call when nuclei is already present. Kicks off a one-shot
+        template download afterwards so the scanner is usable straight away.
+        """
+        if self._tool_paths.get('nuclei'):
+            return True, "Nuclei is already installed"
+
+        import platform as _plat
+        import zipfile
+        arch_map = {
+            'x86_64': 'amd64', 'amd64': 'amd64',
+            'aarch64': 'arm64', 'arm64': 'arm64',
+            'armv7l': 'armv6', 'armv8l': 'armv6',
+        }
+        nuclei_arch = arch_map.get(_plat.machine())
+        if not nuclei_arch:
+            return False, f"Unsupported architecture for nuclei: {_plat.machine()}"
+
+        # Serialize with template updates so we don't race the maintainer.
+        if not self._nuclei_update_lock.acquire(blocking=False):
+            return False, "A nuclei install/update is already in progress"
+        try:
+            version = '3.3.7'  # fallback if the GitHub API is unreachable
+            try:
+                api = 'https://api.github.com/repos/projectdiscovery/nuclei/releases/latest'
+                with urllib.request.urlopen(api, timeout=15) as r:
+                    tag = json.loads(r.read().decode()).get('tag_name', '')
+                    if tag.lstrip('v'):
+                        version = tag.lstrip('v')
+            except Exception as e:
+                logger.warning(f"[NUCLEI-INSTALL] GitHub API lookup failed, using {version}: {e}")
+
+            url = (f"https://github.com/projectdiscovery/nuclei/releases/download/"
+                   f"v{version}/nuclei_{version}_linux_{nuclei_arch}.zip")
+            logger.info(f"[NUCLEI-INSTALL] Downloading nuclei {version} ({nuclei_arch}) from {url}")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                zip_path = os.path.join(tmp, 'nuclei.zip')
+                urllib.request.urlretrieve(url, zip_path)
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extract('nuclei', tmp)
+                bin_path = os.path.join(tmp, 'nuclei')
+                os.chmod(bin_path, 0o755)
+                dest = '/usr/local/bin/nuclei'
+                shutil.move(bin_path, dest)
+                os.chmod(dest, 0o755)
+        except Exception as e:
+            logger.error(f"[NUCLEI-INSTALL] Failed: {e}")
+            return False, f"Nuclei install failed: {e}"
+        finally:
+            self._nuclei_update_lock.release()
+
+        # Re-detect so get_available_scanners() flips nuclei to available.
+        self._detect_tools()
+        if not self._tool_paths.get('nuclei'):
+            return False, "Nuclei downloaded but was not detected on PATH afterwards"
+
+        # Pull templates in the background so the button returns promptly.
+        threading.Thread(target=self.ensure_nuclei_templates, daemon=True).start()
+        logger.info(f"[NUCLEI-INSTALL] Nuclei {version} installed at {self._tool_paths['nuclei']}")
+        return True, f"Nuclei {version} installed"
 
     def _nuclei_template_maintainer(self):
         """Background thread: download templates if missing at startup, refresh weekly."""
@@ -1271,12 +1559,198 @@ class AdvancedVulnScanner:
                     break
         return resolved
 
+    def _nuclei_resource_tuning(self, rate_limit: int, severity: str):
+        """Scale nuclei's footprint to this board's RAM.
+
+        Nuclei loads its whole matched template set into memory and runs 25
+        templates concurrently by default. On a 512MB Pi Zero 2 W that blows
+        past the ~250MB of usable RAM left after the OS and Ragnar itself, and
+        the board thrashes swap until it locks up rather than failing cleanly.
+
+        Returns (perf_flags, env_overrides, severity, note):
+          - perf_flags: concurrency / bulk-size / rate-limit / timeout flags
+          - env_overrides: GOMEMLIMIT/GOGC/GOMAXPROCS to bound the Go runtime
+          - severity: possibly tightened to cut how many templates load
+          - note: a human line for the scan log (empty on capable boards)
+        """
+        try:
+            caps = get_server_capabilities(self.shared_data)
+            total = caps.capabilities.total_ram_gb or 0.0
+            avail = caps.capabilities.available_ram_gb or total
+        except Exception:
+            total, avail = 0.0, 0.0
+
+        # Skip update checks everywhere — it's a startup network hit and a bit
+        # of memory for no scan value.
+        flags = ['-disable-update-check']
+        env = {}
+        note = ''
+
+        def _gomemlimit_mib(fraction, floor=96):
+            budget = (avail or total) * 1024.0
+            return max(floor, int(budget * fraction))
+
+        if total and total < 1.0:
+            # Pi Zero 2 W tier (512MB, ~0.42GB reported). Aggressive limits and
+            # a hard Go heap cap so nuclei self-limits instead of taking the
+            # board down. Also drop interactsh (OOB polling) and the low/info
+            # severities so far fewer templates load.
+            flags += ['-c', '8', '-bulk-size', '5',
+                      '-rate-limit', str(min(rate_limit, 50)),
+                      '-timeout', '8', '-no-interactsh',
+                      # cap the load-phase concurrency too — parsing the whole
+                      # template tree 50-wide is a memory spike on its own.
+                      '-template-loading-concurrency', '5',
+                      '-payload-concurrency', '5']
+            env = {'GOMEMLIMIT': f'{_gomemlimit_mib(0.55)}MiB',
+                   'GOGC': '40', 'GOMAXPROCS': '2'}
+            if severity == 'low,medium,high,critical':  # i.e. caller's default
+                severity = 'high,critical'
+            note = ('low-memory board (<1GB): nuclei concurrency 8, heap capped '
+                    f"({env['GOMEMLIMIT']}), severity limited to {severity}")
+        elif total and total < 2.0:
+            # 1GB boards (Pi 3 A+/Zero-class-with-1GB). Moderate.
+            flags += ['-c', '15', '-bulk-size', '10',
+                      '-rate-limit', str(min(rate_limit, 100)),
+                      '-template-loading-concurrency', '15']
+            env = {'GOMEMLIMIT': f'{_gomemlimit_mib(0.6)}MiB', 'GOGC': '60'}
+            note = f"small board (<2GB): nuclei concurrency 15, heap capped ({env['GOMEMLIMIT']})"
+        else:
+            flags += ['-c', '25', '-rate-limit', str(rate_limit)]
+
+        return flags, env, severity, note
+
+    @staticmethod
+    def _available_mib() -> Optional[int]:
+        """Free RAM right now, in MiB (None if it can't be read)."""
+        try:
+            import psutil
+            return int(psutil.virtual_memory().available / (1024 * 1024))
+        except Exception:
+            pass
+        try:
+            with open('/proc/meminfo') as f:
+                for line in f:
+                    if line.startswith('MemAvailable:'):
+                        return int(int(line.split()[1]) / 1024)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _memory_cgroup_available() -> bool:
+        """True when a hard memory cap via systemd-run will actually bite.
+
+        Needs systemd-run present and the cgroup-v2 memory controller enabled.
+        On Raspberry Pi the memory controller is often off until
+        `cgroup_enable=memory cgroup_memory=1` is added to the kernel cmdline,
+        so this can be False even with systemd — in which case we don't wrap
+        (the flag would be silently ignored anyway).
+        """
+        if not shutil.which('systemd-run'):
+            return False
+        try:
+            with open('/sys/fs/cgroup/cgroup.controllers') as f:
+                return 'memory' in f.read().split()
+        except Exception:
+            return False
+
+    def _nuclei_memory_precheck(self, nuclei_env: Dict[str, str]) -> Optional[str]:
+        """Return an error string if there isn't enough free RAM to run nuclei
+        safely under this tier, else None.
+
+        Only guards constrained tiers (those that set a GOMEMLIMIT). GOMEMLIMIT
+        is a soft cap, so on a small board that's already low on free memory,
+        starting nuclei can push it into swap thrash and lock the whole board
+        up — a clean refusal with the numbers is the right call.
+        """
+        m = re.match(r'(\d+)MiB', nuclei_env.get('GOMEMLIMIT', ''))
+        if not m:
+            return None  # unconstrained board — plenty of headroom
+        need_mib = int(int(m.group(1)) * 1.6)  # heap cap + parsing/runtime overhead
+        free_mib = self._available_mib()
+        if free_mib is None or free_mib >= need_mib:
+            return None
+        return (f"Not enough free memory to run Nuclei safely: {free_mib}MB free, "
+                f"need ~{need_mib}MB. Nuclei is memory-hungry and a 512MB board is "
+                f"borderline — stop other Ragnar features to free RAM, or run Nuclei "
+                f"from a larger unit. Refusing rather than risk locking up the board.")
+
+    def _hard_kill(self, process: subprocess.Popen) -> None:
+        """Kill a scan process — the whole group if we started it in its own
+        session, so children (and a systemd-run scope) go too."""
+        try:
+            pid = process.pid
+            if pid in self._session_leader_pids:
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    return
+                except Exception:
+                    pass
+            process.kill()
+        except Exception:
+            pass
+
+    def _parse_nuclei_progress(self, stderr_path: str) -> Optional[int]:
+        """Extract a 0-99 completion percentage from nuclei's -stats output.
+
+        With -jsonl, nuclei -stats writes periodic JSON stats lines to stderr,
+        e.g. {"duration":"0:00:30","percent":"4","requests":"759","total":
+        "18629",...}. Read the tail of the stderr file and take the most recent
+        "percent" (falling back to requests/total, or the human-readable
+        "(N%)" token some configs emit). Returns None when no stats line is
+        present yet (before the first -si interval) so the caller can leave the
+        bar where it is rather than resetting it.
+        """
+        try:
+            if not os.path.exists(stderr_path):
+                return None
+            with open(stderr_path, 'r', errors='replace') as f:
+                # Stats lines are short; the tail is all we need.
+                try:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - 8192))
+                except Exception:
+                    pass
+                text = f.read()
+            if not text:
+                return None
+            # Preferred: the JSON "percent" field (string or number), latest.
+            pcts = re.findall(r'"percent"\s*:\s*"?(\d{1,3})"?', text)
+            if pcts:
+                return max(0, min(99, int(pcts[-1])))
+            # Fall back to JSON requests/total on the last stats line.
+            reqs = re.findall(r'"requests"\s*:\s*"?(\d+)"?', text)
+            totals = re.findall(r'"total"\s*:\s*"?(\d+)"?', text)
+            if reqs and totals and int(totals[-1]) > 0:
+                return max(0, min(99, int(int(reqs[-1]) * 100 / int(totals[-1]))))
+            # Human-readable "(N%)" token, if stats aren't JSON.
+            paren = re.findall(r'\((\d{1,3})%\)', text)
+            if paren:
+                return max(0, min(99, int(paren[-1])))
+        except Exception as e:
+            logger.debug(f"Could not parse nuclei progress: {e}")
+        return None
+
+    NUCLEI_MESH_STEER = ("Nuclei needs at least 900MB RAM and is disabled on this board — "
+                         "it would OOM and crash the Pi. Run it from a larger Ragnar Mesh "
+                         "unit (Mesh tab) instead; the lighter scanners still work here.")
+
     def _run_nuclei_scan(self, scan_id: str, target: str, options: Dict):
         """Run Nuclei template-based scan"""
         nuclei_path = self._tool_paths.get('nuclei')
         if not nuclei_path:
             raise RuntimeError("Nuclei not installed")
-        
+
+        # Hard gate: nuclei is greyed out below ~900MB (see NUCLEI_MIN_RAM_MB).
+        # Refuse rather than let it crash a tiny board, and point at the mesh.
+        if not getattr(self, '_nuclei_enabled', False):
+            progress = self.active_scans[scan_id]
+            self._scan_log(scan_id, 'error', self.NUCLEI_MESH_STEER)
+            progress.error_message = self.NUCLEI_MESH_STEER
+            raise RuntimeError(self.NUCLEI_MESH_STEER)
+
         progress = self.active_scans[scan_id]
         
         # Build command
@@ -1299,16 +1773,54 @@ class AdvancedVulnScanner:
             output_path = output_file.name
         stderr_path = output_path + '.err'
 
+        # Scale nuclei's memory/CPU footprint to the board so a small one
+        # (e.g. a 512MB Pi Zero 2 W) doesn't OOM and lock up.
+        perf_flags, nuclei_env, severity_filter, tuning_note = \
+            self._nuclei_resource_tuning(rate_limit, severity_filter)
+        if tuning_note:
+            self._scan_log(scan_id, 'info', f"Nuclei tuning — {tuning_note}")
+
+        # On a constrained board, refuse to start if free RAM is already too
+        # low — better a clean failure with the numbers than a locked-up Pi.
+        precheck_error = self._nuclei_memory_precheck(nuclei_env)
+        if precheck_error:
+            self._scan_log(scan_id, 'error', precheck_error)
+            progress.error_message = precheck_error
+            raise RuntimeError(precheck_error)
+
+        gomem_mib = None
+        _gm = re.match(r'(\d+)MiB', nuclei_env.get('GOMEMLIMIT', ''))
+        if _gm:
+            gomem_mib = int(_gm.group(1))
+
+        # If a GOMEMLIMIT tier applies and the kernel's memory cgroup is enabled,
+        # wrap nuclei in a systemd-run scope with a HARD MemoryMax and swap off,
+        # so a runaway is OOM-killed cleanly instead of taking the Pi with it.
+        cgroup_prefix = []
+        use_session = False
+        if gomem_mib and self._memory_cgroup_available():
+            hard_mib = int(gomem_mib * 1.5)
+            cgroup_prefix = [
+                'systemd-run', '--scope', '--quiet', '--collect',
+                '-p', f'MemoryMax={hard_mib}M',
+                '-p', 'MemorySwapMax=0',
+                '--',
+            ]
+            use_session = True
+            self._scan_log(scan_id, 'info',
+                           f"Nuclei hard memory cap: {hard_mib}MB (systemd-run, swap off)")
+
         try:
             cmd = [
+                *cgroup_prefix,
                 nuclei_path,
                 '-u', target,
                 '-jsonl',
                 '-o', output_path,
                 '-severity', severity_filter,
-                '-rate-limit', str(rate_limit),
-                '-stats', '-si', '30',
-                '-no-color'
+                '-stats', '-si', '5',
+                '-no-color',
+                *perf_flags,
             ]
 
             # Resolve template categories against the installed layout (v9.6+
@@ -1361,24 +1873,44 @@ class AdvancedVulnScanner:
                     cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=errf,
-                    text=True
+                    text=True,
+                    env={**os.environ, **nuclei_env},
+                    # New session when wrapped so we can kill the whole group
+                    # (systemd-run scope + nuclei) on cancel/timeout.
+                    start_new_session=use_session,
                 )
+                if use_session:
+                    self._session_leader_pids.add(process.pid)
                 self._register_scan_process(scan_id, process)
 
                 # Monitor progress with a hard runtime cap so a hung nuclei
                 # process cannot block the scan thread indefinitely.
                 max_runtime = int(options.get('max_runtime', 1800))
                 start_time = time.monotonic()
+                # Small initial bump so the bar isn't frozen at 0 before
+                # nuclei's first stats line (which -si 5 emits after ~5s).
+                progress.progress_percent = max(progress.progress_percent, 3)
                 while process.poll() is None:
                     time.sleep(2)
                     if self._is_scan_cancelled(scan_id):
-                        process.kill()
+                        self._hard_kill(process)
                         break
                     if time.monotonic() - start_time > max_runtime:
                         self._scan_log(scan_id, 'warning', f"Nuclei scan exceeded {max_runtime}s, terminating")
-                        process.kill()
+                        self._hard_kill(process)
                         break
-                    progress.current_check = "Scanning with Nuclei templates..."
+                    # Drive the progress bar from nuclei's own -stats output
+                    # (written to the stderr file). It prints a line ending in
+                    # "Requests: A/B (N%)"; use N, or A/B if the percent token
+                    # isn't present. Never let the bar go backwards, and cap at
+                    # 99 so only completion shows 100.
+                    pct = self._parse_nuclei_progress(stderr_path)
+                    if pct is not None:
+                        progress.progress_percent = min(99, max(progress.progress_percent, pct))
+                    progress.current_check = (
+                        f"Scanning with Nuclei templates... {progress.progress_percent}%"
+                        if pct is not None else "Scanning with Nuclei templates..."
+                    )
                     # Update findings count from output file
                     if os.path.exists(output_path):
                         with open(output_path, 'r') as f:
@@ -1386,6 +1918,7 @@ class AdvancedVulnScanner:
                             progress.findings_count = len(lines)
             finally:
                 errf.close()
+                self._session_leader_pids.discard(process.pid)
 
             returncode = process.returncode
             stderr_text = ''
@@ -1395,10 +1928,24 @@ class AdvancedVulnScanner:
             except Exception:
                 pass
 
+            # A hard memory cap that fired shows up as SIGKILL (137 / -9) or an
+            # explicit OOM note. Say so plainly instead of a bare exit code, so
+            # the operator knows the board — not the target — is the limit.
+            oom_hit = (returncode in (137, -9)
+                       or 'signal: killed' in stderr_text.lower()
+                       or 'out of memory' in stderr_text.lower())
+            if oom_hit and not self._is_scan_cancelled(scan_id):
+                msg = ("Nuclei ran out of memory and was killed to protect the board. "
+                       "This Pi is too small for the selected scan — narrow the templates "
+                       "(severity high,critical), scan fewer paths, or run Nuclei from a "
+                       "larger unit.")
+                self._scan_log(scan_id, 'error', msg)
+                progress.error_message = msg
+
             # Surface nuclei's own diagnostics — previously these were discarded,
             # leaving "0 findings" indistinguishable from a hard failure.
             lower_err = stderr_text.lower()
-            if returncode not in (0, None) and not self._is_scan_cancelled(scan_id):
+            if returncode not in (0, None) and not oom_hit and not self._is_scan_cancelled(scan_id):
                 tail = stderr_text.strip()[-600:]
                 self._scan_log(scan_id, 'warning',
                                f"Nuclei exited with code {returncode}" + (f": {tail}" if tail else ""))
@@ -2270,6 +2817,14 @@ class AdvancedVulnScanner:
         freeing locked ports before attempting to start a fresh instance.
         Thread-safe: uses _zap_start_lock to prevent concurrent starts.
         """
+        # Hard gate: ZAP needs a server-class box (see zap_enabled). Refuse to
+        # launch its ~1GB Java daemon on smaller boards. This is the single
+        # chokepoint for /api/zap/start, the watchdog and every ZAP scan run.
+        if not getattr(self, '_zap_enabled', False):
+            logger.info("[ZAP-START] Skipped: ZAP needs a server-class board (8GB RAM); "
+                        "not enough memory on this system.")
+            return False
+
         # Serialize all startup attempts so the watchdog and scan flow
         # never race to start/kill ZAP concurrently.
         acquired = self._zap_start_lock.acquire(timeout=200)
@@ -6026,10 +6581,19 @@ class AdvancedVulnScanner:
             for process in processes:
                 if process.poll() is None:
                     try:
-                        process.kill()
+                        self._hard_kill(process)
                         self._scan_log(scan_id, 'info', "Terminated scan process on cancel")
                     except Exception as e:
                         logger.debug(f"Error killing process for {scan_id}: {e}")
+
+            # Delegated scan: also tell the peer to stop (the relay loop will
+            # see the cancelled status too, but this is immediate).
+            deleg = self._delegated_scans.get(scan_id)
+            if deleg and deleg.get('remote_id'):
+                try:
+                    deleg['peer_io']['cancel'](deleg['remote_id'])
+                except Exception as e:
+                    logger.debug(f"Error cancelling delegated scan {scan_id}: {e}")
 
         return cancelled
 

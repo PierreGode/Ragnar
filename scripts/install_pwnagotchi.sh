@@ -195,20 +195,22 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Pwnagotchi runs fine without an e-paper display — it operates headless with
+# its own web UI. So we no longer block the install on headless Ragnar; the
+# display is optional. We still detect headless to decide whether to enable the
+# e-paper face: on headless there is no panel to drive, so display stays off and
+# Pwnagotchi is used purely via its web UI.
 HEADLESS_DETECTED=false
 if pgrep -f "headlessRagnar.py" >/dev/null 2>&1; then
     HEADLESS_DETECTED=true
-else
-    if systemctl cat ragnar.service 2>/dev/null | grep -q "headlessRagnar.py"; then
-        HEADLESS_DETECTED=true
-    fi
+elif systemctl cat ragnar.service 2>/dev/null | grep -q "headlessRagnar.py"; then
+    HEADLESS_DETECTED=true
 fi
-
 if [[ "$HEADLESS_DETECTED" == true ]]; then
-    BLOCK_MSG="Pwnagotchi requires an e-paper display, but Ragnar is running in Headless mode. Installation is disabled."
-    echo "[ERROR] ${BLOCK_MSG}"
-    write_status "error" "$BLOCK_MSG" "preflight"
-    exit 1
+    PWN_DISPLAY_ENABLED="false"
+    echo "[INFO] Headless Ragnar detected — installing Pwnagotchi in headless mode (web UI only, no e-paper face)."
+else
+    PWN_DISPLAY_ENABLED="true"
 fi
 
 write_status "installing" "Starting Pwnagotchi installation" "preflight"
@@ -435,7 +437,7 @@ mon_start_cmd = "/usr/bin/monstart"
 mon_stop_cmd = "/usr/bin/monstop"
 
 [ui.display]
-enabled = true
+enabled = ${PWN_DISPLAY_ENABLED}
 type = "waveshare_4"
 rotation = 180
 color = "black"
@@ -480,7 +482,7 @@ else
     set_or_update_config_value "ui.web.username" "ragnar"
     set_or_update_config_value "ui.web.password" "ragnar"
     set_or_update_config_value "ui.web.port" "8080"
-    set_or_update_config_value "ui.display.enabled" "true"
+    set_or_update_config_value "ui.display.enabled" "${PWN_DISPLAY_ENABLED}"
     set_or_update_config_value "ui.display.type" "waveshare_4"
     set_or_update_config_value "ui.display.rotation" "180"
     set_or_update_config_value "ui.display.color" "black"
