@@ -300,6 +300,26 @@ else
     echo -e "  ${YELLOW}⚠${NC} tcpdump missing — Traffic Analysis tab stays hidden (apt install tcpdump)"
 fi
 
+echo -e "${BLUE}Step 5.4b: Tailscale subnet-router IP forwarding...${NC}"
+# A Ragnar that advertises subnet routes (e.g. an on-site unit that lets an
+# off-site scanner reach the LAN over the tunnel) must have IP forwarding on, or
+# tailscaled silently drops every forwarded packet. The web UI enables this when
+# you advertise a route; this self-heals boxes that were already advertising
+# before that fix. Only touches nodes that ARE advertising — others are left as-is.
+if command -v tailscale >/dev/null 2>&1 && \
+   tailscale debug prefs 2>/dev/null | tr -d ' \n' | grep -q '"AdvertiseRoutes":\["'; then
+    cat > /etc/sysctl.d/99-ragnar-tailscale-forwarding.conf <<'EOF'
+# Managed by Ragnar — required for Tailscale subnet routing
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+EOF
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} IP forwarding on (this node advertises subnet routes)"
+else
+    echo -e "  ${GREEN}✓${NC} Not a subnet router — IP forwarding left unchanged"
+fi
+
 echo -e "${BLUE}Step 5.5: Restoring local runtime data...${NC}"
 for file in "${PRESERVE_FILES[@]}"; do
     backup_file="$BACKUP_DIR/$(basename $file)"
