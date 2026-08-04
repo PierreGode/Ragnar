@@ -487,6 +487,15 @@ class AdvancedVulnScanner:
         self._zap_port = self.ZAP_DEFAULT_PORT
         self._zap_api_key = self._generate_api_key()
         self._zap_base_url = f"http://127.0.0.1:{self._zap_port}"
+        # Opt-in remote ZAP: when RAGNAR_ZAP_REMOTE_URL is set, drive a ZAP
+        # daemon running on another host instead of launching one locally. This
+        # lets a low-RAM device (e.g. a Raspberry Pi) offload the scan to a more
+        # capable box over the network. RAGNAR_ZAP_REMOTE_KEY supplies that
+        # daemon's API key.
+        self._zap_remote_url = os.environ.get('RAGNAR_ZAP_REMOTE_URL', '').strip().rstrip('/')
+        if self._zap_remote_url:
+            self._zap_base_url = self._zap_remote_url
+            self._zap_api_key = os.environ.get('RAGNAR_ZAP_REMOTE_KEY', '').strip() or self._zap_api_key
         self._zap_watchdog_stop = threading.Event()
         self._zap_user_stopped = False  # True when user explicitly stops ZAP
         self._zap_busy = False  # True during startup or active scan — suppresses watchdog
@@ -2942,6 +2951,14 @@ class AdvancedVulnScanner:
                 logger.debug("[ZAP-START] Could not determine system memory")
 
         port = port or self._zap_port
+        # In remote mode we never spawn a local ZAP daemon: the scanner talks to
+        # the configured remote endpoint directly. Reaching this spawn path in
+        # remote mode means the remote is unreachable — fail cleanly rather than
+        # silently launching a local daemon (which could OOM a small host).
+        if getattr(self, '_zap_remote_url', ''):
+            logger.error("[ZAP-START] remote ZAP %s not responding; refusing to "
+                         "launch a local daemon in remote mode" % self._zap_base_url)
+            return False
         self._zap_port = port
         self._zap_base_url = f"http://127.0.0.1:{port}"
 
