@@ -30694,15 +30694,31 @@ async function refreshMesh(force) {
 // identifiable at a glance.
 function applyHeaderBrand(data) {
     const el = document.getElementById('header-brand-name');
-    if (!el || !data) return;
+    const img = document.getElementById('header-brand-img');
+    if (!data) return;
     const onMesh = !!data.available;               // BackendState == Running
     const name = (data.viking_name || '').trim();
-    if (onMesh && name) {
-        el.textContent = name;
-        el.title = data.unit_name || name;         // full "Name (Unit NN)" on hover
-    } else {
-        el.textContent = 'Ragnar';
-        el.title = '';
+    if (el) {
+        if (onMesh && name) {
+            el.textContent = name;
+            el.title = data.unit_name || name;     // full "Name (Unit NN)" on hover
+        } else {
+            el.textContent = 'Ragnar';
+            el.title = '';
+        }
+    }
+    // A unit renamed to a shieldmaiden (woman's Viking name) shows the female
+    // Ragnar portrait; everyone else keeps the default icon.
+    if (img) {
+        if (onMesh && name && data.viking_female) {
+            img.src = '/web/images/ragnar_female.png';
+            img.alt = name;
+            img.className = 'h-12 w-auto object-contain';
+        } else {
+            img.src = '/web/images/ragnar.ico';
+            img.alt = 'Ragnar';
+            img.className = 'h-12 w-9 object-contain';
+        }
     }
 }
 

@@ -3316,6 +3316,10 @@ def mesh_status():
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),
+        # Whether this unit's Viking name is a woman's — the header shows the
+        # female Ragnar portrait when so.
+        'viking_female': (mesh_manager.is_female_viking(_mesh_viking_name())
+                          if mesh_available else False),
         # Whether `tailscale serve --https` can actually work here. Reported so
         # the UI can say so up front instead of offering a button that hangs.
         'https_available': mesh_manager.https_available() if mesh_available else False,

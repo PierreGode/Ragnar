@@ -93,6 +93,24 @@ VIKING_NAMES = (
     'Nanna', 'Signy',
 )
 
+# The women's names within VIKING_NAMES — used to pick the matching header
+# portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
+VIKING_FEMALE_NAMES = frozenset({
+    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
+    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
+    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
+    'Nanna', 'Signy',
+})
+
+
+def is_female_viking(name):
+    """True if the Viking name (full 'Yrsa Wolfsbane' or bare 'Yrsa') is one of
+    the women's names."""
+    if not name:
+        return False
+    return name.strip().split(' ', 1)[0] in VIKING_FEMALE_NAMES
+
+
 VIKING_EPITHETS = (
     'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
