@@ -30722,7 +30722,8 @@ function applyHeaderBrand(data) {
     }
 }
 
-// Set the header name on load even if the operator never opens the Mesh tab.
+// Set the header name/portrait on load even if the operator never opens the
+// Mesh tab.
 async function updateHeaderBrand() {
     try {
         const resp = await fetch('/api/mesh/status');
@@ -30731,7 +30732,13 @@ async function updateHeaderBrand() {
         /* keep default "Ragnar" */
     }
 }
-document.addEventListener('DOMContentLoaded', updateHeaderBrand);
+// This script is loaded at the end of <body>, so DOMContentLoaded may already
+// have fired by the time we get here — run immediately in that case.
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', updateHeaderBrand);
+} else {
+    updateHeaderBrand();
+}
 
 // Installing Tailscale from the tab. A stock Ragnar ships without it and
 // `update` only installs it once opted in, so this is how a fresh unit gets the
