@@ -277,6 +277,12 @@ echo -e "${BLUE}Step 5.4: Ensuring Traffic Analysis capture tools...${NC}"
 if ! command -v tcpdump >/dev/null 2>&1; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tcpdump >/dev/null 2>&1 || true
 fi
+# tshark powers the JA3/IRC sidecars (sudoers already grants it). Best-effort,
+# idempotent; preseed the wireshark setuid question so it can't stall.
+if ! command -v tshark >/dev/null 2>&1; then
+    echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections 2>/dev/null || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark >/dev/null 2>&1 || true
+fi
 if command -v tcpdump >/dev/null 2>&1; then
     if [ ! -f /etc/sudoers.d/ragnar-traffic ]; then
         cat > /etc/sudoers.d/ragnar-traffic << 'EOF'
