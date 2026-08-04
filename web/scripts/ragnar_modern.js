@@ -30681,12 +30681,41 @@ async function refreshMesh(force) {
         const resp = await fetch('/api/mesh/status' + (force ? '?refresh=1' : ''));
         const data = await resp.json();
         renderMesh(data);
+        applyHeaderBrand(data);
     } catch (err) {
         console.warn('Mesh refresh failed:', err);
     } finally {
         meshRefreshInFlight = false;
     }
 }
+
+// Header branding: default "Ragnar", but once this unit is on the tailnet with
+// a mesh (Viking) name, show that name in the upper-left corner so each unit is
+// identifiable at a glance.
+function applyHeaderBrand(data) {
+    const el = document.getElementById('header-brand-name');
+    if (!el || !data) return;
+    const onMesh = !!data.available;               // BackendState == Running
+    const name = (data.viking_name || '').trim();
+    if (onMesh && name) {
+        el.textContent = name;
+        el.title = data.unit_name || name;         // full "Name (Unit NN)" on hover
+    } else {
+        el.textContent = 'Ragnar';
+        el.title = '';
+    }
+}
+
+// Set the header name on load even if the operator never opens the Mesh tab.
+async function updateHeaderBrand() {
+    try {
+        const resp = await fetch('/api/mesh/status');
+        applyHeaderBrand(await resp.json());
+    } catch (err) {
+        /* keep default "Ragnar" */
+    }
+}
+document.addEventListener('DOMContentLoaded', updateHeaderBrand);
 
 // Installing Tailscale from the tab. A stock Ragnar ships without it and
 // `update` only installs it once opted in, so this is how a fresh unit gets the
