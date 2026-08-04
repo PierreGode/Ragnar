@@ -63,17 +63,17 @@ def test_zap_is_gated_on_ram_not_the_whole_tab(ram_gb, expected_zap):
 
 @pytest.mark.parametrize("ram_gb,expected_nuclei", [
     (0.42, False),   # Pi Zero 2 W (~430MB) — greyed out, steered to mesh
-    (0.90, False),   # ~921MB, just under the 950MB floor
-    (0.93, True),    # ~952MB, just over
+    (0.85, False),   # ~870MB, just under the 900MB floor
+    (0.90, True),    # ~921MB, just over
     (1.0, True),     # 1GB Pi 3 — the board that already works
     (8.0, True),     # big board
 ])
-def test_nuclei_is_gated_at_950mb(ram_gb, expected_nuclei):
+def test_nuclei_is_gated_at_900mb(ram_gb, expected_nuclei):
     sc = caps_for(ram_gb, nmap=True, is_server_capable=(ram_gb >= 7.5))
     sc._determine_feature_flags()
     f = sc.get_feature_status()
     # The tab and the light scanners stay available on every board...
     assert f['advanced_vuln_assessment'] is True
-    # ...but Nuclei greys out below ~950MB so a tiny board can't crash on it.
+    # ...but Nuclei greys out below ~900MB so a tiny board can't crash on it.
     assert f['nuclei'] is expected_nuclei
     assert sc.capabilities.nuclei_enabled is expected_nuclei

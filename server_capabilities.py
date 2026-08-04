@@ -94,7 +94,7 @@ class ServerCapabilities:
     # practice) and OOMs a 512MB Pi Zero 2 W no matter how it's tuned. It runs
     # fine from ~1GB up (a 1GB Pi 3 handles it), so it greys out below this
     # floor and small boards are steered to run it from a larger mesh unit.
-    NUCLEI_MIN_RAM_MB = 950
+    NUCLEI_MIN_RAM_MB = 900
     # The on-screen kiosk drives a full Chromium, which needs ~1GB resident on
     # its own. A Pi Zero 2 W has 512MB total, so the kiosk there thrashes swap
     # and the whole box crawls — Ragnar's own scanning included. Chromium runs
@@ -332,7 +332,7 @@ class ServerCapabilities:
         # Advanced Vuln needs nmap, which Ragnar already uses.
         caps.advanced_vuln_enabled = caps.available_tools.get('nmap', False)
         caps.zap_enabled = caps.total_ram_gb >= self.ZAP_MIN_RAM_GB
-        # Nuclei is the other memory-hungry scanner: greys out below ~950MB so
+        # Nuclei is the other memory-hungry scanner: greys out below ~900MB so
         # a Pi Zero 2 W can't crash on it (see NUCLEI_MIN_RAM_MB).
         caps.nuclei_enabled = (caps.total_ram_gb * 1024) >= self.NUCLEI_MIN_RAM_MB
 

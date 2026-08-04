@@ -27089,8 +27089,12 @@ async function loadAdvancedVulnData() {
         }
 
     } catch (error) {
+        // Don't flip the tab to "Scanner Unavailable" here — that notice means
+        // "nmap not detected", but this catch also fires on a transient fetch
+        // error or a render bug, which has nothing to do with availability.
+        // Log and keep the last good state; availability is decided above from
+        // the status response only.
         console.error('Error loading advanced vuln data:', error);
-        showAdvVulnNotAvailable();
     }
 }
 
@@ -27699,7 +27703,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
         nucleiOption.disabled = !nucleiEff;
         nucleiOption.textContent = scanners.nuclei ? 'Nuclei (Templates)'
             : meshNuclei ? `Nuclei (via ${_mesh.nuclei.viking})`
-            : 'Nuclei (needs 950MB RAM)';
+            : 'Nuclei (needs 900MB RAM)';
         const sel = document.getElementById('adv-vuln-scanner');
         if (!nucleiEff && sel && sel.value === 'nuclei') {
             const fallback = ['nikto', 'sqlmap', 'nmap_vuln', 'whatweb'].find(k => scanners[k]);
@@ -27708,7 +27712,7 @@ function updateScannerStatus(scanners, nucleiTemplates) {
     }
 
     // Update ZAP control panel visibility and status
-    updateZapControlPanel(scanners, meshZap, mesh.zap && mesh.zap.viking);
+    updateZapControlPanel(scanners, meshZap, meshZapViking);
 
     // Show AJAX spider browser warning if no real browser detected
     const browserWarning = document.getElementById('ajax-spider-browser-warning');
@@ -27746,7 +27750,7 @@ function updateNucleiCardStatus(statusEl, available, templates, installing, temp
     // binary is missing.
     const installBtn = document.getElementById('nuclei-install-btn');
 
-    // RAM-gated off (board under 950MB). If a mesh peer can run it, say so
+    // RAM-gated off (board under 900MB). If a mesh peer can run it, say so
     // (scans delegate transparently); otherwise show the RAM requirement.
     if (ramOk === false) {
         statusEl.classList.remove('hidden');
@@ -27756,7 +27760,7 @@ function updateNucleiCardStatus(statusEl, available, templates, installing, temp
             statusEl.classList.add('text-cyan-400');
             statusEl.title = `Runs on ${meshNuclei.viking} in the mesh; results come back here`;
         } else {
-            statusEl.textContent = 'Needs 950MB RAM';
+            statusEl.textContent = 'Needs 900MB RAM';
             statusEl.classList.add('text-yellow-400');
             statusEl.title = 'Nuclei is memory-hungry — run it from a larger Ragnar Mesh unit';
         }

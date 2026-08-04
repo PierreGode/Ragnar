@@ -510,7 +510,7 @@ class AdvancedVulnScanner:
         # don't spin up its ~1GB Java daemon on a 4GB Pi where the rest of the
         # Advanced Vuln tab still works fine.
         self._zap_enabled = bool(caps.capabilities.zap_enabled)
-        # Nuclei greys out below ~950MB (see NUCLEI_MIN_RAM_MB) so a tiny board
+        # Nuclei greys out below ~900MB (see NUCLEI_MIN_RAM_MB) so a tiny board
         # can't crash on it; those boards are steered to a larger mesh unit.
         self._nuclei_enabled = bool(caps.capabilities.nuclei_enabled)
         if self._tool_paths.get('zap') and self._zap_enabled:
@@ -1039,7 +1039,7 @@ class AdvancedVulnScanner:
         zap_running = self._is_zap_running() if zap_available else False
         # Nuclei, like ZAP, is gated on RAM: installed AND enough memory. The
         # frontend uses nuclei_installed / nuclei_ram_ok to grey it with the
-        # right reason ("needs 950MB") and steer to a mesh unit.
+        # right reason ("needs 900MB") and steer to a mesh unit.
         nuclei_installed = self._tool_paths.get('nuclei') is not None
         nuclei_ram_ok = bool(getattr(self, '_nuclei_enabled', False))
         nuclei_available = nuclei_installed and nuclei_ram_ok
@@ -1733,7 +1733,7 @@ class AdvancedVulnScanner:
             logger.debug(f"Could not parse nuclei progress: {e}")
         return None
 
-    NUCLEI_MESH_STEER = ("Nuclei needs at least 950MB RAM and is disabled on this board — "
+    NUCLEI_MESH_STEER = ("Nuclei needs at least 900MB RAM and is disabled on this board — "
                          "it would OOM and crash the Pi. Run it from a larger Ragnar Mesh "
                          "unit (Mesh tab) instead; the lighter scanners still work here.")
 
@@ -1743,7 +1743,7 @@ class AdvancedVulnScanner:
         if not nuclei_path:
             raise RuntimeError("Nuclei not installed")
 
-        # Hard gate: nuclei is greyed out below ~950MB (see NUCLEI_MIN_RAM_MB).
+        # Hard gate: nuclei is greyed out below ~900MB (see NUCLEI_MIN_RAM_MB).
         # Refuse rather than let it crash a tiny board, and point at the mesh.
         if not getattr(self, '_nuclei_enabled', False):
             progress = self.active_scans[scan_id]

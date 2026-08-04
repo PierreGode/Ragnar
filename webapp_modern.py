@@ -19995,7 +19995,7 @@ def get_advanced_vuln_status():
         try:
             if _mesh_enabled() and (not scanners.get('nuclei') or not scanners.get('zap')):
                 # NON-blocking: returns the cached roster immediately and refreshes
-                # in the background. The local gated state ("Needs 950MB RAM") thus
+                # in the background. The local gated state ("Needs 900MB RAM") thus
                 # renders instantly; the "via <peer>" banner follows within a poll
                 # once discovery finishes — no multi-second stall on tab open.
                 mesh_cap = _mesh_scan_capability_cached()
