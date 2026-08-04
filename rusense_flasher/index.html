@@ -13,6 +13,8 @@
       .prov-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin: .5rem 0 1rem; }
       .prov-fields #prov-port { max-width: 8rem; }
       .prov-fields #prov-node { max-width: 8rem; }
+      .prov-ext-ant { grid-column: 1 / -1; display: flex; align-items: center; gap: .5rem; color: #cdd8e3; font-size: .92rem; cursor: pointer; }
+      .prov-ext-ant input { width: auto; }
       .prov-fields input {
         width: 100%; box-sizing: border-box; padding: .6rem .7rem; border-radius: 8px;
         border: 1px solid rgba(255,255,255,.18); background: rgba(0,0,0,.25);
@@ -57,6 +59,17 @@
         </p>
       </div>
 
+      <!-- ───────── Legal / ethical use ───────── -->
+      <div style="max-width:720px;margin:0 auto 1.25rem;padding:.85rem 1.1rem;border:1px solid #c0453f;border-radius:.6rem;background:rgba(192,69,63,.12);color:#f4b8b3;font-size:.95rem;line-height:1.5">
+        ⚖️ <strong>Legal &amp; ethical use.</strong> RuSense senses presence and motion inside a
+        space through WiFi. Only deploy it in spaces you <strong>own or have explicit permission
+        to monitor</strong>. Monitoring a space without consent is <strong>illegal in most
+        jurisdictions</strong> — treat it exactly like installing cameras: you need permission, and
+        many countries also require <strong>visible signage that the space is monitored</strong>.
+        We <strong>condemn any unlawful monitoring</strong>; you alone are responsible for complying
+        with the laws where you deploy.
+      </div>
+
       <!-- WiFi / server provisioning (top — but run it AFTER forging) -->
       <section class="flash-panel" id="provision">
         <h2>🛰️ Provision WiFi <span class="panel-sub">(do this after forging)</span></h2>
@@ -72,6 +85,9 @@
           <input id="prov-ip" type="text" placeholder="Server IP — e.g. 192.168.1.20" autocomplete="off" />
           <input id="prov-port" type="number" value="5005" min="1" max="65535" placeholder="Port" />
           <input id="prov-node" type="number" value="1" min="0" max="255" placeholder="Node ID (0-255, unique per node)" title="Give each node in the mesh a different ID, e.g. 1, 2, 3. Nodes with the same ID collide and only one shows up." />
+          <label class="prov-ext-ant" title="Seeed XIAO ESP32-C6 only: drives the on-board RF switch to the external u.FL/IPEX socket at boot. Ignored on other boards. Only helps with an antenna actually attached.">
+            <input id="prov-ext-ant" type="checkbox" /> Use external u.FL antenna <span class="panel-sub">(Seeed XIAO ESP32-C6 only)</span>
+          </label>
           <p class="prov-hint">⚠️ Give <strong>each node a unique Node ID</strong> (1, 2, 3…). Two nodes sharing an ID collide, so only one shows up in RuSense.</p>
           <p class="prov-hint">📡 Point <strong>every node at the same WiFi access point on one fixed 2.4 GHz channel</strong>. If several routers or a mesh/extenders share one SSID, nodes latch onto different APs, their clocks can't sync, and sensing drops offline. Use a single AP (a dedicated 2.4 GHz SSID served by one router is ideal) and disable auto-channel.</p>
         </div>
@@ -390,7 +406,7 @@
       </div>
     </div>
 
-    <script src="js/nvs_gen.js?v=20260703-edgetier"></script>
-    <script type="module" src="js/flasher.js?v=20260715-ip-validate"></script>
+    <script src="js/nvs_gen.js?v=20260804-ext-antenna"></script>
+    <script type="module" src="js/flasher.js?v=20260804-ext-antenna"></script>
   </body>
 </html>

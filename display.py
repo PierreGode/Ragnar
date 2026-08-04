@@ -916,6 +916,42 @@ class Display:
                 return f
         return self._font_at(font_name, 7)
 
+    def _unit_display_title(self):
+        """Brand name for the panel headers.
+
+        Default is 'RAGNAR'. Once the unit is on the mesh with a Viking name it
+        shows that name abbreviated to 'FIRSTNAME I' — e.g. 'Sigrid Ringbearer'
+        -> 'SIGRID R' — so it stays about as short as 'RAGNAR' and doesn't
+        overlap the header's IP/battery. Where a panel is still too narrow,
+        _fit_font shrinks the type the rest of the way. Cached (keyed on the
+        configured name) so the per-frame render never re-derives it.
+        """
+        cfg = self.shared_data.config
+        if not cfg.get('mesh_enabled'):
+            return "RAGNAR"
+        key = cfg.get('mesh_viking_name') or ''
+        cache = getattr(self, '_unit_title_cache', None)
+        if cache and cache[0] == key:
+            return cache[1]
+        name = key.strip()
+        if not name:
+            try:
+                import mesh_manager
+                name = mesh_manager.derive_viking_name()
+            except Exception:
+                name = ''
+        title = "RAGNAR"
+        if name and name.strip().lower() != 'ragnar':
+            parts = name.split()
+            first = parts[0]
+            # Initial from the *last* word so multi-word epithets pick the
+            # meaningful one, not the article: "Brynhild the Wise" -> "BRYNHILD W",
+            # "Sigrid Ringbearer" -> "SIGRID R".
+            title = (f"{first} {parts[-1][0]}" if len(parts) > 1 and parts[-1]
+                     else first).upper()
+        self._unit_title_cache = (key, title)
+        return title
+
     def _draw_page_frame(self, draw, title, hint="K1:Home K2:Flip K3:Next K4:Rst"):
         """Draw standard page frame: border, title, divider, footer."""
         w = getattr(self, 'render_w', self.shared_data.width)
@@ -1828,9 +1864,10 @@ class Display:
         left_pad = max(18, left_used + 2)
         right_pad = max(18, bat_w)
         avail = W - left_pad - right_pad
-        title_font = self._fit_font('Viking.TTF', sd.font_viking, "RAGNAR", avail)
-        tw = title_font.getlength("RAGNAR")
-        draw.text((left_pad + (avail - tw) / 2, 1), "RAGNAR", font=title_font, fill=0)
+        _title = self._unit_display_title()
+        title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
+        tw = title_font.getlength(_title)
+        draw.text((left_pad + (avail - tw) / 2, 1), _title, font=title_font, fill=0)
         draw.line((1, 16, W - 1, 16), fill=0)
 
         # --- two icon+count stat rows (icons ~30% smaller so they fit) ---
@@ -2764,7 +2801,7 @@ class Display:
         top = int(2 * sy)
         band_h = footer_y - top - int(2 * sy)
         if vk is None or band_h <= 0:
-            msg = "RAGNAR"
+            msg = self._unit_display_title()
             draw.text(((w - font.getlength(msg)) / 2, footer_y / 2), msg, font=font, fill=0)
             return
         try:
@@ -3231,8 +3268,10 @@ class Display:
             draw.ellipse((0, 0, SIZE - 1, SIZE - 1),
                          outline=_ring_col(wifi_on, ap_on, status_text), width=RING_W)
 
-            # Title
-            title = "RAGNAR"
+            # Title — mesh Viking name (abbreviated) or default RAGNAR, fit to
+            # the ring width so a longer name shrinks instead of overrunning.
+            title = self._unit_display_title()
+            font_title = self._fit_font('Viking.TTF', font_title, title, SIZE - 2 * RING_W - 8)
             try:
                 tb = font_title.getbbox(title)
                 tx = (SIZE - (tb[2] - tb[0])) // 2
@@ -3813,8 +3852,9 @@ class Display:
         _png_counter  = 0
         _scroll_pos   = 0   # pixel offset for header scroll
 
-        # Width (px) available in the header beside "RAGNAR " prefix
-        _RAGNAR_LABEL = "RAGNAR "
+        # Width (px) available in the header beside the brand prefix (mesh
+        # Viking name abbreviated, or RAGNAR by default).
+        _RAGNAR_LABEL = self._unit_display_title() + " "
         try:
             _ragnar_w = font_hdr.getbbox(_RAGNAR_LABEL)[2]
         except Exception:
@@ -4392,10 +4432,11 @@ class Display:
                     _pisugar_available = _ps and _ps.available
                 except Exception:
                     pass
+                _title = self._unit_display_title()
                 if _pisugar_available:
-                    draw.text((int(40 * sx), int(6 * sy)), "RAGNAR", font=self.shared_data.font_viking_sm, fill=0)
+                    draw.text((int(40 * sx), int(6 * sy)), _title, font=self.shared_data.font_viking_sm, fill=0)
                 else:
-                    draw.text((int(37 * sx), int(5 * sy)), "RAGNAR", font=self.shared_data.font_viking, fill=0)
+                    draw.text((int(37 * sx), int(5 * sy)), _title, font=self.shared_data.font_viking, fill=0)
                 draw.text((int(110 * sx), int(170 * sy)), self.manual_mode_txt, font=self.shared_data.font_arial14, fill=0)
                 
                 # Show AP status or WiFi status in the top-left corner
