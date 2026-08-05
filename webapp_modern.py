@@ -8088,8 +8088,12 @@ def export_config():
         body = json.dumps(payload, indent=2, default=str)
         stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
         fname = f"ragnar-config-{socket.gethostname()}-{stamp}.json"
-        resp = Response(body, mimetype='application/json')
+        # octet-stream (not application/json) so iOS Safari downloads the file
+        # instead of previewing it inline; nosniff keeps other browsers from
+        # second-guessing that.
+        resp = Response(body, mimetype='application/octet-stream')
         resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+        resp.headers['X-Content-Type-Options'] = 'nosniff'
         return resp
     except Exception as e:
         logger.error(f"Error exporting config: {e}")

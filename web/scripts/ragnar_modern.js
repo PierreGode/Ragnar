@@ -195,24 +195,22 @@ function exportCredentialsCSV() {
 // per-device state (MAC blacklist, RuSense node layout) never travel; display
 // & hardware keys only apply when the operator opts in.
 // ============================================================================
-async function exportRagnarConfig() {
+function exportRagnarConfig() {
+    // Hit the endpoint directly and let the server's Content-Disposition header
+    // drive the save. The fetch()+blob+a.download route works on desktop but
+    // fails silently on iOS Safari (it ignores `download` and won't save a
+    // blob: URL), so a real same-origin link is what actually downloads there.
+    // The server sends application/octet-stream so Safari downloads the JSON
+    // instead of previewing it inline.
     try {
-        const response = await fetch('/api/config/export');
-        if (response.status === 401) { window.location.href = '/login'; return; }
-        if (!response.ok) throw new Error(`Export failed (${response.status})`);
-        const blob = await response.blob();
-        // Prefer the server-provided filename; fall back to a dated default.
-        let fname = `ragnar-config-${new Date().toISOString().slice(0, 10)}.json`;
-        const cd = response.headers.get('Content-Disposition') || '';
-        const m = cd.match(/filename="?([^"]+)"?/);
-        if (m) fname = m[1];
-        const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
-        a.href = url;
-        a.download = fname;
+        a.href = '/api/config/export';
+        a.rel = 'noopener';
+        a.download = '';  // desktop picks up the server filename; iOS ignores it
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
-        showNotification('Config exported', 'success');
+        a.remove();
+        showNotification('Config export started — check your downloads', 'success');
     } catch (error) {
         console.error('Error exporting config:', error);
         showNotification(`Config export failed: ${error.message}`, 'error');
