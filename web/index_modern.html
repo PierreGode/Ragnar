@@ -6194,6 +6194,39 @@
                             </button>
                         </div>
                         
+                        <!-- Fleet Config Card (export / import settings) -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Fleet Config</h4>
+                                <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Deploy</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Export this unit's settings to a file, then import it on other Ragnars so the same switches and options are turned on across the fleet.
+                            </div>
+                            <button onclick="exportRagnarConfig()"
+                                    class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                                </svg>
+                                Export Config
+                            </button>
+                            <input type="file" id="config-import-file" accept="application/json,.json" class="hidden" onchange="importRagnarConfig(this)">
+                            <button onclick="document.getElementById('config-import-file').click()"
+                                    class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                Import Config
+                            </button>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mt-1 cursor-pointer">
+                                <input type="checkbox" id="config-import-hardware" class="rounded border-slate-600 bg-slate-800">
+                                Also apply display &amp; hardware settings
+                            </label>
+                            <div class="text-xs text-gray-500 mt-1">
+                                Leave unchecked when units have different screens — display driver, orientation and brightness stay untouched.
+                            </div>
+                        </div>
+
                         <!-- Pwnagotchi Toggle Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -7478,7 +7511,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260805-mesh-update2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260805-config-export"></script>
 
 </body>
 </html>

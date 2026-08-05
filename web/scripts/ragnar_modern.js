@@ -188,6 +188,82 @@ function exportCredentialsCSV() {
     URL.revokeObjectURL(url);
 }
 
+// ============================================================================
+// FLEET CONFIG EXPORT / IMPORT
+// Download this unit's settings as JSON, then upload on other Ragnars so the
+// same switches/options come up identically across the fleet. Secrets and
+// per-device state (MAC blacklist, RuSense node layout) never travel; display
+// & hardware keys only apply when the operator opts in.
+// ============================================================================
+async function exportRagnarConfig() {
+    try {
+        const response = await fetch('/api/config/export');
+        if (response.status === 401) { window.location.href = '/login'; return; }
+        if (!response.ok) throw new Error(`Export failed (${response.status})`);
+        const blob = await response.blob();
+        // Prefer the server-provided filename; fall back to a dated default.
+        let fname = `ragnar-config-${new Date().toISOString().slice(0, 10)}.json`;
+        const cd = response.headers.get('Content-Disposition') || '';
+        const m = cd.match(/filename="?([^"]+)"?/);
+        if (m) fname = m[1];
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = fname;
+        a.click();
+        URL.revokeObjectURL(url);
+        showNotification('Config exported', 'success');
+    } catch (error) {
+        console.error('Error exporting config:', error);
+        showNotification(`Config export failed: ${error.message}`, 'error');
+    }
+}
+
+async function importRagnarConfig(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const includeHardware = !!document.getElementById('config-import-hardware')?.checked;
+    try {
+        const text = await file.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            showNotification('Import failed: file is not valid JSON', 'error');
+            input.value = '';
+            return;
+        }
+        const hwNote = includeHardware
+            ? '\n\nDisplay & hardware settings WILL be applied — if this unit has a different screen it may restart and the panel may need re-configuring.'
+            : '\n\nDisplay & hardware settings will be skipped.';
+        if (!confirm(`Import settings from "${file.name}"? This overwrites matching settings on this unit.${hwNote}`)) {
+            input.value = '';
+            return;
+        }
+        const result = await postAPI('/api/config/import', {
+            config: parsed,
+            include_hardware: includeHardware,
+        });
+        const count = result.imported_count || 0;
+        let msg = `Imported ${count} setting${count === 1 ? '' : 's'}`;
+        if (result.skipped_hardware && result.skipped_hardware.length) {
+            msg += ` (skipped ${result.skipped_hardware.length} hardware key${result.skipped_hardware.length === 1 ? '' : 's'})`;
+        }
+        showNotification(msg, 'success');
+        if (result.restart_required) {
+            showNotification('Display setting changed — service is restarting…', 'info');
+        } else {
+            // Refresh the Config tab so the toggles reflect the imported values.
+            loadConfigData().catch(() => {});
+        }
+    } catch (error) {
+        console.error('Error importing config:', error);
+        showNotification(`Config import failed: ${error.message}`, 'error');
+    } finally {
+        input.value = '';
+    }
+}
+
 const configMetadata = {
     manual_mode: {
         label: "Pentest Mode",
