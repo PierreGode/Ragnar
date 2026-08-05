@@ -103,6 +103,65 @@ install_pkg() {
     return 0
 }
 
+# Install Nikto with a source fallback.
+# On Debian the nikto package lives in the "non-free" component, which is
+# disabled by default, so `apt install nikto` fails on a stock Debian/WSL box.
+# Fall back to a git clone of sullo/nikto (also gives a far newer version than
+# Debian's ancient 2.1.5) and put a wrapper on PATH so Ragnar finds `nikto`.
+install_nikto() {
+    if check_installed "nikto"; then
+        return 0
+    fi
+
+    # Try the distro package first.
+    if install_pkg "nikto" && check_installed "nikto"; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}nikto not available via ${PKG_MGR}; falling back to git clone (sullo/nikto)${NC}"
+
+    # nikto is a Perl script; make sure the interpreter and its required
+    # modules exist (Net::SSLeay for SSL, XML::Writer is loaded at startup).
+    if [ "$PKG_MGR" = "apt" ]; then
+        $INSTALL_CMD perl libnet-ssleay-perl libxml-writer-perl 2>/dev/null || true
+    else
+        install_pkg perl || true
+    fi
+
+    local nikto_dir="/opt/nikto"
+    if [ -d "${nikto_dir}/.git" ]; then
+        echo -e "${BLUE}Updating existing nikto clone in ${nikto_dir}...${NC}"
+        git -C "${nikto_dir}" pull --ff-only 2>/dev/null || true
+    else
+        rm -rf "${nikto_dir}"
+        echo -e "${BLUE}Cloning nikto into ${nikto_dir}...${NC}"
+        git clone --depth 1 https://github.com/sullo/nikto.git "${nikto_dir}" 2>/dev/null || {
+            echo -e "${RED}Failed to clone nikto from GitHub${NC}"
+            return 1
+        }
+    fi
+
+    local nikto_pl="${nikto_dir}/program/nikto.pl"
+    if [ ! -f "${nikto_pl}" ]; then
+        echo -e "${RED}nikto.pl not found after clone (${nikto_pl})${NC}"
+        return 1
+    fi
+    chmod +x "${nikto_pl}" 2>/dev/null || true
+
+    # Wrapper on PATH so `nikto` resolves everywhere (nikto.pl locates its own
+    # dir via the real script path, so a wrapper is safe from any cwd).
+    cat > /usr/local/bin/nikto << EOF
+#!/bin/sh
+exec perl "${nikto_pl}" "\$@"
+EOF
+    chmod 755 /usr/local/bin/nikto
+
+    if check_installed "nikto"; then
+        return 0
+    fi
+    return 1
+}
+
 # ============================================================================
 # TRAFFIC ANALYSIS TOOLS
 # ============================================================================
@@ -144,8 +203,11 @@ echo -e "${CYAN}═════════════════════�
 echo -e "${CYAN}  Installing Vulnerability Assessment Tools${NC}"
 echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
 
+# Nikto needs a source fallback (Debian ships it in non-free; upstream is newer).
+install_nikto || true
+
 # APT-based tools
-VULN_TOOLS=("nikto" "sqlmap" "whatweb" "hydra")
+VULN_TOOLS=("sqlmap" "whatweb" "hydra")
 
 for tool in "${VULN_TOOLS[@]}"; do
     if ! check_installed "$tool"; then
