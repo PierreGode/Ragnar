@@ -188,6 +188,80 @@ function exportCredentialsCSV() {
     URL.revokeObjectURL(url);
 }
 
+// ============================================================================
+// FLEET CONFIG EXPORT / IMPORT
+// Download this unit's settings as JSON, then upload on other Ragnars so the
+// same switches/options come up identically across the fleet. Secrets and
+// per-device state (MAC blacklist, RuSense node layout) never travel; display
+// & hardware keys only apply when the operator opts in.
+// ============================================================================
+function exportRagnarConfig() {
+    // Hit the endpoint directly and let the server's Content-Disposition header
+    // drive the save. The fetch()+blob+a.download route works on desktop but
+    // fails silently on iOS Safari (it ignores `download` and won't save a
+    // blob: URL), so a real same-origin link is what actually downloads there.
+    // The server sends application/octet-stream so Safari downloads the JSON
+    // instead of previewing it inline.
+    try {
+        const a = document.createElement('a');
+        a.href = '/api/config/export';
+        a.rel = 'noopener';
+        a.download = '';  // desktop picks up the server filename; iOS ignores it
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showNotification('Config export started — check your downloads', 'success');
+    } catch (error) {
+        console.error('Error exporting config:', error);
+        showNotification(`Config export failed: ${error.message}`, 'error');
+    }
+}
+
+async function importRagnarConfig(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const includeHardware = !!document.getElementById('config-import-hardware')?.checked;
+    try {
+        const text = await file.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            showNotification('Import failed: file is not valid JSON', 'error');
+            input.value = '';
+            return;
+        }
+        const hwNote = includeHardware
+            ? '\n\nDisplay & hardware settings WILL be applied — if this unit has a different screen it may restart and the panel may need re-configuring.'
+            : '\n\nDisplay & hardware settings will be skipped.';
+        if (!confirm(`Import settings from "${file.name}"? This overwrites matching settings on this unit.${hwNote}`)) {
+            input.value = '';
+            return;
+        }
+        const result = await postAPI('/api/config/import', {
+            config: parsed,
+            include_hardware: includeHardware,
+        });
+        const count = result.imported_count || 0;
+        let msg = `Imported ${count} setting${count === 1 ? '' : 's'}`;
+        if (result.skipped_hardware && result.skipped_hardware.length) {
+            msg += ` (skipped ${result.skipped_hardware.length} hardware key${result.skipped_hardware.length === 1 ? '' : 's'})`;
+        }
+        showNotification(msg, 'success');
+        if (result.restart_required) {
+            showNotification('Display setting changed — service is restarting…', 'info');
+        } else {
+            // Refresh the Config tab so the toggles reflect the imported values.
+            loadConfigData().catch(() => {});
+        }
+    } catch (error) {
+        console.error('Error importing config:', error);
+        showNotification(`Config import failed: ${error.message}`, 'error');
+    } finally {
+        input.value = '';
+    }
+}
+
 const configMetadata = {
     manual_mode: {
         label: "Pentest Mode",

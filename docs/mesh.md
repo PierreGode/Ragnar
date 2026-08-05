@@ -554,6 +554,31 @@ by up to that window.
 
 Because updating restarts any unit that changes, the card confirms before it runs.
 
+### Fleet deployment — export / import config
+
+Bringing up several Ragnars by hand means flipping the same switches on every
+unit. The **Fleet Config** card (*Config tab → System Management*) removes that:
+configure one unit the way you want, **Export Config** to a JSON file, then
+**Import Config** on each of the others so the same options come up identically.
+
+- **Export** (`GET /api/config/export`) downloads a portable
+  `ragnar-config-<host>-<timestamp>.json`. It carries the feature switches,
+  intervals, list settings and notification preferences — **not** secrets or
+  per-unit state. Secret placeholders (the OpenAI token lives in `.env`, never
+  the config) and device-local keys (`mac_scan_blacklist`,
+  `rusense_node_positions`/`_names`, `web_bind_interface`) are stripped, and
+  display/hardware keys are split into their own group.
+- **Import** (`POST /api/config/import`) applies the file through the *same*
+  code path as a normal Settings save, so imported toggles fire their real side
+  effects (kiosk install/teardown, AI reload, socket refresh). It accepts the
+  exported file or a hand-edited flat config dict; excluded keys are dropped
+  again defensively whatever the shape.
+- **Display & hardware settings** (`epd_type`, orientation, brightness, i2c
+  addresses, …) are **skipped by default** — leave the checkbox off when units
+  have different screens, so an imported `epd_type` can't restart the service or
+  blank the panel on a unit with a different display. Tick *"Also apply display
+  & hardware settings"* only for an identical fleet.
+
 ### Never Funnel
 
 `tailscale serve` (tailnet-only) is supported and exposed in the UI.

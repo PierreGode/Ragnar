@@ -7875,7 +7875,21 @@ def update_config():
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data provided'}), 400
-        
+        payload, status = _apply_config_update(data)
+        return jsonify(payload), status
+    except Exception as e:
+        logger.error(f"Error updating config: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _apply_config_update(data):
+    """Apply a dict of config changes to shared_data and fire the side effects.
+
+    Shared by the Settings save (POST /api/config) and fleet Import
+    (POST /api/config/import) so both paths trigger the same kiosk / AI /
+    display-restart handling. Returns ``(payload_dict, status_code)``; the
+    callers wrap the payload in jsonify."""
+    if True:
         ai_reload_success = None
         ai_reload_error = None
         epd_type_changed = 'epd_type' in data
@@ -7889,7 +7903,7 @@ def update_config():
             kiosk_ok, kiosk_reason = _kiosk_capability()
             if not kiosk_ok:
                 logger.warning(f"[kiosk] enable rejected: {kiosk_reason}")
-                return jsonify({'success': False, 'error': kiosk_reason}), 400
+                return {'success': False, 'error': kiosk_reason}, 400
         kiosk_settings_keys = {'kiosk_url', 'kiosk_rotation', 'kiosk_hide_cursor'}
         kiosk_settings_changed = any(
             k in data and data[k] != shared_data.config.get(k)
@@ -8010,10 +8024,152 @@ def update_config():
                 subprocess.Popen(['systemctl', 'restart', 'ragnar.service'])
             threading.Thread(target=_delayed_restart, daemon=True).start()
 
-        return jsonify(response)
+        return response, 200
+
+
+# ---------------------------------------------------------------------------
+# Fleet config export / import
+# ---------------------------------------------------------------------------
+# Cosmetic section-title keys (start with __) are never portable. On top of
+# that we split the config into "portable settings" (feature switches, delays,
+# lists, notification prefs) and two groups that must NOT blindly travel
+# between units:
+#   * SECRET/IDENTITY keys — device-local state or secret placeholders. Never
+#     exported, never applied on import.
+#   * HARDWARE/DISPLAY keys — valid to clone across an identical fleet, but a
+#     wrong epd_type restarts the service and a wrong orientation blanks the
+#     panel, so they are exported under a separate group and only applied on
+#     import when the operator opts in.
+CONFIG_EXPORT_EXCLUDE = {
+    'openai_api_token',        # secret placeholder; real token lives in .env
+    'mac_scan_blacklist',      # per-device scan blacklist
+    'rusense_node_positions',  # per-install physical node layout
+    'rusense_node_names',      # per-install node naming
+    'web_bind_interface',      # per-device network binding
+}
+
+CONFIG_HARDWARE_KEYS = {
+    'epd_type', 'screen_reversed', 'web_screen_reversed', 'ref_width',
+    'ref_height', 'gc9a01_mascot_color', 'ssd1306_i2c_address',
+    'lcd1602_i2c_address', 'lcd1602_i2c_bus', 'display_brightness',
+    'spi_clock_mhz', 'max7219_spi_port', 'max7219_spi_device',
+    'max7219_block_orientation',
+}
+
+CONFIG_EXPORT_VERSION = 1
+
+
+def _build_config_export():
+    """Return the portable-config payload: metadata + settings/hardware split."""
+    settings = {}
+    hardware = {}
+    for key, value in shared_data.config.items():
+        if key.startswith('__') or key in CONFIG_EXPORT_EXCLUDE:
+            continue
+        if key in CONFIG_HARDWARE_KEYS:
+            hardware[key] = value
+        else:
+            settings[key] = value
+    return {
+        '_ragnar_config_export': True,
+        'version': CONFIG_EXPORT_VERSION,
+        'exported_at': datetime.now().isoformat(timespec='seconds'),
+        'source_host': socket.gethostname(),
+        'settings': settings,
+        'hardware': hardware,
+    }
+
+
+@app.route('/api/config/export', methods=['GET'])
+def export_config():
+    """Download the current config as a portable JSON for fleet deployment."""
+    try:
+        payload = _build_config_export()
+        body = json.dumps(payload, indent=2, default=str)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        fname = f"ragnar-config-{socket.gethostname()}-{stamp}.json"
+        # octet-stream (not application/json) so iOS Safari downloads the file
+        # instead of previewing it inline; nosniff keeps other browsers from
+        # second-guessing that.
+        resp = Response(body, mimetype='application/octet-stream')
+        resp.headers['Content-Disposition'] = f'attachment; filename="{fname}"'
+        resp.headers['X-Content-Type-Options'] = 'nosniff'
+        return resp
     except Exception as e:
-        logger.error(f"Error updating config: {e}")
+        logger.error(f"Error exporting config: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/config/import', methods=['POST'])
+def import_config():
+    """Apply a config exported from another unit (fleet deployment).
+
+    Accepts either the wrapped export ({settings, hardware, ...}) or a raw
+    flat config dict. Per-device/secret keys are always dropped; hardware /
+    display keys are only applied when include_hardware is true."""
+    try:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({'success': False, 'error': 'No valid JSON provided'}), 400
+
+        include_hardware = bool(body.get('include_hardware', False))
+
+        # The uploaded file may be nested under "config" (frontend wraps it)
+        # or be the export payload / raw dict itself.
+        payload = body.get('config', body)
+        if not isinstance(payload, dict):
+            return jsonify({'success': False, 'error': 'Malformed config payload'}), 400
+
+        # Collect candidate key/values from either the split export shape or a
+        # raw flat dict.
+        incoming = {}
+        skipped_hardware = []
+        if isinstance(payload.get('settings'), dict) or isinstance(payload.get('hardware'), dict):
+            if isinstance(payload.get('settings'), dict):
+                incoming.update(payload['settings'])
+            if isinstance(payload.get('hardware'), dict):
+                if include_hardware:
+                    incoming.update(payload['hardware'])
+                else:
+                    skipped_hardware.extend(payload['hardware'].keys())
+        else:
+            # Raw flat config dict (e.g. a hand-edited or legacy file).
+            for key, value in payload.items():
+                if key.startswith('_') or key in ('version', 'exported_at',
+                                                   'source_host', 'include_hardware'):
+                    continue
+                incoming[key] = value
+
+        # Defensive filtering — never let excluded/hardware keys slip through
+        # regardless of the input shape.
+        applied = {}
+        for key, value in incoming.items():
+            if key.startswith('__') or key in CONFIG_EXPORT_EXCLUDE:
+                continue
+            if key in CONFIG_HARDWARE_KEYS and not include_hardware:
+                skipped_hardware.append(key)
+                continue
+            applied[key] = value
+
+        if not applied:
+            return jsonify({'success': False,
+                            'error': 'No importable settings found in file'}), 400
+
+        result, status = _apply_config_update(applied)
+        if status != 200:
+            # e.g. a kiosk_enabled key rejected on incapable hardware.
+            return jsonify(result), status
+        result['success'] = True
+        result['imported_keys'] = sorted(applied.keys())
+        result['imported_count'] = len(applied)
+        result['skipped_hardware'] = sorted(skipped_hardware)
+        result['message'] = f"Imported {len(applied)} setting(s)"
+        if result.get('restart_required'):
+            result['message'] += ' — restarting to apply display change'
+        return jsonify(result), status
+    except Exception as e:
+        logger.error(f"Error importing config: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/kiosk/status', methods=['GET'])
