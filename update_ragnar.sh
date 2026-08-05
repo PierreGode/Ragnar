@@ -239,6 +239,19 @@ if [ ${#_missing_optional[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
 fi
 
+# Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up
+# firefox/firefox-esr at runtime). Ship it to update-only boxes too. Debian and
+# Pi OS provide it as firefox-esr; try that first, then plain firefox for other
+# suites. Idempotent — skipped when either binary is already present.
+if ! command -v firefox >/dev/null 2>&1 && ! command -v firefox-esr >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends firefox-esr >/dev/null 2>&1 \
+       || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends firefox >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed Firefox (ZAP AJAX spider)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Could not install Firefox — the ZAP AJAX spider falls back to a lighter crawl"
+    fi
+fi
+
 echo -e "${BLUE}Step 5.3: Ensuring recon engine dependencies...${NC}"
 # sslyze (TLS audit), dnspython (DNS recon) and tldextract (domain parsing) back
 # three independent recon_engine features. They are deliberately NOT in
