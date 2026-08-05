@@ -322,6 +322,10 @@ package_candidates() {
         dnsmasq) echo "dnsmasq" ;;
         wireless-tools) echo "wireless-tools" ;;
         bridge-utils) echo "bridge-utils" ;;
+        # Debian and Raspberry Pi OS ship the browser as firefox-esr (plain
+        # "firefox" is not a package there); Ubuntu and others use "firefox".
+        # Try ESR first, then fall back so one entry works across suites.
+        firefox) echo "firefox-esr firefox" ;;
         *) echo "$pkg" ;;
     esac
 }
@@ -557,6 +561,10 @@ install_dependencies() {
         "lldpd"
         "ethtool"
         "speedtest-cli"
+        # Firefox powers the ZAP AJAX-spider browser crawl (advanced_vuln_scanner
+        # looks up firefox/firefox-esr at runtime). Resolves to firefox-esr on
+        # Debian/Pi OS via package_candidates.
+        "firefox"
     )
 
     if [ "$IS_ARM" = true ]; then
