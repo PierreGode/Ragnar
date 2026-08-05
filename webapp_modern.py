@@ -2267,6 +2267,69 @@ def _mesh_unit_name():
     return f'{name} (Unit {unit_id:02d})' if unit_id else name
 
 
+# This unit's update posture is reported to every peer so the fleet can count
+# units that are behind. A git fetch on each peer poll would be far too expensive
+# on a Pi Zero, so the fetch is throttled to _MESH_UPDATE_TTL and served from a
+# cache in between; the counts therefore trail reality by at most the TTL.
+_MESH_UPDATE_TTL = 900  # 15 minutes
+_mesh_update_lock = threading.Lock()
+_mesh_update_cache = {'checked': 0.0, 'data': None, 'fetching': False}
+
+
+def _mesh_refresh_update_cache():
+    """Background worker: fetch, recompute this unit's update posture, cache it.
+
+    Runs off the request path so a peer poll never waits on the network. check()
+    self-guards against racing a running update and never raises.
+    """
+    try:
+        st = git_updater.check(RAGNAR_REPO_PATH, allow_fetch=True)
+        data = {
+            'available': bool(st.get('updates_available')),
+            'commits_behind': int(st.get('commits_behind') or 0),
+            'branch': st.get('branch', ''),
+            'current_commit': st.get('current_commit', ''),
+        }
+        with _mesh_update_lock:
+            _mesh_update_cache['data'] = data
+            _mesh_update_cache['checked'] = time.time()
+    except Exception as exc:
+        logger.debug(f"[mesh] update refresh failed: {exc}")
+    finally:
+        with _mesh_update_lock:
+            _mesh_update_cache['fetching'] = False
+
+
+def _mesh_update_state():
+    """This unit's update posture for the mesh report — never blocks the poll.
+
+    Serves cached counts and refreshes them in the background at most once every
+    _MESH_UPDATE_TTL. The first call seeds the cache cheaply from refs already on
+    disk (no network), so even a fresh boot reports a real number.
+    """
+    now = time.time()
+    with _mesh_update_lock:
+        cache = _mesh_update_cache
+        if cache['data'] is None:
+            try:
+                st = git_updater.check(RAGNAR_REPO_PATH, allow_fetch=False)
+                cache['data'] = {
+                    'available': bool(st.get('updates_available')),
+                    'commits_behind': int(st.get('commits_behind') or 0),
+                    'branch': st.get('branch', ''),
+                    'current_commit': st.get('current_commit', ''),
+                }
+            except Exception:
+                cache['data'] = {'available': False, 'commits_behind': 0,
+                                 'branch': '', 'current_commit': ''}
+        stale = (now - cache['checked']) >= _MESH_UPDATE_TTL
+        if stale and not cache['fetching']:
+            cache['fetching'] = True
+            threading.Thread(target=_mesh_refresh_update_cache, daemon=True,
+                             name='mesh-update-check').start()
+        return dict(cache['data'])
+
+
 def _mesh_local_health():
     """This unit's own report — the payload peers receive from us.
 
@@ -2329,6 +2392,13 @@ def _mesh_local_health():
             health['serve'] = mesh_manager.serve_state()
         except Exception as exc:
             logger.debug(f"[mesh] serve state unavailable: {exc}")
+
+    # Update posture, so the fleet can count units that are behind. Throttled and
+    # served from cache — see _mesh_update_state — so this stays cheap on a poll.
+    try:
+        health['update'] = _mesh_update_state()
+    except Exception as exc:
+        logger.debug(f"[mesh] update posture unavailable: {exc}")
 
     # Alert posture, so any unit can rank the mesh by "needs attention".
     try:

@@ -30484,7 +30484,10 @@ function renderMesh(data) {
     // Fleet update only makes sense once this unit is actually in the mesh, so it
     // can reach and relay to peers — same gate as the controls above.
     const updateWrap = document.getElementById('mesh-update-wrap');
-    if (updateWrap) updateWrap.classList.toggle('hidden', !inMesh);
+    if (updateWrap) {
+        updateWrap.classList.toggle('hidden', !inMesh);
+        if (inMesh) renderMeshUpdateSummary(data);
+    }
 
     const notes = [];
     (data.summary?.duplicate_unit_ids || []).forEach(id => {
@@ -30648,6 +30651,28 @@ async function meshUpdateAll(btn) {
     }
 }
 window.meshUpdateAll = meshUpdateAll;
+
+// The two counters on the Update mesh card: how many Ragnar units are reachable
+// in the mesh, and how many of those are behind. "Reachable" means we hold a
+// health report for it (self always counts). The update posture rides in
+// health.update, which each unit refreshes on a throttle, so it can trail by a
+// few minutes — the tooltip says so.
+function renderMeshUpdateSummary(data) {
+    const totalEl = document.getElementById('mesh-update-total');
+    const pendEl = document.getElementById('mesh-update-pending');
+    if (!totalEl && !pendEl) return;
+    const units = [];
+    if (data.self) units.push(data.self);
+    (data.peers || []).forEach(p => { if (p.is_ragnar) units.push(p); });
+    const reachable = units.filter(u => u.is_self || (u.health && u.health.reachable));
+    const pending = reachable.filter(u => u.health && u.health.update && u.health.update.available);
+    if (totalEl) totalEl.textContent = reachable.length;
+    if (pendEl) {
+        pendEl.textContent = pending.length;
+        pendEl.className = 'text-2xl font-bold ' + (pending.length ? 'text-amber-400' : 'text-gray-400');
+    }
+}
+window.renderMeshUpdateSummary = renderMeshUpdateSummary;
 
 // One status line per node from an update-all fan-out. Prefer the node's Viking
 // name (matched from the current mesh data) so the list reads the same as the

@@ -544,6 +544,14 @@ checkout is ever invoked.
 - **One line per node.** The card reports each unit's outcome: `already up to
   date`, `updated → <commit>, restarting`, `unreachable`, or the error.
 
+The card also shows two live counters — **available units in the mesh** (reachable
+Ragnar units, including this one) and **with pending updates** (how many of those
+are behind). The pending count rides in each unit's `/api/mesh/unit` report as an
+`update` block. A git fetch on every peer poll would be far too expensive on a Pi
+Zero, so each unit refreshes its own update posture on a throttle (`_MESH_UPDATE_TTL`,
+15 min) and serves it from cache in between — the count can therefore trail reality
+by up to that window.
+
 Because updating restarts any unit that changes, the card confirms before it runs.
 
 ### Never Funnel

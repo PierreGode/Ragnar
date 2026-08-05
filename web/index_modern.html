@@ -3270,6 +3270,16 @@
                     on this unit and every tagged mesh peer. Each unit updates only if it is behind;
                     ones already current are left untouched. A unit that updates restarts itself when done.
                 </p>
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div class="glass rounded-lg p-3 text-center">
+                        <p class="text-[10px] uppercase tracking-wider text-gray-500">Available units in mesh</p>
+                        <p id="mesh-update-total" class="text-2xl font-bold">–</p>
+                    </div>
+                    <div class="glass rounded-lg p-3 text-center" title="Available units whose checkout is behind origin (checked at most every 15 min)">
+                        <p class="text-[10px] uppercase tracking-wider text-gray-500">With pending updates</p>
+                        <p id="mesh-update-pending" class="text-2xl font-bold text-gray-400">–</p>
+                    </div>
+                </div>
                 <div id="mesh-update-results" class="space-y-1"></div>
             </div>
         </div>
@@ -7468,7 +7478,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260805-mesh-update"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260805-mesh-update2"></script>
 
 </body>
 </html>
