@@ -62,6 +62,25 @@ summary of both when the dependency step ends:
   trixie — so seeing these listed as unavailable is expected, not a failed
   install.
 
+##### nikto on Debian / WSL
+
+Debian ships `nikto` in the **non-free** component, which is disabled by
+default, so `apt install nikto` fails ("Unable to locate package") on a stock
+Debian or Debian-on-WSL box. The advanced-tools installer handles this: run
+
+```bash
+cd ~/Ragnar   # wherever the repo is cloned; run from inside it
+sudo bash install_advanced_tools.sh
+```
+
+If the distro package is unavailable it falls back to cloning
+[`sullo/nikto`](https://github.com/sullo/nikto) into `/opt/nikto`, installs the
+required Perl modules (`libnet-ssleay-perl`, `libxml-writer-perl`), and drops a
+`nikto` wrapper in `/usr/local/bin` so Ragnar finds it. This also gives a far
+newer nikto than Debian's packaged 2.1.5. (`sudo bash` runs as root, so make
+sure your working directory is the actual checkout — `~` resolves to `/root`
+under sudo.)
+
 Two steps in the install are also slow and silent, which can look like a hang on
 a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
 `nmap --script-updatedb`. Give them time before interrupting.
