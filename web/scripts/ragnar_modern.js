@@ -30481,6 +30481,10 @@ function renderMesh(data) {
     summary.classList.toggle('hidden', !joined);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
     if (piWrap) piWrap.classList.toggle('hidden', !joined);
+    // Fleet update only makes sense once this unit is actually in the mesh, so it
+    // can reach and relay to peers — same gate as the controls above.
+    const updateWrap = document.getElementById('mesh-update-wrap');
+    if (updateWrap) updateWrap.classList.toggle('hidden', !inMesh);
 
     const notes = [];
     (data.summary?.duplicate_unit_ids || []).forEach(id => {
@@ -30612,6 +30616,76 @@ async function meshPollNow(btn) {
     }
 }
 window.meshPollNow = meshPollNow;
+
+// Fleet-wide git update. This unit relays the update to every tagged peer over
+// the tailnet (the browser can't dial them) and updates itself, then reports one
+// line per node. A node only actually updates if it is behind — current ones are
+// left as they are. Deliberately confirms first: this can restart the whole mesh.
+async function meshUpdateAll(btn) {
+    const results = document.getElementById('mesh-update-results');
+    if (!confirm('Update every unit in the mesh now?\n\nUnits that are behind will update and restart themselves. Ones already current are left untouched.')) {
+        return;
+    }
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+    if (results) {
+        results.innerHTML = `<p class="text-sm text-gray-400">Fanning the update out across the mesh…
+            peers can take a few minutes while they install dependencies.</p>`;
+    }
+    try {
+        const data = await postAPI('/api/mesh/update-all', {});
+        if (!data || data.success === false) {
+            if (results) results.innerHTML =
+                `<p class="text-sm text-red-400">${escapeHtml((data && data.error) || 'Mesh update failed.')}</p>`;
+            return;
+        }
+        renderMeshUpdateResults(data.results || []);
+    } catch (e) {
+        if (results) results.innerHTML =
+            `<p class="text-sm text-red-400">Mesh update failed: ${escapeHtml(e && e.message ? e.message : String(e))}</p>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label || 'Update all units'; }
+    }
+}
+window.meshUpdateAll = meshUpdateAll;
+
+// One status line per node from an update-all fan-out. Prefer the node's Viking
+// name (matched from the current mesh data) so the list reads the same as the
+// cards above; fall back to whatever name the server returned.
+function renderMeshUpdateResults(list) {
+    const el = document.getElementById('mesh-update-results');
+    if (!el) return;
+    if (!list.length) {
+        el.innerHTML = '<p class="text-sm text-gray-500">No mesh units to update.</p>';
+        return;
+    }
+    el.innerHTML = list.map(item => {
+        const node = _meshFindNode(item.node_id);
+        const name = escapeHtml((node && meshUnitTitle(node)) || item.name || 'unit');
+        const r = item.result || {};
+        let icon, cls, text;
+        if (!item.reachable) {
+            icon = '⚠'; cls = 'text-amber-400';
+            text = 'unreachable' + (r.error ? ` — ${escapeHtml(r.error)}` : '');
+        } else if (r.success === false) {
+            icon = '✕'; cls = 'text-red-400';
+            text = escapeHtml(r.error || 'update failed');
+        } else if (r.already_current) {
+            icon = '✓'; cls = 'text-gray-400';
+            text = 'already up to date';
+        } else {
+            icon = '⬆'; cls = 'text-green-400';
+            text = 'updated' + (r.to_commit ? ` → ${escapeHtml(r.to_commit)}` : '') + ', restarting';
+        }
+        return `<div class="flex items-center gap-2 text-sm ${cls}">
+            <span>${icon}</span>
+            <span class="font-medium">${name}${item.self ? ' (this unit)' : ''}</span>
+            <span class="text-gray-500">—</span>
+            <span>${text}</span>
+        </div>`;
+    }).join('');
+}
+window.renderMeshUpdateResults = renderMeshUpdateResults;
 
 // Pi Connect is a second way in that shares nothing with Tailscale — different
 // vendor, transport and credentials. Its value is precisely that it fails

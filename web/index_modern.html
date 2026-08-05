@@ -3253,6 +3253,25 @@
                 <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Backup access</h3>
                 <div id="mesh-piconnect" class="glass rounded-lg p-4"></div>
             </div>
+
+            <!-- Fleet update, at the very bottom: fan the Config-tab git update
+                 out to every unit in the mesh. Rare, deliberate, fleet-wide, so it
+                 sits last and asks before it runs. -->
+            <div id="mesh-update-wrap" class="glass rounded-xl p-6 mt-6 hidden">
+                <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
+                    <h3 class="text-xl font-semibold text-Ragnar-400">Update mesh</h3>
+                    <button id="mesh-update-btn" onclick="meshUpdateAll(this)"
+                            class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+                        Update all units
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mb-3">
+                    Runs the same git update as <span class="text-gray-300">Config → Updates</span>
+                    on this unit and every tagged mesh peer. Each unit updates only if it is behind;
+                    ones already current are left untouched. A unit that updates restarts itself when done.
+                </p>
+                <div id="mesh-update-results" class="space-y-1"></div>
+            </div>
         </div>
 
         <!-- Pentest Tab -->
@@ -7449,7 +7468,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260804-female-portrait2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260805-mesh-update"></script>
 
 </body>
 </html>

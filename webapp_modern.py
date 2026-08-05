@@ -438,7 +438,12 @@ def check_authentication():
         peer_scan_write = request.method == 'POST' and (
             path == '/api/mesh/scan/start'
             or path.startswith('/api/mesh/scan/cancel/'))
-        if (peer_read or peer_control or peer_scan_write) and _is_mesh_peer_request():
+        # The fleet-update fan-out: a peer's "Update mesh" lands here to run this
+        # unit's own git update. Exact-path allowlisted like the control write, and
+        # the handler only ever runs git_updater against this checkout — a peer
+        # cannot pick what runs, only that an update runs.
+        peer_update = request.method == 'POST' and path == '/api/mesh/update'
+        if (peer_read or peer_control or peer_scan_write or peer_update) and _is_mesh_peer_request():
             return
 
     # Check if user is authenticated via Flask session
@@ -3435,6 +3440,123 @@ def mesh_peer_control():
     except Exception as exc:
         logger.error(f"[mesh] peer-control {feature}/{action} on {node_id!r} failed: {exc}")
         return jsonify({'success': False, 'error': f'Mesh command failed: {exc}'}), 500
+
+
+def _mesh_local_update() -> dict:
+    """Run THIS unit's git update for a mesh fan-out, and report it compactly.
+
+    Same engine as the Config tab (git_updater.update), but it only kicks off the
+    dependency-install + restart when a change actually lands. A fleet-wide
+    "Update mesh" must not bounce every already-current box, so an up-to-date unit
+    is a genuine no-op here. Returns a small dict safe to hand back as JSON to a
+    peer or to the operator.
+    """
+    try:
+        result = git_updater.update(RAGNAR_REPO_PATH)
+    except Exception as exc:
+        logger.error(f"[mesh] local update failed: {exc}")
+        return {'success': False, 'error': str(exc), 'code': 'git_error'}
+
+    compact = {
+        'success': bool(result.get('ok')),
+        'already_current': bool(result.get('already_current')),
+        'branch': result.get('branch', ''),
+        'from_commit': (result.get('from_commit') or '')[:8],
+        'to_commit': (result.get('to_commit') or '')[:8],
+        'warnings': result.get('warnings', []),
+        'restart_pending': False,
+    }
+    if not result.get('ok'):
+        compact['error'] = result.get('error') or 'Update failed'
+        compact['code'] = result.get('code', '')
+        compact['hint'] = result.get('hint', '')
+        return compact
+    if result.get('already_current'):
+        compact['message'] = 'Already up to date.'
+        return compact
+
+    # A real update landed — install deps, provision and restart (all detached,
+    # so this returns before the service actually bounces).
+    _finalize_update(result)
+    compact['restart_pending'] = bool(result.get('restart_pending'))
+    compact['post_update_started'] = bool(result.get('post_update_started'))
+    compact['message'] = 'Update applied.'
+    return compact
+
+
+@app.route('/api/mesh/update', methods=['POST'])
+def mesh_update_self():
+    """Update THIS unit — where a peer's "Update mesh" fan-out lands.
+
+    Peer-reachable on WireGuard identity + mesh tag (exact-path allowlisted in
+    check_authentication, exactly like /api/mesh/control), and also callable by
+    the local operator with a session. Runs the same git update as the Config
+    tab, but restarts only when a change lands, so a current unit is a no-op.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    result = _mesh_local_update()
+    return jsonify(result), (200 if result.get('success') else 500)
+
+
+@app.route('/api/mesh/update-all', methods=['POST'])
+def mesh_update_all():
+    """Operator-facing "Update mesh": update this unit and every tagged peer.
+
+    The browser can't dial peers directly (they're on the tailnet, this unit is
+    not proxied to them), so this unit relays a POST /api/mesh/update to each peer
+    over the tailnet — same identity auth as polling — then updates itself last so
+    the fan-out has finished before this box restarts. Each node updates only if
+    it is behind; ones already current are no-ops. Returns one entry per node.
+    """
+    if not mesh_available:
+        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
+    if not _mesh_enabled():
+        return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
+    try:
+        import concurrent.futures
+
+        state = mesh_manager.status()
+        tag = _mesh_tag()
+        port = _mesh_node_port()
+        self_node = state.get('self') or {}
+        peers = [p for p in state.get('peers', []) if tag in p.get('tags', [])]
+
+        # A real peer update fetches, resets and launches a detached post-update,
+        # so give it room; the peer answers before it actually restarts.
+        peer_timeout = 120
+
+        def _one(peer):
+            reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
+                                           port=port, timeout=peer_timeout)
+            return {
+                'node_id': str(peer.get('id', '')),
+                'name': peer.get('short_name') or peer.get('hostname') or 'peer',
+                'self': False,
+                'reachable': bool(reply.get('reachable')),
+                'result': reply,
+            }
+
+        peer_results = []
+        if peers:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=min(8, len(peers))) as ex:
+                peer_results = list(ex.map(_one, peers))
+
+        # Self last: updating this unit restarts it, so let the peer fan-out land
+        # first. The restart is detached, so this response still flushes.
+        self_result = {
+            'node_id': str(self_node.get('id', '')),
+            'name': self_node.get('short_name') or self_node.get('hostname') or 'This unit',
+            'self': True,
+            'reachable': True,
+            'result': _mesh_local_update(),
+        }
+
+        return jsonify({'success': True, 'results': [self_result] + peer_results})
+    except Exception as exc:
+        logger.error(f"[mesh] update-all failed: {exc}")
+        return jsonify({'success': False, 'error': f'Mesh update failed: {exc}'}), 500
 
 
 @app.route('/api/mesh/join', methods=['POST'])

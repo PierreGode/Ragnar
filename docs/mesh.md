@@ -471,8 +471,8 @@ The gate is deliberately narrow:
 
 | Property | Rule |
 |---|---|
-| Methods | Any `GET` for reads, plus exactly one write: `POST /api/mesh/control` |
-| Paths | `/api/mesh/*` for reads; the write is matched by **exact path** so `join`/`leave`/`serve`/`peer-control` stay session-only. The other ~290 routes stay session-gated |
+| Methods | Any `GET` for reads, plus a short **exact-path** write allowlist: `POST /api/mesh/control`, the scan-delegation writes, and `POST /api/mesh/update` |
+| Paths | `/api/mesh/*` for reads; each write is matched by **exact path** so `join`/`leave`/`serve`/`peer-control`/`update-all` stay session-only. The other ~290 routes stay session-gated |
 | Identity | Must carry `mesh_tag` (default `tag:ragnar-mesh`) |
 | Source | Must be a real tailnet address (100.64/10 or `fd7a:115c:a1e0::/48`) |
 | Loopback | Rejected — a proxied request's true origin is unknowable at that layer |
@@ -518,6 +518,33 @@ tailnet). Clicking Start/Stop on the node page POSTs to the **local** unit's
 `/api/mesh/peer-control`, which relays the command over the tailnet with the
 peer's WireGuard identity — exactly how peer data is pulled. A command aimed at
 the local unit is applied directly with no network hop.
+
+### Fleet update — "Update mesh"
+
+The **Update mesh** card at the bottom of the Ragnar Mesh tab runs the same git
+update as *Config → Updates*, but across the whole fleet in one press. Clicking
+**Update all units** POSTs to the local unit's `/api/mesh/update-all`, which:
+
+- updates this unit directly (no network hop), and
+- relays `POST /api/mesh/update` to every tagged peer over the tailnet, in
+  parallel, with the peer's WireGuard identity — the same relay pattern as
+  peer-control and polling.
+
+Each node runs `git_updater.update` against **its own** checkout. `/api/mesh/update`
+is the second exact-path peer write on the gate: a peer can make this unit *run an
+update*, but it can never choose *what* runs — only `git_updater` against this
+checkout is ever invoked.
+
+- **Only updates a unit that is behind.** A node already on the latest commit is
+  a genuine no-op — it does not reinstall dependencies and it does **not** restart.
+  Only a node that actually pulls new code runs post-update and restarts itself.
+- **Self last.** The fan-out updates every peer first and this unit last, so the
+  results have been collected before this box restarts; the restart is detached,
+  so the response still reaches the browser.
+- **One line per node.** The card reports each unit's outcome: `already up to
+  date`, `updated → <commit>, restarting`, `unreachable`, or the error.
+
+Because updating restarts any unit that changes, the card confirms before it runs.
 
 ### Never Funnel
 
