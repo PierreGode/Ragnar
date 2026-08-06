@@ -39,6 +39,12 @@ class AIService:
         self.enabled = cfg.get("ai_enabled", False)
         self.model = cfg.get("ai_model", "gpt-5.4-nano")
 
+        # Optional: talk to any OpenAI-compatible endpoint (Ollama, LM Studio,
+        # vLLM, LocalAI, ...) instead of OpenAI's own API. Empty string keeps the
+        # original OpenAI behavior. The config key wins; OPENAI_BASE_URL env is a
+        # fallback. When set, an API key becomes optional (local servers ignore it).
+        self.base_url = self._resolve_base_url()
+
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
         self.temperature = cfg.get("ai_temperature")
@@ -64,19 +70,32 @@ class AIService:
     #   INITIALIZATION
     # ===================================================================
 
+    def _resolve_base_url(self) -> str:
+        """OpenAI-compatible endpoint override, or '' to use OpenAI directly.
+
+        Precedence: config `ai_base_url`, then the standard OPENAI_BASE_URL env.
+        """
+        cfg = getattr(self.shared_data, "config", {}) or {}
+        return (cfg.get("ai_base_url") or os.environ.get("OPENAI_BASE_URL") or "").strip()
+
     def _initialize_client(self):
         if not self.enabled:
             return
 
-        if not self.api_token:
-            self.initialization_error = "No OpenAI API key found."
+        if not self.api_token and not self.base_url:
+            self.initialization_error = "No OpenAI API key found (set ai_base_url to use a keyless local endpoint)."
             self.logger.warning(self.initialization_error)
             return
 
         try:
-            self.client = OpenAI(api_key=self.api_token)
+            client_kwargs = {"api_key": self.api_token or "not-needed"}
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
+            self.logger.info(
+                f"AI Service initialized using model: {self.model} via {self.base_url or 'OpenAI'}"
+            )
         except Exception as exc:
             self.client = None
             self.initialization_error = f"OpenAI client initialization failed: {exc}"
@@ -86,9 +105,10 @@ class AIService:
     def reload_token(self) -> bool:
         """Refresh the API token from disk and reinitialize the OpenAI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep enabled flag + endpoint synced with latest config intent
         if hasattr(self.shared_data, "config"):
             self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+        self.base_url = self._resolve_base_url()
 
         self.api_token = self.env_manager.get_token()
         self.client = None
@@ -98,9 +118,9 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
-            self.logger.warning("AI token reload requested but no token present in environment.")
-            self.initialization_error = "No OpenAI API key found."
+        if not self.api_token and not self.base_url:
+            self.logger.warning("AI reload requested but no API key or base URL is configured.")
+            self.initialization_error = "No OpenAI API key found (set ai_base_url to use a keyless local endpoint)."
             return False
 
         self._initialize_client()
@@ -130,10 +150,11 @@ class AIService:
 
     def ensure_ready(self):
         """Lazily initialize the OpenAI client if configuration says AI is enabled."""
-        # Sync enabled state with config in case it changed
+        # Sync enabled state + endpoint with config in case they changed
         if hasattr(self.shared_data, "config"):
             self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
-        
+        self.base_url = self._resolve_base_url()
+
         if not self.enabled:
             return False
 
@@ -141,18 +162,18 @@ class AIService:
         if self.client is not None and self.initialization_error is None:
             return True
 
-        # Don't keep retrying when we've already recorded a permanent failure
-        # But allow retry if token was added after initial failure
-        if self.initialization_error and self.api_token:
-            # Clear error and retry if we have a token now
+        # Don't keep retrying when we've already recorded a permanent failure,
+        # but allow retry if a token or base URL is now available.
+        if self.initialization_error and (self.api_token or self.base_url):
+            # Clear error and retry now that we have credentials/endpoint
             self.initialization_error = None
 
         # Refresh token from disk if we don't have one yet
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
 
-        if not self.api_token:
-            self.initialization_error = "No OpenAI API key found."
+        if not self.api_token and not self.base_url:
+            self.initialization_error = "No OpenAI API key found (set ai_base_url to use a keyless local endpoint)."
             self.logger.warning(self.initialization_error)
             return False
 

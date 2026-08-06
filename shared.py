@@ -835,6 +835,10 @@ class SharedData:
             "ai_enabled": False,
             "openai_api_token": "",
             "ai_model": "gpt-5.4-nano",
+            # Point the AI at any OpenAI-compatible server (Ollama, LM Studio,
+            # vLLM, LocalAI, ...). Leave empty to use OpenAI. When set, the API
+            # key is optional. Example: "http://localhost:11434/v1"
+            "ai_base_url": "",
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,
