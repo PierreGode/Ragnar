@@ -3253,6 +3253,35 @@
                 <h3 class="text-sm uppercase tracking-wider text-gray-400 mb-2">Backup access</h3>
                 <div id="mesh-piconnect" class="glass rounded-lg p-4"></div>
             </div>
+
+            <!-- Fleet update, at the very bottom: fan the Config-tab git update
+                 out to every unit in the mesh. Rare, deliberate, fleet-wide, so it
+                 sits last and asks before it runs. -->
+            <div id="mesh-update-wrap" class="glass rounded-xl p-6 mt-6 hidden">
+                <div class="flex items-center justify-between gap-3 mb-2 flex-wrap">
+                    <h3 class="text-xl font-semibold text-Ragnar-400">Update mesh</h3>
+                    <button id="mesh-update-btn" onclick="meshUpdateAll(this)"
+                            class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+                        Update all units
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mb-3">
+                    Runs the same git update as <span class="text-gray-300">Config → Updates</span>
+                    on this unit and every tagged mesh peer. Each unit updates only if it is behind;
+                    ones already current are left untouched. A unit that updates restarts itself when done.
+                </p>
+                <div class="grid grid-cols-2 gap-3 mb-3">
+                    <div class="glass rounded-lg p-3 text-center">
+                        <p class="text-[10px] uppercase tracking-wider text-gray-500">Available units in mesh</p>
+                        <p id="mesh-update-total" class="text-2xl font-bold">–</p>
+                    </div>
+                    <div class="glass rounded-lg p-3 text-center" title="Available units whose checkout is behind origin (checked at most every 15 min)">
+                        <p class="text-[10px] uppercase tracking-wider text-gray-500">With pending updates</p>
+                        <p id="mesh-update-pending" class="text-2xl font-bold text-gray-400">–</p>
+                    </div>
+                </div>
+                <div id="mesh-update-results" class="space-y-1"></div>
+            </div>
         </div>
 
         <!-- Pentest Tab -->
@@ -6165,6 +6194,39 @@
                             </button>
                         </div>
                         
+                        <!-- Fleet Config Card (export / import settings) -->
+                        <div class="glass rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-3">
+                                <h4 class="font-medium">Fleet Config</h4>
+                                <span class="text-sm px-2 py-1 rounded bg-gray-700 text-gray-300">Deploy</span>
+                            </div>
+                            <div class="text-sm text-gray-400 mb-3">
+                                Export this unit's settings to a file, then import it on other Ragnars so the same switches and options are turned on across the fleet.
+                            </div>
+                            <button onclick="exportRagnarConfig()"
+                                    class="w-full bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path>
+                                </svg>
+                                Export Config
+                            </button>
+                            <input type="file" id="config-import-file" accept="application/json,.json" class="hidden" onchange="importRagnarConfig(this)">
+                            <button onclick="document.getElementById('config-import-file').click()"
+                                    class="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2 px-4 rounded transition-colors mb-2">
+                                <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path>
+                                </svg>
+                                Import Config
+                            </button>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mt-1 cursor-pointer">
+                                <input type="checkbox" id="config-import-hardware" class="rounded border-slate-600 bg-slate-800">
+                                Also apply display &amp; hardware settings
+                            </label>
+                            <div class="text-xs text-gray-500 mt-1">
+                                Leave unchecked when units have different screens — display driver, orientation and brightness stay untouched.
+                            </div>
+                        </div>
+
                         <!-- Pwnagotchi Toggle Card -->
                         <div class="glass rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -7449,7 +7511,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260804-female-portrait2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260805-config-export2"></script>
 
 </body>
 </html>

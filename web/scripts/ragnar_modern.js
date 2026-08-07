@@ -188,6 +188,80 @@ function exportCredentialsCSV() {
     URL.revokeObjectURL(url);
 }
 
+// ============================================================================
+// FLEET CONFIG EXPORT / IMPORT
+// Download this unit's settings as JSON, then upload on other Ragnars so the
+// same switches/options come up identically across the fleet. Secrets and
+// per-device state (MAC blacklist, RuSense node layout) never travel; display
+// & hardware keys only apply when the operator opts in.
+// ============================================================================
+function exportRagnarConfig() {
+    // Hit the endpoint directly and let the server's Content-Disposition header
+    // drive the save. The fetch()+blob+a.download route works on desktop but
+    // fails silently on iOS Safari (it ignores `download` and won't save a
+    // blob: URL), so a real same-origin link is what actually downloads there.
+    // The server sends application/octet-stream so Safari downloads the JSON
+    // instead of previewing it inline.
+    try {
+        const a = document.createElement('a');
+        a.href = '/api/config/export';
+        a.rel = 'noopener';
+        a.download = '';  // desktop picks up the server filename; iOS ignores it
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        showNotification('Config export started — check your downloads', 'success');
+    } catch (error) {
+        console.error('Error exporting config:', error);
+        showNotification(`Config export failed: ${error.message}`, 'error');
+    }
+}
+
+async function importRagnarConfig(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const includeHardware = !!document.getElementById('config-import-hardware')?.checked;
+    try {
+        const text = await file.text();
+        let parsed;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            showNotification('Import failed: file is not valid JSON', 'error');
+            input.value = '';
+            return;
+        }
+        const hwNote = includeHardware
+            ? '\n\nDisplay & hardware settings WILL be applied — if this unit has a different screen it may restart and the panel may need re-configuring.'
+            : '\n\nDisplay & hardware settings will be skipped.';
+        if (!confirm(`Import settings from "${file.name}"? This overwrites matching settings on this unit.${hwNote}`)) {
+            input.value = '';
+            return;
+        }
+        const result = await postAPI('/api/config/import', {
+            config: parsed,
+            include_hardware: includeHardware,
+        });
+        const count = result.imported_count || 0;
+        let msg = `Imported ${count} setting${count === 1 ? '' : 's'}`;
+        if (result.skipped_hardware && result.skipped_hardware.length) {
+            msg += ` (skipped ${result.skipped_hardware.length} hardware key${result.skipped_hardware.length === 1 ? '' : 's'})`;
+        }
+        showNotification(msg, 'success');
+        if (result.restart_required) {
+            showNotification('Display setting changed — service is restarting…', 'info');
+        } else {
+            // Refresh the Config tab so the toggles reflect the imported values.
+            loadConfigData().catch(() => {});
+        }
+    } catch (error) {
+        console.error('Error importing config:', error);
+        showNotification(`Config import failed: ${error.message}`, 'error');
+    } finally {
+        input.value = '';
+    }
+}
+
 const configMetadata = {
     manual_mode: {
         label: "Pentest Mode",
@@ -30481,6 +30555,13 @@ function renderMesh(data) {
     summary.classList.toggle('hidden', !joined);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
     if (piWrap) piWrap.classList.toggle('hidden', !joined);
+    // Fleet update only makes sense once this unit is actually in the mesh, so it
+    // can reach and relay to peers — same gate as the controls above.
+    const updateWrap = document.getElementById('mesh-update-wrap');
+    if (updateWrap) {
+        updateWrap.classList.toggle('hidden', !inMesh);
+        if (inMesh) renderMeshUpdateSummary(data);
+    }
 
     const notes = [];
     (data.summary?.duplicate_unit_ids || []).forEach(id => {
@@ -30612,6 +30693,98 @@ async function meshPollNow(btn) {
     }
 }
 window.meshPollNow = meshPollNow;
+
+// Fleet-wide git update. This unit relays the update to every tagged peer over
+// the tailnet (the browser can't dial them) and updates itself, then reports one
+// line per node. A node only actually updates if it is behind — current ones are
+// left as they are. Deliberately confirms first: this can restart the whole mesh.
+async function meshUpdateAll(btn) {
+    const results = document.getElementById('mesh-update-results');
+    if (!confirm('Update every unit in the mesh now?\n\nUnits that are behind will update and restart themselves. Ones already current are left untouched.')) {
+        return;
+    }
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+    if (results) {
+        results.innerHTML = `<p class="text-sm text-gray-400">Fanning the update out across the mesh…
+            peers can take a few minutes while they install dependencies.</p>`;
+    }
+    try {
+        const data = await postAPI('/api/mesh/update-all', {});
+        if (!data || data.success === false) {
+            if (results) results.innerHTML =
+                `<p class="text-sm text-red-400">${escapeHtml((data && data.error) || 'Mesh update failed.')}</p>`;
+            return;
+        }
+        renderMeshUpdateResults(data.results || []);
+    } catch (e) {
+        if (results) results.innerHTML =
+            `<p class="text-sm text-red-400">Mesh update failed: ${escapeHtml(e && e.message ? e.message : String(e))}</p>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label || 'Update all units'; }
+    }
+}
+window.meshUpdateAll = meshUpdateAll;
+
+// The two counters on the Update mesh card: how many Ragnar units are reachable
+// in the mesh, and how many of those are behind. "Reachable" means we hold a
+// health report for it (self always counts). The update posture rides in
+// health.update, which each unit refreshes on a throttle, so it can trail by a
+// few minutes — the tooltip says so.
+function renderMeshUpdateSummary(data) {
+    const totalEl = document.getElementById('mesh-update-total');
+    const pendEl = document.getElementById('mesh-update-pending');
+    if (!totalEl && !pendEl) return;
+    const units = [];
+    if (data.self) units.push(data.self);
+    (data.peers || []).forEach(p => { if (p.is_ragnar) units.push(p); });
+    const reachable = units.filter(u => u.is_self || (u.health && u.health.reachable));
+    const pending = reachable.filter(u => u.health && u.health.update && u.health.update.available);
+    if (totalEl) totalEl.textContent = reachable.length;
+    if (pendEl) {
+        pendEl.textContent = pending.length;
+        pendEl.className = 'text-2xl font-bold ' + (pending.length ? 'text-amber-400' : 'text-gray-400');
+    }
+}
+window.renderMeshUpdateSummary = renderMeshUpdateSummary;
+
+// One status line per node from an update-all fan-out. Prefer the node's Viking
+// name (matched from the current mesh data) so the list reads the same as the
+// cards above; fall back to whatever name the server returned.
+function renderMeshUpdateResults(list) {
+    const el = document.getElementById('mesh-update-results');
+    if (!el) return;
+    if (!list.length) {
+        el.innerHTML = '<p class="text-sm text-gray-500">No mesh units to update.</p>';
+        return;
+    }
+    el.innerHTML = list.map(item => {
+        const node = _meshFindNode(item.node_id);
+        const name = escapeHtml((node && meshUnitTitle(node)) || item.name || 'unit');
+        const r = item.result || {};
+        let icon, cls, text;
+        if (!item.reachable) {
+            icon = '⚠'; cls = 'text-amber-400';
+            text = 'unreachable' + (r.error ? ` — ${escapeHtml(r.error)}` : '');
+        } else if (r.success === false) {
+            icon = '✕'; cls = 'text-red-400';
+            text = escapeHtml(r.error || 'update failed');
+        } else if (r.already_current) {
+            icon = '✓'; cls = 'text-gray-400';
+            text = 'already up to date';
+        } else {
+            icon = '⬆'; cls = 'text-green-400';
+            text = 'updated' + (r.to_commit ? ` → ${escapeHtml(r.to_commit)}` : '') + ', restarting';
+        }
+        return `<div class="flex items-center gap-2 text-sm ${cls}">
+            <span>${icon}</span>
+            <span class="font-medium">${name}${item.self ? ' (this unit)' : ''}</span>
+            <span class="text-gray-500">—</span>
+            <span>${text}</span>
+        </div>`;
+    }).join('');
+}
+window.renderMeshUpdateResults = renderMeshUpdateResults;
 
 // Pi Connect is a second way in that shares nothing with Tailscale — different
 // vendor, transport and credentials. Its value is precisely that it fails
