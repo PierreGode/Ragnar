@@ -141,6 +141,8 @@ class ScanProgress:
     auth_type: str = ""  # Auth type used for this scan (cookie, bearer_token, etc.)
     auth_status: str = ""  # Auth validation status (applied, verified, failed)
     delegated_to: str = ""  # Viking name of the mesh peer running this scan (delegated scans)
+    egress_iface: str = ""  # Interface the scan host routes the target over (e.g. eth0, tailscale0)
+    egress_tunneled: bool = False  # True when that interface is the Tailscale tunnel
     log_entries: List[Dict[str, str]] = field(default_factory=list)  # Buffered scan log entries
 
     def to_dict(self) -> Dict[str, Any]:
@@ -158,6 +160,8 @@ class ScanProgress:
             'auth_type': self.auth_type,
             'auth_status': self.auth_status,
             'delegated_to': self.delegated_to,
+            'egress_iface': self.egress_iface,
+            'egress_tunneled': self.egress_tunneled,
             'duration_seconds': (
                 (self.completed_at or datetime.now()) - self.started_at
             ).total_seconds() if self.started_at else 0
@@ -1080,6 +1084,10 @@ class AdvancedVulnScanner:
             status='pending'
         )
 
+        # Record how this host routes to the target (eth0 vs tailscale0), so a
+        # delegated scan can show whether it actually went through the tunnel.
+        progress.egress_iface, progress.egress_tunneled = self._target_egress(target)
+
         self.active_scans[scan_id] = progress
         self.scan_results[scan_id] = []
         self.scan_history.append(progress)
@@ -1180,6 +1188,11 @@ class AdvancedVulnScanner:
             progress.progress_percent = scan.get('progress_percent', progress.progress_percent)
             progress.current_check = scan.get('current_check', progress.current_check) or progress.current_check
             progress.findings_count = scan.get('findings_count', progress.findings_count)
+            # Mirror the peer's egress so the cockpit can show whether the remote
+            # scan reached the target through the tunnel (tailscale0) or its LAN.
+            if scan.get('egress_iface'):
+                progress.egress_iface = scan['egress_iface']
+                progress.egress_tunneled = bool(scan.get('egress_tunneled'))
             if scan.get('error_message'):
                 progress.error_message = scan['error_message']
             st = scan.get('status')
@@ -1619,6 +1632,36 @@ class AdvancedVulnScanner:
             flags += ['-c', '25', '-rate-limit', str(rate_limit)]
 
         return flags, env, severity, note
+
+    @staticmethod
+    def _target_egress(target: str):
+        """(iface, tunneled) for how THIS host routes to `target`.
+
+        Resolves the host, then `ip route get <ip>` and reads `dev <iface>`, so
+        the UI can show whether a scan actually leaves over the Tailscale tunnel
+        (tailscale0) or the box's own LAN. Scanner-agnostic — it's the OS routing
+        decision, so it's identical for nuclei, ZAP, nmap, etc. Best-effort."""
+        try:
+            import socket
+            import urllib.parse
+            host = (target or '').strip()
+            if '://' in host:
+                host = urllib.parse.urlparse(host).hostname or host
+            else:
+                host = host.split('/')[0].split(':')[0]
+            if not host:
+                return '', False
+            try:
+                ip = socket.gethostbyname(host)
+            except Exception:
+                ip = host  # already an IP, or unresolvable — let ip-route decide
+            out = subprocess.run(['ip', 'route', 'get', ip],
+                                 capture_output=True, text=True, timeout=5).stdout
+            m = re.search(r'\bdev\s+(\S+)', out or '')
+            iface = m.group(1) if m else ''
+            return iface, iface.startswith('tailscale')
+        except Exception:
+            return '', False
 
     @staticmethod
     def _available_mib() -> Optional[int]:
