@@ -2675,6 +2675,21 @@ class AdvancedVulnScanner:
         except Exception as e:
             return False, f"URL parsing error: {e}"
 
+        # A dotted-quad with an out-of-range octet ("712.20.10.1") is NOT a valid
+        # IP — Python then treats it as a hostname and DNS fails, giving the
+        # misleading "cannot resolve hostname". Catch it with a clear message.
+        host_only = parsed.netloc.split(':')[0].strip('[]')
+        if re.match(r'^\d{1,5}(\.\d{1,5}){3}$', host_only):
+            try:
+                import ipaddress
+                ipaddress.ip_address(host_only)
+            except ValueError:
+                bad = next((o for o in host_only.split('.')
+                            if not (o.isdigit() and 0 <= int(o) <= 255)), None)
+                hint = f" — octet '{bad}' is over 255" if bad else ""
+                return False, (f"'{host_only}' is not a valid IP address{hint}. "
+                               f"Check for a typo (an iPhone hotspot gateway is 172.20.10.1, not 712.20.10.1).")
+
         # Quick connectivity check (with short timeout)
         try:
             host = parsed.netloc.split(':')[0]
