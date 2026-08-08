@@ -1073,6 +1073,14 @@ class AdvancedVulnScanner:
 
         options = options or {}
 
+        # Normalize the URL scheme to lowercase so 'HTTP://Host', 'Http://Host'
+        # and 'http://Host' behave identically downstream (validation, ZAP,
+        # egress, display). Host/path casing is preserved.
+        if isinstance(target, str) and '://' in target:
+            _scheme, _rest = target.split('://', 1)
+            if _scheme.lower() in ('http', 'https'):
+                target = _scheme.lower() + '://' + _rest
+
         with self._lock:
             self._scan_counter += 1
             scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
@@ -2621,8 +2629,8 @@ class AdvancedVulnScanner:
                 if not target_url:
                     return "ZAP Error: No target URL provided for scan."
 
-                # Check URL format
-                if not target_url.startswith(('http://', 'https://')):
+                # Check URL format (scheme is case-insensitive: HTTP:// / Http:// ok)
+                if not target_url.lower().startswith(('http://', 'https://')):
                     return f"ZAP Error: Invalid URL format '{target_url}'. URL must start with http:// or https://"
 
                 # Common ZAP 500 causes
@@ -2663,8 +2671,8 @@ class AdvancedVulnScanner:
         if not target:
             return False, "Target URL is empty"
 
-        # Check URL scheme
-        if not target.startswith(('http://', 'https://')):
+        # Check URL scheme (case-insensitive: HTTP:// / Http:// are fine)
+        if not target.lower().startswith(('http://', 'https://')):
             return False, f"Invalid URL scheme. URL must start with http:// or https://, got: {target[:50]}"
 
         # Parse URL
@@ -6088,7 +6096,7 @@ class AdvancedVulnScanner:
             result['recommendations'].append("Provide a valid URL starting with http:// or https://")
             return result
 
-        if not target.startswith(('http://', 'https://')):
+        if not target.lower().startswith(('http://', 'https://')):
             result['valid'] = False
             result['errors'].append(f"Invalid URL scheme: {target[:30]}")
             result['recommendations'].append("URL must start with http:// or https://")

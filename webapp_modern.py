@@ -21106,7 +21106,7 @@ def handoff_recon_to_zap(scan_id):
         targets = [state.target] + list(subdomains)
         zap_scan_ids = []
         for tgt in targets:
-            target_url = tgt if tgt.startswith('http') else f'https://{tgt}'
+            target_url = tgt if tgt.lower().startswith(('http://', 'https://')) else f'https://{tgt}'
             zap_id = scanner.start_scan(target_url, scan_type=scan_type, options=dict(options))
             zap_scan_ids.append({'target': target_url, 'scan_id': zap_id})
 
@@ -21293,8 +21293,8 @@ def start_zap_scan():
         if not target:
             return jsonify({'success': False, 'error': 'Target URL required'}), 400
 
-        # Validate target is a URL
-        if not target.startswith('http://') and not target.startswith('https://'):
+        # Validate target is a URL (scheme case-insensitive)
+        if not target.lower().startswith(('http://', 'https://')):
             target = f"http://{target}"
 
         # Check if saved credentials exist for this target
@@ -21631,8 +21631,8 @@ def zap_diagnose_target():
                 'recommendations': ['Provide a target URL to diagnose']
             }), 400
 
-        # Ensure URL has scheme
-        if not target.startswith('http://') and not target.startswith('https://'):
+        # Ensure URL has scheme (scheme case-insensitive)
+        if not target.lower().startswith(('http://', 'https://')):
             target = f"http://{target}"
 
         result = scanner.zap_diagnose_target(target)
