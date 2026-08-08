@@ -1073,13 +1073,19 @@ class AdvancedVulnScanner:
 
         options = options or {}
 
-        # Normalize the URL scheme to lowercase so 'HTTP://Host', 'Http://Host'
-        # and 'http://Host' behave identically downstream (validation, ZAP,
-        # egress, display). Host/path casing is preserved.
-        if isinstance(target, str) and '://' in target:
-            _scheme, _rest = target.split('://', 1)
-            if _scheme.lower() in ('http', 'https'):
-                target = _scheme.lower() + '://' + _rest
+        # URL-based scanners (ZAP/Nikto/WhatWeb/Nuclei) need a scheme. If the
+        # user typed a bare IP/host, default to http:// so it "just works"; also
+        # lowercase an explicit scheme ('HTTP://Host' -> 'http://Host'), keeping
+        # host/path casing. nmap takes a raw host, so it's left untouched.
+        if isinstance(target, str) and scan_type != ScanType.NMAP_VULN:
+            t = target.strip()
+            if '://' in t:
+                _scheme, _rest = t.split('://', 1)
+                if _scheme.lower() in ('http', 'https'):
+                    t = _scheme.lower() + '://' + _rest
+            elif t:
+                t = 'http://' + t
+            target = t
 
         with self._lock:
             self._scan_counter += 1
@@ -5567,15 +5573,21 @@ class AdvancedVulnScanner:
                 refs = alert['reference'].split('\n')
                 references.extend([r.strip() for r in refs if r.strip()])
 
-            # Parse URL for host/port
+            # Parse URL for host/port. ZAP normalises URLs to an explicit port
+            # ("http://host:80/"), so netloc carries a :80/:443 the user never
+            # typed. Keep the real port in the port field but drop the *default*
+            # port from the displayed host so it reads "host" not "host:80".
             url = alert.get('url', '')
             host = url
             port = None
             try:
                 parsed = urllib.parse.urlparse(url)
-                host = parsed.netloc
+                host = parsed.hostname or parsed.netloc
                 if parsed.port:
                     port = parsed.port
+                    default_port = 443 if parsed.scheme == 'https' else 80
+                    if parsed.port != default_port:
+                        host = f"{parsed.hostname}:{parsed.port}"
             except Exception:
                 pass
 
