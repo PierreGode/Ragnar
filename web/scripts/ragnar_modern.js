@@ -27253,9 +27253,12 @@ function updateActiveScans(scans, options = {}) {
                      onclick="toggleAdvVulnScanFindings('${scanId}')">
                     <div class="flex items-start justify-between gap-3">
                         <div>
-                            <div class="text-sm font-semibold text-white flex items-center gap-1.5">
+                            <div class="text-sm font-semibold text-white flex items-center gap-1.5 flex-wrap">
                                 ${escapeHtml(formatScanType(scan.scan_type))}
                                 ${scan.delegated_to ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-cyan-900/60 text-cyan-300 font-medium">🛰️ ${escapeHtml(scan.delegated_to)}</span>` : ''}
+                                ${scan.egress_iface ? (scan.egress_tunneled
+                                    ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-900/60 text-emerald-300 font-medium" title="Reached the target over the Tailscale tunnel (${escapeHtml(scan.egress_iface)})">🔒 tunneled</span>`
+                                    : `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-700 text-gray-300 font-medium" title="Reached the target directly over ${escapeHtml(scan.egress_iface)}, not the tunnel">↗ ${escapeHtml(scan.egress_iface)}</span>`) : ''}
                             </div>
                             <div class="text-xs text-gray-400 mt-1">${escapeHtml(scan.target || 'Unknown target')}</div>
                         </div>
