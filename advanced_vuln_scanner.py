@@ -1073,6 +1073,20 @@ class AdvancedVulnScanner:
 
         options = options or {}
 
+        # URL-based scanners (ZAP/Nikto/WhatWeb/Nuclei) need a scheme. If the
+        # user typed a bare IP/host, default to http:// so it "just works"; also
+        # lowercase an explicit scheme ('HTTP://Host' -> 'http://Host'), keeping
+        # host/path casing. nmap takes a raw host, so it's left untouched.
+        if isinstance(target, str) and scan_type != ScanType.NMAP_VULN:
+            t = target.strip()
+            if '://' in t:
+                _scheme, _rest = t.split('://', 1)
+                if _scheme.lower() in ('http', 'https'):
+                    t = _scheme.lower() + '://' + _rest
+            elif t:
+                t = 'http://' + t
+            target = t
+
         with self._lock:
             self._scan_counter += 1
             scan_id = f"AVS-{self._scan_counter:06d}-{int(time.time())}"
@@ -2621,8 +2635,8 @@ class AdvancedVulnScanner:
                 if not target_url:
                     return "ZAP Error: No target URL provided for scan."
 
-                # Check URL format
-                if not target_url.startswith(('http://', 'https://')):
+                # Check URL format (scheme is case-insensitive: HTTP:// / Http:// ok)
+                if not target_url.lower().startswith(('http://', 'https://')):
                     return f"ZAP Error: Invalid URL format '{target_url}'. URL must start with http:// or https://"
 
                 # Common ZAP 500 causes
@@ -2663,8 +2677,8 @@ class AdvancedVulnScanner:
         if not target:
             return False, "Target URL is empty"
 
-        # Check URL scheme
-        if not target.startswith(('http://', 'https://')):
+        # Check URL scheme (case-insensitive: HTTP:// / Http:// are fine)
+        if not target.lower().startswith(('http://', 'https://')):
             return False, f"Invalid URL scheme. URL must start with http:// or https://, got: {target[:50]}"
 
         # Parse URL
@@ -2674,6 +2688,21 @@ class AdvancedVulnScanner:
                 return False, f"Invalid URL format - no host found: {target[:50]}"
         except Exception as e:
             return False, f"URL parsing error: {e}"
+
+        # A dotted-quad with an out-of-range octet ("712.20.10.1") is NOT a valid
+        # IP — Python then treats it as a hostname and DNS fails, giving the
+        # misleading "cannot resolve hostname". Catch it with a clear message.
+        host_only = parsed.netloc.split(':')[0].strip('[]')
+        if re.match(r'^\d{1,5}(\.\d{1,5}){3}$', host_only):
+            try:
+                import ipaddress
+                ipaddress.ip_address(host_only)
+            except ValueError:
+                bad = next((o for o in host_only.split('.')
+                            if not (o.isdigit() and 0 <= int(o) <= 255)), None)
+                hint = f" — octet '{bad}' is over 255" if bad else ""
+                return False, (f"'{host_only}' is not a valid IP address{hint}. "
+                               f"Check for a typo (an iPhone hotspot gateway is 172.20.10.1, not 712.20.10.1).")
 
         # Quick connectivity check (with short timeout)
         try:
@@ -5544,15 +5573,21 @@ class AdvancedVulnScanner:
                 refs = alert['reference'].split('\n')
                 references.extend([r.strip() for r in refs if r.strip()])
 
-            # Parse URL for host/port
+            # Parse URL for host/port. ZAP normalises URLs to an explicit port
+            # ("http://host:80/"), so netloc carries a :80/:443 the user never
+            # typed. Keep the real port in the port field but drop the *default*
+            # port from the displayed host so it reads "host" not "host:80".
             url = alert.get('url', '')
             host = url
             port = None
             try:
                 parsed = urllib.parse.urlparse(url)
-                host = parsed.netloc
+                host = parsed.hostname or parsed.netloc
                 if parsed.port:
                     port = parsed.port
+                    default_port = 443 if parsed.scheme == 'https' else 80
+                    if parsed.port != default_port:
+                        host = f"{parsed.hostname}:{parsed.port}"
             except Exception:
                 pass
 
@@ -6073,7 +6108,7 @@ class AdvancedVulnScanner:
             result['recommendations'].append("Provide a valid URL starting with http:// or https://")
             return result
 
-        if not target.startswith(('http://', 'https://')):
+        if not target.lower().startswith(('http://', 'https://')):
             result['valid'] = False
             result['errors'].append(f"Invalid URL scheme: {target[:30]}")
             result['recommendations'].append("URL must start with http:// or https://")
