@@ -3230,6 +3230,7 @@ def _mesh_health_rollup(known, self_node):
         'attention': 0, 'with_alerts': 0, 'alerts_total': 0,
         'with_incidents': 0, 'incidents_total': 0,
         'undervoltage': 0, 'key_issues': 0, 'published': 0,
+        'undervoltage_nodes': [],
         'worst': None, 'by_severity': {s: 0 for s in _MESH_SEV_ORDER},
     }
     worst_rank = -1
@@ -3260,6 +3261,11 @@ def _mesh_health_rollup(known, self_node):
         undervoltage = bool((health.get('power') or {}).get('undervoltage'))
         if undervoltage:
             roll['undervoltage'] += 1
+            # Name the offender so the chip can point at it, not just count it.
+            # Same fallback order the cards use (meshUnitTitle in the client).
+            roll['undervoltage_nodes'].append(
+                node.get('viking_name') or node.get('label')
+                or node.get('short_name') or node.get('hostname') or 'unknown')
         key_bad = node.get('key_state') in ('warn', 'critical', 'expired')
         if key_bad:
             roll['key_issues'] += 1
@@ -7848,7 +7854,16 @@ def get_status():
             'release_gate': _build_release_gate_payload(),
             'timestamp': datetime.now().isoformat()
         }
-        
+
+        # Compact power/under-voltage summary so the dashboard badge can light
+        # without its own poll. assess() is cached ~15s and never raises, so
+        # this stays cheap even though /api/status is polled every few seconds.
+        try:
+            import power_budget
+            status_data['power'] = power_budget.summary()
+        except Exception as _pe:
+            logger.debug(f"power summary unavailable: {_pe}")
+
         # Add cache headers for quick responses
         response = jsonify(status_data)
         response.headers['Cache-Control'] = 'public, max-age=5'  # Cache for 5 seconds
@@ -11501,6 +11516,22 @@ def wardriving_diagnostics():
         return jsonify(wardrive_diagnostics.collect(engine, shared_data))
     except Exception as e:
         logger.error(f"Wardriving diagnostics error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/power')
+def api_power():
+    """Full power assessment for the dashboard power badge's detail modal.
+
+    The warning severity comes from the SoC throttle register (measured);
+    the per-device draw is an estimate (no per-port meter exists). Cached
+    ~15 s in power_budget.assess(), so a click is cheap.
+    """
+    try:
+        import power_budget
+        return jsonify(power_budget.assess())
+    except Exception as e:
+        logger.error(f"Power assessment error: {e}")
         return jsonify({'error': str(e)}), 500
 
 

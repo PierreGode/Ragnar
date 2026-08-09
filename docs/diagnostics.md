@@ -73,6 +73,11 @@ declared mA) when the radio is a dongle.
 
 ## Power — USB budget + supply health
 
+> The main **Dashboard** carries a small always-on **[power badge](power.md)**
+> that lights straight off the same throttle register when the board under-volts
+> — you don't have to open this panel to catch a brownout. This section is the
+> deeper per-radio view.
+
 `power()` reports the per-USB-device **declared** draw (`bMaxPower` from the USB
 descriptor — *declared, not measured*; no Pi meters per-port current), which
 netdev each adapter backs, and the summed budget. Plus supply health from

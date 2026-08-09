@@ -19338,6 +19338,178 @@ function updateDashboardStatus(data) {
 
     updateReleaseGateState(data.release_gate);
     updatePwnToggleAvailability(Boolean(data.headless_mode));
+
+    renderPowerBadge(data.power);
+}
+
+// ============================================================================
+// POWER / UNDER-VOLTAGE BADGE
+//
+// The badge comes straight off the SoC throttle register (a measured signal),
+// so it only lights when the board is actually being starved — never on a
+// guess. Clicking it opens the breakdown of what is (estimated to be) drawing
+// the power, because on a Pi there is no per-port current meter to measure it.
+// ============================================================================
+function renderPowerBadge(power) {
+    const badge = document.getElementById('power-warning-badge');
+    if (!badge) return;
+    const level = power && power.level;
+    if (!power || (level !== 'warning' && level !== 'critical')) {
+        badge.classList.add('hidden');
+        badge.classList.remove('flex');
+        return;
+    }
+    const iconEl = document.getElementById('power-warning-icon');
+    const textEl = document.getElementById('power-warning-text');
+    const base = 'flex w-full items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors text-left ';
+    if (level === 'critical') {
+        badge.className = base + 'bg-red-600/20 text-red-300 border-red-800 hover:bg-red-600/30';
+        if (iconEl) iconEl.textContent = '⚠️';
+    } else {
+        badge.className = base + 'bg-amber-600/20 text-amber-300 border-amber-800 hover:bg-amber-600/30';
+        if (iconEl) iconEl.textContent = '⚡';
+    }
+    badge.classList.remove('hidden');
+    if (textEl) textEl.textContent = power.headline || 'Power warning';
+}
+
+async function openPowerModal() {
+    let modal = document.getElementById('power-detail-modal');
+    if (!modal) {
+        modal = document.createElement('div');
+        modal.id = 'power-detail-modal';
+        document.body.appendChild(modal);
+    }
+    modal.className = 'fixed inset-0 z-[70] bg-black/60 flex items-start justify-center p-4 overflow-auto';
+    modal.onclick = (e) => { if (e.target === modal) closePowerModal(); };
+    modal.innerHTML = `
+        <div class="glass rounded-xl w-full max-w-2xl my-8 p-6 border border-slate-700">
+            <div class="flex items-start justify-between gap-3 mb-4">
+                <h3 class="text-xl font-bold flex items-center gap-2"><span>⚡</span> Power &amp; supply health</h3>
+                <button onclick="closePowerModal()" class="text-gray-400 hover:text-white text-2xl leading-none flex-shrink-0">&times;</button>
+            </div>
+            <div id="power-modal-body" class="text-sm text-gray-300">Loading…</div>
+        </div>`;
+    document.addEventListener('keydown', _powerModalEsc);
+    try {
+        const data = await fetchAPI('/api/power');
+        renderPowerModalBody(data);
+    } catch (e) {
+        const body = document.getElementById('power-modal-body');
+        if (body) body.innerHTML = `<div class="text-red-300">Could not load power details: ${escapeHtml(String(e))}</div>`;
+    }
+}
+
+function closePowerModal() {
+    const modal = document.getElementById('power-detail-modal');
+    if (modal) modal.remove();
+    document.removeEventListener('keydown', _powerModalEsc);
+}
+function _powerModalEsc(e) { if (e.key === 'Escape') closePowerModal(); }
+
+function _pwMa(ma) {
+    if (ma === null || ma === undefined) return '—';
+    return ma >= 1000 ? `${(ma / 1000).toFixed(2)} A` : `${ma} mA`;
+}
+
+function renderPowerModalBody(d) {
+    const body = document.getElementById('power-modal-body');
+    if (body) body.innerHTML = buildPowerDetailHtml(d);
+}
+
+// Shared by the dashboard badge modal and the System tab's Power panel, so both
+// show the same measured throttle state + estimated budget from one builder.
+function buildPowerDetailHtml(d) {
+    if (!d || d.supported === false) {
+        return `<div class="text-gray-400">Power monitoring is not available on this device
+            (no <code class="font-mono">vcgencmd</code> — not a Raspberry Pi, or the tool is missing).</div>`;
+    }
+    const level = d.level;
+    const tone = level === 'critical' ? 'text-red-300'
+        : level === 'warning' ? 'text-amber-300' : 'text-green-300';
+    const thr = d.throttle || {};
+    const est = d.estimate || {};
+
+    // 1) Live supply state + what it costs, straight from the throttle register.
+    let html = `<div class="mb-4">
+        <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs px-2 py-0.5 rounded border ${
+                level === 'critical' ? 'bg-red-600/20 text-red-300 border-red-800'
+                : level === 'warning' ? 'bg-amber-600/20 text-amber-300 border-amber-800'
+                : 'bg-green-700/20 text-green-300 border-green-800'}">${escapeHtml((level || 'unknown').toUpperCase())}</span>
+            <span class="text-gray-400 text-xs font-mono">${escapeHtml(d.model || '')}</span>
+        </div>`;
+    (d.effects || []).forEach(t => { html += `<p class="${tone} mt-1">${escapeHtml(t)}</p>`; });
+    html += `</div>`;
+
+    // 2) Throttle register decode — the measured truth.
+    if (thr && thr.raw) {
+        const rowsNow = (thr.now || []).map(escapeHtml).join(', ') || 'none';
+        const rowsOcc = (thr.occurred || []).map(escapeHtml).join(', ') || 'none';
+        html += `<div class="bg-slate-900/60 border border-slate-800 rounded-lg p-3 mb-4">
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Supply health (measured — vcgencmd get_throttled)</div>
+            <div class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+                <div class="text-gray-400">Right now</div><div class="${(thr.now||[]).length ? 'text-red-300' : 'text-green-300'}">${rowsNow}</div>
+                <div class="text-gray-400">Since boot</div><div class="${(thr.occurred||[]).length ? 'text-amber-300' : 'text-green-300'}">${rowsOcc}</div>
+                <div class="text-gray-400">Raw flags</div><div class="font-mono text-gray-400">${escapeHtml(thr.raw)}</div>
+                ${d.core_volts != null ? `<div class="text-gray-400">Core voltage</div><div>${escapeHtml(String(d.core_volts))} V</div>` : ''}
+                ${d.temp_c != null ? `<div class="text-gray-400">Temperature</div><div>${escapeHtml(String(d.temp_c))} °C</div>` : ''}
+                ${d.pmic && d.pmic.total_watts != null ? `<div class="text-gray-400">Board power (PMIC)</div><div>${escapeHtml(String(d.pmic.total_watts))} W</div>` : ''}
+            </div>
+        </div>`;
+    }
+
+    // 3) Estimated power budget — what is drawing it, with the honest caveat.
+    html += `<div class="mb-4">
+        <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Estimated draw — what's using the power</div>
+        <p class="text-[11px] text-gray-500 mb-2">Estimated, not measured: a Pi has no per-port current meter, and the HAT is a single USB hub — the board only sees one total draw. Figures below are realistic per-device currents, not the (unreliable) USB descriptor values.</p>
+        <div class="space-y-1">`;
+    (d.devices || []).forEach(dev => {
+        const ifaces = (dev.interfaces || []).length ? ` · ${dev.interfaces.map(escapeHtml).join(', ')}` : '';
+        const declared = (dev.declared_ma != null) ? ` · declares ${dev.declared_ma} mA` : '';
+        html += `<div class="flex items-center justify-between gap-2 text-xs bg-slate-800/40 rounded px-2 py-1">
+            <div><span class="text-gray-200">${escapeHtml(dev.role || 'USB device')}</span>
+                <span class="text-gray-500">${escapeHtml(dev.label ? '· ' + dev.label : '')}${escapeHtml(ifaces)}</span>
+                ${dev.matched ? '' : '<span class="text-amber-400/70"> (declared value — device not recognised)</span>'}</div>
+            <div class="font-mono text-gray-300 whitespace-nowrap">${_pwMa(dev.est_peak_ma)} peak</div>
+        </div>`;
+    });
+    html += `</div>
+        <div class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs mt-3 border-t border-slate-800 pt-2">
+            <div class="text-gray-400">Board itself (${escapeHtml(d.board ? d.board.name : '')})</div><div class="font-mono">${_pwMa(est.base_ma)}–${_pwMa(est.load_ma)}</div>
+            <div class="text-gray-400">Peripherals (peak)</div><div class="font-mono">${_pwMa(est.peripherals_peak_ma)}</div>
+            <div class="text-gray-200 font-semibold">Estimated total at peak</div><div class="font-mono font-semibold ${est.tight ? 'text-amber-300' : 'text-gray-100'}">${_pwMa(est.total_peak_ma)}</div>
+            <div class="text-gray-400">Recommended supply</div><div class="font-mono">${_pwMa(est.psu_ma)}</div>
+            <div class="text-gray-400">Headroom at peak</div><div class="font-mono ${est.headroom_ma < 0 ? 'text-red-300' : est.tight ? 'text-amber-300' : 'text-green-300'}">${_pwMa(est.headroom_ma)}</div>
+        </div>`;
+    if (d.board && d.board.supply_note) {
+        html += `<p class="text-[11px] text-gray-500 mt-2">${escapeHtml(d.board.supply_note)}</p>`;
+    }
+    if (d.usb_max_current_enabled === false) {
+        html += `<p class="text-[11px] text-amber-400/80 mt-1">usb_max_current_enable is not set — USB peripheral current is capped to 600 mA total on this board.</p>`;
+    }
+    html += `</div>`;
+
+    // 4) Reference maxima for the two named field configs.
+    const prof = d.profiles || {};
+    if (prof.stationary || prof.roaming) {
+        html += `<div>
+            <div class="text-xs uppercase tracking-wide text-gray-500 mb-2">Reference: your two field configs (peak, on this board)</div>
+            <div class="space-y-1">`;
+        [['stationary', prof.stationary], ['roaming', prof.roaming]].forEach(([, p]) => {
+            if (!p) return;
+            html += `<div class="flex items-center justify-between gap-2 text-xs bg-slate-800/40 rounded px-2 py-1">
+                <div><span class="text-gray-200">${escapeHtml(p.label)}</span>
+                    <span class="text-gray-500">· ${(p.devices || []).map(escapeHtml).join(' + ')}</span></div>
+                <div class="font-mono whitespace-nowrap ${p.fits ? 'text-green-300' : 'text-red-300'}">${_pwMa(p.peak_ma)}${p.fits ? '' : ' ⚠'}</div>
+            </div>`;
+        });
+        html += `</div>
+            <p class="text-[11px] text-gray-500 mt-2">On a Pi Zero / Pi 3 the Alfa is not hot-pluggable — it only enumerates if it is connected when power is applied. If a config under-volts, a powered USB hub for the dongles fixes it without a bigger PSU.</p>
+        </div>`;
+    }
+
+    return html;
 }
 
 function updateAutomationToggleButton(automationEnabled, options = {}) {
@@ -21274,18 +21446,62 @@ let currentProcessSort = 'cpu';
 function loadSystemData() {
     fetchSystemStatus();
     fetchNetworkStats();
-    
+    fetchPowerDetail();
+
     // Auto-refresh every 5 seconds when on system tab
     if (systemMonitoringInterval) {
         clearInterval(systemMonitoringInterval);
     }
-    
+
     systemMonitoringInterval = setInterval(() => {
         if (currentTab === 'system') {
             fetchSystemStatus();
             fetchNetworkStats();
+            fetchPowerDetail();
         }
     }, 5000);
+}
+
+// System tab's Power card + detail panel. /api/power is cached ~15s server-side,
+// so polling it on the 5s system loop is mostly cache hits. Reuses the same
+// detail builder as the dashboard badge modal.
+function fetchPowerDetail() {
+    networkAwareFetch('/api/power')
+        .then(response => response.json())
+        .then(data => { if (!data || !data.error) updatePowerSystemView(data); })
+        .catch(error => console.error('Error fetching power detail:', error));
+}
+
+function updatePowerSystemView(d) {
+    const card = document.getElementById('power-card');
+    const panel = document.getElementById('power-detail-panel');
+    if (!d || d.supported === false) {
+        // Off-Pi (no vcgencmd): nothing meaningful to show, keep both hidden.
+        if (card) card.classList.add('hidden');
+        if (panel) panel.classList.add('hidden');
+        return;
+    }
+    const level = d.level;
+    const statusEl = document.getElementById('power-card-status');
+    const detailEl = document.getElementById('power-card-details');
+    const iconEl = document.getElementById('power-card-icon');
+    if (card) card.classList.remove('hidden');
+    const label = level === 'critical' ? 'Under-voltage' : level === 'warning' ? 'Warning' : 'Healthy';
+    const tone = level === 'critical' ? 'text-red-400' : level === 'warning' ? 'text-amber-400' : 'text-emerald-400';
+    if (statusEl) { statusEl.textContent = label; statusEl.className = 'text-2xl font-bold ' + tone; }
+    if (iconEl) iconEl.className = 'w-5 h-5 ' + tone;
+    if (detailEl) {
+        const bits = [];
+        if (d.summary && d.summary.headline) bits.push(d.summary.headline);
+        if (d.estimate && d.estimate.total_peak_ma != null) bits.push('~' + _pwMa(d.estimate.total_peak_ma) + ' peak');
+        if (d.temp_c != null) bits.push(d.temp_c + ' °C');
+        detailEl.textContent = bits.join(' · ') || 'Supply health';
+    }
+    if (panel) {
+        panel.classList.remove('hidden');
+        const body = document.getElementById('power-detail-body');
+        if (body) body.innerHTML = buildPowerDetailHtml(d);
+    }
 }
 
 function fetchSystemStatus() {
@@ -30729,14 +30945,28 @@ function renderMeshHealth(h) {
     // Condition chips: only surfaced when non-zero, so a healthy mesh is quiet.
     const chipsEl = document.getElementById('mesh-health-chips');
     if (chipsEl) {
-        const chip = (n, label, tone) => n
-            ? `<span class="text-[11px] px-2 py-0.5 rounded border ${tone}">${n} ${label}</span>` : '';
+        // `names` (optional) lists the offending units; when present we name
+        // them inline instead of only counting, and hang the full list off a
+        // tooltip so a large mesh still stays to one line.
+        const chip = (n, label, tone, names) => {
+            if (!n) return '';
+            let text = `${n} ${label}`;
+            let title = '';
+            if (Array.isArray(names) && names.length) {
+                const shown = names.slice(0, 3).map(escapeHtml);
+                let suffix = shown.join(', ');
+                if (names.length > 3) suffix += ` +${names.length - 3} more`;
+                text += `: ${suffix}`;
+                title = ` title="${escapeHtml(names.join(', '))}"`;
+            }
+            return `<span class="text-[11px] px-2 py-0.5 rounded border ${tone}"${title}>${text}</span>`;
+        };
         const amber = 'bg-amber-600/20 text-amber-300 border-amber-800';
         const red = 'bg-red-600/20 text-red-300 border-red-800';
         const slate = 'bg-slate-600/20 text-gray-300 border-slate-600';
         const green = 'bg-green-700/20 text-green-300 border-green-800';
         chipsEl.innerHTML = [
-            chip(h.undervoltage, 'undervoltage', red),
+            chip(h.undervoltage, 'undervoltage', red, h.undervoltage_nodes),
             chip(h.key_issues, 'key expiring', amber),
             chip(h.not_polled, 'not polled yet', slate),
             chip(h.published, 'published', green),
