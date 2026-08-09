@@ -93,16 +93,18 @@ Returns AI service status and configuration
 ```
 
 ### GET /api/ai/insights
-Returns comprehensive AI insights. The independent analyses (network summary,
-vulnerability, weakness, posture) are generated **concurrently** server-side
-(capped at 2 in flight so several units sharing one API key don't trip OpenAI's
-per-key rate limits), each with a 25s per-request timeout so a stuck/rate-limited
-call fails fast instead of hanging. Results are cached (1h server-side; client-
-side 1h on full success, 2min if any analysis failed so it retries soon). The
-response includes `attempted` (which analyses ran) and `failed` (which of those
-came back empty) so the dashboard can show a per-section "Temporarily
-unavailable + Retry" instead of a stuck "Analyzing…". The card also bounds its
-own wait (60s) and surfaces a Retry on timeout/error rather than hanging.
+Returns comprehensive AI insights. The four analyses (network summary,
+vulnerability, weakness, posture) are generated in a **background thread** and
+the endpoint **answers immediately** — so a slow board (e.g. a Pi Zero) never
+blocks the dashboard on the multi-second generation, which is what timed out and
+showed "could not reach". While the first run is in flight the response carries
+`status:"computing"` (plus any previous result), and the page **polls** every
+~6s until it lands; completed results are cached (1h server-side; client-side 1h
+on full success, 2min if any analysis failed). Pass `?refresh=1` (the Refresh
+button) to force a recompute. Inside the background run the analyses go 2-at-a-
+time so units sharing one API key don't trip OpenAI's per-key rate limits, each
+with a 25s per-request timeout; `attempted`/`failed` tell the UI which analyses
+ran and which came back empty (per-section "Temporarily unavailable + Retry").
 ```json
 {
   "enabled": true,

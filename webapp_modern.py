@@ -22322,30 +22322,80 @@ def get_ai_status():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/ai/insights')
-def get_ai_insights():
-    """Get comprehensive AI-generated insights about the network"""
+# Dashboard AI insights are several LLM round-trips. Running them inline made the
+# request outlast the client's patience (and any proxy in front) on a slow board
+# like a Pi Zero, so the card showed "could not reach". Compute them in a
+# background thread instead and serve the last completed result immediately — the
+# page polls until the first run lands, and never blocks on the generation.
+_ai_insights_state = {
+    'data': None,        # last completed insights dict (with posture_data)
+    'ts': 0.0,           # when it completed
+    'computing': False,  # a background run is in flight
+    'lock': threading.Lock(),
+}
+_AI_INSIGHTS_TTL = 3600  # serve a completed result for an hour before recomputing
+
+
+def _compute_ai_insights_bg():
+    """Background worker: build the dashboard insights and stash them. Only one
+    runs at a time (guarded by the 'computing' flag set by the route)."""
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
-        
+        if not ai_service or not ai_service.is_enabled():
+            return
+        posture = _build_ai_posture()
+        result = ai_service.generate_insights(posture=posture)
+        if posture is not None:
+            result['posture_data'] = posture
+        with _ai_insights_state['lock']:
+            _ai_insights_state['data'] = result
+            _ai_insights_state['ts'] = time.time()
+    except Exception as exc:
+        logger.error(f"[ai] background insights failed: {exc}")
+    finally:
+        with _ai_insights_state['lock']:
+            _ai_insights_state['computing'] = False
+
+
+@app.route('/api/ai/insights')
+def get_ai_insights():
+    """Comprehensive AI insights, computed in the background so a slow board's
+    dashboard never blocks on the generation. Returns the last completed result
+    immediately when fresh; otherwise kicks off a background run and returns
+    status='computing' (plus any stale result) for the page to poll."""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+
         if not ai_service or not ai_service.is_enabled():
             return jsonify({
                 'enabled': False,
                 'message': 'AI service is not enabled. Configure OpenAI API token in settings.'
             })
 
-        # Passive-monitoring posture from Watchtower (aggregates the Wi-Fi Defense
-        # family + wired watchers) — fed to the dashboard AI so it reports on the
-        # live security surface, not just the scan counts.
-        posture = _build_ai_posture()
+        force = request.args.get('refresh') == '1'
+        now = time.time()
+        with _ai_insights_state['lock']:
+            data = _ai_insights_state['data']
+            ts = _ai_insights_state['ts']
+            # A result where some analyses failed (rate-limited) expires fast so
+            # it recomputes soon; a clean result is held for the full hour.
+            ttl = 120 if (data and data.get('failed')) else _AI_INSIGHTS_TTL
+            fresh = data is not None and not force and (now - ts) < ttl
+            start = (not fresh) and (not _ai_insights_state['computing'])
+            if start:
+                _ai_insights_state['computing'] = True
+        if start:
+            socketio.start_background_task(_compute_ai_insights_bg)
 
-        # Generate insights
-        insights = ai_service.generate_insights(posture=posture)
-        if posture is not None:
-            insights['posture_data'] = posture
+        if fresh:
+            return jsonify({**data, 'cached': True})
 
-        return jsonify(insights)
-        
+        # Not fresh: a run is now in flight. Hand back any prior result so the
+        # card can still show something, plus a 'computing' flag the page polls on.
+        if data is not None and not force:
+            return jsonify({**data, 'status': 'computing', 'stale': True})
+        return jsonify({'enabled': True, 'status': 'computing'})
+
     except Exception as e:
         logger.error(f"Error getting AI insights: {e}")
         return jsonify({'error': str(e)}), 500
@@ -22747,7 +22797,12 @@ def clear_ai_cache():
             })
         
         ai_service.clear_cache()
-        
+        # Also invalidate the dashboard's background-insights cache so a refresh
+        # recomputes instead of re-serving the last completed result.
+        with _ai_insights_state['lock']:
+            _ai_insights_state['data'] = None
+            _ai_insights_state['ts'] = 0.0
+
         return jsonify({
             'success': True,
             'message': 'AI cache cleared successfully'
