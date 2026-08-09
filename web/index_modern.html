@@ -978,6 +978,15 @@
                         Current Status
                     </h2>
                     <div class="space-y-3">
+                        <!-- Power / under-voltage badge — hidden unless the SoC
+                             throttle register actually reports a problem. Small
+                             by design; click to see what is drawing the power. -->
+                        <button id="power-warning-badge" type="button" onclick="openPowerModal()"
+                                class="hidden w-full items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-semibold border transition-colors text-left">
+                            <span id="power-warning-icon">⚡</span>
+                            <span id="power-warning-text">Power warning</span>
+                            <span class="ml-auto text-xs opacity-70">details ›</span>
+                        </button>
                         <div class="flex items-center justify-between p-3 bg-slate-800 bg-opacity-50 rounded-lg">
                             <span class="text-gray-400">Status</span>
                             <span id="Ragnar-status" class="text-Ragnar-400 font-semibold">IDLE</span>
@@ -7533,7 +7542,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260809-ai-insights-bg2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260809-power-badge"></script>
 
 </body>
 </html>
