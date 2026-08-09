@@ -21078,6 +21078,7 @@ def handoff_recon_to_zap(scan_id):
         data = request.get_json(silent=True) or {}
         subdomains = data.get('subdomains') or []
         paths = data.get('paths') or []
+        ports = data.get('ports') or []  # selected port URLs from recon (scheme://host:port)
         force = bool(data.get('force'))
         scan_type_name = data.get('scan_type', 'zap_full')
         options = data.get('options') or {}
@@ -21103,7 +21104,11 @@ def handoff_recon_to_zap(scan_id):
 
         options['extra_paths'] = paths
 
-        targets = [state.target] + list(subdomains)
+        # If the operator picked specific discovered ports, scan those exact
+        # scheme://host:port URLs instead of the bare target (which would default
+        # to 80/443). Otherwise fall back to the original target.
+        base_targets = list(ports) if ports else [state.target]
+        targets = base_targets + list(subdomains)
         zap_scan_ids = []
         for tgt in targets:
             target_url = tgt if tgt.lower().startswith(('http://', 'https://')) else f'https://{tgt}'

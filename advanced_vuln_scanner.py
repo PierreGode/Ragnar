@@ -2707,13 +2707,23 @@ class AdvancedVulnScanner:
         # Quick connectivity check (with short timeout)
         try:
             host = parsed.netloc.split(':')[0]
-            port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+            scheme = (parsed.scheme or 'http').lower()
+            port = parsed.port or (443 if scheme == 'https' else 80)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             result = sock.connect_ex((host, port))
             sock.close()
             if result != 0:
-                return False, f"Cannot connect to {host}:{port}. Target may be unreachable or firewall is blocking."
+                # Explain the port: an unspecified http:// target defaults to 80,
+                # which is where "unexpected :80" comes from — the tool isn't
+                # adding it, http just *means* port 80.
+                hint = ""
+                if not parsed.port:
+                    hint = (f" Port {port} is the default for {scheme}:// — if the service "
+                            f"listens on another port or uses HTTPS, say so, "
+                            f"e.g. http://{host}:8080 or https://{host}.")
+                return False, (f"Cannot connect to {host}:{port}. Target may be unreachable, "
+                               f"firewalled, or not listening on that port.{hint}")
         except socket.gaierror:
             return False, f"Cannot resolve hostname: {parsed.netloc}. Check if the URL is correct."
         except socket.timeout:
