@@ -782,11 +782,6 @@ Keep it tight and practical."""
             output["message"] = self.initialization_error or "AI disabled"
             return output
 
-        # Passive-monitoring posture (Watchtower + Wi-Fi Defense), if supplied by
-        # the caller — the route gathers it since the aggregator lives there.
-        if posture is not None:
-            output["posture_analysis"] = self.analyze_security_posture(posture)
-
         net = {
             "target_count": self.shared_data.targetnbr,
             "port_count": self.shared_data.portnbr,
@@ -794,22 +789,39 @@ Keep it tight and practical."""
             "credential_count": self.shared_data.crednbr,
         }
 
-        # Summary
-        output["network_summary"] = self.analyze_network_summary(net)
+        # Assemble the independent analyses as callables, then run them
+        # CONCURRENTLY. Each is its own OpenAI round-trip (~4-6s); running the
+        # four back-to-back made the dashboard's insights card take ~18s cold,
+        # which read as "never loads" (and could trip proxy timeouts). Fan them
+        # out so the whole call costs about the slowest single request instead.
+        tasks = {"network_summary": lambda: self.analyze_network_summary(net)}
+
+        # Passive-monitoring posture (Watchtower + Wi-Fi Defense), if supplied by
+        # the caller — the route gathers it since the aggregator lives there.
+        if posture is not None:
+            tasks["posture_analysis"] = lambda: self.analyze_security_posture(posture)
 
         # Additional analyses if intelligence system is available
         if hasattr(self.shared_data, "network_intelligence") and \
            self.shared_data.network_intelligence:
-
             findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
-
             vulns = list(findings.get("vulnerabilities", {}).values())
             if vulns:
-                output["vulnerability_analysis"] = self.analyze_vulnerabilities(vulns)
-
                 creds = list(findings.get("credentials", {}).values())
                 combined = vulns + creds
-                output["weakness_analysis"] = self.identify_network_weaknesses(net, combined)
+                tasks["vulnerability_analysis"] = lambda: self.analyze_vulnerabilities(vulns)
+                tasks["weakness_analysis"] = lambda: self.identify_network_weaknesses(net, combined)
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+            future_key = {ex.submit(fn): key for key, fn in tasks.items()}
+            for fut in concurrent.futures.as_completed(future_key):
+                key = future_key[fut]
+                try:
+                    output[key] = fut.result()
+                except Exception as exc:  # one analysis failing shouldn't sink the rest
+                    self.logger.error(f"AI insight '{key}' failed: {exc}")
+                    output[key] = None
 
         return output
 
