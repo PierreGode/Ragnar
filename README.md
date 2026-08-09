@@ -185,6 +185,7 @@ When deployed on systems with 8GB+ RAM, Ragnar automatically unlocks advanced se
 > ```
 
 ### Advanced Vulnerability Scanning
+- **Pre-flight recon** — Optional reconnaissance phase before ZAP: **port discovery** (parallel TCP connect-scan of common web ports, each classified http/https via a TLS probe), TLS audit, passive DNS subdomain enumeration, and HTTP content discovery. In the handoff gate the operator ticks exactly which discovered `scheme://host:port` URLs, subdomains and paths get fed to ZAP — so a bare IP is scanned on the ports that are *actually* listening instead of blindly defaulting to :80/:443
 - **OWASP ZAP** *(8GB+ RAM)* — Spider + AJAX spider + active scan with automatic browser detection; greys out on smaller boards
 - **Authenticated scanning** — 8 auth types: form-based, HTTP Basic, OAuth2, Bearer Token, API Key, Cookie, Script-based
 - **Nuclei** — 5000+ vulnerability templates from ProjectDiscovery; if the binary isn't present the scanner card shows a **⤓ Install** button that fetches the right build for your board (templates download automatically after)

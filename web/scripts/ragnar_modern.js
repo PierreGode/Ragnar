@@ -28426,6 +28426,7 @@ async function startReconScan() {
     }
 
     const recon_types = [];
+    if (document.getElementById('recon-ports')?.checked) recon_types.push('port_scan');
     if (document.getElementById('recon-tls')?.checked) recon_types.push('tls_audit');
     if (document.getElementById('recon-dns')?.checked) recon_types.push('dns_passive');
     if (document.getElementById('recon-content')?.checked) recon_types.push('content_discovery');
@@ -28489,6 +28490,7 @@ function renderReconProgress(scan) {
     const container = document.getElementById('recon-progress');
     if (!container) return;
     const labels = {
+        port_scan: 'Port discovery',
         tls_audit: 'TLS audit',
         dns_passive: 'DNS subdomain enum',
         content_discovery: 'Content discovery',
@@ -28539,8 +28541,26 @@ async function loadReconHandoffOptions() {
 }
 
 function renderReconHandoff(data) {
+    const portsEl = document.getElementById('recon-ports-list');
     const subsEl = document.getElementById('recon-subdomains-list');
     const pathsEl = document.getElementById('recon-paths-list');
+    if (portsEl) {
+        if (!data.ports?.length) {
+            portsEl.innerHTML = '<p class="text-xs text-gray-500">No open web ports discovered (or port discovery not run).</p>';
+        } else {
+            // Pre-check 80/443; leave non-standard ports for the operator to opt in.
+            portsEl.innerHTML = '<p class="text-xs text-gray-400 mb-1">Open ports — pick which to scan:</p>' + data.ports.map(p => {
+                const std = (p.port === 80 || p.port === 443);
+                return `
+                <label class="flex items-center gap-2 px-2 py-1 hover:bg-slate-700/50 rounded text-xs cursor-pointer">
+                    <input type="checkbox" class="recon-port-cb" value="${escapeHtml(p.url)}" ${std ? 'checked' : ''}>
+                    <span class="text-gray-200 flex-1">${escapeHtml(p.url)}</span>
+                    <span class="px-1.5 py-0.5 rounded ${p.scheme === 'https' ? 'bg-emerald-900/60 text-emerald-300' : 'bg-slate-700 text-gray-300'}">${escapeHtml(p.scheme)}</span>
+                    <span class="text-gray-500">:${p.port}</span>
+                </label>`;
+            }).join('');
+        }
+    }
     if (subsEl) {
         if (!data.subdomains?.length) {
             subsEl.innerHTML = '<p class="text-xs text-gray-500">No additional subdomains discovered.</p>';
@@ -28575,6 +28595,7 @@ async function handoffReconToZap(force) {
     if (!reconScanId) return;
     const subdomains = Array.from(document.querySelectorAll('.recon-subdomain-cb:checked')).map(cb => cb.value);
     const paths = Array.from(document.querySelectorAll('.recon-path-cb:checked')).map(cb => cb.value);
+    const ports = Array.from(document.querySelectorAll('.recon-port-cb:checked')).map(cb => cb.value);
 
     const scannerSelect = document.getElementById('adv-vuln-scanner');
     const scan_type = scannerSelect ? scannerSelect.value : 'zap_full';
@@ -28583,7 +28604,7 @@ async function handoffReconToZap(force) {
         const response = await fetch(`/api/recon/scan/${reconScanId}/handoff`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ subdomains, paths, scan_type, force: !!force }),
+            body: JSON.stringify({ subdomains, paths, ports, scan_type, force: !!force }),
         });
         const data = await response.json();
         if (!data.success) {

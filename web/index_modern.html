@@ -5341,7 +5341,11 @@
 
                         <!-- State 1: pre-recon -->
                         <div id="recon-state-config" class="space-y-3">
-                            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                                <label class="flex items-center gap-2 px-3 py-2 bg-slate-700/50 rounded-lg cursor-pointer hover:bg-slate-700">
+                                    <input type="checkbox" id="recon-ports" checked class="rounded text-cyan-500 focus:ring-cyan-500">
+                                    <span class="text-gray-200">Port discovery</span>
+                                </label>
                                 <label class="flex items-center gap-2 px-3 py-2 bg-slate-700/50 rounded-lg cursor-pointer hover:bg-slate-700">
                                     <input type="checkbox" id="recon-tls" checked class="rounded text-cyan-500 focus:ring-cyan-500">
                                     <span class="text-gray-200">TLS audit</span>
@@ -5372,6 +5376,7 @@
                         <!-- State 3: handoff gate -->
                         <div id="recon-state-handoff" class="hidden space-y-3">
                             <p class="text-xs text-gray-400">Pick what to scan. Unchecked items will be ignored — the scan uses the scanner selected above.</p>
+                            <div id="recon-ports-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-subdomains-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-paths-list" class="space-y-1 max-h-48 overflow-y-auto"></div>
                             <div id="recon-scope-warning" class="hidden p-2 bg-red-900/40 border border-red-500/50 rounded text-xs text-red-300"></div>
@@ -7511,7 +7516,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260804-scan-egress"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260809-recon-portdisc"></script>
 
 </body>
 </html>

@@ -20,7 +20,7 @@ Expand Ragnar's offensive toolset with three reconnaissance capabilities that ev
 New module `recon_engine.py`, sibling to `advanced_vuln_scanner.py`. Server-mode gated via the same `is_server_mode()` check used by the existing advanced scanner.
 
 ```
-ReconType (Enum)        TLS_AUDIT | DNS_PASSIVE | CONTENT_DISCOVERY
+ReconType (Enum)        PORT_SCAN | TLS_AUDIT | DNS_PASSIVE | CONTENT_DISCOVERY
 ReconResult (dataclass) recon_type, target, findings[VulnerabilityFinding],
                         artifacts (dict), duration_seconds,
                         status (ok|partial|error), error_message
@@ -28,6 +28,7 @@ ReconResult (dataclass) recon_type, target, findings[VulnerabilityFinding],
 class ReconEngine:
     def run(self, target: str, recon_types: list[ReconType],
             timeout: int = 600) -> dict[ReconType, ReconResult]
+    def _run_port_scan(self, target) -> ReconResult
     def _run_tls_audit(self, target) -> ReconResult
     def _run_dns_passive(self, target) -> ReconResult
     def _run_content_discovery(self, target) -> ReconResult
@@ -112,10 +113,14 @@ Follows the existing `/api/vuln-advanced/...` naming convention.
 | POST | `/api/recon/scan` | `{target, recon_types[]}` | `{scan_id}` |
 | GET | `/api/recon/scan/<scan_id>` | — | `{status, progress, partial_results}` |
 | POST | `/api/recon/scan/<scan_id>/cancel` | — | `{ok}` |
-| GET | `/api/recon/scan/<scan_id>/handoff-options` | — | `{subdomains[], paths[], tls_findings[]}` |
-| POST | `/api/recon/scan/<scan_id>/handoff` | `{subdomains[], paths[]}` | `{zap_scan_id}` |
+| GET | `/api/recon/scan/<scan_id>/handoff-options` | — | `{ports[], subdomains[], paths[], tls_findings[]}` |
+| POST | `/api/recon/scan/<scan_id>/handoff` | `{ports[], subdomains[], paths[]}` | `{zap_scans[]}` |
 
-The handoff endpoint invokes the existing `AdvancedVulnScanner` instance directly (in-process function call, not an HTTP self-call) with an augmented target list and a new `extra_paths` argument that the scanner will pass to ZAP's forced-browse / spider-seed API. **This requires a small additive change to `AdvancedVulnScanner.start_scan()` (or its equivalent entry point) to accept and forward `extra_paths`.** No ZAP-trigger logic is duplicated in `recon_engine.py`.
+### PORT_SCAN — web-port discovery
+
+A parallel TCP connect-scan over a curated `COMMON_WEB_PORTS` list (80/443/8080/8443/8000/3000/5000/9443/…). Each open port is classified `http` vs `https` by attempting a TLS handshake (self-signed tolerated: `check_hostname=False`, `CERT_NONE`), yielding `{port, scheme, url}` artifacts plus INFO findings. This solves the "bare IP defaults to :80 but nothing's there" problem: the operator sees the actual listening web ports and, in the handoff gate, ticks exactly which `scheme://host:port` URLs get fed to ZAP (80/443 pre-checked, non-standard ports opt-in). When ports are selected they replace the bare target as the ZAP scan seed.
+
+The handoff endpoint invokes the existing `AdvancedVulnScanner` instance directly (in-process function call, not an HTTP self-call) with an augmented target list (selected ports + subdomains) and a new `extra_paths` argument that the scanner will pass to ZAP's forced-browse / spider-seed API. **This requires a small additive change to `AdvancedVulnScanner.start_scan()` (or its equivalent entry point) to accept and forward `extra_paths`.** No ZAP-trigger logic is duplicated in `recon_engine.py`.
 
 All endpoints reuse the existing `@check_authentication` guard.
 
