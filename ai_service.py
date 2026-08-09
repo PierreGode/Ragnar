@@ -74,7 +74,12 @@ class AIService:
             return
 
         try:
-            self.client = OpenAI(api_key=self.api_token)
+            # Bound every request: the SDK default is 600s, so a single stuck or
+            # rate-limited call (common when several field units share one API
+            # key and each fans out concurrent dashboard calls) would otherwise
+            # hang for minutes — well past any client timeout — instead of
+            # failing fast and letting the rest of the insights render.
+            self.client = OpenAI(api_key=self.api_token, timeout=25.0, max_retries=2)
             self.initialization_error = None
             self.logger.info(f"AI Service initialized using model: {self.model}")
         except Exception as exc:
@@ -812,8 +817,14 @@ Keep it tight and practical."""
                 tasks["vulnerability_analysis"] = lambda: self.analyze_vulnerabilities(vulns)
                 tasks["weakness_analysis"] = lambda: self.identify_network_weaknesses(net, combined)
 
+        # Cap concurrency at 2. Fanning out all four at once cut latency on a
+        # fast box, but when 6 units share one API key that's a 24-wide burst
+        # that trips OpenAI's per-key rate limits — the biggest call (weakness)
+        # loses first, which is exactly the "weakness never loads" report. Two
+        # at a time still roughly halves the sequential time while staying gentle
+        # on the shared key.
         import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(tasks))) as ex:
             future_key = {ex.submit(fn): key for key, fn in tasks.items()}
             for fut in concurrent.futures.as_completed(future_key):
                 key = future_key[fut]
@@ -822,6 +833,13 @@ Keep it tight and practical."""
                 except Exception as exc:  # one analysis failing shouldn't sink the rest
                     self.logger.error(f"AI insight '{key}' failed: {exc}")
                     output[key] = None
+
+        # Tell the UI which analyses were attempted and which of those came back
+        # empty (failed/rate-limited) — so it can show "temporarily unavailable +
+        # retry" for a genuine failure instead of a permanent "Analyzing…", and
+        # distinguish that from a section that simply had nothing to report.
+        output["attempted"] = list(tasks.keys())
+        output["failed"] = [k for k in tasks if not output.get(k)]
 
         return output
 

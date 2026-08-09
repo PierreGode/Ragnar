@@ -22878,27 +22878,49 @@ async function loadAIInsights() {
             clearTimeout(timer);
         }
 
-        // Cache the insights
+        // Cache the insights. If some analyses failed (rate-limited on a shared
+        // key, etc.), keep the cache short so it retries soon instead of showing
+        // a half-empty card for the full hour.
         aiInsightsCache.data = insights;
         aiInsightsCache.timestamp = now;
+        aiInsightsCache.ttl = (insights.failed && insights.failed.length) ? 120000 : 3600000;
 
         displayAIInsights(insights);
 
     } catch (error) {
         console.error('Error loading AI insights:', error);
         // Don't leave the card stuck on a loading spinner — show what happened
-        // and offer a retry. Cache stays empty so the next load tries again.
+        // on every section and offer a retry. Cache stays empty so the next
+        // load tries again.
         aiInsightsCache.data = null;
         aiInsightsCache.timestamp = null;
+        const why = error && error.name === 'AbortError'
+            ? 'The AI analysis took too long to respond.'
+            : 'Could not reach the AI service.';
+        const errHtml = '<span class="text-amber-400">' + _esc(why) + '</span> '
+            + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
         const netSummaryEl = document.getElementById('ai-network-summary');
-        if (netSummaryEl) {
-            const why = error && error.name === 'AbortError'
-                ? 'The AI analysis took too long to respond.'
-                : 'Could not reach the AI service.';
-            netSummaryEl.innerHTML = '<span class="text-amber-400">' + _esc(why) + '</span> '
-                + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
-        }
+        if (netSummaryEl) netSummaryEl.innerHTML = errHtml;
+        // Clear the other two sections' stale "Analyzing…" placeholders too.
+        const vulnEl = document.getElementById('ai-vuln-summary');
+        if (vulnEl) vulnEl.innerHTML = errHtml;
+        const weakEl = document.getElementById('ai-weakness-summary');
+        if (weakEl) weakEl.innerHTML = errHtml;
     }
+}
+
+// True when the server attempted this analysis but it came back empty (a
+// failure/rate-limit), as opposed to a section that had nothing to report.
+function _aiFieldFailed(insights, key) {
+    return Array.isArray(insights.failed) && insights.failed.includes(key);
+}
+
+// Inline "temporarily unavailable + retry" used for a failed analysis so a
+// rate-limited section shows a clear, actionable state instead of a permanent
+// "Analyzing…" that looks like it's still working.
+function _aiUnavailableHtml() {
+    return '<span class="text-amber-400">Temporarily unavailable.</span> '
+        + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
 }
 
 // Display AI insights (separated for reuse with cache)
@@ -22907,7 +22929,9 @@ function displayAIInsights(insights) {
         // Update network summary
         const networkSummary = document.getElementById('ai-network-summary');
         if (networkSummary) {
-            networkSummary.innerHTML = formatAIText(insights.network_summary || 'Analyzing network...');
+            if (insights.network_summary) networkSummary.innerHTML = formatAIText(insights.network_summary);
+            else networkSummary.innerHTML = _aiFieldFailed(insights, 'network_summary')
+                ? _aiUnavailableHtml() : formatAIText('Analyzing network...');
         }
         
         // Update vulnerability analysis with summary/details split
@@ -22931,7 +22955,8 @@ function displayAIInsights(insights) {
                 
                 if (vulnSection) vulnSection.style.display = 'block';
             } else {
-                vulnSummary.textContent = 'No vulnerabilities detected';
+                if (_aiFieldFailed(insights, 'vulnerability_analysis')) vulnSummary.innerHTML = _aiUnavailableHtml();
+                else vulnSummary.textContent = 'No vulnerabilities detected';
                 vulnDetails.innerHTML = '';
                 if (vulnToggle) vulnToggle.style.display = 'none';
                 if (vulnSection) vulnSection.style.display = 'block';
@@ -22959,7 +22984,8 @@ function displayAIInsights(insights) {
                 
                 if (weaknessSection) weaknessSection.style.display = 'block';
             } else {
-                weaknessSummary.textContent = 'Analyzing network topology...';
+                if (_aiFieldFailed(insights, 'weakness_analysis')) weaknessSummary.innerHTML = _aiUnavailableHtml();
+                else weaknessSummary.textContent = 'No attack paths identified';
                 weaknessDetails.innerHTML = '';
                 if (weaknessToggle) weaknessToggle.style.display = 'none';
                 if (weaknessSection) weaknessSection.style.display = 'block';
