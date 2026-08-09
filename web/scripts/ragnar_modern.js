@@ -22859,20 +22859,45 @@ async function loadAIInsights() {
             modelName.textContent = status.model;
         }
         
-        // Load comprehensive insights
+        // Load comprehensive insights. This is several LLM round-trips server
+        // side (parallelized to ~5-10s); show a clear loading state and bound
+        // the wait so a hung request surfaces an error instead of sitting on
+        // "Loading AI analysis..." forever.
         console.log('Fetching fresh AI insights from server...');
-    const insightsResponse = await networkAwareFetch('/api/ai/insights');
-        const insights = await insightsResponse.json();
-        
+        const netSummaryEl = document.getElementById('ai-network-summary');
+        if (netSummaryEl) netSummaryEl.textContent = 'Analyzing… this can take a few seconds.';
+
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 60000); // 60s hard cap
+        let insights;
+        try {
+            const insightsResponse = await networkAwareFetch('/api/ai/insights', { signal: ctrl.signal });
+            if (!insightsResponse.ok) throw new Error(`HTTP ${insightsResponse.status}`);
+            insights = await insightsResponse.json();
+        } finally {
+            clearTimeout(timer);
+        }
+
         // Cache the insights
         aiInsightsCache.data = insights;
         aiInsightsCache.timestamp = now;
-        
+
         displayAIInsights(insights);
-        
+
     } catch (error) {
         console.error('Error loading AI insights:', error);
-        // Silently fail - don't disrupt the dashboard if AI is unavailable
+        // Don't leave the card stuck on a loading spinner — show what happened
+        // and offer a retry. Cache stays empty so the next load tries again.
+        aiInsightsCache.data = null;
+        aiInsightsCache.timestamp = null;
+        const netSummaryEl = document.getElementById('ai-network-summary');
+        if (netSummaryEl) {
+            const why = error && error.name === 'AbortError'
+                ? 'The AI analysis took too long to respond.'
+                : 'Could not reach the AI service.';
+            netSummaryEl.innerHTML = '<span class="text-amber-400">' + _esc(why) + '</span> '
+                + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
+        }
     }
 }
 

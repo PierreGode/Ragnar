@@ -93,7 +93,11 @@ Returns AI service status and configuration
 ```
 
 ### GET /api/ai/insights
-Returns comprehensive AI insights
+Returns comprehensive AI insights. The independent analyses (network summary,
+vulnerability, weakness, posture) are generated **concurrently** server-side, so
+a cold call costs about one LLM round-trip (~5–10s) rather than the sum of all
+four; results are cached (1h server-side, 1h client-side). The dashboard card
+shows a loading state and, on timeout/error, a visible Retry rather than hanging.
 ```json
 {
   "enabled": true,
