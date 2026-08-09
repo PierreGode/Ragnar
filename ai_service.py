@@ -827,22 +827,19 @@ Keep it tight and practical."""
                 self.logger.error(f"AI insights: findings fetch failed, "
                                   f"skipping vuln/weakness: {exc}")
 
-        # Cap concurrency at 2. Fanning out all four at once cut latency on a
-        # fast box, but when 6 units share one API key that's a 24-wide burst
-        # that trips OpenAI's per-key rate limits — the biggest call (weakness)
-        # loses first, which is exactly the "weakness never loads" report. Two
-        # at a time still roughly halves the sequential time while staying gentle
-        # on the shared key.
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(tasks))) as ex:
-            future_key = {ex.submit(fn): key for key, fn in tasks.items()}
-            for fut in concurrent.futures.as_completed(future_key):
-                key = future_key[fut]
-                try:
-                    output[key] = fut.result()
-                except Exception as exc:  # one analysis failing shouldn't sink the rest
-                    self.logger.error(f"AI insight '{key}' failed: {exc}")
-                    output[key] = None
+        # Run the analyses SEQUENTIALLY. This whole method runs in a background
+        # thread (the dashboard doesn't wait on it), so latency no longer matters
+        # — and sequential is the most robust choice on a small board: no nested
+        # thread pool to spawn under memory pressure, and never more than one
+        # OpenAI request in flight per unit, which is the gentlest possible on a
+        # shared API key. Each call is independently bounded by the client's
+        # per-request timeout, and one failing never sinks the rest.
+        for key, fn in tasks.items():
+            try:
+                output[key] = fn()
+            except Exception as exc:  # one analysis failing shouldn't sink the rest
+                self.logger.error(f"AI insight '{key}' failed: {exc}")
+                output[key] = None
 
         # Tell the UI which analyses were attempted and which of those came back
         # empty (failed/rate-limited) — so it can show "temporarily unavailable +

@@ -22335,7 +22335,7 @@ _ai_insights_state = {
     'lock': threading.Lock(),
 }
 _AI_INSIGHTS_TTL = 3600      # serve a completed result for an hour before recomputing
-_AI_INSIGHTS_STALE = 180     # a 'computing' flag older than this is a dead run — restart
+_AI_INSIGHTS_STALE = 300     # a 'computing' flag older than this is a dead run — restart
 
 
 def _compute_ai_insights_bg():
