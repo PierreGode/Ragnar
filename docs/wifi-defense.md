@@ -146,11 +146,27 @@ panel's last scan (no fresh capture) and contains:
   evil twins / duplicate SSIDs, KARMA/MANA — each with its detail line;
 - **airspace posture**: distinct SSID/BSSID counts against the flood
   thresholds, plus the randomized-MAC **LA-ratio** (high = spoofed frames);
-- the full **access-point inventory** (BSSID, SSID, channel, RSSI, beacons).
+- the full **access-point inventory** (BSSID, SSID, channel, RSSI, beacons);
+- when you've run **Analyze with AI**, the **AI analysis** itself, rendered
+  inline (it notes which of the three modules it covered).
 
 The same shared report engine renders the Spectrum Analyzer and Wardriving
 reports, so all three are one visual family. Informal — not a certified
 assessment.
+
+### 🤖 Analyze with AI (all three modules, one read)
+
+The **Analyze with AI** button sends whatever the panel currently holds — the
+WIDS scan plus any **Airtime** and **Client-isolation** captures you've run — to
+the AI in a **single** call, and returns one correlated read across all three
+modules. Because it reasons over the modules together it can tie evidence across
+them (a deauth burst lining up with a retry spike, or a "rogue AP" that's really
+a legit AP with a randomized-MAC client), and it calibrates severity against the
+capture length so a short hopping capture reads as weak evidence rather than an
+incident. Run each module first for the fullest picture. The read is stashed so
+the **Report** button embeds it. Needs an OpenAI token configured in **Config**
+(the button is a no-op with a hint otherwise). Advisory only — see
+[AI integration](AI_INTEGRATION.md).
 
 ---
 
@@ -167,7 +183,8 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET/POST /api/wifidef/thresholds` | get / set the beacon-flood thresholds (`{beacon_ssids, beacon_bssids}`) |
 | `GET /api/wifidef/airtime?interface=&seconds=&channel=` | passive airtime / retry / PHY-rate / roaming diagnostics |
 | `GET /api/wifidef/isolation?interface=&seconds=&channel=` | passive per-BSS client-isolation audit (+ mesh/ESS rollup) |
-| `POST /api/wifidef/report` | `{scan}` (the panel's last capture) → printable HTML incident report |
+| `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
+| `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 
 ## Airtime & link quality

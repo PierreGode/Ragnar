@@ -15663,8 +15663,9 @@ def register_network_diagnostics(app, logger=None):
         if not isinstance(scan, dict) or 'threat' not in scan:
             return _bad('No capture data — run a WiFi Defense scan first')
         device = (data.get('device') or 'Ragnar').strip()[:64]
+        ai = data.get('ai') if isinstance(data.get('ai'), dict) else None
         _log("wifidef/report")
-        html = report_common.build_defense_report_html(scan, device_name=device)
+        html = report_common.build_defense_report_html(scan, device_name=device, ai=ai)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
     @app.route('/api/net/isp', methods=['GET'])

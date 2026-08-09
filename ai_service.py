@@ -667,6 +667,92 @@ note which watchers are reporting. Keep it short."""
         return resp
 
     # ===================================================================
+    #   WI-FI DEFENSE  (WIDS + airtime + client-isolation, one read)
+    # ===================================================================
+
+    def analyze_wifi_defense(self, context: Dict):
+        """One professional read across the three WiFi Defense modules for a
+        single capture window: the 802.11 WIDS scan (deauth/beacon floods,
+        rogue/evil-twin APs, KARMA, airspace posture), the airtime / link-quality
+        analysis (retry rates, airtime hogs, slow/legacy clients, weak security),
+        and the client-isolation observer (whether stations can reach each other
+        on the same BSS/mesh). `context` is assembled by /api/ai/wifidef-analyze
+        from whatever the panel currently holds. Neutral SOC-analyst tone."""
+        if not self.is_enabled():
+            return None
+
+        wids = (context or {}).get('wids') or {}
+        airtime = (context or {}).get('airtime') or {}
+        isolation = (context or {}).get('isolation') or {}
+        key = self._cache_key("wifidef", {
+            "threat": wids.get('threat'),
+            "dets": len(wids.get('detections') or []),
+            "at": len(airtime.get('findings') or []),
+            "iso": [(b.get('bssid'), b.get('verdict')) for b in (isolation.get('bss') or [])[:12]],
+            "frames": wids.get('frames'),
+        })
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        present = []
+        if wids:
+            present.append("WIDS")
+        if airtime:
+            present.append("airtime/link-quality")
+        if isolation:
+            present.append("client-isolation")
+
+        data_json = json.dumps(context, indent=2, default=str)[:6500]
+        system = (
+            "You are a professional wireless security operations analyst reviewing "
+            "a single passive 802.11 monitor-mode capture through three lenses: an "
+            "intrusion-detection (WIDS) view (deauth/disassoc and beacon floods, "
+            "rogue / evil-twin APs, KARMA/MANA, airspace posture such as SSID/BSSID "
+            "counts, randomized-MAC ratio), an airtime / link-quality view (retry "
+            "rates, airtime hogs, slow or legacy clients, ERP/HT protection, weak "
+            "security/ciphers, WPS exposure), and a client-isolation view (whether "
+            "stations on the same BSS/mesh can reach each other). Correlate ACROSS "
+            "the three — e.g. tie a deauth burst to a retry spike, or note that a "
+            "flagged 'rogue' is likely a legit AP with a randomized-MAC client. "
+            "Base every statement strictly on the data; do not invent BSSIDs, SSIDs "
+            "or counts. Calibrate severity against capture length and volume — a few "
+            "deauths or a short hopping capture is weak evidence, not an incident; "
+            "say when the data is inconclusive and what would confirm it. If the "
+            "airspace looks clean, say so plainly. Neutral professional tone, no "
+            "personas. Use short markdown sections and bullet points."
+        )
+        user = f"""Review this WiFi Defense capture ({', '.join(present) or 'no modules'} present).
+
+Data (JSON):
+{data_json}
+
+Provide:
+
+**Verdict** — one or two sentences: is the airspace clear, or the single most
+important issue (threat, link-quality, or isolation) if not.
+
+**Threats & anomalies** — WIDS detections that matter, quoting the counts /
+reason codes / BSSIDs. Distinguish real attacks from benign explanations.
+
+**Link quality** — the airtime findings worth acting on (retry/airtime/legacy/
+security), only if the airtime data supports them.
+
+**Client isolation** — the isolation verdicts and what they mean, only if that
+data is present.
+
+**Recommended actions** — concrete, prioritized next steps for the highest
+items. If the capture is too short/hopping to be sure, say so and name the one
+capture (fixed channel, longer dwell) that would confirm it.
+
+Keep it tight and practical."""
+
+        resp = self._ask(system, user)
+        if resp:
+            self._cache_set(key, resp)
+        return resp
+
+    # ===================================================================
     #   PARALLEL BATCH PREP (FUTURE SUPPORT)
     # ===================================================================
 

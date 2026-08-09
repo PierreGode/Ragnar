@@ -130,6 +130,18 @@ when BT/Zigbee load on ch 1/6/11 is significant), and the response's `overlays`
 field lists which were included. The pressure figures are heuristic activity
 estimates, not measured energy, and the prompt says so.
 
+### POST /api/ai/wifidef-analyze
+One professional read across the **three WiFi Defense modules** for the capture
+the panel currently holds, used by the **WiFi Defense → "Analyze with AI"**
+button. Body: `{"wids": <do_scan>, "airtime": <do_airtime?>, "isolation": <do_isolation?>}`.
+The server compacts each module (WIDS threat/detections/airspace, airtime
+findings + per-AP retry/airtime, client-isolation verdicts) and asks the model
+to **correlate across all three** — e.g. tying a deauth burst to a retry spike,
+or flagging a "rogue" that's really a legit AP with a randomized-MAC client.
+Returns the analysis plus the `modules` that were included. Severity is
+calibrated against capture length so a short hopping capture reads as weak
+evidence, not an incident. Neutral SOC-analyst tone.
+
 ### POST /api/ai/clear-cache
 Clears the AI response cache
 

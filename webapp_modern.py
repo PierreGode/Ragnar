@@ -22523,6 +22523,84 @@ def ai_wifi_analyze():
         return jsonify({'error': str(e)}), 500
 
 
+def _wifidef_ai_context(wids, airtime, isolation):
+    """Compact the three WiFi Defense modules' payloads into the small context
+    the AI reasons over — WIDS scan (wifi_defense.do_scan), airtime analysis
+    (do_airtime) and the client-isolation observer (do_isolation). Only the
+    decision-driving fields are kept so the prompt stays tight."""
+    ctx = {}
+    if isinstance(wids, dict) and 'threat' in wids:
+        aspace = wids.get('airspace') or {}
+        ctx['wids'] = {
+            'threat': wids.get('threat'),
+            'frames': wids.get('frames'),
+            'seconds': wids.get('seconds'),
+            'channel': wids.get('channel'),
+            'counts': wids.get('counts') or {},
+            'airspace': {k: aspace.get(k) for k in
+                         ('ssids', 'bssids', 'random_bssids', 'la_ratio')},
+            'ap_count': len(wids.get('aps') or []),
+            'detections': [
+                {'type': d.get('type'), 'severity': d.get('severity'),
+                 'detail': d.get('detail')}
+                for d in (wids.get('detections') or [])[:20]],
+        }
+    if isinstance(airtime, dict) and (airtime.get('aps') or airtime.get('findings')):
+        ctx['airtime'] = {
+            'frames': airtime.get('frames'),
+            'hopping': airtime.get('hopping'),
+            'findings': [
+                {'type': f.get('type'), 'detail': f.get('detail')}
+                for f in (airtime.get('findings') or [])[:20]],
+            'aps': [
+                {'ssid': a.get('ssid'), 'bssid': a.get('bssid'),
+                 'security': a.get('security'), 'phy': a.get('ap_phy'),
+                 'retry_pct': a.get('retry_pct'), 'airtime_pct': a.get('airtime_pct'),
+                 'rssi': a.get('rssi')}
+                for a in (airtime.get('aps') or [])[:20]],
+        }
+    if isinstance(isolation, dict) and (isolation.get('bss') or isolation.get('frames')):
+        ctx['isolation'] = {
+            'frames': isolation.get('frames'),
+            'hopping': isolation.get('hopping'),
+            'bss': [
+                {'ssid': b.get('ssid'), 'bssid': b.get('bssid'),
+                 'verdict': b.get('verdict'), 'clients': b.get('clients'),
+                 'peer_attempts': b.get('attempts'),
+                 'peer_relays': b.get('relays')}
+                for b in (isolation.get('bss') or [])[:20]],
+        }
+    return ctx
+
+
+@app.route('/api/ai/wifidef-analyze', methods=['POST'])
+def ai_wifidef_analyze():
+    """One professional AI read across the three WiFi Defense modules for the
+    capture the panel currently holds. Body:
+    `{"wids": <do_scan>, "airtime": <do_airtime?>, "isolation": <do_isolation?>}`.
+    Returns the analysis plus which modules were included."""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({'enabled': False,
+                            'message': 'AI service is not enabled. Configure an OpenAI API token in the Config tab.'})
+        body = request.get_json(silent=True) or {}
+        context = _wifidef_ai_context(body.get('wids'), body.get('airtime'),
+                                      body.get('isolation'))
+        if not context:
+            return jsonify({'enabled': True, 'analysis': None,
+                            'message': 'Run a WiFi Defense scan first, then Analyze with AI.'})
+        analysis = ai_service.analyze_wifi_defense(context)
+        return jsonify({
+            'enabled': True,
+            'analysis': analysis,
+            'modules': list(context.keys()),
+        })
+    except Exception as e:
+        logger.error(f"Error in AI WiFi Defense analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/ai/network-summary')
 def get_ai_network_summary():
     """Get AI-generated network security summary"""

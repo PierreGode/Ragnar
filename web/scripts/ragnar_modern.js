@@ -4292,7 +4292,51 @@ function _wifidefLoop() {
 // Printable WIDS incident report from the latest capture.
 function wifidefExportReport() {
     _openScanReport('/api/wifidef/report', _wifidef.data,
-        'Run a WiFi Defense scan first, then export the report.');
+        'Run a WiFi Defense scan first, then export the report.',
+        { ai: _wifidef.ai || null });
+}
+
+// One professional AI read across all three WiFi Defense modules (WIDS +
+// airtime + client isolation) for whatever the panel currently holds. Stashes
+// the result so the report can embed it.
+async function wifidefAnalyzeAI() {
+    const panel = document.getElementById('wifidef-ai-panel');
+    const content = document.getElementById('wifidef-ai-content');
+    const status = document.getElementById('wifidef-ai-status');
+    const btn = document.getElementById('wifidef-ai-btn');
+    if (panel) panel.classList.remove('hidden');
+    if (!_wifidef.data || !('threat' in _wifidef.data)) {
+        if (content) content.innerHTML = '<span class="text-amber-400">Run a WiFi Defense scan first, then Analyze with AI.</span>';
+        return;
+    }
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = '';
+    if (content) content.innerHTML = '<span class="text-gray-400">Correlating WIDS, airtime and client-isolation evidence…</span>';
+    try {
+        const resp = await fetch('/api/ai/wifidef-analyze', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                wids: _wifidef.data || null,
+                airtime: _wifidef.airtime || null,
+                isolation: _wifidef.isolation || null
+            })
+        });
+        const d = await resp.json();
+        if (d.enabled === false) {
+            content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'AI is not enabled.') + '</span>';
+            return;
+        }
+        if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
+        if (!d.analysis) { content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'No analysis returned.') + '</span>'; return; }
+        content.innerHTML = formatAIText(d.analysis);
+        _wifidef.ai = { text: d.analysis, modules: d.modules || [], ts: Date.now() };
+        const mods = (d.modules || []).map(m => m === 'isolation' ? 'client-isolation' : m).join(' + ');
+        if (status) status.textContent = mods ? 'covers ' + mods : '';
+    } catch (e) {
+        content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function wifidefStopContinuous() {
@@ -4474,6 +4518,9 @@ function wifidefScan() {
             _wifidef.monitor = d.monitor || _wifidef.monitor;
             _wifidefUpdateMonBtn();
             _wifidef.data = d;
+            // A fresh WIDS capture invalidates an earlier AI read so it isn't
+            // embedded into a report describing a different capture window.
+            _wifidef.ai = null;
             st.textContent = `${d.frames} frames · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`
                 + (_wifidef.continuous ? ' · live' : '');
             wifidefRender();
@@ -4552,6 +4599,7 @@ function wifidefAirtime() {
             if (btn) btn.disabled = false;
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} frames${d.hopping ? ' · hopping (airtime % approx)' : ''}`;
+            _wifidef.airtime = d;  // stash for the unified AI read + report
             wifidefRenderAirtime(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Airtime scan failed'; });
 }
@@ -4710,6 +4758,7 @@ function wifidefIsolation() {
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} data frames · ${(d.bss || []).length} BSS`
                 + (d.hopping ? ' · hopping (dwell on one channel for solid verdicts)' : '');
+            _wifidef.isolation = d;  // stash for the unified AI read + report
             wifidefRenderIsolation(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Observation failed'; });
 }

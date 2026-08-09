@@ -202,6 +202,10 @@ def ai_analysis_section(ai, *, heading='AI analysis'):
     if ov:
         label = {'bt': 'Bluetooth/BLE', 'zigbee': 'Zigbee'}
         meta.append('Includes ' + ', '.join(label.get(o, o) for o in ov))
+    mods = ai.get('modules') or []
+    if mods:
+        label = {'wids': 'WIDS', 'airtime': 'airtime', 'isolation': 'client-isolation'}
+        meta.append('Covers ' + ', '.join(label.get(m, m) for m in mods))
     meta_html = ('<div class="sub" style="margin:-4px 0 10px">%s</div>'
                  % ' · '.join(meta)) if meta else ''
     return ('<h2>%s</h2>%s<div class="ai-note">%s</div>'
@@ -274,8 +278,11 @@ _DEF_SEV_COLOR = {
 }
 
 
-def build_defense_report_html(scan, device_name='Ragnar'):
-    """Render a WIDS incident report from a wifi_defense.do_scan() result."""
+def build_defense_report_html(scan, device_name='Ragnar', ai=None):
+    """Render a WIDS incident report from a wifi_defense.do_scan() result.
+
+    `ai` is an optional stashed AI analysis ({text, modules, ...}) from the WiFi
+    Defense "Analyze with AI" button; when present it's embedded as a section."""
     scan = scan or {}
     threat = (scan.get('threat') or 'clear').lower()
     verdict = {'clear': 'CLEAR', 'warning': 'WARNING', 'critical': 'CRITICAL'}.get(threat, threat.upper())
@@ -338,6 +345,9 @@ def build_defense_report_html(scan, device_name='Ragnar'):
                 '%s dBm' % a.get('rssi', '?'), a.get('beacons', 0)]
                for a in aps[:150]]
     body.append(data_table(['SSID', 'BSSID', 'Ch', 'RSSI', 'Beacons'], ap_rows))
+
+    # AI read across the three WiFi Defense modules, if the user ran one.
+    body.append(ai_analysis_section(ai, heading='AI analysis'))
 
     return page_shell(
         title='Ragnar WIDS Incident Report',
