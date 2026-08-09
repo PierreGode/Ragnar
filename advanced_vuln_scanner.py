@@ -1086,6 +1086,11 @@ class AdvancedVulnScanner:
             elif t:
                 t = 'http://' + t
             target = t
+            # If no explicit port was given, probe for a live web port so ZAP
+            # scans the service that's actually listening instead of assuming
+            # :80 and hard-failing on an HTTPS-only or alt-port host. Skipped
+            # for nmap (raw host) by the scan_type guard above.
+            target = self._resolve_web_target(target)
 
         with self._lock:
             self._scan_counter += 1
@@ -2671,6 +2676,94 @@ class AdvancedVulnScanner:
 
         # Other HTTP errors
         return f"ZAP API error {code}: {error_detail[:200] if error_detail else 'Unknown error'}"
+
+    # Common web ports probed when the operator gives a bare host with NO explicit
+    # port. ZAP hard-validates reachability and would otherwise assume :80 and fail
+    # on a host that only serves HTTPS or runs on an alt port (Nuclei never
+    # validated, which is why it "worked" where ZAP didn't). Ordered by preference.
+    _WEB_PROBE_PORTS = (80, 443, 8080, 8443, 8000, 8888, 8081, 3000, 5000,
+                        9443, 9090, 8090, 8008, 8181)
+
+    def _probe_web_port(self, host: str, port: int, timeout: float = 2.0):
+        """Return (open: bool, scheme: str) for host:port — https if a TLS
+        handshake succeeds (self-signed tolerated), else http if the raw TCP
+        connect succeeds."""
+        import ssl
+        try:
+            raw = socket.create_connection((host, port), timeout=timeout)
+        except Exception:
+            return False, ""
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            server_hostname = None
+            try:
+                socket.inet_aton(host)
+            except OSError:
+                server_hostname = host  # SNI only for real hostnames
+            tls = ctx.wrap_socket(raw, server_hostname=server_hostname)
+            tls.close()
+            return True, "https"
+        except Exception:
+            try:
+                raw.close()
+            except Exception:
+                pass
+            return True, "http"
+
+    def _resolve_web_target(self, target: str) -> str:
+        """When `target` is a URL with no explicit port, probe common web ports
+        and rewrite it to a scheme://host[:port] that is actually listening, so
+        ZAP scans the live service instead of blindly defaulting to :80.
+
+        Respects an explicit port (returns unchanged). Returns the original
+        target unchanged if nothing is reachable (validation then reports the
+        clear per-port error)."""
+        try:
+            parsed = urllib.parse.urlparse(target)
+        except Exception:
+            return target
+        if not parsed.netloc or parsed.port:
+            return target  # no host, or operator pinned a port — respect it
+        host = parsed.netloc.split(':')[0].strip('[]')
+        if not host:
+            return target
+
+        import concurrent.futures
+        found = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._WEB_PROBE_PORTS)) as ex:
+            futs = {ex.submit(self._probe_web_port, host, p): p
+                    for p in self._WEB_PROBE_PORTS}
+            for fut in concurrent.futures.as_completed(futs, timeout=6):
+                p = futs[fut]
+                try:
+                    ok, scheme = fut.result()
+                except Exception:
+                    ok, scheme = False, ""
+                if ok:
+                    found[p] = scheme
+        if not found:
+            return target  # nothing listening — let validation explain
+
+        # Prefer the scheme the operator implied (bare IP -> http), then the
+        # other canonical port, then the lowest-numbered open port.
+        implied = (parsed.scheme or 'http').lower()
+        order = [80, 443] if implied == 'http' else [443, 80]
+        chosen_port = next((p for p in order if p in found),
+                           min(found.keys()))
+        scheme = found[chosen_port]
+        rest = parsed.path or ''
+        if parsed.query:
+            rest += '?' + parsed.query
+        if (scheme == 'http' and chosen_port == 80) or (scheme == 'https' and chosen_port == 443):
+            resolved = f"{scheme}://{host}{rest}"
+        else:
+            resolved = f"{scheme}://{host}:{chosen_port}{rest}"
+        if resolved != target:
+            logger.info(f"[TARGET-RESOLVE] {target} -> {resolved} "
+                        f"(open web ports: {sorted(found)})")
+        return resolved
 
     def _validate_target_url(self, target: str) -> Tuple[bool, str]:
         """Validate that a target URL is properly formatted and potentially reachable"""
