@@ -22817,12 +22817,33 @@ let aiInsightsCache = {
     ttl: 3600000 // 1 hour in milliseconds
 };
 
-// Load AI status and insights
-async function loadAIInsights() {
+// The server computes insights in the background and returns status:'computing'
+// until the first run lands, so the page polls rather than blocking on the slow
+// generation (which is what timed out on Pi Zeros). This tracks that poll.
+let _aiInsightsPoll = { timer: null, attempts: 0, max: 24 }; // ~24 × 6s ≈ 2.5 min
+function _aiClearPoll() { if (_aiInsightsPoll.timer) { clearTimeout(_aiInsightsPoll.timer); _aiInsightsPoll.timer = null; } }
+function _aiSchedulePoll() {
+    _aiClearPoll();
+    if (_aiInsightsPoll.attempts >= _aiInsightsPoll.max) return;  // give up quietly after the budget
+    _aiInsightsPoll.attempts++;
+    _aiInsightsPoll.timer = setTimeout(() => loadAIInsights(), 6000);
+}
+// Friendly "still working" state for the first run (no prior result to show).
+function _aiShowComputing() {
+    const msg = '<span class="text-purple-300">Analyzing…</span> '
+        + '<span class="text-gray-500 text-xs">first run can take up to a minute on small boards.</span>';
+    ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+        const el = document.getElementById(id); if (el) el.innerHTML = msg;
+    });
+}
+
+// Load AI status and insights. `force` re-runs the server-side generation
+// (used by the Refresh button) and bypasses the client cache.
+async function loadAIInsights(force = false) {
     try {
         // Check client-side cache first
         const now = Date.now();
-        if (aiInsightsCache.data && aiInsightsCache.timestamp) {
+        if (!force && aiInsightsCache.data && aiInsightsCache.timestamp) {
             const age = now - aiInsightsCache.timestamp;
             if (age < aiInsightsCache.ttl) {
                 // Use cached data - don't make API call
@@ -22831,7 +22852,7 @@ async function loadAIInsights() {
                 return;
             }
         }
-        
+
         // First check AI status
     const statusResponse = await networkAwareFetch('/api/ai/status');
         const status = await statusResponse.json();
@@ -22859,28 +22880,41 @@ async function loadAIInsights() {
             modelName.textContent = status.model;
         }
         
-        // Load comprehensive insights. This is several LLM round-trips server
-        // side (parallelized to ~5-10s); show a clear loading state and bound
-        // the wait so a hung request surfaces an error instead of sitting on
-        // "Loading AI analysis..." forever.
-        console.log('Fetching fresh AI insights from server...');
-        const netSummaryEl = document.getElementById('ai-network-summary');
-        if (netSummaryEl) netSummaryEl.textContent = 'Analyzing… this can take a few seconds.';
+        // Fetch insights. The server computes them in the BACKGROUND and answers
+        // immediately, so this request is quick — a short timeout is right, and a
+        // real timeout now means a genuine connectivity problem, not slow AI.
+        console.log('Fetching AI insights from server...');
+        if (force) { _aiInsightsPoll.attempts = 0; _aiShowComputing(); }
 
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 60000); // 60s hard cap
+        const timer = setTimeout(() => ctrl.abort(), 20000);
         let insights;
         try {
-            const insightsResponse = await networkAwareFetch('/api/ai/insights', { signal: ctrl.signal });
+            const url = '/api/ai/insights' + (force ? '?refresh=1' : '');
+            const insightsResponse = await networkAwareFetch(url, { signal: ctrl.signal });
             if (!insightsResponse.ok) throw new Error(`HTTP ${insightsResponse.status}`);
             insights = await insightsResponse.json();
         } finally {
             clearTimeout(timer);
         }
 
-        // Cache the insights. If some analyses failed (rate-limited on a shared
-        // key, etc.), keep the cache short so it retries soon instead of showing
-        // a half-empty card for the full hour.
+        if (insights.status === 'computing') {
+            // First run (or a forced refresh) is still generating server-side.
+            // Show any prior result meanwhile, else a friendly "Analyzing…", and
+            // keep polling until the completed result lands. Don't cache this.
+            const hasData = !!(insights.network_summary || insights.vulnerability_analysis
+                || insights.weakness_analysis || insights.posture_analysis);
+            if (hasData) displayAIInsights(insights);
+            else _aiShowComputing();
+            _aiSchedulePoll();
+            return;
+        }
+
+        // Completed result — stop polling, cache and display it. If some analyses
+        // failed (rate-limited on a shared key, etc.), keep the cache short so it
+        // retries soon instead of showing a half-empty card for the full hour.
+        _aiClearPoll();
+        _aiInsightsPoll.attempts = 0;
         aiInsightsCache.data = insights;
         aiInsightsCache.timestamp = now;
         aiInsightsCache.ttl = (insights.failed && insights.failed.length) ? 120000 : 3600000;
@@ -22889,23 +22923,20 @@ async function loadAIInsights() {
 
     } catch (error) {
         console.error('Error loading AI insights:', error);
+        _aiClearPoll();
         // Don't leave the card stuck on a loading spinner — show what happened
         // on every section and offer a retry. Cache stays empty so the next
         // load tries again.
         aiInsightsCache.data = null;
         aiInsightsCache.timestamp = null;
         const why = error && error.name === 'AbortError'
-            ? 'The AI analysis took too long to respond.'
+            ? 'The AI service did not respond.'
             : 'Could not reach the AI service.';
         const errHtml = '<span class="text-amber-400">' + _esc(why) + '</span> '
             + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Retry</button>';
-        const netSummaryEl = document.getElementById('ai-network-summary');
-        if (netSummaryEl) netSummaryEl.innerHTML = errHtml;
-        // Clear the other two sections' stale "Analyzing…" placeholders too.
-        const vulnEl = document.getElementById('ai-vuln-summary');
-        if (vulnEl) vulnEl.innerHTML = errHtml;
-        const weakEl = document.getElementById('ai-weakness-summary');
-        if (weakEl) weakEl.innerHTML = errHtml;
+        ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
+        });
     }
 }
 
@@ -23032,26 +23063,20 @@ function displayAIInsights(insights) {
 // Refresh AI insights (force refresh, clear both client and server cache)
 async function refreshAIInsights() {
     try {
-        // Clear client-side cache
+        // Clear client-side cache and stop any in-flight poll.
         aiInsightsCache.data = null;
         aiInsightsCache.timestamp = null;
-        
-        // Clear server-side cache
-    await networkAwareFetch('/api/ai/clear-cache', { method: 'POST' });
-        
-        // Show loading state
-        const networkSummary = document.getElementById('ai-network-summary');
-        const vulnSummary = document.getElementById('ai-vuln-summary');
-        const weaknessSummary = document.getElementById('ai-weakness-summary');
-        
-        if (networkSummary) networkSummary.textContent = 'Generating new AI analysis...';
-        if (vulnSummary) vulnSummary.textContent = 'Analyzing vulnerabilities...';
-        if (weaknessSummary) weaknessSummary.textContent = 'Identifying network weaknesses...';
-        
-        // Reload insights (will fetch fresh data since cache is cleared)
-        await loadAIInsights();
-        
-        showNotification('AI insights refreshed successfully', 'success');
+        _aiClearPoll();
+        _aiInsightsPoll.attempts = 0;
+
+        // Clear the server-side per-call cache too.
+        await networkAwareFetch('/api/ai/clear-cache', { method: 'POST' });
+
+        // Kick off a forced server-side recompute; loadAIInsights(true) shows the
+        // "Analyzing…" state and polls until the fresh result lands.
+        await loadAIInsights(true);
+
+        showNotification('Refreshing AI insights…', 'success');
     } catch (error) {
         console.error('Error refreshing AI insights:', error);
         showNotification('Failed to refresh AI insights', 'error');
