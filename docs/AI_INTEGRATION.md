@@ -116,11 +116,31 @@ Returns weakness analysis only
 ### POST /api/ai/wifi-analyze
 Professional assessment of the **current Wi-Fi connection and RF environment**,
 used by the **WiFi Spectrum Analyzer → "Analyze with AI"** button. Body:
-`{"scan": <result of /api/net/wifi/scan>}`. The server determines the connected
-network itself (`iw dev … link`), enriches it from the scan (channel, width,
-security, Wi-Fi generation), computes the co-/adjacent-channel picture, and
-returns prioritized, plain-language recommendations (band/channel/width/security
-changes, AP placement). Neutral professional tone — no persona.
+`{"scan": <result of /api/net/wifi/scan>, "bt": <bt overlay?>, "zb": <zigbee overlay?>}`.
+The server determines the connected network itself (`iw dev … link`), enriches
+it from the scan (channel, width, security, Wi-Fi generation), computes the
+co-/adjacent-channel picture, and returns prioritized, plain-language
+recommendations (band/channel/width/security changes, AP placement). Neutral
+professional tone — no persona.
+
+When the **Bluetooth** and/or **Zigbee** 2.4 GHz overlays are active, the panel
+also passes those payloads. The AI folds their **per-Wi-Fi-channel coexistence
+pressure** into its 2.4 GHz channel advice (e.g. recommending a move to 5/6 GHz
+when BT/Zigbee load on ch 1/6/11 is significant), and the response's `overlays`
+field lists which were included. The pressure figures are heuristic activity
+estimates, not measured energy, and the prompt says so.
+
+### POST /api/ai/wifidef-analyze
+One professional read across the **three WiFi Defense modules** for the capture
+the panel currently holds, used by the **WiFi Defense → "Analyze with AI"**
+button. Body: `{"wids": <do_scan>, "airtime": <do_airtime?>, "isolation": <do_isolation?>}`.
+The server compacts each module (WIDS threat/detections/airspace, airtime
+findings + per-AP retry/airtime, client-isolation verdicts) and asks the model
+to **correlate across all three** — e.g. tying a deauth burst to a retry spike,
+or flagging a "rogue" that's really a legit AP with a randomized-MAC client.
+Returns the analysis plus the `modules` that were included. Severity is
+calibrated against capture length so a short hopping capture reads as weak
+evidence, not an incident. Neutral SOC-analyst tone.
 
 ### POST /api/ai/clear-cache
 Clears the AI response cache

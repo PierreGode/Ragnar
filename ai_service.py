@@ -540,15 +540,38 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             return None
 
         connected = (context or {}).get("connected")
+        bt = (context or {}).get("bt")
+        zb = (context or {}).get("zigbee")
         key = self._cache_key("wifi_conn", {
             "bssid": (connected or {}).get("bssid"),
             "signal": (connected or {}).get("signal_dbm"),
             "cochannel": (context or {}).get("co_channel_count"),
             "aps": (context or {}).get("ap_total"),
+            # Include the non-Wi-Fi 2.4 GHz overlays so enabling/refreshing them
+            # busts the cache instead of serving a Wi-Fi-only verdict.
+            "bt": (bt or {}).get("device_count") if bt else None,
+            "zb": (zb or {}).get("device_count") if zb else None,
         })
         cached = self._cache_get(key)
         if cached:
             return cached
+
+        # Which non-Wi-Fi 2.4 GHz sources are present shapes what we ask for.
+        overlays = []
+        if bt:
+            overlays.append("Bluetooth/BLE")
+        if zb:
+            overlays.append("Zigbee / 802.15.4")
+        overlay_line = (
+            (" The data also includes non-Wi-Fi 2.4 GHz emitters discovered "
+             "alongside the Wi-Fi scan (" + " and ".join(overlays) + "), under "
+             "the 'bt' and/or 'zigbee' keys, with an estimated per-Wi-Fi-channel "
+             "pressure for channels 1/6/11/13. Treat these as coexistence load on "
+             "the 2.4 GHz band: factor them into 2.4 GHz channel advice and, when "
+             "they are significant, recommend moving affected clients to 5/6 GHz. "
+             "The pressure figures are heuristic activity estimates, not measured "
+             "energy — say so and do not overstate them.") if overlays else ""
+        )
 
         data_json = json.dumps(context, indent=2, default=str)[:6000]
         system = (
@@ -560,6 +583,7 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             "do not invent SSIDs, channels or values that are not present. If the "
             "user is not associated to a network, say so and analyze the "
             "environment instead. Use short markdown sections and bullet points."
+            + overlay_line
         )
         user = f"""Analyze this Wi-Fi connection and RF environment.
 
@@ -574,8 +598,10 @@ short paragraph.
 
 **Issues found** — concrete problems supported by the data, e.g. co-channel or
 adjacent-channel congestion, 2.4 GHz use where 5 GHz is available, weak signal,
-legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, or a crowded
-channel. Only list issues the data supports.
+legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, a crowded
+channel, or — when the bt/zigbee overlays are present — non-Wi-Fi 2.4 GHz
+coexistence pressure from Bluetooth/BLE or Zigbee on channels 1/6/11. Only list
+issues the data supports.
 
 **Recommendations** — prioritized, specific actions (e.g. "move to 5 GHz",
 "change to channel 44", "widen to 80 MHz", "upgrade to WPA2/WPA3-CCMP",
@@ -634,6 +660,92 @@ naming the finding codes/summaries present.
 
 If there are no alerts, state that the monitored surface is currently clean and
 note which watchers are reporting. Keep it short."""
+
+        resp = self._ask(system, user)
+        if resp:
+            self._cache_set(key, resp)
+        return resp
+
+    # ===================================================================
+    #   WI-FI DEFENSE  (WIDS + airtime + client-isolation, one read)
+    # ===================================================================
+
+    def analyze_wifi_defense(self, context: Dict):
+        """One professional read across the three WiFi Defense modules for a
+        single capture window: the 802.11 WIDS scan (deauth/beacon floods,
+        rogue/evil-twin APs, KARMA, airspace posture), the airtime / link-quality
+        analysis (retry rates, airtime hogs, slow/legacy clients, weak security),
+        and the client-isolation observer (whether stations can reach each other
+        on the same BSS/mesh). `context` is assembled by /api/ai/wifidef-analyze
+        from whatever the panel currently holds. Neutral SOC-analyst tone."""
+        if not self.is_enabled():
+            return None
+
+        wids = (context or {}).get('wids') or {}
+        airtime = (context or {}).get('airtime') or {}
+        isolation = (context or {}).get('isolation') or {}
+        key = self._cache_key("wifidef", {
+            "threat": wids.get('threat'),
+            "dets": len(wids.get('detections') or []),
+            "at": len(airtime.get('findings') or []),
+            "iso": [(b.get('bssid'), b.get('verdict')) for b in (isolation.get('bss') or [])[:12]],
+            "frames": wids.get('frames'),
+        })
+        cached = self._cache_get(key)
+        if cached:
+            return cached
+
+        present = []
+        if wids:
+            present.append("WIDS")
+        if airtime:
+            present.append("airtime/link-quality")
+        if isolation:
+            present.append("client-isolation")
+
+        data_json = json.dumps(context, indent=2, default=str)[:6500]
+        system = (
+            "You are a professional wireless security operations analyst reviewing "
+            "a single passive 802.11 monitor-mode capture through three lenses: an "
+            "intrusion-detection (WIDS) view (deauth/disassoc and beacon floods, "
+            "rogue / evil-twin APs, KARMA/MANA, airspace posture such as SSID/BSSID "
+            "counts, randomized-MAC ratio), an airtime / link-quality view (retry "
+            "rates, airtime hogs, slow or legacy clients, ERP/HT protection, weak "
+            "security/ciphers, WPS exposure), and a client-isolation view (whether "
+            "stations on the same BSS/mesh can reach each other). Correlate ACROSS "
+            "the three — e.g. tie a deauth burst to a retry spike, or note that a "
+            "flagged 'rogue' is likely a legit AP with a randomized-MAC client. "
+            "Base every statement strictly on the data; do not invent BSSIDs, SSIDs "
+            "or counts. Calibrate severity against capture length and volume — a few "
+            "deauths or a short hopping capture is weak evidence, not an incident; "
+            "say when the data is inconclusive and what would confirm it. If the "
+            "airspace looks clean, say so plainly. Neutral professional tone, no "
+            "personas. Use short markdown sections and bullet points."
+        )
+        user = f"""Review this WiFi Defense capture ({', '.join(present) or 'no modules'} present).
+
+Data (JSON):
+{data_json}
+
+Provide:
+
+**Verdict** — one or two sentences: is the airspace clear, or the single most
+important issue (threat, link-quality, or isolation) if not.
+
+**Threats & anomalies** — WIDS detections that matter, quoting the counts /
+reason codes / BSSIDs. Distinguish real attacks from benign explanations.
+
+**Link quality** — the airtime findings worth acting on (retry/airtime/legacy/
+security), only if the airtime data supports them.
+
+**Client isolation** — the isolation verdicts and what they mean, only if that
+data is present.
+
+**Recommended actions** — concrete, prioritized next steps for the highest
+items. If the capture is too short/hopping to be sure, say so and name the one
+capture (fixed channel, longer dwell) that would confirm it.
+
+Keep it tight and practical."""
 
         resp = self._ask(system, user)
         if resp:

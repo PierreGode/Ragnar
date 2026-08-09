@@ -1701,6 +1701,9 @@ function wifiScan() {
             busy(false);
             if (d.error) { _wifiSetStatus('⚠ ' + d.error); return; }
             _wifiState.data = d;
+            // A fresh scan invalidates any earlier AI read, so it isn't embedded
+            // into a report describing different scan data.
+            _wifiState.ai = null;
             _wifiSetStatus(`${d.ap_count} AP(s) · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`);
             wifiRender();
         }).catch(e => { busy(false); _wifiSetStatus('Scan failed'); });
@@ -1726,9 +1729,15 @@ async function wifiAnalyzeAI() {
             if (!d.error) { _wifiState.data = d; wifiRender(); }
         }
         content.innerHTML = '<span class="text-gray-400">Analyzing your connection and the RF environment…</span>';
+        // Fold in the 2.4 GHz Bluetooth / Zigbee overlays when they're active so
+        // the AI reasons over non-Wi-Fi coexistence too, not just the AP list.
         const resp = await fetch('/api/ai/wifi-analyze', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scan: _wifiState.data || {} })
+            body: JSON.stringify({
+                scan: _wifiState.data || {},
+                bt: _wifiState.btOn ? _wifiState.bt : null,
+                zb: (_wifiState.zbOn && _wifiState.zbAvailable) ? _wifiState.zb : null
+            })
         });
         const d = await resp.json();
         if (d.enabled === false) {
@@ -1737,10 +1746,15 @@ async function wifiAnalyzeAI() {
         }
         if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
         content.innerHTML = formatAIText(d.analysis || 'No analysis returned.');
+        // Stash the analysis so the printable spectrum report can embed it.
+        _wifiState.ai = { text: d.analysis || '', connected: d.connected || null,
+            overlays: d.overlays || [], ts: Date.now() };
         const c = d.connected;
-        status.textContent = c
+        const ov = (d.overlays && d.overlays.length)
+            ? ' · +' + d.overlays.map(o => o === 'zigbee' ? 'Zigbee' : 'BT').join('/') : '';
+        status.textContent = (c
             ? `${c.ssid || c.bssid} · ${c.band || '?'} GHz ch ${c.channel ?? '?'} · ${d.context ? d.context.co_channel_count + ' co-channel' : ''}`
-            : 'not associated — analyzed the environment';
+            : 'not associated — analyzed the environment') + ov;
     } catch (e) {
         content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
     } finally {
@@ -1751,7 +1765,7 @@ async function wifiAnalyzeAI() {
 // Open a printable HTML report in a new tab. POSTs the scan data the panel
 // already holds to a render endpoint (no re-scan), then writes the returned
 // self-contained HTML into the new window so the user can Save-as-PDF.
-function _openScanReport(url, scan, emptyMsg) {
+function _openScanReport(url, scan, emptyMsg, extra) {
     // A WIDS capture is valid even with zero APs (a genuinely clear airspace),
     // so accept anything carrying a threat verdict; the spectrum survey needs APs.
     const hasData = !!scan && (('threat' in scan) || (Array.isArray(scan.aps) && scan.aps.length > 0));
@@ -1760,16 +1774,22 @@ function _openScanReport(url, scan, emptyMsg) {
     if (w) w.document.write('<!DOCTYPE html><title>Generating report…</title>'
         + '<body style="font-family:system-ui,sans-serif;padding:2rem;color:#334">Generating report…</body>');
     fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                 body: JSON.stringify({ scan }) })
+                 body: JSON.stringify(Object.assign({ scan }, extra || {})) })
         .then(r => r.text())
         .then(html => { if (w) { w.document.open(); w.document.write(html); w.document.close(); } })
         .catch(() => { if (w) { try { w.document.body.textContent = 'Report generation failed.'; } catch (e) {} } });
 }
 
-// Printable Wi-Fi spectrum & channel report from the current scan.
+// Printable Wi-Fi spectrum & channel report from the current scan. Carries the
+// live 2.4 GHz Bluetooth / Zigbee overlays and the last AI analysis (if the
+// user ran one) so the report matches everything shown on the panel.
 function wifiExportReport() {
     _openScanReport('/api/net/wifi/report', _wifiState.data,
-        'Run a spectrum scan first, then export the report.');
+        'Run a spectrum scan first, then export the report.', {
+            bt: _wifiState.btOn ? _wifiState.bt : null,
+            zb: (_wifiState.zbOn && _wifiState.zbAvailable) ? _wifiState.zb : null,
+            ai: _wifiState.ai || null
+        });
 }
 
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
@@ -4272,7 +4292,51 @@ function _wifidefLoop() {
 // Printable WIDS incident report from the latest capture.
 function wifidefExportReport() {
     _openScanReport('/api/wifidef/report', _wifidef.data,
-        'Run a WiFi Defense scan first, then export the report.');
+        'Run a WiFi Defense scan first, then export the report.',
+        { ai: _wifidef.ai || null });
+}
+
+// One professional AI read across all three WiFi Defense modules (WIDS +
+// airtime + client isolation) for whatever the panel currently holds. Stashes
+// the result so the report can embed it.
+async function wifidefAnalyzeAI() {
+    const panel = document.getElementById('wifidef-ai-panel');
+    const content = document.getElementById('wifidef-ai-content');
+    const status = document.getElementById('wifidef-ai-status');
+    const btn = document.getElementById('wifidef-ai-btn');
+    if (panel) panel.classList.remove('hidden');
+    if (!_wifidef.data || !('threat' in _wifidef.data)) {
+        if (content) content.innerHTML = '<span class="text-amber-400">Run a WiFi Defense scan first, then Analyze with AI.</span>';
+        return;
+    }
+    if (btn) btn.disabled = true;
+    if (status) status.textContent = '';
+    if (content) content.innerHTML = '<span class="text-gray-400">Correlating WIDS, airtime and client-isolation evidence…</span>';
+    try {
+        const resp = await fetch('/api/ai/wifidef-analyze', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                wids: _wifidef.data || null,
+                airtime: _wifidef.airtime || null,
+                isolation: _wifidef.isolation || null
+            })
+        });
+        const d = await resp.json();
+        if (d.enabled === false) {
+            content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'AI is not enabled.') + '</span>';
+            return;
+        }
+        if (d.error) { content.innerHTML = '<span class="text-red-400">⚠ ' + _esc(d.error) + '</span>'; return; }
+        if (!d.analysis) { content.innerHTML = '<span class="text-amber-400">' + _esc(d.message || 'No analysis returned.') + '</span>'; return; }
+        content.innerHTML = formatAIText(d.analysis);
+        _wifidef.ai = { text: d.analysis, modules: d.modules || [], ts: Date.now() };
+        const mods = (d.modules || []).map(m => m === 'isolation' ? 'client-isolation' : m).join(' + ');
+        if (status) status.textContent = mods ? 'covers ' + mods : '';
+    } catch (e) {
+        content.innerHTML = '<span class="text-red-400">AI analysis failed.</span>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 function wifidefStopContinuous() {
@@ -4454,6 +4518,9 @@ function wifidefScan() {
             _wifidef.monitor = d.monitor || _wifidef.monitor;
             _wifidefUpdateMonBtn();
             _wifidef.data = d;
+            // A fresh WIDS capture invalidates an earlier AI read so it isn't
+            // embedded into a report describing a different capture window.
+            _wifidef.ai = null;
             st.textContent = `${d.frames} frames · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`
                 + (_wifidef.continuous ? ' · live' : '');
             wifidefRender();
@@ -4532,6 +4599,7 @@ function wifidefAirtime() {
             if (btn) btn.disabled = false;
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} frames${d.hopping ? ' · hopping (airtime % approx)' : ''}`;
+            _wifidef.airtime = d;  // stash for the unified AI read + report
             wifidefRenderAirtime(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Airtime scan failed'; });
 }
@@ -4690,6 +4758,7 @@ function wifidefIsolation() {
             if (d.error) { st.textContent = '⚠ ' + d.error; return; }
             st.textContent = `${d.frames} data frames · ${(d.bss || []).length} BSS`
                 + (d.hopping ? ' · hopping (dwell on one channel for solid verdicts)' : '');
+            _wifidef.isolation = d;  // stash for the unified AI read + report
             wifidefRenderIsolation(d);
         }).catch(() => { prog.done(); if (btn) btn.disabled = false; st.textContent = 'Observation failed'; });
 }
