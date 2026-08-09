@@ -1780,17 +1780,11 @@ function _openScanReport(url, scan, emptyMsg, extra) {
         .catch(() => { if (w) { try { w.document.body.textContent = 'Report generation failed.'; } catch (e) {} } });
 }
 
-// Printable Wi-Fi spectrum & channel report from the current scan. Carries the
-// live 2.4 GHz Bluetooth / Zigbee overlays and the last AI analysis (if the
-// user ran one) so the report matches everything shown on the panel.
-function wifiExportReport() {
-    _openScanReport('/api/net/wifi/report', _wifiState.data,
-        'Run a spectrum scan first, then export the report.', {
-            bt: _wifiState.btOn ? _wifiState.bt : null,
-            zb: (_wifiState.zbOn && _wifiState.zbAvailable) ? _wifiState.zb : null,
-            ai: _wifiState.ai || null
-        });
-}
+// NOTE: the active printable Wi-Fi report is the richer client-side
+// wifiExportReport() further down (it also carries the heatmap image + build
+// plan). It renders the 2.4 GHz Bluetooth / Zigbee overlays and the last AI
+// analysis inline. This slot previously held a second, server-rendered
+// wifiExportReport() that was shadowed by that later definition and never ran.
 
 // One auto-refresh tick: the Wi-Fi survey plus any enabled overlays. The
 // Waterfall view streams on its own poll, so it's left alone here.
@@ -2300,6 +2294,80 @@ function wifiExportCsv() {
 
 function _esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
+// ---- Report section builders for the printable WiFi survey report ----------
+// Light-theme markup (own CSS in the print window — no Tailwind), so these emit
+// plain HTML rather than reusing the on-screen dark-themed renderers.
+
+const _RPT_PRESSURE_COLOR = { low: '#64748b', moderate: '#ca8a04', high: '#dc2626' };
+const _RPT_BT_KIND = { le: 'BLE', classic: 'Classic', dual: 'Dual' };
+
+function _wifiReportPressureChips(channels) {
+    const chips = (channels || []).map(c => {
+        const col = _RPT_PRESSURE_COLOR[c.level] || '#64748b';
+        return `<span style="display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;color:#fff;background:${col}">ch${c.wifi_channel}: ${_esc(c.level || '—')}</span>`;
+    });
+    if (!chips.length) return '';
+    return `<p style="margin:6px 0 4px;color:#666;font-size:12px">Estimated Wi-Fi-channel pressure (heuristic, not measured):</p><div style="display:flex;gap:6px;flex-wrap:wrap">${chips.join('')}</div>`;
+}
+
+// Bluetooth / BLE 2.4 GHz overlay → HTML section (or '' when absent/off).
+function _wifiReportBtHtml() {
+    if (!_wifiState.btOn) return '';
+    const bt = _wifiState.bt;
+    const devices = (bt && bt.devices) || [];
+    if (!bt || (!devices.length && !bt.device_count)) return '';
+    const i = bt.interference || {};
+    const rows = devices.slice(0, 60).map(d => `<tr><td>${_esc(d.name) || '<i>(no name)</i>'}</td><td>${_esc(_RPT_BT_KIND[d.kind] || d.kind || '—')}</td><td>${_esc(d.vendor) || '—'}</td><td>${_esc(d.major_class) || '—'}</td><td>${d.rssi == null ? '—' : d.rssi + ' dBm'}</td></tr>`).join('');
+    return `<h2>Bluetooth / BLE (2.4 GHz coexistence)</h2>`
+        + `<p><b>${bt.device_count || devices.length}</b> device(s) · ${i.le_count || 0} BLE · ${i.classic_count || 0} Classic/dual · ${i.strong_count || 0} close</p>`
+        + _wifiReportPressureChips(i.channels)
+        + `<table><thead><tr><th>Device</th><th>Type</th><th>Vendor</th><th>Class</th><th>RSSI</th></tr></thead><tbody>${rows}</tbody></table>`
+        + (bt.coexistence_note ? `<p class="sub" style="margin-top:6px">${_esc(bt.coexistence_note)}</p>` : '');
+}
+
+// Zigbee / 802.15.4 overlay → HTML section (or '' when absent/off).
+function _wifiReportZbHtml() {
+    if (!(_wifiState.zbOn && _wifiState.zbAvailable)) return '';
+    const zb = _wifiState.zb;
+    const devices = (zb && zb.devices) || [];
+    if (!zb || (!devices.length && !zb.device_count)) return '';
+    const i = zb.interference || {};
+    const rows = devices.slice(0, 60).map(d => `<tr><td class="mono">${_esc(d.addr || d.short_addr) || '—'}</td><td>${_esc(d.panid) || '—'}</td><td>${d.channel == null ? '—' : d.channel}</td><td>${_esc(d.proto) || '—'}</td><td>${_esc(d.vendor) || '—'}</td><td>${d.rssi == null ? '—' : d.rssi + ' dBm'}</td><td>${d.lqi == null ? '—' : d.lqi}</td></tr>`).join('');
+    return `<h2>Zigbee / 802.15.4 (2.4 GHz coexistence)</h2>`
+        + `<p><b>${zb.device_count || devices.length}</b> device(s) · ${i.channel_count || 0} active channel(s) · ${i.strong_count || 0} close</p>`
+        + _wifiReportPressureChips(i.wifi_channels)
+        + `<table><thead><tr><th>Address</th><th>PAN ID</th><th>Ch</th><th>Proto</th><th>Vendor</th><th>RSSI</th><th>LQI</th></tr></thead><tbody>${rows}</tbody></table>`
+        + (zb.companion_note ? `<p class="sub" style="margin-top:6px">${_esc(zb.companion_note)}</p>` : '');
+}
+
+// Stashed AI analysis → HTML section (light-theme markdown-lite; or '' when
+// the user hasn't run "Analyze with AI" on the current scan).
+function _wifiReportAIHtml() {
+    const ai = _wifiState.ai;
+    const text = ai && (ai.text || '').trim();
+    if (!text) return '';
+    const lines = text.replace(/\r\n/g, '\n').split('\n');
+    const out = []; let inList = false;
+    const inline = (s) => _esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+?)`/g, '<code>$1</code>');
+    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+    for (const raw of lines) {
+        const s = raw.trim();
+        if (!s) { closeList(); continue; }
+        const bullet = s.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+        if (bullet) { if (!inList) { out.push('<ul>'); inList = true; } out.push(`<li>${inline(bullet[1])}</li>`); continue; }
+        closeList();
+        const head = s.match(/^\*\*(.+?):?\*\*:?$/);
+        if (head) out.push(`<div style="font-weight:700;color:#4338ca;margin:10px 0 3px">${inline(head[1])}</div>`);
+        else out.push(`<p style="margin:0 0 6px">${inline(s)}</p>`);
+    }
+    closeList();
+    const ov = (ai.overlays || []).map(o => o === 'zigbee' ? 'Zigbee' : 'Bluetooth/BLE');
+    const meta = ov.length ? `<div class="sub">Includes ${ov.join(', ')}</div>` : '';
+    return `<h2>AI analysis</h2>${meta}`
+        + `<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-left:4px solid #4f46e5;border-radius:8px;padding:12px 16px;font-size:12.5px;color:#312e5e">${out.join('')}</div>`
+        + `<p class="sub" style="margin-top:6px">Generated by Ragnar's AI assistant from the scan above. Advisory only.</p>`;
+}
+
 function wifiExportReport() {
     const d = _wifiState.data;
     // Coverage stats from the current heatmap metric.
@@ -2352,6 +2420,10 @@ function wifiExportReport() {
     const rows = aps.map(a => `<tr><td>${_esc(a.ssid) || '<i>hidden</i>'}</td><td class="mono">${_esc(a.bssid)}</td><td>${_esc(a.vendor) || '—'}</td><td>${a.band}</td><td>${a.channel}</td><td>${a.width}M</td><td>${a.signal}</td><td>${a.snr == null ? '—' : a.snr}</td><td>${_esc(a.security)}</td></tr>`).join('');
     const now = new Date();
     const issues = aps.filter(a => a.security_findings && a.security_findings.length);
+    // 2.4 GHz coexistence overlays + the AI read (only when active / run).
+    const btHtml = _wifiReportBtHtml();
+    const zbHtml = _wifiReportZbHtml();
+    const aiHtml = _wifiReportAIHtml();
     const html = `<!doctype html><html><head><meta charset="utf-8"><title>WiFi Survey Report</title>
 <style>
   body{font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;color:#111;max-width:900px;margin:24px auto;padding:0 16px}
@@ -2359,15 +2431,19 @@ function wifiExportReport() {
   .sub{color:#666;font-size:12px;margin-bottom:14px}
   table{border-collapse:collapse;width:100%;font-size:11.5px} th,td{border:1px solid #ddd;padding:3px 6px;text-align:left}
   th{background:#f4f4f5} .mono{font-family:ui-monospace,monospace;font-size:10.5px}
+  code{background:#ece9fb;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:11px}
   .foot{margin-top:26px;color:#999;font-size:11px} @media print{body{margin:0}}
 </style></head><body>
   <h1>WiFi Survey Report</h1>
   <div class="sub">${now.toLocaleString()} · interface ${_esc(_wifiState.iface || '—')} · ${aps.length} APs heard${_wifiHm.data && _wifiHm.data.target_ssid ? ' · target ' + _esc(_wifiHm.data.target_ssid) : ''}</div>
+  ${aiHtml}
   ${cov ? '<h2>Coverage</h2>' + cov : ''}
   ${plan ? '<h2>Build plan</h2>' + plan : ''}
   ${img ? '<h2>Heatmap</h2>' + img : ''}
   ${bands ? '<h2>Bands &amp; channel plan</h2>' + bands : ''}
   ${intf ? '<h2>Interference</h2>' + intf : ''}
+  ${btHtml}
+  ${zbHtml}
   ${issues.length ? '<h2>Security issues (' + issues.length + ')</h2><ul>' + issues.map(a => `<li><b>${_esc(a.ssid) || 'hidden'}</b> (${_esc(a.bssid)}): ${_esc(a.security_findings.join('; '))}</li>`).join('') + '</ul>' : ''}
   <h2>AP inventory</h2>
   <table><thead><tr><th>SSID</th><th>BSSID</th><th>Vendor</th><th>Band</th><th>Ch</th><th>Width</th><th>RSSI</th><th>SNR</th><th>Security</th></tr></thead><tbody>${rows}</tbody></table>
