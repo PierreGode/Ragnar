@@ -4572,6 +4572,27 @@
                         <div class="text-2xl font-bold" id="uptime-display">--</div>
                         <div class="text-xs text-gray-400">System running</div>
                     </div>
+
+                    <!-- Power / Supply Card (from the SoC throttle register) -->
+                    <div id="power-card" class="glass-card p-4 hidden">
+                        <div class="flex items-center justify-between mb-2">
+                            <h3 class="font-semibold text-sm">Power</h3>
+                            <svg id="power-card-icon" class="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                            </svg>
+                        </div>
+                        <div class="text-2xl font-bold" id="power-card-status">--</div>
+                        <div class="text-xs text-gray-400" id="power-card-details">Supply health</div>
+                    </div>
+                </div>
+
+                <!-- Power & Supply detail — throttle flags + estimated draw budget -->
+                <div id="power-detail-panel" class="glass-card p-4 mb-6 hidden">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-semibold flex items-center gap-2"><span>⚡</span> Power &amp; Supply</h3>
+                        <span class="text-[11px] text-gray-500">measured throttle register + estimated draw</span>
+                    </div>
+                    <div id="power-detail-body" class="text-sm text-gray-300">Loading…</div>
                 </div>
                 
                 <!-- Detailed Sections -->
@@ -7542,7 +7563,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260809-power-badge"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260809-power-badge2"></script>
 
 </body>
 </html>

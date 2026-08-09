@@ -19414,11 +19414,15 @@ function _pwMa(ma) {
 
 function renderPowerModalBody(d) {
     const body = document.getElementById('power-modal-body');
-    if (!body) return;
+    if (body) body.innerHTML = buildPowerDetailHtml(d);
+}
+
+// Shared by the dashboard badge modal and the System tab's Power panel, so both
+// show the same measured throttle state + estimated budget from one builder.
+function buildPowerDetailHtml(d) {
     if (!d || d.supported === false) {
-        body.innerHTML = `<div class="text-gray-400">Power monitoring is not available on this device
+        return `<div class="text-gray-400">Power monitoring is not available on this device
             (no <code class="font-mono">vcgencmd</code> — not a Raspberry Pi, or the tool is missing).</div>`;
-        return;
     }
     const level = d.level;
     const tone = level === 'critical' ? 'text-red-300'
@@ -19505,7 +19509,7 @@ function renderPowerModalBody(d) {
         </div>`;
     }
 
-    body.innerHTML = html;
+    return html;
 }
 
 function updateAutomationToggleButton(automationEnabled, options = {}) {
@@ -21442,18 +21446,62 @@ let currentProcessSort = 'cpu';
 function loadSystemData() {
     fetchSystemStatus();
     fetchNetworkStats();
-    
+    fetchPowerDetail();
+
     // Auto-refresh every 5 seconds when on system tab
     if (systemMonitoringInterval) {
         clearInterval(systemMonitoringInterval);
     }
-    
+
     systemMonitoringInterval = setInterval(() => {
         if (currentTab === 'system') {
             fetchSystemStatus();
             fetchNetworkStats();
+            fetchPowerDetail();
         }
     }, 5000);
+}
+
+// System tab's Power card + detail panel. /api/power is cached ~15s server-side,
+// so polling it on the 5s system loop is mostly cache hits. Reuses the same
+// detail builder as the dashboard badge modal.
+function fetchPowerDetail() {
+    networkAwareFetch('/api/power')
+        .then(response => response.json())
+        .then(data => { if (!data || !data.error) updatePowerSystemView(data); })
+        .catch(error => console.error('Error fetching power detail:', error));
+}
+
+function updatePowerSystemView(d) {
+    const card = document.getElementById('power-card');
+    const panel = document.getElementById('power-detail-panel');
+    if (!d || d.supported === false) {
+        // Off-Pi (no vcgencmd): nothing meaningful to show, keep both hidden.
+        if (card) card.classList.add('hidden');
+        if (panel) panel.classList.add('hidden');
+        return;
+    }
+    const level = d.level;
+    const statusEl = document.getElementById('power-card-status');
+    const detailEl = document.getElementById('power-card-details');
+    const iconEl = document.getElementById('power-card-icon');
+    if (card) card.classList.remove('hidden');
+    const label = level === 'critical' ? 'Under-voltage' : level === 'warning' ? 'Warning' : 'Healthy';
+    const tone = level === 'critical' ? 'text-red-400' : level === 'warning' ? 'text-amber-400' : 'text-emerald-400';
+    if (statusEl) { statusEl.textContent = label; statusEl.className = 'text-2xl font-bold ' + tone; }
+    if (iconEl) iconEl.className = 'w-5 h-5 ' + tone;
+    if (detailEl) {
+        const bits = [];
+        if (d.summary && d.summary.headline) bits.push(d.summary.headline);
+        if (d.estimate && d.estimate.total_peak_ma != null) bits.push('~' + _pwMa(d.estimate.total_peak_ma) + ' peak');
+        if (d.temp_c != null) bits.push(d.temp_c + ' °C');
+        detailEl.textContent = bits.join(' · ') || 'Supply health';
+    }
+    if (panel) {
+        panel.classList.remove('hidden');
+        const body = document.getElementById('power-detail-body');
+        if (body) body.innerHTML = buildPowerDetailHtml(d);
+    }
 }
 
 function fetchSystemStatus() {

@@ -4,9 +4,13 @@ A small, always-on power-health indicator on the main **Dashboard**, so an
 under-voltage board is visible without opening the Wardriving diagnostics panel
 or the Mesh tab. Click it for a full breakdown of what is drawing the power.
 
-- **UI:** top of the **Current Status** card on the Dashboard. Hidden while the
-  supply is healthy — it only appears on a real warning, so a healthy board
-  stays quiet.
+- **UI:**
+  - **Dashboard** — a small badge at the top of the **Current Status** card,
+    hidden while the supply is healthy so a healthy board stays quiet. It only
+    appears on a real warning; click it for the full breakdown.
+  - **System tab** — a **Power** stat card (always shown on a Pi, including when
+    healthy) plus a full **Power & Supply** panel with the same breakdown inline,
+    since the System tab is the deep view where you expect the detail up front.
 - **Backend:** [`power_budget.py`](../power_budget.py)
 - **Endpoints:** compact summary rides along on `GET /api/status`
   (`power` key); full detail is `GET /api/power`.
