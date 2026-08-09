@@ -22820,11 +22820,19 @@ let aiInsightsCache = {
 // The server computes insights in the background and returns status:'computing'
 // until the first run lands, so the page polls rather than blocking on the slow
 // generation (which is what timed out on Pi Zeros). This tracks that poll.
-let _aiInsightsPoll = { timer: null, attempts: 0, max: 24 }; // ~24 × 6s ≈ 2.5 min
+let _aiInsightsPoll = { timer: null, attempts: 0, max: 50 }; // ~50 × 6s ≈ 5 min
 function _aiClearPoll() { if (_aiInsightsPoll.timer) { clearTimeout(_aiInsightsPoll.timer); _aiInsightsPoll.timer = null; } }
 function _aiSchedulePoll() {
     _aiClearPoll();
-    if (_aiInsightsPoll.attempts >= _aiInsightsPoll.max) return;  // give up quietly after the budget
+    if (_aiInsightsPoll.attempts >= _aiInsightsPoll.max) {
+        // Budget exhausted — don't sit on "Analyzing…" forever; surface a retry.
+        const errHtml = '<span class="text-amber-400">Still working — the AI service is taking longer than usual.</span> '
+            + '<button onclick="refreshAIInsights()" class="ml-1 underline text-purple-300 hover:text-purple-200">Check again</button>';
+        ['ai-network-summary', 'ai-vuln-summary', 'ai-weakness-summary'].forEach(id => {
+            const el = document.getElementById(id); if (el) el.innerHTML = errHtml;
+        });
+        return;
+    }
     _aiInsightsPoll.attempts++;
     _aiInsightsPoll.timer = setTimeout(() => loadAIInsights(), 6000);
 }

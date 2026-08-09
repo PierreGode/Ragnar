@@ -22331,29 +22331,46 @@ _ai_insights_state = {
     'data': None,        # last completed insights dict (with posture_data)
     'ts': 0.0,           # when it completed
     'computing': False,  # a background run is in flight
+    'started': 0.0,      # when the current run started (for the stale watchdog)
     'lock': threading.Lock(),
 }
-_AI_INSIGHTS_TTL = 3600  # serve a completed result for an hour before recomputing
+_AI_INSIGHTS_TTL = 3600      # serve a completed result for an hour before recomputing
+_AI_INSIGHTS_STALE = 180     # a 'computing' flag older than this is a dead run — restart
 
 
 def _compute_ai_insights_bg():
     """Background worker: build the dashboard insights and stash them. Only one
-    runs at a time (guarded by the 'computing' flag set by the route)."""
+    runs at a time (guarded by the 'computing' flag set by the route).
+
+    It ALWAYS records a result — a real one, or an error stub — so the endpoint
+    can flip out of 'computing' even when the generation fails. Otherwise the
+    dashboard would poll "Analyzing…" forever (the exact wedge seen on a Pi Zero
+    whose OpenAI calls were failing)."""
+    result = None
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
         if not ai_service or not ai_service.is_enabled():
+            result = {'enabled': False,
+                      'message': 'AI service is not enabled.'}
             return
         posture = _build_ai_posture()
         result = ai_service.generate_insights(posture=posture)
         if posture is not None:
             result['posture_data'] = posture
-        with _ai_insights_state['lock']:
-            _ai_insights_state['data'] = result
-            _ai_insights_state['ts'] = time.time()
     except Exception as exc:
         logger.error(f"[ai] background insights failed: {exc}")
+        # A completed-with-error result so the UI shows a Retry, not a spinner.
+        result = {'enabled': True, 'error': str(exc),
+                  'timestamp': datetime.now().isoformat(),
+                  'attempted': ['network_summary', 'vulnerability_analysis',
+                                'weakness_analysis'],
+                  'failed': ['network_summary', 'vulnerability_analysis',
+                             'weakness_analysis']}
     finally:
         with _ai_insights_state['lock']:
+            if result is not None:
+                _ai_insights_state['data'] = result
+                _ai_insights_state['ts'] = time.time()
             _ai_insights_state['computing'] = False
 
 
@@ -22381,9 +22398,16 @@ def get_ai_insights():
             # it recomputes soon; a clean result is held for the full hour.
             ttl = 120 if (data and data.get('failed')) else _AI_INSIGHTS_TTL
             fresh = data is not None and not force and (now - ts) < ttl
-            start = (not fresh) and (not _ai_insights_state['computing'])
+            # Watchdog: if a 'computing' flag has been set too long, the worker
+            # died/hung without clearing it — treat it as free so a new run can
+            # start instead of the dashboard polling forever.
+            computing = _ai_insights_state['computing']
+            if computing and (now - _ai_insights_state['started']) > _AI_INSIGHTS_STALE:
+                computing = False
+            start = (not fresh) and (not computing)
             if start:
                 _ai_insights_state['computing'] = True
+                _ai_insights_state['started'] = now
         if start:
             socketio.start_background_task(_compute_ai_insights_bg)
 

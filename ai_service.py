@@ -78,8 +78,10 @@ class AIService:
             # rate-limited call (common when several field units share one API
             # key and each fans out concurrent dashboard calls) would otherwise
             # hang for minutes — well past any client timeout — instead of
-            # failing fast and letting the rest of the insights render.
-            self.client = OpenAI(api_key=self.api_token, timeout=25.0, max_retries=2)
+            # failing fast and letting the rest of the insights render. One retry
+            # keeps the worst-case bounded (~40s/call) so the background insights
+            # run resolves quickly even on a slow board.
+            self.client = OpenAI(api_key=self.api_token, timeout=20.0, max_retries=1)
             self.initialization_error = None
             self.logger.info(f"AI Service initialized using model: {self.model}")
         except Exception as exc:
@@ -806,16 +808,24 @@ Keep it tight and practical."""
         if posture is not None:
             tasks["posture_analysis"] = lambda: self.analyze_security_posture(posture)
 
-        # Additional analyses if intelligence system is available
+        # Additional analyses if intelligence system is available. Guard the
+        # findings fetch: if it raises on some unit (DB state, etc.) it must not
+        # sink the whole insights run — the network summary should still render.
+        # (The Wi-Fi analyze path works on those units precisely because it never
+        # touches this, so isolate it here.)
         if hasattr(self.shared_data, "network_intelligence") and \
            self.shared_data.network_intelligence:
-            findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
-            vulns = list(findings.get("vulnerabilities", {}).values())
-            if vulns:
-                creds = list(findings.get("credentials", {}).values())
-                combined = vulns + creds
-                tasks["vulnerability_analysis"] = lambda: self.analyze_vulnerabilities(vulns)
-                tasks["weakness_analysis"] = lambda: self.identify_network_weaknesses(net, combined)
+            try:
+                findings = self.shared_data.network_intelligence.get_active_findings_for_dashboard()
+                vulns = list(findings.get("vulnerabilities", {}).values())
+                if vulns:
+                    creds = list(findings.get("credentials", {}).values())
+                    combined = vulns + creds
+                    tasks["vulnerability_analysis"] = lambda: self.analyze_vulnerabilities(vulns)
+                    tasks["weakness_analysis"] = lambda: self.identify_network_weaknesses(net, combined)
+            except Exception as exc:
+                self.logger.error(f"AI insights: findings fetch failed, "
+                                  f"skipping vuln/weakness: {exc}")
 
         # Cap concurrency at 2. Fanning out all four at once cut latency on a
         # fast box, but when 6 units share one API key that's a 24-wide burst
