@@ -19488,6 +19488,16 @@ function buildPowerDetailHtml(d) {
     if (d.usb_max_current_enabled === false) {
         html += `<p class="text-[11px] text-amber-400/80 mt-1">usb_max_current_enable is not set — USB peripheral current is capped to 600 mA total on this board.</p>`;
     }
+    // Reconcile the confusing case this panel can otherwise show: the SoC
+    // reports under-voltage while the estimated budget still has plenty of
+    // headroom. That is not a contradiction — the loss is between the PSU and
+    // the board (cable/connector), not too much current — and saying so stops
+    // the numbers reading like a bug.
+    const uv = d.summary && d.summary.undervoltage;
+    if (uv && est.headroom_ma > 0 && !est.tight) {
+        html += `<p class="text-[12px] text-amber-300 mt-2 border-l-2 border-amber-700 pl-2">
+            Under-voltage <em>despite</em> headroom on paper? That points at a <strong>cable/connector voltage drop</strong>, not too much current: the draw is well under the supply's rating, but the 5&nbsp;V rail still sags below spec between the PSU and the board — a thin/long micro-USB cable, a tired connector, or a flat 5.0&nbsp;V supply with no margin. Try a short thick cable and a 5.1&nbsp;V supply before reaching for a bigger PSU.</p>`;
+    }
     html += `</div>`;
 
     // 4) Reference maxima for the two named field configs.

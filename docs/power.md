@@ -46,7 +46,12 @@ polled status endpoint stays cheap.
    register value, core voltage, temperature, and Pi 5 PMIC board power.
 3. **Estimated draw (what's using the power).** A realistic 5 V current for each
    USB device that is actually plugged in, plus the board's own draw, summed
-   against the recommended supply with the headroom at peak.
+   against the recommended supply with the headroom at peak. When the board
+   reports under-voltage **while the estimated budget still shows headroom**, a
+   note reconciles the two: that is a **cable/connector voltage drop**, not
+   excess current — the 5 V rail sags between the PSU and the board (a thin/long
+   micro-USB cable, a tired connector, or a flat 5.0 V supply), so a short thick
+   cable and a 5.1 V supply fix it before a bigger PSU would.
 4. **Reference configs.** The two named field profiles — *Stationary / recon*
    (Alfa + Ethernet) and *Roaming / wardrive* (Alfa + GPS + ESP32) — costed at
    peak on the detected board.
