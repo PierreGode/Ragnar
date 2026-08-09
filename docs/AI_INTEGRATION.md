@@ -116,11 +116,19 @@ Returns weakness analysis only
 ### POST /api/ai/wifi-analyze
 Professional assessment of the **current Wi-Fi connection and RF environment**,
 used by the **WiFi Spectrum Analyzer → "Analyze with AI"** button. Body:
-`{"scan": <result of /api/net/wifi/scan>}`. The server determines the connected
-network itself (`iw dev … link`), enriches it from the scan (channel, width,
-security, Wi-Fi generation), computes the co-/adjacent-channel picture, and
-returns prioritized, plain-language recommendations (band/channel/width/security
-changes, AP placement). Neutral professional tone — no persona.
+`{"scan": <result of /api/net/wifi/scan>, "bt": <bt overlay?>, "zb": <zigbee overlay?>}`.
+The server determines the connected network itself (`iw dev … link`), enriches
+it from the scan (channel, width, security, Wi-Fi generation), computes the
+co-/adjacent-channel picture, and returns prioritized, plain-language
+recommendations (band/channel/width/security changes, AP placement). Neutral
+professional tone — no persona.
+
+When the **Bluetooth** and/or **Zigbee** 2.4 GHz overlays are active, the panel
+also passes those payloads. The AI folds their **per-Wi-Fi-channel coexistence
+pressure** into its 2.4 GHz channel advice (e.g. recommending a move to 5/6 GHz
+when BT/Zigbee load on ch 1/6/11 is significant), and the response's `overlays`
+field lists which were included. The pressure figures are heuristic activity
+estimates, not measured energy, and the prompt says so.
 
 ### POST /api/ai/clear-cache
 Clears the AI response cache

@@ -15288,8 +15288,14 @@ def register_network_diagnostics(app, logger=None):
         if not isinstance(scan, dict) or not scan.get('aps'):
             return _bad('No scan data — run a spectrum scan first')
         device = (data.get('device') or 'Ragnar').strip()[:64]
+        # Optional companions the panel carries: the live 2.4 GHz Bluetooth /
+        # Zigbee overlays and the last AI analysis, so the report mirrors the UI.
+        bt = data.get('bt') if isinstance(data.get('bt'), dict) else None
+        zb = data.get('zb') if isinstance(data.get('zb'), dict) else None
+        ai = data.get('ai') if isinstance(data.get('ai'), dict) else None
         _log("net/wifi/report")
-        html = report_common.build_spectrum_report_html(scan, device_name=device)
+        html = report_common.build_spectrum_report_html(
+            scan, device_name=device, bt=bt, zb=zb, ai=ai)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
     @app.route('/api/net/wifi/radius', methods=['GET'])

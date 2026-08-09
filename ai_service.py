@@ -540,15 +540,38 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             return None
 
         connected = (context or {}).get("connected")
+        bt = (context or {}).get("bt")
+        zb = (context or {}).get("zigbee")
         key = self._cache_key("wifi_conn", {
             "bssid": (connected or {}).get("bssid"),
             "signal": (connected or {}).get("signal_dbm"),
             "cochannel": (context or {}).get("co_channel_count"),
             "aps": (context or {}).get("ap_total"),
+            # Include the non-Wi-Fi 2.4 GHz overlays so enabling/refreshing them
+            # busts the cache instead of serving a Wi-Fi-only verdict.
+            "bt": (bt or {}).get("device_count") if bt else None,
+            "zb": (zb or {}).get("device_count") if zb else None,
         })
         cached = self._cache_get(key)
         if cached:
             return cached
+
+        # Which non-Wi-Fi 2.4 GHz sources are present shapes what we ask for.
+        overlays = []
+        if bt:
+            overlays.append("Bluetooth/BLE")
+        if zb:
+            overlays.append("Zigbee / 802.15.4")
+        overlay_line = (
+            (" The data also includes non-Wi-Fi 2.4 GHz emitters discovered "
+             "alongside the Wi-Fi scan (" + " and ".join(overlays) + "), under "
+             "the 'bt' and/or 'zigbee' keys, with an estimated per-Wi-Fi-channel "
+             "pressure for channels 1/6/11/13. Treat these as coexistence load on "
+             "the 2.4 GHz band: factor them into 2.4 GHz channel advice and, when "
+             "they are significant, recommend moving affected clients to 5/6 GHz. "
+             "The pressure figures are heuristic activity estimates, not measured "
+             "energy — say so and do not overstate them.") if overlays else ""
+        )
 
         data_json = json.dumps(context, indent=2, default=str)[:6000]
         system = (
@@ -560,6 +583,7 @@ Limit to 2-3 most viable attack paths. Be specific and tactical.
             "do not invent SSIDs, channels or values that are not present. If the "
             "user is not associated to a network, say so and analyze the "
             "environment instead. Use short markdown sections and bullet points."
+            + overlay_line
         )
         user = f"""Analyze this Wi-Fi connection and RF environment.
 
@@ -574,8 +598,10 @@ short paragraph.
 
 **Issues found** — concrete problems supported by the data, e.g. co-channel or
 adjacent-channel congestion, 2.4 GHz use where 5 GHz is available, weak signal,
-legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, or a crowded
-channel. Only list issues the data supports.
+legacy/weak security (Open/WEP/WPA/TKIP), a narrow channel width, a crowded
+channel, or — when the bt/zigbee overlays are present — non-Wi-Fi 2.4 GHz
+coexistence pressure from Bluetooth/BLE or Zigbee on channels 1/6/11. Only list
+issues the data supports.
 
 **Recommendations** — prioritized, specific actions (e.g. "move to 5 GHz",
 "change to channel 44", "widen to 80 MHz", "upgrade to WPA2/WPA3-CCMP",

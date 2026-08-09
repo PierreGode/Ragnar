@@ -83,7 +83,12 @@ contains:
   histogram**;
 - **interference** counts (co-channel and adjacent/overlap groups);
 - **Networks** (SSID view) and **strongest access points** tables (band,
-  channel, width, signal, SNR, standard, security).
+  channel, width, signal, SNR, standard, security);
+- when the **Bluetooth** / **Zigbee** overlays are on, a **2.4 GHz coexistence**
+  section for each — device counts, per-Wi-Fi-channel pressure chips and the
+  device inventory heard during the scan;
+- when you've run **Analyze with AI** on the current scan, the **AI analysis**
+  itself, rendered inline (it also reflects the BT/Zigbee overlays it was given).
 
 The same shared report engine renders the WiFi Defense and Wardriving reports,
 so all three are one visual family. Informal — not a certified assessment.

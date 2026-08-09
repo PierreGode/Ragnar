@@ -22450,11 +22450,55 @@ def _wifi_ai_context(scan, connected):
     }
 
 
+def _rf_overlay_context(bt, zb):
+    """Compact the Bluetooth and Zigbee 2.4 GHz overlays (bt_scanner.do_scan /
+    zigbee overlay payloads) into the small summaries the Wi-Fi AI reasons over.
+    Only the coexistence-relevant fields are kept so the prompt stays tight."""
+    out = {}
+    if isinstance(bt, dict) and (bt.get('devices') or bt.get('device_count')):
+        inter = bt.get('interference') or {}
+        devices = bt.get('devices') or []
+        out['bt'] = {
+            'device_count': bt.get('device_count', len(devices)),
+            'le_count': inter.get('le_count'),
+            'classic_count': inter.get('classic_count'),
+            'strong_count': inter.get('strong_count'),
+            'hopping_load': inter.get('hopping'),
+            'wifi_channel_pressure': [
+                {'wifi_channel': c.get('wifi_channel'), 'level': c.get('level'),
+                 'pressure': c.get('pressure')}
+                for c in (inter.get('channels') or [])],
+            'top_devices': [
+                {'name': d.get('name'), 'vendor': d.get('vendor'),
+                 'kind': d.get('kind'), 'rssi': d.get('rssi')}
+                for d in devices[:8]],
+        }
+    if isinstance(zb, dict) and (zb.get('devices') or zb.get('device_count')):
+        inter = zb.get('interference') or {}
+        out['zigbee'] = {
+            'device_count': zb.get('device_count', len(zb.get('devices') or [])),
+            'channel_count': inter.get('channel_count'),
+            'strong_count': inter.get('strong_count'),
+            'channels': [
+                {'channel': m.get('channel'), 'count': m.get('count'),
+                 'best_rssi': m.get('best_rssi')}
+                for m in (inter.get('markers') or [])],
+            'wifi_channel_pressure': [
+                {'wifi_channel': c.get('wifi_channel'), 'level': c.get('level'),
+                 'pressure': c.get('pressure')}
+                for c in (inter.get('wifi_channels') or [])],
+        }
+    return out
+
+
 @app.route('/api/ai/wifi-analyze', methods=['POST'])
 def ai_wifi_analyze():
     """Professional AI assessment of the current Wi-Fi connection + RF
-    environment. Body: {"scan": <do_scan result>}. Determines the connected
-    network server-side and returns prioritized recommendations."""
+    environment. Body: {"scan": <do_scan result>, "bt": <bt overlay>,
+    "zb": <zigbee overlay>}. Determines the connected network server-side and
+    returns prioritized recommendations. When the 2.4 GHz Bluetooth/Zigbee
+    overlays are active the client passes them so the AI factors coexistence
+    load into its 2.4 GHz channel advice."""
     try:
         ai_service = getattr(shared_data, 'ai_service', None)
         if not ai_service or not ai_service.is_enabled():
@@ -22464,6 +22508,7 @@ def ai_wifi_analyze():
         scan = body.get('scan') or {}
         connected = _connected_wifi()
         context = _wifi_ai_context(scan, connected)
+        context.update(_rf_overlay_context(body.get('bt'), body.get('zb')))
         analysis = ai_service.analyze_wifi_connection(context)
         return jsonify({
             'enabled': True,
@@ -22471,6 +22516,7 @@ def ai_wifi_analyze():
             'connected': context.get('connected'),
             'context': {k: context[k] for k in
                         ('ap_total', 'co_channel_count', 'same_band_ap_count', 'bands_seen')},
+            'overlays': [k for k in ('bt', 'zigbee') if context.get(k)],
         })
     except Exception as e:
         logger.error(f"Error in AI Wi-Fi analysis: {e}")
