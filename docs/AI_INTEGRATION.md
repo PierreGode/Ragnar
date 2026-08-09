@@ -94,10 +94,15 @@ Returns AI service status and configuration
 
 ### GET /api/ai/insights
 Returns comprehensive AI insights. The independent analyses (network summary,
-vulnerability, weakness, posture) are generated **concurrently** server-side, so
-a cold call costs about one LLM round-trip (~5–10s) rather than the sum of all
-four; results are cached (1h server-side, 1h client-side). The dashboard card
-shows a loading state and, on timeout/error, a visible Retry rather than hanging.
+vulnerability, weakness, posture) are generated **concurrently** server-side
+(capped at 2 in flight so several units sharing one API key don't trip OpenAI's
+per-key rate limits), each with a 25s per-request timeout so a stuck/rate-limited
+call fails fast instead of hanging. Results are cached (1h server-side; client-
+side 1h on full success, 2min if any analysis failed so it retries soon). The
+response includes `attempted` (which analyses ran) and `failed` (which of those
+came back empty) so the dashboard can show a per-section "Temporarily
+unavailable + Retry" instead of a stuck "Analyzing…". The card also bounds its
+own wait (60s) and surfaces a Retry on timeout/error rather than hanging.
 ```json
 {
   "enabled": true,
