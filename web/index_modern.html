@@ -671,22 +671,22 @@
         <div class="max-w-7xl 2xl:max-w-[1664px] mx-auto px-4 sm:px-6 lg:px-8">
             <div class="flex items-center justify-between py-2">
                 <!-- Logo -->
-                <div class="flex items-center space-x-3">
+                <div class="flex items-center space-x-3 shrink-0">
                     <a href="/web/index_modern.html" aria-label="Go to main dashboard" class="flex items-center space-x-3 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-Ragnar-400">
                         <img id="header-brand-img" src="/web/images/ragnar.ico" alt="Ragnar" class="h-12 w-9 object-contain">
-                        <span id="header-brand-name" class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent whitespace-nowrap" title="">
-                            Ragnar
+                        <span class="flex flex-col leading-tight">
+                            <span id="header-brand-name" class="text-2xl font-bold bg-gradient-to-r from-Ragnar-400 to-Ragnar-600 bg-clip-text text-transparent whitespace-nowrap" title="">
+                                Ragnar
+                            </span>
+                            <span id="connection-status" class="flex items-center mt-0.5" title="Connected" aria-label="Connection status">
+                                <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
+                            </span>
                         </span>
                     </a>
-                    <span id="connection-status" class="flex items-center space-x-2">
-                        <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
-                        <span class="text-xs text-gray-400">Connected</span>
-                        <span class="text-xs text-gray-400">         </span>
-                    </span>
                 </div>
                 
                 <!-- Navigation Links -->
-                <div id="desktop-nav" class="hidden flex-wrap gap-1">
+                <div id="desktop-nav" class="hidden flex-1 min-w-0 flex-wrap items-center justify-end gap-x-0.5 gap-y-1 ml-4">
                     <button onclick="showTab('dashboard')" class="nav-btn px-3 py-1.5 rounded-lg hover:bg-slate-700 transition-colors text-[15px] whitespace-nowrap" data-tab="dashboard">
                         Dashboard
                     </button>
@@ -7623,7 +7623,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260810-mesh-dice-gender"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260810-status-dot"></script>
 
 </body>
 </html>
