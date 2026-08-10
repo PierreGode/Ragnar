@@ -3370,9 +3370,23 @@ def mesh_status():
     # naming was meant to remove — surface it so one can be renamed.
     names = [u['viking_name'] for u in known if u.get('viking_name')]
     duplicate_names = sorted({n for n in names if names.count(n) > 1})
-    unnumbered = sum(1 for u in ([self_node] if self_node else []) + ragnar_peers
-                     if u.get('is_ragnar') is not False and not u.get('unit_id')
-                     and (u is self_node or (u.get('health') or {}).get('reachable')))
+
+    # An operator can't act on "1 unit has no number" — they need to know WHICH
+    # one. Name each unnumbered unit by whatever identity it does carry (Viking
+    # name, then label, then Tailscale short name), and flag whether it's this
+    # very unit so the UI can say "This unit" instead of a name it may not
+    # recognise as itself.
+    def _mesh_display_name(u):
+        return (u.get('viking_name') or u.get('label')
+                or u.get('short_name') or u.get('hostname') or 'unnamed unit')
+
+    unnumbered_names = [
+        {'name': _mesh_display_name(u), 'is_self': u is self_node}
+        for u in ([self_node] if self_node else []) + ragnar_peers
+        if u.get('is_ragnar') is not False and not u.get('unit_id')
+        and (u is self_node or (u.get('health') or {}).get('reachable'))
+    ]
+    unnumbered = len(unnumbered_names)
 
     with _mesh_install_lock:
         installing = _mesh_installing
@@ -3440,6 +3454,7 @@ def mesh_status():
             'duplicate_unit_ids': duplicates,
             'duplicate_names': duplicate_names,
             'unnumbered_units': unnumbered,
+            'unnumbered_names': unnumbered_names,
             # Mesh-wide health, rolled up server-side so a fleet of thousands is
             # one small object here instead of the browser crunching every node.
             'health': health_rollup,

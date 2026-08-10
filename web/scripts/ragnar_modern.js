@@ -31069,8 +31069,17 @@ function renderMesh(data) {
             `can happen — rename one in Config → Ragnar Mesh.`));
     });
     if (data.summary?.unnumbered_units) {
+        const named = (data.summary.unnumbered_names || []).map(u =>
+            u.is_self ? '<strong>This unit</strong>'
+                      : `<strong>${escapeHtml(u.name)}</strong>`);
+        const who = named.length
+            ? ` (${named.join(', ')})`
+            : '';
+        const n = data.summary.unnumbered_units;
         notes.push(meshWarning(
-            `${data.summary.unnumbered_units} reachable unit(s) have no unit number assigned.`));
+            `${n} reachable unit${n === 1 ? '' : 's'}${who} ` +
+            `${n === 1 ? 'has' : 'have'} no unit number assigned — ` +
+            `set one in Config → Ragnar Mesh so reports can name it.`));
     }
     if (data.self && data.self.key_state && data.self.key_state !== 'ok') {
         notes.push(meshWarning(`This unit: ${escapeHtml(data.self.key_message || '')}`,
