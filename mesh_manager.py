@@ -83,24 +83,65 @@ DEFAULT_NODE_PORT = 8000
 # would collide inside a mesh of a dozen units often enough to be annoying —
 # 48 x 24 gives 1,152 combinations, which pushes a first collision out past any
 # mesh anyone is going to run.
-VIKING_NAMES = (
+# Given names for the auto-derived Viking identity. Overwhelmingly drawn from
+# real Viking-age history and the Icelandic sagas — kings and jarls (Guthrum,
+# Gorm, Horik, Ragnvald, Sigtrygg), explorers (Leif, Thorfinn, Ingvar), and
+# saga figures (Egil, Skallagrim, Kjartan, Njal, Flosi) — with a few
+# legendary/mythic names kept for flavour. Men first, women second; the split
+# point is tracked by VIKING_FEMALE_NAMES below, so keep the two in step.
+VIKING_MALE_NAMES = (
     'Ragnar', 'Bjorn', 'Ivar', 'Ubbe', 'Sigurd', 'Halfdan', 'Floki', 'Rollo',
     'Erik', 'Leif', 'Harald', 'Gunnar', 'Knut', 'Olaf', 'Sven', 'Torstein',
     'Ulf', 'Arne', 'Egil', 'Hakon', 'Vali', 'Orm', 'Trygve', 'Steinar',
+    # Historical kings, jarls and Great Heathen Army leaders
+    'Guthrum', 'Hastein', 'Eystein', 'Ottar', 'Horik', 'Gorm', 'Sigtrygg',
+    'Magnus', 'Ragnvald', 'Godfred', 'Anlaf', 'Onund', 'Hemming', 'Styrbjorn',
+    # Explorers and settlers
+    'Thorfinn', 'Thorvald', 'Ingvar', 'Ketil', 'Ohthere', 'Naddod',
+    # Jomsvikings and warriors
+    'Palnatoki', 'Sigvaldi', 'Bui', 'Vagn', 'Toki', 'Thorkell', 'Thorgils',
+    # Saga figures (Egils, Laxdaela, Njals, Eyrbyggja)
+    'Skallagrim', 'Kveldulf', 'Thorolf', 'Snorri', 'Njal', 'Grim', 'Kjartan',
+    'Bolli', 'Hrut', 'Skarphedin', 'Kari', 'Flosi', 'Hoskuld', 'Gizur',
+    'Asgeir', 'Bard', 'Brand', 'Finn', 'Frodi', 'Geir', 'Hallvard', 'Hrafn',
+    'Ingjald', 'Ospak', 'Ozur', 'Thorgeir', 'Thorir', 'Thormod', 'Vestein',
+)
+
+VIKING_FEMALE_NAMES_ORDERED = (
     'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
     'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
     'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
     'Nanna', 'Signy',
+    # Historical queens and noblewomen
+    'Gunnhild', 'Thyra', 'Estrid', 'Gyda', 'Ragnhild', 'Asa', 'Aud', 'Unn',
+    # Saga women (Laxdaela, Njals, Egils, Eyrbyggja)
+    'Thorgerd', 'Bergthora', 'Hallgerd', 'Melkorka', 'Thurid', 'Vigdis',
+    'Thordis', 'Halldora', 'Katla', 'Groa', 'Steinunn', 'Thorunn', 'Jorunn',
+    'Ingibjorg', 'Herdis', 'Alfhild', 'Bodil', 'Ragna', 'Svanhild', 'Gerd',
+    'Hild', 'Grima', 'Ylva', 'Olof',
 )
+
+VIKING_NAMES = VIKING_MALE_NAMES + VIKING_FEMALE_NAMES_ORDERED
 
 # The women's names within VIKING_NAMES — used to pick the matching header
 # portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
-VIKING_FEMALE_NAMES = frozenset({
-    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
-    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
-    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
-    'Nanna', 'Signy',
-})
+VIKING_FEMALE_NAMES = frozenset(VIKING_FEMALE_NAMES_ORDERED)
+
+# The ORIGINAL 48-name / 24-epithet pool, frozen exactly as it was. The
+# auto-derived name (derive_viking_name) draws only from this so that no box
+# already running Ragnar is renamed when the pool above grows: derivation is
+# `hash % pool_size`, so changing the pool size would remap every seed. The
+# larger VIKING_NAMES/VIKING_EPITHETS above are for the dice roll and manual
+# choice — variety on demand, without disturbing anyone's inherited name. Do
+# not reorder or resize these two; that is exactly what would rename units.
+VIKING_NAMES_LEGACY = VIKING_MALE_NAMES[:24] + VIKING_FEMALE_NAMES_ORDERED[:24]
+VIKING_EPITHETS_LEGACY = (
+    'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
+    'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
+    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
+    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+)
 
 
 def is_female_viking(name):
@@ -111,12 +152,23 @@ def is_female_viking(name):
     return name.strip().split(' ', 1)[0] in VIKING_FEMALE_NAMES
 
 
+# Bynames appended after the given name. Mostly genuine Viking-age epithets
+# recorded in the chronicles and sagas — Ironside (Bjorn), the Boneless (Ivar),
+# Forkbeard (Sven), Bluetooth (Harald), Fairhair, Bloodaxe (Erik), Flatnose
+# (Ketil), the Deep-minded (Aud), Barefoot (Magnus), the Lucky (Leif),
+# Skull-splitter (Thorfinn) — with a handful of flavour ones retained.
 VIKING_EPITHETS = (
     'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
-    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
-    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
-    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'the Silent', 'the Keen',
+    'the Far-travelled', 'the Unyielding', 'Seafarer', 'the Watchful',
+    'Shieldbreaker', 'Wolfsbane', 'Stormborn', 'Frostbeard', 'Ravenwing',
+    # Attested historical bynames
+    'Fairhair', 'Bloodaxe', 'the Good', 'the Great', 'the Old', 'Flatnose',
+    'the Deep-minded', 'the Strong', 'Barefoot', 'the Tall', 'Longsword',
+    'the Holy', 'the Mighty', 'Skull-splitter', 'the Lucky', 'the Peaceable',
+    'the Proud', 'Half-troll', 'the Sharp', 'Longshanks', 'Crowbone',
+    'the Generous', 'Bare-legs', 'the Quarrelsome',
 )
 
 
@@ -153,6 +205,12 @@ def derive_viking_name(seed=None):
 
     Same seed always yields the same name — a unit that is reinstalled comes
     back as itself rather than as a stranger.
+
+    Draws from the FROZEN legacy pool (VIKING_*_LEGACY), not the larger roster,
+    on purpose: the mapping is `hash % pool_size`, so growing the pool would
+    remap every seed and rename boxes that never chose a name. Keeping the auto
+    default on the original pool means no existing unit is ever renamed; the
+    bigger historic roster is offered through the dice and manual selection.
     """
     import hashlib
     if seed is None:
@@ -161,8 +219,8 @@ def derive_viking_name(seed=None):
     # Two independent slices so the given name and the epithet vary
     # independently; deriving both from one number would correlate them and
     # collapse the effective range back towards 48.
-    name = VIKING_NAMES[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES)]
-    epithet = VIKING_EPITHETS[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS)]
+    name = VIKING_NAMES_LEGACY[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES_LEGACY)]
+    epithet = VIKING_EPITHETS_LEGACY[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS_LEGACY)]
     return f'{name} {epithet}'
 
 
@@ -1365,6 +1423,28 @@ def _self_test():
     check('name pools are collision-free',
           len(set(VIKING_NAMES)) == len(VIKING_NAMES)
           and len(set(VIKING_EPITHETS)) == len(VIKING_EPITHETS))
+    check('female names are all in the given-name pool',
+          VIKING_FEMALE_NAMES <= set(VIKING_NAMES))
+    check('no name is both a man\'s and a woman\'s',
+          not (set(VIKING_MALE_NAMES) & VIKING_FEMALE_NAMES))
+    check(f'pool is large (got {len(VIKING_NAMES)} names x {len(VIKING_EPITHETS)} epithets)',
+          len(VIKING_NAMES) >= 100 and len(VIKING_EPITHETS) >= 40)
+    # The auto default must stay frozen so growing the pool never renames a box.
+    check('legacy pool is unchanged in size (48 x 24)',
+          len(VIKING_NAMES_LEGACY) == 48 and len(VIKING_EPITHETS_LEGACY) == 24)
+    check('legacy pool is a subset of the full roster',
+          set(VIKING_NAMES_LEGACY) <= set(VIKING_NAMES)
+          and set(VIKING_EPITHETS_LEGACY) <= set(VIKING_EPITHETS))
+    # Golden values: derive_viking_name must return exactly what it did before
+    # the roster was expanded. If these change, existing units get renamed.
+    _GOLDEN = {
+        'seed-a': 'Knut Stormborn',
+        'seed-b': 'Erik Ravenwing',
+        'machine-id-1': 'Astrid Forkbeard',
+        'abc123': 'Revna Bluetooth',
+    }
+    check('auto-derived names are unchanged (no box renamed)',
+          all(derive_viking_name(s) == want for s, want in _GOLDEN.items()))
 
     print('pi connect')
     pc = pi_connect_status()
