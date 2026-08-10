@@ -2260,6 +2260,27 @@ def _mesh_viking_name():
         return socket.gethostname()
 
 
+def _mesh_viking_female():
+    """Whether this unit's portrait should be the shieldmaiden.
+
+    Gender is derived from the Viking name when the name is one Ragnar knows
+    (the built-in list carries its own gender), but a custom name — 'Xena', a
+    surname, anything off-list — can't be derived, so the operator sets it
+    explicitly and that choice (mesh_viking_gender) wins when present.
+    """
+    gender = (shared_data.config.get('mesh_viking_gender') or '').strip().lower()
+    if gender == 'female':
+        return True
+    if gender == 'male':
+        return False
+    if mesh_available:
+        try:
+            return mesh_manager.is_female_viking(_mesh_viking_name())
+        except Exception:
+            return False
+    return False
+
+
 def _mesh_unit_name():
     """How this unit identifies itself to peers: 'Bjorn Ironside (Unit 03)'."""
     unit_id = _mesh_unit_id()
@@ -2343,6 +2364,9 @@ def _mesh_local_health():
     health = {
         'unit_id': _mesh_unit_id(),
         'viking_name': _mesh_viking_name(),
+        # Peers render this unit's portrait from this rather than re-deriving the
+        # gender, so a custom-named unit shows the right one across the fleet.
+        'viking_female': _mesh_viking_female(),
         'name': _mesh_unit_name(),
         'label': cfg.get('mesh_site_label') or socket.gethostname(),
         'hostname': socket.gethostname(),
@@ -2981,6 +3005,21 @@ def mesh_scan_capabilities():
                     'nuclei': cap['nuclei'], 'zap': cap['zap']})
 
 
+@app.route('/api/mesh/viking-names')
+def mesh_viking_names():
+    """The canonical Viking name/epithet lists, so the identity editor can roll
+    a fresh random name and know a name's gender without hard-coding the roster
+    in the browser (it lives once, in mesh_manager)."""
+    if not mesh_available:
+        return jsonify({'success': False, 'names': [], 'female': [], 'epithets': []})
+    return jsonify({
+        'success': True,
+        'names': list(mesh_manager.VIKING_NAMES),
+        'female': sorted(mesh_manager.VIKING_FEMALE_NAMES),
+        'epithets': list(mesh_manager.VIKING_EPITHETS),
+    })
+
+
 @app.route('/api/mesh/scan/start', methods=['POST'])
 def mesh_scan_start():
     """Run a delegated scan locally on behalf of a peer. Peer-write allowlisted."""
@@ -3413,8 +3452,10 @@ def mesh_status():
         'viking_name': _mesh_viking_name(),
         # Whether this unit's Viking name is a woman's — the header shows the
         # female Ragnar portrait when so.
-        'viking_female': (mesh_manager.is_female_viking(_mesh_viking_name())
-                          if mesh_available else False),
+        'viking_female': _mesh_viking_female(),
+        # The explicit gender override ('', 'male', 'female') so the editor can
+        # restore the operator's choice rather than re-deriving it every load.
+        'viking_gender': (shared_data.config.get('mesh_viking_gender') or ''),
         # Whether `tailscale serve --https` can actually work here. Reported so
         # the UI can say so up front instead of offering a button that hangs.
         'https_available': mesh_manager.https_available() if mesh_available else False,

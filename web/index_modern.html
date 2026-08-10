@@ -3146,14 +3146,28 @@
                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
                         <p class="text-[11px] text-gray-500 mt-1">Where the box physically is.</p>
                     </div>
-                    <div class="md:col-span-2">
+                    <div>
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Viking name</label>
-                        <input id="mesh-viking-input" type="text"
-                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                        <div class="flex gap-2">
+                            <input id="mesh-viking-input" type="text" oninput="meshOnJoinVikingInput()"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                            <button type="button" onclick="meshRollJoinName()" title="Roll a random Viking name"
+                                    aria-label="Roll a random Viking name"
+                                    class="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 rounded-lg text-lg leading-none transition-colors">🎲</button>
+                        </div>
                         <p class="text-[11px] text-gray-500 mt-1">
                             This unit's name in the army. Derived from the machine itself, so it already
-                            has one and keeps it across reinstalls — change it if you'd rather choose.
+                            has one and keeps it across reinstalls — change it, or roll a new one.
                         </p>
+                    </div>
+                    <div>
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Portrait / gender</label>
+                        <select id="mesh-viking-gender" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                            <option value="">Auto (from name)</option>
+                            <option value="male">Male</option>
+                            <option value="female">Female</option>
+                        </select>
+                        <p id="mesh-join-gender-hint" class="text-[11px] text-gray-500 mt-1">Known names set this automatically.</p>
                     </div>
                     <div class="md:col-span-2">
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
@@ -3258,9 +3272,23 @@
                         </div>
                         <div>
                             <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Viking name</label>
-                            <input id="mesh-ident-viking" type="text"
-                                   class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
-                            <p class="text-[11px] text-gray-500 mt-1">Its name in the army.</p>
+                            <div class="flex gap-2">
+                                <input id="mesh-ident-viking" type="text" oninput="meshOnVikingInput()"
+                                       class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                                <button type="button" onclick="meshRollName(this)" title="Roll a random Viking name"
+                                        aria-label="Roll a random Viking name"
+                                        class="flex-shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 rounded-lg text-lg leading-none transition-colors">🎲</button>
+                            </div>
+                            <p class="text-[11px] text-gray-500 mt-1">Its name in the army — or roll one.</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Portrait / gender</label>
+                            <select id="mesh-ident-gender" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                                <option value="">Auto (from name)</option>
+                                <option value="male">Male</option>
+                                <option value="female">Female</option>
+                            </select>
+                            <p id="mesh-ident-gender-hint" class="text-[11px] text-gray-500 mt-1">Known names set this automatically.</p>
                         </div>
                     </div>
                     <div class="flex items-center gap-3 mt-3">
@@ -7595,7 +7623,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260810-mesh-identity"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260810-mesh-dice-gender"></script>
 
 </body>
 </html>
