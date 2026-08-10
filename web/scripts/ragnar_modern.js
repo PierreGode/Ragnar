@@ -839,16 +839,13 @@ function initializeSocket() {
 function updateConnectionStatus(connected) {
     const statusEl = document.getElementById('connection-status');
     if (statusEl) {
+        // Just the dot — no wording. Colour carries the state; tooltip labels it.
         if (connected) {
-            statusEl.innerHTML = `
-                <span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>
-                <span class="text-xs text-gray-400">Connected</span>
-            `;
+            statusEl.title = 'Connected';
+            statusEl.innerHTML = `<span class="w-2 h-2 bg-green-500 rounded-full pulse-glow"></span>`;
         } else {
-            statusEl.innerHTML = `
-                <span class="w-2 h-2 bg-red-500 rounded-full"></span>
-                <span class="text-xs text-gray-400">Disconnected</span>
-            `;
+            statusEl.title = 'Disconnected';
+            statusEl.innerHTML = `<span class="w-2 h-2 bg-red-500 rounded-full"></span>`;
         }
     }
 }
