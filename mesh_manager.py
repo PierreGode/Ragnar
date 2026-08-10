@@ -127,6 +127,22 @@ VIKING_NAMES = VIKING_MALE_NAMES + VIKING_FEMALE_NAMES_ORDERED
 # portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
 VIKING_FEMALE_NAMES = frozenset(VIKING_FEMALE_NAMES_ORDERED)
 
+# The ORIGINAL 48-name / 24-epithet pool, frozen exactly as it was. The
+# auto-derived name (derive_viking_name) draws only from this so that no box
+# already running Ragnar is renamed when the pool above grows: derivation is
+# `hash % pool_size`, so changing the pool size would remap every seed. The
+# larger VIKING_NAMES/VIKING_EPITHETS above are for the dice roll and manual
+# choice — variety on demand, without disturbing anyone's inherited name. Do
+# not reorder or resize these two; that is exactly what would rename units.
+VIKING_NAMES_LEGACY = VIKING_MALE_NAMES[:24] + VIKING_FEMALE_NAMES_ORDERED[:24]
+VIKING_EPITHETS_LEGACY = (
+    'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
+    'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
+    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
+    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+)
+
 
 def is_female_viking(name):
     """True if the Viking name (full 'Yrsa Wolfsbane' or bare 'Yrsa') is one of
@@ -146,7 +162,7 @@ VIKING_EPITHETS = (
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
     'the Wanderer', 'Snake-eye', 'the Wise', 'the Silent', 'the Keen',
     'the Far-travelled', 'the Unyielding', 'Seafarer', 'the Watchful',
-    'Shieldbreaker', 'Wolfsbane', 'Stormborn',
+    'Shieldbreaker', 'Wolfsbane', 'Stormborn', 'Frostbeard', 'Ravenwing',
     # Attested historical bynames
     'Fairhair', 'Bloodaxe', 'the Good', 'the Great', 'the Old', 'Flatnose',
     'the Deep-minded', 'the Strong', 'Barefoot', 'the Tall', 'Longsword',
@@ -189,6 +205,12 @@ def derive_viking_name(seed=None):
 
     Same seed always yields the same name — a unit that is reinstalled comes
     back as itself rather than as a stranger.
+
+    Draws from the FROZEN legacy pool (VIKING_*_LEGACY), not the larger roster,
+    on purpose: the mapping is `hash % pool_size`, so growing the pool would
+    remap every seed and rename boxes that never chose a name. Keeping the auto
+    default on the original pool means no existing unit is ever renamed; the
+    bigger historic roster is offered through the dice and manual selection.
     """
     import hashlib
     if seed is None:
@@ -197,8 +219,8 @@ def derive_viking_name(seed=None):
     # Two independent slices so the given name and the epithet vary
     # independently; deriving both from one number would correlate them and
     # collapse the effective range back towards 48.
-    name = VIKING_NAMES[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES)]
-    epithet = VIKING_EPITHETS[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS)]
+    name = VIKING_NAMES_LEGACY[int.from_bytes(digest[0:4], 'big') % len(VIKING_NAMES_LEGACY)]
+    epithet = VIKING_EPITHETS_LEGACY[int.from_bytes(digest[4:8], 'big') % len(VIKING_EPITHETS_LEGACY)]
     return f'{name} {epithet}'
 
 
@@ -1407,6 +1429,22 @@ def _self_test():
           not (set(VIKING_MALE_NAMES) & VIKING_FEMALE_NAMES))
     check(f'pool is large (got {len(VIKING_NAMES)} names x {len(VIKING_EPITHETS)} epithets)',
           len(VIKING_NAMES) >= 100 and len(VIKING_EPITHETS) >= 40)
+    # The auto default must stay frozen so growing the pool never renames a box.
+    check('legacy pool is unchanged in size (48 x 24)',
+          len(VIKING_NAMES_LEGACY) == 48 and len(VIKING_EPITHETS_LEGACY) == 24)
+    check('legacy pool is a subset of the full roster',
+          set(VIKING_NAMES_LEGACY) <= set(VIKING_NAMES)
+          and set(VIKING_EPITHETS_LEGACY) <= set(VIKING_EPITHETS))
+    # Golden values: derive_viking_name must return exactly what it did before
+    # the roster was expanded. If these change, existing units get renamed.
+    _GOLDEN = {
+        'seed-a': 'Knut Stormborn',
+        'seed-b': 'Erik Ravenwing',
+        'machine-id-1': 'Astrid Forkbeard',
+        'abc123': 'Revna Bluetooth',
+    }
+    check('auto-derived names are unchanged (no box renamed)',
+          all(derive_viking_name(s) == want for s, want in _GOLDEN.items()))
 
     print('pi connect')
     pc = pi_connect_status()

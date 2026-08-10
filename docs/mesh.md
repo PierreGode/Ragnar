@@ -136,12 +136,20 @@ back to the Pi's CPU serial and then the hostname), so:
   comes back as itself, not as a stranger
 - the derivation is pure and offline; nothing is looked up or registered
 
-The pool is drawn from real Viking-age history and the Icelandic sagas — kings
-and jarls, explorers, and saga figures — giving 136 given names × 46 epithets =
-6,256 combinations. In the web UI (Ragnar Mesh → *This unit's identity*) a 🎲
-rolls a fresh random name, and a custom name lets you pick the portrait gender
-explicitly. Override from the shell with `mesh_viking_name` if you would rather
-choose:
+In the web UI (Ragnar Mesh → *This unit's identity*) a 🎲 rolls a fresh random
+name from the full historic roster — 136 given names × 48 epithets = 6,528
+combinations, drawn from real Viking-age history and the Icelandic sagas (kings
+and jarls, explorers, saga figures) — and a custom name lets you pick the
+portrait gender explicitly.
+
+The **auto-derived** default name (the one a box is born with) deliberately
+draws from the original, frozen 48 × 24 pool, *not* the larger roster. Because
+derivation is `hash % pool_size`, growing the pool would remap every seed and
+rename boxes that never chose a name — so the default pool is held constant and
+the extra names are offered only on demand via the dice. Growing the roster
+therefore renames nobody.
+
+Override from the shell with `mesh_viking_name` if you would rather choose:
 
 ```sh
 python3 -c "import mesh_manager; print(mesh_manager.derive_viking_name())"
