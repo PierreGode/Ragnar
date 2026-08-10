@@ -9650,48 +9650,27 @@ function initializeMobileMenu() {
         });
     }
 
-    // Auto-collapse: switch between desktop nav and hamburger based on overflow
+    // Switch between the desktop nav and the hamburger based on the WINDOW
+    // SIZE — not on how many items are in the menu. On tablets/phones the
+    // hamburger is used; on wider windows the desktop nav is shown and simply
+    // wraps to a second row (flex-wrap) when the items don't all fit on one.
     const desktopNav = document.getElementById('desktop-nav');
     if (!desktopNav || !menuBtn) return;
 
+    // Below this viewport width we treat it as a tablet/phone (covers iPad
+    // portrait at 768 and landscape at 1024) and collapse to the hamburger.
+    const NAV_HAMBURGER_MAX_WIDTH = 1024;
+
     function updateNavMode() {
-        // Temporarily show desktop nav offscreen to measure natural width
-        desktopNav.style.position = 'absolute';
-        desktopNav.style.visibility = 'hidden';
-        desktopNav.style.whiteSpace = 'nowrap';
-        desktopNav.classList.remove('hidden');
-        desktopNav.classList.add('flex');
+        const useHamburger = window.innerWidth <= NAV_HAMBURGER_MAX_WIDTH;
 
-        // Sum widths of visible buttons
-        let totalWidth = 0;
-        const gap = 4; // gap-1 = 0.25rem = 4px
-        let visibleCount = 0;
-        for (const btn of desktopNav.children) {
-            if (!btn.classList.contains('hidden')) {
-                totalWidth += btn.scrollWidth;
-                visibleCount++;
-            }
-        }
-        totalWidth += Math.max(0, visibleCount - 1) * gap;
-
-        // Reset temp styles
-        desktopNav.style.position = '';
-        desktopNav.style.visibility = '';
-        desktopNav.style.whiteSpace = '';
-
-        // Available space = parent width minus logo area
-        const parent = desktopNav.parentElement;
-        const logo = parent ? parent.querySelector('.flex.items-center.space-x-3') : null;
-        const logoWidth = logo ? logo.offsetWidth + 24 : 200; // 24px gap
-        const available = (parent ? parent.offsetWidth : window.innerWidth) - logoWidth - 48; // 48px for hamburger btn
-
-        if (totalWidth > available) {
-            // Too wide — show hamburger
+        if (useHamburger) {
+            // Tablet / phone — show hamburger
             desktopNav.classList.add('hidden');
             desktopNav.classList.remove('flex');
             menuBtn.classList.remove('hidden');
         } else {
-            // Fits — show desktop nav
+            // Desktop — show the wrapping nav bar
             desktopNav.classList.remove('hidden');
             desktopNav.classList.add('flex');
             menuBtn.classList.add('hidden');
@@ -23442,8 +23421,9 @@ async function checkServerCapabilities() {
                 console.log('[ServerMode]   - Full capabilities:', data.capabilities);
             }
             
-            // Re-measure the nav: we just changed which buttons are visible,
-            // and that decides desktop bar vs hamburger.
+            // Re-evaluate the nav mode (desktop bar wraps / hamburger). This is
+            // driven purely by window width, but re-running is harmless and keeps
+            // things in sync if buttons appeared while resizing.
             if (window._updateNavMode) window._updateNavMode();
             return data;
         } else if (!data.success) {
