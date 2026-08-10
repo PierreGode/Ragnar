@@ -31034,6 +31034,8 @@ function renderMesh(data) {
         if (vikingField && !vikingField.value && data.viking_name) {
             vikingField.value = data.viking_name;
         }
+        // Load the roster so the dice and the gender hint work before join too.
+        meshLoadVikingNames().then(() => meshOnJoinVikingInput());
     }
 
     // A page load that lands mid-install should resume the progress view rather
@@ -31059,6 +31061,10 @@ function renderMesh(data) {
         setIfIdle('mesh-ident-unit-id', data.unit_id ? String(data.unit_id) : '');
         setIfIdle('mesh-ident-label', data.site_label || '');
         setIfIdle('mesh-ident-viking', data.viking_name || '');
+        setIfIdle('mesh-ident-gender', data.viking_gender || '');
+        // Load the name roster (once) so the gender hint can tell known names
+        // from custom ones, then refresh the hint for whatever is in the box.
+        meshLoadVikingNames().then(() => meshOnVikingInput());
     }
     // Fleet update only makes sense once this unit is actually in the mesh, so it
     // can reach and relay to peers — same gate as the controls above.
@@ -31514,11 +31520,19 @@ async function meshJoin() {
     const unitId = parseInt(document.getElementById('mesh-unit-id-input').value, 10);
     const label = document.getElementById('mesh-label-input').value.trim();
     const viking = document.getElementById('mesh-viking-input').value.trim();
+    const gender = document.getElementById('mesh-viking-gender').value;
     const routes = document.getElementById('mesh-routes-input').value
         .split(',').map(r => r.trim()).filter(Boolean);
 
     if (!authKey) {
         out.innerHTML = '<span class="text-red-400">An auth key is required.</span>';
+        return;
+    }
+    // A custom name has no built-in gender, so require the operator to pick one.
+    await meshLoadVikingNames();
+    if (viking && meshNameIsKnown(viking) === false && !gender) {
+        out.innerHTML = '<span class="text-amber-400">Pick Male or Female for this custom name.</span>';
+        document.getElementById('mesh-viking-gender').focus();
         return;
     }
     btn.disabled = true;
@@ -31531,6 +31545,8 @@ async function meshJoin() {
         if (Number.isInteger(unitId) && unitId > 0) cfg.mesh_unit_id = unitId;
         if (label) cfg.mesh_site_label = label;
         if (viking) cfg.mesh_viking_name = viking;
+        // '' lets the server derive gender from a known name; else it's pinned.
+        cfg.mesh_viking_gender = gender;
         if (Object.keys(cfg).length) {
             await fetch('/api/config', {
                 method: 'POST',
@@ -31565,16 +31581,123 @@ async function meshJoin() {
     }
 }
 
+// The canonical Viking roster, fetched once from the server so the browser
+// never hard-codes it. Powers the dice roll and the known-vs-custom gender rule.
+let _meshVikingNames = null;
+async function meshLoadVikingNames() {
+    if (_meshVikingNames) return _meshVikingNames;
+    try {
+        const r = await fetch('/api/mesh/viking-names');
+        const d = await r.json();
+        if (d.success) {
+            _meshVikingNames = {
+                names: d.names || [],
+                female: new Set(d.female || []),
+                epithets: d.epithets || [],
+            };
+        }
+    } catch (_) { /* offline / no mesh module — dice + auto-gender just idle */ }
+    return _meshVikingNames;
+}
+
+// null = roster not loaded yet (can't judge); true/false = known/custom.
+function meshNameIsKnown(name) {
+    if (!_meshVikingNames) return null;
+    const first = (name || '').trim().split(/\s+/)[0];
+    return !!first && _meshVikingNames.names.includes(first);
+}
+
+function meshNameIsFemale(name) {
+    if (!_meshVikingNames) return false;
+    const first = (name || '').trim().split(/\s+/)[0];
+    return _meshVikingNames.female.has(first);
+}
+
+async function meshRollName() {
+    const list = await meshLoadVikingNames();
+    if (!list || !list.names.length) return;
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    document.getElementById('mesh-ident-viking').value =
+        `${pick(list.names)} ${pick(list.epithets)}`;
+    // A rolled name is always from the known roster, so its gender derives
+    // itself — reset the override back to Auto.
+    document.getElementById('mesh-ident-gender').value = '';
+    meshOnVikingInput();
+}
+
+// Keep the gender hint honest as the name is typed: a known name derives its own
+// gender; a custom one must be told which portrait to wear.
+function meshOnVikingInput() {
+    const hint = document.getElementById('mesh-ident-gender-hint');
+    if (!hint) return;
+    const name = document.getElementById('mesh-ident-viking').value;
+    const known = meshNameIsKnown(name);
+    if (!name.trim() || known === null) {
+        hint.textContent = 'Known names set this automatically.';
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else if (known) {
+        hint.textContent =
+            `Known name — portrait derives automatically (${meshNameIsFemale(name) ? 'female' : 'male'}).`;
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else {
+        hint.textContent = 'Custom name — choose Male or Female for the portrait.';
+        hint.className = 'text-[11px] text-amber-400 mt-1';
+    }
+}
+
+// The onboarding join form carries the same name/gender pair as the identity
+// editor, so it gets the same dice and known-vs-custom hint.
+async function meshRollJoinName() {
+    const list = await meshLoadVikingNames();
+    if (!list || !list.names.length) return;
+    const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+    document.getElementById('mesh-viking-input').value =
+        `${pick(list.names)} ${pick(list.epithets)}`;
+    document.getElementById('mesh-viking-gender').value = '';
+    meshOnJoinVikingInput();
+}
+
+function meshOnJoinVikingInput() {
+    const hint = document.getElementById('mesh-join-gender-hint');
+    if (!hint) return;
+    const name = document.getElementById('mesh-viking-input').value;
+    const known = meshNameIsKnown(name);
+    if (!name.trim() || known === null) {
+        hint.textContent = 'Known names set this automatically.';
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else if (known) {
+        hint.textContent =
+            `Known name — portrait derives automatically (${meshNameIsFemale(name) ? 'female' : 'male'}).`;
+        hint.className = 'text-[11px] text-gray-500 mt-1';
+    } else {
+        hint.textContent = 'Custom name — choose Male or Female for the portrait.';
+        hint.className = 'text-[11px] text-amber-400 mt-1';
+    }
+}
+
 async function meshSaveIdentity(btn) {
     const out = document.getElementById('mesh-ident-result');
     const unitId = parseInt(document.getElementById('mesh-ident-unit-id').value, 10);
     const label = document.getElementById('mesh-ident-label').value.trim();
     const viking = document.getElementById('mesh-ident-viking').value.trim();
+    const gender = document.getElementById('mesh-ident-gender').value;
+
+    // A custom name carries no built-in gender, so the portrait would be a
+    // coin toss unless the operator picks one — require it before saving.
+    await meshLoadVikingNames();
+    if (viking && meshNameIsKnown(viking) === false && !gender) {
+        out.textContent = 'Pick Male or Female for this custom name.';
+        out.className = 'text-sm text-amber-400';
+        document.getElementById('mesh-ident-gender').focus();
+        return;
+    }
 
     const cfg = {};
     // Unit 0 is the "unassigned" sentinel, so an empty box clears the number.
     cfg.mesh_unit_id = (Number.isInteger(unitId) && unitId > 0) ? unitId : 0;
     cfg.mesh_site_label = label;
+    // '' lets the server derive gender from a known name; 'male'/'female' pins it.
+    cfg.mesh_viking_gender = gender;
     if (viking) cfg.mesh_viking_name = viking;
 
     if (btn) btn.disabled = true;
@@ -31812,6 +31935,10 @@ window.meshCloseSetupHelp = meshCloseSetupHelp;
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
 window.meshSaveIdentity = meshSaveIdentity;
+window.meshRollName = meshRollName;
+window.meshOnVikingInput = meshOnVikingInput;
+window.meshRollJoinName = meshRollJoinName;
+window.meshOnJoinVikingInput = meshOnJoinVikingInput;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
