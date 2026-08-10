@@ -136,8 +136,12 @@ back to the Pi's CPU serial and then the hostname), so:
   comes back as itself, not as a stranger
 - the derivation is pure and offline; nothing is looked up or registered
 
-48 given names × 24 epithets = 1,152 combinations. Override with
-`mesh_viking_name` if you would rather choose:
+The pool is drawn from real Viking-age history and the Icelandic sagas — kings
+and jarls, explorers, and saga figures — giving 136 given names × 46 epithets =
+6,256 combinations. In the web UI (Ragnar Mesh → *This unit's identity*) a 🎲
+rolls a fresh random name, and a custom name lets you pick the portrait gender
+explicitly. Override from the shell with `mesh_viking_name` if you would rather
+choose:
 
 ```sh
 python3 -c "import mesh_manager; print(mesh_manager.derive_viking_name())"

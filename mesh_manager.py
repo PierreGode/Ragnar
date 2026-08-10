@@ -83,24 +83,49 @@ DEFAULT_NODE_PORT = 8000
 # would collide inside a mesh of a dozen units often enough to be annoying —
 # 48 x 24 gives 1,152 combinations, which pushes a first collision out past any
 # mesh anyone is going to run.
-VIKING_NAMES = (
+# Given names for the auto-derived Viking identity. Overwhelmingly drawn from
+# real Viking-age history and the Icelandic sagas — kings and jarls (Guthrum,
+# Gorm, Horik, Ragnvald, Sigtrygg), explorers (Leif, Thorfinn, Ingvar), and
+# saga figures (Egil, Skallagrim, Kjartan, Njal, Flosi) — with a few
+# legendary/mythic names kept for flavour. Men first, women second; the split
+# point is tracked by VIKING_FEMALE_NAMES below, so keep the two in step.
+VIKING_MALE_NAMES = (
     'Ragnar', 'Bjorn', 'Ivar', 'Ubbe', 'Sigurd', 'Halfdan', 'Floki', 'Rollo',
     'Erik', 'Leif', 'Harald', 'Gunnar', 'Knut', 'Olaf', 'Sven', 'Torstein',
     'Ulf', 'Arne', 'Egil', 'Hakon', 'Vali', 'Orm', 'Trygve', 'Steinar',
+    # Historical kings, jarls and Great Heathen Army leaders
+    'Guthrum', 'Hastein', 'Eystein', 'Ottar', 'Horik', 'Gorm', 'Sigtrygg',
+    'Magnus', 'Ragnvald', 'Godfred', 'Anlaf', 'Onund', 'Hemming', 'Styrbjorn',
+    # Explorers and settlers
+    'Thorfinn', 'Thorvald', 'Ingvar', 'Ketil', 'Ohthere', 'Naddod',
+    # Jomsvikings and warriors
+    'Palnatoki', 'Sigvaldi', 'Bui', 'Vagn', 'Toki', 'Thorkell', 'Thorgils',
+    # Saga figures (Egils, Laxdaela, Njals, Eyrbyggja)
+    'Skallagrim', 'Kveldulf', 'Thorolf', 'Snorri', 'Njal', 'Grim', 'Kjartan',
+    'Bolli', 'Hrut', 'Skarphedin', 'Kari', 'Flosi', 'Hoskuld', 'Gizur',
+    'Asgeir', 'Bard', 'Brand', 'Finn', 'Frodi', 'Geir', 'Hallvard', 'Hrafn',
+    'Ingjald', 'Ospak', 'Ozur', 'Thorgeir', 'Thorir', 'Thormod', 'Vestein',
+)
+
+VIKING_FEMALE_NAMES_ORDERED = (
     'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
     'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
     'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
     'Nanna', 'Signy',
+    # Historical queens and noblewomen
+    'Gunnhild', 'Thyra', 'Estrid', 'Gyda', 'Ragnhild', 'Asa', 'Aud', 'Unn',
+    # Saga women (Laxdaela, Njals, Egils, Eyrbyggja)
+    'Thorgerd', 'Bergthora', 'Hallgerd', 'Melkorka', 'Thurid', 'Vigdis',
+    'Thordis', 'Halldora', 'Katla', 'Groa', 'Steinunn', 'Thorunn', 'Jorunn',
+    'Ingibjorg', 'Herdis', 'Alfhild', 'Bodil', 'Ragna', 'Svanhild', 'Gerd',
+    'Hild', 'Grima', 'Ylva', 'Olof',
 )
+
+VIKING_NAMES = VIKING_MALE_NAMES + VIKING_FEMALE_NAMES_ORDERED
 
 # The women's names within VIKING_NAMES — used to pick the matching header
 # portrait (a unit renamed to a shieldmaiden shows the female Ragnar image).
-VIKING_FEMALE_NAMES = frozenset({
-    'Lagertha', 'Astrid', 'Freydis', 'Sigrid', 'Thora', 'Yrsa', 'Ingrid',
-    'Brynhild', 'Gudrun', 'Helga', 'Revna', 'Solveig', 'Torvi', 'Aslaug',
-    'Randvi', 'Sigyn', 'Hilda', 'Runa', 'Eira', 'Frida', 'Idunn', 'Kara',
-    'Nanna', 'Signy',
-})
+VIKING_FEMALE_NAMES = frozenset(VIKING_FEMALE_NAMES_ORDERED)
 
 
 def is_female_viking(name):
@@ -111,12 +136,23 @@ def is_female_viking(name):
     return name.strip().split(' ', 1)[0] in VIKING_FEMALE_NAMES
 
 
+# Bynames appended after the given name. Mostly genuine Viking-age epithets
+# recorded in the chronicles and sagas — Ironside (Bjorn), the Boneless (Ivar),
+# Forkbeard (Sven), Bluetooth (Harald), Fairhair, Bloodaxe (Erik), Flatnose
+# (Ketil), the Deep-minded (Aud), Barefoot (Magnus), the Lucky (Leif),
+# Skull-splitter (Thorfinn) — with a handful of flavour ones retained.
 VIKING_EPITHETS = (
     'Ironside', 'the Boneless', 'Forkbeard', 'Bluetooth', 'the Red',
     'the Black', 'Longbeard', 'the Stout', 'the Fearless', 'Hardrada',
-    'the Wanderer', 'Snake-eye', 'the Wise', 'Stormborn', 'the Silent',
-    'Shieldbreaker', 'the Far-travelled', 'Frostbeard', 'the Keen',
-    'Wolfsbane', 'the Unyielding', 'Seafarer', 'the Watchful', 'Ravenwing',
+    'the Wanderer', 'Snake-eye', 'the Wise', 'the Silent', 'the Keen',
+    'the Far-travelled', 'the Unyielding', 'Seafarer', 'the Watchful',
+    'Shieldbreaker', 'Wolfsbane', 'Stormborn',
+    # Attested historical bynames
+    'Fairhair', 'Bloodaxe', 'the Good', 'the Great', 'the Old', 'Flatnose',
+    'the Deep-minded', 'the Strong', 'Barefoot', 'the Tall', 'Longsword',
+    'the Holy', 'the Mighty', 'Skull-splitter', 'the Lucky', 'the Peaceable',
+    'the Proud', 'Half-troll', 'the Sharp', 'Longshanks', 'Crowbone',
+    'the Generous', 'Bare-legs', 'the Quarrelsome',
 )
 
 
@@ -1365,6 +1401,12 @@ def _self_test():
     check('name pools are collision-free',
           len(set(VIKING_NAMES)) == len(VIKING_NAMES)
           and len(set(VIKING_EPITHETS)) == len(VIKING_EPITHETS))
+    check('female names are all in the given-name pool',
+          VIKING_FEMALE_NAMES <= set(VIKING_NAMES))
+    check('no name is both a man\'s and a woman\'s',
+          not (set(VIKING_MALE_NAMES) & VIKING_FEMALE_NAMES))
+    check(f'pool is large (got {len(VIKING_NAMES)} names x {len(VIKING_EPITHETS)} epithets)',
+          len(VIKING_NAMES) >= 100 and len(VIKING_EPITHETS) >= 40)
 
     print('pi connect')
     pc = pi_connect_status()
