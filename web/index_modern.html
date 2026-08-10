@@ -3237,6 +3237,38 @@
             <!-- Node controls, available once joined -->
             <div id="mesh-controls" class="glass rounded-xl p-6 mt-6 hidden">
                 <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">This unit's mesh controls</h3>
+                <div class="glass rounded-lg p-4 mb-4">
+                    <h4 class="font-medium mb-1">This unit's identity</h4>
+                    <p class="text-xs text-gray-400 mb-3">
+                        How this box is named across the mesh. The unit number is set on the
+                        unit itself — to number a different box, open its own Ragnar Mesh tab.
+                    </p>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                            <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Unit number</label>
+                            <input id="mesh-ident-unit-id" type="number" min="1" max="99" placeholder="3"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                            <p class="text-[11px] text-gray-500 mt-1">Unique in the mesh.</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Site label</label>
+                            <input id="mesh-ident-label" type="text" placeholder="Jersey DC"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                            <p class="text-[11px] text-gray-500 mt-1">Where the box is.</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Viking name</label>
+                            <input id="mesh-ident-viking" type="text"
+                                   class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                            <p class="text-[11px] text-gray-500 mt-1">Its name in the army.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3 mt-3">
+                        <button onclick="meshSaveIdentity(this)"
+                                class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-4 rounded text-sm transition-colors">Save identity</button>
+                        <span id="mesh-ident-result" class="text-sm"></span>
+                    </div>
+                </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="glass rounded-lg p-4">
                         <h4 class="font-medium mb-1">Publish web UI to the tailnet</h4>
@@ -7563,7 +7595,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260810-mesh-unnumbered"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260810-mesh-identity"></script>
 
 </body>
 </html>
