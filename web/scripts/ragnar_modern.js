@@ -31048,6 +31048,18 @@ function renderMesh(data) {
     summary.classList.toggle('hidden', !joined);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
     if (piWrap) piWrap.classList.toggle('hidden', !joined);
+
+    // Fill the post-join identity editor from what this unit currently reports,
+    // but never yank a field out from under someone mid-edit.
+    if (joined) {
+        const setIfIdle = (id, val) => {
+            const el = document.getElementById(id);
+            if (el && document.activeElement !== el) el.value = val;
+        };
+        setIfIdle('mesh-ident-unit-id', data.unit_id ? String(data.unit_id) : '');
+        setIfIdle('mesh-ident-label', data.site_label || '');
+        setIfIdle('mesh-ident-viking', data.viking_name || '');
+    }
     // Fleet update only makes sense once this unit is actually in the mesh, so it
     // can reach and relay to peers — same gate as the controls above.
     const updateWrap = document.getElementById('mesh-update-wrap');
@@ -31069,8 +31081,24 @@ function renderMesh(data) {
             `can happen — rename one in Config → Ragnar Mesh.`));
     });
     if (data.summary?.unnumbered_units) {
+        const named = (data.summary.unnumbered_names || []).map(u =>
+            u.is_self ? '<strong>This unit</strong>'
+                      : `<strong>${escapeHtml(u.name)}</strong>`);
+        const who = named.length
+            ? ` (${named.join(', ')})`
+            : '';
+        const n = data.summary.unnumbered_units;
+        const hasSelf = (data.summary.unnumbered_names || []).some(u => u.is_self);
+        const where = hasSelf
+            ? `Set this unit's number under <em>This unit's mesh controls → This unit's identity</em> below. `
+            : ``;
+        const peers = (data.summary.unnumbered_names || []).some(u => !u.is_self)
+            ? `A peer's number lives on that box — open its own Ragnar Mesh tab to set it. `
+            : ``;
         notes.push(meshWarning(
-            `${data.summary.unnumbered_units} reachable unit(s) have no unit number assigned.`));
+            `${n} reachable unit${n === 1 ? '' : 's'}${who} ` +
+            `${n === 1 ? 'has' : 'have'} no unit number assigned, so reports can't name ` +
+            `${n === 1 ? 'it' : 'them'} by number. ${where}${peers}`));
     }
     if (data.self && data.self.key_state && data.self.key_state !== 'ok') {
         notes.push(meshWarning(`This unit: ${escapeHtml(data.self.key_message || '')}`,
@@ -31537,6 +31565,41 @@ async function meshJoin() {
     }
 }
 
+async function meshSaveIdentity(btn) {
+    const out = document.getElementById('mesh-ident-result');
+    const unitId = parseInt(document.getElementById('mesh-ident-unit-id').value, 10);
+    const label = document.getElementById('mesh-ident-label').value.trim();
+    const viking = document.getElementById('mesh-ident-viking').value.trim();
+
+    const cfg = {};
+    // Unit 0 is the "unassigned" sentinel, so an empty box clears the number.
+    cfg.mesh_unit_id = (Number.isInteger(unitId) && unitId > 0) ? unitId : 0;
+    cfg.mesh_site_label = label;
+    if (viking) cfg.mesh_viking_name = viking;
+
+    if (btn) btn.disabled = true;
+    out.textContent = 'Saving…';
+    out.className = 'text-sm text-gray-400';
+    try {
+        const resp = await fetch('/api/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg)
+        });
+        const data = await resp.json();
+        if (data.success === false) throw new Error(data.message || 'Save failed.');
+        out.textContent = 'Saved.';
+        out.className = 'text-sm text-green-400';
+        showNotification('Mesh identity saved', 'success');
+        await refreshMesh(true);
+    } catch (err) {
+        out.textContent = String(err.message || err);
+        out.className = 'text-sm text-red-400';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
 async function meshPost(path, body, okMessage) {
     const out = document.getElementById('mesh-control-result');
     out.innerHTML = '<span class="text-gray-400">Working…</span>';
@@ -31748,6 +31811,7 @@ window.meshCloseSetupHelp = meshCloseSetupHelp;
 
 window.refreshMesh = refreshMesh;
 window.meshJoin = meshJoin;
+window.meshSaveIdentity = meshSaveIdentity;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
