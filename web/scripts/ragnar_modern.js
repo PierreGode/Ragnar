@@ -20655,7 +20655,18 @@ async function loadAIConfiguration(config) {
             : false;
         aiEnabledCheckbox.checked = aiEnabled;
     }
-    
+
+    // Self-hosted endpoint + model (issue #462)
+    const baseUrlInput = document.getElementById('ai-base-url');
+    if (baseUrlInput) {
+        baseUrlInput.value = (config && config.ai_base_url) ? config.ai_base_url : '';
+    }
+    const modelInput = document.getElementById('ai-model-input');
+    if (modelInput) {
+        modelInput.value = (config && config.ai_model) ? config.ai_model : '';
+        if (!modelInput.value) modelInput.placeholder = 'gpt-5.4-nano  ·  or e.g. qwen2.5:7b';
+    }
+
     // Fetch token status from environment variable
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
@@ -20672,6 +20683,40 @@ async function loadAIConfiguration(config) {
         }
     } catch (error) {
         console.error('Failed to fetch AI token status:', error);
+    }
+}
+
+// Save the self-hosted endpoint + model (issue #462). Empty base URL reverts
+// to OpenAI's cloud. The backend re-inits the AI client on these keys.
+async function saveAIEndpoint() {
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    const model = (document.getElementById('ai-model-input')?.value || '').trim();
+
+    const payload = { ai_base_url: baseUrl };
+    if (model) payload.ai_model = model;
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    };
+
+    try {
+        const result = await postAPI('/api/config', payload);
+        // A non-null false means the AI client failed to re-init with the new
+        // endpoint (unreachable server, wrong model name, etc.).
+        if (result && result.ai_reload_success === false) {
+            throw new Error(result.ai_reload_error || 'AI engine could not reach the endpoint. Check the URL and that the server is running.');
+        }
+        const target = baseUrl || 'OpenAI cloud';
+        show('bg-green-900/30 border border-green-700', `✓ Endpoint saved — using ${target}${model ? ` (model: ${model})` : ''}.`);
+    } catch (error) {
+        console.error('Failed to save AI endpoint:', error);
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Failed to save endpoint'}`);
     }
 }
 

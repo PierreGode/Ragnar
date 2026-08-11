@@ -835,6 +835,12 @@ class SharedData:
             "ai_enabled": False,
             "openai_api_token": "",
             "ai_model": "gpt-5.4-nano",
+            # Self-hosted / OpenAI-compatible endpoint (issue #462). Leave blank
+            # for OpenAI's cloud. Set to e.g. http://192.168.1.50:11434/v1 to
+            # point at an Ollama/LocalAI/vLLM/LM Studio server; Ragnar then
+            # talks Chat Completions and the API key becomes optional.
+            "ai_base_url": "",
+            "ai_api_style": "auto",  # auto | responses | chat
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,

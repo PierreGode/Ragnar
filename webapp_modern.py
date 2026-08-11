@@ -8122,12 +8122,18 @@ def _apply_config_update(data):
         shared_data.screen_reversed = normalize_rotation(shared_data.config.get('screen_reversed', 0))
         shared_data.web_screen_reversed = normalize_rotation(shared_data.config.get('web_screen_reversed', 0))
         
-        # Reload AI service if ai_enabled was changed
-        if 'ai_enabled' in data:
+        # Reload AI service when the enable flag OR the endpoint config changes
+        # (base URL / model / api style), so pointing at a self-hosted endpoint
+        # takes effect without also toggling ai_enabled. The config dict was
+        # already updated above, so read the effective enabled state from it.
+        ai_endpoint_keys = ('ai_base_url', 'ai_model', 'ai_api_style')
+        ai_config_touched = 'ai_enabled' in data or any(k in data for k in ai_endpoint_keys)
+        ai_now_enabled = bool(shared_data.config.get('ai_enabled', False))
+        if ai_config_touched:
             ai_service = getattr(shared_data, 'ai_service', None)
-            
+
             # If AI service doesn't exist and user enabled it, try to initialize
-            if not ai_service and data['ai_enabled']:
+            if not ai_service and ai_now_enabled:
                 try:
                     shared_data.initialize_ai_service()
                     ai_service = shared_data.ai_service
@@ -8141,7 +8147,7 @@ def _apply_config_update(data):
                     ai_reload_error = str(e)
             # If AI service exists, reload or disable it
             elif ai_service:
-                if data['ai_enabled']:
+                if ai_now_enabled:
                     ai_reload_success = ai_service.reload_token()
                     if not ai_reload_success:
                         ai_reload_error = getattr(ai_service, 'initialization_error', None)

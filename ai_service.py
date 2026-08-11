@@ -39,6 +39,15 @@ class AIService:
         self.enabled = cfg.get("ai_enabled", False)
         self.model = cfg.get("ai_model", "gpt-5.4-nano")
 
+        # Self-hosted / OpenAI-compatible endpoint support (issue #462).
+        # When ai_base_url is set (e.g. an Ollama/LocalAI/vLLM/LM Studio server
+        # on the LAN or mesh), Ragnar talks to it as a thin HTTP client and
+        # uses the Chat Completions API — local servers implement /v1/chat/
+        # completions, not OpenAI's proprietary Responses API. Empty base URL
+        # keeps the default OpenAI Responses behavior unchanged.
+        self.base_url = str(cfg.get("ai_base_url", "") or "").strip()
+        self.use_chat_api = self._resolve_use_chat_api()
+
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
         self.temperature = cfg.get("ai_temperature")
@@ -64,11 +73,28 @@ class AIService:
     #   INITIALIZATION
     # ===================================================================
 
+    def _resolve_use_chat_api(self):
+        """Decide which API dialect to speak.
+
+        ``ai_api_style`` ('auto'|'responses'|'chat') overrides when set;
+        otherwise a configured base URL implies a self-hosted, Chat-Completions
+        server and the default OpenAI cloud uses the Responses API.
+        """
+        style = str(self.shared_data.config.get("ai_api_style", "auto") or "auto").strip().lower()
+        if style == "chat":
+            return True
+        if style == "responses":
+            return False
+        return bool(self.base_url)
+
     def _initialize_client(self):
         if not self.enabled:
             return
 
-        if not self.api_token:
+        # A real key is mandatory for OpenAI's cloud, but self-hosted endpoints
+        # usually accept any non-empty string — the SDK still requires one, so
+        # fall back to a harmless placeholder when the operator left it blank.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return
@@ -81,9 +107,20 @@ class AIService:
             # failing fast and letting the rest of the insights render. One retry
             # keeps the worst-case bounded (~40s/call) so the background insights
             # run resolves quickly even on a slow board.
-            self.client = OpenAI(api_key=self.api_token, timeout=20.0, max_retries=1)
+            client_kwargs = {
+                "api_key": self.api_token or "ragnar-local",
+                "timeout": 20.0,
+                "max_retries": 1,
+            }
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
+            endpoint = self.base_url or "OpenAI"
+            api_dialect = "chat.completions" if self.use_chat_api else "responses"
+            self.logger.info(
+                f"AI Service initialized (model: {self.model}, endpoint: {endpoint}, api: {api_dialect})"
+            )
         except Exception as exc:
             self.client = None
             self.initialization_error = f"OpenAI client initialization failed: {exc}"
@@ -93,9 +130,13 @@ class AIService:
     def reload_token(self) -> bool:
         """Refresh the API token from disk and reinitialize the OpenAI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep enabled flag + endpoint config synced with latest config intent
         if hasattr(self.shared_data, "config"):
-            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            cfg = self.shared_data.config
+            self.enabled = cfg.get("ai_enabled", self.enabled)
+            self.model = cfg.get("ai_model", self.model)
+            self.base_url = str(cfg.get("ai_base_url", "") or "").strip()
+            self.use_chat_api = self._resolve_use_chat_api()
 
         self.api_token = self.env_manager.get_token()
         self.client = None
@@ -105,7 +146,7 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
+        if not self.api_token and not self.base_url:
             self.logger.warning("AI token reload requested but no token present in environment.")
             self.initialization_error = "No OpenAI API key found."
             return False
@@ -158,7 +199,9 @@ class AIService:
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
 
-        if not self.api_token:
+        # A token is only mandatory for the OpenAI cloud; a self-hosted base URL
+        # can run keyless.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return False
@@ -200,6 +243,11 @@ class AIService:
         if self.client is None:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
+
+        # Self-hosted / OpenAI-compatible servers speak Chat Completions, not
+        # the proprietary Responses API — route them separately.
+        if self.use_chat_api:
+            return self._ask_chat(system_msg, user_msg)
 
         # Base GPT-5 payload
         payload = {
@@ -245,6 +293,56 @@ class AIService:
             return None
 
 
+
+    def _ask_chat(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """Chat Completions call for self-hosted OpenAI-compatible endpoints.
+
+        No reasoning/verbosity params (unsupported by local servers); reads the
+        classic ``choices[0].message.content`` response shape.
+        """
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        try:
+            result = self.client.chat.completions.create(**payload)
+        except Exception as e:
+            error_text = str(e).lower()
+            if "temperature" in error_text and payload.pop("temperature", None) is not None:
+                self.temperature_supported = False
+                self.logger.warning("Endpoint rejected temperature — retrying without it.")
+                try:
+                    result = self.client.chat.completions.create(**payload)
+                except Exception as e2:
+                    self.logger.error(f"Self-hosted AI retry failed: {e2}")
+                    return None
+            else:
+                self.logger.error(f"Self-hosted AI call failed: {e}")
+                return None
+
+        # Usage fields on OpenAI-compatible servers use prompt/completion naming.
+        usage = getattr(result, "usage", None)
+        if usage is not None:
+            self.logger.info(
+                "AI Tokens → input:{} output:{} total:{}".format(
+                    getattr(usage, "prompt_tokens", "?"),
+                    getattr(usage, "completion_tokens", "?"),
+                    getattr(usage, "total_tokens", "?"),
+                )
+            )
+
+        try:
+            content = result.choices[0].message.content
+            return content.strip() if content else None
+        except (AttributeError, IndexError, TypeError):
+            self.logger.error("Self-hosted AI response had no message content.")
+            return None
 
     def _extract_output(self, result):
         """Extract output text and log token usage."""
