@@ -23288,10 +23288,23 @@ async function loadAIInsights(force = false) {
         if (aiSection) aiSection.style.display = 'block';
         if (aiNotConfigured) aiNotConfigured.style.display = 'none';
         
-        // Update model name
+        // Update model name — adapt the heading and the footer to whichever
+        // model is actually configured (self-hosted tag or OpenAI). When the
+        // self-hosted endpoint has dropped and we're running on the cloud
+        // fallback, make that visible rather than showing a model that isn't
+        // answering.
+        const fallback = Boolean(status.fallback_active);
+        const shownModel = status.model || 'AI';
+        const headingModel = document.getElementById('ai-insights-model');
+        if (headingModel) {
+            headingModel.textContent = fallback ? `${shownModel} → OpenAI fallback` : shownModel;
+        }
         const modelName = document.getElementById('ai-model-name');
         if (modelName && status.model) {
-            modelName.textContent = status.model;
+            modelName.textContent = fallback ? `${shownModel} (OpenAI fallback active)` : shownModel;
+            modelName.className = fallback
+                ? 'text-amber-400 font-semibold'
+                : 'text-purple-400 font-semibold';
         }
         
         // Fetch insights. The server computes them in the BACKGROUND and answers

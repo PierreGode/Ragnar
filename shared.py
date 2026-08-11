@@ -841,6 +841,7 @@ class SharedData:
             # talks Chat Completions and the API key becomes optional.
             "ai_base_url": "",
             "ai_api_style": "auto",  # auto | responses | chat
+            "ai_fallback_model": "",  # cloud model used if a self-hosted endpoint drops (blank = gpt-5.4-nano)
             "ai_analysis_enabled": True,
             "ai_vulnerability_summaries": True,
             "ai_network_insights": True,

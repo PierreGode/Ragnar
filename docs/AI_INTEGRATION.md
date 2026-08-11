@@ -62,7 +62,17 @@ that server's model tag. When a base URL is present:
 Click **Connect** next to the endpoint field to list the models the server
 offers and pick one from the dropdown (backed by `POST /api/ai/models`, which
 the Pi proxies so it works even though the browser can't reach the remote server
-directly). Then click **Save Endpoint**.
+directly). Then click **Save Endpoint**. URLs are tidied automatically — a
+missing `http://` or `/v1` is added, so `192.168.1.50:11434` becomes
+`http://192.168.1.50:11434/v1`.
+
+**Cloud fallback:** if a self-hosted endpoint becomes unreachable (connection
+lost / timeout) mid-run and an OpenAI token is configured, Ragnar automatically
+falls back to OpenAI's cloud so insights keep flowing. The dashboard header
+shows `… → OpenAI fallback` while this is active, and reverts once the local
+endpoint answers again. Set **ai_fallback_model** to choose the cloud model used
+(blank = `gpt-5.4-nano`). The dashboard AI card's title and footer always show
+the model actually in use.
 
 **The model runs on whatever host you point at — not on the Pi.** The Pi stays a
 thin HTTP client, exactly as it is with OpenAI. This pairs naturally with a

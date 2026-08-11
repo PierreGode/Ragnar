@@ -22554,6 +22554,8 @@ def get_ai_status():
             'config_enabled': config_enabled,  # User's intent from config
             'available': True,  # Always assume SDK is installed
             'model': getattr(ai_service, 'model', None),
+            'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
+            'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
