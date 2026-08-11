@@ -66,6 +66,17 @@ directly). Then click **Save Endpoint**. URLs are tidied automatically — a
 missing `http://` or `/v1` is added, so `192.168.1.50:11434` becomes
 `http://192.168.1.50:11434/v1`.
 
+**Scan Network** (auto-discovery): the button beside *Connect* sweeps your
+**Tailscale peers** (via the Ragnar Mesh) *and* the **local subnet** for a
+running Ollama on port 11434 (`POST /api/ai/discover`), then lists every
+responder with its model count. Click one to fill the endpoint + model dropdown,
+then **Save Endpoint**. This is how you reach an Ollama on another machine over
+Tailscale — join that machine to the same tailnet and it shows up here.
+
+> Ollama binds to `127.0.0.1` by default, so it is *not* reachable over Tailscale
+> or the LAN until you set **`OLLAMA_HOST=0.0.0.0:11434`** on that machine and
+> allow port 11434 through its firewall. The scan says so when nothing answers.
+
 **Cloud fallback:** if a self-hosted endpoint becomes unreachable (connection
 lost / timeout) mid-run and an OpenAI token is configured, Ragnar automatically
 falls back to OpenAI's cloud so insights keep flowing. The dashboard header

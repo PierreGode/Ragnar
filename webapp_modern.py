@@ -23156,6 +23156,134 @@ def list_ai_models():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def _probe_ollama(ip, port=11434, connect_timeout=0.6, read_timeout=2.5):
+    """Return a sorted model list if an OpenAI-compatible/Ollama server answers
+    on ip:port, else None. A fast TCP pre-check avoids waiting the full HTTP
+    timeout on the many closed ports in a subnet sweep. An empty list means the
+    server answered but has no models pulled (still a valid, reachable endpoint).
+    """
+    import socket as _socket
+    try:
+        with _socket.create_connection((ip, port), timeout=connect_timeout):
+            pass
+    except OSError:
+        return None
+
+    import json as _json
+    from urllib.request import urlopen, Request
+    base = f"http://{ip}:{port}"
+    # OpenAI-compatible path first (Ollama, LocalAI, vLLM, LM Studio), then
+    # Ollama's native /api/tags as a fallback.
+    for path, extract in (
+        ('/v1/models', lambda d: [m.get('id') for m in (d.get('data') or [])]),
+        ('/api/tags', lambda d: [m.get('name') for m in (d.get('models') or [])]),
+    ):
+        try:
+            req = Request(base + path, headers={'Accept': 'application/json'})
+            with urlopen(req, timeout=read_timeout) as resp:
+                payload = _json.loads(resp.read().decode('utf-8', 'replace'))
+            return sorted({m for m in extract(payload) if m})
+        except Exception:
+            continue
+    return None  # port open but not an OpenAI/Ollama server
+
+
+@app.route('/api/ai/discover', methods=['POST'])
+def discover_ai_endpoints():
+    """Scan the tailnet and the local subnet for OpenAI/Ollama servers (#462).
+
+    Tailnet peers come from mesh_manager; local hosts from the primary /24.
+    Every candidate is probed on :11434 concurrently; responders are returned
+    with their model lists so the UI can offer them as one-click endpoints.
+    """
+    import concurrent.futures
+    from ai_service import normalize_base_url
+    try:
+        candidates = {}  # ip -> {name, os, source}
+
+        # --- Tailnet peers (Ragnar Mesh already speaks Tailscale) ---
+        tailnet_available = False
+        try:
+            import mesh_manager
+            st = mesh_manager.status()
+            tailnet_available = bool(st.get('available'))
+            nodes = ([st['self']] if st.get('self') else []) + (st.get('peers') or [])
+            for n in nodes:
+                ip = n.get('ip')
+                if ip and n.get('online', False):
+                    candidates.setdefault(ip, {
+                        'name': n.get('short_name') or n.get('hostname') or '',
+                        'os': n.get('os') or '',
+                        'source': 'tailnet',
+                    })
+        except Exception as e:
+            logger.debug(f"Tailnet enumeration failed during AI discovery: {e}")
+
+        # --- Local subnet (primary interface /24) ---
+        try:
+            import netifaces
+            gw = netifaces.gateways().get('default', {}).get(netifaces.AF_INET)
+            if gw:
+                addrs = netifaces.ifaddresses(gw[1]).get(netifaces.AF_INET) or []
+                if addrs:
+                    my_ip = addrs[0]['addr']
+                    mask = addrs[0].get('netmask', '255.255.255.0')
+                    bits = sum(bin(int(x)).count('1') for x in mask.split('.'))
+                    bits = max(bits, 24)  # cap the sweep at a /24
+                    net = ipaddress.ip_network(f"{my_ip}/{bits}", strict=False)
+                    # Nicer labels for hosts Ragnar already knows.
+                    db_names = {}
+                    try:
+                        for h in (shared_data.db.get_all_hosts() or []):
+                            if h.get('ip'):
+                                db_names[h['ip']] = h.get('hostname') or ''
+                    except Exception:
+                        pass
+                    for host in net.hosts():
+                        s = str(host)
+                        if s == my_ip:
+                            continue
+                        candidates.setdefault(s, {'name': db_names.get(s, ''), 'os': '', 'source': 'local'})
+        except Exception as e:
+            logger.debug(f"Local subnet enumeration failed during AI discovery: {e}")
+
+        if not candidates:
+            return jsonify({
+                'success': True, 'results': [], 'tailnet_available': tailnet_available,
+                'hint': 'No candidate hosts found — is this box on a network or tailnet?'
+            })
+
+        def work(ip):
+            models = _probe_ollama(ip)
+            if models is None:
+                return None
+            meta = candidates[ip]
+            return {
+                'ip': ip, 'name': meta['name'], 'os': meta['os'], 'source': meta['source'],
+                'port': 11434, 'base_url': normalize_base_url(f"http://{ip}:11434"),
+                'models': models,
+            }
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+            for r in ex.map(work, list(candidates.keys())):
+                if r:
+                    results.append(r)
+        results.sort(key=lambda r: (r['source'] != 'tailnet', (r['name'] or '').lower(), r['ip']))
+
+        return jsonify({
+            'success': True,
+            'results': results,
+            'tailnet_available': tailnet_available,
+            'scanned': len(candidates),
+            'hint': ("If your Ollama host isn't listed, make it listen beyond localhost: set "
+                     "OLLAMA_HOST=0.0.0.0:11434 on that machine and allow port 11434 through its firewall."),
+        })
+    except Exception as e:
+        logger.error(f"Error discovering AI endpoints: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/ai/token', methods=['GET'])
 def get_ai_token():
     """Get OpenAI API token status (without revealing the actual token)"""
