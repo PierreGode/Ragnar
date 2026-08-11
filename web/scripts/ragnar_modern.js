@@ -10412,8 +10412,76 @@ async function updateNetworkStatusBanner() {
 // STABLE NETWORK DATA FUNCTIONS
 // ============================================================================
 
+// Per-device scan ignore lists (issue #459). Cached client-side so the hosts
+// table can show the correct Ignore/Unignore state without re-fetching config
+// on every row. Kept in sync by loadScanBlacklist() and toggleIgnoreHost().
+let scanBlacklist = { macs: new Set(), ips: new Set() };
+
+async function loadScanBlacklist() {
+    try {
+        const data = await fetchAPI('/api/config/scan-blacklist');
+        scanBlacklist.macs = new Set((data.macs || []).map(m => String(m).toLowerCase()));
+        scanBlacklist.ips = new Set(data.ips || []);
+    } catch (error) {
+        console.warn('Could not load scan blacklist:', error);
+    }
+}
+
+function isHostIgnored(ip, mac) {
+    const m = (mac && mac !== 'Unknown') ? String(mac).toLowerCase() : '';
+    return (m && scanBlacklist.macs.has(m)) || (ip && scanBlacklist.ips.has(ip));
+}
+
+// Add or remove a host from the scan ignore list, then refresh the table.
+async function toggleIgnoreHost(ip, mac, ignore) {
+    const m = (mac && mac !== 'Unknown' && mac !== '00:00:00:00:00:00') ? mac : '';
+    const body = {};
+    if (m) body.mac = m;
+    if (ip && ip !== 'Unknown') body.ip = ip;
+    if (!body.mac && !body.ip) {
+        showNotification('This host has no MAC or IP to ignore.', 'error');
+        return;
+    }
+    try {
+        const resp = await fetch('/api/config/scan-blacklist', {
+            method: ignore ? 'POST' : 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        // Parse defensively: a stale server without this route returns an HTML
+        // 404, so resp.json() would throw a cryptic "did not match the expected
+        // pattern" instead of a useful message.
+        let data;
+        try {
+            data = await resp.json();
+        } catch (_) {
+            if (resp.status === 404) {
+                throw new Error('Ignore-list endpoint not found — restart the Ragnar web service to load this feature.');
+            }
+            throw new Error(`Server returned a non-JSON response (HTTP ${resp.status}).`);
+        }
+        if (!resp.ok) throw new Error(data.error || `Request failed (HTTP ${resp.status})`);
+        scanBlacklist.macs = new Set((data.macs || []).map(x => String(x).toLowerCase()));
+        scanBlacklist.ips = new Set(data.ips || []);
+        const label = m || ip;
+        showNotification(
+            ignore ? `Ignoring ${label} — it will be skipped in future scans.`
+                   : `${label} removed from the ignore list.`,
+            'success'
+        );
+        if (!data.enabled) {
+            showNotification('Note: "Honor Scan Blacklists" is off in Settings, so ignore lists are not enforced yet.', 'info');
+        }
+        loadStableNetworkData();
+    } catch (error) {
+        console.error('Error toggling host ignore state:', error);
+        showNotification(`Failed to update ignore list: ${error.message}`, 'error');
+    }
+}
+
 async function loadStableNetworkData() {
     try {
+        await loadScanBlacklist();
         const { network } = getSelectedDashboardNetworkKey() || {};
         const query = network ? `/api/network/stable?network=${encodeURIComponent(network)}` : '/api/network/stable';
         const data = await fetchAPI(query);
@@ -10471,10 +10539,12 @@ function displayStableNetworkTable(data) {
         }
         
         const row = document.createElement('tr');
-        row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors';
-        
+        const ignored = isHostIgnored(host.ip, host.mac);
+        row.className = 'border-b border-slate-700 hover:bg-slate-700/50 transition-colors' +
+            (ignored ? ' opacity-50' : '');
+
         // Status indicator
-        const statusIcon = host.status === 'up' ? 
+        const statusIcon = host.status === 'up' ?
             '<span class="flex items-center"><div class="w-2 h-2 bg-green-500 rounded-full mr-2"></div>Online</span>' :
             '<span class="flex items-center"><div class="w-2 h-2 bg-gray-500 rounded-full mr-2"></div>Unknown</span>';
         
@@ -10507,13 +10577,26 @@ function displayStableNetworkTable(data) {
             <td class="py-3 px-4">${vulnDisplay}</td>
             <td class="py-3 px-4">${lastScanDisplay}</td>
             <td class="py-3 px-4">
-                <button onclick="triggerDeepScan('${host.ip}', { mode: 'full' })" 
-                        id="deep-scan-btn-${host.ip.replace(/\./g, '-')}"
-                        data-scan-status="idle"
-                        class="deep-scan-button bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
-                        title="Scan all 65535 ports with TCP connect (-sT). IP: ${host.ip}">
-                    Deep Scan
-                </button>
+                <div class="flex items-center gap-2">
+                    <button onclick="triggerDeepScan('${host.ip}', { mode: 'full' })"
+                            id="deep-scan-btn-${host.ip.replace(/\./g, '-')}"
+                            data-scan-status="idle"
+                            class="deep-scan-button bg-purple-600 hover:bg-purple-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                            title="Scan all 65535 ports with TCP connect (-sT). IP: ${host.ip}">
+                        Deep Scan
+                    </button>
+                    ${ignored
+                        ? `<button onclick="toggleIgnoreHost('${host.ip}', '${host.mac}', false)"
+                                class="bg-slate-600 hover:bg-slate-700 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                                title="Remove this host from the scan ignore list">
+                            Unignore
+                        </button>`
+                        : `<button onclick="toggleIgnoreHost('${host.ip}', '${host.mac}', true)"
+                                class="bg-amber-700 hover:bg-amber-800 text-white text-xs px-3 py-1 rounded transition-all duration-300"
+                                title="Skip this host in future scans and automated actions">
+                            Ignore
+                        </button>`}
+                </div>
             </td>
         `;
         
