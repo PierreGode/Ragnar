@@ -68,6 +68,24 @@ Click the **Logout** button in the navigation bar or go to **Config > Security >
 | **WebSocket** | SocketIO connections are rejected during the HTTP upgrade handshake if the session is not authenticated |
 | **Kill switch** | `/api/kill` remains accessible without authentication (requires separate `ERASE_ALL_DATA` confirmation) so the device can always be wiped |
 
+## Web hardening (HTTP response headers)
+
+Every response from the web server carries a baseline set of security headers, applied centrally in `webapp_modern.py` so the whole dashboard is covered in one place:
+
+| Header | Value | Purpose |
+|--------|-------|---------|
+| **Content-Security-Policy** | `default-src 'self'` with `'unsafe-inline'` scripts/styles, `img-src … https:` for map tiles | Mitigates XSS / data injection; blocks framing, object embeds and cross-origin script sources. Override the whole policy with the `RAGNAR_CSP` env var |
+| **X-Frame-Options** | `SAMEORIGIN` | Anti-clickjacking (belt-and-suspenders with CSP `frame-ancestors`) |
+| **X-Content-Type-Options** | `nosniff` | Stops MIME sniffing |
+| **Referrer-Policy** | `strict-origin-when-cross-origin` | Limits referrer leakage to other origins |
+| **Permissions-Policy** | `geolocation=(), microphone=(), camera=(), usb=()` | Disables powerful browser features Ragnar does not use |
+| **Strict-Transport-Security** | `max-age=31536000; includeSubDomains` (HTTPS only) | Enforces TLS once served over HTTPS |
+| **Server** | `Ragnar` | Suppresses the exact Werkzeug/Python version |
+
+**No wildcard CORS.** Ragnar is a same-origin dashboard (the mobile app talks to it over native HTTP), so it does **not** emit `Access-Control-Allow-Origin: *`. Cross-origin access can be re-enabled explicitly by listing trusted origins in the `RAGNAR_CORS_ORIGINS` env var (comma-separated); the same list is applied to the Socket.IO handshake.
+
+**Vendored frontend libraries.** Socket.IO, d3, Leaflet and Leaflet.markercluster are served locally from `web/vendor/` instead of a third-party CDN. This removes the cross-origin script-inclusion / Sub-Resource-Integrity exposure and lets the dashboard load with no internet access in the field. Map tiles are still fetched from OpenStreetMap over HTTPS (allowed by the CSP `img-src`).
+
 ## Crash recovery
 
 If Ragnar is terminated unexpectedly (power loss, crash):

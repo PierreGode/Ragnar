@@ -92,12 +92,87 @@ except Exception:  # pragma: no cover - fingerprinting must never block startup
 app.config['JSON_SORT_KEYS'] = False
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
 
-# Set up CORS if available
-if flask_cors_available:
-    CORS(app)
+# Set up CORS if available.
+# We deliberately do NOT emit a wildcard "Access-Control-Allow-Origin: *".
+# Ragnar is a same-origin dashboard: the web UI is served from this app and the
+# mobile app talks to it over native HTTP (CapacitorHttp), neither of which
+# needs browser CORS. A wildcard ACAO lets any website's JS read authenticated
+# responses, which ZAP correctly flags as a Cross-Domain Misconfiguration.
+# Cross-origin access can be re-enabled explicitly by listing trusted origins in
+# the RAGNAR_CORS_ORIGINS env var (comma-separated).
+_cors_env = os.environ.get('RAGNAR_CORS_ORIGINS', '').strip()
+_cors_origins = [o.strip() for o in _cors_env.split(',') if o.strip()]
+if flask_cors_available and _cors_origins:
+    CORS(app, origins=_cors_origins, supports_credentials=True)
 
-# Initialize SocketIO for real-time updates
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+# Initialize SocketIO for real-time updates. cors_allowed_origins=None means
+# same-origin connections only (python-socketio default); pass the explicit
+# allowlist when the operator has configured one.
+socketio = SocketIO(app,
+                    cors_allowed_origins=(_cors_origins or None),
+                    async_mode='threading')
+
+
+# ----------------------------------------------------------------------------
+# SECURITY RESPONSE HEADERS
+# Applied to every Flask response so the whole dashboard is hardened in one
+# place. Closes the ZAP findings for missing CSP, missing anti-clickjacking,
+# missing X-Content-Type-Options and Server version leakage.
+# All JS/CSS is served same-origin (see web/vendor/), so script/style sources are
+# 'self'. 'unsafe-inline' is required because the UI uses hundreds of inline
+# on* handlers and style attributes. img-src allows remote https for the
+# OpenStreetMap map tiles; connect-src allows the same-origin Socket.IO websocket.
+# Override the whole policy with RAGNAR_CSP if a deployment needs different sources.
+_DEFAULT_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' ws: wss:; "
+    "frame-ancestors 'self'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+_CSP_VALUE = os.environ.get('RAGNAR_CSP', _DEFAULT_CSP).strip()
+
+
+@app.after_request
+def _apply_security_headers(response):
+    # Content-Security-Policy — mitigates XSS / data injection.
+    if _CSP_VALUE and 'Content-Security-Policy' not in response.headers:
+        response.headers['Content-Security-Policy'] = _CSP_VALUE
+    # Anti-clickjacking (belt-and-suspenders with CSP frame-ancestors).
+    response.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
+    # Stop MIME sniffing.
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    # Limit referrer leakage to other origins.
+    response.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
+    # Lock down powerful browser features we don't use.
+    response.headers.setdefault(
+        'Permissions-Policy',
+        'geolocation=(), microphone=(), camera=(), usb=()'
+    )
+    # Note: the "Server" header is suppressed at the WSGI-handler layer below
+    # (setting it here as well would produce a duplicate under Werkzeug).
+    # Only assert HSTS when actually served over TLS.
+    if request.is_secure:
+        response.headers.setdefault(
+            'Strict-Transport-Security',
+            'max-age=31536000; includeSubDomains'
+        )
+    return response
+
+
+# Suppress the Werkzeug/Python version in the "Server" response header. Werkzeug
+# emits its own header at the WSGI-handler layer (below the Flask response), so
+# it has to be overridden here rather than in after_request.
+try:
+    from werkzeug.serving import WSGIRequestHandler as _WSGIRequestHandler
+    _WSGIRequestHandler.version_string = lambda self: 'Ragnar'
+except Exception:  # pragma: no cover - defensive; never block startup
+    pass
 
 # Register Network > Diagnostics / Switch & L2 / Interfaces API routes.
 # Kept in a separate module (network_diagnostics.py) to keep this file lean;
