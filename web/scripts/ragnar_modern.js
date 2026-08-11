@@ -10448,8 +10448,19 @@ async function toggleIgnoreHost(ip, mac, ignore) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
         });
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || 'Request failed');
+        // Parse defensively: a stale server without this route returns an HTML
+        // 404, so resp.json() would throw a cryptic "did not match the expected
+        // pattern" instead of a useful message.
+        let data;
+        try {
+            data = await resp.json();
+        } catch (_) {
+            if (resp.status === 404) {
+                throw new Error('Ignore-list endpoint not found — restart the Ragnar web service to load this feature.');
+            }
+            throw new Error(`Server returned a non-JSON response (HTTP ${resp.status}).`);
+        }
+        if (!resp.ok) throw new Error(data.error || `Request failed (HTTP ${resp.status})`);
         scanBlacklist.macs = new Set((data.macs || []).map(x => String(x).toLowerCase()));
         scanBlacklist.ips = new Set(data.ips || []);
         const label = m || ip;
