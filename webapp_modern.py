@@ -8561,6 +8561,89 @@ def manage_scan_subnets():
         logger.error(f"Error managing scan subnets: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+_MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+
+
+@app.route('/api/config/scan-blacklist', methods=['GET', 'POST', 'DELETE'])
+def manage_scan_blacklist():
+    """Manage the per-device scan ignore lists (MAC and IP).
+
+    These lists are honored across every scan/action path when the master
+    ``blacklistcheck`` toggle is on, so adding a host here makes Ragnar skip
+    it. Backs the per-device "Ignore" button on the Network tab (issue #459).
+
+    GET:    Return {"macs": [...], "ips": [...], "enabled": bool}.
+    POST:   Add a host   (body: {"mac": "aa:bb:.."} and/or {"ip": "1.2.3.4"}).
+    DELETE: Remove a host (same body shape).
+    """
+    import ipaddress as _ip
+    try:
+        macs = list(shared_data.config.get('mac_scan_blacklist', []))
+        ips = list(shared_data.config.get('ip_scan_blacklist', []))
+
+        if request.method == 'GET':
+            return jsonify({
+                'macs': macs,
+                'ips': ips,
+                'enabled': bool(shared_data.config.get('blacklistcheck', True)),
+            })
+
+        data = request.get_json(silent=True) or {}
+        raw_mac = str(data.get('mac', '') or '').strip().lower()
+        raw_ip = str(data.get('ip', '') or '').strip()
+
+        # 'unknown'/'00:..:00' placeholders aren't real identifiers to ignore.
+        if raw_mac in ('unknown', '00:00:00:00:00:00'):
+            raw_mac = ''
+        if raw_ip.lower() in ('unknown', ''):
+            raw_ip = ''
+
+        # Validate whatever was supplied; require at least one usable field.
+        if raw_mac and not _MAC_RE.match(raw_mac):
+            return jsonify({'error': f'Invalid MAC: {raw_mac}'}), 400
+        if raw_ip:
+            try:
+                raw_ip = str(_ip.ip_address(raw_ip))
+            except ValueError:
+                return jsonify({'error': f'Invalid IP: {raw_ip}'}), 400
+        if not raw_mac and not raw_ip:
+            return jsonify({'error': 'Provide a mac and/or ip to ignore'}), 400
+
+        changed = False
+        if request.method == 'POST':
+            if raw_mac and raw_mac not in macs:
+                macs.append(raw_mac)
+                changed = True
+            if raw_ip and raw_ip not in ips:
+                ips.append(raw_ip)
+                changed = True
+        else:  # DELETE
+            if raw_mac and raw_mac in macs:
+                macs = [m for m in macs if m != raw_mac]
+                changed = True
+            if raw_ip and raw_ip in ips:
+                ips = [i for i in ips if i != raw_ip]
+                changed = True
+
+        if changed:
+            shared_data.config['mac_scan_blacklist'] = macs
+            shared_data.config['ip_scan_blacklist'] = ips
+            shared_data.mac_scan_blacklist = macs
+            shared_data.ip_scan_blacklist = ips
+            shared_data.save_config()
+
+        return jsonify({
+            'macs': macs,
+            'ips': ips,
+            'enabled': bool(shared_data.config.get('blacklistcheck', True)),
+        })
+
+    except Exception as e:
+        logger.error(f"Error managing scan blacklist: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/config/scan-subnets/trigger', methods=['POST'])
 def trigger_subnet_scan():
     """Trigger an immediate nmap scan of a specific subnet in the background.
