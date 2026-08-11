@@ -3721,8 +3721,6 @@ def mesh_update_all():
     if not _mesh_enabled():
         return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
     try:
-        import concurrent.futures
-
         state = mesh_manager.status()
         tag = _mesh_tag()
         port = _mesh_node_port()
@@ -3734,21 +3732,29 @@ def mesh_update_all():
         peer_timeout = 120
 
         def _one(peer):
-            reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
-                                           port=port, timeout=peer_timeout)
+            name = peer.get('short_name') or peer.get('hostname') or 'peer'
+            # Keep a raising peer as a reported unreachable result rather than
+            # letting it drop out of the fan-out.
+            try:
+                reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
+                                               port=port, timeout=peer_timeout)
+            except Exception as e:
+                reply = {'reachable': False, 'error': str(e)}
             return {
                 'node_id': str(peer.get('id', '')),
-                'name': peer.get('short_name') or peer.get('hostname') or 'peer',
+                'name': name,
                 'self': False,
                 'reachable': bool(reply.get('reachable')),
                 'result': reply,
             }
 
-        peer_results = []
-        if peers:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(8, len(peers))) as ex:
-                peer_results = list(ex.map(_one, peers))
+        # Manual thread pool (see _concurrent_map): avoids concurrent.futures'
+        # interpreter-shutdown flag that breaks ThreadPoolExecutor under
+        # async_mode='threading'. Allow for the slow, restart-triggering update.
+        peer_results = _concurrent_map(
+            _one, peers, max_workers=8, overall_timeout=peer_timeout + 30
+        )
+        peer_results.sort(key=lambda r: (r['name'] or '').lower())
 
         # Self last: updating this unit restarts it, so let the peer fan-out land
         # first. The restart is detached, so this response still flushes.
