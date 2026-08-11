@@ -23443,7 +23443,35 @@ document.addEventListener('DOMContentLoaded', function() {
 // TRAFFIC ANALYSIS FUNCTIONS
 // ============================================================================
 
+// Populate the traffic-capture interface picker, mirroring the L2/L3 cards:
+// list every NIC with a (LAN)/(WiFi) tag and default the selection to the
+// wired link ("eth wired auto first"). Backend still treats an empty value as
+// its own auto-detect, so "Auto (wired first)" stays a valid choice.
+function _trafficFillIfaces() {
+    const sel = document.getElementById('traffic-iface');
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        const ifs = (x.interfaces || []);
+        ifs.forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)'
+                : i.type === 'vpn' ? ' (VPN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        // Wired first: prefer an ethernet NIC with a live link, then any
+        // ethernet, else leave the "Auto (wired first)" option selected.
+        const wiredUp = ifs.find(i => i.type === 'ethernet'
+            && (i.link_detected === true || i.operstate === 'up'));
+        const wired = wiredUp || ifs.find(i => i.type === 'ethernet');
+        if (wired) sel.value = wired.name;
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+
 async function loadTrafficAnalysisData() {
+    _trafficFillIfaces();
     try {
         // Fire status and all sub-data calls in parallel for faster load
         const [statusResponse, ...subResults] = await Promise.all([
@@ -23471,6 +23499,19 @@ async function loadTrafficAnalysisData() {
 
         // Update capture button state
         trafficCaptureRunning = data.summary?.status === 'running';
+        const trafIfaceEl = document.getElementById('traffic-iface');
+        if (trafIfaceEl) {
+            // Show and lock the live interface while a capture is running.
+            if (trafficCaptureRunning && data.summary?.interface) {
+                if (![...trafIfaceEl.options].some(o => o.value === data.summary.interface)) {
+                    const o = document.createElement('option');
+                    o.value = o.textContent = data.summary.interface;
+                    trafIfaceEl.appendChild(o);
+                }
+                trafIfaceEl.value = data.summary.interface;
+            }
+            trafIfaceEl.disabled = trafficCaptureRunning;
+        }
         updateTrafficCaptureButton();
 
     } catch (error) {
@@ -24402,16 +24443,21 @@ async function loadTrafficPortActivity() {
 
 async function toggleTrafficCapture() {
     try {
-        const endpoint = trafficCaptureRunning ? '/api/traffic/stop' : '/api/traffic/start';
+        const starting = !trafficCaptureRunning;
+        const endpoint = starting ? '/api/traffic/start' : '/api/traffic/stop';
+        const ifaceEl = document.getElementById('traffic-iface');
+        // Empty value => backend auto-detect; a chosen NIC pins the capture.
+        const body = starting && ifaceEl && ifaceEl.value ? { interface: ifaceEl.value } : {};
         const response = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
+            body: JSON.stringify(body)
         });
         const data = await response.json();
-        
+
         if (data.success) {
             trafficCaptureRunning = !trafficCaptureRunning;
+            if (ifaceEl) ifaceEl.disabled = trafficCaptureRunning; // lock while capturing
             updateTrafficCaptureButton();
             
             if (trafficCaptureRunning) {

@@ -4931,6 +4931,9 @@
                         <span class="px-2 py-1 bg-cyan-600 bg-opacity-30 text-cyan-400 text-xs rounded-full">Live capture</span>
                     </div>
                     <div class="flex flex-wrap gap-2">
+                        <select id="traffic-iface" title="Interface to capture on — Auto picks the wired LAN link first, then WiFi" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
                         <button onclick="toggleTrafficCapture()" id="traffic-toggle-btn" class="flex-1 sm:flex-none bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors text-sm sm:text-base">
                             <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"></path>
@@ -7623,7 +7626,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260810-status-dot"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260811-traffic-iface"></script>
 
 </body>
 </html>

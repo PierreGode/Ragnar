@@ -128,6 +128,16 @@ real results, so a false positive costs one scan cycle.
 the capture tools, and unlike the vulnerability-scanner tools it works on any
 board — that is the path that installs the missing `tcpdump`.
 
+## Choosing the interface
+
+The **Traffic** tab has an interface picker next to the capture button, matching
+the L2/L3 cards: every NIC is listed with a `(LAN)`/`(WiFi)`/`(VPN)` tag. It
+defaults to the wired link — the first ethernet NIC with a live carrier, then
+any ethernet — so a plugged-in LAN port is selected automatically ("wired
+first"). Leaving it on **Auto (wired first)** hands the choice to the backend's
+own default-route detection. The picker locks while a capture is running and
+reflects the live interface; stop the capture to switch NICs.
+
 ## Notes
 
 - Capture excludes ports 22 and 8000 so SSH and the web UI do not analyze
