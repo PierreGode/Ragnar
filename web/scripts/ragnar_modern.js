@@ -20777,8 +20777,8 @@ async function scanAIEndpoints() {
         }
 
         const badge = (src) => src === 'tailnet'
-            ? '<span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/60 text-indigo-300 border border-indigo-700">Tailscale</span>'
-            : '<span class="text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-gray-300 border border-slate-600">Local</span>';
+            ? '<span class="text-xs px-2 py-1 rounded bg-blue-900 text-blue-300 border border-blue-700">Tailscale</span>'
+            : '<span class="text-xs px-2 py-1 rounded bg-slate-700 text-gray-300 border border-slate-600">Local</span>';
 
         const rows = aiDiscovered.map((r, i) => {
             const n = r.models ? r.models.length : 0;
@@ -20794,11 +20794,11 @@ async function scanAIEndpoints() {
         box.innerHTML = `<div class="space-y-2">
             <div class="text-xs text-gray-400">Found ${aiDiscovered.length} endpoint${aiDiscovered.length === 1 ? '' : 's'} — pick one:</div>
             ${rows}
-            <div class="text-[11px] text-gray-600 mt-1">${escapeHtml(result.hint || '')}</div>
+            <div class="text-xs text-gray-600 mt-1">${escapeHtml(result.hint || '')}</div>
         </div>`;
     } catch (error) {
         console.error('AI endpoint scan failed:', error);
-        box.innerHTML = `<div class="text-xs text-red-400 p-3 rounded-lg bg-red-900/20 border border-red-800">✗ ${escapeHtml(error.message || 'Scan failed')}</div>`;
+        box.innerHTML = `<div class="text-xs text-red-400 p-3 rounded-lg bg-red-900/30 border border-red-800">✗ ${escapeHtml(error.message || 'Scan failed')}</div>`;
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = prev || 'Scan Network'; }
     }
