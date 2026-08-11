@@ -81,7 +81,7 @@ web will be down during wardrive without ap or wifi connection.
 - **AI-Powered Analysis** — GPT-5.4 Nano integration for security summaries, vulnerability prioritization, and remediation advice. See [AI Integration Guide](docs/AI_INTEGRATION.md)
 - **System Attacks** — Brute-force attacks on FTP, SSH, SMB, RDP, Telnet, SQL
 - **File Stealing** — Extracts data from vulnerable services
-- **Traffic Analysis** — Live `tcpdump` capture in its own web-UI tab: per-host bandwidth and top talkers, connection tracking, protocol mix, DNS logging, and detection of **port scans**, **DNS tunnelling** and **C2 beacons** (interval/size-regularity scoring). Also drives **passive host discovery** — firewalled hosts that never answer a scan still land in the hosts DB. **Detection-only**, it never sends a packet. Needs only `tcpdump`, so it runs on **any board**, Pi Zero included (measured: 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s); only the optional `tshark` JA3/IRC sidecars need a bigger board. See [Traffic Analysis](docs/traffic-analysis.md)
+- **Traffic Analysis** — Live `tcpdump` capture in its own web-UI tab: per-host bandwidth and top talkers, connection tracking, protocol mix, DNS logging, and detection of **port scans**, **DNS tunnelling** and **C2 beacons** (interval/size-regularity scoring). Also drives **passive host discovery** — firewalled hosts that never answer a scan still land in the hosts DB. **Detection-only**, it never sends a packet. Needs only `tcpdump`, so it runs on **any board**, Pi Zero 2W included (measured: 0.4% of one Pi 5 core and 18MB RSS at ~90 pkt/s); only the optional `tshark` JA3/IRC sidecars need a bigger board. See [Traffic Analysis](docs/traffic-analysis.md)
 - **Advanced Vulnerability Scanning** — The **Adv Scan** tab runs on **any board** that has `nmap`: Nuclei, Nikto, SQLMap, WhatWeb, Nmap vuln scripts and CVE correlation. **OWASP ZAP** is the one exception — its Java daemon needs a server-class Ragnar (**8GB+ RAM**), so it greys out on smaller boards while the rest of the tab stays usable. Parallel scanning is likewise an 8GB+ feature. **Nuclei is gated at 900MB RAM** (ZAP at 8GB) — they load heavy template/Java engines that OOM a 512MB Pi Zero 2 W, so they **grey out** below their floor (a 1GB Pi 3 runs Nuclei fine) and the lighter scanners still work on the Zero. Instead of a dead end, a gated scanner is **enabled when any mesh unit can run it** — the scan is then **transparently delegated** to that unit and its live progress + findings relay back into the Zero's normal scan view. The operator just picks the scanner and scans as usual; a small "🛰️ Mesh ready — Nuclei → ylva" flag shows which peer is handling it. If the mesh only has a Nuclei-capable unit, ZAP simply stays greyed out. Discovery/auto-pick/relay ride the existing Tailscale peer-identity auth. (Needs 2+ units; single-unit boards just see the normal grey-out.) From 900MB up nuclei **auto-tunes to the board's RAM** — lower concurrency, a capped Go heap and high/critical templates on 1-2GB boards, full tilt on big ones — and on constrained boards it **refuses to start when free RAM is already too low** (reporting how much is free) rather than risk a lock-up. If the kernel memory cgroup is enabled it also wraps nuclei in a **hard memory cap** (`systemd-run`, swap off); enable it on a Pi with `cgroup_enable=memory cgroup_memory=1` in `/boot/firmware/cmdline.txt` + reboot. See [Server Mode](#-server-mode-advanced-features-8gb-ram)
 - **LAN-First Connectivity** — Prefers Ethernet when present, manages WiFi as fallback
 - **Smart WiFi Management** — Auto-connects to known networks, falls back to AP mode, captive portal for configuration
@@ -106,7 +106,7 @@ web will be down during wardrive without ap or wifi connection.
 
 ## 📌 Supported Platforms & Prerequisites
 
-### Raspberry Pi (Zero W / W2 / 4 / 5)
+### Raspberry Pi (Zero W2 /3B(+) / 4 / 5)
 
 - 64-bit Raspberry Pi OS (Debian Trixie, kernel 6.12+)
 - Username and hostname set to `ragnar`
@@ -152,7 +152,7 @@ The installer auto-detects your platform and configures everything:
 - **Architecture support** — AMD64, ARM64, ARMv7, ARMv8
 - **Profiles** — Pi + e-Paper, Server/Headless, WiFi Pineapple Pager
 - **Automatic advanced tools** — Systems with 8GB+ RAM get advanced features installed automatically
-- **Smart resource management** — Pi Zero W/W2 automatically skip resource-intensive tools
+- **Smart resource management** — Pi Zero W2 automatically skip resource-intensive tools
 - **ARM optimizations** — Uses PiWheels on ARM, retries mirrors, skips Pi-only steps on other hardware
 
 For the full installation walkthrough see [Install Guide](docs/INSTALL.md). For updating an existing box, see [Updating Ragnar](docs/updates.md).
