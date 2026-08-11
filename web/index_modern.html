@@ -12,8 +12,8 @@
          RuSense tab renders styled instantly (no unstyled "terminal" flash). -->
     <link rel="preload" href="/web/rusense/assets/app.css" as="style">
 
-    <!-- Socket.IO Client -->
-    <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+    <!-- Socket.IO Client (vendored locally for offline use + no third-party origin) -->
+    <script src="/web/vendor/socket.io.min.js"></script>
 
     <!-- xterm.js (web terminal), vendored locally for offline use -->
     <link rel="stylesheet" href="/web/vendor/xterm.css">
@@ -656,12 +656,15 @@
             .wifi-fs-listwrap { flex: 0 0 30%; }
         }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" crossorigin=""/>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" crossorigin=""/>
-    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js" crossorigin=""></script>
+    <!-- d3 v7.9.0 + Leaflet 1.9.4 + markercluster 1.5.3, vendored locally
+         (web/vendor/) so nothing loads from a third-party CDN: works offline in
+         the field and removes the cross-origin script/SRI exposure. -->
+    <script src="/web/vendor/d3.min.js"></script>
+    <link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+    <script src="/web/vendor/leaflet/leaflet.js"></script>
+    <link rel="stylesheet" href="/web/vendor/leaflet/markercluster/MarkerCluster.css"/>
+    <link rel="stylesheet" href="/web/vendor/leaflet/markercluster/MarkerCluster.Default.css"/>
+    <script src="/web/vendor/leaflet/markercluster/leaflet.markercluster.js"></script>
 </head>
 
 <body class="bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white min-h-screen">
