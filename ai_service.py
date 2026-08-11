@@ -17,6 +17,28 @@ from openai import OpenAI
 from logger import Logger
 from env_manager import EnvManager, load_env
 
+
+def normalize_base_url(url: str) -> str:
+    """Tidy an OpenAI-compatible base URL so common shorthands just work.
+
+    Adds a missing http:// scheme, strips trailing slashes, and appends the
+    conventional ``/v1`` path when the operator gave only a host[:port] (every
+    supported server — Ollama, LocalAI, vLLM, LM Studio — serves the OpenAI API
+    under /v1). The port is never guessed. Empty input stays empty.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "http://" + url
+    url = url.rstrip("/")
+    if urlparse(url).path in ("", "/"):
+        url = url + "/v1"
+    return url
+
 # Load environment variables immediately
 load_env()
 
@@ -45,7 +67,7 @@ class AIService:
         # uses the Chat Completions API — local servers implement /v1/chat/
         # completions, not OpenAI's proprietary Responses API. Empty base URL
         # keeps the default OpenAI Responses behavior unchanged.
-        self.base_url = str(cfg.get("ai_base_url", "") or "").strip()
+        self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
         self.use_chat_api = self._resolve_use_chat_api()
 
         # These must remain for backward compatibility (but not used)
@@ -135,7 +157,7 @@ class AIService:
             cfg = self.shared_data.config
             self.enabled = cfg.get("ai_enabled", self.enabled)
             self.model = cfg.get("ai_model", self.model)
-            self.base_url = str(cfg.get("ai_base_url", "") or "").strip()
+            self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
             self.use_chat_api = self._resolve_use_chat_api()
 
         self.api_token = self.env_manager.get_token()

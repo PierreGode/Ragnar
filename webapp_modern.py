@@ -23098,15 +23098,21 @@ def list_ai_models():
     falls back to the saved ai_base_url and the stored token.
     """
     try:
+        from ai_service import normalize_base_url
         data = request.get_json(silent=True) or {}
-        base_url = str(data.get('base_url', '') or '').strip()
-        if not base_url:
-            base_url = str(shared_data.config.get('ai_base_url', '') or '').strip()
-        if not base_url:
+        raw_url = str(data.get('base_url', '') or '').strip()
+        if not raw_url:
+            raw_url = str(shared_data.config.get('ai_base_url', '') or '').strip()
+        if not raw_url:
             return jsonify({
                 'success': False,
                 'error': 'Enter an endpoint URL first (e.g. http://host:11434/v1).'
             }), 400
+        base_url = normalize_base_url(raw_url)
+        # A host without an explicit port is the most common Connect failure
+        # (Ollama listens on 11434, LocalAI on 8080, …) — hint at it.
+        from urllib.parse import urlparse as _urlparse
+        port_hint = '' if _urlparse(base_url).port else ' Tip: include the port (Ollama uses :11434), e.g. http://host:11434/v1.'
 
         api_key = str(data.get('api_key', '') or '').strip()
         if not api_key:
@@ -23129,7 +23135,7 @@ def list_ai_models():
             logger.warning(f"AI model listing failed for {base_url}: {e}")
             return jsonify({
                 'success': False,
-                'error': f'Could not reach {base_url} — check the URL and that the server is running.'
+                'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
             }), 502
 
         models = sorted({
