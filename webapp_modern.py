@@ -23088,6 +23088,66 @@ def clear_ai_cache():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/ai/models', methods=['POST'])
+def list_ai_models():
+    """List models offered by an OpenAI-compatible endpoint (issue #462).
+
+    Proxied through the backend: the browser can't reach a remote Ollama /
+    LocalAI server directly (CORS / mixed-content), and the Pi shares the same
+    network vantage that the real AI calls use. Body: {base_url?, api_key?} —
+    falls back to the saved ai_base_url and the stored token.
+    """
+    try:
+        data = request.get_json(silent=True) or {}
+        base_url = str(data.get('base_url', '') or '').strip()
+        if not base_url:
+            base_url = str(shared_data.config.get('ai_base_url', '') or '').strip()
+        if not base_url:
+            return jsonify({
+                'success': False,
+                'error': 'Enter an endpoint URL first (e.g. http://host:11434/v1).'
+            }), 400
+
+        api_key = str(data.get('api_key', '') or '').strip()
+        if not api_key:
+            try:
+                from env_manager import EnvManager
+                api_key = EnvManager().get_token() or ''
+            except Exception:
+                api_key = ''
+
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key or 'ragnar-local',
+            base_url=base_url,
+            timeout=10.0,
+            max_retries=0,
+        )
+        try:
+            resp = client.models.list()
+        except Exception as e:
+            logger.warning(f"AI model listing failed for {base_url}: {e}")
+            return jsonify({
+                'success': False,
+                'error': f'Could not reach {base_url} — check the URL and that the server is running.'
+            }), 502
+
+        models = sorted({
+            getattr(m, 'id', None)
+            for m in (getattr(resp, 'data', None) or [])
+            if getattr(m, 'id', None)
+        })
+        return jsonify({
+            'success': True,
+            'models': models,
+            'base_url': base_url,
+            'count': len(models),
+        })
+    except Exception as e:
+        logger.error(f"Error listing AI models: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/ai/token', methods=['GET'])
 def get_ai_token():
     """Get OpenAI API token status (without revealing the actual token)"""

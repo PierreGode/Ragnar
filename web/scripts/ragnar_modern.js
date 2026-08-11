@@ -20686,6 +20686,82 @@ async function loadAIConfiguration(config) {
     }
 }
 
+// Connect to a self-hosted endpoint and list the models it offers (#462).
+// Proxied via the backend so we hit the server from the Pi's vantage.
+async function connectAIEndpoint() {
+    const btn = document.getElementById('ai-connect-btn');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const modelsRow = document.getElementById('ai-models-row');
+    const select = document.getElementById('ai-model-select');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    // The token field shows a masked placeholder when already saved; only send
+    // a value the operator actually typed, otherwise let the backend use the
+    // stored token.
+    const apiKey = (document.getElementById('openai-api-token')?.value || '').trim();
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+    };
+
+    if (!baseUrl) {
+        show('bg-red-900/30 border border-red-700', '✗ Enter an endpoint URL first (e.g. http://host:11434/v1).');
+        setTimeout(() => statusDiv?.classList.add('hidden'), 5000);
+        return;
+    }
+
+    const prevLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+    show('bg-blue-900/30 border border-blue-700', `⏳ Contacting ${baseUrl}…`);
+
+    try {
+        const payload = { base_url: baseUrl };
+        if (apiKey) payload.api_key = apiKey;
+        const result = await postAPI('/api/ai/models', payload);
+        if (!result || !result.success) {
+            throw new Error((result && result.error) || 'Endpoint did not return a model list.');
+        }
+        const models = result.models || [];
+        if (select) {
+            const current = (document.getElementById('ai-model-input')?.value || '').trim();
+            select.innerHTML = '<option value="">Select a model…</option>' +
+                models.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+        }
+        if (modelsRow) modelsRow.classList.remove('hidden');
+        // Prefill the model field if it's empty so Save works in one click.
+        const modelInput = document.getElementById('ai-model-input');
+        if (modelInput && !modelInput.value && models.length) {
+            modelInput.value = models[0];
+            if (select) select.value = models[0];
+        }
+        if (models.length) {
+            show('bg-green-900/30 border border-green-700', `✓ Connected — ${models.length} model${models.length === 1 ? '' : 's'} available. Pick one, then Save Endpoint.`);
+        } else {
+            show('bg-yellow-900/30 border border-yellow-700', 'ℹ Connected, but the endpoint reported no models. Pull a model on the server first.');
+        }
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } catch (error) {
+        console.error('Failed to connect to AI endpoint:', error);
+        if (modelsRow) modelsRow.classList.add('hidden');
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Connection failed'}`);
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prevLabel || 'Connect'; }
+    }
+}
+
+// Mirror the dropdown choice into the model field (the value Save persists).
+function onAIModelSelect() {
+    const select = document.getElementById('ai-model-select');
+    const modelInput = document.getElementById('ai-model-input');
+    if (select && modelInput && select.value) {
+        modelInput.value = select.value;
+    }
+}
+
 // Save the self-hosted endpoint + model (issue #462). Empty base URL reverts
 // to OpenAI's cloud. The backend re-inits the AI client on these keys.
 async function saveAIEndpoint() {

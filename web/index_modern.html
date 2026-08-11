@@ -7162,11 +7162,23 @@
                                     </div>
                                     <div class="border-t border-slate-700 pt-3 mt-1">
                                         <label for="ai-base-url" class="block text-sm font-medium text-gray-300 mb-2">Self-Hosted / Custom Endpoint <span class="text-gray-500 font-normal">(optional)</span></label>
-                                        <input type="text" id="ai-base-url" autocomplete="off" placeholder="http://192.168.1.50:11434/v1"
-                                               class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                            <input type="text" id="ai-base-url" autocomplete="off" placeholder="http://192.168.1.50:11434/v1"
+                                                   class="flex-1 w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <button onclick="connectAIEndpoint()" id="ai-connect-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                Connect
+                                            </button>
+                                        </div>
                                         <p class="text-xs text-gray-500 mt-1">
-                                            Point at an OpenAI-compatible server (Ollama, LocalAI, vLLM, LM Studio) on your LAN or mesh. Leave blank to use OpenAI's cloud. When set, Ragnar uses the Chat Completions API and the token above becomes optional.
+                                            Point at an OpenAI-compatible server (Ollama, LocalAI, vLLM, LM Studio) on your LAN or mesh. Leave blank to use OpenAI's cloud. When set, Ragnar uses the Chat Completions API and the token above becomes optional. <strong class="text-gray-400">Connect</strong> loads the models the endpoint offers.
                                         </p>
+                                        <div id="ai-models-row" class="mt-3 hidden">
+                                            <label for="ai-model-select" class="block text-sm font-medium text-gray-300 mb-2">Available Models <span class="text-gray-500 font-normal">(from endpoint)</span></label>
+                                            <select id="ai-model-select" onchange="onAIModelSelect()"
+                                                    class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                                <option value="">Select a model…</option>
+                                            </select>
+                                        </div>
                                         <div class="mt-3">
                                             <label for="ai-model-input" class="block text-sm font-medium text-gray-300 mb-2">Model</label>
                                             <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -7176,7 +7188,7 @@
                                                     Save Endpoint
                                                 </button>
                                             </div>
-                                            <p class="text-xs text-gray-500 mt-1">Model name to request from the endpoint. For OpenAI leave the default; for a local server use its model tag.</p>
+                                            <p class="text-xs text-gray-500 mt-1">Pick from the dropdown above, or type a model tag. For OpenAI leave the default; for a local server use its model tag.</p>
                                         </div>
                                     </div>
                                     <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
@@ -7645,7 +7657,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260811-selfhosted-ai"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260811-ai-models"></script>
 
 </body>
 </html>

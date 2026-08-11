@@ -59,6 +59,11 @@ that server's model tag. When a base URL is present:
   lets you force `responses` or `chat` if auto-detection guesses wrong.
 - The API token becomes **optional** (most local servers accept any key).
 
+Click **Connect** next to the endpoint field to list the models the server
+offers and pick one from the dropdown (backed by `POST /api/ai/models`, which
+the Pi proxies so it works even though the browser can't reach the remote server
+directly). Then click **Save Endpoint**.
+
 **The model runs on whatever host you point at — not on the Pi.** The Pi stays a
 thin HTTP client, exactly as it is with OpenAI. This pairs naturally with a
 fleet: a small board (e.g. a Pi Zero 2W) can offload inference to a capable box
@@ -102,6 +107,11 @@ Click the "Refresh" button in the AI Insights section to:
 ## API Endpoints
 
 The following API endpoints are available for programmatic access:
+
+### POST /api/ai/models
+Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).
+Body: `{ "base_url": "http://host:11434/v1", "api_key": "optional" }` — both
+fall back to the saved config. Returns `{ "success": true, "models": [...] }`.
 
 ### GET /api/ai/status
 Returns AI service status and configuration
