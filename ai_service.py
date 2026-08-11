@@ -17,6 +17,28 @@ from openai import OpenAI
 from logger import Logger
 from env_manager import EnvManager, load_env
 
+
+def normalize_base_url(url: str) -> str:
+    """Tidy an OpenAI-compatible base URL so common shorthands just work.
+
+    Adds a missing http:// scheme, strips trailing slashes, and appends the
+    conventional ``/v1`` path when the operator gave only a host[:port] (every
+    supported server — Ollama, LocalAI, vLLM, LM Studio — serves the OpenAI API
+    under /v1). The port is never guessed. Empty input stays empty.
+    """
+    import re
+    from urllib.parse import urlparse
+
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "http://" + url
+    url = url.rstrip("/")
+    if urlparse(url).path in ("", "/"):
+        url = url + "/v1"
+    return url
+
 # Load environment variables immediately
 load_env()
 
@@ -38,6 +60,21 @@ class AIService:
         # Configuration
         self.enabled = cfg.get("ai_enabled", False)
         self.model = cfg.get("ai_model", "gpt-5.4-nano")
+
+        # Self-hosted / OpenAI-compatible endpoint support (issue #462).
+        # When ai_base_url is set (e.g. an Ollama/LocalAI/vLLM/LM Studio server
+        # on the LAN or mesh), Ragnar talks to it as a thin HTTP client and
+        # uses the Chat Completions API — local servers implement /v1/chat/
+        # completions, not OpenAI's proprietary Responses API. Empty base URL
+        # keeps the default OpenAI Responses behavior unchanged.
+        self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
+        self.use_chat_api = self._resolve_use_chat_api()
+
+        # OpenAI-cloud fallback for when a self-hosted endpoint goes away
+        # (issue #462). Built lazily the first time it's needed.
+        self._fallback_client = None
+        self._fallback_model = None
+        self.fallback_active = False  # True while running on the cloud fallback
 
         # These must remain for backward compatibility (but not used)
         self.max_tokens = cfg.get("ai_max_tokens")
@@ -64,11 +101,28 @@ class AIService:
     #   INITIALIZATION
     # ===================================================================
 
+    def _resolve_use_chat_api(self):
+        """Decide which API dialect to speak.
+
+        ``ai_api_style`` ('auto'|'responses'|'chat') overrides when set;
+        otherwise a configured base URL implies a self-hosted, Chat-Completions
+        server and the default OpenAI cloud uses the Responses API.
+        """
+        style = str(self.shared_data.config.get("ai_api_style", "auto") or "auto").strip().lower()
+        if style == "chat":
+            return True
+        if style == "responses":
+            return False
+        return bool(self.base_url)
+
     def _initialize_client(self):
         if not self.enabled:
             return
 
-        if not self.api_token:
+        # A real key is mandatory for OpenAI's cloud, but self-hosted endpoints
+        # usually accept any non-empty string — the SDK still requires one, so
+        # fall back to a harmless placeholder when the operator left it blank.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return
@@ -81,9 +135,20 @@ class AIService:
             # failing fast and letting the rest of the insights render. One retry
             # keeps the worst-case bounded (~40s/call) so the background insights
             # run resolves quickly even on a slow board.
-            self.client = OpenAI(api_key=self.api_token, timeout=20.0, max_retries=1)
+            client_kwargs = {
+                "api_key": self.api_token or "ragnar-local",
+                "timeout": 20.0,
+                "max_retries": 1,
+            }
+            if self.base_url:
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
             self.initialization_error = None
-            self.logger.info(f"AI Service initialized using model: {self.model}")
+            endpoint = self.base_url or "OpenAI"
+            api_dialect = "chat.completions" if self.use_chat_api else "responses"
+            self.logger.info(
+                f"AI Service initialized (model: {self.model}, endpoint: {endpoint}, api: {api_dialect})"
+            )
         except Exception as exc:
             self.client = None
             self.initialization_error = f"OpenAI client initialization failed: {exc}"
@@ -93,9 +158,16 @@ class AIService:
     def reload_token(self) -> bool:
         """Refresh the API token from disk and reinitialize the OpenAI client."""
 
-        # Keep enabled flag synced with latest config intent
+        # Keep enabled flag + endpoint config synced with latest config intent
         if hasattr(self.shared_data, "config"):
-            self.enabled = self.shared_data.config.get("ai_enabled", self.enabled)
+            cfg = self.shared_data.config
+            self.enabled = cfg.get("ai_enabled", self.enabled)
+            self.model = cfg.get("ai_model", self.model)
+            self.base_url = normalize_base_url(cfg.get("ai_base_url", ""))
+            self.use_chat_api = self._resolve_use_chat_api()
+            # Force the cloud fallback to rebuild with the latest token/model.
+            self._fallback_client = None
+            self.fallback_active = False
 
         self.api_token = self.env_manager.get_token()
         self.client = None
@@ -105,7 +177,7 @@ class AIService:
             self.logger.info("AI service disabled in config; skipping token reload.")
             return False
 
-        if not self.api_token:
+        if not self.api_token and not self.base_url:
             self.logger.warning("AI token reload requested but no token present in environment.")
             self.initialization_error = "No OpenAI API key found."
             return False
@@ -158,7 +230,9 @@ class AIService:
         if not self.api_token:
             self.api_token = self.env_manager.get_token()
 
-        if not self.api_token:
+        # A token is only mandatory for the OpenAI cloud; a self-hosted base URL
+        # can run keyless.
+        if not self.api_token and not self.base_url:
             self.initialization_error = "No OpenAI API key found."
             self.logger.warning(self.initialization_error)
             return False
@@ -201,9 +275,21 @@ class AIService:
             self.logger.error("AI client unavailable despite service being enabled.")
             return None
 
-        # Base GPT-5 payload
+        # Self-hosted / OpenAI-compatible servers speak Chat Completions, not
+        # the proprietary Responses API — route them separately.
+        if self.use_chat_api:
+            return self._ask_chat(system_msg, user_msg)
+
+        return self._ask_responses(system_msg, user_msg)
+
+    def _ask_responses(self, system_msg, user_msg, client=None, model=None):
+        """OpenAI Responses-API call (GPT-5 family). Reused for both the primary
+        cloud path and the self-hosted fallback (with a cloud client + model)."""
+        client = client or self.client
+        model = model or self.model
+
         payload = {
-            "model": self.model,
+            "model": model,
             "input": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
@@ -218,7 +304,7 @@ class AIService:
 
         # FIRST ATTEMPT
         try:
-            result = self.client.responses.create(**payload)
+            result = client.responses.create(**payload)
             return self._extract_output(result)
 
         except Exception as e:
@@ -235,7 +321,7 @@ class AIService:
 
                 # SECOND ATTEMPT WITHOUT TEMPERATURE
                 try:
-                    result = self.client.responses.create(**payload)
+                    result = client.responses.create(**payload)
                     return self._extract_output(result)
                 except Exception as e2:
                     self.logger.error(f"Retry after removing temperature failed: {e2}")
@@ -245,6 +331,110 @@ class AIService:
             return None
 
 
+
+    def _ask_chat(self, system_msg: str, user_msg: str) -> Optional[str]:
+        """Chat Completions call for self-hosted OpenAI-compatible endpoints.
+
+        No reasoning/verbosity params (unsupported by local servers); reads the
+        classic ``choices[0].message.content`` response shape.
+        """
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+        if self.temperature_supported and self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        try:
+            result = self.client.chat.completions.create(**payload)
+        except Exception as e:
+            error_text = str(e).lower()
+            if "temperature" in error_text and payload.pop("temperature", None) is not None:
+                self.temperature_supported = False
+                self.logger.warning("Endpoint rejected temperature — retrying without it.")
+                try:
+                    result = self.client.chat.completions.create(**payload)
+                except Exception as e2:
+                    return self._maybe_fallback(system_msg, user_msg, e2)
+            else:
+                return self._maybe_fallback(system_msg, user_msg, e)
+
+        # A successful self-hosted call clears any prior fallback state.
+        self.fallback_active = False
+
+        # Usage fields on OpenAI-compatible servers use prompt/completion naming.
+        usage = getattr(result, "usage", None)
+        if usage is not None:
+            self.logger.info(
+                "AI Tokens → input:{} output:{} total:{}".format(
+                    getattr(usage, "prompt_tokens", "?"),
+                    getattr(usage, "completion_tokens", "?"),
+                    getattr(usage, "total_tokens", "?"),
+                )
+            )
+
+        try:
+            content = result.choices[0].message.content
+            return content.strip() if content else None
+        except (AttributeError, IndexError, TypeError):
+            self.logger.error("Self-hosted AI response had no message content.")
+            return None
+
+    def _maybe_fallback(self, system_msg, user_msg, error):
+        """Retry a failed self-hosted call on OpenAI's cloud when the endpoint
+        looks unreachable and a token is configured (issue #462)."""
+        if self._should_fallback(error):
+            fb = self._ensure_fallback_client()
+            if fb is not None:
+                self.logger.warning(
+                    f"Self-hosted endpoint unavailable ({error}); falling back to "
+                    f"OpenAI cloud (model: {self._fallback_model})."
+                )
+                self.fallback_active = True
+                return self._ask_responses(
+                    system_msg, user_msg, client=fb, model=self._fallback_model
+                )
+        self.logger.error(f"Self-hosted AI call failed: {error}")
+        return None
+
+    def _should_fallback(self, error):
+        """True when the error looks like the endpoint is unreachable / timed
+        out, rather than a bad request the cloud would also reject."""
+        if type(error).__name__ in (
+            "APIConnectionError", "APITimeoutError", "InternalServerError",
+            "ConnectionError", "Timeout", "ConnectTimeout", "ReadTimeout",
+        ):
+            return True
+        msg = str(error).lower()
+        return any(s in msg for s in (
+            "connection", "timed out", "timeout", "refused", "unreachable",
+            "failed to establish", "max retries", "connect", "temporarily unavailable",
+        ))
+
+    def _ensure_fallback_client(self):
+        """Lazily build an OpenAI-cloud client used only for fallback. Requires a
+        real token; returns None when none is configured (so no fallback)."""
+        if not self.base_url:
+            return None  # already on the cloud — no separate fallback needed
+        if self._fallback_client is not None:
+            return self._fallback_client
+        token = self.api_token or self.env_manager.get_token()
+        if not token:
+            return None
+        try:
+            self._fallback_client = OpenAI(api_key=token, timeout=20.0, max_retries=1)
+            self._fallback_model = (
+                str(self.shared_data.config.get("ai_fallback_model", "") or "").strip()
+                or "gpt-5.4-nano"
+            )
+            self.logger.info(f"AI cloud fallback ready (model: {self._fallback_model}).")
+            return self._fallback_client
+        except Exception as e:
+            self.logger.warning(f"Could not initialize AI fallback client: {e}")
+            return None
 
     def _extract_output(self, result):
         """Extract output text and log token usage."""

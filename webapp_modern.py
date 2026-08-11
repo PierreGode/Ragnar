@@ -8122,12 +8122,18 @@ def _apply_config_update(data):
         shared_data.screen_reversed = normalize_rotation(shared_data.config.get('screen_reversed', 0))
         shared_data.web_screen_reversed = normalize_rotation(shared_data.config.get('web_screen_reversed', 0))
         
-        # Reload AI service if ai_enabled was changed
-        if 'ai_enabled' in data:
+        # Reload AI service when the enable flag OR the endpoint config changes
+        # (base URL / model / api style), so pointing at a self-hosted endpoint
+        # takes effect without also toggling ai_enabled. The config dict was
+        # already updated above, so read the effective enabled state from it.
+        ai_endpoint_keys = ('ai_base_url', 'ai_model', 'ai_api_style')
+        ai_config_touched = 'ai_enabled' in data or any(k in data for k in ai_endpoint_keys)
+        ai_now_enabled = bool(shared_data.config.get('ai_enabled', False))
+        if ai_config_touched:
             ai_service = getattr(shared_data, 'ai_service', None)
-            
+
             # If AI service doesn't exist and user enabled it, try to initialize
-            if not ai_service and data['ai_enabled']:
+            if not ai_service and ai_now_enabled:
                 try:
                     shared_data.initialize_ai_service()
                     ai_service = shared_data.ai_service
@@ -8141,7 +8147,7 @@ def _apply_config_update(data):
                     ai_reload_error = str(e)
             # If AI service exists, reload or disable it
             elif ai_service:
-                if data['ai_enabled']:
+                if ai_now_enabled:
                     ai_reload_success = ai_service.reload_token()
                     if not ai_reload_success:
                         ai_reload_error = getattr(ai_service, 'initialization_error', None)
@@ -22548,6 +22554,8 @@ def get_ai_status():
             'config_enabled': config_enabled,  # User's intent from config
             'available': True,  # Always assume SDK is installed
             'model': getattr(ai_service, 'model', None),
+            'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
+            'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
@@ -23080,6 +23088,200 @@ def clear_ai_cache():
     except Exception as e:
         logger.error(f"Error clearing AI cache: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/models', methods=['POST'])
+def list_ai_models():
+    """List models offered by an OpenAI-compatible endpoint (issue #462).
+
+    Proxied through the backend: the browser can't reach a remote Ollama /
+    LocalAI server directly (CORS / mixed-content), and the Pi shares the same
+    network vantage that the real AI calls use. Body: {base_url?, api_key?} —
+    falls back to the saved ai_base_url and the stored token.
+    """
+    try:
+        from ai_service import normalize_base_url
+        data = request.get_json(silent=True) or {}
+        raw_url = str(data.get('base_url', '') or '').strip()
+        if not raw_url:
+            raw_url = str(shared_data.config.get('ai_base_url', '') or '').strip()
+        if not raw_url:
+            return jsonify({
+                'success': False,
+                'error': 'Enter an endpoint URL first (e.g. http://host:11434/v1).'
+            }), 400
+        base_url = normalize_base_url(raw_url)
+        # A host without an explicit port is the most common Connect failure
+        # (Ollama listens on 11434, LocalAI on 8080, …) — hint at it.
+        from urllib.parse import urlparse as _urlparse
+        port_hint = '' if _urlparse(base_url).port else ' Tip: include the port (Ollama uses :11434), e.g. http://host:11434/v1.'
+
+        api_key = str(data.get('api_key', '') or '').strip()
+        if not api_key:
+            try:
+                from env_manager import EnvManager
+                api_key = EnvManager().get_token() or ''
+            except Exception:
+                api_key = ''
+
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key or 'ragnar-local',
+            base_url=base_url,
+            timeout=10.0,
+            max_retries=0,
+        )
+        try:
+            resp = client.models.list()
+        except Exception as e:
+            logger.warning(f"AI model listing failed for {base_url}: {e}")
+            return jsonify({
+                'success': False,
+                'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
+            }), 502
+
+        models = sorted({
+            getattr(m, 'id', None)
+            for m in (getattr(resp, 'data', None) or [])
+            if getattr(m, 'id', None)
+        })
+        return jsonify({
+            'success': True,
+            'models': models,
+            'base_url': base_url,
+            'count': len(models),
+        })
+    except Exception as e:
+        logger.error(f"Error listing AI models: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _probe_ollama(ip, port=11434, connect_timeout=0.6, read_timeout=2.5):
+    """Return a sorted model list if an OpenAI-compatible/Ollama server answers
+    on ip:port, else None. A fast TCP pre-check avoids waiting the full HTTP
+    timeout on the many closed ports in a subnet sweep. An empty list means the
+    server answered but has no models pulled (still a valid, reachable endpoint).
+    """
+    import socket as _socket
+    try:
+        with _socket.create_connection((ip, port), timeout=connect_timeout):
+            pass
+    except OSError:
+        return None
+
+    import json as _json
+    from urllib.request import urlopen, Request
+    base = f"http://{ip}:{port}"
+    # OpenAI-compatible path first (Ollama, LocalAI, vLLM, LM Studio), then
+    # Ollama's native /api/tags as a fallback.
+    for path, extract in (
+        ('/v1/models', lambda d: [m.get('id') for m in (d.get('data') or [])]),
+        ('/api/tags', lambda d: [m.get('name') for m in (d.get('models') or [])]),
+    ):
+        try:
+            req = Request(base + path, headers={'Accept': 'application/json'})
+            with urlopen(req, timeout=read_timeout) as resp:
+                payload = _json.loads(resp.read().decode('utf-8', 'replace'))
+            return sorted({m for m in extract(payload) if m})
+        except Exception:
+            continue
+    return None  # port open but not an OpenAI/Ollama server
+
+
+@app.route('/api/ai/discover', methods=['POST'])
+def discover_ai_endpoints():
+    """Scan the tailnet and the local subnet for OpenAI/Ollama servers (#462).
+
+    Tailnet peers come from mesh_manager; local hosts from the primary /24.
+    Every candidate is probed on :11434 concurrently; responders are returned
+    with their model lists so the UI can offer them as one-click endpoints.
+    """
+    import concurrent.futures
+    from ai_service import normalize_base_url
+    try:
+        candidates = {}  # ip -> {name, os, source}
+
+        # --- Tailnet peers (Ragnar Mesh already speaks Tailscale) ---
+        tailnet_available = False
+        try:
+            import mesh_manager
+            st = mesh_manager.status()
+            tailnet_available = bool(st.get('available'))
+            nodes = ([st['self']] if st.get('self') else []) + (st.get('peers') or [])
+            for n in nodes:
+                ip = n.get('ip')
+                if ip and n.get('online', False):
+                    candidates.setdefault(ip, {
+                        'name': n.get('short_name') or n.get('hostname') or '',
+                        'os': n.get('os') or '',
+                        'source': 'tailnet',
+                    })
+        except Exception as e:
+            logger.debug(f"Tailnet enumeration failed during AI discovery: {e}")
+
+        # --- Local subnet (primary interface /24) ---
+        try:
+            import netifaces
+            gw = netifaces.gateways().get('default', {}).get(netifaces.AF_INET)
+            if gw:
+                addrs = netifaces.ifaddresses(gw[1]).get(netifaces.AF_INET) or []
+                if addrs:
+                    my_ip = addrs[0]['addr']
+                    mask = addrs[0].get('netmask', '255.255.255.0')
+                    bits = sum(bin(int(x)).count('1') for x in mask.split('.'))
+                    bits = max(bits, 24)  # cap the sweep at a /24
+                    net = ipaddress.ip_network(f"{my_ip}/{bits}", strict=False)
+                    # Nicer labels for hosts Ragnar already knows.
+                    db_names = {}
+                    try:
+                        for h in (shared_data.db.get_all_hosts() or []):
+                            if h.get('ip'):
+                                db_names[h['ip']] = h.get('hostname') or ''
+                    except Exception:
+                        pass
+                    for host in net.hosts():
+                        s = str(host)
+                        if s == my_ip:
+                            continue
+                        candidates.setdefault(s, {'name': db_names.get(s, ''), 'os': '', 'source': 'local'})
+        except Exception as e:
+            logger.debug(f"Local subnet enumeration failed during AI discovery: {e}")
+
+        if not candidates:
+            return jsonify({
+                'success': True, 'results': [], 'tailnet_available': tailnet_available,
+                'hint': 'No candidate hosts found — is this box on a network or tailnet?'
+            })
+
+        def work(ip):
+            models = _probe_ollama(ip)
+            if models is None:
+                return None
+            meta = candidates[ip]
+            return {
+                'ip': ip, 'name': meta['name'], 'os': meta['os'], 'source': meta['source'],
+                'port': 11434, 'base_url': normalize_base_url(f"http://{ip}:11434"),
+                'models': models,
+            }
+
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+            for r in ex.map(work, list(candidates.keys())):
+                if r:
+                    results.append(r)
+        results.sort(key=lambda r: (r['source'] != 'tailnet', (r['name'] or '').lower(), r['ip']))
+
+        return jsonify({
+            'success': True,
+            'results': results,
+            'tailnet_available': tailnet_available,
+            'scanned': len(candidates),
+            'hint': ("If your Ollama host isn't listed, make it listen beyond localhost: set "
+                     "OLLAMA_HOST=0.0.0.0:11434 on that machine and allow port 11434 through its firewall."),
+        })
+    except Exception as e:
+        logger.error(f"Error discovering AI endpoints: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/ai/token', methods=['GET'])

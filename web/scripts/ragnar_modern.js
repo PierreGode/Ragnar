@@ -20655,7 +20655,18 @@ async function loadAIConfiguration(config) {
             : false;
         aiEnabledCheckbox.checked = aiEnabled;
     }
-    
+
+    // Self-hosted endpoint + model (issue #462)
+    const baseUrlInput = document.getElementById('ai-base-url');
+    if (baseUrlInput) {
+        baseUrlInput.value = (config && config.ai_base_url) ? config.ai_base_url : '';
+    }
+    const modelInput = document.getElementById('ai-model-input');
+    if (modelInput) {
+        modelInput.value = (config && config.ai_model) ? config.ai_model : '';
+        if (!modelInput.value) modelInput.placeholder = 'gpt-5.4-nano  ·  or e.g. qwen2.5:7b';
+    }
+
     // Fetch token status from environment variable
     try {
         const tokenStatus = await fetchAPI('/api/ai/token');
@@ -20672,6 +20683,190 @@ async function loadAIConfiguration(config) {
         }
     } catch (error) {
         console.error('Failed to fetch AI token status:', error);
+    }
+}
+
+// Connect to a self-hosted endpoint and list the models it offers (#462).
+// Proxied via the backend so we hit the server from the Pi's vantage.
+async function connectAIEndpoint() {
+    const btn = document.getElementById('ai-connect-btn');
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const modelsRow = document.getElementById('ai-models-row');
+    const select = document.getElementById('ai-model-select');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    // The token field shows a masked placeholder when already saved; only send
+    // a value the operator actually typed, otherwise let the backend use the
+    // stored token.
+    const apiKey = (document.getElementById('openai-api-token')?.value || '').trim();
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+    };
+
+    if (!baseUrl) {
+        show('bg-red-900/30 border border-red-700', '✗ Enter an endpoint URL first (e.g. http://host:11434/v1).');
+        setTimeout(() => statusDiv?.classList.add('hidden'), 5000);
+        return;
+    }
+
+    const prevLabel = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Connecting…'; }
+    show('bg-blue-900/30 border border-blue-700', `⏳ Contacting ${baseUrl}…`);
+
+    try {
+        const payload = { base_url: baseUrl };
+        if (apiKey) payload.api_key = apiKey;
+        const result = await postAPI('/api/ai/models', payload);
+        if (!result || !result.success) {
+            throw new Error((result && result.error) || 'Endpoint did not return a model list.');
+        }
+        const models = result.models || [];
+        if (select) {
+            const current = (document.getElementById('ai-model-input')?.value || '').trim();
+            select.innerHTML = '<option value="">Select a model…</option>' +
+                models.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+        }
+        if (modelsRow) modelsRow.classList.remove('hidden');
+        // Prefill the model field if it's empty so Save works in one click.
+        const modelInput = document.getElementById('ai-model-input');
+        if (modelInput && !modelInput.value && models.length) {
+            modelInput.value = models[0];
+            if (select) select.value = models[0];
+        }
+        if (models.length) {
+            show('bg-green-900/30 border border-green-700', `✓ Connected — ${models.length} model${models.length === 1 ? '' : 's'} available. Pick one, then Save Endpoint.`);
+        } else {
+            show('bg-yellow-900/30 border border-yellow-700', 'ℹ Connected, but the endpoint reported no models. Pull a model on the server first.');
+        }
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } catch (error) {
+        console.error('Failed to connect to AI endpoint:', error);
+        if (modelsRow) modelsRow.classList.add('hidden');
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Connection failed'}`);
+        setTimeout(() => statusDiv?.classList.add('hidden'), 6000);
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prevLabel || 'Connect'; }
+    }
+}
+
+// Scan the tailnet + local subnet for a running Ollama and list what's found
+// (issue #462). Clicking a result fills the endpoint + model dropdown.
+let aiDiscovered = [];
+async function scanAIEndpoints() {
+    const btn = document.getElementById('ai-scan-btn');
+    const box = document.getElementById('ai-discover-results');
+    if (!box) return;
+    const prev = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="text-xs text-gray-400 p-2">⏳ Scanning Tailscale peers and the local subnet for Ollama… this can take a few seconds.</div>';
+
+    try {
+        const result = await postAPI('/api/ai/discover', {});
+        if (!result || !result.success) throw new Error((result && result.error) || 'Scan failed');
+        aiDiscovered = result.results || [];
+
+        if (!aiDiscovered.length) {
+            box.innerHTML = `<div class="text-xs text-gray-400 p-3 rounded-lg bg-slate-800 border border-slate-700">
+                No Ollama endpoints answered on :11434.<br><span class="text-gray-500">${escapeHtml(result.hint || '')}</span></div>`;
+            return;
+        }
+
+        const badge = (src) => src === 'tailnet'
+            ? '<span class="text-xs px-2 py-1 rounded bg-blue-900 text-blue-300 border border-blue-700">Tailscale</span>'
+            : '<span class="text-xs px-2 py-1 rounded bg-slate-700 text-gray-300 border border-slate-600">Local</span>';
+
+        const rows = aiDiscovered.map((r, i) => {
+            const n = r.models ? r.models.length : 0;
+            const label = r.name ? `${escapeHtml(r.name)} <span class="text-gray-500">${escapeHtml(r.ip)}</span>` : escapeHtml(r.ip);
+            const modelText = n ? `${n} model${n === 1 ? '' : 's'}` : '<span class="text-amber-400">0 models — pull one first</span>';
+            const os = r.os ? ` <span class="text-gray-600">${escapeHtml(r.os)}</span>` : '';
+            return `<button onclick="pickDiscoveredEndpoint(${i})" class="w-full text-left flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors">
+                        <span class="text-sm text-gray-200 flex items-center gap-2">${badge(r.source)} ${label}${os}</span>
+                        <span class="text-xs text-gray-400">${modelText}</span>
+                    </button>`;
+        }).join('');
+
+        box.innerHTML = `<div class="space-y-2">
+            <div class="text-xs text-gray-400">Found ${aiDiscovered.length} endpoint${aiDiscovered.length === 1 ? '' : 's'} — pick one:</div>
+            ${rows}
+            <div class="text-xs text-gray-600 mt-1">${escapeHtml(result.hint || '')}</div>
+        </div>`;
+    } catch (error) {
+        console.error('AI endpoint scan failed:', error);
+        box.innerHTML = `<div class="text-xs text-red-400 p-3 rounded-lg bg-red-900/30 border border-red-800">✗ ${escapeHtml(error.message || 'Scan failed')}</div>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = prev || 'Scan Network'; }
+    }
+}
+
+// Apply a scanned endpoint: fill the base URL + model dropdown, ready to Save.
+function pickDiscoveredEndpoint(idx) {
+    const r = aiDiscovered[idx];
+    if (!r) return;
+    const baseInput = document.getElementById('ai-base-url');
+    if (baseInput) baseInput.value = r.base_url;
+
+    const models = r.models || [];
+    const select = document.getElementById('ai-model-select');
+    const modelInput = document.getElementById('ai-model-input');
+    const current = (modelInput?.value || '').trim();
+    if (select) {
+        select.innerHTML = '<option value="">Select a model…</option>' +
+            models.map(m => `<option value="${escapeHtml(m)}"${m === current ? ' selected' : ''}>${escapeHtml(m)}</option>`).join('');
+    }
+    document.getElementById('ai-models-row')?.classList.remove('hidden');
+    if (modelInput && models.length && !modelInput.value) {
+        modelInput.value = models[0];
+        if (select) select.value = models[0];
+    }
+    showNotification(`Selected ${r.name || r.ip} — click Save Endpoint to use it.`, 'success');
+}
+
+// Mirror the dropdown choice into the model field (the value Save persists).
+function onAIModelSelect() {
+    const select = document.getElementById('ai-model-select');
+    const modelInput = document.getElementById('ai-model-input');
+    if (select && modelInput && select.value) {
+        modelInput.value = select.value;
+    }
+}
+
+// Save the self-hosted endpoint + model (issue #462). Empty base URL reverts
+// to OpenAI's cloud. The backend re-inits the AI client on these keys.
+async function saveAIEndpoint() {
+    const statusDiv = document.getElementById('ai-config-status');
+    const statusMessage = document.getElementById('ai-config-status-message');
+    const baseUrl = (document.getElementById('ai-base-url')?.value || '').trim();
+    const model = (document.getElementById('ai-model-input')?.value || '').trim();
+
+    const payload = { ai_base_url: baseUrl };
+    if (model) payload.ai_model = model;
+
+    const show = (cls, msg) => {
+        if (!statusDiv || !statusMessage) return;
+        statusDiv.className = `p-3 rounded-lg text-sm ${cls}`;
+        statusMessage.textContent = msg;
+        statusDiv.classList.remove('hidden');
+        setTimeout(() => statusDiv.classList.add('hidden'), 5000);
+    };
+
+    try {
+        const result = await postAPI('/api/config', payload);
+        // A non-null false means the AI client failed to re-init with the new
+        // endpoint (unreachable server, wrong model name, etc.).
+        if (result && result.ai_reload_success === false) {
+            throw new Error(result.ai_reload_error || 'AI engine could not reach the endpoint. Check the URL and that the server is running.');
+        }
+        const target = baseUrl || 'OpenAI cloud';
+        show('bg-green-900/30 border border-green-700', `✓ Endpoint saved — using ${target}${model ? ` (model: ${model})` : ''}.`);
+    } catch (error) {
+        console.error('Failed to save AI endpoint:', error);
+        show('bg-red-900/30 border border-red-700', `✗ ${error.message || 'Failed to save endpoint'}`);
     }
 }
 
@@ -23167,10 +23362,23 @@ async function loadAIInsights(force = false) {
         if (aiSection) aiSection.style.display = 'block';
         if (aiNotConfigured) aiNotConfigured.style.display = 'none';
         
-        // Update model name
+        // Update model name — adapt the heading and the footer to whichever
+        // model is actually configured (self-hosted tag or OpenAI). When the
+        // self-hosted endpoint has dropped and we're running on the cloud
+        // fallback, make that visible rather than showing a model that isn't
+        // answering.
+        const fallback = Boolean(status.fallback_active);
+        const shownModel = status.model || 'AI';
+        const headingModel = document.getElementById('ai-insights-model');
+        if (headingModel) {
+            headingModel.textContent = fallback ? `${shownModel} → OpenAI fallback` : shownModel;
+        }
         const modelName = document.getElementById('ai-model-name');
         if (modelName && status.model) {
-            modelName.textContent = status.model;
+            modelName.textContent = fallback ? `${shownModel} (OpenAI fallback active)` : shownModel;
+            modelName.className = fallback
+                ? 'text-amber-400 font-semibold'
+                : 'text-purple-400 font-semibold';
         }
         
         // Fetch insights. The server computes them in the BACKGROUND and answers
