@@ -19,7 +19,7 @@ https://www.raspberrypi.com/software/
 
 ![image](https://github.com/user-attachments/assets/e8d276be-4cb2-474d-a74d-b5b6704d22f5)
 
-I did not develop ragnar for the raspberry pi zero w2 64bits, but several feedbacks have attested that the installation worked perfectly.
+Use Raspberry Pi OS Lite (64-bit) Debian Trixie with no desktop environment. 
 
 - Raspberry Pi OS installed. 
     - Stable:
