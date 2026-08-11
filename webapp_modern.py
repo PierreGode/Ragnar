@@ -3721,8 +3721,6 @@ def mesh_update_all():
     if not _mesh_enabled():
         return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
     try:
-        import concurrent.futures
-
         state = mesh_manager.status()
         tag = _mesh_tag()
         port = _mesh_node_port()
@@ -3734,21 +3732,29 @@ def mesh_update_all():
         peer_timeout = 120
 
         def _one(peer):
-            reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
-                                           port=port, timeout=peer_timeout)
+            name = peer.get('short_name') or peer.get('hostname') or 'peer'
+            # Keep a raising peer as a reported unreachable result rather than
+            # letting it drop out of the fan-out.
+            try:
+                reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
+                                               port=port, timeout=peer_timeout)
+            except Exception as e:
+                reply = {'reachable': False, 'error': str(e)}
             return {
                 'node_id': str(peer.get('id', '')),
-                'name': peer.get('short_name') or peer.get('hostname') or 'peer',
+                'name': name,
                 'self': False,
                 'reachable': bool(reply.get('reachable')),
                 'result': reply,
             }
 
-        peer_results = []
-        if peers:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(8, len(peers))) as ex:
-                peer_results = list(ex.map(_one, peers))
+        # Manual thread pool (see _concurrent_map): avoids concurrent.futures'
+        # interpreter-shutdown flag that breaks ThreadPoolExecutor under
+        # async_mode='threading'. Allow for the slow, restart-triggering update.
+        peer_results = _concurrent_map(
+            _one, peers, max_workers=8, overall_timeout=peer_timeout + 30
+        )
+        peer_results.sort(key=lambda r: (r['name'] or '').lower())
 
         # Self last: updating this unit restarts it, so let the peer fan-out land
         # first. The restart is detached, so this response still flushes.
@@ -23156,6 +23162,59 @@ def list_ai_models():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+def _concurrent_map(fn, items, max_workers=32, overall_timeout=25):
+    """Run ``fn`` over ``items`` across a small, manually managed thread pool,
+    collecting the non-None results.
+
+    Deliberately avoids ``concurrent.futures``: under Flask-SocketIO's
+    ``async_mode='threading'`` its module-global shutdown flag can end up set in
+    a still-live process, after which ``ThreadPoolExecutor.submit`` permanently
+    raises "cannot schedule new futures after interpreter shutdown" (seen on a
+    Pi Zero). Plain threads don't consult that flag. Thread-start failures and
+    an overall deadline are handled so a constrained board degrades instead of
+    erroring.
+    """
+    import queue as _queue
+    if not items:
+        return []
+
+    work_q = _queue.Queue()
+    for it in items:
+        work_q.put(it)
+
+    results = []
+    lock = threading.Lock()
+
+    def _worker():
+        while True:
+            try:
+                it = work_q.get_nowait()
+            except _queue.Empty:
+                return
+            try:
+                r = fn(it)
+            except Exception:
+                r = None
+            if r is not None:
+                with lock:
+                    results.append(r)
+
+    n = max(1, min(max_workers, len(items)))
+    threads = []
+    for _ in range(n):
+        t = threading.Thread(target=_worker, daemon=True)
+        try:
+            t.start()
+        except RuntimeError:
+            break  # out of threads — those already started drain the queue
+        threads.append(t)
+
+    deadline = time.time() + overall_timeout
+    for t in threads:
+        t.join(timeout=max(0.1, deadline - time.time()))
+    return results
+
+
 def _probe_ollama(ip, port=11434, connect_timeout=0.6, read_timeout=2.5):
     """Return a sorted model list if an OpenAI-compatible/Ollama server answers
     on ip:port, else None. A fast TCP pre-check avoids waiting the full HTTP
@@ -23196,7 +23255,6 @@ def discover_ai_endpoints():
     Every candidate is probed on :11434 concurrently; responders are returned
     with their model lists so the UI can offer them as one-click endpoints.
     """
-    import concurrent.futures
     from ai_service import normalize_base_url
     try:
         candidates = {}  # ip -> {name, os, source}
@@ -23264,11 +23322,7 @@ def discover_ai_endpoints():
                 'models': models,
             }
 
-        results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
-            for r in ex.map(work, list(candidates.keys())):
-                if r:
-                    results.append(r)
+        results = _concurrent_map(work, list(candidates.keys()), max_workers=32)
         results.sort(key=lambda r: (r['source'] != 'tailnet', (r['name'] or '').lower(), r['ip']))
 
         return jsonify({
