@@ -21552,9 +21552,11 @@ document.addEventListener('keydown', e => {
     if (ov && !ov.classList.contains('hidden')) { closeImageFullscreen(); return; }
     closeFilePreview();
 });
-// Click the backdrop (not the image) to close the full-screen viewer.
-document.getElementById('image-fullscreen-overlay')?.addEventListener('click', function(e) {
-    if (e.target === this) closeImageFullscreen();
+// Tap anywhere — including the image — closes the viewer. The image covers
+// almost the whole overlay on phones (and there is no Esc key there), so a
+// backdrop-only close left no reliable way out.
+document.getElementById('image-fullscreen-overlay')?.addEventListener('click', function() {
+    closeImageFullscreen();
 });
 // If the user leaves native fullscreen (e.g. via Esc handled by the browser),
 // keep our overlay state in sync.
