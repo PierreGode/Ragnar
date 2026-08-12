@@ -4623,6 +4623,28 @@
                 </div>
             </div>
 
+            <!-- Move-to-folder picker -->
+            <div id="move-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                <div class="glass rounded-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                    <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <button onclick="moveModalBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                            </button>
+                            <span id="move-title" class="font-semibold truncate">Move to…</span>
+                        </div>
+                        <button onclick="closeMoveModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 flex-shrink-0">
+                        <span id="move-path" class="text-sm text-gray-400 truncate">/</span>
+                        <button id="move-here-btn" onclick="doMove()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-3 py-1.5 rounded-lg flex-shrink-0 transition-colors">Move here</button>
+                    </div>
+                    <div id="move-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                </div>
+            </div>
+
             <!-- Vault (encrypted) Modal -->
             <div id="safe-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-4">
                 <div class="glass rounded-xl w-full max-w-3xl flex flex-col overflow-hidden" style="max-height:calc(100vh - 2rem)">
@@ -7800,7 +7822,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-upload-refresh"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260812-file-move"></script>
 
 </body>
 </html>

@@ -21311,6 +21311,106 @@ function renameSafeFolder(path, currentName) {
 // Small inline SVG icons reused by row action buttons.
 const ICON_RENAME = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>';
 const ICON_SEND = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>';
+const ICON_MOVE = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14h6m0 0l-2-2m2 2l-2 2"></path></svg>';
+
+// ── Move a file/folder to another folder (filesystem + Vault) ────────────────
+let _moveCtx = null;   // { kind:'fs'|'vault', src:{...}, dir }
+
+function moveFsEntry(path, name, isDir) { _openMove('fs', { path: path, name: name, isDir: !!isDir }, '/'); }
+function moveVaultFile(id, name) { _openMove('vault', { id: id, name: name, isDir: false }, ''); }
+function moveVaultFolder(folderPath, name) { _openMove('vault', { folderPath: folderPath, name: name, isDir: true }, ''); }
+
+function _openMove(kind, src, startDir) {
+    _moveCtx = { kind: kind, src: src, dir: startDir };
+    const t = document.getElementById('move-title');
+    if (t) t.textContent = `Move “${src.name}” to…`;
+    const m = document.getElementById('move-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    _moveCtx._history = [];
+    moveModalLoad(startDir);
+}
+function closeMoveModal() {
+    const m = document.getElementById('move-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    _moveCtx = null;
+}
+function moveModalBack() {
+    if (_moveCtx && _moveCtx._history && _moveCtx._history.length) moveModalLoad(_moveCtx._history.pop(), true);
+}
+function moveModalLoad(dir, isBack) {
+    if (!_moveCtx) return;
+    if (!isBack && dir !== _moveCtx.dir) _moveCtx._history.push(_moveCtx.dir);
+    _moveCtx.dir = dir;
+    const list = document.getElementById('move-list');
+    const pathEl = document.getElementById('move-path');
+    const hereBtn = document.getElementById('move-here-btn');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    if (_moveCtx.kind === 'vault') {
+        if (pathEl) pathEl.textContent = '🔒 Vault' + (dir ? '/' + dir : '');
+        if (hereBtn) hereBtn.classList.remove('hidden');   // vault root is a valid target
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(dir))
+            .then(r => r.json())
+            .then(d => {
+                if (!d.success) { list.innerHTML = '<p class="text-amber-300 p-4">Vault locked.</p>'; return; }
+                // Hide the folder being moved (can't move into itself).
+                const folders = (d.folders || []).filter(f => !(_moveCtx.src.folderPath && (f.path === _moveCtx.src.folderPath || f.path.indexOf(_moveCtx.src.folderPath + '/') === 0)));
+                list.innerHTML = folders.length
+                    ? '<div class="space-y-1">' + folders.map(f => _moveFolderRow('vault', f.path, f.name)).join('') + '</div>'
+                    : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+            })
+            .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    // Filesystem: only Uploads/Backups are writable move targets.
+    if (pathEl) pathEl.textContent = dir;
+    if (hereBtn) hereBtn.classList.toggle('hidden', dir === '/');   // '/' is not a real folder
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir))
+        .then(r => r.json())
+        .then(files => {
+            let dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory);
+            if (dir === '/') dirs = dirs.filter(f => f.path === '/uploads' || f.path === '/backups');
+            // Don't allow descending into the folder being moved.
+            if (_moveCtx.src.isDir) dirs = dirs.filter(f => f.path !== _moveCtx.src.path);
+            dirs.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            list.innerHTML = dirs.length
+                ? '<div class="space-y-1">' + dirs.map(f => _moveFolderRow('fs', f.path, f.name)).join('') + '</div>'
+                : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+        })
+        .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function _moveFolderRow(kind, navPath, name) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="moveModalLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${kind === 'vault' ? 'text-amber-400' : 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate flex-1">${escapeHtml(name)}</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></div>`;
+}
+function doMove() {
+    if (!_moveCtx) return;
+    const dir = _moveCtx.dir;
+    if (_moveCtx.kind === 'vault') {
+        const s = _moveCtx.src;
+        const body = s.folderPath ? { folder: s.folderPath, dir: dir } : { id: s.id, dir: dir };
+        networkAwareFetch('/api/safe/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        }).then(r => r.json()).then(d => {
+            if (d.locked) { closeMoveModal(); afterSafeChange(); return; }
+            if (d.success) { showFileSuccess(`Moved “${s.name}”`); closeMoveModal(); afterSafeChange(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    } else {
+        networkAwareFetch('/api/files/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: _moveCtx.src.path, dir: dir })
+        }).then(r => r.json()).then(d => {
+            if (d.success) { showFileSuccess(d.noop ? 'Already there' : `Moved “${_moveCtx.src.name}”`); closeMoveModal(); refreshFiles(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    }
+}
+document.getElementById('move-modal')?.addEventListener('click', function (e) { if (e.target === this) closeMoveModal(); });
 
 function setFileSort(sort) {
     currentFileSort = sort;
@@ -21433,6 +21533,7 @@ function displayFiles(files, path, highlightFile = null) {
             actions += `<button onclick="sendFsFile(event,'${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit">${ICON_SEND}</button>`;
         }
         if (writable) {
+            actions += `<button onclick="moveFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}',${file.is_directory ? 'true' : 'false'})" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>`;
             actions += `<button onclick="renameFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>`;
         }
         if (!file.is_directory || writable) {
@@ -22223,6 +22324,7 @@ function loadSafeIntoBrowser() {
                         <div class="font-medium truncate">${escapeHtml(f.name)}</div>
                     </div>
                     <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="moveVaultFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move folder">${ICON_MOVE}</button>
                         <button onclick="renameSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename folder">${ICON_RENAME}</button>
                         <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete folder">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -22255,6 +22357,7 @@ function loadSafeIntoBrowser() {
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg>
                         </button>
                         <button onclick="sendVaultFile(event,'${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit (decrypts)">${ICON_SEND}</button>
+                        <button onclick="moveVaultFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>
                         <button onclick="renameSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>
                         <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -23659,6 +23762,13 @@ window.xferInboxSave = xferInboxSave;
 window.xferInboxDiscard = xferInboxDiscard;
 window.sendFsFile = sendFsFile;
 window.sendVaultFile = sendVaultFile;
+window.moveFsEntry = moveFsEntry;
+window.moveVaultFile = moveVaultFile;
+window.moveVaultFolder = moveVaultFolder;
+window.moveModalLoad = moveModalLoad;
+window.moveModalBack = moveModalBack;
+window.closeMoveModal = closeMoveModal;
+window.doMove = doMove;
 window.openXferPicker = openXferPicker;
 window.closeXferPicker = closeXferPicker;
 window.xferPickerBack = xferPickerBack;

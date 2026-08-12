@@ -19836,6 +19836,44 @@ def rename_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/files/move', methods=['POST'])
+def move_file_api():
+    """Move a file or folder to another /uploads|/backups directory."""
+    try:
+        data = request.get_json(silent=True) or {}
+        src = data.get('path', '')
+        dest_dir = data.get('dir', '')
+        if not src or not dest_dir:
+            return jsonify({'error': 'Source and destination are required'}), 400
+        try:
+            src_actual = _resolve_upload_target(src)      # writable trees only
+            dest_actual = _resolve_upload_target(dest_dir)
+        except ValueError:
+            return jsonify({'error': 'Files can only be moved within Uploads or Backups'}), 400
+        if not os.path.exists(src_actual):
+            return jsonify({'error': 'File not found'}), 404
+
+        src_real = os.path.realpath(src_actual)
+        dest_real = os.path.realpath(dest_actual)
+        # Already there — nothing to do.
+        if os.path.dirname(src_real) == dest_real:
+            return jsonify({'success': True, 'noop': True})
+        # Don't move a folder into itself or its own subtree.
+        if os.path.isdir(src_real) and (dest_real == src_real or dest_real.startswith(src_real + os.sep)):
+            return jsonify({'error': "A folder can't be moved into itself"}), 400
+
+        os.makedirs(dest_actual, exist_ok=True)
+        dest_path = _unique_dest(dest_actual, os.path.basename(src_actual))
+        import shutil as _sh
+        _sh.move(src_actual, dest_path)
+        logger.info(f"Moved {src_actual} -> {dest_path}")
+        return jsonify({'success': True, 'name': os.path.basename(dest_path)})
+
+    except Exception as e:
+        logger.error(f"Error moving: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/files/clear', methods=['POST'])
 def clear_files_api():
     """Clear files from specified directories"""
@@ -20383,6 +20421,28 @@ def safe_rename_api():
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
         logger.error(f"Safe rename error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/move', methods=['POST'])
+def safe_move_api():
+    """Move a file (by id) or folder (by path) to `dir` within the Safe."""
+    try:
+        data = request.get_json(silent=True) or {}
+        dest = data.get('dir', '')
+        if data.get('folder'):
+            _get_safe_vault().move_folder(data['folder'], dest)
+        elif data.get('id'):
+            _get_safe_vault().move_file(data['id'], dest)
+        else:
+            return jsonify({'success': False, 'error': 'Nothing to move'}), 400
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe move error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
