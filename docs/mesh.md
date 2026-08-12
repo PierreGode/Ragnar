@@ -771,6 +771,28 @@ Endpoints: `POST /api/mesh/files/push` (receiver), `POST /api/mesh/files/send`
 `POST /api/mesh/inbox/{save,discard}`, `POST /api/mesh/files/config`. Per-file size
 ceiling is 4 GB.
 
+## Mesh Share
+
+The **Ragnar Mesh → Mesh Share** sub-tab is a folder every unit publishes to the
+whole mesh. It is **not** a central store: each unit serves its own shared list
+(`data/mesh_share/`), and the catalog is assembled on demand by asking every online
+peer for theirs. Each entry shows the **filename** and its **owner** (the Viking
+name of the unit that actually holds the file).
+
+- **Share files** — publish file(s) from your computer to this unit's shared folder;
+  they immediately appear mesh-wide with you as the owner.
+- **Fetch** — pull any peer's shared file **directly from its owner** (peer-to-peer
+  over Tailscale) and save it into a folder you pick — an Uploads/Backups folder or
+  the Vault. The file only leaves the owner when someone fetches it.
+- **Unshare** — stop publishing one of your own files (the file itself is not
+  deleted).
+
+The listing (`GET /api/mesh/share/local`) and the file stream
+(`GET /api/mesh/share/download`) are plain reads, so they use the mesh's existing
+WireGuard-identity + tag authorization; publishing, fetching and unsharing are
+operator-only (`POST /api/mesh/share/{add,remove,fetch}`), and `GET /api/mesh/share`
+is the aggregate catalog.
+
 ## Cross-site incident correlation
 
 Each unit pulls its peers' Watchtower alerts and folds them into its **own**

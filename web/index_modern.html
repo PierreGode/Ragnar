@@ -3108,6 +3108,7 @@
                 <div class="flex items-center gap-2 mt-2">
                     <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
                     <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
+                    <button id="mesh-nav-share" onclick="showMeshView('share')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">Mesh Share</button>
                 </div>
             </div>
 
@@ -3448,6 +3449,46 @@
                         </div>
                         <div class="px-3 py-2 text-xs text-gray-400 border-b border-slate-700 flex-shrink-0">Sending to <b id="xfer-pick-dest" class="text-sky-300">—</b> · click a file to send it</div>
                         <div id="xfer-pick-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mesh Share view -->
+            <div id="mesh-view-share" class="hidden">
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                            <h3 class="text-xl font-bold">Mesh Share</h3>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="shareUploadFiles()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">⬆ Share files</button>
+                            <button onclick="loadMeshShare()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-4">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
+                </div>
+
+                <!-- Fetch destination folder picker -->
+                <div id="share-dest-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                        <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <button onclick="shareDestBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <span id="share-dest-title" class="font-semibold truncate">Save to…</span>
+                            </div>
+                            <button onclick="closeShareDest()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 flex-shrink-0">
+                            <span id="share-dest-path" class="text-sm text-gray-400 truncate">Choose a folder</span>
+                            <button id="share-dest-here" onclick="shareDoFetch()" class="hidden bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-3 py-1.5 rounded-lg flex-shrink-0 transition-colors">Save here</button>
+                        </div>
+                        <div id="share-dest-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
                     </div>
                 </div>
             </div>
@@ -7822,7 +7863,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-file-move"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-merged"></script>
 
 </body>
 </html>
