@@ -21540,10 +21540,10 @@ function uploadFile() {
         
         // Set upload path (default to uploads)
         formData.append('path', '/uploads');
-        
+
         fileOperationInProgress = true;
         showFileLoading('Uploading files...');
-        
+
         networkAwareFetch('/api/files/upload', {
             method: 'POST',
             body: formData
@@ -21564,9 +21564,344 @@ function uploadFile() {
             fileOperationInProgress = false;
         });
     };
-    
+
     input.click();
 }
+
+// ── Safe (password-protected encrypted vault) ───────────────────────────────
+// The Safe stores files encrypted at rest (AES-256-GCM, key derived from the
+// password). It must be unlocked with the password for the current server
+// session before anything can be listed, viewed, downloaded or added.
+
+function openSafe() {
+    const modal = document.getElementById('safe-modal');
+    if (!modal) return;
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    refreshSafe();
+}
+
+function closeSafe() {
+    const modal = document.getElementById('safe-modal');
+    if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
+}
+
+// Fetch current state and render the matching view.
+function refreshSafe() {
+    const body = document.getElementById('safe-body');
+    if (body) {
+        body.innerHTML = `<div class="text-center text-gray-400 py-12">
+            <svg class="w-8 h-8 inline animate-spin mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+            </svg><p>Loading Safe…</p></div>`;
+    }
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (!s.success) { renderSafeError(s.error || 'Failed to read Safe status'); return; }
+            if (!s.configured) { renderSafeSetup(s); }
+            else if (!s.unlocked) { renderSafeUnlock(s); }
+            else { renderSafeBrowser(s); }
+        })
+        .catch(err => renderSafeError(err.message));
+}
+
+function renderSafeError(msg) {
+    setSafeBadge('', '');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const body = document.getElementById('safe-body');
+    if (body) body.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(msg)}</p>`;
+}
+
+function setSafeBadge(text, cls) {
+    const badge = document.getElementById('safe-status-badge');
+    if (!badge) return;
+    if (!text) { badge.classList.add('hidden'); return; }
+    badge.textContent = text;
+    badge.className = `text-xs px-2 py-0.5 rounded ${cls}`;
+    badge.classList.remove('hidden');
+}
+
+// State 1 — not configured: pick a size + password to create the Safe.
+function renderSafeSetup(s) {
+    setSafeBadge('Not set up', 'bg-slate-700 text-gray-300');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const minMB = Math.round((s.min_size_bytes || 8 * 1048576) / 1048576);
+    // Cap the picker at whatever is realistically free on the card.
+    const freeMB = s.disk_free_bytes ? Math.floor(s.disk_free_bytes / 1048576) - 32 : null;
+    const maxMB = Math.min(
+        Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576),
+        freeMB && freeMB > minMB ? freeMB : Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576)
+    );
+    const defMB = Math.min(Math.max(minMB, 256), maxMB);
+    const freeLabel = s.disk_free_bytes ? formatBytes(s.disk_free_bytes) : 'unknown';
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="max-w-lg mx-auto space-y-5">
+            <div class="text-sm text-gray-300 bg-slate-800/60 border border-slate-700 rounded-lg p-3">
+                The Safe encrypts every file with your password (AES-256). Choose how much
+                storage to reserve for it below. <span class="text-amber-300">If you forget the
+                password there is no recovery — the files cannot be decrypted.</span>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Safe size</label>
+                <div class="flex items-center gap-3">
+                    <input id="safe-size-range" type="range" min="${minMB}" max="${maxMB}" step="8" value="${defMB}"
+                        oninput="document.getElementById('safe-size-num').value=this.value"
+                        class="flex-1 accent-amber-500">
+                    <div class="flex items-center gap-1">
+                        <input id="safe-size-num" type="number" min="${minMB}" max="${maxMB}" value="${defMB}"
+                            oninput="const r=document.getElementById('safe-size-range'); r.value=Math.min(${maxMB},Math.max(${minMB},this.value||${minMB}));"
+                            class="w-24 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-white">
+                        <span class="text-sm text-gray-400">MB</span>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · range ${minMB}–${maxMB} MB</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Password</label>
+                <input id="safe-pw1" type="password" autocomplete="new-password"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Confirm password</label>
+                <input id="safe-pw2" type="password" autocomplete="new-password"
+                    onkeydown="if(event.key==='Enter')submitSafeSetup()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div id="safe-setup-msg" class="text-sm text-red-400 hidden"></div>
+            <button onclick="submitSafeSetup()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Create Safe</button>
+        </div>`;
+}
+
+function submitSafeSetup() {
+    const sizeMb = parseInt(document.getElementById('safe-size-num').value, 10);
+    const pw1 = document.getElementById('safe-pw1').value;
+    const pw2 = document.getElementById('safe-pw2').value;
+    const msg = document.getElementById('safe-setup-msg');
+    const showMsg = t => { msg.textContent = t; msg.classList.remove('hidden'); };
+    if (!pw1 || pw1.length < 6) return showMsg('Password must be at least 6 characters.');
+    if (pw1 !== pw2) return showMsg('Passwords do not match.');
+    if (!sizeMb || sizeMb < 8) return showMsg('Please choose a valid size.');
+    msg.classList.add('hidden');
+    networkAwareFetch('/api/safe/setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw1, size_mb: sizeMb })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { showFileSuccess('Safe created and unlocked'); refreshSafe(); }
+        else showMsg(d.error || 'Failed to create Safe');
+    })
+    .catch(err => showMsg(err.message));
+}
+
+// State 2 — configured but locked: ask for the password.
+function renderSafeUnlock(s) {
+    setSafeBadge('Locked', 'bg-red-900/60 text-red-300');
+    document.getElementById('safe-lock-btn')?.classList.add('hidden');
+    const sizeLabel = s.size_limit_bytes ? formatBytes(s.size_limit_bytes) : '';
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="max-w-md mx-auto space-y-5 py-6">
+            <div class="text-center">
+                <svg class="w-12 h-12 mx-auto text-amber-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                </svg>
+                <p class="text-gray-300">The Safe is locked${sizeLabel ? ` · ${sizeLabel} reserved` : ''}.</p>
+            </div>
+            <div>
+                <label class="block text-sm font-medium mb-1">Password</label>
+                <input id="safe-unlock-pw" type="password" autocomplete="current-password"
+                    onkeydown="if(event.key==='Enter')submitSafeUnlock()"
+                    class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
+            </div>
+            <div id="safe-unlock-msg" class="text-sm text-red-400 hidden"></div>
+            <button onclick="submitSafeUnlock()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Unlock</button>
+        </div>`;
+    setTimeout(() => document.getElementById('safe-unlock-pw')?.focus(), 50);
+}
+
+function submitSafeUnlock() {
+    const pw = document.getElementById('safe-unlock-pw').value;
+    const msg = document.getElementById('safe-unlock-msg');
+    networkAwareFetch('/api/safe/unlock', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { refreshSafe(); }
+        else { msg.textContent = d.error || 'Unlock failed'; msg.classList.remove('hidden'); }
+    })
+    .catch(err => { msg.textContent = err.message; msg.classList.remove('hidden'); });
+}
+
+function lockSafe() {
+    networkAwareFetch('/api/safe/lock', { method: 'POST' })
+        .then(r => r.json())
+        .then(() => { showFileSuccess('Safe locked'); refreshSafe(); })
+        .catch(err => showFileError(err.message));
+}
+
+// State 3 — unlocked: usage bar + file list + add button.
+function renderSafeBrowser(s) {
+    setSafeBadge('Unlocked', 'bg-green-900/60 text-green-300');
+    document.getElementById('safe-lock-btn')?.classList.remove('hidden');
+    const used = s.used_bytes || 0;
+    const limit = s.size_limit_bytes || 1;
+    const pct = Math.min(100, Math.round((used / limit) * 100));
+    const body = document.getElementById('safe-body');
+    body.innerHTML = `
+        <div class="space-y-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div class="flex-1">
+                    <div class="flex justify-between text-xs text-gray-400 mb-1">
+                        <span>${formatBytes(used)} used of ${formatBytes(limit)}</span>
+                        <span>${pct}%</span>
+                    </div>
+                    <div class="w-full bg-slate-700 rounded-full h-2">
+                        <div class="bg-amber-500 h-2 rounded-full" style="width:${pct}%"></div>
+                    </div>
+                </div>
+                <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
+                    + Add files
+                </button>
+            </div>
+            <div id="safe-file-list" class="glass-card overflow-y-auto scrollbar-thin" style="max-height:50vh">
+                <p class="text-gray-400 p-4">Loading files…</p>
+            </div>
+        </div>`;
+    loadSafeFiles();
+}
+
+function loadSafeFiles() {
+    const list = document.getElementById('safe-file-list');
+    if (!list) return;
+    networkAwareFetch('/api/safe/list')
+        .then(r => r.json())
+        .then(d => {
+            if (d.locked) { refreshSafe(); return; }
+            if (!d.success) { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list')}</p>`; return; }
+            if (!d.files.length) {
+                list.innerHTML = `<p class="text-gray-400 p-6 text-center">The Safe is empty. Use “Add files” to store encrypted files here.</p>`;
+                return;
+            }
+            list.innerHTML = d.files.map(f => `
+                <div class="flex items-center justify-between px-4 py-2.5 hover:bg-slate-800 border-b border-slate-700/50">
+                    <div class="min-w-0 flex-1">
+                        <p class="text-sm truncate">${escapeHtml(f.name)}</p>
+                        <p class="text-xs text-gray-500">${formatBytes(f.size)}</p>
+                    </div>
+                    <div class="flex items-center gap-1 flex-shrink-0 ml-2">
+                        <button onclick="previewSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" title="View" class="p-1.5 hover:bg-slate-700 rounded text-gray-300">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
+                        </button>
+                        <button onclick="downloadSafeFile('${escapeAttr(f.id)}')" title="Download" class="p-1.5 hover:bg-slate-700 rounded text-gray-300">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                        </button>
+                        <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" title="Delete" class="p-1.5 hover:bg-slate-700 rounded text-red-400">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>`).join('');
+        })
+        .catch(err => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+}
+
+function uploadToSafe() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = function(event) {
+        const files = event.target.files;
+        if (!files.length) return;
+        const formData = new FormData();
+        for (let file of files) formData.append('file', file);
+        showFileLoading('Encrypting & storing…');
+        networkAwareFetch('/api/safe/upload', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(d => {
+                if (d.locked) { showFileError('Safe locked — unlock again'); refreshSafe(); return; }
+                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Safe`); refreshSafe(); }
+                else showFileError(d.error || 'Upload failed');
+            })
+            .catch(err => showFileError(err.message));
+    };
+    input.click();
+}
+
+function downloadSafeFile(id) {
+    const url = resolveNetworkAwareEndpoint(`/api/safe/download?id=${encodeURIComponent(id)}`);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function deleteSafeFile(id, name) {
+    showFileConfirmModal('Delete from Safe',
+        `Permanently delete "${name}" from the Safe? This cannot be undone.`,
+        () => {
+            networkAwareFetch('/api/safe/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id })
+            })
+            .then(r => r.json())
+            .then(d => {
+                closeFileModal();
+                if (d.locked) { refreshSafe(); return; }
+                if (d.success) { showFileSuccess(`Deleted ${name}`); refreshSafe(); }
+                else showFileError(d.error || 'Delete failed');
+            })
+            .catch(err => { closeFileModal(); showFileError(err.message); });
+        });
+}
+
+// Reuse the standard file-preview modal, fed from the decrypted Safe payload.
+function previewSafeFile(id, name) {
+    const modal = document.getElementById('file-preview-modal');
+    const content = document.getElementById('preview-content');
+    const filename = document.getElementById('preview-filename');
+    const truncBadge = document.getElementById('preview-truncated-badge');
+    const dlBtn = document.getElementById('preview-download-btn');
+    if (!modal) return;
+    filename.textContent = name;
+    truncBadge.classList.add('hidden');
+    content.innerHTML = `<div class="text-center text-gray-400 py-12"><p>Decrypting preview…</p></div>`;
+    dlBtn.onclick = () => downloadSafeFile(id);
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    networkAwareFetch(`/api/safe/preview?id=${encodeURIComponent(id)}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.locked) { closeFilePreview(); refreshSafe(); return; }
+            if (data.error) { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(data.error)}</p>`; return; }
+            if (data.type === 'image') {
+                content.innerHTML = `<div class="flex items-center justify-center h-full p-4"><img src="data:${data.mime};base64,${data.data}" alt="${escapeHtml(name)}" class="max-w-full max-h-full object-contain rounded"></div>`;
+            } else if (data.type === 'text') {
+                if (data.truncated) truncBadge.classList.remove('hidden');
+                content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;
+            } else {
+                content.innerHTML = `<div class="text-center text-gray-400 py-12">
+                    <p class="mb-1">Cannot preview this file type (${escapeHtml(data.mime || 'unknown')})</p>
+                    <p class="text-sm mb-3">Size: ${formatBytes(data.size)}</p>
+                    <button onclick="downloadSafeFile('${escapeAttr(id)}')" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm">Download</button>
+                </div>`;
+            }
+        })
+        .catch(err => { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+}
+
+// Close Safe on backdrop click.
+document.getElementById('safe-modal')?.addEventListener('click', function(e) {
+    if (e.target === this) closeSafe();
+});
 
 function clearFiles() {
     showFileConfirmModal(
@@ -22464,6 +22799,16 @@ window.uploadFile = uploadFile;
 window.clearFiles = clearFiles;
 window.refreshFiles = refreshFiles;
 window.closeFileModal = closeFileModal;
+window.openSafe = openSafe;
+window.closeSafe = closeSafe;
+window.refreshSafe = refreshSafe;
+window.submitSafeSetup = submitSafeSetup;
+window.submitSafeUnlock = submitSafeUnlock;
+window.lockSafe = lockSafe;
+window.uploadToSafe = uploadToSafe;
+window.downloadSafeFile = downloadSafeFile;
+window.deleteSafeFile = deleteSafeFile;
+window.previewSafeFile = previewSafeFile;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions

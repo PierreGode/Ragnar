@@ -53,6 +53,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+from safe_vault import SafeVault, SafeError, SafeLockedError
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
 from logger import Logger
@@ -19782,6 +19783,221 @@ def clear_files_api():
     except Exception as e:
         logger.error(f"Error clearing files: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Safe — password-protected, size-capped encrypted vault (Files tab)
+# ---------------------------------------------------------------------------
+
+_safe_vault = None
+_safe_vault_lock = threading.Lock()
+
+
+def _get_safe_vault():
+    """Lazily build the single SafeVault instance under the data directory."""
+    global _safe_vault
+    if _safe_vault is None:
+        with _safe_vault_lock:
+            if _safe_vault is None:
+                base_dir = os.path.join(shared_data.datadir, 'safe')
+                _safe_vault = SafeVault(base_dir)
+    return _safe_vault
+
+
+@app.route('/api/safe/status')
+def safe_status_api():
+    """Report whether the Safe is set up, unlocked, and its usage."""
+    try:
+        info = _get_safe_vault().status()
+        # Advertise the configurable size window so the UI can build its picker.
+        from safe_vault import MIN_SIZE_BYTES, MAX_SIZE_BYTES
+        info['min_size_bytes'] = MIN_SIZE_BYTES
+        info['max_size_bytes'] = MAX_SIZE_BYTES
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            info['disk_free_bytes'] = usage.free
+            info['disk_total_bytes'] = usage.total
+        except OSError:
+            pass
+        return jsonify({'success': True, **info})
+    except Exception as e:
+        logger.error(f"Safe status error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/setup', methods=['POST'])
+def safe_setup_api():
+    """Create the Safe for the first time: choose password + size cap."""
+    try:
+        data = request.get_json(silent=True) or {}
+        password = data.get('password') or ''
+        # Accept size in MB from the UI; clamp against disk free space.
+        size_mb = _safe_int(data.get('size_mb'), 0, min_v=0)
+        size_bytes = size_mb * 1024 * 1024
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            # Leave a small margin so we never fill the card completely.
+            if size_bytes > max(0, usage.free - 32 * 1024 * 1024):
+                return jsonify({'success': False,
+                                'error': 'Requested size exceeds available disk space'}), 400
+        except OSError:
+            pass
+        _get_safe_vault().setup(password, size_bytes)
+        logger.info("Safe created (%d MB cap)" % size_mb)
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe setup error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/unlock', methods=['POST'])
+def safe_unlock_api():
+    """Unlock the Safe with the password for this server session."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().unlock(data.get('password') or '')
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe unlock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/lock', methods=['POST'])
+def safe_lock_api():
+    """Wipe the in-memory key so the Safe requires the password again."""
+    try:
+        _get_safe_vault().lock()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Safe lock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/list')
+def safe_list_api():
+    """List files stored in the Safe (requires unlock)."""
+    try:
+        files = _get_safe_vault().list_files()
+        return jsonify({'success': True, 'files': [{
+            'id': e['id'],
+            'name': e.get('name', ''),
+            'size': e.get('size', 0),
+            'mime': e.get('mime', ''),
+            'modified': e.get('modified'),
+        } for e in files]})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe list error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/upload', methods=['POST'])
+def safe_upload_api():
+    """Encrypt and store one or more files into the Safe (requires unlock)."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'}), 400
+        vault = _get_safe_vault()
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            data = file.read()
+            mime = file.mimetype or 'application/octet-stream'
+            vault.add_file(os.path.basename(file.filename), data, mime)
+            stored.append(file.filename)
+        if not stored:
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        logger.info("Safe: stored %d encrypted file(s)" % len(stored))
+        return jsonify({'success': True, 'stored': len(stored)})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe upload error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/download')
+def safe_download_api():
+    """Decrypt and stream a stored file as an attachment (requires unlock)."""
+    try:
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        resp = make_response(data)
+        resp.headers['Content-Type'] = entry.get('mime') or 'application/octet-stream'
+        safe_name = os.path.basename(entry.get('name', 'file'))
+        resp.headers['Content-Disposition'] = 'attachment; filename="%s"' % safe_name
+        resp.headers['Content-Length'] = str(len(data))
+        return resp
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe download error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/preview')
+def safe_preview_api():
+    """Decrypt a stored file in memory and return an inline preview payload."""
+    import mimetypes
+    try:
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        name = os.path.basename(entry.get('name', 'file'))
+        mime = entry.get('mime') or mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        ext = os.path.splitext(name)[1].lower()
+
+        TEXT_EXTENSIONS = {'.txt', '.log', '.csv', '.json', '.xml', '.yaml', '.yml',
+                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
+        IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
+
+        if ext in IMAGE_EXTENSIONS:
+            if len(data) > 5 * 1024 * 1024:
+                return jsonify({'type': 'too_large', 'size': len(data), 'name': name})
+            return jsonify({'type': 'image', 'mime': mime,
+                            'data': base64.b64encode(data).decode('ascii'), 'name': name})
+        elif ext in TEXT_EXTENSIONS or (mime and mime.startswith('text/')):
+            truncated = len(data) > 512 * 1024
+            text = data[:512 * 1024].decode('utf-8', errors='replace')
+            return jsonify({'type': 'text', 'content': text, 'truncated': truncated,
+                            'size': len(data), 'name': name})
+        else:
+            return jsonify({'type': 'binary', 'mime': mime, 'size': len(data), 'name': name})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe preview error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/delete', methods=['POST'])
+def safe_delete_api():
+    """Remove a file from the Safe (requires unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().delete_file(data.get('id', ''))
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe delete error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # Legacy endpoint compatibility
 @app.route('/list_files')
