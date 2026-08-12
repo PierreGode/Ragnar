@@ -136,9 +136,11 @@ def test_deep_scan_requires_ip_via_dispatcher():
 
 
 def test_step_cap_forces_final_answer():
-    # Model keeps asking for tools forever; the loop must stop and force an answer.
-    chat = make_chat(['<tool>{"tool":"get_scan_status","args":{}}</tool>'] * 20
-                     + ["final summary"])
+    # Model keeps asking for DISTINCT tools (so dedup doesn't collapse them); the
+    # loop must stop at MAX_STEPS and force a final answer.
+    scans = ['<tool>{"tool":"deep_scan_host","args":{"ip":"10.0.0.%d"}}</tool>' % i
+             for i in range(RagnarChat.MAX_STEPS)]
+    chat = make_chat(scans + ["final summary"])
     res = chat.run([], "loop forever", cookie="")
     assert len(res["actions"]) == RagnarChat.MAX_STEPS
     assert res["reply"]  # a non-empty final answer was produced
@@ -318,6 +320,40 @@ def test_placeholder_retry_can_end_in_a_tool_call():
     assert calls == ["get_vulnerabilities"]
     assert "no open vulnerabilities" in res["reply"].lower()
     assert "<" not in res["reply"]
+
+
+def test_repeated_identical_tool_call_runs_once():
+    # The model loops on the SAME search_docs query several times before
+    # answering — it must execute only once, and only one chip is shown.
+    runs = []
+
+    def dispatch(tool, args, cookie):
+        runs.append((tool, tuple(sorted(args.items()))))
+        return {"ok": True, "data": {"count": 1}}
+
+    same = '<tool>{"tool":"get_network_devices","args":{}}</tool>'
+    chat = make_chat([same, same, same, "48 devices, all healthy."], dispatch=dispatch)
+    res = chat.run([], "list devices", cookie="")
+    assert len(runs) == 1                      # executed once despite 3 requests
+    assert len(res["actions"]) == 1            # one chip, not three
+    assert "48 devices" in res["reply"]
+
+
+def test_different_args_are_not_deduped():
+    runs = []
+
+    def dispatch(tool, args, cookie):
+        runs.append(args.get("ip"))
+        return {"ok": True, "data": {}}
+
+    chat = make_chat([
+        '<tool>{"tool":"deep_scan_host","args":{"ip":"10.0.0.1"}}</tool>',
+        '<tool>{"tool":"deep_scan_host","args":{"ip":"10.0.0.2"}}</tool>',
+        "Scanned both hosts.",
+    ], dispatch=dispatch)
+    res = chat.run([], "deep scan .1 and .2", cookie="")
+    assert runs == ["10.0.0.1", "10.0.0.2"]    # distinct args both run
+    assert len(res["actions"]) == 2
 
 
 def test_every_action_tool_is_documented():

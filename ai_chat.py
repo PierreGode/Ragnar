@@ -487,6 +487,7 @@ class RagnarChat:
 
         actions: List[Dict] = []
         used_docs = [{"file": h["file"], "title": h["title"]} for h in hits]
+        seen_calls: set = set()   # (tool, args) already run this turn — don't repeat
 
         for step in range(self.MAX_STEPS):
             text = self.ai.chat_messages(messages)
@@ -516,6 +517,19 @@ class RagnarChat:
                         "model": getattr(self.ai, "model", "")}
 
             name, args = call
+            key = (name, json.dumps(args, sort_keys=True, default=str))
+            if key in seen_calls:
+                # Weak models loop on the same call (e.g. search_docs with the
+                # identical query 4×). Don't re-run it — its result is already in
+                # the transcript. Push back hard and move on.
+                messages.append({"role": "assistant", "content": text})
+                messages.append({"role": "user", "content":
+                    f"You already ran {name} with those arguments and its result is "
+                    "above. Do NOT call it again. Either answer now in plain prose "
+                    "using what you have, or call a DIFFERENT tool."})
+                continue
+            seen_calls.add(key)
+
             result = self._run_tool(name, args, cookie)
             actions.append({
                 "tool": name,
@@ -528,7 +542,11 @@ class RagnarChat:
             if len(obs) > self.OBS_LIMIT:
                 obs = obs[:self.OBS_LIMIT] + " …(truncated)"
             messages.append({"role": "assistant", "content": text})
-            messages.append({"role": "user", "content": f"<result>{obs}</result>"})
+            # After a docs lookup, steer weak models straight to answering rather
+            # than wandering into unrelated reads.
+            nudge = ("  Now answer the question in plain prose using these docs; "
+                     "do not call more tools unless essential.") if name == "search_docs" else ""
+            messages.append({"role": "user", "content": f"<result>{obs}</result>{nudge}"})
 
         # Ran out of steps — force a final plain-language answer.
         messages.append({"role": "user", "content":
