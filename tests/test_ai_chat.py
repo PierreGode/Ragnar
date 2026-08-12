@@ -273,6 +273,53 @@ def test_model_returning_none_is_handled():
     assert "did not respond" in res["reply"].lower()
 
 
+@pytest.mark.parametrize("text,expected", [
+    ("<answer from the documentation; call search_docs first — no scan>", True),
+    ("<do the scan and report>", True),   # whole reply is one bracket token
+    ("", True),
+    ("   ", True),
+    ("Legacy devices show up under Wi-Fi Defense's legacy-client view.", False),
+    ("See the <b>Networking</b> tab for details.", False),  # brackets mid-sentence are fine
+])
+def test_is_placeholder(text, expected):
+    assert RagnarChat._is_placeholder(text) is expected
+
+
+def test_placeholder_reply_triggers_corrective_retry():
+    # First the model echoes an instruction placeholder; after the corrective
+    # nudge it answers for real. The user must see only the real answer.
+    chat = make_chat([
+        "<answer from the documentation; no scan>",
+        "Legacy 802.11b/g clients are flagged in Wi-Fi Defense's airtime view.",
+    ])
+    res = chat.run([], "how do I find legacy devices?", cookie="")
+    assert "802.11" in res["reply"]
+    assert "<answer" not in res["reply"]
+    assert res["actions"] == []
+    # it took a second model call (the corrective turn)
+    assert chat.ai.calls == 2
+
+
+def test_placeholder_retry_can_end_in_a_tool_call():
+    # After the nudge the model may finally decide to call a tool — the loop
+    # must execute it, not surface the placeholder.
+    calls = []
+
+    def dispatch(tool, args, cookie):
+        calls.append(tool)
+        return {"ok": True, "data": {"count": 0, "vulnerabilities": []}}
+
+    chat = make_chat([
+        "<get_vulnerabilities>",                                   # placeholder-ish
+        '<tool>{"tool":"get_vulnerabilities","args":{}}</tool>',   # corrective -> real call
+        "You have no open vulnerabilities right now.",
+    ], dispatch=dispatch)
+    res = chat.run([], "what vulns do I have?", cookie="")
+    assert calls == ["get_vulnerabilities"]
+    assert "no open vulnerabilities" in res["reply"].lower()
+    assert "<" not in res["reply"]
+
+
 def test_every_action_tool_is_documented():
     for name, spec in TOOLS.items():
         assert spec.get("desc"), f"{name} missing description"

@@ -357,16 +357,21 @@ class RagnarChat:
             "- Be specific: cite real IPs, ports, severities, counts from the tool "
             "results. Lead with what matters and the recommended next step.\n"
             "- No filler. Do not end with \"What would you like to do next?\".\n\n"
-            "EXAMPLES (how you should respond):\n"
+            "EXAMPLES (each Ragnar line is a complete reply — copy the STYLE, not "
+            "the text; never output a description of what to do, actually do it):\n"
             "User: hi\n"
-            "You: Hi! Ask me about a Ragnar feature, or tell me to run a scan.\n"
-            "User: how do I discover legacy devices?\n"
-            "You: <answer from the documentation; call search_docs first if needed — "
-            "no scan>\n"
+            "Ragnar: Hi! Ask me about a Ragnar feature, or tell me to run a scan.\n"
+            "User: what is Watchtower?\n"
+            "Ragnar: Watchtower is Ragnar's single alert feed — it merges the passive "
+            "watchers (wifiwatch, ndpwatch, arp_guard, and the rest) into one "
+            "deduplicated stream and can push notifications. Turn it on in the "
+            "Networking tab.\n"
+            "User: how do I find legacy devices?\n"
+            'Ragnar: <tool>{"tool":"search_docs","args":{"query":"legacy device detection"}}</tool>\n'
             "User: what vulnerabilities do I have?\n"
-            'You: <tool>{"tool":"get_vulnerabilities","args":{}}</tool>\n'
+            'Ragnar: <tool>{"tool":"get_vulnerabilities","args":{}}</tool>\n'
             "User: scan the network\n"
-            'You: <tool>{"tool":"run_network_scan","args":{}}</tool>\n\n'
+            'Ragnar: <tool>{"tool":"run_network_scan","args":{}}</tool>\n\n'
             "RELEVANT DOCUMENTATION (retrieved for this question; may be empty — "
             "prefer this over guessing):\n"
             f"{doc_context or '(none retrieved — call search_docs if this is a how-to/what-is question)'}"
@@ -396,6 +401,16 @@ class RagnarChat:
                 if depth == 0:
                     return text[open_idx:i + 1]
         return None
+
+    @staticmethod
+    def _is_placeholder(text: str) -> bool:
+        """True when a 'reply' is really an un-acted instruction a weak model
+        echoed — an empty string or a whole reply that is just an angle-bracket
+        token like ``<answer from the docs…>``. Such text must never be shown."""
+        s = (text or "").strip()
+        if not s:
+            return True
+        return bool(re.fullmatch(r"<[^>]*>", s))
 
     @classmethod
     def _parse_tool_call(cls, text: str) -> Optional[Tuple[str, Dict]]:
@@ -483,9 +498,21 @@ class RagnarChat:
 
             call = self._parse_tool_call(text)
             if not call:
-                # Plain answer — strip any stray tags and return.
-                return {"reply": _TOOL_TAG_RE.sub("", text).strip() or text.strip(),
-                        "actions": actions, "docs": used_docs,
+                # Plain answer. Weak models sometimes echo an instruction/
+                # placeholder ("<answer from the docs…>") instead of acting on it
+                # — never show that to the user. Give the model one corrective
+                # turn (it may then answer in prose or finally call a tool, both
+                # handled by the loop); otherwise fall through to a clean answer.
+                reply = _TOOL_TAG_RE.sub("", text).strip() or text.strip()
+                if self._is_placeholder(reply) and step < self.MAX_STEPS - 1:
+                    messages.append({"role": "assistant", "content": text})
+                    messages.append({"role": "user", "content":
+                        "Answer my question directly, in plain prose, right now. Do "
+                        "not output a description of what to do, a placeholder, or "
+                        "text in angle brackets. If you need data or docs, call the "
+                        "appropriate tool instead."})
+                    continue
+                return {"reply": reply, "actions": actions, "docs": used_docs,
                         "model": getattr(self.ai, "model", "")}
 
             name, args = call
@@ -509,7 +536,7 @@ class RagnarChat:
                          "above. Do not call any more tools."})
         final = self.ai.chat_messages(messages)
         reply = _TOOL_TAG_RE.sub("", final or "").strip()
-        if not reply:
+        if self._is_placeholder(reply):
             # The model still tried to call a tool (or returned nothing) even when
             # told to stop — don't hand back an empty bubble.
             reply = ("I ran the actions above but couldn't compose a summary. "
