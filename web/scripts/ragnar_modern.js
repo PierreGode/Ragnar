@@ -1357,7 +1357,12 @@ function showTab(tabName) {
     if (selectedTab) {
         selectedTab.classList.remove('hidden');
     }
-    
+
+    // File Management uses the full page width (its file browser benefits from
+    // the extra room); every other tab keeps the centered max-width column.
+    const mainEl = document.querySelector('main');
+    if (mainEl) mainEl.style.maxWidth = (tabName === 'files') ? 'none' : '';
+
     const selectedBtn = document.querySelector(`[data-tab="${tabName}"]`);
     if (selectedBtn) {
         selectedBtn.classList.add('bg-Ragnar-600');
