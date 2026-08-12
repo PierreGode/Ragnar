@@ -145,6 +145,9 @@ backup/uploads/
 # Encrypted Safe vault — user data, must never be committed
 data/safe/
 
+# Mesh file-transfer inbox — received files, must never be committed
+data/mesh_inbox/
+
 # Configuration files (contains sensitive data)
 config/shared_config.json
 

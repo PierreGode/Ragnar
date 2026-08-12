@@ -3103,7 +3103,15 @@
 
                 <!-- Problems the mesh detects about itself -->
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
+
+                <!-- Sub-view nav: Overview vs File Transfer -->
+                <div class="flex items-center gap-2 mt-2">
+                    <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
+                    <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
+                </div>
             </div>
+
+            <div id="mesh-view-overview">
 
             <!-- Install step: shown when Tailscale is not on this unit yet. -->
             <div id="mesh-install" class="glass rounded-xl p-6 mb-6 hidden">
@@ -3370,6 +3378,78 @@
                     </div>
                 </div>
                 <div id="mesh-update-results" class="space-y-1"></div>
+            </div>
+            </div><!-- /mesh-view-overview -->
+
+            <!-- File Transfer view -->
+            <div id="mesh-view-transfer" class="hidden">
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center gap-2 mb-1">
+                        <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                        <h3 class="text-xl font-bold">File Transfer</h3>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-5">Move files across your Viking mesh over Tailscale — every byte is WireGuard-encrypted in transit. Received files land in this unit's Inbox for you to file.</p>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Send -->
+                        <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-4">
+                            <h4 class="font-semibold mb-3">Send</h4>
+                            <label class="block text-sm text-gray-400 mb-1">Destination unit</label>
+                            <select id="xfer-dest" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-4">
+                                <option value="">Loading units…</option>
+                            </select>
+                            <div id="xfer-drop" onclick="xferPickComputerFile()"
+                                class="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center text-gray-400 hover:border-sky-500 cursor-pointer transition-colors">
+                                <div class="text-3xl mb-2">⬆</div>
+                                <div class="text-sm">Drop files here to send</div>
+                                <div class="text-xs text-gray-500">or click to browse your computer</div>
+                            </div>
+                            <div class="flex items-center gap-2 my-3"><div class="flex-1 border-t border-slate-700"></div><span class="text-xs text-gray-500">or</span><div class="flex-1 border-t border-slate-700"></div></div>
+                            <button onclick="openXferPicker()" class="w-full bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">📁 Send a file from this unit</button>
+                            <p class="text-xs text-gray-500 mt-2">You can also use the <b>Send</b> (paper-plane) action on any row in the <b>Files</b> tab.</p>
+                        </div>
+
+                        <!-- Activity -->
+                        <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="font-semibold">Transfers</h4>
+                                <span class="text-xs text-gray-500">live</span>
+                            </div>
+                            <div id="xfer-list"><p class="text-gray-500 text-sm py-2">No transfers yet.</p></div>
+
+                            <div class="flex items-center justify-between mt-5 mb-2">
+                                <h4 class="font-semibold">Inbox <span id="xfer-inbox-count" class="hidden text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></h4>
+                                <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                                    <input id="xfer-receive-toggle" type="checkbox" onchange="xferSetReceive(this.checked)" class="rounded bg-slate-900 border-slate-700">
+                                    Accept incoming
+                                </label>
+                            </div>
+                            <div id="xfer-inbox"><p class="text-gray-500 text-sm py-2">Inbox is empty.</p></div>
+                        </div>
+                    </div>
+
+                    <div id="xfer-units" class="mt-5 flex items-center gap-2 flex-wrap"></div>
+                </div>
+
+                <!-- Pick a file already on this unit to send to a peer -->
+                <div id="xfer-pick-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                        <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <button onclick="xferPickerBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <span class="font-semibold">Send from this unit</span>
+                                <span id="xfer-pick-path" class="text-sm text-gray-400 truncate">/</span>
+                            </div>
+                            <button onclick="closeXferPicker()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="px-3 py-2 text-xs text-gray-400 border-b border-slate-700 flex-shrink-0">Sending to <b id="xfer-pick-dest" class="text-sky-300">—</b> · click a file to send it</div>
+                        <div id="xfer-pick-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -7720,7 +7800,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-vault-slider"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260812-upload-refresh"></script>
 
 </body>
 </html>
