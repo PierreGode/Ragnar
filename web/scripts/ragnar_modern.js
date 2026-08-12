@@ -9647,6 +9647,10 @@ function setupAutoRefresh() {
         checkForUpdatesQuiet();
     }, 30000); // Check 30 seconds after page load (deferred from 5s)
 
+    // Flag the Files nav when a file has been sent to this unit's Inbox.
+    autoRefreshIntervals.filesFlag = setInterval(refreshFilesFlag, 20000); // every 20s
+    setTimeout(refreshFilesFlag, 4000);   // initial check shortly after load
+
     setPwnStatusPollInterval(PWN_STATUS_POLL_INTERVAL);
 }
 
@@ -15528,6 +15532,31 @@ async function checkForUpdatesQuiet() {
         // Silently fail for background checks
         console.debug('Background update check failed:', error);
     }
+}
+
+// ── Files nav flag ───────────────────────────────────────────────────────────
+// Put a dot on the "Files" nav word (like the Config update flag) whenever a
+// file has been sent to this unit — i.e. its mesh Inbox has items waiting.
+function setFilesNavFlag(count) {
+    document.querySelectorAll('[data-tab="files"]').forEach(btn => {
+        let dot = btn.querySelector('.files-flag');
+        if (count > 0) {
+            if (!dot) {
+                dot = document.createElement('span');
+                dot.className = 'files-flag absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full pulse-glow';
+                btn.style.position = 'relative';
+                btn.appendChild(dot);
+            }
+        } else if (dot) {
+            dot.remove();
+        }
+    });
+}
+function refreshFilesFlag() {
+    networkAwareFetch('/api/mesh/inbox')
+        .then(r => r.json())
+        .then(d => setFilesNavFlag((d && d.items) ? d.items.length : 0))
+        .catch(() => { /* silent — background check */ });
 }
 
 async function restartService() {
@@ -21617,6 +21646,7 @@ function displayDirectoryTree() {
         .then(d => {
             const slot = document.getElementById('directory-tree-inbox');
             const n = (d && d.items) ? d.items.length : 0;
+            setFilesNavFlag(n);   // keep the Files nav flag in sync
             if (slot && n) {
                 slot.innerHTML = `
                     <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="showTab('mesh'); showMeshView('transfer')">
@@ -22626,6 +22656,7 @@ function loadXferInbox() {
         const setBadge = (id, n) => { const b = document.getElementById(id); if (b) { b.textContent = n; b.classList.toggle('hidden', !n); } };
         setBadge('xfer-inbox-count', items.length);
         setBadge('mesh-inbox-badge', items.length);
+        setFilesNavFlag(items.length);   // keep the Files nav flag in sync
         if (!el) return;
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">Inbox is empty.</p>'; return; }
         el.innerHTML = items.map(m => `
