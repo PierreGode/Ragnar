@@ -22564,6 +22564,68 @@ function _xferUploadAndSend(file, target) {
     });
 })();
 
+// ── Pick a file already on THIS unit and send it to a peer ───────────────────
+let _xferPickPath = '/';
+let _xferPickHistory = [];
+function openXferPicker() {
+    const dest = document.getElementById('xfer-dest');
+    if (!dest || !dest.value) { showFileError('Pick an online destination unit first'); return; }
+    const destLabel = document.getElementById('xfer-pick-dest');
+    if (destLabel) destLabel.textContent = dest.options[dest.selectedIndex]?.text || 'unit';
+    const m = document.getElementById('xfer-pick-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    _xferPickHistory = [];
+    xferPickerLoad('/');
+}
+function closeXferPicker() {
+    const m = document.getElementById('xfer-pick-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+function xferPickerBack() {
+    if (_xferPickHistory.length) xferPickerLoad(_xferPickHistory.pop(), true);
+}
+function xferPickerLoad(path, isBack) {
+    if (!isBack && path !== _xferPickPath) _xferPickHistory.push(_xferPickPath);
+    _xferPickPath = path;
+    const pathEl = document.getElementById('xfer-pick-path');
+    if (pathEl) pathEl.textContent = path;
+    const list = document.getElementById('xfer-pick-list');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(path))
+        .then(r => r.json())
+        .then(files => {
+            if (!Array.isArray(files) || !files.length) { list.innerHTML = '<p class="text-gray-500 p-4">This folder is empty.</p>'; return; }
+            files.sort((a, b) => (a.is_directory === b.is_directory)
+                ? a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+                : (a.is_directory ? -1 : 1));
+            list.innerHTML = '<div class="space-y-1">' + files.map(f => f.is_directory
+                ? `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="xferPickerLoad('${escapeAttr(f.path)}')">
+                       <svg class="w-5 h-5 mr-3 flex-shrink-0 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                       <span class="truncate">${escapeHtml(f.name)}</span></div>`
+                : `<div class="flex items-center justify-between gap-2 p-2.5 hover:bg-slate-700 rounded-lg">
+                       <div class="flex items-center min-w-0"><svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                       <div class="min-w-0"><div class="truncate">${escapeHtml(f.name)}</div><div class="text-xs text-gray-500">${formatBytes(f.size)}</div></div></div>
+                       <button onclick="xferSendPath('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1.5 rounded flex-shrink-0">Send</button></div>`
+            ).join('') + '</div>';
+        })
+        .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function xferSendPath(path, name) {
+    const target = document.getElementById('xfer-dest')?.value;
+    if (!target) { showFileError('Pick a destination unit'); return; }
+    networkAwareFetch('/api/mesh/files/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: target, source: 'path', path })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Sending ' + name + ' → ' + (d.dest || 'unit')); closeXferPicker(); xferRefresh(); }
+        else showFileError(d.error || 'Send failed');
+    }).catch(e => showFileError(e.message));
+}
+document.getElementById('xfer-pick-modal')?.addEventListener('click', function (e) {
+    if (e.target === this) closeXferPicker();
+});
+
 // ── "Send to unit" menu, used by the per-row Send action in the Files tab ────
 function closeSendMenu() { document.getElementById('send-unit-menu')?.remove(); }
 function openSendMenu(evt, payload) {
@@ -23544,6 +23606,11 @@ window.xferInboxSave = xferInboxSave;
 window.xferInboxDiscard = xferInboxDiscard;
 window.sendFsFile = sendFsFile;
 window.sendVaultFile = sendVaultFile;
+window.openXferPicker = openXferPicker;
+window.closeXferPicker = closeXferPicker;
+window.xferPickerBack = xferPickerBack;
+window.xferPickerLoad = xferPickerLoad;
+window.xferSendPath = xferSendPath;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions

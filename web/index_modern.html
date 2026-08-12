@@ -3404,7 +3404,9 @@
                                 <div class="text-sm">Drop files here to send</div>
                                 <div class="text-xs text-gray-500">or click to browse your computer</div>
                             </div>
-                            <p class="text-xs text-gray-500 mt-3">To send a file already on this unit, use the <b>Send</b> (paper-plane) action on any row in the <b>Files</b> tab.</p>
+                            <div class="flex items-center gap-2 my-3"><div class="flex-1 border-t border-slate-700"></div><span class="text-xs text-gray-500">or</span><div class="flex-1 border-t border-slate-700"></div></div>
+                            <button onclick="openXferPicker()" class="w-full bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">📁 Send a file from this unit</button>
+                            <p class="text-xs text-gray-500 mt-2">You can also use the <b>Send</b> (paper-plane) action on any row in the <b>Files</b> tab.</p>
                         </div>
 
                         <!-- Activity -->
@@ -3427,6 +3429,26 @@
                     </div>
 
                     <div id="xfer-units" class="mt-5 flex items-center gap-2 flex-wrap"></div>
+                </div>
+
+                <!-- Pick a file already on this unit to send to a peer -->
+                <div id="xfer-pick-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                        <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <button onclick="xferPickerBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <span class="font-semibold">Send from this unit</span>
+                                <span id="xfer-pick-path" class="text-sm text-gray-400 truncate">/</span>
+                            </div>
+                            <button onclick="closeXferPicker()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="px-3 py-2 text-xs text-gray-400 border-b border-slate-700 flex-shrink-0">Sending to <b id="xfer-pick-dest" class="text-sky-300">—</b> · click a file to send it</div>
+                        <div id="xfer-pick-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -7778,7 +7800,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-mesh-xfer"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260812-mesh-xfer2"></script>
 
 </body>
 </html>

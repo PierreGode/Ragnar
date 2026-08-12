@@ -751,10 +751,12 @@ folder. A unit can refuse incoming files entirely (**Accept incoming** toggle /
 
 Flow:
 
-- **Send** — pick a destination unit, then drag-and-drop a file from your computer,
-  or use the **Send** (paper-plane) action on any row in the **Files** tab. Files
-  already on the unit stream straight to the peer; a file dropped from your machine
-  is staged on the unit first. Sends run in the background with live progress.
+- **Send** — pick a destination unit, then either drag-and-drop a file from your
+  computer, **browse this unit's own files** (“Send a file from this unit” opens a
+  picker over Uploads/Backups and the scan/loot folders), or use the **Send**
+  (paper-plane) action on any row in the **Files** tab. Files already on the unit
+  stream straight to the peer; a file dropped from your machine is staged on the
+  unit first. Sends run in the background with live progress.
 - **Vault files** can be sent too: an unlocked Vault decrypts the file on send. Note
   it then exists as plaintext on the receiving unit's disk (the link itself stays
   WireGuard-encrypted) until the operator files it.

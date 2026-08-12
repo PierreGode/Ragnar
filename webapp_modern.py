@@ -19705,6 +19705,34 @@ def _resolve_upload_target(target_path):
     raise ValueError('Invalid upload path')
 
 
+def _resolve_readable_path(file_path):
+    """Map any browsable virtual file path to a real path for READING.
+
+    Mirrors the download endpoint's mapping (loot dirs, scans, logs, backups,
+    uploads) so a file the operator can see in the Files tab can also be sent
+    over the mesh. Raises ValueError on an invalid/escaping path.
+    """
+    loot = {
+        '/data_stolen': 'loot/data_stolen',
+        '/scan_results': 'output/scan_results',
+        '/crackedpwd': 'loot/credentials',
+        '/vulnerabilities': 'output/vulnerabilities',
+    }
+    for root, rel in loot.items():
+        if file_path == root or file_path.startswith(root + '/'):
+            resolved = _resolve_loot_path(root, rel, file_path)
+            if resolved is None:
+                raise ValueError('Invalid path')
+            return resolved
+    if file_path == '/logs' or file_path.startswith('/logs/'):
+        return _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
+    if file_path == '/backups' or file_path.startswith('/backups/'):
+        return _resolve_legacy_path('/backups', shared_data.backupdir, file_path)
+    if file_path == '/uploads' or file_path.startswith('/uploads/'):
+        return _resolve_legacy_path('/uploads', shared_data.upload_dir, file_path)
+    raise ValueError('Invalid path')
+
+
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
     """Upload one or more files into an /uploads or /backups folder."""
@@ -19988,9 +20016,9 @@ def mesh_files_send():
             with os.fdopen(fd, 'wb') as w:
                 w.write(data)
             cleanup = True
-        else:  # a real /uploads or /backups file
+        else:  # a real file the operator can browse on this unit
             try:
-                src_path = _resolve_upload_target(body.get('path', ''))
+                src_path = _resolve_readable_path(body.get('path', ''))
             except ValueError:
                 return jsonify({'success': False, 'error': 'Invalid source path'}), 400
             if not os.path.isfile(src_path):
