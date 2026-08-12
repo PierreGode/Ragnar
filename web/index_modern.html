@@ -4403,30 +4403,30 @@
         </div>
 
         <div id="files-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">File Management</h2>
-                    <div class="flex space-x-3">
-                        <button onclick="uploadFile()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="glass rounded-xl p-4 sm:p-6">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+                    <h2 class="text-xl sm:text-2xl font-bold">File Management</h2>
+                    <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+                        <button onclick="uploadFile()" class="flex items-center justify-center bg-green-600 hover:bg-green-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                             </svg>
                             Upload
                         </button>
-                        <button onclick="openSafe()" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <button onclick="openSafe()" class="flex items-center justify-center bg-amber-600 hover:bg-amber-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                             </svg>
-                            Upload to Safe
+                            <span class="whitespace-nowrap">Upload to Safe</span>
                         </button>
-                        <button onclick="clearFiles()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <button onclick="clearFiles()" class="flex items-center justify-center bg-red-600 hover:bg-red-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>
-                            Clear Files
+                            <span class="whitespace-nowrap">Clear Files</span>
                         </button>
-                        <button onclick="refreshFiles()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <button onclick="refreshFiles()" class="refresh-btn flex items-center justify-center bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                             </svg>
                             Refresh
@@ -4435,11 +4435,11 @@
                 </div>
                 
                 <!-- File Browser -->
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
                     <!-- Directory Tree -->
                     <div class="lg:col-span-1">
                         <h3 class="text-lg font-semibold mb-3">Directories</h3>
-                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                        <div class="glass-card h-48 lg:h-96 overflow-y-auto scrollbar-thin">
                             <div id="directory-tree" class="p-4">
                                 <p class="text-gray-400">Loading directories...</p>
                             </div>
