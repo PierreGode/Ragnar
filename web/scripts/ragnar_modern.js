@@ -21311,6 +21311,106 @@ function renameSafeFolder(path, currentName) {
 // Small inline SVG icons reused by row action buttons.
 const ICON_RENAME = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>';
 const ICON_SEND = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>';
+const ICON_MOVE = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14h6m0 0l-2-2m2 2l-2 2"></path></svg>';
+
+// ── Move a file/folder to another folder (filesystem + Vault) ────────────────
+let _moveCtx = null;   // { kind:'fs'|'vault', src:{...}, dir }
+
+function moveFsEntry(path, name, isDir) { _openMove('fs', { path: path, name: name, isDir: !!isDir }, '/'); }
+function moveVaultFile(id, name) { _openMove('vault', { id: id, name: name, isDir: false }, ''); }
+function moveVaultFolder(folderPath, name) { _openMove('vault', { folderPath: folderPath, name: name, isDir: true }, ''); }
+
+function _openMove(kind, src, startDir) {
+    _moveCtx = { kind: kind, src: src, dir: startDir };
+    const t = document.getElementById('move-title');
+    if (t) t.textContent = `Move “${src.name}” to…`;
+    const m = document.getElementById('move-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    _moveCtx._history = [];
+    moveModalLoad(startDir);
+}
+function closeMoveModal() {
+    const m = document.getElementById('move-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    _moveCtx = null;
+}
+function moveModalBack() {
+    if (_moveCtx && _moveCtx._history && _moveCtx._history.length) moveModalLoad(_moveCtx._history.pop(), true);
+}
+function moveModalLoad(dir, isBack) {
+    if (!_moveCtx) return;
+    if (!isBack && dir !== _moveCtx.dir) _moveCtx._history.push(_moveCtx.dir);
+    _moveCtx.dir = dir;
+    const list = document.getElementById('move-list');
+    const pathEl = document.getElementById('move-path');
+    const hereBtn = document.getElementById('move-here-btn');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    if (_moveCtx.kind === 'vault') {
+        if (pathEl) pathEl.textContent = '🔒 Vault' + (dir ? '/' + dir : '');
+        if (hereBtn) hereBtn.classList.remove('hidden');   // vault root is a valid target
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(dir))
+            .then(r => r.json())
+            .then(d => {
+                if (!d.success) { list.innerHTML = '<p class="text-amber-300 p-4">Vault locked.</p>'; return; }
+                // Hide the folder being moved (can't move into itself).
+                const folders = (d.folders || []).filter(f => !(_moveCtx.src.folderPath && (f.path === _moveCtx.src.folderPath || f.path.indexOf(_moveCtx.src.folderPath + '/') === 0)));
+                list.innerHTML = folders.length
+                    ? '<div class="space-y-1">' + folders.map(f => _moveFolderRow('vault', f.path, f.name)).join('') + '</div>'
+                    : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+            })
+            .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    // Filesystem: only Uploads/Backups are writable move targets.
+    if (pathEl) pathEl.textContent = dir;
+    if (hereBtn) hereBtn.classList.toggle('hidden', dir === '/');   // '/' is not a real folder
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir))
+        .then(r => r.json())
+        .then(files => {
+            let dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory);
+            if (dir === '/') dirs = dirs.filter(f => f.path === '/uploads' || f.path === '/backups');
+            // Don't allow descending into the folder being moved.
+            if (_moveCtx.src.isDir) dirs = dirs.filter(f => f.path !== _moveCtx.src.path);
+            dirs.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            list.innerHTML = dirs.length
+                ? '<div class="space-y-1">' + dirs.map(f => _moveFolderRow('fs', f.path, f.name)).join('') + '</div>'
+                : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+        })
+        .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function _moveFolderRow(kind, navPath, name) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="moveModalLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${kind === 'vault' ? 'text-amber-400' : 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate flex-1">${escapeHtml(name)}</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></div>`;
+}
+function doMove() {
+    if (!_moveCtx) return;
+    const dir = _moveCtx.dir;
+    if (_moveCtx.kind === 'vault') {
+        const s = _moveCtx.src;
+        const body = s.folderPath ? { folder: s.folderPath, dir: dir } : { id: s.id, dir: dir };
+        networkAwareFetch('/api/safe/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        }).then(r => r.json()).then(d => {
+            if (d.locked) { closeMoveModal(); afterSafeChange(); return; }
+            if (d.success) { showFileSuccess(`Moved “${s.name}”`); closeMoveModal(); afterSafeChange(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    } else {
+        networkAwareFetch('/api/files/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: _moveCtx.src.path, dir: dir })
+        }).then(r => r.json()).then(d => {
+            if (d.success) { showFileSuccess(d.noop ? 'Already there' : `Moved “${_moveCtx.src.name}”`); closeMoveModal(); refreshFiles(); }
+            else showFileError(d.error || 'Move failed');
+        }).catch(e => showFileError(e.message));
+    }
+}
+document.getElementById('move-modal')?.addEventListener('click', function (e) { if (e.target === this) closeMoveModal(); });
 
 function setFileSort(sort) {
     currentFileSort = sort;
@@ -21433,6 +21533,7 @@ function displayFiles(files, path, highlightFile = null) {
             actions += `<button onclick="sendFsFile(event,'${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit">${ICON_SEND}</button>`;
         }
         if (writable) {
+            actions += `<button onclick="moveFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}',${file.is_directory ? 'true' : 'false'})" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>`;
             actions += `<button onclick="renameFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>`;
         }
         if (!file.is_directory || writable) {
@@ -21500,6 +21601,9 @@ function displayDirectoryTree() {
     // Mesh Inbox shortcut — jumps to Ragnar Mesh → File Transfer. Shown only
     // when there are received files waiting (filled in asynchronously).
     html += '<div id="directory-tree-inbox"></div>';
+    // Mesh Share shortcut — jumps to Ragnar Mesh → Mesh Share (only when the
+    // mesh is enabled).
+    html += '<div id="directory-tree-share"></div>';
     // Placeholder for the Vault row — filled in asynchronously once we know its
     // lock state, so it only appears in Directories while the Vault is unlocked.
     html += '<div id="directory-tree-safe"></div>';
@@ -21520,6 +21624,34 @@ function displayDirectoryTree() {
                         <span class="ml-auto text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">${n}</span>
                     </div>`;
             } else if (slot) { slot.innerHTML = ''; }
+        })
+        .catch(() => {});
+
+    // Mesh Share shortcut — shown when this unit is in a mesh. Badge = the
+    // number of files this unit is publishing.
+    networkAwareFetch('/api/mesh/status')
+        .then(r => r.json())
+        .then(s => {
+            const slot = document.getElementById('directory-tree-share');
+            if (!slot) return;
+            if (s && s.enabled) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-sky-600/40" onclick="showTab('mesh'); showMeshView('share')">
+                        <span class="mr-3">📡</span><span>Mesh Share</span>
+                        <span id="directory-tree-share-badge" class="hidden ml-auto text-xs bg-sky-500 text-slate-900 font-bold px-1.5 rounded-full"></span>
+                    </div>`;
+                // Cheap local count for the badge (files WE publish).
+                networkAwareFetch('/api/mesh/share/local')
+                    .then(r => r.json())
+                    .then(d => {
+                        const b = document.getElementById('directory-tree-share-badge');
+                        const n = (d && d.files) ? d.files.length : 0;
+                        if (b && n) { b.textContent = n; b.classList.remove('hidden'); }
+                    })
+                    .catch(() => {});
+            } else {
+                slot.innerHTML = '';
+            }
         })
         .catch(() => {});
 
@@ -22223,6 +22355,7 @@ function loadSafeIntoBrowser() {
                         <div class="font-medium truncate">${escapeHtml(f.name)}</div>
                     </div>
                     <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="moveVaultFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move folder">${ICON_MOVE}</button>
                         <button onclick="renameSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename folder">${ICON_RENAME}</button>
                         <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete folder">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -22255,6 +22388,7 @@ function loadSafeIntoBrowser() {
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg>
                         </button>
                         <button onclick="sendVaultFile(event,'${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-sky-400 hover:bg-slate-600 rounded" title="Send to unit (decrypts)">${ICON_SEND}</button>
+                        <button onclick="moveVaultFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Move to folder">${ICON_MOVE}</button>
                         <button onclick="renameSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>
                         <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
@@ -22422,22 +22556,23 @@ document.getElementById('safe-modal')?.addEventListener('click', function(e) {
 // ── Mesh File Transfer ──────────────────────────────────────────────────────
 let _xferPollTimer = null;
 
-// Toggle the Ragnar Mesh sub-views (Overview vs File Transfer).
+// Toggle the Ragnar Mesh sub-views (Overview / File Transfer / Mesh Share).
 function showMeshView(view) {
-    const isTr = view === 'transfer';
-    document.getElementById('mesh-view-overview')?.classList.toggle('hidden', isTr);
-    document.getElementById('mesh-view-transfer')?.classList.toggle('hidden', !isTr);
-    const setBtn = (el, active) => {
+    const views = { overview: 'mesh-view-overview', transfer: 'mesh-view-transfer', share: 'mesh-view-share' };
+    const navs = { overview: 'mesh-nav-overview', transfer: 'mesh-nav-transfer', share: 'mesh-nav-share' };
+    Object.entries(views).forEach(([k, id]) => document.getElementById(id)?.classList.toggle('hidden', k !== view));
+    Object.entries(navs).forEach(([k, id]) => {
+        const el = document.getElementById(id);
         if (!el) return;
+        const active = k === view;
         el.classList.toggle('bg-Ragnar-600', active);
         el.classList.toggle('text-white', active);
         el.classList.toggle('bg-slate-700', !active);
         el.classList.toggle('text-gray-300', !active);
-    };
-    setBtn(document.getElementById('mesh-nav-overview'), !isTr);
-    setBtn(document.getElementById('mesh-nav-transfer'), isTr);
-    if (isTr) { xferLoadUnits(); xferRefresh(); _xferStartPolling(); }
+    });
+    if (view === 'transfer') { xferLoadUnits(); xferRefresh(); _xferStartPolling(); }
     else _xferStopPolling();
+    if (view === 'share') loadMeshShare();
 }
 function _xferStartPolling() { _xferStopPolling(); _xferPollTimer = setInterval(xferRefresh, 2000); }
 function _xferStopPolling() { if (_xferPollTimer) { clearInterval(_xferPollTimer); _xferPollTimer = null; } }
@@ -22536,6 +22671,130 @@ function xferSetReceive(on) {
     }).then(r => r.json()).then(() => showFileSuccess(on ? 'Now accepting transfers' : 'Not accepting transfers'))
       .catch(e => showFileError(e.message));
 }
+
+// ── Mesh Share — a folder every unit publishes to the whole mesh ─────────────
+function loadMeshShare() {
+    const el = document.getElementById('mesh-share-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
+        const items = (d && d.items) || [];
+        if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">Nothing shared yet. Use “Share files” to publish a file to the mesh.</p>'; return; }
+        el.innerHTML = items.map(it => {
+            const action = it.is_local
+                ? `<button onclick="shareUnshare('${escapeAttr(it.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Unshare</button>`
+                : `<button onclick="openShareDest('${escapeAttr(it.name)}','${escapeAttr(it.owner_id)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Fetch</button>`;
+            return `<div class="flex items-center justify-between gap-2 p-3">
+                <div class="flex items-center min-w-0">
+                    <svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                    <div class="min-w-0"><div class="text-sm truncate">${escapeHtml(it.name)}</div>
+                        <div class="text-xs text-gray-500">${formatBytes(it.size)} · owner <span class="text-gray-300">${escapeHtml(it.owner)}</span>${it.is_local ? ' <span class="text-sky-300">(you)</span>' : ''}</div></div>
+                </div>
+                <div class="flex-shrink-0">${action}</div></div>`;
+        }).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function shareUploadFiles() {
+    const input = document.createElement('input');
+    input.type = 'file'; input.multiple = true;
+    input.onchange = ev => {
+        if (!ev.target.files.length) return;
+        const fd = new FormData();
+        for (const f of ev.target.files) fd.append('file', f);
+        showFileLoading('Publishing to Mesh Share…');
+        networkAwareFetch('/api/mesh/share/add', { method: 'POST', body: fd })
+            .then(r => r.json())
+            .then(d => { if (d.success) { showFileSuccess(`Shared ${d.stored || 1} file(s)`); loadMeshShare(); } else showFileError(d.error || 'Share failed'); })
+            .catch(e => showFileError(e.message));
+    };
+    input.click();
+}
+
+function shareUnshare(name) {
+    showFileConfirmModal('Unshare file', `Stop sharing “${name}” with the mesh? (the file itself is not deleted)`, () => {
+        networkAwareFetch('/api/mesh/share/remove', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name })
+        }).then(r => r.json()).then(() => { closeFileModal(); showFileSuccess('Unshared'); loadMeshShare(); })
+          .catch(e => { closeFileModal(); showFileError(e.message); });
+    });
+}
+
+// Fetch destination picker — navigate Uploads/Backups/Vault, then "Save here".
+let _shareDest = null;   // { name, owner_id, dir, history }
+function openShareDest(name, ownerId) {
+    _shareDest = { name: name, owner_id: ownerId, dir: '/', history: [] };
+    document.getElementById('share-dest-title').textContent = `Save “${name}” to…`;
+    const m = document.getElementById('share-dest-modal');
+    m.classList.remove('hidden'); m.classList.add('flex');
+    shareDestLoad('/');
+}
+function closeShareDest() {
+    const m = document.getElementById('share-dest-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+    _shareDest = null;
+}
+function shareDestBack() { if (_shareDest && _shareDest.history.length) shareDestLoad(_shareDest.history.pop(), true); }
+function _shareDestRow(navPath, name, tint) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="shareDestLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${tint || 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate flex-1">${escapeHtml(name)}</span>
+        <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg></div>`;
+}
+function shareDestLoad(dir, isBack) {
+    if (!_shareDest) return;
+    if (!isBack && dir !== _shareDest.dir) _shareDest.history.push(_shareDest.dir);
+    _shareDest.dir = dir;
+    const list = document.getElementById('share-dest-list');
+    const pathEl = document.getElementById('share-dest-path');
+    const hereBtn = document.getElementById('share-dest-here');
+    if (!list) return;
+    list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
+
+    if (dir.indexOf('vault:') === 0) {
+        const vdir = dir.slice(6);
+        pathEl.textContent = '🔒 Vault' + (vdir ? '/' + vdir : '');
+        hereBtn.classList.remove('hidden');
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(vdir)).then(r => r.json()).then(d => {
+            if (!d.success) { list.innerHTML = '<p class="text-amber-300 p-4">Vault locked.</p>'; return; }
+            const rows = (d.folders || []).map(f => _shareDestRow('vault:' + f.path, f.name, 'text-amber-400')).join('');
+            list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">No subfolders.</p>';
+        }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    if (dir === '/') {
+        pathEl.textContent = 'Choose a folder';
+        hereBtn.classList.add('hidden');   // the root itself isn't a destination
+        networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({})).then(st => {
+            let rows = _shareDestRow('/uploads', 'Uploads', 'text-blue-400') + _shareDestRow('/backups', 'Backups', 'text-blue-400');
+            if (st && st.success && st.configured && st.unlocked) rows += _shareDestRow('vault:', '🔒 Vault', 'text-amber-400');
+            list.innerHTML = '<div class="space-y-1">' + rows + '</div>';
+        });
+        return;
+    }
+
+    pathEl.textContent = dir;
+    hereBtn.classList.remove('hidden');
+    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(dir)).then(r => r.json()).then(files => {
+        const dirs = (Array.isArray(files) ? files : []).filter(f => f.is_directory)
+            .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+        list.innerHTML = dirs.length ? '<div class="space-y-1">' + dirs.map(f => _shareDestRow(f.path, f.name)).join('') + '</div>' : '<p class="text-gray-500 p-4">No subfolders here.</p>';
+    }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function shareDoFetch() {
+    if (!_shareDest) return;
+    const dir = _shareDest.dir;
+    const dest = (dir.indexOf('vault:') === 0) ? (dir === 'vault:' ? 'vault' : dir) : dir;
+    showFileLoading('Fetching ' + _shareDest.name + '…');
+    networkAwareFetch('/api/mesh/share/fetch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: _shareDest.name, owner_id: _shareDest.owner_id, dest: dest })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Saved ' + _shareDest.name); closeShareDest(); }
+        else showFileError(d.error || 'Fetch failed');
+    }).catch(e => showFileError(e.message));
+}
+document.getElementById('share-dest-modal')?.addEventListener('click', function (e) { if (e.target === this) closeShareDest(); });
 
 // Drag-drop / browse a file from the operator's computer to send to a peer.
 function xferPickComputerFile() {
@@ -23653,12 +23912,27 @@ window.renameFsEntry = renameFsEntry;
 window.renameSafeFile = renameSafeFile;
 window.renameSafeFolder = renameSafeFolder;
 window.showMeshView = showMeshView;
+window.loadMeshShare = loadMeshShare;
+window.shareUploadFiles = shareUploadFiles;
+window.shareUnshare = shareUnshare;
+window.openShareDest = openShareDest;
+window.closeShareDest = closeShareDest;
+window.shareDestBack = shareDestBack;
+window.shareDestLoad = shareDestLoad;
+window.shareDoFetch = shareDoFetch;
 window.xferPickComputerFile = xferPickComputerFile;
 window.xferSetReceive = xferSetReceive;
 window.xferInboxSave = xferInboxSave;
 window.xferInboxDiscard = xferInboxDiscard;
 window.sendFsFile = sendFsFile;
 window.sendVaultFile = sendVaultFile;
+window.moveFsEntry = moveFsEntry;
+window.moveVaultFile = moveVaultFile;
+window.moveVaultFolder = moveVaultFolder;
+window.moveModalLoad = moveModalLoad;
+window.moveModalBack = moveModalBack;
+window.closeMoveModal = closeMoveModal;
+window.doMove = doMove;
 window.openXferPicker = openXferPicker;
 window.closeXferPicker = closeXferPicker;
 window.xferPickerBack = xferPickerBack;
