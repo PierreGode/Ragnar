@@ -22586,32 +22586,77 @@ function closeXferPicker() {
 function xferPickerBack() {
     if (_xferPickHistory.length) xferPickerLoad(_xferPickHistory.pop(), true);
 }
+// Row builders for the picker (folder, filesystem file, vault file).
+function _xferFolderRow(navPath, name, tint) {
+    return `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="xferPickerLoad('${escapeAttr(navPath)}')">
+        <svg class="w-5 h-5 mr-3 flex-shrink-0 ${tint || 'text-yellow-400'}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+        <span class="truncate">${escapeHtml(name)}</span></div>`;
+}
+function _xferFileRow(name, sizeLabel, sendCall) {
+    return `<div class="flex items-center justify-between gap-2 p-2.5 hover:bg-slate-700 rounded-lg">
+        <div class="flex items-center min-w-0"><svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+        <div class="min-w-0"><div class="truncate">${escapeHtml(name)}</div><div class="text-xs text-gray-500">${sizeLabel}</div></div></div>
+        <button onclick="${sendCall}" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1.5 rounded flex-shrink-0">Send</button></div>`;
+}
+
 function xferPickerLoad(path, isBack) {
     if (!isBack && path !== _xferPickPath) _xferPickHistory.push(_xferPickPath);
     _xferPickPath = path;
     const pathEl = document.getElementById('xfer-pick-path');
-    if (pathEl) pathEl.textContent = path;
     const list = document.getElementById('xfer-pick-list');
     if (!list) return;
     list.innerHTML = '<p class="text-gray-400 p-4">Loading…</p>';
-    networkAwareFetch('/api/files/list?path=' + encodeURIComponent(path))
-        .then(r => r.json())
-        .then(files => {
-            if (!Array.isArray(files) || !files.length) { list.innerHTML = '<p class="text-gray-500 p-4">This folder is empty.</p>'; return; }
-            files.sort((a, b) => (a.is_directory === b.is_directory)
-                ? a.name.toLowerCase().localeCompare(b.name.toLowerCase())
-                : (a.is_directory ? -1 : 1));
-            list.innerHTML = '<div class="space-y-1">' + files.map(f => f.is_directory
-                ? `<div class="flex items-center p-2.5 hover:bg-slate-700 rounded-lg cursor-pointer" onclick="xferPickerLoad('${escapeAttr(f.path)}')">
-                       <svg class="w-5 h-5 mr-3 flex-shrink-0 text-yellow-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
-                       <span class="truncate">${escapeHtml(f.name)}</span></div>`
-                : `<div class="flex items-center justify-between gap-2 p-2.5 hover:bg-slate-700 rounded-lg">
-                       <div class="flex items-center min-w-0"><svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                       <div class="min-w-0"><div class="truncate">${escapeHtml(f.name)}</div><div class="text-xs text-gray-500">${formatBytes(f.size)}</div></div></div>
-                       <button onclick="xferSendPath('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-3 py-1.5 rounded flex-shrink-0">Send</button></div>`
-            ).join('') + '</div>';
-        })
-        .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+
+    // Vault sub-tree (only reachable when the Vault is unlocked). Paths are
+    // 'vault:' + dir; files send via source:'vault' (decrypt-on-send).
+    if (path.indexOf('vault:') === 0) {
+        const dir = path.slice(6);
+        if (pathEl) pathEl.textContent = '🔒 Vault' + (dir ? '/' + dir : '');
+        networkAwareFetch('/api/safe/list?dir=' + encodeURIComponent(dir))
+            .then(r => r.json())
+            .then(d => {
+                if (d.locked || !d.success) { list.innerHTML = '<p class="text-amber-300 p-4">The Vault is locked — unlock it in the Files tab.</p>'; return; }
+                let rows = (d.folders || []).map(f => _xferFolderRow('vault:' + f.path, f.name, 'text-amber-400')).join('');
+                rows += (d.files || []).slice().sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+                    .map(f => _xferFileRow(f.name, formatBytes(f.size), `xferSendVault('${escapeAttr(f.id)}','${escapeAttr(f.name)}')`)).join('');
+                list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">This folder is empty.</p>';
+            })
+            .catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+        return;
+    }
+
+    if (pathEl) pathEl.textContent = path;
+    // The filesystem browser. At the root, also offer the Vault when unlocked.
+    const listFs = networkAwareFetch('/api/files/list?path=' + encodeURIComponent(path)).then(r => r.json()).catch(() => []);
+    const status = (path === '/')
+        ? networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({}))
+        : Promise.resolve({});
+    Promise.all([listFs, status]).then(([files, st]) => {
+        files = Array.isArray(files) ? files.slice() : [];
+        files.sort((a, b) => (a.is_directory === b.is_directory)
+            ? a.name.toLowerCase().localeCompare(b.name.toLowerCase())
+            : (a.is_directory ? -1 : 1));
+        let rows = '';
+        if (path === '/' && st && st.success && st.configured && st.unlocked) {
+            rows += _xferFolderRow('vault:', '🔒 Vault', 'text-amber-400');
+        }
+        rows += files.map(f => f.is_directory
+            ? _xferFolderRow(f.path, f.name)
+            : _xferFileRow(f.name, formatBytes(f.size), `xferSendPath('${escapeAttr(f.path)}','${escapeAttr(f.name)}')`)
+        ).join('');
+        list.innerHTML = rows ? '<div class="space-y-1">' + rows + '</div>' : '<p class="text-gray-500 p-4">This folder is empty.</p>';
+    }).catch(e => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+function xferSendVault(id, name) {
+    const target = document.getElementById('xfer-dest')?.value;
+    if (!target) { showFileError('Pick a destination unit'); return; }
+    networkAwareFetch('/api/mesh/files/send', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: target, source: 'vault', vault_id: id })
+    }).then(r => r.json()).then(d => {
+        if (d.success) { showFileSuccess('Sending ' + name + ' → ' + (d.dest || 'unit')); closeXferPicker(); xferRefresh(); }
+        else showFileError(d.error || 'Send failed');
+    }).catch(e => showFileError(e.message));
 }
 function xferSendPath(path, name) {
     const target = document.getElementById('xfer-dest')?.value;
@@ -23613,6 +23658,7 @@ window.closeXferPicker = closeXferPicker;
 window.xferPickerBack = xferPickerBack;
 window.xferPickerLoad = xferPickerLoad;
 window.xferSendPath = xferSendPath;
+window.xferSendVault = xferSendVault;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions
