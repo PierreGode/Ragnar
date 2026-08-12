@@ -4555,6 +4555,17 @@
                 </div>
             </div>
 
+            <!-- Full-screen image viewer (shared by file + Safe previews) -->
+            <div id="image-fullscreen-overlay" class="fixed inset-0 bg-black hidden items-center justify-center overflow-auto" style="z-index:60">
+                <img id="image-fullscreen-img" src="" alt="" class="max-w-full max-h-full object-contain select-none">
+                <button onclick="closeImageFullscreen()" title="Close (Esc)"
+                    class="fixed top-4 right-4 p-2 bg-black/60 hover:bg-black/80 rounded-lg text-white transition-colors" style="z-index:61">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                </button>
+            </div>
+
 
         </div>
 
@@ -7693,7 +7704,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-safe-vault"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260812-img-fullscreen"></script>
 
 </body>
 </html>

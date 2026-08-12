@@ -21436,9 +21436,7 @@ function previewFile(filePath) {
                 return;
             }
             if (data.type === 'image') {
-                content.innerHTML = `<div class="flex items-center justify-center h-full p-4">
-                    <img src="data:${data.mime};base64,${data.data}" alt="${escapeHtml(name)}" class="max-w-full max-h-full object-contain rounded">
-                </div>`;
+                renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
             } else if (data.type === 'text') {
                 if (data.truncated) truncBadge.classList.remove('hidden');
                 const isCSV = name.toLowerCase().endsWith('.csv');
@@ -21479,8 +21477,69 @@ function closeFilePreview() {
     if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
 }
 
-// Close preview on backdrop click or Escape key
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFilePreview(); });
+// Render an image into a preview pane with a full-screen affordance: click the
+// image (or the ⛶ button) to open it in the dedicated full-screen viewer.
+function renderPreviewImage(content, src, name) {
+    content.innerHTML = `<div class="relative flex items-center justify-center h-full p-4">
+        <img src="${src}" alt="${escapeHtml(name)}" title="Click to view full screen"
+            onclick="openImageFullscreen(this.src, this.alt)"
+            class="max-w-full max-h-full object-contain rounded cursor-zoom-in">
+        <button onclick="openImageFullscreen(this.previousElementSibling.src, this.previousElementSibling.alt)"
+            class="absolute top-2 right-2 flex items-center gap-1 bg-black/50 hover:bg-black/70 text-white text-xs px-2 py-1 rounded transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-5v4m0-4h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+            </svg>
+            Full screen
+        </button>
+    </div>`;
+}
+
+// Full-screen image viewer — uses the native Fullscreen API when available and
+// falls back to a fixed full-viewport overlay otherwise. The overlay allows
+// scroll/pinch-zoom on the image on touch devices.
+function openImageFullscreen(src, alt) {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    const img = document.getElementById('image-fullscreen-img');
+    if (!ov || !img) return;
+    img.src = src;
+    img.alt = alt || '';
+    ov.classList.remove('hidden');
+    ov.classList.add('flex');
+    if (ov.requestFullscreen) ov.requestFullscreen().catch(() => {});
+}
+
+function closeImageFullscreen() {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (!ov) return;
+    ov.classList.add('hidden');
+    ov.classList.remove('flex');
+    const img = document.getElementById('image-fullscreen-img');
+    if (img) img.src = '';
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+
+// Close the full-screen viewer first (if open), otherwise the preview modal.
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (ov && !ov.classList.contains('hidden')) { closeImageFullscreen(); return; }
+    closeFilePreview();
+});
+// Click the backdrop (not the image) to close the full-screen viewer.
+document.getElementById('image-fullscreen-overlay')?.addEventListener('click', function(e) {
+    if (e.target === this) closeImageFullscreen();
+});
+// If the user leaves native fullscreen (e.g. via Esc handled by the browser),
+// keep our overlay state in sync.
+document.addEventListener('fullscreenchange', () => {
+    const ov = document.getElementById('image-fullscreen-overlay');
+    if (!document.fullscreenElement && ov && !ov.classList.contains('hidden')) {
+        ov.classList.add('hidden');
+        ov.classList.remove('flex');
+        const img = document.getElementById('image-fullscreen-img');
+        if (img) img.src = '';
+    }
+});
 document.getElementById('file-preview-modal')?.addEventListener('click', function(e) {
     if (e.target === this) closeFilePreview();
 });
@@ -21883,7 +21942,7 @@ function previewSafeFile(id, name) {
             if (data.locked) { closeFilePreview(); refreshSafe(); return; }
             if (data.error) { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(data.error)}</p>`; return; }
             if (data.type === 'image') {
-                content.innerHTML = `<div class="flex items-center justify-center h-full p-4"><img src="data:${data.mime};base64,${data.data}" alt="${escapeHtml(name)}" class="max-w-full max-h-full object-contain rounded"></div>`;
+                renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
             } else if (data.type === 'text') {
                 if (data.truncated) truncBadge.classList.remove('hidden');
                 content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;
@@ -22809,6 +22868,8 @@ window.uploadToSafe = uploadToSafe;
 window.downloadSafeFile = downloadSafeFile;
 window.deleteSafeFile = deleteSafeFile;
 window.previewSafeFile = previewSafeFile;
+window.openImageFullscreen = openImageFullscreen;
+window.closeImageFullscreen = closeImageFullscreen;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions
