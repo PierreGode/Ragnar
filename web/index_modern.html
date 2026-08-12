@@ -1269,8 +1269,80 @@
                     <div class="text-green-400">Ragnar console loading...</div>
                 </div>
             </div>
+
+            <!-- ============================================================ -->
+            <!-- Ragnar AI Chat — floating assistant, shown only when AI is    -->
+            <!-- enabled (see updateRagnarChatAvailability). Lives inside the  -->
+            <!-- dashboard tab so it auto-hides on other tabs.                 -->
+            <!-- ============================================================ -->
+            <div id="ragnar-chat" style="display:none;">
+                <!-- Launcher bubble -->
+                <button id="ragnar-chat-fab" onclick="toggleRagnarChat()" title="Chat with Ragnar"
+                        style="position:fixed; right:22px; bottom:22px; z-index:60; width:58px; height:58px;
+                               border-radius:50%; border:none; cursor:pointer; color:#fff;
+                               background:linear-gradient(135deg,#7c3aed,#4f46e5);
+                               box-shadow:0 8px 24px rgba(79,70,229,.45); display:flex;
+                               align-items:center; justify-content:center;">
+                    <svg width="26" height="26" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                              d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.86 9.86 0 01-4-.84L3 20l1.09-3.27A7.6 7.6 0 013 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path>
+                    </svg>
+                </button>
+
+                <!-- Chat panel -->
+                <div id="ragnar-chat-panel" style="display:none; position:fixed; right:22px; bottom:22px;
+                        z-index:61; width:min(400px,calc(100vw - 32px)); height:min(600px,calc(100vh - 90px));
+                        background:rgba(15,23,42,.97); backdrop-filter:blur(12px);
+                        border:1px solid rgba(124,58,237,.35); border-radius:16px;
+                        box-shadow:0 18px 50px rgba(0,0,0,.55); display:flex; flex-direction:column; overflow:hidden;">
+                    <!-- Header -->
+                    <div style="display:flex; align-items:center; gap:10px; padding:12px 14px;
+                                border-bottom:1px solid rgba(124,58,237,.28);
+                                background:linear-gradient(135deg,rgba(124,58,237,.25),rgba(79,70,229,.12));">
+                        <div style="width:34px; height:34px; border-radius:50%; flex:0 0 auto;
+                                    background:linear-gradient(135deg,#7c3aed,#4f46e5); display:flex;
+                                    align-items:center; justify-content:center;">
+                            <svg width="18" height="18" fill="none" stroke="#fff" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                        </div>
+                        <div style="flex:1; min-width:0;">
+                            <div style="font-weight:700; color:#fff; font-size:14px;">Ragnar Assistant</div>
+                            <div id="ragnar-chat-model" style="font-size:11px; color:#a5b4fc;">AI</div>
+                        </div>
+                        <button onclick="clearRagnarChat()" title="New chat"
+                                style="background:none;border:none;color:#94a3b8;cursor:pointer;padding:4px;">
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M12 4v16m8-8H4"></path></svg>
+                        </button>
+                        <button onclick="toggleRagnarChat()" title="Close"
+                                style="background:none;border:none;color:#94a3b8;cursor:pointer;padding:4px;">
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                      d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <!-- Message log -->
+                    <div id="ragnar-chat-log" style="flex:1; overflow-y:auto; padding:14px;
+                            display:flex; flex-direction:column; gap:10px; font-size:13.5px; line-height:1.5;"></div>
+                    <!-- Composer -->
+                    <form onsubmit="return sendRagnarChat(event)"
+                          style="display:flex; gap:8px; padding:10px 12px; border-top:1px solid rgba(148,163,184,.18);">
+                        <input id="ragnar-chat-input" type="text" autocomplete="off"
+                               placeholder="Ask Ragnar, or say 'scan the network'…"
+                               style="flex:1; background:rgba(30,41,59,.9); border:1px solid rgba(148,163,184,.25);
+                                      border-radius:10px; padding:9px 12px; color:#e2e8f0; font-size:13.5px; outline:none;">
+                        <button id="ragnar-chat-send" type="submit"
+                                style="background:linear-gradient(135deg,#7c3aed,#4f46e5); border:none; color:#fff;
+                                       border-radius:10px; padding:0 16px; font-weight:600; cursor:pointer; font-size:13.5px;">
+                            Send
+                        </button>
+                    </form>
+                </div>
+            </div>
         </div>
-        
+
         <!-- Network Tab -->
         <div id="network-tab" class="tab-content hidden">
             <!-- Sub-tab navigation -->
@@ -7863,7 +7935,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-mesh-share-shortcut"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-ragnar-chat"></script>
 
 </body>
 </html>

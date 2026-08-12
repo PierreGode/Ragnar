@@ -125,9 +125,62 @@ Click the "Refresh" button in the AI Insights section to:
 - Generate new analysis with latest data
 - Get updated recommendations
 
+## Chat Assistant (Dashboard)
+
+When AI is enabled, a **floating chat button** appears in the bottom-right of the
+**Dashboard** tab. Click it to open a conversation with **Ragnar** — an assistant
+that both **understands Ragnar** (it answers from this repo's own `docs/` folder)
+and can **take real actions** on the unit, then read the results back and explain
+them in plain language.
+
+### What it can do
+
+Ask it questions ("how does wardriving GPS work?", "what is Watchtower?") or give
+it commands. The operator has authorised it to run actions **automatically** — it
+does not ask for confirmation, it just runs the tool and reports what happened.
+Available tools (a curated allowlist):
+
+| Intent | Tools |
+| --- | --- |
+| **Docs** | `search_docs` — search the `docs/` folder |
+| **Read state** | `get_network_devices`, `get_vulnerabilities`, `get_ai_insights`, `get_watchtower`, `get_incidents`, `get_scan_status`, `get_wifi_status` |
+| **Network scans** | `run_network_scan` (ARP + nmap sweep), `deep_scan_host` (single host), `start_vulnerability_scan` |
+| **Wi-Fi** | `start_wifi_scan`, `stop_wifi_scan` |
+
+Example prompts: *"scan the network and tell me what's new"*, *"deep scan
+192.168.1.20"*, *"show me the latest vulnerabilities and which to fix first"*,
+*"start a vulnerability scan"*.
+
+### How it works
+
+`ai_chat.py` runs a small **agentic loop** on top of `ai_service.py`. It is
+deliberately **model-agnostic**: instead of native function-calling (which the
+OpenAI Responses API and self-hosted Ollama/LocalAI servers all express
+differently), the assistant emits a tiny text protocol —
+`<tool>{"tool":"name","args":{...}}</tool>` — which the server executes and feeds
+back as `<result>…</result>`. This works identically on **OpenAI's cloud and on a
+local model**.
+
+Each action tool maps to one of Ragnar's **existing API endpoints**, dispatched
+**in-process** with the caller's session cookie forwarded — so every action reuses
+the real, already-authenticated handler (no self-HTTP, no auth bypass) and
+inherits its exact behaviour. Documentation retrieval is a lightweight keyword
+search over `docs/*.md` (no embeddings), so it runs even on a Pi Zero.
+
+The chat button only shows when the AI service is enabled **and** configured
+(same gate as the dashboard insight cards).
+
 ## API Endpoints
 
 The following API endpoints are available for programmatic access:
+
+### POST /api/ai/chat
+Backs the dashboard **Chat Assistant**. Body:
+`{ "message": "<user text>", "history": [{"role":"user|assistant","content":"…"}] }`.
+Returns `{ success, reply, actions, docs, model }`, where `actions` lists the
+tools the assistant ran this turn (`{tool, args, ok, summary}`) and `docs` lists
+the documentation sections it consulted. Requires `ai_enabled` and a ready AI
+service (token or self-hosted endpoint), otherwise returns 400/503 with a reason.
 
 ### POST /api/ai/models
 Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).
