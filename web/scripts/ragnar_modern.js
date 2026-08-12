@@ -21903,15 +21903,8 @@ function renderSafeSetup(s) {
         freeMB && freeMB > minMB ? freeMB : Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576)
     );
     const defMB = Math.min(Math.max(minMB, 256), maxMB);
-    // Show the default in GB when it's large enough to read better that way.
-    const defUnit = defMB >= 1024 ? 'GB' : 'MB';
-    const defNum = defUnit === 'GB' ? +(defMB / 1024).toFixed(1) : defMB;
+    const step = 8;   // fine 8 MB steps (so round values like 1000 MB land exactly)
     const freeLabel = s.disk_free_bytes ? formatBytes(s.disk_free_bytes) : 'unknown';
-    // Preset chips (only those that fit under the max).
-    const presetChips = [['512 MB', 512], ['1 GB', 1024], ['5 GB', 5120], ['10 GB', 10240], ['50 GB', 51200]]
-        .filter(([, mb]) => mb >= minMB && mb <= maxMB)
-        .map(([label, mb]) => `<button type="button" onclick="setVaultSizeMb(${mb})" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2 py-1 rounded transition-colors">${label}</button>`)
-        .join('');
     const body = document.getElementById('safe-body');
     body.innerHTML = `
         <div class="max-w-lg mx-auto space-y-5">
@@ -21921,20 +21914,14 @@ function renderSafeSetup(s) {
                 password there is no recovery — the files cannot be decrypted.</span>
             </div>
             <div>
-                <label class="block text-sm font-medium mb-1">Vault size</label>
-                <div class="flex items-center gap-2 flex-wrap">
-                    <input id="safe-size-num" type="number" min="0" step="1" value="${defNum}" data-min="${minMB}" data-max="${maxMB}"
-                        oninput="onVaultSizeInput()"
-                        class="w-28 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500">
-                    <select id="safe-size-unit" onchange="onVaultSizeInput()"
-                        class="bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-white focus:outline-none focus:border-amber-500">
-                        <option value="MB" ${defUnit === 'MB' ? 'selected' : ''}>MB</option>
-                        <option value="GB" ${defUnit === 'GB' ? 'selected' : ''}>GB</option>
-                    </select>
-                    <span id="safe-size-eq" class="text-sm text-gray-400"></span>
+                <div class="flex items-center justify-between mb-1">
+                    <label class="block text-sm font-medium">Vault size</label>
+                    <span id="safe-size-readout" class="text-sm font-semibold text-amber-300"></span>
                 </div>
-                <div id="safe-size-presets" class="flex flex-wrap gap-1.5 mt-2">${presetChips}</div>
-                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · max ${formatBytes(maxMB * 1048576)}. Enter 1000+ MB and it switches to GB automatically.</p>
+                <input id="safe-size-range" type="range" min="${minMB}" max="${maxMB}" step="${step}" value="${defMB}"
+                    data-min="${minMB}" data-max="${maxMB}"
+                    oninput="onVaultSliderInput()" class="w-full accent-amber-500">
+                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · max ${formatVaultSize(maxMB)}</p>
             </div>
             <div>
                 <label class="block text-sm font-medium mb-1">Password</label>
@@ -21950,46 +21937,29 @@ function renderSafeSetup(s) {
             <div id="safe-setup-msg" class="text-sm text-red-400 hidden"></div>
             <button onclick="submitSafeSetup()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Create Vault</button>
         </div>`;
-    onVaultSizeInput();   // populate the "= N GB" hint
+    onVaultSliderInput();   // populate the size readout
 }
 
-// Return the chosen vault size in whole MB (GB entries are ×1024).
-function vaultSizeToMb() {
-    const n = parseFloat(document.getElementById('safe-size-num').value) || 0;
-    const unit = document.getElementById('safe-size-unit').value;
-    return Math.round(unit === 'GB' ? n * 1024 : n);
+// Format a size in MB for display: MB below 1000, GB from 1000 up (so 1000 MB
+// reads as "1 GB", 1500 as "1.5 GB").
+function formatVaultSize(mb) {
+    if (mb < 1000) return mb + ' MB';
+    const gb = mb / 1000;
+    return (gb % 1 === 0 ? gb : gb.toFixed(1)) + ' GB';
 }
 
-// Live: recompute the "= N GB" hint and auto-switch MB→GB once the number
-// reaches 4 digits (≥1000 MB), so users don't type huge MB values for GB vaults.
-function onVaultSizeInput() {
-    const numEl = document.getElementById('safe-size-num');
-    const unitEl = document.getElementById('safe-size-unit');
-    if (!numEl || !unitEl) return;
-    const v = parseFloat(numEl.value);
-    if (unitEl.value === 'MB' && v >= 1000) {
-        unitEl.value = 'GB';
-        numEl.value = +(v / 1024).toFixed(1);
-    }
-    const eq = document.getElementById('safe-size-eq');
-    const mb = vaultSizeToMb();
-    if (eq) eq.textContent = mb ? '= ' + formatBytes(mb * 1048576) : '';
-}
-
-// A preset chip picks a size in MB, choosing the nicer unit to display it in.
-function setVaultSizeMb(mb) {
-    const numEl = document.getElementById('safe-size-num');
-    const unitEl = document.getElementById('safe-size-unit');
-    if (mb >= 1024) { unitEl.value = 'GB'; numEl.value = +(mb / 1024).toFixed(mb % 1024 ? 1 : 0); }
-    else { unitEl.value = 'MB'; numEl.value = mb; }
-    onVaultSizeInput();
+// Update the readout as the slider moves.
+function onVaultSliderInput() {
+    const range = document.getElementById('safe-size-range');
+    const out = document.getElementById('safe-size-readout');
+    if (range && out) out.textContent = formatVaultSize(parseInt(range.value, 10) || 0);
 }
 
 function submitSafeSetup() {
-    const numEl = document.getElementById('safe-size-num');
-    const sizeMb = vaultSizeToMb();
-    const maxMb = parseInt(numEl.getAttribute('data-max'), 10) || Infinity;
-    const minMb = parseInt(numEl.getAttribute('data-min'), 10) || 8;
+    const range = document.getElementById('safe-size-range');
+    const sizeMb = parseInt(range.value, 10) || 0;
+    const maxMb = parseInt(range.getAttribute('data-max'), 10) || Infinity;
+    const minMb = parseInt(range.getAttribute('data-min'), 10) || 8;
     const pw1 = document.getElementById('safe-pw1').value;
     const pw2 = document.getElementById('safe-pw2').value;
     const msg = document.getElementById('safe-setup-msg');
@@ -23334,8 +23304,7 @@ window.deleteSafeFolder = deleteSafeFolder;
 window.browseSafeFromModal = browseSafeFromModal;
 window.toggleSafeDestroy = toggleSafeDestroy;
 window.destroySafe = destroySafe;
-window.onVaultSizeInput = onVaultSizeInput;
-window.setVaultSizeMb = setVaultSizeMb;
+window.onVaultSliderInput = onVaultSliderInput;
 window.fileGoBack = fileGoBack;
 window.fileGoUp = fileGoUp;
 window.renameFsEntry = renameFsEntry;
