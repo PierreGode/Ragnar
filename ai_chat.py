@@ -29,6 +29,7 @@ index lives here.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -154,6 +155,8 @@ class DocIndex:
     def __init__(self, docs_dir: str):
         self.docs_dir = docs_dir
         self.chunks: List[Dict[str, Any]] = []
+        self._df: Dict[str, int] = {}   # document frequency per term
+        self._n = 0                     # number of chunks
         self._mtime = 0.0
         self._build()
 
@@ -195,7 +198,19 @@ class DocIndex:
                     "text": body,
                     "tf": self._tf(blob),
                 })
+        # Document frequency per term -> IDF, so common words ("network",
+        # "device", "scan") that appear in nearly every chunk stop dominating the
+        # score and specific terms ("legacy", "wardriving", "watchtower") win.
+        self._n = len(self.chunks)
+        df: Dict[str, int] = {}
+        for ch in self.chunks:
+            for term in ch["tf"]:
+                df[term] = df.get(term, 0) + 1
+        self._df = df
         self._mtime = self._dir_mtime()
+
+    def _idf(self, term: str) -> float:
+        return math.log((self._n + 1) / (self._df.get(term, 0) + 1)) + 1.0
 
     @staticmethod
     def _split_sections(text: str) -> List[Tuple[str, str]]:
@@ -233,15 +248,17 @@ class DocIndex:
         if not q or not self.chunks:
             return []
         qset = set(q)
+        idf = {w: self._idf(w) for w in qset}
         scored = []
         for ch in self.chunks:
             tf = ch["tf"]
-            score = sum(tf.get(w, 0) for w in qset)
+            score = sum(tf.get(w, 0) * idf[w] for w in qset)
             if score <= 0:
                 continue
-            # Bonus when the query terms hit the filename/heading (title).
-            title_hits = len(qset & set(_tokens(ch["title"])))
-            score += title_hits * 3
+            # Bonus when the query terms hit the filename/heading (title),
+            # weighted by IDF so a specific word in the heading counts most.
+            title_terms = set(_tokens(ch["title"]))
+            score += sum(idf[w] for w in qset & title_terms) * 2.0
             scored.append((score, ch))
         scored.sort(key=lambda x: x[0], reverse=True)
         out = []
@@ -307,29 +324,52 @@ class RagnarChat:
     def _system_prompt(self, doc_context: str) -> str:
         return (
             "You are Ragnar, the built-in assistant of the Ragnar network-security "
-            "appliance. Be concise, technical, and practical. Speak plainly; a short "
-            "answer beats a long one.\n\n"
+            "appliance. Be concise, technical, and practical.\n\n"
             f"{_OVERVIEW}\n\n"
             "You can take real actions on this unit and read real data by calling "
-            "tools. The operator has authorised you to run actions automatically — "
-            "do NOT ask for confirmation, just do it, then report what you did and "
-            "explain the result.\n\n"
+            "tools. The operator has authorised actions to run automatically — never "
+            "ask for confirmation.\n\n"
             "TOOLS:\n"
             f"{self._tools_block()}\n\n"
             "TOOL PROTOCOL — follow exactly:\n"
-            "- To call a tool, reply with ONE line and nothing else:\n"
+            "- To call a tool, reply with ONE line and NOTHING else:\n"
             '  <tool>{\"tool\":\"NAME\",\"args\":{...}}</tool>\n'
-            "- Do not add any prose in the same message as a <tool> call.\n"
+            "- Never put prose in the same message as a <tool> call.\n"
             "- The system runs the tool and replies with <result>…</result>.\n"
-            "- You may call tools several times in a row (e.g. scan, then read "
-            "results). When you have enough information, reply to the user in plain "
-            "text with NO <tool> tag.\n"
-            "- Only use tools that exist above. If a request needs something no tool "
-            "covers, explain what to do in the UI instead.\n"
-            "- When you present scan/vulnerability results, interpret them: what "
-            "matters, severity, and what the operator should do next.\n\n"
-            "RELEVANT DOCUMENTATION (retrieved for this question; may be empty):\n"
-            f"{doc_context or '(none retrieved — use search_docs if you need docs)'}"
+            "- You may chain tools (e.g. scan, then read results). When you have "
+            "enough, reply in plain text with NO <tool> tag.\n\n"
+            "WHEN TO USE A TOOL — this is important:\n"
+            "- Greetings, thanks, or small talk (\"hi\", \"thanks\", \"ok\"): just "
+            "reply in one friendly line. Do NOT call any tool.\n"
+            "- \"How do I…\", \"what is…\", \"how does … work\", \"how do I find/"
+            "configure X\": this is a DOCUMENTATION question. Answer from the "
+            "documentation below; if it is not enough, call search_docs. Do NOT run "
+            "scans or read device/vuln data for a how-to question.\n"
+            "- Only use an ACTION tool (scan/start/stop) when the user explicitly "
+            "asks you to DO something.\n"
+            "- To state the user's ACTUAL devices, vulnerabilities, alerts, or "
+            "incidents, you MUST call the matching read tool first. NEVER invent or "
+            "guess findings, hostnames, CVEs, or counts — if you didn't get it from a "
+            "tool or the docs, say you need to check and call the tool.\n\n"
+            "STYLE:\n"
+            "- Talk about findings, not plumbing. Never mention tool names, JSON, "
+            "\"the response\", or internal fields to the user.\n"
+            "- Be specific: cite real IPs, ports, severities, counts from the tool "
+            "results. Lead with what matters and the recommended next step.\n"
+            "- No filler. Do not end with \"What would you like to do next?\".\n\n"
+            "EXAMPLES (how you should respond):\n"
+            "User: hi\n"
+            "You: Hi! Ask me about a Ragnar feature, or tell me to run a scan.\n"
+            "User: how do I discover legacy devices?\n"
+            "You: <answer from the documentation; call search_docs first if needed — "
+            "no scan>\n"
+            "User: what vulnerabilities do I have?\n"
+            'You: <tool>{"tool":"get_vulnerabilities","args":{}}</tool>\n'
+            "User: scan the network\n"
+            'You: <tool>{"tool":"run_network_scan","args":{}}</tool>\n\n'
+            "RELEVANT DOCUMENTATION (retrieved for this question; may be empty — "
+            "prefer this over guessing):\n"
+            f"{doc_context or '(none retrieved — call search_docs if this is a how-to/what-is question)'}"
         )
 
     @staticmethod
