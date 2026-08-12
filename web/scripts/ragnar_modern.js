@@ -9647,6 +9647,14 @@ function setupAutoRefresh() {
         checkForUpdatesQuiet();
     }, 30000); // Check 30 seconds after page load (deferred from 5s)
 
+    // Flag the Files nav when a file has been sent to this unit's Inbox.
+    autoRefreshIntervals.filesFlag = setInterval(refreshFilesFlag, 20000); // every 20s
+    setTimeout(refreshFilesFlag, 4000);   // initial check shortly after load
+    // …and when a peer shares new files to the mesh (slower — the aggregate
+    // polls peers, so keep it light).
+    autoRefreshIntervals.sharedFlag = setInterval(refreshSharedFlag, 120000); // every 2 min
+    setTimeout(refreshSharedFlag, 8000);
+
     setPwnStatusPollInterval(PWN_STATUS_POLL_INTERVAL);
 }
 
@@ -15528,6 +15536,62 @@ async function checkForUpdatesQuiet() {
         // Silently fail for background checks
         console.debug('Background update check failed:', error);
     }
+}
+
+// ── Files nav flag ───────────────────────────────────────────────────────────
+// Put a dot on the "Files" nav word (like the Config update flag) when a file is
+// sent to this unit (its mesh Inbox has items) OR shared to the mesh by a peer
+// since it was last viewed.
+let _filesFlagInbox = 0;
+let _filesFlagSharedNew = false;
+function _applyFilesFlag() {
+    const on = _filesFlagInbox > 0 || _filesFlagSharedNew;
+    document.querySelectorAll('[data-tab="files"]').forEach(btn => {
+        let dot = btn.querySelector('.files-flag');
+        if (on) {
+            if (!dot) {
+                dot = document.createElement('span');
+                dot.className = 'files-flag absolute -top-1 -right-1 w-3 h-3 bg-amber-500 rounded-full pulse-glow';
+                btn.style.position = 'relative';
+                btn.appendChild(dot);
+            }
+        } else if (dot) {
+            dot.remove();
+        }
+    });
+}
+// Sent-to-this-unit case (Inbox count).
+function setFilesNavFlag(count) { _filesFlagInbox = count; _applyFilesFlag(); }
+function refreshFilesFlag() {
+    networkAwareFetch('/api/mesh/inbox')
+        .then(r => r.json())
+        .then(d => setFilesNavFlag((d && d.items) ? d.items.length : 0))
+        .catch(() => { /* silent — background check */ });
+}
+// Shared-to-the-mesh case: flag when a peer has shared more files than we last
+// saw. Baselines silently on first observation so pre-existing shares don't flag.
+function refreshSharedFlag() {
+    networkAwareFetch('/api/mesh/share')
+        .then(r => r.json())
+        .then(d => {
+            const peerCount = ((d && d.items) || []).filter(i => !i.is_local).length;
+            let raw = null;
+            try { raw = localStorage.getItem('mesh_share_seen'); } catch (e) { /* ignore */ }
+            if (raw === null) {
+                try { localStorage.setItem('mesh_share_seen', String(peerCount)); } catch (e) { /* ignore */ }
+                _filesFlagSharedNew = false;
+            } else {
+                _filesFlagSharedNew = peerCount > (parseInt(raw, 10) || 0);
+            }
+            _applyFilesFlag();
+        })
+        .catch(() => { /* silent — background check */ });
+}
+// Everything currently shared is now "seen" (called when Mesh Share is opened).
+function markSharedSeen(peerCount) {
+    try { localStorage.setItem('mesh_share_seen', String(peerCount || 0)); } catch (e) { /* ignore */ }
+    _filesFlagSharedNew = false;
+    _applyFilesFlag();
 }
 
 async function restartService() {
@@ -21617,6 +21681,7 @@ function displayDirectoryTree() {
         .then(d => {
             const slot = document.getElementById('directory-tree-inbox');
             const n = (d && d.items) ? d.items.length : 0;
+            setFilesNavFlag(n);   // keep the Files nav flag in sync
             if (slot && n) {
                 slot.innerHTML = `
                     <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="showTab('mesh'); showMeshView('transfer')">
@@ -22626,6 +22691,7 @@ function loadXferInbox() {
         const setBadge = (id, n) => { const b = document.getElementById(id); if (b) { b.textContent = n; b.classList.toggle('hidden', !n); } };
         setBadge('xfer-inbox-count', items.length);
         setBadge('mesh-inbox-badge', items.length);
+        setFilesNavFlag(items.length);   // keep the Files nav flag in sync
         if (!el) return;
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">Inbox is empty.</p>'; return; }
         el.innerHTML = items.map(m => `
@@ -22678,6 +22744,8 @@ function loadMeshShare() {
     if (!el) return;
     networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
         const items = (d && d.items) || [];
+        // Viewing Mesh Share clears the "new shared files" part of the Files flag.
+        markSharedSeen(items.filter(i => !i.is_local).length);
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">Nothing shared yet. Use “Share files” to publish a file to the mesh.</p>'; return; }
         el.innerHTML = items.map(it => {
             const action = it.is_local
