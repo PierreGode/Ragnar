@@ -19770,6 +19770,39 @@ def mkdir_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/files/rename', methods=['POST'])
+def rename_file_api():
+    """Rename a file or folder under /uploads or /backups (same directory)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        path = data.get('path', '')
+        new_name = (data.get('name') or '').strip()
+        if not path or not new_name:
+            return jsonify({'error': 'Path and new name are required'}), 400
+        if '/' in new_name or '\\' in new_name or new_name in ('.', '..'):
+            return jsonify({'error': 'Invalid name'}), 400
+
+        try:
+            actual = _resolve_upload_target(path)   # source; writable trees only
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+        if not os.path.exists(actual):
+            return jsonify({'error': 'File not found'}), 404
+
+        dest = os.path.join(os.path.dirname(actual), new_name)
+        # dest stays in the same (already-validated) directory; new_name has no
+        # separators, so it cannot escape it.
+        if os.path.exists(dest):
+            return jsonify({'error': 'A file with that name already exists'}), 400
+        os.rename(actual, dest)
+        logger.info(f"Renamed {actual} -> {dest}")
+        return jsonify({'success': True, 'name': new_name})
+
+    except Exception as e:
+        logger.error(f"Error renaming: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/files/clear', methods=['POST'])
 def clear_files_api():
     """Clear files from specified directories"""
@@ -20102,6 +20135,28 @@ def safe_delete_api():
         return jsonify({'success': False, 'error': str(e)}), 400
     except Exception as e:
         logger.error(f"Safe delete error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/rename', methods=['POST'])
+def safe_rename_api():
+    """Rename a file (by id) or a folder (by path) in the Safe (unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        name = data.get('name', '')
+        if data.get('folder'):
+            _get_safe_vault().rename_folder(data['folder'], name)
+        elif data.get('id'):
+            _get_safe_vault().rename_file(data['id'], name)
+        else:
+            return jsonify({'success': False, 'error': 'Nothing to rename'}), 400
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe rename error: {e}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
