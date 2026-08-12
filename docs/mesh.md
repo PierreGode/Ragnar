@@ -738,6 +738,37 @@ live running state. The command is relayed server-side over the tailnet; see
 unit can drive any other — the trust boundary is the mesh tag, so the way to
 keep a unit from being actuated remotely is simply not to tag it into the mesh.
 
+## File transfer
+
+The **Ragnar Mesh → File Transfer** sub-tab moves files between units. Transport
+reuses the mesh channel — plain HTTP to a peer's `http://[tailnet-ip]:8000`, which
+Tailscale already wraps in **WireGuard**, so nothing is added to encrypt the wire.
+Authorization is the same **WireGuard-identity + mesh-tag** check as every other
+peer call: the receiver's `POST /api/mesh/files/push` is exact-path allowlisted for
+tagged peers and does nothing but write into a **quarantined inbox** — never a live
+folder. A unit can refuse incoming files entirely (**Accept incoming** toggle /
+`mesh_file_receive`).
+
+Flow:
+
+- **Send** — pick a destination unit, then drag-and-drop a file from your computer,
+  or use the **Send** (paper-plane) action on any row in the **Files** tab. Files
+  already on the unit stream straight to the peer; a file dropped from your machine
+  is staged on the unit first. Sends run in the background with live progress.
+- **Vault files** can be sent too: an unlocked Vault decrypts the file on send. Note
+  it then exists as plaintext on the receiving unit's disk (the link itself stays
+  WireGuard-encrypted) until the operator files it.
+- **Receive** — arrivals land in the unit's **Inbox** (under `data/mesh_inbox/`,
+  gitignored). The receiving operator picks where each file goes — an Uploads/Backups
+  folder, or the Vault — with **Save**, or drops it with **Discard**. Nothing is
+  auto-filed. A badge appears on the **Inbox** entry in the Files-tab Directories
+  list and on the File Transfer sub-tab.
+
+Endpoints: `POST /api/mesh/files/push` (receiver), `POST /api/mesh/files/send`
+(operator), `GET /api/mesh/transfers`, `GET /api/mesh/inbox`,
+`POST /api/mesh/inbox/{save,discard}`, `POST /api/mesh/files/config`. Per-file size
+ceiling is 4 GB.
+
 ## Cross-site incident correlation
 
 Each unit pulls its peers' Watchtower alerts and folds them into its **own**

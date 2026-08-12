@@ -519,7 +519,12 @@ def check_authentication():
         # the handler only ever runs git_updater against this checkout — a peer
         # cannot pick what runs, only that an update runs.
         peer_update = request.method == 'POST' and path == '/api/mesh/update'
-        if (peer_read or peer_control or peer_scan_write or peer_update) and _is_mesh_peer_request():
+        # File transfer: a peer may push a file to this unit's quarantined inbox.
+        # Exact-path allowlisted; the handler itself only ever writes into the
+        # inbox (never a live path) and can be turned off (mesh_file_receive).
+        peer_file_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        if (peer_read or peer_control or peer_scan_write or peer_update
+                or peer_file_push) and _is_mesh_peer_request():
             return
 
     # Check if user is authenticated via Flask session
@@ -19881,6 +19886,194 @@ def _get_safe_vault():
                 base_dir = os.path.join(shared_data.datadir, 'safe')
                 _safe_vault = SafeVault(base_dir)
     return _safe_vault
+
+
+# ---------------------------------------------------------------------------
+# Mesh file transfer — move files between Ragnar units over Tailscale
+# ---------------------------------------------------------------------------
+_mesh_transfer = None
+_mesh_transfer_lock = threading.Lock()
+
+
+def _get_mesh_transfer():
+    """Lazily build the single MeshTransfer instance (inbox under datadir)."""
+    global _mesh_transfer
+    if _mesh_transfer is None:
+        with _mesh_transfer_lock:
+            if _mesh_transfer is None:
+                from mesh_transfer import MeshTransfer
+                _mesh_transfer = MeshTransfer(os.path.join(shared_data.datadir, 'mesh_inbox'))
+    return _mesh_transfer
+
+
+def _mesh_receive_enabled():
+    # Default on when mesh is enabled; operator can turn off receiving.
+    return bool(shared_data.config.get('mesh_file_receive', True))
+
+
+def _unique_dest(directory, filename):
+    """A non-colliding path in `directory` for `filename` (adds ' (2)', …)."""
+    base, ext = os.path.splitext(filename)
+    candidate = os.path.join(directory, filename)
+    n = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, f'{base} ({n}){ext}')
+        n += 1
+    return candidate
+
+
+@app.route('/api/mesh/files/push', methods=['POST'])
+def mesh_files_push():
+    """Receive a file from a peer into this unit's quarantined inbox.
+
+    Reachable by a tagged peer (allowlisted in check_authentication) or the
+    local session. Streams the raw body to disk; never touches a live folder.
+    """
+    if not _mesh_receive_enabled():
+        return jsonify({'success': False, 'error': 'This unit is not accepting transfers'}), 403
+    try:
+        filename = request.headers.get('X-Filename') or 'file'
+        sender = request.headers.get('X-Sender-Name') or ''
+        try:
+            sender_id = int(request.headers.get('X-Sender-Id') or 0)
+        except (TypeError, ValueError):
+            sender_id = 0
+        meta = _get_mesh_transfer().receive_stream(
+            request.stream, request.content_length or 0, filename, sender, sender_id)
+        logger.info(f"Mesh inbox: received {meta['name']} ({meta['size']} bytes) from {meta['sender']}")
+        return jsonify({'success': True, 'id': meta['id']})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh push error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/files/send', methods=['POST'])
+def mesh_files_send():
+    """Operator: stream a file from this unit to a peer (runs in background).
+
+    Source is one of: a drag-dropped upload (multipart 'file'), an /uploads or
+    /backups path ('source':'path'), or an unlocked Vault file ('source':'vault').
+    """
+    import tempfile
+    try:
+        mt = _get_mesh_transfer()
+        multipart = bool(request.files.get('file'))
+        body = {} if multipart else (request.get_json(silent=True) or {})
+        target_id = (request.form.get('target_id') if multipart else body.get('target_id')) or ''
+
+        node = _resolve_delegate_node(target_id)
+        if not node:
+            return jsonify({'success': False, 'error': 'Target unit not found in mesh'}), 400
+        dest_name = node.get('viking_name') or node.get('label') or node.get('short_name') or 'peer'
+        url = mesh_manager.peer_url(node, _mesh_node_port(), '/api/mesh/files/push')
+        if not url:
+            return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
+
+        headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id())}
+        cleanup = False
+
+        if multipart:
+            f = request.files['file']
+            filename = os.path.basename(f.filename or 'file')
+            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+            os.close(fd)
+            f.save(src_path)
+            cleanup = True
+        elif body.get('source') == 'vault':
+            entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
+            filename = os.path.basename(entry.get('name', 'file'))
+            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+            with os.fdopen(fd, 'wb') as w:
+                w.write(data)
+            cleanup = True
+        else:  # a real /uploads or /backups file
+            try:
+                src_path = _resolve_upload_target(body.get('path', ''))
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid source path'}), 400
+            if not os.path.isfile(src_path):
+                return jsonify({'success': False, 'error': 'Source file not found'}), 404
+            filename = os.path.basename(src_path)
+
+        tid = mt.registry.create(filename, dest_name)
+        mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
+        return jsonify({'success': True, 'transfer_id': tid, 'dest': dest_name})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first to send a Vault file'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/transfers')
+def mesh_transfers_list():
+    """Outbound transfer progress/history for the UI to poll."""
+    return jsonify({'success': True, 'transfers': _get_mesh_transfer().registry.list()})
+
+
+@app.route('/api/mesh/inbox')
+def mesh_inbox_list():
+    """Files received into this unit's inbox, awaiting the operator's choice."""
+    return jsonify({'success': True,
+                    'items': _get_mesh_transfer().list_inbox(),
+                    'receive_enabled': _mesh_receive_enabled()})
+
+
+@app.route('/api/mesh/inbox/save', methods=['POST'])
+def mesh_inbox_save():
+    """File an inbox item into a chosen folder: an /uploads|/backups path, or
+    the Vault (dest 'vault' or 'vault:<subfolder>')."""
+    data = request.get_json(silent=True) or {}
+    item_id = data.get('id', '')
+    dest = data.get('dest', '/uploads') or '/uploads'
+    mt = _get_mesh_transfer()
+    meta = mt.get_item(item_id)
+    if not meta:
+        return jsonify({'success': False, 'error': 'Inbox item not found'}), 404
+    try:
+        if dest == 'vault' or dest.startswith('vault:'):
+            vault_dir = dest.split(':', 1)[1] if ':' in dest else ''
+            _m, blob = mt.read_item(item_id)
+            _get_safe_vault().add_file(meta['name'], blob, None, dir=vault_dir)
+        else:
+            try:
+                actual_dir = _resolve_upload_target(dest)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid destination'}), 400
+            os.makedirs(actual_dir, exist_ok=True)
+            import shutil as _sh
+            _sh.copy2(mt.blob_path_for(item_id),
+                      _unique_dest(actual_dir, os.path.basename(meta['name'])))
+        mt.discard(item_id)
+        logger.info(f"Mesh inbox: saved {meta['name']} to {dest}")
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh inbox save error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/inbox/discard', methods=['POST'])
+def mesh_inbox_discard():
+    data = request.get_json(silent=True) or {}
+    _get_mesh_transfer().discard(data.get('id', ''))
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/files/config', methods=['POST'])
+def mesh_files_config():
+    """Toggle whether this unit accepts incoming transfers."""
+    data = request.get_json(silent=True) or {}
+    shared_data.config['mesh_file_receive'] = bool(data.get('receive', True))
+    shared_data.save_config()
+    return jsonify({'success': True, 'receive_enabled': _mesh_receive_enabled()})
 
 
 @app.route('/api/safe/status')
