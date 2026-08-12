@@ -21601,6 +21601,9 @@ function displayDirectoryTree() {
     // Mesh Inbox shortcut — jumps to Ragnar Mesh → File Transfer. Shown only
     // when there are received files waiting (filled in asynchronously).
     html += '<div id="directory-tree-inbox"></div>';
+    // Mesh Share shortcut — jumps to Ragnar Mesh → Mesh Share (only when the
+    // mesh is enabled).
+    html += '<div id="directory-tree-share"></div>';
     // Placeholder for the Vault row — filled in asynchronously once we know its
     // lock state, so it only appears in Directories while the Vault is unlocked.
     html += '<div id="directory-tree-safe"></div>';
@@ -21621,6 +21624,34 @@ function displayDirectoryTree() {
                         <span class="ml-auto text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">${n}</span>
                     </div>`;
             } else if (slot) { slot.innerHTML = ''; }
+        })
+        .catch(() => {});
+
+    // Mesh Share shortcut — shown when this unit is in a mesh. Badge = the
+    // number of files this unit is publishing.
+    networkAwareFetch('/api/mesh/status')
+        .then(r => r.json())
+        .then(s => {
+            const slot = document.getElementById('directory-tree-share');
+            if (!slot) return;
+            if (s && s.enabled) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-sky-600/40" onclick="showTab('mesh'); showMeshView('share')">
+                        <span class="mr-3">📡</span><span>Mesh Share</span>
+                        <span id="directory-tree-share-badge" class="hidden ml-auto text-xs bg-sky-500 text-slate-900 font-bold px-1.5 rounded-full"></span>
+                    </div>`;
+                // Cheap local count for the badge (files WE publish).
+                networkAwareFetch('/api/mesh/share/local')
+                    .then(r => r.json())
+                    .then(d => {
+                        const b = document.getElementById('directory-tree-share-badge');
+                        const n = (d && d.files) ? d.files.length : 0;
+                        if (b && n) { b.textContent = n; b.classList.remove('hidden'); }
+                    })
+                    .catch(() => {});
+            } else {
+                slot.innerHTML = '';
+            }
         })
         .catch(() => {});
 
