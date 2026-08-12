@@ -22465,11 +22465,13 @@ function loadXferTransfers() {
         const items = (d && d.transfers) || [];
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">No transfers yet.</p>'; return; }
         el.innerHTML = items.map(t => {
-            let right, bar = '';
+            let right, bar = '', extra = '';
             if (t.state === 'delivered') right = '<span class="text-green-400 text-xs whitespace-nowrap">✓ delivered</span>';
-            else if (t.state === 'failed') right = `<span class="text-red-400 text-xs whitespace-nowrap" title="${escapeAttr(t.error || '')}">✗ failed</span>`;
-            else { right = `<span class="text-sky-300 text-xs">${t.pct || 0}%</span>`; bar = `<div class="w-full bg-slate-700 rounded-full h-1.5 mt-1"><div class="bg-sky-500 h-1.5 rounded-full" style="width:${t.pct || 0}%"></div></div>`; }
-            return `<div class="py-2 border-b border-slate-700/50"><div class="flex justify-between text-sm gap-2"><span class="truncate">${escapeHtml(t.name)} <span class="text-gray-500">→</span> <b>${escapeHtml(t.dest)}</b></span>${right}</div>${bar}</div>`;
+            else if (t.state === 'failed') {
+                right = '<span class="text-red-400 text-xs whitespace-nowrap">✗ failed</span>';
+                if (t.error) extra = `<div class="text-xs text-red-400/80 mt-0.5 break-words">${escapeHtml(t.error)}</div>`;
+            } else { right = `<span class="text-sky-300 text-xs">${t.pct || 0}%</span>`; bar = `<div class="w-full bg-slate-700 rounded-full h-1.5 mt-1"><div class="bg-sky-500 h-1.5 rounded-full" style="width:${t.pct || 0}%"></div></div>`; }
+            return `<div class="py-2 border-b border-slate-700/50"><div class="flex justify-between text-sm gap-2"><span class="truncate">${escapeHtml(t.name)} <span class="text-gray-500">→</span> <b>${escapeHtml(t.dest)}</b></span>${right}</div>${bar}${extra}</div>`;
         }).join('');
     }).catch(() => {});
 }

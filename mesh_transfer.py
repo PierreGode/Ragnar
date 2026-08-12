@@ -238,10 +238,13 @@ class MeshTransfer:
                 self.registry.update(tid, state='delivered', sent=total, pct=100)
             elif resp.status_code == 401:
                 self.registry.update(tid, state='failed',
-                                     error='not authorized by peer (check mesh tag)')
+                                     error='peer rejected our identity (both units need the same mesh tag)')
             elif resp.status_code == 403:
                 self.registry.update(tid, state='failed',
-                                     error='peer is not accepting transfers')
+                                     error='peer is not accepting transfers (turn on "Accept incoming" there)')
+            elif resp.status_code == 404:
+                self.registry.update(tid, state='failed',
+                                     error='peer has no transfer endpoint — update that unit to this version')
             else:
                 msg = ''
                 try:
@@ -249,9 +252,16 @@ class MeshTransfer:
                 except Exception:
                     pass
                 self.registry.update(tid, state='failed',
-                                     error=msg or ('HTTP %d' % resp.status_code))
+                                     error=msg or ('peer returned HTTP %d' % resp.status_code))
         except Exception as exc:
-            self.registry.update(tid, state='failed', error=type(exc).__name__ + ': ' + str(exc))
+            name = type(exc).__name__
+            if 'ConnectionError' in name or 'ConnectTimeout' in name:
+                msg = 'could not reach peer — Ragnar may be down or on a different port'
+            elif 'Timeout' in name:
+                msg = 'timed out talking to peer'
+            else:
+                msg = str(exc) or name
+            self.registry.update(tid, state='failed', error=msg)
         finally:
             if cleanup_source:
                 try:
