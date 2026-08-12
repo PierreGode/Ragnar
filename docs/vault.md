@@ -26,11 +26,12 @@ Typical flow:
    - **Upload into the folder you're viewing** (**⬆ Add files**),
    - navigate with the **breadcrumb**, the **Back** and **Up** buttons, or the
      **.. (Up)** row,
-   - **view / download / rename / delete** files, and **rename or delete a folder**
-     (delete removes everything inside it).
+   - **view / download / rename / move / delete** files, and **rename, move or
+     delete a folder** (delete removes everything inside it). **Move** opens a
+     folder picker — navigate to the target and click *Move here*.
 
    Files and folders in **Uploads** / **Backups** support the same New folder,
-   upload-here, rename and delete actions and Back/Up navigation.
+   upload-here, rename, **move** and delete actions and Back/Up navigation.
 
    The Vault dialog shows a usage summary with a **Browse files** shortcut into the
    same view.
