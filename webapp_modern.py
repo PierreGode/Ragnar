@@ -53,6 +53,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+from safe_vault import SafeVault, SafeError, SafeLockedError
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
 from logger import Logger
@@ -19519,7 +19520,13 @@ def preview_file_api():
                            '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
-        if ext in IMAGE_EXTENSIONS:
+        if ext == '.pdf' or mime_type == 'application/pdf':
+            # Rendered inline by the browser via an iframe pointed at the
+            # download endpoint (?inline=1) — no base64 blob in the JSON.
+            return jsonify({'type': 'pdf', 'size': file_size,
+                            'name': os.path.basename(actual_path)})
+
+        elif ext in IMAGE_EXTENSIONS:
             if file_size > 5 * 1024 * 1024:  # 5MB limit for images
                 return jsonify({'type': 'too_large', 'size': file_size, 'name': os.path.basename(actual_path)})
             with open(actual_path, 'rb') as f:
@@ -19597,12 +19604,15 @@ def download_file_api():
         if not os.path.isfile(actual_path):
             return jsonify({'error': 'File not found'}), 404
 
+        # inline=1 serves the file for in-browser display (e.g. PDF preview)
+        # instead of forcing a download.
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
         return send_from_directory(
             os.path.dirname(actual_path),
             os.path.basename(actual_path),
-            as_attachment=True
+            as_attachment=not inline
         )
-        
+
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         return jsonify({'error': str(e)}), 500
@@ -19677,49 +19687,86 @@ def delete_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+def _resolve_upload_target(target_path):
+    """Map an /uploads or /backups virtual dir (possibly nested) to a real dir.
+
+    Returns the actual directory path, or raises ValueError on a bad/escaping
+    path. Only the writable uploads and backups trees are allowed as targets.
+    """
+    if target_path == '/uploads' or target_path.startswith('/uploads/'):
+        return _resolve_legacy_path('/uploads', shared_data.upload_dir, target_path)
+    if target_path == '/backups' or target_path.startswith('/backups/'):
+        return _resolve_legacy_path('/backups', shared_data.backupdir, target_path)
+    raise ValueError('Invalid upload path')
+
+
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
-    """Upload a file"""
+    """Upload one or more files into an /uploads or /backups folder."""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
-        
-        file = request.files['file']
+
         target_path = request.form.get('path', '/uploads')
-        
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        # Map virtual path to actual path
-        actual_dir = ""
-        if target_path.startswith('/uploads'):
-            actual_dir = shared_data.upload_dir
-        elif target_path.startswith('/backups'):
-            actual_dir = shared_data.backupdir
-        else:
+        try:
+            actual_dir = _resolve_upload_target(target_path)
+        except ValueError:
             return jsonify({'error': 'Invalid upload path'}), 400
-        
-        # Create directory if it doesn't exist
+
+        # Create the (possibly nested) directory if it doesn't exist.
         os.makedirs(actual_dir, exist_ok=True)
-        
-        # Save file
-        filename = file.filename
-        if not filename:
-            return jsonify({'error': 'Invalid filename'}), 400
-            
-        actual_path = os.path.join(actual_dir, filename)
-        file.save(actual_path)
-        
-        logger.info(f"File uploaded: {actual_path}")
-        
+
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            filename = os.path.basename(file.filename)  # strip any client path
+            if not filename:
+                continue
+            file.save(os.path.join(actual_dir, filename))
+            stored.append(filename)
+
+        if not stored:
+            return jsonify({'error': 'No file selected'}), 400
+
+        logger.info(f"Uploaded {len(stored)} file(s) to {actual_dir}")
         return jsonify({
             'success': True,
             'message': 'File uploaded successfully',
-            'filename': filename
+            'filename': stored[0],
+            'stored': len(stored),
         })
-        
+
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files/mkdir', methods=['POST'])
+def mkdir_file_api():
+    """Create a subfolder under /uploads or /backups."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('path', '/uploads') or '/uploads'
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Folder name required'}), 400
+        # A single new folder name only — reject separators and traversal.
+        if '/' in name or '\\' in name or name in ('.', '..'):
+            return jsonify({'error': 'Invalid folder name'}), 400
+
+        target = parent.rstrip('/') + '/' + name
+        try:
+            actual_dir = _resolve_upload_target(target)
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+
+        os.makedirs(actual_dir, exist_ok=True)
+        logger.info(f"Created folder: {actual_dir}")
+        return jsonify({'success': True, 'path': target, 'name': name})
+
+    except Exception as e:
+        logger.error(f"Error creating folder: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -19782,6 +19829,281 @@ def clear_files_api():
     except Exception as e:
         logger.error(f"Error clearing files: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Safe — password-protected, size-capped encrypted vault (Files tab)
+# ---------------------------------------------------------------------------
+
+_safe_vault = None
+_safe_vault_lock = threading.Lock()
+
+
+def _get_safe_vault():
+    """Lazily build the single SafeVault instance under the data directory."""
+    global _safe_vault
+    if _safe_vault is None:
+        with _safe_vault_lock:
+            if _safe_vault is None:
+                base_dir = os.path.join(shared_data.datadir, 'safe')
+                _safe_vault = SafeVault(base_dir)
+    return _safe_vault
+
+
+@app.route('/api/safe/status')
+def safe_status_api():
+    """Report whether the Safe is set up, unlocked, and its usage."""
+    try:
+        info = _get_safe_vault().status()
+        # Advertise the configurable size window so the UI can build its picker.
+        from safe_vault import MIN_SIZE_BYTES, MAX_SIZE_BYTES
+        info['min_size_bytes'] = MIN_SIZE_BYTES
+        info['max_size_bytes'] = MAX_SIZE_BYTES
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            info['disk_free_bytes'] = usage.free
+            info['disk_total_bytes'] = usage.total
+        except OSError:
+            pass
+        return jsonify({'success': True, **info})
+    except Exception as e:
+        logger.error(f"Safe status error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/setup', methods=['POST'])
+def safe_setup_api():
+    """Create the Safe for the first time: choose password + size cap."""
+    try:
+        data = request.get_json(silent=True) or {}
+        password = data.get('password') or ''
+        # Accept size in MB from the UI; clamp against disk free space.
+        size_mb = _safe_int(data.get('size_mb'), 0, min_v=0)
+        size_bytes = size_mb * 1024 * 1024
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            # Leave a small margin so we never fill the card completely.
+            if size_bytes > max(0, usage.free - 32 * 1024 * 1024):
+                return jsonify({'success': False,
+                                'error': 'Requested size exceeds available disk space'}), 400
+        except OSError:
+            pass
+        _get_safe_vault().setup(password, size_bytes)
+        logger.info("Safe created (%d MB cap)" % size_mb)
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe setup error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/unlock', methods=['POST'])
+def safe_unlock_api():
+    """Unlock the Safe with the password for this server session."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().unlock(data.get('password') or '')
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe unlock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/lock', methods=['POST'])
+def safe_lock_api():
+    """Wipe the in-memory key so the Safe requires the password again."""
+    try:
+        _get_safe_vault().lock()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Safe lock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/destroy', methods=['POST'])
+def safe_destroy_api():
+    """Permanently erase the Safe (verifies the password first)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().destroy(data.get('password') or '')
+        logger.info("Safe permanently deleted by user request")
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe destroy error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/list')
+def safe_list_api():
+    """List a folder in the Safe: its files and immediate subfolders (unlock)."""
+    try:
+        listing = _get_safe_vault().list_dir(request.args.get('dir', ''))
+        return jsonify({
+            'success': True,
+            'dir': listing['dir'],
+            'folders': [{'name': f['name'], 'path': f['path']} for f in listing['folders']],
+            'files': [{
+                'id': e['id'],
+                'name': e.get('name', ''),
+                'size': e.get('size', 0),
+                'mime': e.get('mime', ''),
+                'modified': e.get('modified'),
+            } for e in listing['files']],
+        })
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe list error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/mkdir', methods=['POST'])
+def safe_mkdir_api():
+    """Create a folder inside the Safe (requires unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('dir', '') or ''
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'Folder name required'}), 400
+        # A single new folder name — no path separators from the user.
+        if '/' in name or '\\' in name:
+            return jsonify({'success': False, 'error': 'Folder name cannot contain slashes'}), 400
+        path = (parent + '/' + name) if parent else name
+        created = _get_safe_vault().mkdir(path)
+        return jsonify({'success': True, 'path': created})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe mkdir error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/upload', methods=['POST'])
+def safe_upload_api():
+    """Encrypt and store one or more files into a Safe folder (requires unlock)."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'}), 400
+        target_dir = request.form.get('dir', '') or ''
+        vault = _get_safe_vault()
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            data = file.read()
+            mime = file.mimetype or 'application/octet-stream'
+            vault.add_file(os.path.basename(file.filename), data, mime, dir=target_dir)
+            stored.append(file.filename)
+        if not stored:
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        logger.info("Safe: stored %d encrypted file(s)" % len(stored))
+        return jsonify({'success': True, 'stored': len(stored)})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe upload error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/download')
+def safe_download_api():
+    """Decrypt and stream a stored file as an attachment (requires unlock)."""
+    try:
+        import mimetypes
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        resp = make_response(data)
+        safe_name = os.path.basename(entry.get('name', 'file'))
+        # Prefer the stored mime, but fall back to the extension so PDFs (and
+        # friends) stored with a generic type still render inline under nosniff.
+        mime = entry.get('mime') or 'application/octet-stream'
+        if mime == 'application/octet-stream':
+            mime = mimetypes.guess_type(safe_name)[0] or mime
+        resp.headers['Content-Type'] = mime
+        # inline=1 lets the browser render it in place (e.g. PDF preview).
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
+        disposition = 'inline' if inline else 'attachment'
+        resp.headers['Content-Disposition'] = '%s; filename="%s"' % (disposition, safe_name)
+        resp.headers['Content-Length'] = str(len(data))
+        return resp
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe download error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/preview')
+def safe_preview_api():
+    """Decrypt a stored file in memory and return an inline preview payload."""
+    import mimetypes
+    try:
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        name = os.path.basename(entry.get('name', 'file'))
+        mime = entry.get('mime') or mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        ext = os.path.splitext(name)[1].lower()
+
+        TEXT_EXTENSIONS = {'.txt', '.log', '.csv', '.json', '.xml', '.yaml', '.yml',
+                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
+        IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
+
+        if ext == '.pdf' or mime == 'application/pdf':
+            return jsonify({'type': 'pdf', 'size': len(data), 'name': name})
+        elif ext in IMAGE_EXTENSIONS:
+            if len(data) > 5 * 1024 * 1024:
+                return jsonify({'type': 'too_large', 'size': len(data), 'name': name})
+            return jsonify({'type': 'image', 'mime': mime,
+                            'data': base64.b64encode(data).decode('ascii'), 'name': name})
+        elif ext in TEXT_EXTENSIONS or (mime and mime.startswith('text/')):
+            truncated = len(data) > 512 * 1024
+            text = data[:512 * 1024].decode('utf-8', errors='replace')
+            return jsonify({'type': 'text', 'content': text, 'truncated': truncated,
+                            'size': len(data), 'name': name})
+        else:
+            return jsonify({'type': 'binary', 'mime': mime, 'size': len(data), 'name': name})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe preview error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/delete', methods=['POST'])
+def safe_delete_api():
+    """Remove a file, or a folder and its contents, from the Safe (unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        folder = data.get('folder')
+        if folder:
+            _get_safe_vault().delete_folder(folder)
+        else:
+            _get_safe_vault().delete_file(data.get('id', ''))
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe delete error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # Legacy endpoint compatibility
 @app.route('/list_files')
