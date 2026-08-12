@@ -4417,13 +4417,13 @@
                             <svg id="safe-toggle-icon" class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                             </svg>
-                            <span id="safe-toggle-label" class="whitespace-nowrap">Safe</span>
+                            <span id="safe-toggle-label" class="whitespace-nowrap">Vault</span>
                         </button>
                         <button onclick="uploadOrOpenSafe()" class="flex items-center justify-center bg-amber-700 hover:bg-amber-800 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
                             <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                             </svg>
-                            <span class="whitespace-nowrap">Upload to Safe</span>
+                            <span class="whitespace-nowrap">Upload to Vault</span>
                         </button>
                         <button onclick="clearFiles()" class="flex items-center justify-center bg-red-600 hover:bg-red-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
                             <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4455,9 +4455,17 @@
                     <!-- File List -->
                     <div class="lg:col-span-2 lg:flex lg:flex-col lg:min-h-0">
                         <div class="flex flex-col gap-2 mb-3 lg:flex-shrink-0">
-                            <div class="flex items-center justify-between">
-                                <h3 class="text-lg font-semibold">Files</h3>
-                                <div class="text-sm text-gray-400">
+                            <div class="flex items-center justify-between gap-2">
+                                <div class="flex items-center gap-1.5 min-w-0">
+                                    <button onclick="fileGoBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors flex-shrink-0">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                    </button>
+                                    <button onclick="fileGoUp()" title="Up one folder" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors flex-shrink-0">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>
+                                    </button>
+                                    <h3 class="text-lg font-semibold ml-1">Files</h3>
+                                </div>
+                                <div class="text-sm text-gray-400 truncate">
                                     <span id="current-path">/</span>
                                 </div>
                             </div>
@@ -4535,7 +4543,7 @@
                 </div>
             </div>
 
-            <!-- Safe (encrypted vault) Modal -->
+            <!-- Vault (encrypted) Modal -->
             <div id="safe-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-4">
                 <div class="glass rounded-xl w-full max-w-3xl flex flex-col overflow-hidden" style="max-height:calc(100vh - 2rem)">
                     <!-- Header -->
@@ -4544,7 +4552,7 @@
                             <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                             </svg>
-                            <span class="font-semibold">Safe</span>
+                            <span class="font-semibold">Vault</span>
                             <span id="safe-status-badge" class="hidden text-xs px-2 py-0.5 rounded"></span>
                         </div>
                         <div class="flex items-center gap-2">
@@ -7712,7 +7720,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260812-files-fullwidth"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260812-vault-slider"></script>
 
 </body>
 </html>

@@ -21218,9 +21218,9 @@ let fileOperationInProgress = false;
 let currentFileSort = 'name';
 let currentFileSearch = '';
 
-// Virtual path for the unlocked Safe, browsed in the main pane like a folder.
+// Virtual path for the unlocked Vault, browsed in the main pane like a folder.
 const SAFE_VDIR = '/__safe__';
-// Current subfolder within the Safe ('' = root), preserved across refreshes.
+// Current subfolder within the Vault ('' = root), preserved across refreshes.
 let currentSafeDir = '';
 
 // Real-filesystem locations the user may create folders in / upload to.
@@ -21228,6 +21228,80 @@ function isWritablePath(p) {
     return p === '/uploads' || p.startsWith('/uploads/') ||
            p === '/backups' || p.startsWith('/backups/');
 }
+
+// ── File-explorer navigation (Back = history, Up = parent folder) ────────────
+let fileHistory = [];   // stack of previously-visited locations
+
+function _fileLocationSnapshot() {
+    return currentDirectory === SAFE_VDIR
+        ? { vault: true, dir: currentSafeDir }
+        : { vault: false, path: currentDirectory };
+}
+function _applyFileLocation(loc) {
+    if (loc.vault) { currentSafeDir = loc.dir || ''; currentDirectory = SAFE_VDIR; loadSafeIntoBrowser(); }
+    else { loadFiles(loc.path); }
+}
+// Record-then-navigate for user-initiated moves, so Back can return here.
+function navFs(path) { fileHistory.push(_fileLocationSnapshot()); loadFiles(path); }
+function navVault(dir) { fileHistory.push(_fileLocationSnapshot()); currentSafeDir = dir || ''; currentDirectory = SAFE_VDIR; loadSafeIntoBrowser(); }
+
+function fileGoBack() {
+    if (!fileHistory.length) { showFileError('No previous location'); return; }
+    _applyFileLocation(fileHistory.pop());
+}
+function fileGoUp() {
+    const loc = _fileLocationSnapshot();
+    if (loc.vault) {
+        if (!loc.dir) navFs('/');                                  // Vault root → Directories list
+        else navVault(loc.dir.split('/').slice(0, -1).join('/'));  // up one Vault folder
+    } else {
+        if (loc.path === '/') { showFileError('Already at the top'); return; }
+        navFs(loc.path.split('/').slice(0, -1).join('/') || '/');
+    }
+}
+
+// ── Rename (files + folders), for the filesystem and the Vault ───────────────
+function _promptRename(currentName, apply) {
+    const name = (prompt('New name:', currentName) || '').trim();
+    if (!name || name === currentName) return;
+    apply(name);
+}
+function renameFsEntry(path, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/files/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.success) { showFileSuccess(`Renamed to "${d.name}"`); refreshFiles(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+function renameSafeFile(id, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/safe/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.locked) { afterSafeChange(); return; } if (d.success) { showFileSuccess(`Renamed to "${name}"`); afterSafeChange(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+function renameSafeFolder(path, currentName) {
+    _promptRename(currentName, name => {
+        networkAwareFetch('/api/safe/rename', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder: path, name })
+        })
+        .then(r => r.json())
+        .then(d => { if (d.locked) { afterSafeChange(); return; } if (d.success) { showFileSuccess(`Renamed to "${name}"`); afterSafeChange(); } else showFileError(d.error || 'Rename failed'); })
+        .catch(e => showFileError(e.message));
+    });
+}
+
+// Small inline SVG icons reused by row action buttons.
+const ICON_RENAME = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>';
 
 function setFileSort(sort) {
     currentFileSort = sort;
@@ -21248,7 +21322,7 @@ function onFileSearch(value) {
 
 function loadFiles(path = '/', highlightFile = null) {
     if (fileOperationInProgress) return;
-    // The Safe is not a real filesystem path — browse it via the /api/safe API.
+    // The Vault is not a real filesystem path — browse it via the /api/safe API.
     if (path === SAFE_VDIR) { loadSafeIntoBrowser(); return; }
     const desiredHighlight = highlightFile || (pendingFileHighlight && pendingFileHighlight.directory === path ? pendingFileHighlight.file : null);
     
@@ -21296,7 +21370,7 @@ function displayFiles(files, path, highlightFile = null) {
     if (path !== '/') {
         const parentPath = path.split('/').slice(0, -1).join('/') || '/';
         html += `
-            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${escapeAttr(parentPath)}')">
+            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navFs('${escapeAttr(parentPath)}')">
                 <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path>
                 </svg>
@@ -21336,30 +21410,36 @@ function displayFiles(files, path, highlightFile = null) {
         const size = file.is_directory ? '' : formatBytes(file.size);
         const date = file.modified ? new Date(file.modified * 1000).toLocaleDateString() : '';
         const fileKey = encodeURIComponent(file.name);
-        
+        const writable = isWritablePath(path);
+        const openAction = file.is_directory
+            ? `navFs('${escapeAttr(file.path)}')`
+            : `previewFile('${escapeAttr(file.path)}')`;
+
+        // Row actions: download (files), rename (writable), delete (files always,
+        // folders only in writable locations).
+        let actions = '';
+        if (!file.is_directory) {
+            actions += `<button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg></button>`;
+        }
+        if (writable) {
+            actions += `<button onclick="renameFsEntry('${escapeAttr(file.path)}','${escapeAttr(file.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>`;
+        }
+        if (!file.is_directory || writable) {
+            actions += `<button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>`;
+        }
+
         html += `
             <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors" data-file-key="${fileKey}">
-                <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="${file.is_directory ? `loadFiles('${escapeAttr(file.path)}')` : `previewFile('${escapeAttr(file.path)}')`}">
+                <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="${openAction}">
                     ${icon}
                     <div class="flex-1 min-w-0">
                         <div class="font-medium truncate">${escapeHtml(file.name)}</div>
                         ${!file.is_directory && size ? `<div class="text-sm text-gray-400">${size} • ${date}</div>` : ''}
                     </div>
                 </div>
-                ${!file.is_directory ? `
-                    <div class="flex space-x-2 flex-shrink-0">
-                        <button onclick="downloadFile('${escapeAttr(file.path)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path>
-                            </svg>
-                        </button>
-                        <button onclick="deleteFile('${escapeAttr(file.path)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
-                            </svg>
-                        </button>
-                    </div>
-                ` : ''}
+                ${actions ? `<div class="flex space-x-2 flex-shrink-0">${actions}</div>` : ''}
             </div>
         `;
     });
@@ -21401,20 +21481,20 @@ function displayDirectoryTree() {
     let html = '<div class="space-y-1">';
     directories.forEach(dir => {
         html += `
-            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="loadFiles('${dir.path}')">
+            <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navFs('${dir.path}')">
                 <span class="mr-3">${dir.icon}</span>
                 <span>${dir.name}</span>
             </div>
         `;
     });
-    // Placeholder for the Safe row — filled in asynchronously once we know its
-    // lock state, so it only appears in Directories while the Safe is unlocked.
+    // Placeholder for the Vault row — filled in asynchronously once we know its
+    // lock state, so it only appears in Directories while the Vault is unlocked.
     html += '<div id="directory-tree-safe"></div>';
     html += '</div>';
 
     treeContainer.innerHTML = html;
 
-    // Show the Safe as a browsable folder only when it is unlocked.
+    // Show the Vault as a browsable folder only when it is unlocked.
     networkAwareFetch('/api/safe/status')
         .then(r => r.json())
         .then(s => {
@@ -21422,9 +21502,9 @@ function displayDirectoryTree() {
             if (!slot) return;
             if (s && s.success && s.configured && s.unlocked) {
                 slot.innerHTML = `
-                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="openSafeRoot()">
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="navVault('')">
                         <span class="mr-3">🔒</span>
-                        <span>Safe</span>
+                        <span>Vault</span>
                         <span class="ml-auto text-xs text-amber-300">unlocked</span>
                     </div>`;
             } else {
@@ -21715,8 +21795,8 @@ function newFolder() {
     .catch(err => showFileError(err.message));
 }
 
-// ── Safe (password-protected encrypted vault) ───────────────────────────────
-// The Safe stores files encrypted at rest (AES-256-GCM, key derived from the
+// ── Vault (password-protected encrypted vault) ───────────────────────────────
+// The Vault stores files encrypted at rest (AES-256-GCM, key derived from the
 // password). It must be unlocked with the password for the current server
 // session before anything can be listed, viewed, downloaded or added.
 
@@ -21733,7 +21813,7 @@ function closeSafe() {
     if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
 }
 
-// Header "Safe" button: unlock/set-up when locked, lock when unlocked. Its label
+// Header "Vault" button: unlock/set-up when locked, lock when unlocked. Its label
 // and colour reflect the current state, refreshed via updateSafeHeaderButton().
 function toggleSafeLock() {
     networkAwareFetch('/api/safe/status')
@@ -21745,7 +21825,7 @@ function toggleSafeLock() {
         .catch(() => openSafe());
 }
 
-// Upload-to-Safe header button: go straight to the file picker if already
+// Upload-to-Vault header button: go straight to the file picker if already
 // unlocked, otherwise open the modal so the user can set up / unlock first.
 function uploadOrOpenSafe() {
     networkAwareFetch('/api/safe/status')
@@ -21757,7 +21837,7 @@ function uploadOrOpenSafe() {
         .catch(() => openSafe());
 }
 
-// Keep the header Safe button's label/style in sync with lock state.
+// Keep the header Vault button's label/style in sync with lock state.
 function updateSafeHeaderButton() {
     const btn = document.getElementById('safe-toggle-btn');
     const label = document.getElementById('safe-toggle-label');
@@ -21768,11 +21848,11 @@ function updateSafeHeaderButton() {
     networkAwareFetch('/api/safe/status')
         .then(r => r.json())
         .then(s => {
-            if (!s || !s.success || !s.configured) { label.textContent = 'Set up Safe'; setColour(amber); }
-            else if (s.unlocked) { label.textContent = 'Lock Safe'; setColour(green); }
-            else { label.textContent = 'Unlock Safe'; setColour(amber); }
+            if (!s || !s.success || !s.configured) { label.textContent = 'Set up Vault'; setColour(amber); }
+            else if (s.unlocked) { label.textContent = 'Lock Vault'; setColour(green); }
+            else { label.textContent = 'Unlock Vault'; setColour(amber); }
         })
-        .catch(() => { label.textContent = 'Safe'; setColour(amber); });
+        .catch(() => { label.textContent = 'Vault'; setColour(amber); });
 }
 
 // Fetch current state and render the matching view.
@@ -21782,12 +21862,12 @@ function refreshSafe() {
         body.innerHTML = `<div class="text-center text-gray-400 py-12">
             <svg class="w-8 h-8 inline animate-spin mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-            </svg><p>Loading Safe…</p></div>`;
+            </svg><p>Loading Vault…</p></div>`;
     }
     networkAwareFetch('/api/safe/status')
         .then(r => r.json())
         .then(s => {
-            if (!s.success) { renderSafeError(s.error || 'Failed to read Safe status'); return; }
+            if (!s.success) { renderSafeError(s.error || 'Failed to read Vault status'); return; }
             if (!s.configured) { renderSafeSetup(s); }
             else if (!s.unlocked) { renderSafeUnlock(s); }
             else { renderSafeBrowser(s); }
@@ -21811,7 +21891,7 @@ function setSafeBadge(text, cls) {
     badge.classList.remove('hidden');
 }
 
-// State 1 — not configured: pick a size + password to create the Safe.
+// State 1 — not configured: pick a size + password to create the Vault.
 function renderSafeSetup(s) {
     setSafeBadge('Not set up', 'bg-slate-700 text-gray-300');
     document.getElementById('safe-lock-btn')?.classList.add('hidden');
@@ -21823,29 +21903,25 @@ function renderSafeSetup(s) {
         freeMB && freeMB > minMB ? freeMB : Math.round((s.max_size_bytes || 65536 * 1048576) / 1048576)
     );
     const defMB = Math.min(Math.max(minMB, 256), maxMB);
+    const step = 8;   // fine 8 MB steps (so round values like 1000 MB land exactly)
     const freeLabel = s.disk_free_bytes ? formatBytes(s.disk_free_bytes) : 'unknown';
     const body = document.getElementById('safe-body');
     body.innerHTML = `
         <div class="max-w-lg mx-auto space-y-5">
             <div class="text-sm text-gray-300 bg-slate-800/60 border border-slate-700 rounded-lg p-3">
-                The Safe encrypts every file with your password (AES-256). Choose how much
+                The Vault encrypts every file with your password (AES-256). Choose how much
                 storage to reserve for it below. <span class="text-amber-300">If you forget the
                 password there is no recovery — the files cannot be decrypted.</span>
             </div>
             <div>
-                <label class="block text-sm font-medium mb-1">Safe size</label>
-                <div class="flex items-center gap-3">
-                    <input id="safe-size-range" type="range" min="${minMB}" max="${maxMB}" step="8" value="${defMB}"
-                        oninput="document.getElementById('safe-size-num').value=this.value"
-                        class="flex-1 accent-amber-500">
-                    <div class="flex items-center gap-1">
-                        <input id="safe-size-num" type="number" min="${minMB}" max="${maxMB}" value="${defMB}"
-                            oninput="const r=document.getElementById('safe-size-range'); r.value=Math.min(${maxMB},Math.max(${minMB},this.value||${minMB}));"
-                            class="w-24 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sm text-white">
-                        <span class="text-sm text-gray-400">MB</span>
-                    </div>
+                <div class="flex items-center justify-between mb-1">
+                    <label class="block text-sm font-medium">Vault size</label>
+                    <span id="safe-size-readout" class="text-sm font-semibold text-amber-300"></span>
                 </div>
-                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · range ${minMB}–${maxMB} MB</p>
+                <input id="safe-size-range" type="range" min="${minMB}" max="${maxMB}" step="${step}" value="${defMB}"
+                    data-min="${minMB}" data-max="${maxMB}"
+                    oninput="onVaultSliderInput()" class="w-full accent-amber-500">
+                <p class="text-xs text-gray-500 mt-1">Free on disk: ${freeLabel} · max ${formatVaultSize(maxMB)}</p>
             </div>
             <div>
                 <label class="block text-sm font-medium mb-1">Password</label>
@@ -21859,19 +21935,39 @@ function renderSafeSetup(s) {
                     class="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500">
             </div>
             <div id="safe-setup-msg" class="text-sm text-red-400 hidden"></div>
-            <button onclick="submitSafeSetup()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Create Safe</button>
+            <button onclick="submitSafeSetup()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Create Vault</button>
         </div>`;
+    onVaultSliderInput();   // populate the size readout
+}
+
+// Format a size in MB for display: MB below 1000, GB from 1000 up (so 1000 MB
+// reads as "1 GB", 1500 as "1.5 GB").
+function formatVaultSize(mb) {
+    if (mb < 1000) return mb + ' MB';
+    const gb = mb / 1000;
+    return (gb % 1 === 0 ? gb : gb.toFixed(1)) + ' GB';
+}
+
+// Update the readout as the slider moves.
+function onVaultSliderInput() {
+    const range = document.getElementById('safe-size-range');
+    const out = document.getElementById('safe-size-readout');
+    if (range && out) out.textContent = formatVaultSize(parseInt(range.value, 10) || 0);
 }
 
 function submitSafeSetup() {
-    const sizeMb = parseInt(document.getElementById('safe-size-num').value, 10);
+    const range = document.getElementById('safe-size-range');
+    const sizeMb = parseInt(range.value, 10) || 0;
+    const maxMb = parseInt(range.getAttribute('data-max'), 10) || Infinity;
+    const minMb = parseInt(range.getAttribute('data-min'), 10) || 8;
     const pw1 = document.getElementById('safe-pw1').value;
     const pw2 = document.getElementById('safe-pw2').value;
     const msg = document.getElementById('safe-setup-msg');
     const showMsg = t => { msg.textContent = t; msg.classList.remove('hidden'); };
     if (!pw1 || pw1.length < 6) return showMsg('Password must be at least 6 characters.');
     if (pw1 !== pw2) return showMsg('Passwords do not match.');
-    if (!sizeMb || sizeMb < 8) return showMsg('Please choose a valid size.');
+    if (!sizeMb || sizeMb < minMb) return showMsg(`Please choose a size of at least ${formatBytes(minMb * 1048576)}.`);
+    if (sizeMb > maxMb) return showMsg(`Size is larger than the ${formatBytes(maxMb * 1048576)} available.`);
     msg.classList.add('hidden');
     networkAwareFetch('/api/safe/setup', {
         method: 'POST',
@@ -21880,8 +21976,8 @@ function submitSafeSetup() {
     })
     .then(r => r.json())
     .then(d => {
-        if (d.success) { showFileSuccess('Safe created and unlocked'); afterSafeChange(); }
-        else showMsg(d.error || 'Failed to create Safe');
+        if (d.success) { showFileSuccess('Vault created and unlocked'); afterSafeChange(); }
+        else showMsg(d.error || 'Failed to create Vault');
     })
     .catch(err => showMsg(err.message));
 }
@@ -21898,7 +21994,7 @@ function renderSafeUnlock(s) {
                 <svg class="w-12 h-12 mx-auto text-amber-400 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
                 </svg>
-                <p class="text-gray-300">The Safe is locked${sizeLabel ? ` · ${sizeLabel} reserved` : ''}.</p>
+                <p class="text-gray-300">The Vault is locked${sizeLabel ? ` · ${sizeLabel} reserved` : ''}.</p>
             </div>
             <div>
                 <label class="block text-sm font-medium mb-1">Password</label>
@@ -21909,11 +22005,11 @@ function renderSafeUnlock(s) {
             <div id="safe-unlock-msg" class="text-sm text-red-400 hidden"></div>
             <button onclick="submitSafeUnlock()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Unlock</button>
 
-            <!-- Danger zone: permanently delete the Safe (password required). -->
+            <!-- Danger zone: permanently delete the Vault (password required). -->
             <div class="pt-4 mt-2 border-t border-slate-700">
-                <button id="safe-destroy-toggle" onclick="toggleSafeDestroy(true)" class="w-full text-sm text-red-400 hover:text-red-300 py-2 rounded-lg transition-colors">Delete Safe &amp; erase all files…</button>
+                <button id="safe-destroy-toggle" onclick="toggleSafeDestroy(true)" class="w-full text-sm text-red-400 hover:text-red-300 py-2 rounded-lg transition-colors">Delete Vault &amp; erase all files…</button>
                 <div id="safe-destroy-confirm" class="hidden mt-2 p-3 bg-red-900/20 border border-red-800/50 rounded-lg space-y-3">
-                    <p class="text-sm text-red-200">This permanently erases the Safe and <strong>every encrypted file inside it</strong>. It cannot be undone. Enter your password above, then confirm.</p>
+                    <p class="text-sm text-red-200">This permanently erases the Vault and <strong>every encrypted file inside it</strong>. It cannot be undone. Enter your password above, then confirm.</p>
                     <div class="flex gap-2">
                         <button onclick="destroySafe()" class="flex-1 bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-lg text-sm font-medium">Permanently delete</button>
                         <button onclick="toggleSafeDestroy(false)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm">Cancel</button>
@@ -21929,7 +22025,7 @@ function toggleSafeDestroy(show) {
     document.getElementById('safe-destroy-toggle')?.classList.toggle('hidden', show);
 }
 
-// Permanently erase the Safe. Requires the correct password (verified server
+// Permanently erase the Vault. Requires the correct password (verified server
 // side) plus the explicit confirm click above.
 function destroySafe() {
     const pwEl = document.getElementById('safe-unlock-pw');
@@ -21945,7 +22041,7 @@ function destroySafe() {
     .then(r => r.json())
     .then(d => {
         if (d.success) {
-            showFileSuccess('Safe deleted');
+            showFileSuccess('Vault deleted');
             if (currentDirectory === SAFE_VDIR) { currentDirectory = '/'; loadFiles('/'); }
             afterSafeChange();   // status → not configured → setup view
         } else {
@@ -21974,7 +22070,7 @@ function submitSafeUnlock() {
 function lockSafe() {
     networkAwareFetch('/api/safe/lock', { method: 'POST' })
         .then(r => r.json())
-        .then(() => { showFileSuccess('Safe locked'); afterSafeChange(); })
+        .then(() => { showFileSuccess('Vault locked'); afterSafeChange(); })
         .catch(err => showFileError(err.message));
 }
 
@@ -22005,11 +22101,11 @@ function renderSafeBrowser(s) {
                 <button onclick="uploadToSafe()" class="bg-amber-700 hover:bg-amber-800 text-white px-4 py-2 rounded-lg text-sm transition-colors">+ Add files</button>
                 <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Lock</button>
             </div>
-            <p class="text-xs text-gray-500">The unlocked Safe also appears as a 🔒 folder in Directories — click it to browse, create subfolders and upload.</p>
+            <p class="text-xs text-gray-500">The unlocked Vault also appears as a 🔒 folder in Directories — click it to browse, create subfolders and upload.</p>
         </div>`;
 }
 
-// From the modal, jump to browsing the Safe root in the main Files pane.
+// From the modal, jump to browsing the Vault root in the main Files pane.
 function browseSafeFromModal() {
     closeSafe();
     currentSafeDir = '';
@@ -22017,48 +22113,48 @@ function browseSafeFromModal() {
     loadSafeIntoBrowser();
 }
 
-// Enter the Safe from Directories (always at the root).
+// Enter the Vault from Directories (always at the root).
 function openSafeRoot() {
     currentSafeDir = '';
     currentDirectory = SAFE_VDIR;
     loadSafeIntoBrowser();
 }
 
-// Navigate to a subfolder within the Safe.
+// Navigate to a subfolder within the Vault.
 function openSafeDir(dir) {
     currentSafeDir = dir || '';
     loadSafeIntoBrowser();
 }
 
-// Render the unlocked Safe (folder `currentSafeDir`) into the main Files pane,
+// Render the unlocked Vault (folder `currentSafeDir`) into the main Files pane,
 // with folder navigation, a breadcrumb, and per-item actions. Honors the shared
-// search box and sort control. Falls back to the normal browser if the Safe
+// search box and sort control. Falls back to the normal browser if the Vault
 // locked in the meantime.
 function loadSafeIntoBrowser() {
     currentDirectory = SAFE_VDIR;
-    updateCurrentPath(currentSafeDir ? `🔒 Safe/${currentSafeDir}` : '🔒 Safe');
+    updateCurrentPath(currentSafeDir ? `🔒 Vault/${currentSafeDir}` : '🔒 Vault');
     const fileList = document.getElementById('file-list');
     if (!fileList) return;
-    fileList.innerHTML = '<p class="text-gray-400 p-4">Loading Safe…</p>';
+    fileList.innerHTML = '<p class="text-gray-400 p-4">Loading Vault…</p>';
     networkAwareFetch(`/api/safe/list?dir=${encodeURIComponent(currentSafeDir)}`)
         .then(r => r.json())
         .then(d => {
             if (d.locked) {
-                showFileError('Safe locked — unlock it again');
+                showFileError('Vault locked — unlock it again');
                 currentDirectory = '/';
                 displayDirectoryTree();
                 loadFiles('/');
                 return;
             }
-            if (!d.success) { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list Safe')}</p>`; return; }
+            if (!d.success) { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list Vault')}</p>`; return; }
 
-            // Breadcrumb (Safe / seg / seg), each segment clickable.
+            // Breadcrumb (Vault / seg / seg), each segment clickable.
             const segs = currentSafeDir ? currentSafeDir.split('/') : [];
             let acc = '';
-            const crumbs = [`<span onclick="openSafeDir('')" class="cursor-pointer hover:text-amber-200">🔒 Safe</span>`];
+            const crumbs = [`<span onclick="navVault('')" class="cursor-pointer hover:text-amber-200">🔒 Vault</span>`];
             segs.forEach(seg => {
                 acc = acc ? acc + '/' + seg : seg;
-                crumbs.push(`<span onclick="openSafeDir('${escapeAttr(acc)}')" class="cursor-pointer hover:text-amber-200">${escapeHtml(seg)}</span>`);
+                crumbs.push(`<span onclick="navVault('${escapeAttr(acc)}')" class="cursor-pointer hover:text-amber-200">${escapeHtml(seg)}</span>`);
             });
 
             const header = `
@@ -22076,7 +22172,7 @@ function loadSafeIntoBrowser() {
             if (currentSafeDir) {
                 const parent = currentSafeDir.split('/').slice(0, -1).join('/');
                 rows += `
-                <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="openSafeDir('${escapeAttr(parent)}')">
+                <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="navVault('${escapeAttr(parent)}')">
                     <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
                     <span class="text-blue-400">.. (Up)</span>
                 </div>`;
@@ -22088,13 +22184,16 @@ function loadSafeIntoBrowser() {
             folders.forEach(f => {
                 rows += `
                 <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
-                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="openSafeDir('${escapeAttr(f.path)}')">
+                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="navVault('${escapeAttr(f.path)}')">
                         <svg class="w-5 h-5 mr-3 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
                         <div class="font-medium truncate">${escapeHtml(f.name)}</div>
                     </div>
-                    <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded flex-shrink-0" title="Delete folder">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                    </button>
+                    <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="renameSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename folder">${ICON_RENAME}</button>
+                        <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete folder">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
                 </div>`;
             });
 
@@ -22121,6 +22220,7 @@ function loadSafeIntoBrowser() {
                         <button onclick="downloadSafeFile('${escapeAttr(f.id)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg>
                         </button>
+                        <button onclick="renameSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-gray-300 hover:bg-slate-600 rounded" title="Rename">${ICON_RENAME}</button>
                         <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
@@ -22139,7 +22239,7 @@ function loadSafeIntoBrowser() {
         .catch(err => { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
 }
 
-// Create a subfolder inside the current Safe folder.
+// Create a subfolder inside the current Vault folder.
 function newSafeFolder() {
     const name = (prompt('New folder name:') || '').trim();
     if (!name) return;
@@ -22150,14 +22250,14 @@ function newSafeFolder() {
     })
     .then(r => r.json())
     .then(d => {
-        if (d.locked) { showFileError('Safe locked — unlock again'); afterSafeChange(); return; }
+        if (d.locked) { showFileError('Vault locked — unlock again'); afterSafeChange(); return; }
         if (d.success) { showFileSuccess(`Created folder "${name}"`); afterSafeChange(); }
         else showFileError(d.error || 'Could not create folder');
     })
     .catch(err => showFileError(err.message));
 }
 
-// Delete a Safe subfolder and everything inside it.
+// Delete a Vault subfolder and everything inside it.
 function deleteSafeFolder(path, name) {
     showFileConfirmModal('Delete folder',
         `Permanently delete the folder "${name}" and all files inside it? This cannot be undone.`,
@@ -22178,9 +22278,9 @@ function deleteSafeFolder(path, name) {
         });
 }
 
-// After any change to the Safe (add/delete/lock/unlock), refresh whichever
+// After any change to the Vault (add/delete/lock/unlock), refresh whichever
 // views are currently showing it: the modal, the directory-pane browser, and
-// the Directories list (so the Safe row appears/disappears with lock state).
+// the Directories list (so the Vault row appears/disappears with lock state).
 function afterSafeChange() {
     const modal = document.getElementById('safe-modal');
     if (modal && !modal.classList.contains('hidden')) refreshSafe();
@@ -22203,8 +22303,8 @@ function uploadToSafe() {
         networkAwareFetch('/api/safe/upload', { method: 'POST', body: formData })
             .then(r => r.json())
             .then(d => {
-                if (d.locked) { showFileError('Safe locked — unlock again'); afterSafeChange(); return; }
-                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Safe`); afterSafeChange(); }
+                if (d.locked) { showFileError('Vault locked — unlock again'); afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Vault`); afterSafeChange(); }
                 else showFileError(d.error || 'Upload failed');
             })
             .catch(err => showFileError(err.message));
@@ -22223,8 +22323,8 @@ function downloadSafeFile(id) {
 }
 
 function deleteSafeFile(id, name) {
-    showFileConfirmModal('Delete from Safe',
-        `Permanently delete "${name}" from the Safe? This cannot be undone.`,
+    showFileConfirmModal('Delete from Vault',
+        `Permanently delete "${name}" from the Vault? This cannot be undone.`,
         () => {
             networkAwareFetch('/api/safe/delete', {
                 method: 'POST',
@@ -22242,7 +22342,7 @@ function deleteSafeFile(id, name) {
         });
 }
 
-// Reuse the standard file-preview modal, fed from the decrypted Safe payload.
+// Reuse the standard file-preview modal, fed from the decrypted Vault payload.
 function previewSafeFile(id, name) {
     const modal = document.getElementById('file-preview-modal');
     const content = document.getElementById('preview-content');
@@ -22279,7 +22379,7 @@ function previewSafeFile(id, name) {
         .catch(err => { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
 }
 
-// Close Safe on backdrop click.
+// Close Vault on backdrop click.
 document.getElementById('safe-modal')?.addEventListener('click', function(e) {
     if (e.target === this) closeSafe();
 });
@@ -23204,6 +23304,12 @@ window.deleteSafeFolder = deleteSafeFolder;
 window.browseSafeFromModal = browseSafeFromModal;
 window.toggleSafeDestroy = toggleSafeDestroy;
 window.destroySafe = destroySafe;
+window.onVaultSliderInput = onVaultSliderInput;
+window.fileGoBack = fileGoBack;
+window.fileGoUp = fileGoUp;
+window.renameFsEntry = renameFsEntry;
+window.renameSafeFile = renameSafeFile;
+window.renameSafeFolder = renameSafeFolder;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions

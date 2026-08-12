@@ -401,3 +401,52 @@ class SafeVault:
             data['folders'] = [fp for fp in data['folders']
                                if not (fp == path or fp.startswith(prefix))]
             self._write_index(data)
+
+    @staticmethod
+    def _clean_name(name):
+        name = (name or '').strip()
+        if not name or '/' in name or '\\' in name or name in ('.', '..'):
+            raise SafeError('Invalid name')
+        return name
+
+    def rename_file(self, file_id, new_name):
+        with self._lock:
+            key = self._require_key()
+            data = self._read_index(key)
+            new_name = self._clean_name(new_name)
+            entry = next((e for e in data['files'] if e.get('id') == file_id), None)
+            if not entry:
+                raise SafeError('File not found in Safe')
+            entry['name'] = new_name
+            self._write_index(data)
+            return new_name
+
+    def rename_folder(self, path, new_name):
+        """Rename a folder, re-homing its subfolders and the files inside it."""
+        with self._lock:
+            key = self._require_key()
+            data = self._read_index(key)
+            path = self._norm_dir(path)
+            new_name = self._clean_name(new_name)
+            if not path or path not in data['folders']:
+                raise SafeError('Folder not found in Safe')
+            parent = path.rsplit('/', 1)[0] if '/' in path else ''
+            new_path = self._norm_dir((parent + '/' + new_name) if parent else new_name)
+            if new_path == path:
+                return path
+            if new_path in data['folders']:
+                raise SafeError('A folder with that name already exists')
+            old_prefix = path + '/'
+
+            def remap(p):
+                if p == path:
+                    return new_path
+                if p.startswith(old_prefix):
+                    return new_path + '/' + p[len(old_prefix):]
+                return p
+
+            data['folders'] = [remap(fp) for fp in data['folders']]
+            for e in data['files']:
+                e['dir'] = remap(e.get('dir', ''))
+            self._write_index(data)
+            return new_path
