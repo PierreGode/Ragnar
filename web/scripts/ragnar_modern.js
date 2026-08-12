@@ -21484,6 +21484,8 @@ function previewFile(filePath) {
             }
             if (data.type === 'image') {
                 renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
+            } else if (data.type === 'pdf') {
+                renderPreviewPdf(content, resolveNetworkAwareEndpoint(`/api/files/download?path=${encodeURIComponent(filePath)}&inline=1`), name);
             } else if (data.type === 'text') {
                 if (data.truncated) truncBadge.classList.remove('hidden');
                 const isCSV = name.toLowerCase().endsWith('.csv');
@@ -21539,6 +21541,14 @@ function renderPreviewImage(content, src, name) {
             Full screen
         </button>
     </div>`;
+}
+
+// Render a PDF inline via an iframe pointed at the (same-origin) download
+// endpoint with inline disposition — the browser's built-in PDF viewer handles
+// paging/zoom. A data: URI would be blocked by the CSP, hence the URL form.
+function renderPreviewPdf(content, url, name) {
+    content.innerHTML = `<iframe src="${url}" title="${escapeHtml(name)}"
+        class="w-full rounded bg-white" style="height:78vh;border:0"></iframe>`;
 }
 
 // Full-screen image viewer — uses the native Fullscreen API when available and
@@ -22248,6 +22258,8 @@ function previewSafeFile(id, name) {
             if (data.error) { content.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(data.error)}</p>`; return; }
             if (data.type === 'image') {
                 renderPreviewImage(content, `data:${data.mime};base64,${data.data}`, name);
+            } else if (data.type === 'pdf') {
+                renderPreviewPdf(content, resolveNetworkAwareEndpoint(`/api/safe/download?id=${encodeURIComponent(id)}&inline=1`), name);
             } else if (data.type === 'text') {
                 if (data.truncated) truncBadge.classList.remove('hidden');
                 content.innerHTML = `<pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(data.content)}</pre>`;

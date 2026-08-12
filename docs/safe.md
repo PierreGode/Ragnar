@@ -90,8 +90,8 @@ All endpoints are under `/api/safe/` and are used by the Files tab UI:
 | `/api/safe/list` | GET | List a folder's files + subfolders (`?dir=`) (requires unlock). |
 | `/api/safe/mkdir` | POST | Create a subfolder (`dir` parent + `name`) (requires unlock). |
 | `/api/safe/upload` | POST | Encrypt & store uploaded file(s) into `dir` (requires unlock). |
-| `/api/safe/download` | GET | Decrypt & stream a file by `id` (requires unlock). |
-| `/api/safe/preview` | GET | Inline text/image preview by `id` (requires unlock). |
+| `/api/safe/download` | GET | Decrypt & stream a file by `id`; `?inline=1` renders in-browser instead of downloading (requires unlock). |
+| `/api/safe/preview` | GET | Inline text/image/PDF preview by `id` (requires unlock). |
 | `/api/safe/delete` | POST | Remove a file by `id`, or a folder (+contents) by `folder` (requires unlock). |
 
 While locked, the file endpoints return `403` with `{"locked": true}`.

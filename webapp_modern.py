@@ -19520,7 +19520,13 @@ def preview_file_api():
                            '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
-        if ext in IMAGE_EXTENSIONS:
+        if ext == '.pdf' or mime_type == 'application/pdf':
+            # Rendered inline by the browser via an iframe pointed at the
+            # download endpoint (?inline=1) — no base64 blob in the JSON.
+            return jsonify({'type': 'pdf', 'size': file_size,
+                            'name': os.path.basename(actual_path)})
+
+        elif ext in IMAGE_EXTENSIONS:
             if file_size > 5 * 1024 * 1024:  # 5MB limit for images
                 return jsonify({'type': 'too_large', 'size': file_size, 'name': os.path.basename(actual_path)})
             with open(actual_path, 'rb') as f:
@@ -19598,12 +19604,15 @@ def download_file_api():
         if not os.path.isfile(actual_path):
             return jsonify({'error': 'File not found'}), 404
 
+        # inline=1 serves the file for in-browser display (e.g. PDF preview)
+        # instead of forcing a download.
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
         return send_from_directory(
             os.path.dirname(actual_path),
             os.path.basename(actual_path),
-            as_attachment=True
+            as_attachment=not inline
         )
-        
+
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         return jsonify({'error': str(e)}), 500
@@ -20012,12 +20021,21 @@ def safe_upload_api():
 def safe_download_api():
     """Decrypt and stream a stored file as an attachment (requires unlock)."""
     try:
+        import mimetypes
         file_id = request.args.get('id', '')
         entry, data = _get_safe_vault().read_file(file_id)
         resp = make_response(data)
-        resp.headers['Content-Type'] = entry.get('mime') or 'application/octet-stream'
         safe_name = os.path.basename(entry.get('name', 'file'))
-        resp.headers['Content-Disposition'] = 'attachment; filename="%s"' % safe_name
+        # Prefer the stored mime, but fall back to the extension so PDFs (and
+        # friends) stored with a generic type still render inline under nosniff.
+        mime = entry.get('mime') or 'application/octet-stream'
+        if mime == 'application/octet-stream':
+            mime = mimetypes.guess_type(safe_name)[0] or mime
+        resp.headers['Content-Type'] = mime
+        # inline=1 lets the browser render it in place (e.g. PDF preview).
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
+        disposition = 'inline' if inline else 'attachment'
+        resp.headers['Content-Disposition'] = '%s; filename="%s"' % (disposition, safe_name)
         resp.headers['Content-Length'] = str(len(data))
         return resp
     except SafeLockedError:
@@ -20044,7 +20062,9 @@ def safe_preview_api():
                            '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
-        if ext in IMAGE_EXTENSIONS:
+        if ext == '.pdf' or mime == 'application/pdf':
+            return jsonify({'type': 'pdf', 'size': len(data), 'name': name})
+        elif ext in IMAGE_EXTENSIONS:
             if len(data) > 5 * 1024 * 1024:
                 return jsonify({'type': 'too_large', 'size': len(data), 'name': name})
             return jsonify({'type': 'image', 'mime': mime,
