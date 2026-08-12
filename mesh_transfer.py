@@ -20,6 +20,7 @@ import json
 import time
 import uuid
 import shutil
+import hashlib
 import threading
 
 try:
@@ -93,12 +94,19 @@ class MeshTransfer:
     def _blob_path(self, item_id):
         return os.path.join(self.inbox_dir, item_id + '.bin')
 
-    def receive_stream(self, stream, content_length, filename, sender_name, sender_id):
+    def receive_stream(self, stream, content_length, filename, sender_name, sender_id,
+                       expected_sha=None):
         """Persist an incoming stream into the inbox. Returns the item metadata.
 
-        Raises ValueError on an over-size file or insufficient disk space.
+        Validates: filename present, size within the limit, enough disk space,
+        the transfer arrived complete (bytes == Content-Length), and — when the
+        sender supplied one — that the SHA-256 matches. Raises ValueError on any
+        failure, leaving no partial file behind.
         """
         filename = _safe_component(filename)
+        if not filename or filename == 'file':
+            # tolerate 'file' fallback, but a truly empty name is rejected below
+            pass
         if content_length and content_length > self.max_bytes:
             raise ValueError('File exceeds the %d byte transfer limit' % self.max_bytes)
         try:
@@ -111,6 +119,7 @@ class MeshTransfer:
         item_id = uuid.uuid4().hex
         blob = self._blob_path(item_id)
         written = 0
+        hasher = hashlib.sha256()
         tmp = blob + '.part'
         try:
             with open(tmp, 'wb') as f:
@@ -121,7 +130,16 @@ class MeshTransfer:
                     written += len(chunk)
                     if written > self.max_bytes:
                         raise ValueError('File exceeds the transfer limit')
+                    hasher.update(chunk)
                     f.write(chunk)
+            if written == 0:
+                raise ValueError('Received an empty file')
+            # Completeness: a dropped connection yields fewer bytes than promised.
+            if content_length and written != content_length:
+                raise ValueError('Incomplete transfer (%d of %d bytes)' % (written, content_length))
+            # Integrity: verify the sender's checksum when provided.
+            if expected_sha and hasher.hexdigest().lower() != expected_sha.strip().lower():
+                raise ValueError('Integrity check failed — file corrupted in transit')
             os.replace(tmp, blob)
         except Exception:
             for p in (tmp, blob):
@@ -140,6 +158,7 @@ class MeshTransfer:
             'id': item_id,
             'name': filename,
             'size': written,
+            'sha256': hasher.hexdigest(),
             'sender': sender_name or 'a peer',
             'sender_id': sender_id or 0,
             'received_at': time.time(),
@@ -245,10 +264,17 @@ class MeshTransfer:
                     except Exception:
                         pass
 
+            # Checksum the file up front so the receiver can verify integrity.
+            hasher = hashlib.sha256()
+            with open(file_path, 'rb') as _hf:
+                for _blk in iter(lambda: _hf.read(CHUNK), b''):
+                    hasher.update(_blk)
+
             body = _ProgressFile(file_path)
             send_headers = dict(headers or {})
             send_headers['Content-Type'] = 'application/octet-stream'
             send_headers['X-Filename'] = filename   # Content-Length set by requests
+            send_headers['X-Content-SHA256'] = hasher.hexdigest()
             try:
                 resp = requests.post(url, data=body, headers=send_headers, timeout=timeout)
             finally:
