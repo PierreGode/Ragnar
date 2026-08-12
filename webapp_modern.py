@@ -19967,7 +19967,8 @@ def mesh_files_push():
         except (TypeError, ValueError):
             sender_id = 0
         meta = _get_mesh_transfer().receive_stream(
-            request.stream, request.content_length or 0, filename, sender, sender_id)
+            request.stream, request.content_length or 0, filename, sender, sender_id,
+            expected_sha=request.headers.get('X-Content-SHA256'))
         logger.info(f"Mesh inbox: received {meta['name']} ({meta['size']} bytes) from {meta['sender']}")
         return jsonify({'success': True, 'id': meta['id']})
     except ValueError as e:
@@ -20029,6 +20030,27 @@ def mesh_files_send():
             if not os.path.isfile(src_path):
                 return jsonify({'success': False, 'error': 'Source file not found'}), 404
             filename = os.path.basename(src_path)
+
+        # Validate the source before queuing a doomed transfer.
+        def _cleanup_staged():
+            if cleanup:
+                try:
+                    os.remove(src_path)
+                except OSError:
+                    pass
+        try:
+            src_size = os.path.getsize(src_path)
+        except OSError:
+            _cleanup_staged()
+            return jsonify({'success': False, 'error': 'Source file not found'}), 404
+        if src_size == 0:
+            _cleanup_staged()
+            return jsonify({'success': False, 'error': 'That file is empty — nothing to send'}), 400
+        if src_size > mt.max_bytes:
+            _cleanup_staged()
+            return jsonify({'success': False,
+                            'error': 'File is larger than the %d GB transfer limit'
+                                     % (mt.max_bytes // (1024 ** 3))}), 400
 
         tid = mt.registry.create(filename, dest_name)
         mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
