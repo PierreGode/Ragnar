@@ -4403,8 +4403,8 @@
         </div>
 
         <div id="files-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-4 sm:p-6">
-                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
+            <div class="glass rounded-xl p-4 sm:p-6 lg:h-[calc(100vh-7rem)] lg:flex lg:flex-col lg:overflow-hidden">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6 lg:flex-shrink-0">
                     <h2 class="text-xl sm:text-2xl font-bold">File Management</h2>
                     <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
                         <button onclick="uploadFile()" class="flex items-center justify-center bg-green-600 hover:bg-green-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
@@ -4441,20 +4441,20 @@
                 </div>
                 
                 <!-- File Browser -->
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6 lg:flex-1 lg:min-h-0">
                     <!-- Directory Tree -->
-                    <div class="lg:col-span-1">
-                        <h3 class="text-lg font-semibold mb-3">Directories</h3>
-                        <div class="glass-card h-48 lg:h-96 overflow-y-auto scrollbar-thin">
+                    <div class="lg:col-span-1 lg:flex lg:flex-col lg:min-h-0">
+                        <h3 class="text-lg font-semibold mb-3 lg:flex-shrink-0">Directories</h3>
+                        <div class="glass-card h-48 lg:h-auto lg:flex-1 lg:min-h-0 overflow-y-auto scrollbar-thin bg-slate-800/40 border border-slate-700 rounded-lg">
                             <div id="directory-tree" class="p-4">
                                 <p class="text-gray-400">Loading directories...</p>
                             </div>
                         </div>
                     </div>
-                    
+
                     <!-- File List -->
-                    <div class="lg:col-span-2">
-                        <div class="flex flex-col gap-2 mb-3">
+                    <div class="lg:col-span-2 lg:flex lg:flex-col lg:min-h-0">
+                        <div class="flex flex-col gap-2 mb-3 lg:flex-shrink-0">
                             <div class="flex items-center justify-between">
                                 <h3 class="text-lg font-semibold">Files</h3>
                                 <div class="text-sm text-gray-400">
@@ -4481,7 +4481,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                        <div class="glass-card h-96 lg:h-auto lg:flex-1 lg:min-h-0 overflow-y-auto scrollbar-thin bg-slate-800/40 border border-slate-700 rounded-lg">
                             <div id="file-list" class="p-4">
                                 <p class="text-gray-400">Select a directory to view files</p>
                             </div>
