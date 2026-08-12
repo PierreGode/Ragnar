@@ -142,6 +142,9 @@ data/output/
 backup/backups/
 backup/uploads/
 
+# Encrypted Safe vault — user data, must never be committed
+data/safe/
+
 # Configuration files (contains sensitive data)
 config/shared_config.json
 
