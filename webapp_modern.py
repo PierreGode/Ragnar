@@ -19994,7 +19994,12 @@ def mesh_files_send():
         node = _resolve_delegate_node(target_id)
         if not node:
             return jsonify({'success': False, 'error': 'Target unit not found in mesh'}), 400
-        dest_name = node.get('viking_name') or node.get('label') or node.get('short_name') or 'peer'
+        # Prefer the peer's self-reported Viking name (from the poll cache) over
+        # the bare tailnet label, so transfers read "→ Kara the Great" not "here-1".
+        _ph = _mesh_peer_health.get(node.get('id'), {}) if isinstance(_mesh_peer_health, dict) else {}
+        dest_name = (node.get('viking_name') or _ph.get('viking_name')
+                     or node.get('label') or _ph.get('label')
+                     or node.get('short_name') or 'peer')
         url = mesh_manager.peer_url(node, _mesh_node_port(), '/api/mesh/files/push')
         if not url:
             return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
