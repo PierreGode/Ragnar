@@ -21215,6 +21215,14 @@ let currentFileSearch = '';
 
 // Virtual path for the unlocked Safe, browsed in the main pane like a folder.
 const SAFE_VDIR = '/__safe__';
+// Current subfolder within the Safe ('' = root), preserved across refreshes.
+let currentSafeDir = '';
+
+// Real-filesystem locations the user may create folders in / upload to.
+function isWritablePath(p) {
+    return p === '/uploads' || p.startsWith('/uploads/') ||
+           p === '/backups' || p.startsWith('/backups/');
+}
 
 function setFileSort(sort) {
     currentFileSort = sort;
@@ -21257,16 +21265,28 @@ function loadFiles(path = '/', highlightFile = null) {
 function displayFiles(files, path, highlightFile = null) {
     const fileList = document.getElementById('file-list');
     currentDirectory = path;
-    
+
     if (!fileList) return false;
-    
+
+    // A contextual toolbar for writable locations: create folders and upload
+    // straight into the folder being browsed. Shown even when the folder is
+    // empty (so a freshly created folder can be filled).
+    const toolbar = isWritablePath(path) ? `
+        <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 mb-1 bg-slate-800/60 border border-slate-700 rounded-lg">
+            <span class="text-sm text-gray-300 truncate">📁 ${escapeHtml(path)}</span>
+            <div class="flex items-center gap-2 flex-shrink-0">
+                <button onclick="newFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>
+                <button onclick="uploadFile()" class="bg-green-700 hover:bg-green-800 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">⬆ Upload here</button>
+            </div>
+        </div>` : '';
+
     if (files.length === 0) {
-        fileList.innerHTML = '<p class="text-gray-400 p-4">No files found in this directory</p>';
+        fileList.innerHTML = toolbar + '<p class="text-gray-400 p-4">This folder is empty</p>';
         return false;
     }
-    
-    let html = '<div class="space-y-2">';
-    
+
+    let html = toolbar + '<div class="space-y-2">';
+
     // Add back button if not in root
     if (path !== '/') {
         const parentPath = path.split('/').slice(0, -1).join('/') || '/';
@@ -21397,7 +21417,7 @@ function displayDirectoryTree() {
             if (!slot) return;
             if (s && s.success && s.configured && s.unlocked) {
                 slot.innerHTML = `
-                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="loadFiles('${SAFE_VDIR}')">
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="openSafeRoot()">
                         <span class="mr-3">🔒</span>
                         <span>Safe</span>
                         <span class="ml-auto text-xs text-amber-300">unlocked</span>
@@ -21620,14 +21640,16 @@ function uploadFile() {
         if (files.length === 0) return;
         
         const formData = new FormData();
-        
+
         // Add all selected files
         for (let file of files) {
             formData.append('file', file);
         }
-        
-        // Set upload path (default to uploads)
-        formData.append('path', '/uploads');
+
+        // Upload into the folder currently being browsed when it is writable
+        // (an /uploads or /backups subfolder); otherwise default to /uploads.
+        const target = isWritablePath(currentDirectory) ? currentDirectory : '/uploads';
+        formData.append('path', target);
 
         fileOperationInProgress = true;
         showFileLoading('Uploading files...');
@@ -21640,6 +21662,7 @@ function uploadFile() {
         .then(data => {
             if (data.success) {
                 showFileSuccess(`Uploaded ${files.length} file(s)`);
+                if (!isWritablePath(currentDirectory)) currentDirectory = target;
                 refreshFiles();
             } else {
                 showFileError(`Upload failed: ${data.error}`);
@@ -21654,6 +21677,27 @@ function uploadFile() {
     };
 
     input.click();
+}
+
+// Create a subfolder in the current /uploads or /backups location.
+function newFolder() {
+    if (!isWritablePath(currentDirectory)) {
+        showFileError('Folders can be created under Uploads or Backups');
+        return;
+    }
+    const name = (prompt('New folder name:') || '').trim();
+    if (!name) return;
+    networkAwareFetch('/api/files/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: currentDirectory, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) { showFileSuccess(`Created folder "${d.name}"`); refreshFiles(); }
+        else showFileError(d.error || 'Could not create folder');
+    })
+    .catch(err => showFileError(err.message));
 }
 
 // ── Safe (password-protected encrypted vault) ───────────────────────────────
@@ -21876,7 +21920,9 @@ function lockSafe() {
         .catch(err => showFileError(err.message));
 }
 
-// State 3 — unlocked: usage bar + file list + add button.
+// State 3 — unlocked: usage summary + actions. The actual file/folder browsing
+// happens in the main Files pane (loadSafeIntoBrowser), so there is only one
+// folder browser to maintain.
 function renderSafeBrowser(s) {
     setSafeBadge('Unlocked', 'bg-green-900/60 text-green-300');
     document.getElementById('safe-lock-btn')?.classList.remove('hidden');
@@ -21886,71 +21932,57 @@ function renderSafeBrowser(s) {
     const body = document.getElementById('safe-body');
     body.innerHTML = `
         <div class="space-y-4">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div class="flex-1">
-                    <div class="flex justify-between text-xs text-gray-400 mb-1">
-                        <span>${formatBytes(used)} used of ${formatBytes(limit)}</span>
-                        <span>${pct}%</span>
-                    </div>
-                    <div class="w-full bg-slate-700 rounded-full h-2">
-                        <div class="bg-amber-500 h-2 rounded-full" style="width:${pct}%"></div>
-                    </div>
+            <div>
+                <div class="flex justify-between text-xs text-gray-400 mb-1">
+                    <span>${formatBytes(used)} used of ${formatBytes(limit)}</span>
+                    <span>${pct}%</span>
                 </div>
-                <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm transition-colors whitespace-nowrap">
-                    + Add files
-                </button>
+                <div class="w-full bg-slate-700 rounded-full h-2">
+                    <div class="bg-amber-500 h-2 rounded-full" style="width:${pct}%"></div>
+                </div>
             </div>
-            <div id="safe-file-list" class="glass-card overflow-y-auto scrollbar-thin" style="max-height:50vh">
-                <p class="text-gray-400 p-4">Loading files…</p>
+            <div class="text-sm text-gray-300">${s.file_count || 0} file(s)${s.folder_count ? ` · ${s.folder_count} folder(s)` : ''} stored, encrypted.</div>
+            <div class="flex flex-wrap gap-2">
+                <button onclick="browseSafeFromModal()" class="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">Browse files</button>
+                <button onclick="uploadToSafe()" class="bg-amber-700 hover:bg-amber-800 text-white px-4 py-2 rounded-lg text-sm transition-colors">+ Add files</button>
+                <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Lock</button>
             </div>
+            <p class="text-xs text-gray-500">The unlocked Safe also appears as a 🔒 folder in Directories — click it to browse, create subfolders and upload.</p>
         </div>`;
-    loadSafeFiles();
 }
 
-function loadSafeFiles() {
-    const list = document.getElementById('safe-file-list');
-    if (!list) return;
-    networkAwareFetch('/api/safe/list')
-        .then(r => r.json())
-        .then(d => {
-            if (d.locked) { refreshSafe(); return; }
-            if (!d.success) { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list')}</p>`; return; }
-            if (!d.files.length) {
-                list.innerHTML = `<p class="text-gray-400 p-6 text-center">The Safe is empty. Use “Add files” to store encrypted files here.</p>`;
-                return;
-            }
-            list.innerHTML = d.files.map(f => `
-                <div class="flex items-center justify-between px-4 py-2.5 hover:bg-slate-800 border-b border-slate-700/50">
-                    <div class="min-w-0 flex-1">
-                        <p class="text-sm truncate">${escapeHtml(f.name)}</p>
-                        <p class="text-xs text-gray-500">${formatBytes(f.size)}</p>
-                    </div>
-                    <div class="flex items-center gap-1 flex-shrink-0 ml-2">
-                        <button onclick="previewSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" title="View" class="p-1.5 hover:bg-slate-700 rounded text-gray-300">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-                        </button>
-                        <button onclick="downloadSafeFile('${escapeAttr(f.id)}')" title="Download" class="p-1.5 hover:bg-slate-700 rounded text-gray-300">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
-                        </button>
-                        <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" title="Delete" class="p-1.5 hover:bg-slate-700 rounded text-red-400">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                        </button>
-                    </div>
-                </div>`).join('');
-        })
-        .catch(err => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+// From the modal, jump to browsing the Safe root in the main Files pane.
+function browseSafeFromModal() {
+    closeSafe();
+    currentSafeDir = '';
+    currentDirectory = SAFE_VDIR;
+    loadSafeIntoBrowser();
 }
 
-// Render the unlocked Safe into the main Files pane (as if it were a folder),
-// honoring the shared search box and sort control. Falls back to the normal
-// browser if the Safe has locked in the meantime.
+// Enter the Safe from Directories (always at the root).
+function openSafeRoot() {
+    currentSafeDir = '';
+    currentDirectory = SAFE_VDIR;
+    loadSafeIntoBrowser();
+}
+
+// Navigate to a subfolder within the Safe.
+function openSafeDir(dir) {
+    currentSafeDir = dir || '';
+    loadSafeIntoBrowser();
+}
+
+// Render the unlocked Safe (folder `currentSafeDir`) into the main Files pane,
+// with folder navigation, a breadcrumb, and per-item actions. Honors the shared
+// search box and sort control. Falls back to the normal browser if the Safe
+// locked in the meantime.
 function loadSafeIntoBrowser() {
     currentDirectory = SAFE_VDIR;
-    updateCurrentPath('🔒 Safe');
+    updateCurrentPath(currentSafeDir ? `🔒 Safe/${currentSafeDir}` : '🔒 Safe');
     const fileList = document.getElementById('file-list');
     if (!fileList) return;
     fileList.innerHTML = '<p class="text-gray-400 p-4">Loading Safe…</p>';
-    networkAwareFetch('/api/safe/list')
+    networkAwareFetch(`/api/safe/list?dir=${encodeURIComponent(currentSafeDir)}`)
         .then(r => r.json())
         .then(d => {
             if (d.locked) {
@@ -21962,6 +21994,53 @@ function loadSafeIntoBrowser() {
             }
             if (!d.success) { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list Safe')}</p>`; return; }
 
+            // Breadcrumb (Safe / seg / seg), each segment clickable.
+            const segs = currentSafeDir ? currentSafeDir.split('/') : [];
+            let acc = '';
+            const crumbs = [`<span onclick="openSafeDir('')" class="cursor-pointer hover:text-amber-200">🔒 Safe</span>`];
+            segs.forEach(seg => {
+                acc = acc ? acc + '/' + seg : seg;
+                crumbs.push(`<span onclick="openSafeDir('${escapeAttr(acc)}')" class="cursor-pointer hover:text-amber-200">${escapeHtml(seg)}</span>`);
+            });
+
+            const header = `
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 p-3 mb-1 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                    <span class="text-sm text-amber-200 truncate">${crumbs.join(' <span class="text-amber-600/60">/</span> ')}</span>
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                        <button onclick="newSafeFolder()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ New folder</button>
+                        <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">⬆ Add files</button>
+                        <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Lock</button>
+                    </div>
+                </div>`;
+
+            let rows = '';
+            // Up / parent row.
+            if (currentSafeDir) {
+                const parent = currentSafeDir.split('/').slice(0, -1).join('/');
+                rows += `
+                <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors" onclick="openSafeDir('${escapeAttr(parent)}')">
+                    <svg class="w-5 h-5 mr-3 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                    <span class="text-blue-400">.. (Up)</span>
+                </div>`;
+            }
+
+            // Subfolders (filtered by search).
+            let folders = d.folders.slice();
+            if (currentFileSearch) folders = folders.filter(f => f.name.toLowerCase().includes(currentFileSearch));
+            folders.forEach(f => {
+                rows += `
+                <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
+                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="openSafeDir('${escapeAttr(f.path)}')">
+                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                        <div class="font-medium truncate">${escapeHtml(f.name)}</div>
+                    </div>
+                    <button onclick="deleteSafeFolder('${escapeAttr(f.path)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded flex-shrink-0" title="Delete folder">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                    </button>
+                </div>`;
+            });
+
+            // Files (filtered + sorted).
             let files = d.files.slice();
             if (currentFileSearch) files = files.filter(f => f.name.toLowerCase().includes(currentFileSearch));
             files.sort((a, b) => {
@@ -21969,29 +22048,12 @@ function loadSafeIntoBrowser() {
                 if (currentFileSort === 'size') return (b.size || 0) - (a.size || 0);
                 return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
             });
-
-            const header = `
-                <div class="flex items-center justify-between gap-2 p-3 mb-1 bg-amber-900/20 border border-amber-700/40 rounded-lg">
-                    <span class="text-sm text-amber-200">🔒 Encrypted Safe</span>
-                    <div class="flex items-center gap-2 flex-shrink-0">
-                        <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ Add files</button>
-                        <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Lock</button>
-                    </div>
-                </div>`;
-
-            if (!files.length) {
-                fileList.innerHTML = header + (currentFileSearch
-                    ? `<p class="text-gray-400 p-4">No files match "<span class="text-white">${escapeHtml(currentFileSearch)}</span>"</p>`
-                    : `<p class="text-gray-400 p-6 text-center">The Safe is empty. Use “Add files” to store encrypted files here.</p>`);
-                return;
-            }
-
-            const rows = files.map(f => {
+            files.forEach(f => {
                 const date = f.modified ? new Date(f.modified * 1000).toLocaleDateString() : '';
-                return `
+                rows += `
                 <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
                     <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="previewSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')">
-                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
                         <div class="flex-1 min-w-0">
                             <div class="font-medium truncate">${escapeHtml(f.name)}</div>
                             <div class="text-sm text-gray-400">${formatBytes(f.size)}${date ? ' • ' + date : ''}</div>
@@ -22006,10 +22068,56 @@ function loadSafeIntoBrowser() {
                         </button>
                     </div>
                 </div>`;
-            }).join('');
+            });
+
+            if (!rows) {
+                fileList.innerHTML = header + (currentFileSearch
+                    ? `<p class="text-gray-400 p-4">No items match "<span class="text-white">${escapeHtml(currentFileSearch)}</span>"</p>`
+                    : `<p class="text-gray-400 p-6 text-center">This folder is empty. Use “Add files” or “New folder”.</p>`);
+                return;
+            }
             fileList.innerHTML = header + '<div class="space-y-2">' + rows + '</div>';
         })
         .catch(err => { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+}
+
+// Create a subfolder inside the current Safe folder.
+function newSafeFolder() {
+    const name = (prompt('New folder name:') || '').trim();
+    if (!name) return;
+    networkAwareFetch('/api/safe/mkdir', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dir: currentSafeDir, name })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.locked) { showFileError('Safe locked — unlock again'); afterSafeChange(); return; }
+        if (d.success) { showFileSuccess(`Created folder "${name}"`); afterSafeChange(); }
+        else showFileError(d.error || 'Could not create folder');
+    })
+    .catch(err => showFileError(err.message));
+}
+
+// Delete a Safe subfolder and everything inside it.
+function deleteSafeFolder(path, name) {
+    showFileConfirmModal('Delete folder',
+        `Permanently delete the folder "${name}" and all files inside it? This cannot be undone.`,
+        () => {
+            networkAwareFetch('/api/safe/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folder: path })
+            })
+            .then(r => r.json())
+            .then(d => {
+                closeFileModal();
+                if (d.locked) { afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Deleted folder "${name}"`); afterSafeChange(); }
+                else showFileError(d.error || 'Delete failed');
+            })
+            .catch(err => { closeFileModal(); showFileError(err.message); });
+        });
 }
 
 // After any change to the Safe (add/delete/lock/unlock), refresh whichever
@@ -22032,6 +22140,7 @@ function uploadToSafe() {
         if (!files.length) return;
         const formData = new FormData();
         for (let file of files) formData.append('file', file);
+        formData.append('dir', currentSafeDir);   // store into the current folder
         showFileLoading('Encrypting & storing…');
         networkAwareFetch('/api/safe/upload', { method: 'POST', body: formData })
             .then(r => r.json())
@@ -23027,6 +23136,12 @@ window.closeImageFullscreen = closeImageFullscreen;
 window.toggleSafeLock = toggleSafeLock;
 window.uploadOrOpenSafe = uploadOrOpenSafe;
 window.updateSafeHeaderButton = updateSafeHeaderButton;
+window.newFolder = newFolder;
+window.openSafeRoot = openSafeRoot;
+window.openSafeDir = openSafeDir;
+window.newSafeFolder = newSafeFolder;
+window.deleteSafeFolder = deleteSafeFolder;
+window.browseSafeFromModal = browseSafeFromModal;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions

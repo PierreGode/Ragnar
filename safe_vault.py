@@ -156,7 +156,7 @@ class SafeVault:
             self._key = key
             self._touch()
             # Initialise an empty encrypted index.
-            self._write_index([])
+            self._write_index(self._blank_index())
 
     # ── AES-GCM helpers ────────────────────────────────────────────────────
     def _encrypt(self, key, plaintext, aad):
@@ -167,19 +167,45 @@ class SafeVault:
         return AESGCM(key).decrypt(blob[:_NONCE_LEN], blob[_NONCE_LEN:], aad)
 
     # ── encrypted index ────────────────────────────────────────────────────
+    # The index is a dict {'files': [...], 'folders': [...]}. Each file entry
+    # carries a 'dir' (normalized virtual folder path, '' = root); 'folders' is
+    # the list of folder paths so that empty folders persist.
+    @staticmethod
+    def _blank_index():
+        return {'files': [], 'folders': []}
+
+    @staticmethod
+    def _norm_dir(d):
+        """Normalize a virtual folder path; '' is the root. Rejects traversal."""
+        if not d:
+            return ''
+        parts = [p for p in str(d).replace('\\', '/').split('/') if p not in ('', '.')]
+        for p in parts:
+            if p == '..' or len(p) > 100:
+                raise SafeError('Invalid folder path')
+        return '/'.join(parts)
+
     def _read_index(self, key):
         if not os.path.isfile(self.index_path):
-            return []
+            return self._blank_index()
         with open(self.index_path, 'rb') as f:
             blob = f.read()
         try:
             raw = self._decrypt(key, blob, b'safe-index')
         except InvalidTag:
             raise SafeError('Safe index is corrupt or key mismatch')
-        return json.loads(raw.decode('utf-8'))
+        data = json.loads(raw.decode('utf-8'))
+        # Migrate the original flat-list format to the folder-aware dict.
+        if isinstance(data, list):
+            data = {'files': [dict(e, dir=e.get('dir', '')) for e in data], 'folders': []}
+        data.setdefault('files', [])
+        data.setdefault('folders', [])
+        for e in data['files']:
+            e.setdefault('dir', '')
+        return data
 
-    def _write_index(self, entries):
-        blob = self._encrypt(self._key, json.dumps(entries).encode('utf-8'), b'safe-index')
+    def _write_index(self, data):
+        blob = self._encrypt(self._key, json.dumps(data).encode('utf-8'), b'safe-index')
         tmp = self.index_path + '.tmp'
         with open(tmp, 'wb') as f:
             f.write(blob)
@@ -204,34 +230,73 @@ class SafeVault:
                 info['size_limit_bytes'] = meta.get('size_limit_bytes', 0)
                 info['created_at'] = meta.get('created_at')
             if unlocked:
-                entries = self._read_index(self._key)
-                info['file_count'] = len(entries)
-                info['used_bytes'] = sum(int(e.get('size', 0)) for e in entries)
+                data = self._read_index(self._key)
+                info['file_count'] = len(data['files'])
+                info['folder_count'] = len(data['folders'])
+                info['used_bytes'] = sum(int(e.get('size', 0)) for e in data['files'])
                 info['expires_at'] = self._expires_at
                 self._touch()
             return info
 
     # ── file operations (all require unlock) ───────────────────────────────
+    def list_dir(self, dir=''):
+        """Return the files and immediate subfolders inside a virtual folder."""
+        with self._lock:
+            key = self._require_key()
+            data = self._read_index(key)
+            dir = self._norm_dir(dir)
+            if dir and dir not in data['folders']:
+                raise SafeError('Folder not found in Safe')
+            files = sorted((e for e in data['files'] if e.get('dir', '') == dir),
+                           key=lambda e: e.get('name', '').lower())
+            subs = []
+            for fp in data['folders']:
+                parent = fp.rsplit('/', 1)[0] if '/' in fp else ''
+                if parent == dir:
+                    subs.append({'path': fp, 'name': fp.rsplit('/', 1)[-1]})
+            subs.sort(key=lambda f: f['name'].lower())
+            return {'dir': dir, 'files': files, 'folders': subs}
+
+    # Backwards-compatible flat listing (all files, ignoring folders).
     def list_files(self):
         with self._lock:
             key = self._require_key()
-            entries = self._read_index(key)
-            return sorted(entries, key=lambda e: e.get('name', '').lower())
+            data = self._read_index(key)
+            return sorted(data['files'], key=lambda e: e.get('name', '').lower())
 
-    def add_file(self, filename, data, mime=None):
+    def mkdir(self, path):
+        """Create a folder (and any missing ancestors) inside the Safe."""
+        with self._lock:
+            key = self._require_key()
+            data = self._read_index(key)
+            path = self._norm_dir(path)
+            if not path:
+                raise SafeError('Folder name required')
+            cur = ''
+            for p in path.split('/'):
+                cur = p if not cur else cur + '/' + p
+                if cur not in data['folders']:
+                    data['folders'].append(cur)
+            self._write_index(data)
+            return path
+
+    def add_file(self, filename, data_bytes, mime=None, dir=''):
         with self._lock:
             key = self._require_key()
             meta = self._load_meta()
             limit = int(meta.get('size_limit_bytes', 0))
-            entries = self._read_index(key)
-            used = sum(int(e.get('size', 0)) for e in entries)
-            if used + len(data) > limit:
+            data = self._read_index(key)
+            dir = self._norm_dir(dir)
+            if dir and dir not in data['folders']:
+                raise SafeError('Target folder does not exist')
+            used = sum(int(e.get('size', 0)) for e in data['files'])
+            if used + len(data_bytes) > limit:
                 free = max(0, limit - used)
                 raise SafeError(
-                    'Not enough space in the Safe (%d bytes free, need %d)' % (free, len(data)))
+                    'Not enough space in the Safe (%d bytes free, need %d)' % (free, len(data_bytes)))
 
             file_id = uuid.uuid4().hex
-            blob = self._encrypt(key, data, file_id.encode('ascii'))
+            blob = self._encrypt(key, data_bytes, file_id.encode('ascii'))
             blob_path = os.path.join(self.blobs_dir, file_id + '.bin')
             with open(blob_path, 'wb') as f:
                 f.write(blob)
@@ -240,22 +305,23 @@ class SafeVault:
             except OSError:
                 pass
 
-            entries.append({
+            data['files'].append({
                 'id': file_id,
                 'name': filename,
-                'size': len(data),
+                'size': len(data_bytes),
                 'mime': mime or 'application/octet-stream',
                 'modified': time.time(),
+                'dir': dir,
             })
-            self._write_index(entries)
+            self._write_index(data)
             return file_id
 
     def read_file(self, file_id):
         """Return (entry, plaintext_bytes) for a stored file."""
         with self._lock:
             key = self._require_key()
-            entries = self._read_index(key)
-            entry = next((e for e in entries if e.get('id') == file_id), None)
+            data = self._read_index(key)
+            entry = next((e for e in data['files'] if e.get('id') == file_id), None)
             if not entry:
                 raise SafeError('File not found in Safe')
             blob_path = os.path.join(self.blobs_dir, file_id + '.bin')
@@ -264,22 +330,44 @@ class SafeVault:
             with open(blob_path, 'rb') as f:
                 blob = f.read()
             try:
-                data = self._decrypt(key, blob, file_id.encode('ascii'))
+                plaintext = self._decrypt(key, blob, file_id.encode('ascii'))
             except InvalidTag:
                 raise SafeError('File failed integrity check')
-            return entry, data
+            return entry, plaintext
+
+    def _remove_blob(self, file_id):
+        blob_path = os.path.join(self.blobs_dir, file_id + '.bin')
+        try:
+            if os.path.isfile(blob_path):
+                os.remove(blob_path)
+        except OSError:
+            pass
 
     def delete_file(self, file_id):
         with self._lock:
             key = self._require_key()
-            entries = self._read_index(key)
-            new_entries = [e for e in entries if e.get('id') != file_id]
-            if len(new_entries) == len(entries):
+            data = self._read_index(key)
+            keep = [e for e in data['files'] if e.get('id') != file_id]
+            if len(keep) == len(data['files']):
                 raise SafeError('File not found in Safe')
-            blob_path = os.path.join(self.blobs_dir, file_id + '.bin')
-            try:
-                if os.path.isfile(blob_path):
-                    os.remove(blob_path)
-            except OSError:
-                pass
-            self._write_index(new_entries)
+            self._remove_blob(file_id)
+            data['files'] = keep
+            self._write_index(data)
+
+    def delete_folder(self, path):
+        """Delete a folder and everything inside it (files + subfolders)."""
+        with self._lock:
+            key = self._require_key()
+            data = self._read_index(key)
+            path = self._norm_dir(path)
+            if not path or path not in data['folders']:
+                raise SafeError('Folder not found in Safe')
+            prefix = path + '/'
+            doomed = [e for e in data['files']
+                      if e.get('dir', '') == path or e.get('dir', '').startswith(prefix)]
+            for e in doomed:
+                self._remove_blob(e['id'])
+            data['files'] = [e for e in data['files'] if e not in doomed]
+            data['folders'] = [fp for fp in data['folders']
+                               if not (fp == path or fp.startswith(prefix))]
+            self._write_index(data)

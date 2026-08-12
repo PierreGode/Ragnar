@@ -21,9 +21,15 @@ Typical flow:
    unlocked.
 2. **Later (locked):** click **Unlock Safe** and enter the password.
 3. **Unlocked:** a **🔒 Safe** folder appears in the **Directories** list. Click it
-   to browse the Safe in the main pane like any other folder, with per-file
-   **view / download / delete** actions and an inline **+ Add files** / **Lock**
-   toolbar. The same view is also available in the Safe dialog (usage bar + list).
+   to browse the Safe in the main pane like any other folder. You can:
+   - **Create subfolders** (**+ New folder**) and nest them arbitrarily,
+   - **Upload into the folder you're viewing** (**⬆ Add files**),
+   - navigate with the **breadcrumb** / **.. (Up)** row,
+   - **view / download / delete** files, and **delete a folder** (and everything
+     inside it).
+
+   The Safe dialog shows a usage summary with a **Browse files** shortcut into the
+   same view.
 
 The Safe **auto-locks after 15 minutes of inactivity**. After that, the password
 is required again — the encryption key is wiped from memory, the **🔒 Safe** folder
@@ -55,7 +61,7 @@ Everything lives under `data/safe/`:
 | Path | Contents |
 |------|----------|
 | `vault.json` | Public metadata only: scrypt salt, KDF params, the password verifier, and the size cap. No key, no password. |
-| `index.enc` | AES-GCM encrypted JSON list of entries (`id`, `name`, `size`, `mime`, `modified`). |
+| `index.enc` | AES-GCM encrypted JSON `{files, folders}`: each file entry has `id`, `name`, `size`, `mime`, `modified`, and its virtual folder `dir`; `folders` is the list of folder paths so empty folders persist. Folder names are encrypted too. |
 | `blobs/<id>.bin` | AES-GCM encrypted file contents (`nonce ‖ ciphertext`). |
 
 Because `data/` is not committed to git, the vault never leaves the device through
@@ -71,11 +77,12 @@ All endpoints are under `/api/safe/` and are used by the Files tab UI:
 | `/api/safe/setup` | POST | Create the vault (`password`, `size_mb`). One-time. |
 | `/api/safe/unlock` | POST | Unlock with `password` for this server session. |
 | `/api/safe/lock` | POST | Wipe the in-memory key. |
-| `/api/safe/list` | GET | List stored files (requires unlock). |
-| `/api/safe/upload` | POST | Encrypt & store uploaded file(s) (requires unlock). |
+| `/api/safe/list` | GET | List a folder's files + subfolders (`?dir=`) (requires unlock). |
+| `/api/safe/mkdir` | POST | Create a subfolder (`dir` parent + `name`) (requires unlock). |
+| `/api/safe/upload` | POST | Encrypt & store uploaded file(s) into `dir` (requires unlock). |
 | `/api/safe/download` | GET | Decrypt & stream a file by `id` (requires unlock). |
 | `/api/safe/preview` | GET | Inline text/image preview by `id` (requires unlock). |
-| `/api/safe/delete` | POST | Remove a file by `id` (requires unlock). |
+| `/api/safe/delete` | POST | Remove a file by `id`, or a folder (+contents) by `folder` (requires unlock). |
 
 While locked, the file endpoints return `403` with `{"locked": true}`.
 

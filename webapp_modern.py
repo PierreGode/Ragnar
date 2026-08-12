@@ -19678,49 +19678,86 @@ def delete_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+def _resolve_upload_target(target_path):
+    """Map an /uploads or /backups virtual dir (possibly nested) to a real dir.
+
+    Returns the actual directory path, or raises ValueError on a bad/escaping
+    path. Only the writable uploads and backups trees are allowed as targets.
+    """
+    if target_path == '/uploads' or target_path.startswith('/uploads/'):
+        return _resolve_legacy_path('/uploads', shared_data.upload_dir, target_path)
+    if target_path == '/backups' or target_path.startswith('/backups/'):
+        return _resolve_legacy_path('/backups', shared_data.backupdir, target_path)
+    raise ValueError('Invalid upload path')
+
+
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
-    """Upload a file"""
+    """Upload one or more files into an /uploads or /backups folder."""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
-        
-        file = request.files['file']
+
         target_path = request.form.get('path', '/uploads')
-        
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        # Map virtual path to actual path
-        actual_dir = ""
-        if target_path.startswith('/uploads'):
-            actual_dir = shared_data.upload_dir
-        elif target_path.startswith('/backups'):
-            actual_dir = shared_data.backupdir
-        else:
+        try:
+            actual_dir = _resolve_upload_target(target_path)
+        except ValueError:
             return jsonify({'error': 'Invalid upload path'}), 400
-        
-        # Create directory if it doesn't exist
+
+        # Create the (possibly nested) directory if it doesn't exist.
         os.makedirs(actual_dir, exist_ok=True)
-        
-        # Save file
-        filename = file.filename
-        if not filename:
-            return jsonify({'error': 'Invalid filename'}), 400
-            
-        actual_path = os.path.join(actual_dir, filename)
-        file.save(actual_path)
-        
-        logger.info(f"File uploaded: {actual_path}")
-        
+
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            filename = os.path.basename(file.filename)  # strip any client path
+            if not filename:
+                continue
+            file.save(os.path.join(actual_dir, filename))
+            stored.append(filename)
+
+        if not stored:
+            return jsonify({'error': 'No file selected'}), 400
+
+        logger.info(f"Uploaded {len(stored)} file(s) to {actual_dir}")
         return jsonify({
             'success': True,
             'message': 'File uploaded successfully',
-            'filename': filename
+            'filename': stored[0],
+            'stored': len(stored),
         })
-        
+
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files/mkdir', methods=['POST'])
+def mkdir_file_api():
+    """Create a subfolder under /uploads or /backups."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('path', '/uploads') or '/uploads'
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Folder name required'}), 400
+        # A single new folder name only — reject separators and traversal.
+        if '/' in name or '\\' in name or name in ('.', '..'):
+            return jsonify({'error': 'Invalid folder name'}), 400
+
+        target = parent.rstrip('/') + '/' + name
+        try:
+            actual_dir = _resolve_upload_target(target)
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+
+        os.makedirs(actual_dir, exist_ok=True)
+        logger.info(f"Created folder: {actual_dir}")
+        return jsonify({'success': True, 'path': target, 'name': name})
+
+    except Exception as e:
+        logger.error(f"Error creating folder: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -19879,16 +19916,21 @@ def safe_lock_api():
 
 @app.route('/api/safe/list')
 def safe_list_api():
-    """List files stored in the Safe (requires unlock)."""
+    """List a folder in the Safe: its files and immediate subfolders (unlock)."""
     try:
-        files = _get_safe_vault().list_files()
-        return jsonify({'success': True, 'files': [{
-            'id': e['id'],
-            'name': e.get('name', ''),
-            'size': e.get('size', 0),
-            'mime': e.get('mime', ''),
-            'modified': e.get('modified'),
-        } for e in files]})
+        listing = _get_safe_vault().list_dir(request.args.get('dir', ''))
+        return jsonify({
+            'success': True,
+            'dir': listing['dir'],
+            'folders': [{'name': f['name'], 'path': f['path']} for f in listing['folders']],
+            'files': [{
+                'id': e['id'],
+                'name': e.get('name', ''),
+                'size': e.get('size', 0),
+                'mime': e.get('mime', ''),
+                'modified': e.get('modified'),
+            } for e in listing['files']],
+        })
     except SafeLockedError:
         return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
     except SafeError as e:
@@ -19898,12 +19940,37 @@ def safe_list_api():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/safe/mkdir', methods=['POST'])
+def safe_mkdir_api():
+    """Create a folder inside the Safe (requires unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('dir', '') or ''
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'Folder name required'}), 400
+        # A single new folder name — no path separators from the user.
+        if '/' in name or '\\' in name:
+            return jsonify({'success': False, 'error': 'Folder name cannot contain slashes'}), 400
+        path = (parent + '/' + name) if parent else name
+        created = _get_safe_vault().mkdir(path)
+        return jsonify({'success': True, 'path': created})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe mkdir error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/safe/upload', methods=['POST'])
 def safe_upload_api():
-    """Encrypt and store one or more files into the Safe (requires unlock)."""
+    """Encrypt and store one or more files into a Safe folder (requires unlock)."""
     try:
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'No file provided'}), 400
+        target_dir = request.form.get('dir', '') or ''
         vault = _get_safe_vault()
         stored = []
         for file in request.files.getlist('file'):
@@ -19911,7 +19978,7 @@ def safe_upload_api():
                 continue
             data = file.read()
             mime = file.mimetype or 'application/octet-stream'
-            vault.add_file(os.path.basename(file.filename), data, mime)
+            vault.add_file(os.path.basename(file.filename), data, mime, dir=target_dir)
             stored.append(file.filename)
         if not stored:
             return jsonify({'success': False, 'error': 'No file selected'}), 400
@@ -19985,10 +20052,14 @@ def safe_preview_api():
 
 @app.route('/api/safe/delete', methods=['POST'])
 def safe_delete_api():
-    """Remove a file from the Safe (requires unlock)."""
+    """Remove a file, or a folder and its contents, from the Safe (unlock)."""
     try:
         data = request.get_json(silent=True) or {}
-        _get_safe_vault().delete_file(data.get('id', ''))
+        folder = data.get('folder')
+        if folder:
+            _get_safe_vault().delete_folder(folder)
+        else:
+            _get_safe_vault().delete_file(data.get('id', ''))
         return jsonify({'success': True})
     except SafeLockedError:
         return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
