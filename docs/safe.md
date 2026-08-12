@@ -6,16 +6,28 @@ downloaded or added without unlocking it with the password first.
 
 ## Using the Safe
 
-1. Open the **Files** tab and click **Upload to Safe**.
-2. **First time (setup):** choose how much disk space to reserve for the Safe and
-   set a password (twice). Click **Create Safe** — it is created and unlocked.
-3. **Later (locked):** enter the password and click **Unlock**.
-4. **Unlocked:** you see a usage bar and the file list. Use **+ Add files** to
-   store encrypted files, and the per-file **view / download / delete** actions.
-   Click **Lock** in the header to re-lock immediately.
+The **Files** tab header has two Safe buttons:
+
+- **Set up Safe / Unlock Safe / Lock Safe** — a single button whose label follows
+  the Safe's state. First use runs setup; when locked it prompts to unlock; when
+  unlocked it turns green and locks the Safe on click.
+- **Upload to Safe** — jumps straight to the file picker when unlocked, or opens
+  the setup/unlock dialog first if needed.
+
+Typical flow:
+
+1. **First time (setup):** click **Set up Safe**, choose how much disk space to
+   reserve, and set a password (twice). Click **Create Safe** — it is created and
+   unlocked.
+2. **Later (locked):** click **Unlock Safe** and enter the password.
+3. **Unlocked:** a **🔒 Safe** folder appears in the **Directories** list. Click it
+   to browse the Safe in the main pane like any other folder, with per-file
+   **view / download / delete** actions and an inline **+ Add files** / **Lock**
+   toolbar. The same view is also available in the Safe dialog (usage bar + list).
 
 The Safe **auto-locks after 15 minutes of inactivity**. After that, the password
-is required again — the encryption key is wiped from memory.
+is required again — the encryption key is wiped from memory, the **🔒 Safe** folder
+disappears from Directories, and the header button returns to **Unlock Safe**.
 
 > **There is no password recovery.** The key is derived from your password and is
 > never stored. If you forget it, the files cannot be decrypted — by you or anyone.

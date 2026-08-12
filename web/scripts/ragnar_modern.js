@@ -21213,6 +21213,9 @@ let fileOperationInProgress = false;
 let currentFileSort = 'name';
 let currentFileSearch = '';
 
+// Virtual path for the unlocked Safe, browsed in the main pane like a folder.
+const SAFE_VDIR = '/__safe__';
+
 function setFileSort(sort) {
     currentFileSort = sort;
     document.querySelectorAll('.file-sort-btn').forEach(btn => {
@@ -21232,6 +21235,8 @@ function onFileSearch(value) {
 
 function loadFiles(path = '/', highlightFile = null) {
     if (fileOperationInProgress) return;
+    // The Safe is not a real filesystem path — browse it via the /api/safe API.
+    if (path === SAFE_VDIR) { loadSafeIntoBrowser(); return; }
     const desiredHighlight = highlightFile || (pendingFileHighlight && pendingFileHighlight.directory === path ? pendingFileHighlight.file : null);
     
     networkAwareFetch(`/api/files/list?path=${encodeURIComponent(path)}`)
@@ -21377,9 +21382,31 @@ function displayDirectoryTree() {
             </div>
         `;
     });
+    // Placeholder for the Safe row — filled in asynchronously once we know its
+    // lock state, so it only appears in Directories while the Safe is unlocked.
+    html += '<div id="directory-tree-safe"></div>';
     html += '</div>';
-    
+
     treeContainer.innerHTML = html;
+
+    // Show the Safe as a browsable folder only when it is unlocked.
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            const slot = document.getElementById('directory-tree-safe');
+            if (!slot) return;
+            if (s && s.success && s.configured && s.unlocked) {
+                slot.innerHTML = `
+                    <div class="flex items-center p-3 hover:bg-slate-700 rounded-lg cursor-pointer transition-colors ring-1 ring-amber-600/40" onclick="loadFiles('${SAFE_VDIR}')">
+                        <span class="mr-3">🔒</span>
+                        <span>Safe</span>
+                        <span class="ml-auto text-xs text-amber-300">unlocked</span>
+                    </div>`;
+            } else {
+                slot.innerHTML = '';
+            }
+        })
+        .catch(() => {});
 }
 
 function updateCurrentPath(path) {
@@ -21645,6 +21672,48 @@ function closeSafe() {
     if (modal) { modal.classList.add('hidden'); modal.classList.remove('flex'); }
 }
 
+// Header "Safe" button: unlock/set-up when locked, lock when unlocked. Its label
+// and colour reflect the current state, refreshed via updateSafeHeaderButton().
+function toggleSafeLock() {
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (s && s.success && s.configured && s.unlocked) lockSafe();
+            else openSafe();   // setup (not configured) or unlock (locked)
+        })
+        .catch(() => openSafe());
+}
+
+// Upload-to-Safe header button: go straight to the file picker if already
+// unlocked, otherwise open the modal so the user can set up / unlock first.
+function uploadOrOpenSafe() {
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (s && s.success && s.configured && s.unlocked) uploadToSafe();
+            else openSafe();
+        })
+        .catch(() => openSafe());
+}
+
+// Keep the header Safe button's label/style in sync with lock state.
+function updateSafeHeaderButton() {
+    const btn = document.getElementById('safe-toggle-btn');
+    const label = document.getElementById('safe-toggle-label');
+    if (!btn || !label) return;
+    const amber = ['bg-amber-600', 'hover:bg-amber-700'];
+    const green = ['bg-green-700', 'hover:bg-green-800'];
+    const setColour = on => { btn.classList.remove(...amber, ...green); btn.classList.add(...on); };
+    networkAwareFetch('/api/safe/status')
+        .then(r => r.json())
+        .then(s => {
+            if (!s || !s.success || !s.configured) { label.textContent = 'Set up Safe'; setColour(amber); }
+            else if (s.unlocked) { label.textContent = 'Lock Safe'; setColour(green); }
+            else { label.textContent = 'Unlock Safe'; setColour(amber); }
+        })
+        .catch(() => { label.textContent = 'Safe'; setColour(amber); });
+}
+
 // Fetch current state and render the matching view.
 function refreshSafe() {
     const body = document.getElementById('safe-body');
@@ -21750,7 +21819,7 @@ function submitSafeSetup() {
     })
     .then(r => r.json())
     .then(d => {
-        if (d.success) { showFileSuccess('Safe created and unlocked'); refreshSafe(); }
+        if (d.success) { showFileSuccess('Safe created and unlocked'); afterSafeChange(); }
         else showMsg(d.error || 'Failed to create Safe');
     })
     .catch(err => showMsg(err.message));
@@ -21792,7 +21861,7 @@ function submitSafeUnlock() {
     })
     .then(r => r.json())
     .then(d => {
-        if (d.success) { refreshSafe(); }
+        if (d.success) { afterSafeChange(); }
         else { msg.textContent = d.error || 'Unlock failed'; msg.classList.remove('hidden'); }
     })
     .catch(err => { msg.textContent = err.message; msg.classList.remove('hidden'); });
@@ -21801,7 +21870,7 @@ function submitSafeUnlock() {
 function lockSafe() {
     networkAwareFetch('/api/safe/lock', { method: 'POST' })
         .then(r => r.json())
-        .then(() => { showFileSuccess('Safe locked'); refreshSafe(); })
+        .then(() => { showFileSuccess('Safe locked'); afterSafeChange(); })
         .catch(err => showFileError(err.message));
 }
 
@@ -21870,6 +21939,88 @@ function loadSafeFiles() {
         .catch(err => { list.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
 }
 
+// Render the unlocked Safe into the main Files pane (as if it were a folder),
+// honoring the shared search box and sort control. Falls back to the normal
+// browser if the Safe has locked in the meantime.
+function loadSafeIntoBrowser() {
+    currentDirectory = SAFE_VDIR;
+    updateCurrentPath('🔒 Safe');
+    const fileList = document.getElementById('file-list');
+    if (!fileList) return;
+    fileList.innerHTML = '<p class="text-gray-400 p-4">Loading Safe…</p>';
+    networkAwareFetch('/api/safe/list')
+        .then(r => r.json())
+        .then(d => {
+            if (d.locked) {
+                showFileError('Safe locked — unlock it again');
+                currentDirectory = '/';
+                displayDirectoryTree();
+                loadFiles('/');
+                return;
+            }
+            if (!d.success) { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(d.error || 'Failed to list Safe')}</p>`; return; }
+
+            let files = d.files.slice();
+            if (currentFileSearch) files = files.filter(f => f.name.toLowerCase().includes(currentFileSearch));
+            files.sort((a, b) => {
+                if (currentFileSort === 'date') return (b.modified || 0) - (a.modified || 0);
+                if (currentFileSort === 'size') return (b.size || 0) - (a.size || 0);
+                return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+            });
+
+            const header = `
+                <div class="flex items-center justify-between gap-2 p-3 mb-1 bg-amber-900/20 border border-amber-700/40 rounded-lg">
+                    <span class="text-sm text-amber-200">🔒 Encrypted Safe</span>
+                    <div class="flex items-center gap-2 flex-shrink-0">
+                        <button onclick="uploadToSafe()" class="bg-amber-600 hover:bg-amber-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors whitespace-nowrap">+ Add files</button>
+                        <button onclick="lockSafe()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Lock</button>
+                    </div>
+                </div>`;
+
+            if (!files.length) {
+                fileList.innerHTML = header + (currentFileSearch
+                    ? `<p class="text-gray-400 p-4">No files match "<span class="text-white">${escapeHtml(currentFileSearch)}</span>"</p>`
+                    : `<p class="text-gray-400 p-6 text-center">The Safe is empty. Use “Add files” to store encrypted files here.</p>`);
+                return;
+            }
+
+            const rows = files.map(f => {
+                const date = f.modified ? new Date(f.modified * 1000).toLocaleDateString() : '';
+                return `
+                <div class="flex items-center justify-between gap-2 p-3 hover:bg-slate-700 rounded-lg transition-colors">
+                    <div class="flex items-center cursor-pointer flex-1 min-w-0" onclick="previewSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')">
+                        <svg class="w-5 h-5 mr-3 flex-shrink-0 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        <div class="flex-1 min-w-0">
+                            <div class="font-medium truncate">${escapeHtml(f.name)}</div>
+                            <div class="text-sm text-gray-400">${formatBytes(f.size)}${date ? ' • ' + date : ''}</div>
+                        </div>
+                    </div>
+                    <div class="flex space-x-2 flex-shrink-0">
+                        <button onclick="downloadSafeFile('${escapeAttr(f.id)}')" class="p-2 text-blue-400 hover:bg-slate-600 rounded" title="Download">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-4-4m4 4l4-4m6 4H6"></path></svg>
+                        </button>
+                        <button onclick="deleteSafeFile('${escapeAttr(f.id)}','${escapeAttr(f.name)}')" class="p-2 text-red-400 hover:bg-slate-600 rounded" title="Delete">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        </button>
+                    </div>
+                </div>`;
+            }).join('');
+            fileList.innerHTML = header + '<div class="space-y-2">' + rows + '</div>';
+        })
+        .catch(err => { fileList.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(err.message)}</p>`; });
+}
+
+// After any change to the Safe (add/delete/lock/unlock), refresh whichever
+// views are currently showing it: the modal, the directory-pane browser, and
+// the Directories list (so the Safe row appears/disappears with lock state).
+function afterSafeChange() {
+    const modal = document.getElementById('safe-modal');
+    if (modal && !modal.classList.contains('hidden')) refreshSafe();
+    displayDirectoryTree();
+    updateSafeHeaderButton();
+    if (currentDirectory === SAFE_VDIR) loadSafeIntoBrowser();
+}
+
 function uploadToSafe() {
     const input = document.createElement('input');
     input.type = 'file';
@@ -21883,8 +22034,8 @@ function uploadToSafe() {
         networkAwareFetch('/api/safe/upload', { method: 'POST', body: formData })
             .then(r => r.json())
             .then(d => {
-                if (d.locked) { showFileError('Safe locked — unlock again'); refreshSafe(); return; }
-                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Safe`); refreshSafe(); }
+                if (d.locked) { showFileError('Safe locked — unlock again'); afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Stored ${d.stored} file(s) in Safe`); afterSafeChange(); }
                 else showFileError(d.error || 'Upload failed');
             })
             .catch(err => showFileError(err.message));
@@ -21914,8 +22065,8 @@ function deleteSafeFile(id, name) {
             .then(r => r.json())
             .then(d => {
                 closeFileModal();
-                if (d.locked) { refreshSafe(); return; }
-                if (d.success) { showFileSuccess(`Deleted ${name}`); refreshSafe(); }
+                if (d.locked) { afterSafeChange(); return; }
+                if (d.success) { showFileSuccess(`Deleted ${name}`); afterSafeChange(); }
                 else showFileError(d.error || 'Delete failed');
             })
             .catch(err => { closeFileModal(); showFileError(err.message); });
@@ -22015,6 +22166,7 @@ function clearFiles() {
 
 function refreshFiles() {
     displayDirectoryTree();
+    updateSafeHeaderButton();
     loadFiles(currentDirectory);
 }
 
@@ -22870,6 +23022,9 @@ window.deleteSafeFile = deleteSafeFile;
 window.previewSafeFile = previewSafeFile;
 window.openImageFullscreen = openImageFullscreen;
 window.closeImageFullscreen = closeImageFullscreen;
+window.toggleSafeLock = toggleSafeLock;
+window.uploadOrOpenSafe = uploadOrOpenSafe;
+window.updateSafeHeaderButton = updateSafeHeaderButton;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions
