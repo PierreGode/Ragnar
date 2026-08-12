@@ -113,6 +113,36 @@ class SafeVault:
             self._key = key
             self._touch()
 
+    def _verify_password(self, password):
+        """Return True if `password` matches the configured Safe, else raise."""
+        meta = self._load_meta()
+        salt = base64.b64decode(meta['kdf']['salt'])
+        key = self._derive_key(password, salt)
+        try:
+            blob = base64.b64decode(meta['verifier'])
+            AESGCM(key).decrypt(blob[:_NONCE_LEN], blob[_NONCE_LEN:], _VERIFIER_TOKEN)
+        except (InvalidTag, ValueError, KeyError):
+            raise SafeError('Incorrect password')
+        return True
+
+    def destroy(self, password):
+        """Permanently erase the whole vault after verifying the password.
+
+        Removes vault.json, the encrypted index and every encrypted blob. There
+        is no recovery — this is the deliberate 'reset the Safe' escape hatch.
+        """
+        import shutil
+        with self._lock:
+            if not self.is_configured():
+                raise SafeError('Safe is not set up')
+            self._verify_password(password)
+            try:
+                shutil.rmtree(self.base_dir)
+            except OSError as exc:
+                raise SafeError('Could not remove Safe: %s' % exc)
+            self._key = None
+            self._expires_at = 0.0
+
     # ── setup ──────────────────────────────────────────────────────────────
     def setup(self, password, size_bytes):
         with self._lock:

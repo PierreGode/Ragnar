@@ -19914,6 +19914,21 @@ def safe_lock_api():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
+@app.route('/api/safe/destroy', methods=['POST'])
+def safe_destroy_api():
+    """Permanently erase the Safe (verifies the password first)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().destroy(data.get('password') or '')
+        logger.info("Safe permanently deleted by user request")
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe destroy error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/safe/list')
 def safe_list_api():
     """List a folder in the Safe: its files and immediate subfolders (unlock)."""

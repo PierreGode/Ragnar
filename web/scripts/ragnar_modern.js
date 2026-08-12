@@ -21893,8 +21893,51 @@ function renderSafeUnlock(s) {
             </div>
             <div id="safe-unlock-msg" class="text-sm text-red-400 hidden"></div>
             <button onclick="submitSafeUnlock()" class="w-full bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium">Unlock</button>
+
+            <!-- Danger zone: permanently delete the Safe (password required). -->
+            <div class="pt-4 mt-2 border-t border-slate-700">
+                <button id="safe-destroy-toggle" onclick="toggleSafeDestroy(true)" class="w-full text-sm text-red-400 hover:text-red-300 py-2 rounded-lg transition-colors">Delete Safe &amp; erase all files…</button>
+                <div id="safe-destroy-confirm" class="hidden mt-2 p-3 bg-red-900/20 border border-red-800/50 rounded-lg space-y-3">
+                    <p class="text-sm text-red-200">This permanently erases the Safe and <strong>every encrypted file inside it</strong>. It cannot be undone. Enter your password above, then confirm.</p>
+                    <div class="flex gap-2">
+                        <button onclick="destroySafe()" class="flex-1 bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-lg text-sm font-medium">Permanently delete</button>
+                        <button onclick="toggleSafeDestroy(false)" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-2 rounded-lg text-sm">Cancel</button>
+                    </div>
+                </div>
+            </div>
         </div>`;
     setTimeout(() => document.getElementById('safe-unlock-pw')?.focus(), 50);
+}
+
+function toggleSafeDestroy(show) {
+    document.getElementById('safe-destroy-confirm')?.classList.toggle('hidden', !show);
+    document.getElementById('safe-destroy-toggle')?.classList.toggle('hidden', show);
+}
+
+// Permanently erase the Safe. Requires the correct password (verified server
+// side) plus the explicit confirm click above.
+function destroySafe() {
+    const pwEl = document.getElementById('safe-unlock-pw');
+    const msg = document.getElementById('safe-unlock-msg');
+    const pw = pwEl ? pwEl.value : '';
+    const showMsg = t => { if (msg) { msg.textContent = t; msg.classList.remove('hidden'); } };
+    if (!pw) { showMsg('Enter your password above first, then confirm deletion.'); pwEl?.focus(); return; }
+    networkAwareFetch('/api/safe/destroy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.success) {
+            showFileSuccess('Safe deleted');
+            if (currentDirectory === SAFE_VDIR) { currentDirectory = '/'; loadFiles('/'); }
+            afterSafeChange();   // status → not configured → setup view
+        } else {
+            showMsg(d.error || 'Delete failed');
+        }
+    })
+    .catch(err => showMsg(err.message));
 }
 
 function submitSafeUnlock() {
@@ -23142,6 +23185,8 @@ window.openSafeDir = openSafeDir;
 window.newSafeFolder = newSafeFolder;
 window.deleteSafeFolder = deleteSafeFolder;
 window.browseSafeFromModal = browseSafeFromModal;
+window.toggleSafeDestroy = toggleSafeDestroy;
+window.destroySafe = destroySafe;
 window.openLootFile = openLootFile;
 
 // System Monitoring Functions

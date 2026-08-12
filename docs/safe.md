@@ -35,6 +35,15 @@ The Safe **auto-locks after 15 minutes of inactivity**. After that, the password
 is required again — the encryption key is wiped from memory, the **🔒 Safe** folder
 disappears from Directories, and the header button returns to **Unlock Safe**.
 
+### Deleting the Safe
+
+The unlock dialog has a **Delete Safe & erase all files…** option. It requires you
+to enter your password and then explicitly confirm; on approval the entire vault
+(`vault.json`, the encrypted index and every blob) is permanently erased and you
+can set up a fresh Safe. The password must be **correct** — it is verified server
+side before anything is deleted, so a wrong password (or someone without it) cannot
+wipe your files. There is no recovery.
+
 > **There is no password recovery.** The key is derived from your password and is
 > never stored. If you forget it, the files cannot be decrypted — by you or anyone.
 
@@ -77,6 +86,7 @@ All endpoints are under `/api/safe/` and are used by the Files tab UI:
 | `/api/safe/setup` | POST | Create the vault (`password`, `size_mb`). One-time. |
 | `/api/safe/unlock` | POST | Unlock with `password` for this server session. |
 | `/api/safe/lock` | POST | Wipe the in-memory key. |
+| `/api/safe/destroy` | POST | Permanently erase the whole Safe (verifies `password` first). |
 | `/api/safe/list` | GET | List a folder's files + subfolders (`?dir=`) (requires unlock). |
 | `/api/safe/mkdir` | POST | Create a subfolder (`dir` parent + `name`) (requires unlock). |
 | `/api/safe/upload` | POST | Encrypt & store uploaded file(s) into `dir` (requires unlock). |
