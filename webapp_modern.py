@@ -20109,6 +20109,175 @@ def mesh_files_config():
     return jsonify({'success': True, 'receive_enabled': _mesh_receive_enabled()})
 
 
+# ---------------------------------------------------------------------------
+# Mesh Share — a folder each unit publishes to the whole mesh. Files stay on
+# their owner; peers see the catalog and fetch on demand.
+# ---------------------------------------------------------------------------
+def _mesh_share_dir():
+    d = os.path.join(shared_data.datadir, 'mesh_share')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _mesh_share_list_local():
+    out = []
+    try:
+        for entry in os.scandir(_mesh_share_dir()):
+            if entry.is_file():
+                st = entry.stat()
+                out.append({'name': entry.name, 'size': st.st_size, 'modified': st.st_mtime})
+    except OSError:
+        pass
+    out.sort(key=lambda x: x['name'].lower())
+    return out
+
+
+@app.route('/api/mesh/share/local')
+def mesh_share_local():
+    """This unit's shared-folder listing — peer-readable (GET under /api/mesh/)."""
+    return jsonify({'success': True, 'files': _mesh_share_list_local(),
+                    'owner': _mesh_viking_name() or 'a unit', 'owner_id': _mesh_unit_id()})
+
+
+@app.route('/api/mesh/share/download')
+def mesh_share_download():
+    """Stream one shared file to a requesting peer/operator (read-only, own dir)."""
+    name = os.path.basename(request.args.get('name', ''))
+    if not name:
+        return jsonify({'success': False, 'error': 'name required'}), 400
+    d = _mesh_share_dir()
+    if not os.path.isfile(os.path.join(d, name)):
+        return jsonify({'success': False, 'error': 'not found'}), 404
+    inline = request.args.get('inline') in ('1', 'true', 'yes')
+    return send_from_directory(d, name, as_attachment=not inline)
+
+
+@app.route('/api/mesh/share')
+def mesh_share_all():
+    """Aggregate catalog: this unit's shared files plus every online peer's."""
+    items = []
+    for f in _mesh_share_list_local():
+        items.append({**f, 'owner': _mesh_viking_name() or 'this unit',
+                      'owner_id': 'self', 'is_local': True})
+    if _mesh_enabled():
+        port = _mesh_node_port()
+        for node in _mesh_tagged_peers():
+            if not node.get('online'):
+                continue
+            rep = mesh_manager.poll_peer(node, port=port, timeout=6, path='/api/mesh/share/local')
+            if not rep.get('reachable') or not rep.get('success'):
+                continue
+            owner = rep.get('owner') or node.get('label') or node.get('id')
+            for f in rep.get('files', []):
+                items.append({**f, 'owner': owner, 'owner_id': node.get('id'), 'is_local': False})
+    items.sort(key=lambda x: (str(x.get('owner', '')).lower(), x['name'].lower()))
+    return jsonify({'success': True, 'items': items})
+
+
+@app.route('/api/mesh/share/add', methods=['POST'])
+def mesh_share_add():
+    """Publish file(s) to this unit's shared folder (upload or an existing path)."""
+    try:
+        d = _mesh_share_dir()
+        if request.files.get('file'):
+            stored = 0
+            for f in request.files.getlist('file'):
+                if not f or not f.filename:
+                    continue
+                f.save(_unique_dest(d, os.path.basename(f.filename)))
+                stored += 1
+            if not stored:
+                return jsonify({'success': False, 'error': 'No file selected'}), 400
+            return jsonify({'success': True, 'stored': stored})
+        data = request.get_json(silent=True) or {}
+        if data.get('path'):
+            try:
+                src = _resolve_readable_path(data['path'])
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid path'}), 400
+            if not os.path.isfile(src):
+                return jsonify({'success': False, 'error': 'File not found'}), 404
+            import shutil as _sh
+            _sh.copy2(src, _unique_dest(d, os.path.basename(src)))
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'No file provided'}), 400
+    except Exception as e:
+        logger.error(f"Mesh share add error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/share/remove', methods=['POST'])
+def mesh_share_remove():
+    """Unshare one of this unit's own shared files."""
+    data = request.get_json(silent=True) or {}
+    name = os.path.basename(data.get('name', ''))
+    if name:
+        p = os.path.join(_mesh_share_dir(), name)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/share/fetch', methods=['POST'])
+def mesh_share_fetch():
+    """Fetch a shared file (from its owner) and save it into a chosen folder."""
+    import requests as _rq
+    from urllib.parse import quote
+    try:
+        data = request.get_json(silent=True) or {}
+        name = os.path.basename(data.get('name', ''))
+        owner_id = data.get('owner_id', '')
+        dest = data.get('dest', '/uploads') or '/uploads'
+        if not name:
+            return jsonify({'success': False, 'error': 'name required'}), 400
+
+        # Get the bytes: locally (our own share) or streamed from the owner peer.
+        if owner_id == 'self':
+            src = os.path.join(_mesh_share_dir(), name)
+            if not os.path.isfile(src):
+                return jsonify({'success': False, 'error': 'File not found'}), 404
+            with open(src, 'rb') as f:
+                blob = f.read()
+        else:
+            node = _resolve_delegate_node(owner_id)
+            if not node:
+                return jsonify({'success': False, 'error': 'Owner unit not found in mesh'}), 400
+            url = mesh_manager.peer_url(node, _mesh_node_port(),
+                                        '/api/mesh/share/download?name=' + quote(name))
+            if not url:
+                return jsonify({'success': False, 'error': 'Owner has no address'}), 400
+            r = _rq.get(url, timeout=120)
+            if r.status_code != 200:
+                return jsonify({'success': False,
+                                'error': 'Owner returned HTTP %d' % r.status_code}), 400
+            blob = r.content
+
+        # Save into the chosen folder: an /uploads|/backups path, or the Vault.
+        if dest == 'vault' or dest.startswith('vault:'):
+            vdir = dest.split(':', 1)[1] if ':' in dest else ''
+            _get_safe_vault().add_file(name, blob, None, dir=vdir)   # needs unlock
+        else:
+            try:
+                actual_dir = _resolve_upload_target(dest)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid destination'}), 400
+            os.makedirs(actual_dir, exist_ok=True)
+            with open(_unique_dest(actual_dir, name), 'wb') as f:
+                f.write(blob)
+        logger.info(f"Mesh share: fetched {name} -> {dest}")
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh share fetch error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/safe/status')
 def safe_status_api():
     """Report whether the Safe is set up, unlocked, and its usage."""
