@@ -217,23 +217,42 @@ class MeshTransfer:
             total = os.path.getsize(file_path)
             self.registry.update(tid, state='sending', total=total, sent=0)
             reg = self.registry
+            _tid = tid
 
-            def gen():
-                sent = 0
-                with open(file_path, 'rb') as f:
-                    while True:
-                        chunk = f.read(CHUNK)
-                        if not chunk:
-                            break
-                        sent += len(chunk)
-                        reg.update(tid, sent=sent)
-                        yield chunk
+            # Send a length-bearing file object, NOT a generator: a generator
+            # makes requests use chunked transfer-encoding, which the Werkzeug
+            # receiver rejects ("Invalid chunk header"). With .len set, requests
+            # sends a normal Content-Length body and streams via read().
+            class _ProgressFile:
+                def __init__(self, path):
+                    self._f = open(path, 'rb')
+                    self.len = total           # requests.super_len() reads this
+                    self._sent = 0
+                def read(self, size=-1):
+                    chunk = self._f.read(size if size and size > 0 else CHUNK)
+                    if chunk:
+                        self._sent += len(chunk)
+                        reg.update(_tid, sent=self._sent)
+                    return chunk
+                def __len__(self):
+                    return self.len
+                # Present as iterable so requests treats us as a stream body.
+                def __iter__(self):
+                    return iter(lambda: self.read(CHUNK), b'')
+                def close(self):
+                    try:
+                        self._f.close()
+                    except Exception:
+                        pass
 
+            body = _ProgressFile(file_path)
             send_headers = dict(headers or {})
             send_headers['Content-Type'] = 'application/octet-stream'
-            send_headers['Content-Length'] = str(total)
-            send_headers['X-Filename'] = filename
-            resp = requests.post(url, data=gen(), headers=send_headers, timeout=timeout)
+            send_headers['X-Filename'] = filename   # Content-Length set by requests
+            try:
+                resp = requests.post(url, data=body, headers=send_headers, timeout=timeout)
+            finally:
+                body.close()
             if resp.status_code == 200:
                 self.registry.update(tid, state='delivered', sent=total, pct=100)
             elif resp.status_code == 401:
