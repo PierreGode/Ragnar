@@ -21735,6 +21735,7 @@ function deleteFile(filePath) {
             })
             .then(response => response.json())
             .then(data => {
+                fileOperationInProgress = false;   // clear before refreshFiles()
                 if (data.success) {
                     showFileSuccess(`Deleted ${fileName}`);
                     refreshFiles();
@@ -21784,6 +21785,10 @@ function uploadFile() {
         })
         .then(response => response.json())
         .then(data => {
+            // Clear the busy flag BEFORE refreshing — loadFiles() bails out while
+            // it's set, which otherwise leaves the new file invisible until a
+            // manual page refresh.
+            fileOperationInProgress = false;
             if (data.success) {
                 showFileSuccess(`Uploaded ${files.length} file(s)`);
                 if (!isWritablePath(currentDirectory)) currentDirectory = target;
@@ -22753,6 +22758,7 @@ function clearFiles() {
             })
             .then(response => response.json())
             .then(data => {
+                fileOperationInProgress = false;   // clear before refreshFiles()
                 if (data.success) {
                     showFileSuccess(data.message);
                     refreshFiles();
