@@ -23129,7 +23129,13 @@ function showFileConfirmModal(title, content, onConfirm) {
     const confirmBtn = document.getElementById('modal-confirm');
     
     if (!modal || !modalTitle || !modalContent || !confirmBtn) return;
-    
+
+    // The dialog is authored inside #files-tab. When triggered from another tab
+    // (e.g. the mesh Inbox's Discard, or Mesh Share's Unshare) that tab is
+    // display:none, so the dialog can't render — it only appears once you switch
+    // to Files. Reparent it to <body> so it shows regardless of the active tab.
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
+
     modalTitle.textContent = title;
     modalContent.innerHTML = content;
     
