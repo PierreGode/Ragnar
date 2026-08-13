@@ -22766,6 +22766,8 @@ function loadMeshShare() {
     if (!el) return;
     networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
         const items = (d && d.items) || [];
+        const gt = document.getElementById('share-guest-read-toggle');
+        if (gt) gt.checked = !!(d && d.guest_read);
         // Viewing Mesh Share clears the "new shared files" part of the Files flag.
         markSharedSeen(items.filter(i => !i.is_local).length);
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">Nothing shared yet. Use “Share files” to publish a file to the mesh.</p>'; return; }
@@ -22782,6 +22784,16 @@ function loadMeshShare() {
                 <div class="flex-shrink-0">${action}</div></div>`;
         }).join('');
     }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function setShareGuestRead(on) {
+    networkAwareFetch('/api/mesh/files/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_read: !!on })
+    }).then(r => r.json()).then(d => {
+        showNotification(on ? 'Share-guests can now browse & fetch this folder'
+                             : 'Share-guests are send-only again', 'success');
+    }).catch(e => { showNotification('Could not update share access: ' + e.message, 'error'); });
 }
 
 function shareUploadFiles() {

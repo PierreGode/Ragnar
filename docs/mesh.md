@@ -793,6 +793,80 @@ WireGuard-identity + tag authorization; publishing, fetching and unsharing are
 operator-only (`POST /api/mesh/share/{add,remove,fetch}`), and `GET /api/mesh/share`
 is the aggregate catalog.
 
+### Share-only guest access (`tag:ragnar-share`)
+
+Sometimes you want to let **one outside person** send files to your Ragnar —
+without making them a full mesh unit, without them seeing your other Ragnars, and
+without any other action or view. That is what the **share-guest** role is for.
+
+A share-guest is a device that joins **your** tailnet carrying the tag
+`tag:ragnar-share` (not `tag:ragnar-mesh`). Ragnar recognises that tag and grants
+it exactly one capability by default:
+
+- **Send files to you** — `POST /api/mesh/files/push` (lands in your quarantined
+  inbox, same as any mesh transfer; you still choose where each file is saved).
+
+Everything else — the dashboard, scan control, node lists, findings, config, even
+the *list* of what is in your Mesh Share — is denied. The guest does not appear as
+a Ragnar in your mesh, and cannot enumerate your other units.
+
+Optionally, you can let share-guests also **browse and fetch** your Mesh Share
+folder (read-only): toggle **"Let share-guests browse & fetch this folder"** in
+**Ragnar Mesh → Mesh Share**. Off by default (send-only). This flips
+`mesh_share_guest_read`, which opens *only* `GET /api/mesh/share/local` and
+`GET /api/mesh/share/download` to the guest tag — never the operator write routes.
+
+#### One tailnet, two tags
+
+The guest joins the **same tailnet as your Ragnar** — there is no second Tailscale
+network. Tailscale can only bind one node to one tailnet at a time, so this works
+cleanly when the guest is a plain Tailscale client (a phone or laptop with the app
++ a browser), not a second Ragnar that is already meshed elsewhere. The wall
+between "guest" and "unit" is the **tag + ACL**, not a separate network.
+
+#### Setup — the owner mints a tagged auth key
+
+1. In the Tailscale admin console, allow the tag and scope it to *only* your
+   Ragnar's web port:
+
+   ```jsonc
+   {
+     "tagOwners": {
+       "tag:ragnar-mesh":  ["autogroup:admin"],
+       "tag:ragnar-share": ["autogroup:admin"]
+     },
+     "acls": [
+       // your units talk to each other (unchanged)
+       { "action": "accept", "src": ["tag:ragnar-mesh"],
+         "dst": ["tag:ragnar-mesh:8000"] },
+       // a share-guest may reach ONLY this one Ragnar, ONLY on :8000.
+       // Pin dst to your receiving unit's tag or IP — never tag:ragnar-mesh,
+       // or the guest could reach every unit.
+       { "action": "accept", "src": ["tag:ragnar-share"],
+         "dst": ["tag:ragnar-mesh:8000"] }
+     ]
+   }
+   ```
+
+   Tighten `dst` to a single host (e.g. the unit's Tailscale IP `100.x.y.z:8000`)
+   if you do not want the guest reachable to every `tag:ragnar-mesh` unit.
+
+2. Generate a **pre-authorized, tagged** auth key (Settings → Keys → Generate auth
+   key → *Tags:* `tag:ragnar-share`). Hand that key to the guest.
+
+3. The guest joins your tailnet with it:
+
+   ```bash
+   tailscale up --authkey=tskey-auth-... --advertise-tags=tag:ragnar-share
+   ```
+
+   …then opens `http://<your-ragnar-tailscale-ip>:8000` and sends you files. They
+   see only your one unit's send surface — nothing else.
+
+To change the tag Ragnar trusts, set `mesh_share_tag` in config (default
+`tag:ragnar-share`). Revoking access is one click in the Tailscale console —
+disable the key or the guest's node.
+
 ## Cross-site incident correlation
 
 Each unit pulls its peers' Watchtower alerts and folds them into its **own**
@@ -838,6 +912,8 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_poll_timeout` | `6` | Per-peer HTTP timeout. Kept short so one dead unit cannot stall the view. |
 | `mesh_aggregate_alerts` | `true` | Pull peers' alerts into the local incident engine. |
 | `mesh_alert_limit` | `50` | Max alerts pulled per peer per poll. |
+| `mesh_share_tag` | `tag:ragnar-share` | Tailscale tag trusted for **share-only guests** (send files to this unit, nothing else). |
+| `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). Off = send-only. |
 
 Environment variables (imaging / unattended):
 `RAGNAR_MESH_AUTHKEY`, `RAGNAR_MESH_UNIT_ID`, `RAGNAR_MESH_LABEL`,

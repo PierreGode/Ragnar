@@ -447,6 +447,31 @@ def _is_mesh_peer_request():
         return False
 
 
+def _mesh_share_tag():
+    """The Tailscale tag that marks a share-only guest (default tag:ragnar-share)."""
+    return shared_data.config.get('mesh_share_tag') or 'tag:ragnar-share'
+
+
+def _is_mesh_share_request():
+    """True when the request came from a share-only guest over the tailnet.
+
+    A share guest carries the share tag (tag:ragnar-share) but NOT the mesh tag,
+    so it is never treated as a peer Ragnar. Same source paranoia as the peer
+    check — loopback rejected, real tailnet address required, tag proven by
+    tailscaled. Fails closed on any error.
+    """
+    if not mesh_available:
+        return False
+    remote = request.remote_addr or ''
+    if remote in ('127.0.0.1', '::1'):
+        return False
+    try:
+        return mesh_manager.caller_is_mesh_peer(remote, _mesh_share_tag())
+    except Exception as exc:
+        logger.warning(f"[mesh] share-guest identity check failed for {remote}: {exc}")
+        return False
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
@@ -525,6 +550,20 @@ def check_authentication():
         peer_file_push = request.method == 'POST' and path == '/api/mesh/files/push'
         if (peer_read or peer_control or peer_scan_write or peer_update
                 or peer_file_push) and _is_mesh_peer_request():
+            return
+
+        # Share-only guest role. A device carrying the SHARE tag (tag:ragnar-share)
+        # but NOT the mesh tag may ONLY drop a file into this unit's inbox — no
+        # roster, no reads, no scans, no control. It never appears as a mesh unit
+        # and cannot enumerate anything about this box. Optionally (operator
+        # opt-in) it may also browse/fetch this unit's Mesh Share folder. The push
+        # handler still honours mesh_file_receive, so "stop accepting" also stops
+        # guests. Exact-path allowlisted and fail-closed.
+        share_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        share_read = (request.method == 'GET'
+                      and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                      and bool(shared_data.config.get('mesh_share_guest_read')))
+        if (share_push or share_read) and _is_mesh_share_request():
             return
 
     # Check if user is authenticated via Flask session
@@ -20113,7 +20152,9 @@ def mesh_inbox_list():
     """Files received into this unit's inbox, awaiting the operator's choice."""
     return jsonify({'success': True,
                     'items': _get_mesh_transfer().list_inbox(),
-                    'receive_enabled': _mesh_receive_enabled()})
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    'share_tag': _mesh_share_tag()})
 
 
 @app.route('/api/mesh/inbox/save', methods=['POST'])
@@ -20162,11 +20203,17 @@ def mesh_inbox_discard():
 
 @app.route('/api/mesh/files/config', methods=['POST'])
 def mesh_files_config():
-    """Toggle whether this unit accepts incoming transfers."""
+    """Toggle whether this unit accepts incoming transfers, and whether
+    share-only guests may browse this unit's Mesh Share folder."""
     data = request.get_json(silent=True) or {}
-    shared_data.config['mesh_file_receive'] = bool(data.get('receive', True))
+    if 'receive' in data:
+        shared_data.config['mesh_file_receive'] = bool(data.get('receive'))
+    if 'share_read' in data:
+        shared_data.config['mesh_share_guest_read'] = bool(data.get('share_read'))
     shared_data.save_config()
-    return jsonify({'success': True, 'receive_enabled': _mesh_receive_enabled()})
+    return jsonify({'success': True,
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read'))})
 
 
 # ---------------------------------------------------------------------------
@@ -20231,7 +20278,8 @@ def mesh_share_all():
             for f in rep.get('files', []):
                 items.append({**f, 'owner': owner, 'owner_id': node.get('id'), 'is_local': False})
     items.sort(key=lambda x: (str(x.get('owner', '')).lower(), x['name'].lower()))
-    return jsonify({'success': True, 'items': items})
+    return jsonify({'success': True, 'items': items,
+                    'guest_read': bool(shared_data.config.get('mesh_share_guest_read'))})
 
 
 @app.route('/api/mesh/share/add', methods=['POST'])

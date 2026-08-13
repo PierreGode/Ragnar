@@ -3466,7 +3466,11 @@
                             <button onclick="loadMeshShare()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
                         </div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-4">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <p class="text-sm text-gray-400 mb-3">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mb-4">
+                        <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700">
+                        Let <b class="text-gray-300">share-guests</b> (<code class="text-gray-500">tag:ragnar-share</code>) browse &amp; fetch this folder — off means they can only send files to you.
+                    </label>
                     <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
                 </div>
 
@@ -7863,7 +7867,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-inbox-select-keep"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-share-guest"></script>
 
 </body>
 </html>
