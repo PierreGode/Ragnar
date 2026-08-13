@@ -773,6 +773,11 @@ ceiling is 4 GB.
 
 ## Mesh Share
 
+> **Detailed guide:** [mesh-share.md](mesh-share.md) covers the full picture —
+> the Mesh Share folder, direct transfers, and all three ways to share with
+> someone **outside** your mesh (tag-guest, share-only Join, and token +
+> node-share/Funnel), with step-by-step "who does what".
+
 The **Ragnar Mesh → Mesh Share** sub-tab is a folder every unit publishes to the
 whole mesh. It is **not** a central store: each unit serves its own shared list
 (`data/mesh_share/`), and the catalog is assembled on demand by asking every online
