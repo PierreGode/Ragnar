@@ -447,14 +447,142 @@ def _is_mesh_peer_request():
         return False
 
 
+def _mesh_share_tag():
+    """The Tailscale tag that marks a share-only guest for THIS unit's mesh.
+
+    An explicit mesh_share_tag config wins. Otherwise the share tag is derived
+    from the mesh tag so it stays paired with it: a unit on the default mesh
+    trusts tag:ragnar-share, a unit on tag:ragnar-mesh-2 trusts tag:ragnar-share-2.
+    That keeps share guests confined to one mesh even when several separate
+    meshes share a tailnet.
+    """
+    explicit = shared_data.config.get('mesh_share_tag')
+    if explicit:
+        return explicit
+    if mesh_available:
+        return mesh_manager.share_tag_for_mesh_tag(_mesh_tag())
+    return 'tag:ragnar-share'
+
+
+def _this_unit_is_share_only():
+    """True when THIS unit joined as a share-only guest (not a mesh member).
+
+    Two signals, either is enough: the role recorded locally at join time
+    (mesh_share_only — survives even when Tailscale doesn't echo the tag), or a
+    live Self that carries the share tag but not the mesh tag. Used to strip the
+    host mesh out of a guest's own UI. Fails open to "not share-only" on error,
+    so a normal unit is never accidentally treated as a guest.
+    """
+    if shared_data.config.get('mesh_share_only'):
+        return True
+    if not mesh_available:
+        return False
+    try:
+        self_node = (mesh_manager.status() or {}).get('self') or {}
+        tags = self_node.get('tags', [])
+        return (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+    except Exception:
+        return False
+
+
+def _is_mesh_share_request():
+    """True when the request came from a share-only guest over the tailnet.
+
+    A share guest carries the share tag (tag:ragnar-share) but NOT the mesh tag,
+    so it is never treated as a peer Ragnar. Same source paranoia as the peer
+    check — loopback rejected, real tailnet address required, tag proven by
+    tailscaled. Fails closed on any error.
+    """
+    if not mesh_available:
+        return False
+    remote = request.remote_addr or ''
+    if remote in ('127.0.0.1', '::1'):
+        return False
+    try:
+        return mesh_manager.caller_is_mesh_peer(remote, _mesh_share_tag())
+    except Exception as exc:
+        logger.warning(f"[mesh] share-guest identity check failed for {remote}: {exc}")
+        return False
+
+
+def _share_tokens():
+    """Incoming share tokens this unit accepts (operator-issued, handed out)."""
+    toks = shared_data.config.get('mesh_share_tokens')
+    return toks if isinstance(toks, list) else []
+
+
+def _valid_share_token():
+    """True when the request carries a Bearer token this unit has issued.
+
+    This authenticates a remote purely by the secret token — independent of
+    tailnet identity — so a remote reaching us over Tailscale node-sharing or
+    Funnel (a separate tailnet) can still push a file to our inbox. The token
+    grants exactly one thing: POST /api/mesh/files/push. Constant-time compared.
+    """
+    import hmac
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return False
+    presented = auth[7:].strip()
+    if not presented:
+        return False
+    for t in _share_tokens():
+        stored = t.get('token') if isinstance(t, dict) else None
+        if stored and hmac.compare_digest(str(stored), presented):
+            return True
+    return False
+
+
+def _remote_shares():
+    """Outbound remote-share targets (address + token) this unit can send to."""
+    v = shared_data.config.get('mesh_remote_shares')
+    return v if isinstance(v, list) else []
+
+
+def _get_remote_share(rid):
+    for r in _remote_shares():
+        if isinstance(r, dict) and r.get('id') == rid:
+            return r
+    return None
+
+
+def _remote_share_push_url(address):
+    """Build the push URL for a saved remote address (host[:port] or full URL)."""
+    address = (address or '').strip()
+    if not address:
+        return ''
+    if not address.startswith(('http://', 'https://')):
+        address = 'http://' + address
+    return address.rstrip('/') + '/api/mesh/files/push'
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
+    path = request.path
     if not auth_mgr.is_configured():
-        return  # No auth set up yet, allow everything
+        # No local login — everyone is otherwise allowed. But the two
+        # deliberately-limited OUTSIDER roles must stay confined even here, or an
+        # open box would hand them the full dashboard and the whole point of the
+        # role (tag:ragnar-share, or a share token) would be lost. Same
+        # confinement the mesh block below enforces when auth IS configured, so
+        # 2A/2B (tag) and 2C (token) all behave the same with or without a login.
+        if shared_data.config.get('mesh_enabled'):
+            is_push = request.method == 'POST' and path == '/api/mesh/files/push'
+            if _is_mesh_share_request():            # tailnet share-guest (2A / 2B)
+                share_read = (request.method == 'GET'
+                              and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                              and bool(shared_data.config.get('mesh_share_guest_read')))
+                if not (is_push or share_read):
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share-only guest: file share access only'}), 403
+            elif _valid_share_token():              # cross-tailnet token holder (2C)
+                if not is_push:
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share token: file push only'}), 403
+        return  # No auth set up yet, allow everyone else
 
     # Whitelist: paths that must be accessible without authentication
-    path = request.path
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
         return
@@ -525,6 +653,30 @@ def check_authentication():
         peer_file_push = request.method == 'POST' and path == '/api/mesh/files/push'
         if (peer_read or peer_control or peer_scan_write or peer_update
                 or peer_file_push) and _is_mesh_peer_request():
+            return
+
+        # Share-only guest role. A device carrying the SHARE tag (tag:ragnar-share)
+        # but NOT the mesh tag may ONLY drop a file into this unit's inbox — no
+        # roster, no reads, no scans, no control. It never appears as a mesh unit
+        # and cannot enumerate anything about this box. Optionally (operator
+        # opt-in) it may also browse/fetch this unit's Mesh Share folder. The push
+        # handler still honours mesh_file_receive, so "stop accepting" also stops
+        # guests. Exact-path allowlisted and fail-closed.
+        share_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        share_read = (request.method == 'GET'
+                      and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                      and bool(shared_data.config.get('mesh_share_guest_read')))
+        if (share_push or share_read) and _is_mesh_share_request():
+            return
+
+        # Share-token role. A remote holding a valid share token (one this unit's
+        # operator generated and handed out) may ONLY push a file to the inbox.
+        # Authenticated purely by the bearer token — no tailnet identity needed —
+        # so it works across separate tailnets (node-sharing / Funnel) where
+        # WireGuard-identity tagging does not carry. Same inbox-only handler,
+        # same mesh_file_receive off-switch, exact-path allowlisted, fail-closed.
+        token_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        if token_push and _valid_share_token():
             return
 
     # Check if user is authenticated via Flask session
@@ -3038,6 +3190,34 @@ def _mesh_tagged_peers():
     return [p for p in state.get('peers', []) if tag in p.get('tags', [])]
 
 
+def _mesh_share_guest_nodes():
+    """Tailnet nodes that are share-only guests: they carry the share tag but
+    NOT the mesh tag. Deliberately kept OUT of the mesh roster (they are not
+    units to monitor), but they ARE valid file recipients — a mesh unit can send
+    files to a guest's inbox. Returns clean node dicts for the recipient picker.
+    """
+    if not _mesh_enabled():
+        return []
+    state = mesh_manager.status()
+    if not state.get('available'):
+        return []
+    mesh_tag, share_tag = _mesh_tag(), _mesh_share_tag()
+    out = []
+    for p in state.get('peers', []):
+        tags = p.get('tags', [])
+        if share_tag in tags and mesh_tag not in tags:
+            out.append(p)
+    return out
+
+
+def _resolve_share_guest_node(node_id):
+    """Find a share-only guest node by its stable Tailscale node id."""
+    for p in _mesh_share_guest_nodes():
+        if p.get('id') and p.get('id') == node_id:
+            return p
+    return None
+
+
 def _resolve_delegate_node(node_id):
     """Find a tagged peer node by its stable Tailscale node id.
 
@@ -3456,6 +3636,7 @@ def mesh_status():
 
     self_node = state.get('self')
     self_tagged = False
+    self_share_tagged = False
     if self_node:
         self_node = dict(self_node)
         # Is THIS unit tagged into the mesh? A unit can be fully on the tailnet
@@ -3464,7 +3645,16 @@ def mesh_status():
         # whole mesh keys off the tag, and an interactive `tailscale up` login
         # never applies one.
         self_tagged = tag in self_node.get('tags', [])
+        # A share-only guest deliberately joins with tag:ragnar-share and NO
+        # mesh tag. That is a valid, intended state — not the "forgot to tag"
+        # misconfiguration — so the UI must not nag it to add the mesh tag.
+        self_share_tagged = _mesh_share_tag() in self_node.get('tags', [])
+        # Trust the locally-recorded join role too: Self.Tags can lag or omit the
+        # tag, but a box that joined share-only knows it did.
+        if shared_data.config.get('mesh_share_only'):
+            self_share_tagged = True
         self_node['is_ragnar'] = self_tagged
+        self_node['is_share_guest'] = self_share_tagged and not self_tagged
         self_node['health'] = _mesh_local_health()
         self_node['findings'] = dict(_mesh_local_findings(),
                                      features=_mesh_local_features())
@@ -3475,6 +3665,14 @@ def mesh_status():
         self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
 
     ragnar_peers = [p for p in peers if p['is_ragnar']]
+
+    # A share-only guest is not a mesh member: it has no business enumerating the
+    # host's mesh. Even though Tailscale lets it SEE those machines, Ragnar hides
+    # them so this unit's UI shows no peers, no shared roster — only its own
+    # share-only role. This is a view decision; the ACL is what actually confines
+    # it on the wire.
+    if self_share_tagged and not self_tagged:
+        ragnar_peers = []
 
     # Two units answering to the same number makes every report ambiguous
     # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
@@ -3525,9 +3723,17 @@ def mesh_status():
         'version': state.get('version', ''),
         'magic_dns_suffix': state.get('magic_dns_suffix', ''),
         'mesh_tag': tag,
+        # The suffix that names this unit's mesh ('' = the default ragnar-mesh).
+        # Several isolated meshes can share one tailnet, told apart by this.
+        'mesh_suffix': mesh_manager.suffix_of_mesh_tag(tag) if mesh_available else '',
         # Whether THIS unit is tagged into the mesh. False + available means
         # "on the tailnet but not in the mesh" — the state to explain loudly.
         'self_tagged': self_tagged,
+        # Whether this unit joined as a share-only guest (carries the share tag
+        # but not the mesh tag). A deliberate state, so the UI explains it as
+        # "share-only" rather than nagging to add the mesh tag.
+        'self_share_tagged': self_share_tagged and not self_tagged,
+        'share_tag': _mesh_share_tag(),
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),
@@ -3561,6 +3767,14 @@ def mesh_status():
         # phones, unrelated services) are intentionally not listed — they are
         # not the mesh's business and naming them just leaks the tailnet roster.
         'peers': ragnar_peers,
+        # Share-only guests are NOT roster units, but they ARE valid file
+        # recipients — the File Transfer picker lists them so a mesh unit can
+        # send files to a guest. Empty on a guest's own view (it hosts none).
+        'share_guests': ([] if (self_share_tagged and not self_tagged) else [
+            {'id': g.get('id'), 'short_name': g.get('short_name', ''),
+             'label': g.get('label', '') or g.get('short_name', ''),
+             'online': bool(g.get('online'))}
+            for g in _mesh_share_guest_nodes()]),
         'summary': {
             'total': len(ragnar_peers) + (1 if self_node else 0),
             'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
@@ -3786,7 +4000,25 @@ def mesh_join():
     data = request.get_json(silent=True) or {}
     auth_key = (data.get('auth_key') or '').strip()
     hostname = (data.get('hostname') or '').strip()
-    tags = data.get('tags') or [_mesh_tag()]
+
+    # Which Ragnar mesh does this box belong to? An optional suffix selects a
+    # separate, isolated mesh (ragnar-mesh-2, …) under the same tailnet; blank or
+    # absent means the default mesh. mesh_suffix is the source of truth here — it
+    # decides both the mesh tag advertised and the paired share tag.
+    if data.get('mesh_suffix') is not None:
+        mesh_tag = mesh_manager.mesh_tag_for_suffix(data.get('mesh_suffix'))
+    else:
+        mesh_tag = _mesh_tag()
+
+    # What to advertise. An explicit tags list wins (back-compat / power users).
+    # A share-only join carries the share tag paired with the chosen mesh, never
+    # the mesh tag; a full join carries the mesh tag.
+    if data.get('tags'):
+        tags = data.get('tags')
+    elif data.get('share_only'):
+        tags = [mesh_manager.share_tag_for_mesh_tag(mesh_tag)]
+    else:
+        tags = [mesh_tag]
     routes = [r.strip() for r in (data.get('advertise_routes') or []) if r.strip()]
     ok, message = mesh_manager.join(
         auth_key,
@@ -3795,12 +4027,26 @@ def mesh_join():
         advertise_routes=routes,
         enable_ssh=bool(data.get('enable_ssh', True)),
         accept_routes=bool(data.get('accept_routes', False)),
+        logout_first=bool(data.get('switch_tailnet', False)),
     )
     if ok:
         # Joining is the moment the operator has decided this box is mesh-managed.
         shared_data.config['mesh_enabled'] = True
         if hostname and not shared_data.config.get('mesh_site_label'):
             shared_data.config['mesh_site_label'] = hostname
+        # Pin the mesh this box now belongs to, so every later peer scan and
+        # trust check filters on it (and _mesh_share_tag derives from it). A
+        # share-only guest records the mesh it is guesting too, so its own share
+        # tag matches the host's. Only persisted when the operator chose one.
+        if data.get('mesh_suffix') is not None:
+            shared_data.config['mesh_tag'] = mesh_tag
+        # Remember HOW this box joined. A share-only guest carries the share tag
+        # and NOT the mesh tag: it is here to send/receive files, not to be a
+        # mesh peer. We record that locally rather than trusting what Tailscale
+        # reports back for Self.Tags (which can lag or be omitted), so this
+        # unit's own UI reliably shows the share-only role and hides the mesh.
+        share_only = (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+        shared_data.config['mesh_share_only'] = bool(share_only)
         shared_data.save_config()
         logger.success(f"[mesh] joined tailnet as {hostname or socket.gethostname()}")
     else:
@@ -3814,6 +4060,10 @@ def mesh_leave():
     if not mesh_available:
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     ok, message = mesh_manager.leave()
+    if ok:
+        # Leaving drops the share-only role too; a later normal join re-derives it.
+        shared_data.config['mesh_share_only'] = False
+        shared_data.save_config()
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
@@ -20016,21 +20266,81 @@ def mesh_files_push():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/mesh/files/send', methods=['POST'])
-def mesh_files_send():
-    """Operator: stream a file from this unit to a peer (runs in background).
+class _OutboundError(Exception):
+    """A staging/validation failure with an HTTP status for the caller."""
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
+def _prepare_outbound_file(multipart, body):
+    """Stage and validate one outbound file for a mesh transfer.
 
     Source is one of: a drag-dropped upload (multipart 'file'), an /uploads or
     /backups path ('source':'path'), or an unlocked Vault file ('source':'vault').
+    Returns (src_path, filename, cleanup). Raises _OutboundError for a bad source,
+    or SafeLockedError/SafeError when a locked Vault file is requested. Shared by
+    the mesh-peer send and the token-based remote-share send.
     """
     import tempfile
+    mt = _get_mesh_transfer()
+    if multipart:
+        f = request.files['file']
+        filename = os.path.basename(f.filename or 'file')
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        os.close(fd)
+        f.save(src_path)
+        cleanup = True
+    elif body.get('source') == 'vault':
+        entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
+        filename = os.path.basename(entry.get('name', 'file'))
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        with os.fdopen(fd, 'wb') as w:
+            w.write(data)
+        cleanup = True
+    else:  # a real file the operator can browse on this unit
+        try:
+            src_path = _resolve_readable_path(body.get('path', ''))
+        except ValueError:
+            raise _OutboundError('Invalid source path')
+        if not os.path.isfile(src_path):
+            raise _OutboundError('Source file not found', 404)
+        filename = os.path.basename(src_path)
+        cleanup = False
+
+    def _cleanup_staged():
+        if cleanup:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+    try:
+        src_size = os.path.getsize(src_path)
+    except OSError:
+        _cleanup_staged()
+        raise _OutboundError('Source file not found', 404)
+    if src_size == 0:
+        _cleanup_staged()
+        raise _OutboundError('That file is empty — nothing to send')
+    if src_size > mt.max_bytes:
+        _cleanup_staged()
+        raise _OutboundError('File is larger than the %d GB transfer limit'
+                             % (mt.max_bytes // (1024 ** 3)))
+    return src_path, filename, cleanup
+
+
+@app.route('/api/mesh/files/send', methods=['POST'])
+def mesh_files_send():
+    """Operator: stream a file from this unit to a peer (runs in background)."""
     try:
         mt = _get_mesh_transfer()
         multipart = bool(request.files.get('file'))
         body = {} if multipart else (request.get_json(silent=True) or {})
         target_id = (request.form.get('target_id') if multipart else body.get('target_id')) or ''
 
-        node = _resolve_delegate_node(target_id)
+        # A recipient is either a mesh unit or a share-only guest (guests can be
+        # sent to, they just aren't part of the monitored roster).
+        node = _resolve_delegate_node(target_id) or _resolve_share_guest_node(target_id)
         if not node:
             return jsonify({'success': False, 'error': 'Target unit not found in mesh'}), 400
         # Prefer the peer's self-reported Viking name (from the poll cache) over
@@ -20044,51 +20354,10 @@ def mesh_files_send():
             return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
 
         headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id())}
-        cleanup = False
-
-        if multipart:
-            f = request.files['file']
-            filename = os.path.basename(f.filename or 'file')
-            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
-            os.close(fd)
-            f.save(src_path)
-            cleanup = True
-        elif body.get('source') == 'vault':
-            entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
-            filename = os.path.basename(entry.get('name', 'file'))
-            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
-            with os.fdopen(fd, 'wb') as w:
-                w.write(data)
-            cleanup = True
-        else:  # a real file the operator can browse on this unit
-            try:
-                src_path = _resolve_readable_path(body.get('path', ''))
-            except ValueError:
-                return jsonify({'success': False, 'error': 'Invalid source path'}), 400
-            if not os.path.isfile(src_path):
-                return jsonify({'success': False, 'error': 'Source file not found'}), 404
-            filename = os.path.basename(src_path)
-
-        # Validate the source before queuing a doomed transfer.
-        def _cleanup_staged():
-            if cleanup:
-                try:
-                    os.remove(src_path)
-                except OSError:
-                    pass
         try:
-            src_size = os.path.getsize(src_path)
-        except OSError:
-            _cleanup_staged()
-            return jsonify({'success': False, 'error': 'Source file not found'}), 404
-        if src_size == 0:
-            _cleanup_staged()
-            return jsonify({'success': False, 'error': 'That file is empty — nothing to send'}), 400
-        if src_size > mt.max_bytes:
-            _cleanup_staged()
-            return jsonify({'success': False,
-                            'error': 'File is larger than the %d GB transfer limit'
-                                     % (mt.max_bytes // (1024 ** 3))}), 400
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
 
         tid = mt.registry.create(filename, dest_name)
         mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
@@ -20108,12 +20377,135 @@ def mesh_transfers_list():
     return jsonify({'success': True, 'transfers': _get_mesh_transfer().registry.list()})
 
 
+# --- Share tokens: this unit issues them; a remote presents one to push here ---
+
+@app.route('/api/mesh/share/tokens', methods=['GET'])
+def mesh_share_tokens_list():
+    """Operator: list the incoming share tokens this unit accepts.
+
+    Only a masked preview is returned — the full secret is shown once, at
+    creation. (A peer Ragnar can GET any /api/mesh/* path, so the raw token
+    must never appear here.) Lost a token? Revoke it and mint a new one.
+    """
+    return jsonify({'success': True, 'tokens': [
+        {'id': t.get('id'), 'label': t.get('label', ''),
+         'preview': '…' + str(t.get('token', ''))[-6:], 'created': t.get('created', '')}
+        for t in _share_tokens() if isinstance(t, dict)]})
+
+
+@app.route('/api/mesh/share/tokens', methods=['POST'])
+def mesh_share_tokens_create():
+    """Operator: mint a new share token to hand to one outside sender."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    label = (data.get('label') or '').strip()[:60]
+    entry = {'id': secrets.token_hex(6),
+             'label': label,
+             'token': 'rgnr-share-' + secrets.token_urlsafe(24),
+             'created': datetime.now().isoformat(timespec='seconds')}
+    toks = _share_tokens() + [entry]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True, 'token': entry})
+
+
+@app.route('/api/mesh/share/tokens/<tid>', methods=['DELETE'])
+def mesh_share_tokens_delete(tid):
+    """Operator: revoke one share token (that sender can no longer push)."""
+    toks = [t for t in _share_tokens() if isinstance(t, dict) and t.get('id') != tid]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+# --- Remote shares: saved outbound targets (address + token) to send files to ---
+
+def _remote_share_public(r):
+    """Strip the secret token for listing."""
+    return {'id': r.get('id'), 'name': r.get('name', ''), 'address': r.get('address', ''),
+            'created': r.get('created', '')}
+
+
+@app.route('/api/mesh/remote-shares', methods=['GET'])
+def mesh_remote_shares_list():
+    """Operator: saved remote-share targets (tokens masked)."""
+    return jsonify({'success': True,
+                    'remotes': [_remote_share_public(r) for r in _remote_shares() if isinstance(r, dict)]})
+
+
+@app.route('/api/mesh/remote-shares', methods=['POST'])
+def mesh_remote_shares_add():
+    """Operator: add a remote to send files to (name + address + their token)."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()[:60]
+    address = (data.get('address') or '').strip()
+    token = (data.get('token') or '').strip()
+    if not name or not address or not token:
+        return jsonify({'success': False, 'error': 'Name, address and token are all required'}), 400
+    if not _remote_share_push_url(address):
+        return jsonify({'success': False, 'error': 'That address is not valid'}), 400
+    entry = {'id': secrets.token_hex(6), 'name': name, 'address': address, 'token': token,
+             'created': datetime.now().isoformat(timespec='seconds')}
+    remotes = _remote_shares() + [entry]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True, 'remote': _remote_share_public(entry)})
+
+
+@app.route('/api/mesh/remote-shares/<rid>', methods=['DELETE'])
+def mesh_remote_shares_delete(rid):
+    """Operator: forget a remote-share target."""
+    remotes = [r for r in _remote_shares() if isinstance(r, dict) and r.get('id') != rid]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/remote-shares/<rid>/send', methods=['POST'])
+def mesh_remote_shares_send(rid):
+    """Operator: stream a file to a saved remote share, authenticated by its token.
+
+    Same staging/validation as a peer send, but the destination is an arbitrary
+    address and the auth is the bearer token — so it reaches a Ragnar on a
+    separate tailnet (node-sharing / Funnel), not just a mesh peer.
+    """
+    remote = _get_remote_share(rid)
+    if not remote:
+        return jsonify({'success': False, 'error': 'Remote share not found'}), 404
+    url = _remote_share_push_url(remote.get('address'))
+    if not url:
+        return jsonify({'success': False, 'error': 'Remote has no valid address'}), 400
+    try:
+        mt = _get_mesh_transfer()
+        multipart = bool(request.files.get('file'))
+        body = {} if multipart else (request.get_json(silent=True) or {})
+        headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id()),
+                   'Authorization': 'Bearer ' + str(remote.get('token', ''))}
+        try:
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
+        tid = mt.registry.create(filename, remote.get('name', 'remote'))
+        mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
+        return jsonify({'success': True, 'transfer_id': tid, 'dest': remote.get('name', 'remote')})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first to send a Vault file'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh remote-share send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/mesh/inbox')
 def mesh_inbox_list():
     """Files received into this unit's inbox, awaiting the operator's choice."""
     return jsonify({'success': True,
                     'items': _get_mesh_transfer().list_inbox(),
-                    'receive_enabled': _mesh_receive_enabled()})
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    'share_tag': _mesh_share_tag()})
 
 
 @app.route('/api/mesh/inbox/save', methods=['POST'])
@@ -20162,11 +20554,17 @@ def mesh_inbox_discard():
 
 @app.route('/api/mesh/files/config', methods=['POST'])
 def mesh_files_config():
-    """Toggle whether this unit accepts incoming transfers."""
+    """Toggle whether this unit accepts incoming transfers, and whether
+    share-only guests may browse this unit's Mesh Share folder."""
     data = request.get_json(silent=True) or {}
-    shared_data.config['mesh_file_receive'] = bool(data.get('receive', True))
+    if 'receive' in data:
+        shared_data.config['mesh_file_receive'] = bool(data.get('receive'))
+    if 'share_read' in data:
+        shared_data.config['mesh_share_guest_read'] = bool(data.get('share_read'))
     shared_data.save_config()
-    return jsonify({'success': True, 'receive_enabled': _mesh_receive_enabled()})
+    return jsonify({'success': True,
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read'))})
 
 
 # ---------------------------------------------------------------------------
@@ -20219,9 +20617,16 @@ def mesh_share_all():
     for f in _mesh_share_list_local():
         items.append({**f, 'owner': _mesh_viking_name() or 'this unit',
                       'owner_id': 'self', 'is_local': True})
+    # Even a share-only guest is a participant in the shared FOLDER: it sees every
+    # unit's shared files and can fetch them (subject to each host's guest-read
+    # opt-in). Only the device ROSTER is hidden from a guest, not the share.
     if _mesh_enabled():
         port = _mesh_node_port()
-        for node in _mesh_tagged_peers():
+        # Poll mesh units AND share-only guests: the shared folder spans both.
+        # A guest's files are read via the same /share/local (a mesh peer poll is
+        # authorized on the guest as a peer read; a guest polling a unit needs
+        # that unit's guest-read opt-in).
+        for node in _mesh_tagged_peers() + _mesh_share_guest_nodes():
             if not node.get('online'):
                 continue
             rep = mesh_manager.poll_peer(node, port=port, timeout=6, path='/api/mesh/share/local')
@@ -20231,7 +20636,11 @@ def mesh_share_all():
             for f in rep.get('files', []):
                 items.append({**f, 'owner': owner, 'owner_id': node.get('id'), 'is_local': False})
     items.sort(key=lambda x: (str(x.get('owner', '')).lower(), x['name'].lower()))
-    return jsonify({'success': True, 'items': items})
+    return jsonify({'success': True, 'items': items,
+                    'guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    # Lets the Mesh Share tab hide host-only tooling (guest-read
+                    # toggle, tokens, remote shares, join) on a share-only guest.
+                    'share_only': _this_unit_is_share_only()})
 
 
 @app.route('/api/mesh/share/add', methods=['POST'])

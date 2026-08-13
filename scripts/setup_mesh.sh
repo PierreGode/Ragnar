@@ -11,7 +11,8 @@
 # them:
 #
 #   1. Imaging / unattended. Set RAGNAR_MESH_AUTHKEY (plus optionally
-#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES) in the
+#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES, and
+#      RAGNAR_MESH_SUFFIX to place the box in a separate mesh) in the
 #      environment or in /boot/ragnar-mesh.conf. The unit joins on first boot
 #      with nobody logged in — the technician plugs in power and ethernet and
 #      walks away.
@@ -27,7 +28,26 @@
 
 set -o pipefail
 
-MESH_TAG="${RAGNAR_MESH_TAG:-tag:ragnar-mesh}"
+# One tailnet can hold several *isolated* Ragnar meshes, told apart only by
+# their tag: ragnar-mesh (the default) and ragnar-mesh-<suffix> for each extra
+# one. RAGNAR_MESH_TAG is the explicit override (full tag); RAGNAR_MESH_SUFFIX is
+# the friendly form a technician sets ("2", "lab"). A node tagged ragnar-mesh-2
+# is invisible to a ragnar-mesh node even on the same account.
+if [ -n "${RAGNAR_MESH_TAG:-}" ]; then
+    MESH_TAG="$RAGNAR_MESH_TAG"
+elif [ -n "${RAGNAR_MESH_SUFFIX:-}" ]; then
+    # Tailscale tags are DNS labels: lowercase [a-z0-9-]. Tolerate a pasted full
+    # tag or "ragnar-mesh-2" as well as a bare "2".
+    _mesh_suffix="$(printf '%s' "$RAGNAR_MESH_SUFFIX" \
+        | tr '[:upper:]' '[:lower:]' \
+        | sed -E 's/^tag:ragnar-mesh-?//; s/^ragnar-mesh-?//; s/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+    MESH_TAG="tag:ragnar-mesh${_mesh_suffix:+-$_mesh_suffix}"
+    # Record the resolved tag in Ragnar's config too, so the web UI and peer
+    # scans agree with what was advertised at join time.
+    export RAGNAR_MESH_TAG="$MESH_TAG"
+else
+    MESH_TAG="tag:ragnar-mesh"
+fi
 BOOT_CONF="/boot/ragnar-mesh.conf"
 BOOT_CONF_ALT="/boot/firmware/ragnar-mesh.conf"
 RAGNAR_CONFIG="${RAGNAR_CONFIG:-/home/ragnar/Ragnar/config/shared_config.json}"

@@ -65,6 +65,56 @@ LOCALAPI_HOST = 'local-tailscaled.sock'
 # Default tag every Ragnar mesh node carries. Overridable via config so an
 # operator running Ragnar inside a larger tailnet can scope it to their own tag.
 DEFAULT_MESH_TAG = 'tag:ragnar-mesh'
+DEFAULT_SHARE_TAG = 'tag:ragnar-share'
+
+# One tailnet can hold several *completely separate* Ragnar meshes, told apart
+# only by their tag. The default mesh is tag:ragnar-mesh; a second, isolated
+# mesh is tag:ragnar-mesh-2, and so on. Separation is real because every trust
+# check (caller_is_mesh_peer) and every peer scan filters on the exact tag, so a
+# node tagged ragnar-mesh-2 is invisible to — and rejected by — a ragnar-mesh
+# node even though they share a coordination server.
+_MESH_TAG_PREFIX = 'tag:ragnar-mesh'
+_SHARE_TAG_PREFIX = 'tag:ragnar-share'
+
+
+def normalize_mesh_suffix(suffix):
+    """Sanitise an operator-supplied mesh suffix to a DNS-label-safe fragment.
+
+    The suffix becomes part of a Tailscale tag, which is a DNS label, so it is
+    lowercased and reduced to [a-z0-9-]. An operator who pastes the whole thing
+    ("ragnar-mesh-2", "tag:ragnar-mesh-2") gets the same result as typing "2".
+    Returns '' for anything empty — i.e. the default mesh.
+    """
+    s = (str(suffix) if suffix is not None else '').strip().lower()
+    for p in ('tag:ragnar-mesh-', 'ragnar-mesh-', 'tag:ragnar-mesh', 'ragnar-mesh'):
+        if s.startswith(p):
+            s = s[len(p):]
+            break
+    s = re.sub(r'[^a-z0-9-]+', '-', s).strip('-')
+    return s[:32]
+
+
+def mesh_tag_for_suffix(suffix):
+    """The mesh tag for a suffix. Blank suffix ⇒ the default mesh tag."""
+    s = normalize_mesh_suffix(suffix)
+    return f'{_MESH_TAG_PREFIX}-{s}' if s else DEFAULT_MESH_TAG
+
+
+def suffix_of_mesh_tag(mesh_tag):
+    """Inverse of mesh_tag_for_suffix: the suffix a mesh tag carries ('' = default)."""
+    tag = (mesh_tag or '').strip()
+    prefix = _MESH_TAG_PREFIX + '-'
+    return tag[len(prefix):] if tag.startswith(prefix) else ''
+
+
+def share_tag_for_mesh_tag(mesh_tag):
+    """The share-guest tag paired with a mesh tag, so guests stay mesh-scoped.
+
+    ragnar-mesh ⇒ ragnar-share, ragnar-mesh-2 ⇒ ragnar-share-2. A fully custom
+    mesh tag with no recognised prefix falls back to the default share tag.
+    """
+    s = suffix_of_mesh_tag(mesh_tag)
+    return f'{_SHARE_TAG_PREFIX}-{s}' if s else DEFAULT_SHARE_TAG
 
 # Port a peer Ragnar serves its web API on. Mesh polling assumes the mesh is
 # homogeneous; a node on a different port can be overridden per-node in config.
@@ -757,17 +807,26 @@ def _valid_auth_key(key):
 
 
 def join(auth_key, hostname='', tags=None, advertise_routes=None,
-         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90):
+         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90,
+         logout_first=False):
     """Join this node to a tailnet with a pre-authorized key.
 
     This is the unattended-deploy path: everything a remote node needs is
     supplied up front so a technician who plugs the box in never sees a login
     prompt. Returns (ok, message).
+
+    `logout_first` switches tailnets: a node already logged into tailnet A
+    cannot re-`up` straight onto tailnet B, so log out first. Harmless when the
+    node is on no tailnet (logout is then a no-op).
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
     if not _valid_auth_key(auth_key):
         return False, 'That does not look like a Tailscale auth key (expected tskey-...).'
+
+    if logout_first:
+        _run(['logout'], timeout=30)  # best-effort; a no-op if already logged out
+        invalidate_cache()
 
     args = ['up', '--authkey', auth_key, '--reset']
     if hostname:

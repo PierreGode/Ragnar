@@ -3105,7 +3105,7 @@
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
 
                 <!-- Sub-view nav: Overview vs File Transfer -->
-                <div class="flex items-center gap-2 mt-2">
+                <div class="flex flex-wrap items-center gap-2 mt-2">
                     <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
                     <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
                     <button id="mesh-nav-share" onclick="showMeshView('share')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">Mesh Share</button>
@@ -3180,6 +3180,18 @@
                             <option value="female">Female</option>
                         </select>
                         <p id="mesh-join-gender-hint" class="text-[11px] text-gray-500 mt-1">Known names set this automatically.</p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Mesh name <span class="text-gray-600 normal-case">(optional)</span></label>
+                        <input id="mesh-suffix-input" type="text" placeholder="blank = main mesh (ragnar-mesh)"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            Leave blank to join the main mesh. Type a short name — e.g. <code>2</code> or <code>lab</code> —
+                            to place this unit in a <strong>separate, isolated mesh</strong>
+                            (<code>tag:ragnar-mesh-&lt;name&gt;</code>) on the same Tailscale account. Units in
+                            different meshes never see or trust each other. The tag must exist under
+                            <code>tagOwners</code> in your Tailscale ACL.
+                        </p>
                     </div>
                     <div class="md:col-span-2">
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
@@ -3317,7 +3329,7 @@
                             never the public internet.
                         </p>
                         <div id="mesh-https-note" class="hidden text-[11px] rounded border px-2 py-1.5 mb-2"></div>
-                        <div class="flex gap-2">
+                        <div class="flex flex-wrap gap-2">
                             <button onclick="meshServe(true, false)"
                                     class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors"
                                     title="Plain HTTP on port 80 — tailnet-only, no certificate needed. The way in most units use.">Publish</button>
@@ -3466,8 +3478,117 @@
                             <button onclick="loadMeshShare()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
                         </div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-4">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <p class="text-sm text-gray-400 mb-3">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <label id="share-guest-read-row" class="flex items-start gap-2 text-xs text-gray-400 cursor-pointer mb-4">
+                        <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700 flex-shrink-0 mt-0.5">
+                        Let <b class="text-gray-300">share-guests</b> (<code class="text-gray-500">tag:ragnar-share</code>) browse &amp; fetch this folder — off means they can only send files to you.
+                    </label>
                     <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
+                </div>
+
+                <!-- People outside your mesh: token-based sharing -->
+                <div id="mesh-share-outside-panel" class="glass rounded-xl p-6 mt-4">
+                    <button type="button" onclick="toggleOutsideMesh()" class="w-full text-left flex items-start gap-2 group">
+                        <svg class="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-xl font-bold">Outside your mesh</h3>
+                            <p class="text-sm text-gray-400 mt-1">Share files with someone who is <b>not a unit in your mesh</b>. Tailscale still carries the traffic; the sender is limited to <b>send files only</b> — no dashboard, scans, or other units.</p>
+                        </div>
+                        <svg id="mesh-share-outside-chevron" class="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5 transition-transform group-hover:text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+
+                    <div id="mesh-share-outside-body" class="hidden mt-4">
+                    <!-- Join a tailnet as share-only (for a box not yet on any tailnet) -->
+                    <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-3 mb-6 flex items-center justify-between gap-3 flex-wrap">
+                        <div class="min-w-0">
+                            <div class="text-sm font-semibold">This unit isn't on a tailnet?</div>
+                            <div class="text-xs text-gray-500">Paste an auth key to join <b>share-only</b> (tag <code class="text-gray-400">ragnar-share</code>) — no terminal needed.</div>
+                        </div>
+                        <button onclick="openShareJoinModal()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors flex-shrink-0">🔗 Join a tailnet (share-only)</button>
+                    </div>
+
+                    <!-- Remotes I can send TO -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Remote shares <span class="text-xs text-gray-500 font-normal">— send files to</span></h4>
+                        <button onclick="openRemoteShareModal()" class="bg-sky-600 hover:bg-sky-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ Add remote share</button>
+                    </div>
+                    <div id="remote-shares-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50 mb-6"><p class="text-gray-500 text-sm p-4">No remote shares yet.</p></div>
+
+                    <!-- Tokens that let someone send TO me -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Share tokens <span class="text-xs text-gray-500 font-normal">— let someone send to you</span></h4>
+                        <button onclick="createShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ New token</button>
+                    </div>
+                    <div id="share-tokens-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">No tokens issued.</p></div>
+                    <p class="text-xs text-gray-500 mt-2">Hand a token to one outside sender. They add <b>your</b> Ragnar as a remote share using your Tailscale address + this token. The full token is shown once, at creation — revoke any time.</p>
+                    </div>
+                </div>
+
+                <!-- Add remote share modal -->
+                <div id="remote-share-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-bold text-lg">Add remote share</h3>
+                            <button onclick="closeRemoteShareModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <label class="block text-sm text-gray-400 mb-1">Name</label>
+                        <input id="rs-name" type="text" placeholder="Alice's Ragnar" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3">
+                        <label class="block text-sm text-gray-400 mb-1">Tailscale address</label>
+                        <input id="rs-address" type="text" placeholder="100.x.y.z:8000  or  their-host:8000" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1">
+                        <p class="text-xs text-gray-500 mb-3">Their Ragnar's Tailscale IP or MagicDNS name, with the port (usually 8000).</p>
+                        <label class="block text-sm text-gray-400 mb-1">Share token</label>
+                        <input id="rs-token" type="text" placeholder="rgnr-share-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-xs text-gray-500 mb-3">The token they generated and gave you.</p>
+                        <div class="flex justify-end gap-2">
+                            <button onclick="closeRemoteShareModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                            <button onclick="saveRemoteShare()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Join a tailnet (share-only) modal -->
+                <div id="share-join-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-bold text-lg">Join a tailnet — share-only</h3>
+                            <button onclick="closeShareJoinModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <p class="text-sm text-gray-400 mb-3">Ask the tailnet owner for a Tailscale <b>auth key</b> tagged <code class="text-gray-300">tag:ragnar-share</code>. Paste it here and this unit joins as a share-only guest — it can send files to that owner and nothing else.</p>
+                        <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 mb-3 text-xs text-amber-300">
+                            ⚠ A machine can only be on <b>one</b> tailnet at a time. If this unit is currently in your own mesh, joining here <b>removes it from your mesh</b> and moves it onto theirs. To keep it in your mesh, use their <b>node-share + a share token</b> instead.
+                        </div>
+                        <label class="block text-sm text-gray-400 mb-1">Auth key</label>
+                        <input id="sj-authkey" type="text" placeholder="tskey-auth-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3 font-mono">
+                        <label class="block text-sm text-gray-400 mb-1">Name for this unit <span class="text-gray-600">(optional)</span></label>
+                        <input id="sj-hostname" type="text" placeholder="e.g. bjorn-share" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-4">
+                        <label class="block text-sm text-gray-400 mb-1">Mesh name <span class="text-gray-600">(optional)</span></label>
+                        <input id="sj-mesh-suffix" type="text" placeholder="blank = main mesh (ragnar-share)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-[11px] text-gray-500 mb-4">Match the host's mesh. Blank ⇒ <code>tag:ragnar-share</code>; a name (e.g. <code>2</code>) ⇒ <code>tag:ragnar-share-&lt;name&gt;</code>, the guest tag for that separate mesh.</p>
+                        <div id="sj-status" class="hidden text-sm mb-3"></div>
+                        <div class="flex justify-end gap-2">
+                            <button onclick="closeShareJoinModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                            <button id="sj-join-btn" onclick="shareJoinTailnet()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm">Join</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- New token reveal modal (shown once) -->
+                <div id="share-token-reveal-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5">
+                        <h3 class="font-bold text-lg mb-1">New share token</h3>
+                        <p class="text-sm text-gray-400 mb-3">Copy it now — it is shown only once. Give it, plus this unit's Tailscale address, to the person who should be able to send you files.</p>
+                        <div class="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 mb-4">
+                            <code id="share-token-reveal-value" class="text-sm text-emerald-300 font-mono break-all flex-1"></code>
+                            <button onclick="copyShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0">Copy</button>
+                        </div>
+                        <div class="flex justify-end">
+                            <button onclick="closeShareTokenReveal()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Done</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Fetch destination folder picker -->
@@ -7863,7 +7984,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-inbox-select-keep"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-multi-mesh"></script>
 
 </body>
 </html>

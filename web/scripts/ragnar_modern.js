@@ -22647,17 +22647,24 @@ function xferRefresh() { loadXferTransfers(); loadXferInbox(); }
 function xferLoadUnits() {
     networkAwareFetch('/api/mesh/status').then(r => r.json()).then(s => {
         const peers = (s && s.peers) || [];
+        // Share-only guests aren't roster units, but a mesh unit can send files
+        // TO them — so list them as recipients too, marked "(guest)".
+        const guests = ((s && s.share_guests) || []).map(g => ({
+            id: g.id, viking_name: g.label || g.short_name || g.id,
+            label: g.label, online: g.online, is_guest: true }));
+        const all = peers.concat(guests);
         const sel = document.getElementById('xfer-dest');
         const chips = document.getElementById('xfer-units');
-        const online = peers.filter(p => p.online);
+        const online = all.filter(p => p.online);
+        const rname = p => (p.viking_name || p.label || p.id) + (p.is_guest ? ' (guest)' : (p.unit_id ? ' #' + p.unit_id : ''));
         if (sel) {
             sel.innerHTML = online.length
-                ? online.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.viking_name || p.label || p.id)}${p.unit_id ? ' #' + p.unit_id : ''}</option>`).join('')
+                ? online.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(rname(p))}</option>`).join('')
                 : '<option value="">No online units</option>';
         }
         if (chips) {
-            chips.innerHTML = '<span class="text-sm text-gray-400 mr-1">Units:</span>' + (peers.length
-                ? peers.map(p => `<span class="inline-flex items-center gap-1.5 bg-slate-800 border border-slate-600 rounded-full px-3 py-1 text-sm ${p.online ? '' : 'opacity-50'}"><span class="w-2 h-2 rounded-full ${p.online ? 'bg-green-400' : 'bg-slate-500'}"></span>${escapeHtml(p.viking_name || p.label || p.id)}${p.unit_id ? ' <span class="text-xs text-slate-500">#' + p.unit_id + '</span>' : ''}${p.online ? '' : ' <span class="text-xs text-slate-500">(offline)</span>'}</span>`).join(' ')
+            chips.innerHTML = '<span class="text-sm text-gray-400 mr-1">Units:</span>' + (all.length
+                ? all.map(p => `<span class="inline-flex items-center gap-1.5 bg-slate-800 border ${p.is_guest ? 'border-sky-700' : 'border-slate-600'} rounded-full px-3 py-1 text-sm ${p.online ? '' : 'opacity-50'}"><span class="w-2 h-2 rounded-full ${p.online ? 'bg-green-400' : 'bg-slate-500'}"></span>${escapeHtml(p.viking_name || p.label || p.id)}${p.is_guest ? ' <span class="text-xs text-sky-400">guest</span>' : (p.unit_id ? ' <span class="text-xs text-slate-500">#' + p.unit_id + '</span>' : '')}${p.online ? '' : ' <span class="text-xs text-slate-500">(offline)</span>'}</span>`).join(' ')
                 : '<span class="text-sm text-gray-500">No peers in the mesh yet.</span>');
         }
     }).catch(() => {});
@@ -22766,6 +22773,17 @@ function loadMeshShare() {
     if (!el) return;
     networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
         const items = (d && d.items) || [];
+        // A share-only guest hosts nobody: hide the host-only tooling (the
+        // guest-read toggle, "Outside your mesh" tokens/remotes/join panel) and
+        // don't even fetch their data. It only sends files to its host.
+        const shareOnly = !!(d && d.share_only);
+        const readRow = document.getElementById('share-guest-read-row');
+        if (readRow) readRow.classList.toggle('hidden', shareOnly);
+        const outside = document.getElementById('mesh-share-outside-panel');
+        if (outside) outside.classList.toggle('hidden', shareOnly);
+        if (!shareOnly) { loadRemoteShares(); loadShareTokens(); }
+        const gt = document.getElementById('share-guest-read-toggle');
+        if (gt) gt.checked = !!(d && d.guest_read);
         // Viewing Mesh Share clears the "new shared files" part of the Files flag.
         markSharedSeen(items.filter(i => !i.is_local).length);
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">Nothing shared yet. Use “Share files” to publish a file to the mesh.</p>'; return; }
@@ -22782,6 +22800,217 @@ function loadMeshShare() {
                 <div class="flex-shrink-0">${action}</div></div>`;
         }).join('');
     }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function setShareGuestRead(on) {
+    networkAwareFetch('/api/mesh/files/config', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ share_read: !!on })
+    }).then(r => r.json()).then(d => {
+        showNotification(on ? 'Share-guests can now browse & fetch this folder'
+                             : 'Share-guests are send-only again', 'success');
+    }).catch(e => { showNotification('Could not update share access: ' + e.message, 'error'); });
+}
+
+// ---- Outside-mesh sharing: remote-share targets (send TO) -------------------
+
+// Collapsed by default — only the heading/description show until expanded. Keeps
+// the common case (nothing to configure) quiet while the tools stay one click away.
+function toggleOutsideMesh() {
+    const body = document.getElementById('mesh-share-outside-body');
+    const chev = document.getElementById('mesh-share-outside-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(180deg)' : '';
+}
+
+function loadRemoteShares() {
+    const el = document.getElementById('remote-shares-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/remote-shares').then(r => r.json()).then(d => {
+        const rows = (d && d.remotes) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No remote shares yet. Add one with a name, their Tailscale address and the token they gave you.</p>'; return; }
+        el.innerHTML = rows.map(r => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(r.name)}</div>
+                <div class="text-xs text-gray-500 truncate font-mono">${escapeHtml(r.address)}</div>
+            </div>
+            <div class="flex-shrink-0 flex gap-2">
+                <button onclick="sendToRemote('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Send file</button>
+                <button onclick="removeRemoteShare('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Remove</button>
+            </div></div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function openRemoteShareModal() {
+    ['rs-name', 'rs-address', 'rs-token'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeRemoteShareModal() {
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function saveRemoteShare() {
+    const name = (document.getElementById('rs-name') || {}).value || '';
+    const address = (document.getElementById('rs-address') || {}).value || '';
+    const token = (document.getElementById('rs-token') || {}).value || '';
+    if (!name.trim() || !address.trim() || !token.trim()) {
+        showNotification('Name, address and token are all required', 'error'); return;
+    }
+    networkAwareFetch('/api/mesh/remote-shares', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), address: address.trim(), token: token.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { showNotification(d.error || 'Could not add remote share', 'error'); return; }
+        closeRemoteShareModal();
+        showNotification('Remote share added', 'success');
+        loadRemoteShares();
+    }).catch(e => showNotification('Could not add remote share: ' + e.message, 'error'));
+}
+
+function removeRemoteShare(id, name) {
+    showFileConfirmModal('Remove remote share', `Stop sharing with “${name}”? Files already sent are unaffected.`, function () {
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not remove', 'error'); return; }
+                showNotification('Remote share removed', 'success');
+                loadRemoteShares();
+            }).catch(e => showNotification('Could not remove: ' + e.message, 'error'));
+    });
+}
+
+function sendToRemote(id, name) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = ev => {
+        if (!ev.target.files.length) return;
+        const fd = new FormData();
+        fd.append('file', ev.target.files[0]);
+        showFileLoading(`Sending to ${name}…`);
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id) + '/send', { method: 'POST', body: fd })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Send failed', 'error'); return; }
+                showNotification(`Sending to ${name} — watch Transfers for progress`, 'success');
+                if (typeof loadXferTransfers === 'function') loadXferTransfers();
+            }).catch(e => { showNotification('Send failed: ' + e.message, 'error'); });
+    };
+    input.click();
+}
+
+// ---- Outside-mesh sharing: share tokens (let someone send TO me) ------------
+
+function loadShareTokens() {
+    const el = document.getElementById('share-tokens-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/share/tokens').then(r => r.json()).then(d => {
+        const rows = (d && d.tokens) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No tokens issued. Create one to let an outside person send files to this unit.</p>'; return; }
+        el.innerHTML = rows.map(t => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(t.label || 'Unnamed')}</div>
+                <div class="text-xs text-gray-500 font-mono truncate">${escapeHtml(t.preview)}${t.created ? ' · ' + escapeHtml(String(t.created).replace('T', ' ').slice(0, 16)) : ''}</div>
+            </div>
+            <button onclick="revokeShareToken('${escapeAttr(t.id)}','${escapeAttr(t.label || 'this token')}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0 transition-colors">Revoke</button>
+            </div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function createShareToken() {
+    const label = prompt('Name this token (who is it for?) — optional:', '') || '';
+    networkAwareFetch('/api/mesh/share/tokens', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success || !d.token) { showNotification((d && d.error) || 'Could not create token', 'error'); return; }
+        const v = document.getElementById('share-token-reveal-value');
+        if (v) v.textContent = d.token.token;
+        const m = document.getElementById('share-token-reveal-modal');
+        if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+        loadShareTokens();
+    }).catch(e => showNotification('Could not create token: ' + e.message, 'error'));
+}
+
+function copyShareToken() {
+    const v = document.getElementById('share-token-reveal-value');
+    if (!v) return;
+    const txt = v.textContent || '';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(() => showNotification('Token copied', 'success'))
+            .catch(() => showNotification('Copy failed — select it manually', 'error'));
+    } else {
+        showNotification('Copy not available — select the token manually', 'error');
+    }
+}
+
+function closeShareTokenReveal() {
+    const m = document.getElementById('share-token-reveal-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+// ---- Join a tailnet as a share-only guest (no terminal) --------------------
+
+function openShareJoinModal() {
+    ['sj-authkey', 'sj-hostname', 'sj-mesh-suffix'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const st = document.getElementById('sj-status');
+    if (st) { st.classList.add('hidden'); st.textContent = ''; }
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeShareJoinModal() {
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function shareJoinTailnet() {
+    const key = (document.getElementById('sj-authkey') || {}).value || '';
+    const hostname = (document.getElementById('sj-hostname') || {}).value || '';
+    const meshSuffix = (document.getElementById('sj-mesh-suffix') || {}).value || '';
+    const st = document.getElementById('sj-status');
+    const btn = document.getElementById('sj-join-btn');
+    if (!key.trim()) { showNotification('Paste the auth key first', 'error'); return; }
+    if (st) { st.className = 'text-sm mb-3 text-gray-400'; st.textContent = 'Joining the tailnet…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Joining…'; }
+    networkAwareFetch('/api/mesh/join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            auth_key: key.trim(),
+            hostname: hostname.trim(),
+            // Join share-only, scoped to the host's mesh: the server advertises
+            // the paired share tag (tag:ragnar-share[-<suffix>]) for this mesh.
+            share_only: true,
+            mesh_suffix: meshSuffix.trim(),
+            enable_ssh: false,
+            accept_routes: false,
+            switch_tailnet: true
+        })
+    }).then(r => r.json()).then(d => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (!d.success) {
+            if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = d.message || 'Join failed'; }
+            return;
+        }
+        if (st) { st.className = 'text-sm mb-3 text-emerald-400'; st.textContent = 'Joined — this unit is now share-only on that tailnet.'; }
+        showNotification('Joined the tailnet as share-only', 'success');
+        setTimeout(closeShareJoinModal, 1500);
+    }).catch(e => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = 'Join failed: ' + e.message; }
+    });
+}
+
+function revokeShareToken(id, label) {
+    showFileConfirmModal('Revoke share token', `Revoke “${label}”? Whoever holds it can no longer send you files.`, function () {
+        networkAwareFetch('/api/mesh/share/tokens/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not revoke', 'error'); return; }
+                showNotification('Token revoked', 'success');
+                loadShareTokens();
+            }).catch(e => showNotification('Could not revoke: ' + e.message, 'error'));
+    });
 }
 
 function shareUploadFiles() {
@@ -32386,7 +32615,7 @@ function meshNodeBanner(unit, isSelf, ctx) {
             <button onclick="meshOpenNode('${nodeId}')"
                     class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
         </div>
-        <div class="flex items-center gap-6 mt-3 pt-3 border-t border-slate-700/40">
+        <div class="flex items-center flex-wrap gap-x-6 gap-y-2 mt-3 pt-3 border-t border-slate-700/40">
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Status</div>
                  <div class="text-xs ${st.reachable ? 'text-green-300' : 'text-gray-400'}">${escapeHtml(st.label)}</div></div>
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Alerts</div>
@@ -32845,6 +33074,8 @@ function renderMesh(data) {
         pillText = 'Tailscale not installed';
     } else if (!joined) {
         pillText = data.backend_state || 'Not connected';
+    } else if (data.self_share_tagged) {
+        pillText = 'Share-only · on tailnet';
     } else if (!data.self_tagged) {
         pillText = 'On tailnet · not in mesh';
     } else {
@@ -32873,6 +33104,12 @@ function renderMesh(data) {
         if (vikingField && !vikingField.value && data.viking_name) {
             vikingField.value = data.viking_name;
         }
+        // Prefill the mesh name from whatever this box is already scoped to, so
+        // a re-join keeps it on the same mesh unless the operator changes it.
+        const suffixField = document.getElementById('mesh-suffix-input');
+        if (suffixField && !suffixField.value && data.mesh_suffix) {
+            suffixField.value = data.mesh_suffix;
+        }
         // Load the roster so the dice and the gender hint work before join too.
         meshLoadVikingNames().then(() => meshOnJoinVikingInput());
     }
@@ -32883,12 +33120,15 @@ function renderMesh(data) {
         meshPollInstall();
     }
 
+    // A share-only guest is not a mesh member: it must not see the peer roster,
+    // the fleet summary, or mesh controls — only that it is a share-only guest.
+    const shareOnly = !!data.self_share_tagged;
     selfWrap.classList.toggle('hidden', !data.self);
-    peersWrap.classList.toggle('hidden', !joined);
-    controls.classList.toggle('hidden', !joined);
-    summary.classList.toggle('hidden', !joined);
+    peersWrap.classList.toggle('hidden', !joined || shareOnly);
+    controls.classList.toggle('hidden', !joined || shareOnly);
+    summary.classList.toggle('hidden', !joined || shareOnly);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
-    if (piWrap) piWrap.classList.toggle('hidden', !joined);
+    if (piWrap) piWrap.classList.toggle('hidden', !joined || shareOnly);
 
     // Fill the post-join identity editor from what this unit currently reports,
     // but never yank a field out from under someone mid-edit.
@@ -32955,7 +33195,22 @@ function renderMesh(data) {
     // The #1 "they sense each other but don't share data" cause: this unit is
     // on the tailnet but was never tagged into the mesh. An interactive
     // `tailscale up` login never applies a tag, and the whole mesh keys off it.
-    if (joined && data.self && !data.self_tagged) {
+    if (joined && data.self && data.self_share_tagged) {
+        // A deliberate share-only join (tag:ragnar-share, no mesh tag). This is
+        // the intended state for scenario 2B — the box is here to send/receive
+        // files, not to join the mesh — so explain it, don't flag it as broken.
+        const shareTag = escapeHtml(data.share_tag || 'tag:ragnar-share');
+        notes.push(meshWarning(
+            `<strong>This unit is a share-only guest on this tailnet.</strong> ` +
+            `It carries <code>${shareTag}</code>, not the mesh tag, so it is not part of the ` +
+            `mesh: it publishes no reports and reads none. It can only send files to ` +
+            `(and, if the host allows, fetch shared files from) the units that host it — nothing else. ` +
+            `<br>To turn it into a full mesh unit instead, add <code>${tagCode}</code> in the ` +
+            `Tailscale admin console (<em>Machines → this device → ⋯ → Edit ACL tags</em>).` +
+            `<br><button onclick="meshLeaveShare()" class="mt-3 inline-block bg-slate-700 hover:bg-slate-600 ` +
+            `text-white text-xs px-3 py-1.5 rounded transition-colors">← Leave share-mesh</button>`,
+            'info'));
+    } else if (joined && data.self && !data.self_tagged) {
         notes.push(meshWarning(
             `<strong>This unit is on the tailnet, but not in the mesh.</strong> ` +
             `It carries no <code>${tagCode}</code> tag, so Ragnar won't treat it as a mesh ` +
@@ -33360,6 +33615,7 @@ async function meshJoin() {
     const label = document.getElementById('mesh-label-input').value.trim();
     const viking = document.getElementById('mesh-viking-input').value.trim();
     const gender = document.getElementById('mesh-viking-gender').value;
+    const meshSuffix = (document.getElementById('mesh-suffix-input') || {}).value || '';
     const routes = document.getElementById('mesh-routes-input').value
         .split(',').map(r => r.trim()).filter(Boolean);
 
@@ -33400,6 +33656,9 @@ async function meshJoin() {
             body: JSON.stringify({
                 auth_key: authKey,
                 hostname: label ? label.toLowerCase().replace(/[^a-z0-9-]+/g, '-') : '',
+                // '' joins the main mesh; a name puts this box in a separate,
+                // isolated mesh (tag:ragnar-mesh-<name>) on the same tailnet.
+                mesh_suffix: meshSuffix.trim(),
                 advertise_routes: routes,
                 enable_ssh: document.getElementById('mesh-ssh-input').checked
             })
@@ -33624,6 +33883,16 @@ function meshLeave() {
     return meshPost('/api/mesh/leave', {}, 'Logged out.');
 }
 
+// Leave a share-only tailnet (scenario 2B). Same logout, but worded for a guest:
+// it stops sharing with the host and can then rejoin its own mesh.
+function meshLeaveShare() {
+    if (!confirm('Leave this share-mesh? This unit logs out of the host\'s tailnet, ' +
+                 'stops sharing files with it, and can then rejoin your own mesh.')) {
+        return;
+    }
+    return meshPost('/api/mesh/leave', {}, 'Left the share-mesh.');
+}
+
 // Turn on data sharing (the mesh_enabled master switch) in one click. This is
 // the fix for a unit tagged in the console but never Joined through Ragnar:
 // tagging puts it in the mesh, this makes it actually poll.
@@ -33781,5 +34050,6 @@ window.meshOnJoinVikingInput = meshOnJoinVikingInput;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
+window.meshLeaveShare = meshLeaveShare;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
