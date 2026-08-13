@@ -33186,7 +33186,9 @@ function renderMesh(data) {
             `mesh: it publishes no reports and reads none. It can only send files to ` +
             `(and, if the host allows, fetch shared files from) the units that host it — nothing else. ` +
             `<br>To turn it into a full mesh unit instead, add <code>${tagCode}</code> in the ` +
-            `Tailscale admin console (<em>Machines → this device → ⋯ → Edit ACL tags</em>).`,
+            `Tailscale admin console (<em>Machines → this device → ⋯ → Edit ACL tags</em>).` +
+            `<br><button onclick="meshLeaveShare()" class="mt-3 inline-block bg-slate-700 hover:bg-slate-600 ` +
+            `text-white text-xs px-3 py-1.5 rounded transition-colors">← Leave share-mesh</button>`,
             'info'));
     } else if (joined && data.self && !data.self_tagged) {
         notes.push(meshWarning(
@@ -33857,6 +33859,16 @@ function meshLeave() {
     return meshPost('/api/mesh/leave', {}, 'Logged out.');
 }
 
+// Leave a share-only tailnet (scenario 2B). Same logout, but worded for a guest:
+// it stops sharing with the host and can then rejoin its own mesh.
+function meshLeaveShare() {
+    if (!confirm('Leave this share-mesh? This unit logs out of the host\'s tailnet, ' +
+                 'stops sharing files with it, and can then rejoin your own mesh.')) {
+        return;
+    }
+    return meshPost('/api/mesh/leave', {}, 'Left the share-mesh.');
+}
+
 // Turn on data sharing (the mesh_enabled master switch) in one click. This is
 // the fix for a unit tagged in the console but never Joined through Ragnar:
 // tagging puts it in the mesh, this makes it actually poll.
@@ -34014,5 +34026,6 @@ window.meshOnJoinVikingInput = meshOnJoinVikingInput;
 window.meshInstall = meshInstall;
 window.meshServe = meshServe;
 window.meshLeave = meshLeave;
+window.meshLeaveShare = meshLeaveShare;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
