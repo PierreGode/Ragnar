@@ -22681,9 +22681,15 @@ function loadXferTransfers() {
     }).catch(() => {});
 }
 
+let _xferInboxSig = null;   // signature of the last rendered inbox
 function loadXferInbox() {
     const el = document.getElementById('xfer-inbox');
-    networkAwareFetch('/api/mesh/inbox').then(r => r.json()).then(d => {
+    // Fetch the inbox and the Vault lock state together so the "Vault" save
+    // option reflects reality: only unlocked Vaults accept files.
+    Promise.all([
+        networkAwareFetch('/api/mesh/inbox').then(r => r.json()).catch(() => ({})),
+        networkAwareFetch('/api/safe/status').then(r => r.json()).catch(() => ({})),
+    ]).then(([d, vault]) => {
         const items = (d && d.items) || [];
         // Sync the "accept incoming" toggle + badges.
         const tgl = document.getElementById('xfer-receive-toggle');
@@ -22693,7 +22699,23 @@ function loadXferInbox() {
         setBadge('mesh-inbox-badge', items.length);
         setFilesNavFlag(items.length);   // keep the Files nav flag in sync
         if (!el) return;
+        // Only rebuild the list when it actually changed — the 2s poll otherwise
+        // destroys the destination <select> mid-interaction (you couldn't pick
+        // Vault because the dropdown was wiped before you clicked it).
+        const sig = JSON.stringify({
+            u: !!(vault && vault.unlocked), c: !!(vault && vault.configured),
+            items: items.map(m => [m.id, m.name, m.size]),
+        });
+        if (sig === _xferInboxSig && el.childElementCount > 0) return;
+        _xferInboxSig = sig;
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">Inbox is empty.</p>'; return; }
+        // Vault option: enabled only when the Vault is unlocked; shown disabled
+        // (with why) when locked; omitted entirely if no Vault is set up.
+        const vaultOpt = (vault && vault.configured)
+            ? (vault.unlocked
+                ? '<option value="vault">Vault</option>'
+                : '<option value="vault" disabled>Vault (locked — unlock in Files)</option>')
+            : '';
         el.innerHTML = items.map(m => `
             <div class="py-2 border-b border-slate-700/50">
                 <div class="flex items-center justify-between gap-2">
@@ -22703,7 +22725,7 @@ function loadXferInbox() {
                         <select id="dest-${escapeAttr(m.id)}" class="bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-xs">
                             <option value="/uploads">Uploads</option>
                             <option value="/backups">Backups</option>
-                            <option value="vault">Vault</option>
+                            ${vaultOpt}
                         </select>
                         <button onclick="xferInboxSave('${escapeAttr(m.id)}')" class="bg-green-700 hover:bg-green-800 text-white text-xs px-2 py-1 rounded">Save</button>
                         <button onclick="xferInboxDiscard('${escapeAttr(m.id)}','${escapeAttr(m.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2 py-1 rounded">Discard</button>
