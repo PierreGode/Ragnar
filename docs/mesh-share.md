@@ -64,8 +64,10 @@ off entirely with **Accept incoming** (`mesh_file_receive`).
 ## Part 2 — Sharing with someone OUTSIDE your mesh
 
 Everything in this part lives in **Ragnar Mesh → Mesh Share → "Outside your
-mesh"**. The goal is always the same: let one outside person move files to/from
-you, and **nothing else** — no dashboard, no scans, no roster, no other units.
+mesh"** — a panel that is **collapsed by default** (click its header to expand the
+join, remote-share and token tools). The goal is always the same: let one outside
+person move files to/from you, and **nothing else** — no dashboard, no scans, no
+roster, no other units.
 
 Ragnar gives that person one of two *roles*, and the traffic reaches you by one of
 three *network paths*. Pick the row that matches your situation:
@@ -112,11 +114,18 @@ and send. Either
 - if their side is a Ragnar, use its **🔗 Join a tailnet (share-only)** button
   (see [2B](#2b-join-share-only-switch-a-box-onto-their-tailnet)) — no terminal.
 
-**What they can do:** exactly one thing — `POST /api/mesh/files/push` into your
-inbox. Optionally you can also let share-guests **browse & fetch your Mesh Share**
-folder (read-only) with the **"Let share-guests browse & fetch this folder"**
-toggle (`mesh_share_guest_read`, off by default). Everything else is denied; they
-never appear as a unit and can't enumerate your other boxes.
+**What they can do:** at minimum, `POST /api/mesh/files/push` into your inbox.
+Optionally you can also let share-guests **browse & fetch your Mesh Share** folder
+(read-only) with the **"Let share-guests browse & fetch this folder"** toggle
+(`mesh_share_guest_read`, off by default). Everything else is denied; they never
+appear as a unit and can't enumerate your other boxes.
+
+The share **folder** is two-way, exactly as in [2B](#2b-join-share-only-switch-a-box-onto-their-tailnet):
+if the guest is a Ragnar, its own shared files show up in your Mesh Share catalog,
+and you can **send files to it** — it appears in your File Transfer picker as a
+*(guest)* recipient and receives into its inbox. It is still never on your
+**roster** (no monitoring, no scans, no other units) — folder participant, not
+mesh member.
 
 ---
 
@@ -153,8 +162,15 @@ toggle are hidden on a guest — a guest hosts nobody.
 > **Two things are separate:** the **roster** (who's a monitored mesh unit — a
 > guest is *not* on it) and the **share folder** (a shared drop-zone — a guest
 > *is* a full participant, both fetching and receiving).
+
 (The Tailscale ACL is what actually confines it on the wire; the UI just stops it
 enumerating machines it has no business in.)
+
+**Leaving.** The share-only notice carries a **← Leave share-mesh** button
+(`POST /api/mesh/leave`): it logs the box out of the host's tailnet, clears the
+local `mesh_share_only` flag, and the box is then free to rejoin its own mesh. The
+normal mesh **Log out of tailnet** control is hidden on a guest, so this is the
+one way out from the UI.
 
 ---
 
@@ -220,7 +236,9 @@ confuse it with a Tailscale auth key (`tskey-…`, used only for *joining*).
 
 All non-operator pushes still honour the **Accept incoming** off-switch
 (`mesh_file_receive`) — turning receiving off stops guests and token holders too.
-Everything fails **closed**: no tailscaled, no valid tag, or no valid token ⇒ 401.
+Everything fails **closed**: an unidentified caller ⇒ **401**; a *recognised*
+outsider (valid tag or token) reaching outside its allowlist ⇒ **403**. This holds
+whether or not the unit has a login — see the security model below.
 
 ---
 
@@ -265,7 +283,7 @@ click in the Tailscale console — disable the key or the guest's node.
 | `/api/mesh/share/remove` | POST | operator | unshare one of your files |
 | `/api/mesh/share/fetch` | POST | operator | fetch a peer's file into a folder |
 | `/api/mesh/files/push` | POST | operator / peer / guest / **token** | drop one file in the inbox |
-| `/api/mesh/files/send` | POST | operator | send a file to a mesh peer |
+| `/api/mesh/files/send` | POST | operator | send a file to a mesh peer **or a share-guest** |
 | `/api/mesh/inbox` | GET | operator | list quarantined inbox items |
 | `/api/mesh/inbox/save` | POST | operator | file an inbox item into a folder/Vault |
 | `/api/mesh/inbox/discard` | POST | operator | delete an inbox item |
@@ -276,8 +294,13 @@ click in the Tailscale console — disable the key or the guest's node.
 | `/api/mesh/remote-shares/<id>` | DELETE | operator | forget a remote target |
 | `/api/mesh/remote-shares/<id>/send` | POST | operator | send a file to a saved remote |
 | `/api/mesh/join` | POST | operator | join/switch tailnet (share-only when `tags:["tag:ragnar-share"]`) |
+| `/api/mesh/leave` | POST | operator | log out of the tailnet (also clears `mesh_share_only`) |
 
 \* guest reads only when `mesh_share_guest_read` is on.
+
+The mesh status (`GET /api/mesh/status`) also reports `self_share_tagged` (this
+unit joined share-only), `share_guests` (share-tagged nodes offered as File
+Transfer recipients but kept off the roster), and `share_tag`.
 
 ---
 
