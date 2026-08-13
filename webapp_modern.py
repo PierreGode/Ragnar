@@ -452,6 +452,27 @@ def _mesh_share_tag():
     return shared_data.config.get('mesh_share_tag') or 'tag:ragnar-share'
 
 
+def _this_unit_is_share_only():
+    """True when THIS unit joined as a share-only guest (not a mesh member).
+
+    Two signals, either is enough: the role recorded locally at join time
+    (mesh_share_only — survives even when Tailscale doesn't echo the tag), or a
+    live Self that carries the share tag but not the mesh tag. Used to strip the
+    host mesh out of a guest's own UI. Fails open to "not share-only" on error,
+    so a normal unit is never accidentally treated as a guest.
+    """
+    if shared_data.config.get('mesh_share_only'):
+        return True
+    if not mesh_available:
+        return False
+    try:
+        self_node = (mesh_manager.status() or {}).get('self') or {}
+        tags = self_node.get('tags', [])
+        return (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+    except Exception:
+        return False
+
+
 def _is_mesh_share_request():
     """True when the request came from a share-only guest over the tailnet.
 
@@ -20502,8 +20523,7 @@ def mesh_share_all():
                       'owner_id': 'self', 'is_local': True})
     # A share-only guest sees only its own shared folder, never the host mesh's.
     # It joined to send files, not to browse the fleet's shares.
-    share_only = bool(shared_data.config.get('mesh_share_only'))
-    if _mesh_enabled() and not share_only:
+    if _mesh_enabled() and not _this_unit_is_share_only():
         port = _mesh_node_port()
         for node in _mesh_tagged_peers():
             if not node.get('online'):
@@ -20516,7 +20536,10 @@ def mesh_share_all():
                 items.append({**f, 'owner': owner, 'owner_id': node.get('id'), 'is_local': False})
     items.sort(key=lambda x: (str(x.get('owner', '')).lower(), x['name'].lower()))
     return jsonify({'success': True, 'items': items,
-                    'guest_read': bool(shared_data.config.get('mesh_share_guest_read'))})
+                    'guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    # Lets the Mesh Share tab hide host-only tooling (guest-read
+                    # toggle, tokens, remote shares, join) on a share-only guest.
+                    'share_only': _this_unit_is_share_only()})
 
 
 @app.route('/api/mesh/share/add', methods=['POST'])

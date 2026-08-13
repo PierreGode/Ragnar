@@ -143,7 +143,9 @@ even if Tailscale doesn't echo the tag back on `Self`.
 **What a share-only unit sees on its own screen:** nothing about the host mesh. Its
 Ragnar Mesh tab shows a *"share-only guest"* notice, **no peer roster**, no fleet
 summary or mesh controls, and its Mesh Share tab lists **only its own** shared
-files — never the host fleet's. It joined to send files, not to browse the mesh.
+files — never the host fleet's. The host-only *"Outside your mesh"* tools (issue
+tokens, add remote shares, join a tailnet) and the guest-read toggle are hidden
+too — a guest hosts nobody. It joined to send files, not to browse the mesh.
 (The Tailscale ACL is what actually confines it on the wire; the UI just stops it
 enumerating machines it has no business in.)
 

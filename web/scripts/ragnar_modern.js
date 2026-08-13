@@ -22764,10 +22764,17 @@ function xferSetReceive(on) {
 function loadMeshShare() {
     const el = document.getElementById('mesh-share-list');
     if (!el) return;
-    loadRemoteShares();
-    loadShareTokens();
     networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
         const items = (d && d.items) || [];
+        // A share-only guest hosts nobody: hide the host-only tooling (the
+        // guest-read toggle, "Outside your mesh" tokens/remotes/join panel) and
+        // don't even fetch their data. It only sends files to its host.
+        const shareOnly = !!(d && d.share_only);
+        const readRow = document.getElementById('share-guest-read-row');
+        if (readRow) readRow.classList.toggle('hidden', shareOnly);
+        const outside = document.getElementById('mesh-share-outside-panel');
+        if (outside) outside.classList.toggle('hidden', shareOnly);
+        if (!shareOnly) { loadRemoteShares(); loadShareTokens(); }
         const gt = document.getElementById('share-guest-read-toggle');
         if (gt) gt.checked = !!(d && d.guest_read);
         // Viewing Mesh Share clears the "new shared files" part of the Files flag.

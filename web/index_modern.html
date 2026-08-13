@@ -3467,7 +3467,7 @@
                         </div>
                     </div>
                     <p class="text-sm text-gray-400 mb-3">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
-                    <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mb-4">
+                    <label id="share-guest-read-row" class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mb-4">
                         <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700">
                         Let <b class="text-gray-300">share-guests</b> (<code class="text-gray-500">tag:ragnar-share</code>) browse &amp; fetch this folder — off means they can only send files to you.
                     </label>
@@ -3475,7 +3475,7 @@
                 </div>
 
                 <!-- People outside your mesh: token-based sharing -->
-                <div class="glass rounded-xl p-6 mt-4">
+                <div id="mesh-share-outside-panel" class="glass rounded-xl p-6 mt-4">
                     <div class="flex items-center gap-2 mb-1">
                         <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
                         <h3 class="text-xl font-bold">Outside your mesh</h3>
@@ -7964,7 +7964,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-share-only-view"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-share-only-hosttools"></script>
 
 </body>
 </html>
