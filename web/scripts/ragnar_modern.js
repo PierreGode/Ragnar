@@ -22926,6 +22926,53 @@ function closeShareTokenReveal() {
     if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
 }
 
+// ---- Join a tailnet as a share-only guest (no terminal) --------------------
+
+function openShareJoinModal() {
+    ['sj-authkey', 'sj-hostname'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const st = document.getElementById('sj-status');
+    if (st) { st.classList.add('hidden'); st.textContent = ''; }
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeShareJoinModal() {
+    const m = document.getElementById('share-join-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function shareJoinTailnet() {
+    const key = (document.getElementById('sj-authkey') || {}).value || '';
+    const hostname = (document.getElementById('sj-hostname') || {}).value || '';
+    const st = document.getElementById('sj-status');
+    const btn = document.getElementById('sj-join-btn');
+    if (!key.trim()) { showNotification('Paste the auth key first', 'error'); return; }
+    if (st) { st.className = 'text-sm mb-3 text-gray-400'; st.textContent = 'Joining the tailnet…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Joining…'; }
+    networkAwareFetch('/api/mesh/join', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            auth_key: key.trim(),
+            hostname: hostname.trim(),
+            tags: ['tag:ragnar-share'],
+            enable_ssh: false,
+            accept_routes: false
+        })
+    }).then(r => r.json()).then(d => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (!d.success) {
+            if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = d.message || 'Join failed'; }
+            return;
+        }
+        if (st) { st.className = 'text-sm mb-3 text-emerald-400'; st.textContent = 'Joined — this unit is now share-only on that tailnet.'; }
+        showNotification('Joined the tailnet as share-only', 'success');
+        setTimeout(closeShareJoinModal, 1500);
+    }).catch(e => {
+        if (btn) { btn.disabled = false; btn.textContent = 'Join'; }
+        if (st) { st.className = 'text-sm mb-3 text-red-400'; st.textContent = 'Join failed: ' + e.message; }
+    });
+}
+
 function revokeShareToken(id, label) {
     showFileConfirmModal('Revoke share token', `Revoke “${label}”? Whoever holds it can no longer send you files.`, function () {
         networkAwareFetch('/api/mesh/share/tokens/' + encodeURIComponent(id), { method: 'DELETE' })
