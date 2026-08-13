@@ -22911,7 +22911,7 @@ function loadShareTokens() {
         el.innerHTML = rows.map(t => `<div class="flex items-center justify-between gap-2 p-3">
             <div class="min-w-0">
                 <div class="text-sm truncate">${escapeHtml(t.label || 'Unnamed')}</div>
-                <div class="text-xs text-gray-500 font-mono">${escapeHtml(t.preview)}${t.created ? ' · ' + escapeHtml(t.created) : ''}</div>
+                <div class="text-xs text-gray-500 font-mono truncate">${escapeHtml(t.preview)}${t.created ? ' · ' + escapeHtml(String(t.created).replace('T', ' ').slice(0, 16)) : ''}</div>
             </div>
             <button onclick="revokeShareToken('${escapeAttr(t.id)}','${escapeAttr(t.label || 'this token')}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0 transition-colors">Revoke</button>
             </div>`).join('');
@@ -32611,7 +32611,7 @@ function meshNodeBanner(unit, isSelf, ctx) {
             <button onclick="meshOpenNode('${nodeId}')"
                     class="flex-shrink-0 bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-xs px-4 py-1.5 rounded transition-colors">Open</button>
         </div>
-        <div class="flex items-center gap-6 mt-3 pt-3 border-t border-slate-700/40">
+        <div class="flex items-center flex-wrap gap-x-6 gap-y-2 mt-3 pt-3 border-t border-slate-700/40">
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Status</div>
                  <div class="text-xs ${st.reachable ? 'text-green-300' : 'text-gray-400'}">${escapeHtml(st.label)}</div></div>
             <div><div class="text-[9px] uppercase tracking-wider text-gray-500">Alerts</div>

@@ -3105,7 +3105,7 @@
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
 
                 <!-- Sub-view nav: Overview vs File Transfer -->
-                <div class="flex items-center gap-2 mt-2">
+                <div class="flex flex-wrap items-center gap-2 mt-2">
                     <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
                     <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
                     <button id="mesh-nav-share" onclick="showMeshView('share')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">Mesh Share</button>
@@ -3317,7 +3317,7 @@
                             never the public internet.
                         </p>
                         <div id="mesh-https-note" class="hidden text-[11px] rounded border px-2 py-1.5 mb-2"></div>
-                        <div class="flex gap-2">
+                        <div class="flex flex-wrap gap-2">
                             <button onclick="meshServe(true, false)"
                                     class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors"
                                     title="Plain HTTP on port 80 — tailnet-only, no certificate needed. The way in most units use.">Publish</button>
@@ -3467,8 +3467,8 @@
                         </div>
                     </div>
                     <p class="text-sm text-gray-400 mb-3">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
-                    <label id="share-guest-read-row" class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer mb-4">
-                        <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700">
+                    <label id="share-guest-read-row" class="flex items-start gap-2 text-xs text-gray-400 cursor-pointer mb-4">
+                        <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700 flex-shrink-0 mt-0.5">
                         Let <b class="text-gray-300">share-guests</b> (<code class="text-gray-500">tag:ragnar-share</code>) browse &amp; fetch this folder — off means they can only send files to you.
                     </label>
                     <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
@@ -3514,7 +3514,7 @@
 
                 <!-- Add remote share modal -->
                 <div id="remote-share-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
-                    <div class="glass rounded-xl w-full max-w-md p-5">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
                         <div class="flex items-center justify-between mb-3">
                             <h3 class="font-bold text-lg">Add remote share</h3>
                             <button onclick="closeRemoteShareModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
@@ -3538,7 +3538,7 @@
 
                 <!-- Join a tailnet (share-only) modal -->
                 <div id="share-join-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
-                    <div class="glass rounded-xl w-full max-w-md p-5">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
                         <div class="flex items-center justify-between mb-3">
                             <h3 class="font-bold text-lg">Join a tailnet — share-only</h3>
                             <button onclick="closeShareJoinModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
@@ -7969,7 +7969,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-outside-collapse"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-mesh-mobile"></script>
 
 </body>
 </html>
