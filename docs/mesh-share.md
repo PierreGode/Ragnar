@@ -312,6 +312,16 @@ to a live folder until the operator chooses where. Node-shares should be
 ACL-scoped to `:8000`; Funnel must always be paired with a token because it is
 public.
 
+**Share-guests are confined even on a box with no login.** A Ragnar with no
+password configured normally serves everything to everyone (an "open box"). A
+`tag:ragnar-share` guest is the one exception: it is *always* held to file-share
+access only — `POST /api/mesh/files/push`, plus `GET /share/local` and
+`/share/download` **only when "Let share-guests browse & fetch" is on**. So the
+guest-read toggle is real regardless of whether you set a login, and a guest can
+never reach the dashboard, scans, or config even on an open box. (Mesh peers and
+random tailnet devices are still fully trusted on an open box — set a login if you
+don't want that.)
+
 ---
 
 ## See also

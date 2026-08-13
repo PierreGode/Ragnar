@@ -547,11 +547,25 @@ def _remote_share_push_url(address):
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
+    path = request.path
     if not auth_mgr.is_configured():
-        return  # No auth set up yet, allow everything
+        # No local login — everyone is otherwise allowed. But a tailnet
+        # SHARE-ONLY guest (tag:ragnar-share) is a deliberately-limited outsider:
+        # it must stay confined to the share allowlist even here, or an open box
+        # would hand it the full dashboard and the guest-read toggle would mean
+        # nothing. (When auth IS configured, the mesh block below enforces the
+        # same confinement.) Identity is proven by tailscaled, fails closed.
+        if shared_data.config.get('mesh_enabled') and _is_mesh_share_request():
+            share_push = request.method == 'POST' and path == '/api/mesh/files/push'
+            share_read = (request.method == 'GET'
+                          and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                          and bool(shared_data.config.get('mesh_share_guest_read')))
+            if not (share_push or share_read):
+                return jsonify({'error': 'Forbidden',
+                                'detail': 'share-only guest: file share access only'}), 403
+        return  # No auth set up yet, allow everyone else
 
     # Whitelist: paths that must be accessible without authentication
-    path = request.path
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
         return
