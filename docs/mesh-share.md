@@ -140,12 +140,19 @@ Under the hood this calls `POST /api/mesh/join` with
 The join is recorded locally (`mesh_share_only`), so this box knows it is a guest
 even if Tailscale doesn't echo the tag back on `Self`.
 
-**What a share-only unit sees on its own screen:** nothing about the host mesh. Its
-Ragnar Mesh tab shows a *"share-only guest"* notice, **no peer roster**, no fleet
-summary or mesh controls, and its Mesh Share tab lists **only its own** shared
-files — never the host fleet's. The host-only *"Outside your mesh"* tools (issue
-tokens, add remote shares, join a tailnet) and the guest-read toggle are hidden
-too — a guest hosts nobody. It joined to send files, not to browse the mesh.
+**What a share-only unit sees on its own screen:** the shared **folder**, but not
+the mesh. Its Ragnar Mesh tab shows a *"share-only guest"* notice and **no peer
+roster** (no fleet summary, no mesh controls, no device monitoring). Its **Mesh
+Share tab is fully live**, though: it sees every unit's shared files and can fetch
+them (each host must have enabled **Let share-guests browse & fetch**), and mesh
+units can **send files to it** — it appears in their File Transfer picker as a
+*(guest)* recipient and receives into its inbox. The host-only *"Outside your
+mesh"* tools (issue tokens, add remote shares, join a tailnet) and the guest-read
+toggle are hidden on a guest — a guest hosts nobody.
+
+> **Two things are separate:** the **roster** (who's a monitored mesh unit — a
+> guest is *not* on it) and the **share folder** (a shared drop-zone — a guest
+> *is* a full participant, both fetching and receiving).
 (The Tailscale ACL is what actually confines it on the wire; the UI just stops it
 enumerating machines it has no business in.)
 

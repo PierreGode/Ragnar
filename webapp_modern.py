@@ -3159,6 +3159,34 @@ def _mesh_tagged_peers():
     return [p for p in state.get('peers', []) if tag in p.get('tags', [])]
 
 
+def _mesh_share_guest_nodes():
+    """Tailnet nodes that are share-only guests: they carry the share tag but
+    NOT the mesh tag. Deliberately kept OUT of the mesh roster (they are not
+    units to monitor), but they ARE valid file recipients — a mesh unit can send
+    files to a guest's inbox. Returns clean node dicts for the recipient picker.
+    """
+    if not _mesh_enabled():
+        return []
+    state = mesh_manager.status()
+    if not state.get('available'):
+        return []
+    mesh_tag, share_tag = _mesh_tag(), _mesh_share_tag()
+    out = []
+    for p in state.get('peers', []):
+        tags = p.get('tags', [])
+        if share_tag in tags and mesh_tag not in tags:
+            out.append(p)
+    return out
+
+
+def _resolve_share_guest_node(node_id):
+    """Find a share-only guest node by its stable Tailscale node id."""
+    for p in _mesh_share_guest_nodes():
+        if p.get('id') and p.get('id') == node_id:
+            return p
+    return None
+
+
 def _resolve_delegate_node(node_id):
     """Find a tagged peer node by its stable Tailscale node id.
 
@@ -3705,6 +3733,14 @@ def mesh_status():
         # phones, unrelated services) are intentionally not listed — they are
         # not the mesh's business and naming them just leaks the tailnet roster.
         'peers': ragnar_peers,
+        # Share-only guests are NOT roster units, but they ARE valid file
+        # recipients — the File Transfer picker lists them so a mesh unit can
+        # send files to a guest. Empty on a guest's own view (it hosts none).
+        'share_guests': ([] if (self_share_tagged and not self_tagged) else [
+            {'id': g.get('id'), 'short_name': g.get('short_name', ''),
+             'label': g.get('label', '') or g.get('short_name', ''),
+             'online': bool(g.get('online'))}
+            for g in _mesh_share_guest_nodes()]),
         'summary': {
             'total': len(ragnar_peers) + (1 if self_node else 0),
             'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
@@ -20244,7 +20280,9 @@ def mesh_files_send():
         body = {} if multipart else (request.get_json(silent=True) or {})
         target_id = (request.form.get('target_id') if multipart else body.get('target_id')) or ''
 
-        node = _resolve_delegate_node(target_id)
+        # A recipient is either a mesh unit or a share-only guest (guests can be
+        # sent to, they just aren't part of the monitored roster).
+        node = _resolve_delegate_node(target_id) or _resolve_share_guest_node(target_id)
         if not node:
             return jsonify({'success': False, 'error': 'Target unit not found in mesh'}), 400
         # Prefer the peer's self-reported Viking name (from the poll cache) over
@@ -20521,11 +20559,16 @@ def mesh_share_all():
     for f in _mesh_share_list_local():
         items.append({**f, 'owner': _mesh_viking_name() or 'this unit',
                       'owner_id': 'self', 'is_local': True})
-    # A share-only guest sees only its own shared folder, never the host mesh's.
-    # It joined to send files, not to browse the fleet's shares.
-    if _mesh_enabled() and not _this_unit_is_share_only():
+    # Even a share-only guest is a participant in the shared FOLDER: it sees every
+    # unit's shared files and can fetch them (subject to each host's guest-read
+    # opt-in). Only the device ROSTER is hidden from a guest, not the share.
+    if _mesh_enabled():
         port = _mesh_node_port()
-        for node in _mesh_tagged_peers():
+        # Poll mesh units AND share-only guests: the shared folder spans both.
+        # A guest's files are read via the same /share/local (a mesh peer poll is
+        # authorized on the guest as a peer read; a guest polling a unit needs
+        # that unit's guest-read opt-in).
+        for node in _mesh_tagged_peers() + _mesh_share_guest_nodes():
             if not node.get('online'):
                 continue
             rep = mesh_manager.poll_peer(node, port=port, timeout=6, path='/api/mesh/share/local')

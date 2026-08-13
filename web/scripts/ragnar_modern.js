@@ -22647,17 +22647,24 @@ function xferRefresh() { loadXferTransfers(); loadXferInbox(); }
 function xferLoadUnits() {
     networkAwareFetch('/api/mesh/status').then(r => r.json()).then(s => {
         const peers = (s && s.peers) || [];
+        // Share-only guests aren't roster units, but a mesh unit can send files
+        // TO them — so list them as recipients too, marked "(guest)".
+        const guests = ((s && s.share_guests) || []).map(g => ({
+            id: g.id, viking_name: g.label || g.short_name || g.id,
+            label: g.label, online: g.online, is_guest: true }));
+        const all = peers.concat(guests);
         const sel = document.getElementById('xfer-dest');
         const chips = document.getElementById('xfer-units');
-        const online = peers.filter(p => p.online);
+        const online = all.filter(p => p.online);
+        const rname = p => (p.viking_name || p.label || p.id) + (p.is_guest ? ' (guest)' : (p.unit_id ? ' #' + p.unit_id : ''));
         if (sel) {
             sel.innerHTML = online.length
-                ? online.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(p.viking_name || p.label || p.id)}${p.unit_id ? ' #' + p.unit_id : ''}</option>`).join('')
+                ? online.map(p => `<option value="${escapeAttr(p.id)}">${escapeHtml(rname(p))}</option>`).join('')
                 : '<option value="">No online units</option>';
         }
         if (chips) {
-            chips.innerHTML = '<span class="text-sm text-gray-400 mr-1">Units:</span>' + (peers.length
-                ? peers.map(p => `<span class="inline-flex items-center gap-1.5 bg-slate-800 border border-slate-600 rounded-full px-3 py-1 text-sm ${p.online ? '' : 'opacity-50'}"><span class="w-2 h-2 rounded-full ${p.online ? 'bg-green-400' : 'bg-slate-500'}"></span>${escapeHtml(p.viking_name || p.label || p.id)}${p.unit_id ? ' <span class="text-xs text-slate-500">#' + p.unit_id + '</span>' : ''}${p.online ? '' : ' <span class="text-xs text-slate-500">(offline)</span>'}</span>`).join(' ')
+            chips.innerHTML = '<span class="text-sm text-gray-400 mr-1">Units:</span>' + (all.length
+                ? all.map(p => `<span class="inline-flex items-center gap-1.5 bg-slate-800 border ${p.is_guest ? 'border-sky-700' : 'border-slate-600'} rounded-full px-3 py-1 text-sm ${p.online ? '' : 'opacity-50'}"><span class="w-2 h-2 rounded-full ${p.online ? 'bg-green-400' : 'bg-slate-500'}"></span>${escapeHtml(p.viking_name || p.label || p.id)}${p.is_guest ? ' <span class="text-xs text-sky-400">guest</span>' : (p.unit_id ? ' <span class="text-xs text-slate-500">#' + p.unit_id + '</span>' : '')}${p.online ? '' : ' <span class="text-xs text-slate-500">(offline)</span>'}</span>`).join(' ')
                 : '<span class="text-sm text-gray-500">No peers in the mesh yet.</span>');
         }
     }).catch(() => {});
