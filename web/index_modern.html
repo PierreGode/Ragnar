@@ -3474,6 +3474,69 @@
                     <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
                 </div>
 
+                <!-- People outside your mesh: token-based sharing -->
+                <div class="glass rounded-xl p-6 mt-4">
+                    <div class="flex items-center gap-2 mb-1">
+                        <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
+                        <h3 class="text-xl font-bold">Outside your mesh</h3>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-4">Share files with someone who is <b>not a unit in your mesh</b> — authenticated by a <b>share token</b>, not the tailnet, so it works even across separate tailnets (node-sharing / Funnel). Either side can only <b>send files</b> to the other's inbox — nothing else.</p>
+
+                    <!-- Remotes I can send TO -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Remote shares <span class="text-xs text-gray-500 font-normal">— send files to</span></h4>
+                        <button onclick="openRemoteShareModal()" class="bg-sky-600 hover:bg-sky-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ Add remote share</button>
+                    </div>
+                    <div id="remote-shares-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50 mb-6"><p class="text-gray-500 text-sm p-4">No remote shares yet.</p></div>
+
+                    <!-- Tokens that let someone send TO me -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Share tokens <span class="text-xs text-gray-500 font-normal">— let someone send to you</span></h4>
+                        <button onclick="createShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ New token</button>
+                    </div>
+                    <div id="share-tokens-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">No tokens issued.</p></div>
+                    <p class="text-xs text-gray-500 mt-2">Hand a token to one outside sender. They add <b>your</b> Ragnar as a remote share using your Tailscale address + this token. The full token is shown once, at creation — revoke any time.</p>
+                </div>
+
+                <!-- Add remote share modal -->
+                <div id="remote-share-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-bold text-lg">Add remote share</h3>
+                            <button onclick="closeRemoteShareModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <label class="block text-sm text-gray-400 mb-1">Name</label>
+                        <input id="rs-name" type="text" placeholder="Alice's Ragnar" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3">
+                        <label class="block text-sm text-gray-400 mb-1">Tailscale address</label>
+                        <input id="rs-address" type="text" placeholder="100.x.y.z:8000  or  their-host:8000" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1">
+                        <p class="text-xs text-gray-500 mb-3">Their Ragnar's Tailscale IP or MagicDNS name, with the port (usually 8000).</p>
+                        <label class="block text-sm text-gray-400 mb-1">Share token</label>
+                        <input id="rs-token" type="text" placeholder="rgnr-share-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-xs text-gray-500 mb-3">The token they generated and gave you.</p>
+                        <div class="flex justify-end gap-2">
+                            <button onclick="closeRemoteShareModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                            <button onclick="saveRemoteShare()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- New token reveal modal (shown once) -->
+                <div id="share-token-reveal-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5">
+                        <h3 class="font-bold text-lg mb-1">New share token</h3>
+                        <p class="text-sm text-gray-400 mb-3">Copy it now — it is shown only once. Give it, plus this unit's Tailscale address, to the person who should be able to send you files.</p>
+                        <div class="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 mb-4">
+                            <code id="share-token-reveal-value" class="text-sm text-emerald-300 font-mono break-all flex-1"></code>
+                            <button onclick="copyShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0">Copy</button>
+                        </div>
+                        <div class="flex justify-end">
+                            <button onclick="closeShareTokenReveal()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Done</button>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Fetch destination folder picker -->
                 <div id="share-dest-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
                     <div class="glass rounded-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
@@ -7867,7 +7930,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-share-guest"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-remote-share"></script>
 
 </body>
 </html>

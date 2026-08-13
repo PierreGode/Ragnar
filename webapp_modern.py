@@ -472,6 +472,57 @@ def _is_mesh_share_request():
         return False
 
 
+def _share_tokens():
+    """Incoming share tokens this unit accepts (operator-issued, handed out)."""
+    toks = shared_data.config.get('mesh_share_tokens')
+    return toks if isinstance(toks, list) else []
+
+
+def _valid_share_token():
+    """True when the request carries a Bearer token this unit has issued.
+
+    This authenticates a remote purely by the secret token — independent of
+    tailnet identity — so a remote reaching us over Tailscale node-sharing or
+    Funnel (a separate tailnet) can still push a file to our inbox. The token
+    grants exactly one thing: POST /api/mesh/files/push. Constant-time compared.
+    """
+    import hmac
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return False
+    presented = auth[7:].strip()
+    if not presented:
+        return False
+    for t in _share_tokens():
+        stored = t.get('token') if isinstance(t, dict) else None
+        if stored and hmac.compare_digest(str(stored), presented):
+            return True
+    return False
+
+
+def _remote_shares():
+    """Outbound remote-share targets (address + token) this unit can send to."""
+    v = shared_data.config.get('mesh_remote_shares')
+    return v if isinstance(v, list) else []
+
+
+def _get_remote_share(rid):
+    for r in _remote_shares():
+        if isinstance(r, dict) and r.get('id') == rid:
+            return r
+    return None
+
+
+def _remote_share_push_url(address):
+    """Build the push URL for a saved remote address (host[:port] or full URL)."""
+    address = (address or '').strip()
+    if not address:
+        return ''
+    if not address.startswith(('http://', 'https://')):
+        address = 'http://' + address
+    return address.rstrip('/') + '/api/mesh/files/push'
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
@@ -564,6 +615,16 @@ def check_authentication():
                       and path in ('/api/mesh/share/local', '/api/mesh/share/download')
                       and bool(shared_data.config.get('mesh_share_guest_read')))
         if (share_push or share_read) and _is_mesh_share_request():
+            return
+
+        # Share-token role. A remote holding a valid share token (one this unit's
+        # operator generated and handed out) may ONLY push a file to the inbox.
+        # Authenticated purely by the bearer token — no tailnet identity needed —
+        # so it works across separate tailnets (node-sharing / Funnel) where
+        # WireGuard-identity tagging does not carry. Same inbox-only handler,
+        # same mesh_file_receive off-switch, exact-path allowlisted, fail-closed.
+        token_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        if token_push and _valid_share_token():
             return
 
     # Check if user is authenticated via Flask session
@@ -20055,14 +20116,72 @@ def mesh_files_push():
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
-@app.route('/api/mesh/files/send', methods=['POST'])
-def mesh_files_send():
-    """Operator: stream a file from this unit to a peer (runs in background).
+class _OutboundError(Exception):
+    """A staging/validation failure with an HTTP status for the caller."""
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
+def _prepare_outbound_file(multipart, body):
+    """Stage and validate one outbound file for a mesh transfer.
 
     Source is one of: a drag-dropped upload (multipart 'file'), an /uploads or
     /backups path ('source':'path'), or an unlocked Vault file ('source':'vault').
+    Returns (src_path, filename, cleanup). Raises _OutboundError for a bad source,
+    or SafeLockedError/SafeError when a locked Vault file is requested. Shared by
+    the mesh-peer send and the token-based remote-share send.
     """
     import tempfile
+    mt = _get_mesh_transfer()
+    if multipart:
+        f = request.files['file']
+        filename = os.path.basename(f.filename or 'file')
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        os.close(fd)
+        f.save(src_path)
+        cleanup = True
+    elif body.get('source') == 'vault':
+        entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
+        filename = os.path.basename(entry.get('name', 'file'))
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        with os.fdopen(fd, 'wb') as w:
+            w.write(data)
+        cleanup = True
+    else:  # a real file the operator can browse on this unit
+        try:
+            src_path = _resolve_readable_path(body.get('path', ''))
+        except ValueError:
+            raise _OutboundError('Invalid source path')
+        if not os.path.isfile(src_path):
+            raise _OutboundError('Source file not found', 404)
+        filename = os.path.basename(src_path)
+        cleanup = False
+
+    def _cleanup_staged():
+        if cleanup:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+    try:
+        src_size = os.path.getsize(src_path)
+    except OSError:
+        _cleanup_staged()
+        raise _OutboundError('Source file not found', 404)
+    if src_size == 0:
+        _cleanup_staged()
+        raise _OutboundError('That file is empty — nothing to send')
+    if src_size > mt.max_bytes:
+        _cleanup_staged()
+        raise _OutboundError('File is larger than the %d GB transfer limit'
+                             % (mt.max_bytes // (1024 ** 3)))
+    return src_path, filename, cleanup
+
+
+@app.route('/api/mesh/files/send', methods=['POST'])
+def mesh_files_send():
+    """Operator: stream a file from this unit to a peer (runs in background)."""
     try:
         mt = _get_mesh_transfer()
         multipart = bool(request.files.get('file'))
@@ -20083,51 +20202,10 @@ def mesh_files_send():
             return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
 
         headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id())}
-        cleanup = False
-
-        if multipart:
-            f = request.files['file']
-            filename = os.path.basename(f.filename or 'file')
-            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
-            os.close(fd)
-            f.save(src_path)
-            cleanup = True
-        elif body.get('source') == 'vault':
-            entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
-            filename = os.path.basename(entry.get('name', 'file'))
-            fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
-            with os.fdopen(fd, 'wb') as w:
-                w.write(data)
-            cleanup = True
-        else:  # a real file the operator can browse on this unit
-            try:
-                src_path = _resolve_readable_path(body.get('path', ''))
-            except ValueError:
-                return jsonify({'success': False, 'error': 'Invalid source path'}), 400
-            if not os.path.isfile(src_path):
-                return jsonify({'success': False, 'error': 'Source file not found'}), 404
-            filename = os.path.basename(src_path)
-
-        # Validate the source before queuing a doomed transfer.
-        def _cleanup_staged():
-            if cleanup:
-                try:
-                    os.remove(src_path)
-                except OSError:
-                    pass
         try:
-            src_size = os.path.getsize(src_path)
-        except OSError:
-            _cleanup_staged()
-            return jsonify({'success': False, 'error': 'Source file not found'}), 404
-        if src_size == 0:
-            _cleanup_staged()
-            return jsonify({'success': False, 'error': 'That file is empty — nothing to send'}), 400
-        if src_size > mt.max_bytes:
-            _cleanup_staged()
-            return jsonify({'success': False,
-                            'error': 'File is larger than the %d GB transfer limit'
-                                     % (mt.max_bytes // (1024 ** 3))}), 400
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
 
         tid = mt.registry.create(filename, dest_name)
         mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
@@ -20145,6 +20223,127 @@ def mesh_files_send():
 def mesh_transfers_list():
     """Outbound transfer progress/history for the UI to poll."""
     return jsonify({'success': True, 'transfers': _get_mesh_transfer().registry.list()})
+
+
+# --- Share tokens: this unit issues them; a remote presents one to push here ---
+
+@app.route('/api/mesh/share/tokens', methods=['GET'])
+def mesh_share_tokens_list():
+    """Operator: list the incoming share tokens this unit accepts.
+
+    Only a masked preview is returned — the full secret is shown once, at
+    creation. (A peer Ragnar can GET any /api/mesh/* path, so the raw token
+    must never appear here.) Lost a token? Revoke it and mint a new one.
+    """
+    return jsonify({'success': True, 'tokens': [
+        {'id': t.get('id'), 'label': t.get('label', ''),
+         'preview': '…' + str(t.get('token', ''))[-6:], 'created': t.get('created', '')}
+        for t in _share_tokens() if isinstance(t, dict)]})
+
+
+@app.route('/api/mesh/share/tokens', methods=['POST'])
+def mesh_share_tokens_create():
+    """Operator: mint a new share token to hand to one outside sender."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    label = (data.get('label') or '').strip()[:60]
+    entry = {'id': secrets.token_hex(6),
+             'label': label,
+             'token': 'rgnr-share-' + secrets.token_urlsafe(24),
+             'created': datetime.now().isoformat(timespec='seconds')}
+    toks = _share_tokens() + [entry]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True, 'token': entry})
+
+
+@app.route('/api/mesh/share/tokens/<tid>', methods=['DELETE'])
+def mesh_share_tokens_delete(tid):
+    """Operator: revoke one share token (that sender can no longer push)."""
+    toks = [t for t in _share_tokens() if isinstance(t, dict) and t.get('id') != tid]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+# --- Remote shares: saved outbound targets (address + token) to send files to ---
+
+def _remote_share_public(r):
+    """Strip the secret token for listing."""
+    return {'id': r.get('id'), 'name': r.get('name', ''), 'address': r.get('address', ''),
+            'created': r.get('created', '')}
+
+
+@app.route('/api/mesh/remote-shares', methods=['GET'])
+def mesh_remote_shares_list():
+    """Operator: saved remote-share targets (tokens masked)."""
+    return jsonify({'success': True,
+                    'remotes': [_remote_share_public(r) for r in _remote_shares() if isinstance(r, dict)]})
+
+
+@app.route('/api/mesh/remote-shares', methods=['POST'])
+def mesh_remote_shares_add():
+    """Operator: add a remote to send files to (name + address + their token)."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()[:60]
+    address = (data.get('address') or '').strip()
+    token = (data.get('token') or '').strip()
+    if not name or not address or not token:
+        return jsonify({'success': False, 'error': 'Name, address and token are all required'}), 400
+    if not _remote_share_push_url(address):
+        return jsonify({'success': False, 'error': 'That address is not valid'}), 400
+    entry = {'id': secrets.token_hex(6), 'name': name, 'address': address, 'token': token,
+             'created': datetime.now().isoformat(timespec='seconds')}
+    remotes = _remote_shares() + [entry]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True, 'remote': _remote_share_public(entry)})
+
+
+@app.route('/api/mesh/remote-shares/<rid>', methods=['DELETE'])
+def mesh_remote_shares_delete(rid):
+    """Operator: forget a remote-share target."""
+    remotes = [r for r in _remote_shares() if isinstance(r, dict) and r.get('id') != rid]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/remote-shares/<rid>/send', methods=['POST'])
+def mesh_remote_shares_send(rid):
+    """Operator: stream a file to a saved remote share, authenticated by its token.
+
+    Same staging/validation as a peer send, but the destination is an arbitrary
+    address and the auth is the bearer token — so it reaches a Ragnar on a
+    separate tailnet (node-sharing / Funnel), not just a mesh peer.
+    """
+    remote = _get_remote_share(rid)
+    if not remote:
+        return jsonify({'success': False, 'error': 'Remote share not found'}), 404
+    url = _remote_share_push_url(remote.get('address'))
+    if not url:
+        return jsonify({'success': False, 'error': 'Remote has no valid address'}), 400
+    try:
+        mt = _get_mesh_transfer()
+        multipart = bool(request.files.get('file'))
+        body = {} if multipart else (request.get_json(silent=True) or {})
+        headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id()),
+                   'Authorization': 'Bearer ' + str(remote.get('token', ''))}
+        try:
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
+        tid = mt.registry.create(filename, remote.get('name', 'remote'))
+        mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
+        return jsonify({'success': True, 'transfer_id': tid, 'dest': remote.get('name', 'remote')})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first to send a Vault file'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh remote-share send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/mesh/inbox')

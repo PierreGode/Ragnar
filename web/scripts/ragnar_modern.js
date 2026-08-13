@@ -22764,6 +22764,8 @@ function xferSetReceive(on) {
 function loadMeshShare() {
     const el = document.getElementById('mesh-share-list');
     if (!el) return;
+    loadRemoteShares();
+    loadShareTokens();
     networkAwareFetch('/api/mesh/share').then(r => r.json()).then(d => {
         const items = (d && d.items) || [];
         const gt = document.getElementById('share-guest-read-toggle');
@@ -22794,6 +22796,145 @@ function setShareGuestRead(on) {
         showNotification(on ? 'Share-guests can now browse & fetch this folder'
                              : 'Share-guests are send-only again', 'success');
     }).catch(e => { showNotification('Could not update share access: ' + e.message, 'error'); });
+}
+
+// ---- Outside-mesh sharing: remote-share targets (send TO) -------------------
+
+function loadRemoteShares() {
+    const el = document.getElementById('remote-shares-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/remote-shares').then(r => r.json()).then(d => {
+        const rows = (d && d.remotes) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No remote shares yet. Add one with a name, their Tailscale address and the token they gave you.</p>'; return; }
+        el.innerHTML = rows.map(r => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(r.name)}</div>
+                <div class="text-xs text-gray-500 truncate font-mono">${escapeHtml(r.address)}</div>
+            </div>
+            <div class="flex-shrink-0 flex gap-2">
+                <button onclick="sendToRemote('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-sky-600 hover:bg-sky-700 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Send file</button>
+                <button onclick="removeRemoteShare('${escapeAttr(r.id)}','${escapeAttr(r.name)}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded transition-colors">Remove</button>
+            </div></div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function openRemoteShareModal() {
+    ['rs-name', 'rs-address', 'rs-token'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+}
+
+function closeRemoteShareModal() {
+    const m = document.getElementById('remote-share-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function saveRemoteShare() {
+    const name = (document.getElementById('rs-name') || {}).value || '';
+    const address = (document.getElementById('rs-address') || {}).value || '';
+    const token = (document.getElementById('rs-token') || {}).value || '';
+    if (!name.trim() || !address.trim() || !token.trim()) {
+        showNotification('Name, address and token are all required', 'error'); return;
+    }
+    networkAwareFetch('/api/mesh/remote-shares', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name.trim(), address: address.trim(), token: token.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success) { showNotification(d.error || 'Could not add remote share', 'error'); return; }
+        closeRemoteShareModal();
+        showNotification('Remote share added', 'success');
+        loadRemoteShares();
+    }).catch(e => showNotification('Could not add remote share: ' + e.message, 'error'));
+}
+
+function removeRemoteShare(id, name) {
+    showFileConfirmModal('Remove remote share', `Stop sharing with “${name}”? Files already sent are unaffected.`, function () {
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not remove', 'error'); return; }
+                showNotification('Remote share removed', 'success');
+                loadRemoteShares();
+            }).catch(e => showNotification('Could not remove: ' + e.message, 'error'));
+    });
+}
+
+function sendToRemote(id, name) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = ev => {
+        if (!ev.target.files.length) return;
+        const fd = new FormData();
+        fd.append('file', ev.target.files[0]);
+        showFileLoading(`Sending to ${name}…`);
+        networkAwareFetch('/api/mesh/remote-shares/' + encodeURIComponent(id) + '/send', { method: 'POST', body: fd })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Send failed', 'error'); return; }
+                showNotification(`Sending to ${name} — watch Transfers for progress`, 'success');
+                if (typeof loadXferTransfers === 'function') loadXferTransfers();
+            }).catch(e => { showNotification('Send failed: ' + e.message, 'error'); });
+    };
+    input.click();
+}
+
+// ---- Outside-mesh sharing: share tokens (let someone send TO me) ------------
+
+function loadShareTokens() {
+    const el = document.getElementById('share-tokens-list');
+    if (!el) return;
+    networkAwareFetch('/api/mesh/share/tokens').then(r => r.json()).then(d => {
+        const rows = (d && d.tokens) || [];
+        if (!rows.length) { el.innerHTML = '<p class="text-gray-500 text-sm p-4">No tokens issued. Create one to let an outside person send files to this unit.</p>'; return; }
+        el.innerHTML = rows.map(t => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="text-sm truncate">${escapeHtml(t.label || 'Unnamed')}</div>
+                <div class="text-xs text-gray-500 font-mono">${escapeHtml(t.preview)}${t.created ? ' · ' + escapeHtml(t.created) : ''}</div>
+            </div>
+            <button onclick="revokeShareToken('${escapeAttr(t.id)}','${escapeAttr(t.label || 'this token')}')" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0 transition-colors">Revoke</button>
+            </div>`).join('');
+    }).catch(e => { el.innerHTML = `<p class="text-red-400 p-4">${escapeHtml(e.message)}</p>`; });
+}
+
+function createShareToken() {
+    const label = prompt('Name this token (who is it for?) — optional:', '') || '';
+    networkAwareFetch('/api/mesh/share/tokens', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label.trim() })
+    }).then(r => r.json()).then(d => {
+        if (!d.success || !d.token) { showNotification((d && d.error) || 'Could not create token', 'error'); return; }
+        const v = document.getElementById('share-token-reveal-value');
+        if (v) v.textContent = d.token.token;
+        const m = document.getElementById('share-token-reveal-modal');
+        if (m) { m.classList.remove('hidden'); m.classList.add('flex'); }
+        loadShareTokens();
+    }).catch(e => showNotification('Could not create token: ' + e.message, 'error'));
+}
+
+function copyShareToken() {
+    const v = document.getElementById('share-token-reveal-value');
+    if (!v) return;
+    const txt = v.textContent || '';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(() => showNotification('Token copied', 'success'))
+            .catch(() => showNotification('Copy failed — select it manually', 'error'));
+    } else {
+        showNotification('Copy not available — select the token manually', 'error');
+    }
+}
+
+function closeShareTokenReveal() {
+    const m = document.getElementById('share-token-reveal-modal');
+    if (m) { m.classList.add('hidden'); m.classList.remove('flex'); }
+}
+
+function revokeShareToken(id, label) {
+    showFileConfirmModal('Revoke share token', `Revoke “${label}”? Whoever holds it can no longer send you files.`, function () {
+        networkAwareFetch('/api/mesh/share/tokens/' + encodeURIComponent(id), { method: 'DELETE' })
+            .then(r => r.json()).then(d => {
+                if (!d.success) { showNotification(d.error || 'Could not revoke', 'error'); return; }
+                showNotification('Token revoked', 'success');
+                loadShareTokens();
+            }).catch(e => showNotification('Could not revoke: ' + e.message, 'error'));
+    });
 }
 
 function shareUploadFiles() {

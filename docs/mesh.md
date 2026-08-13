@@ -867,6 +867,48 @@ To change the tag Ragnar trusts, set `mesh_share_tag` in config (default
 `tag:ragnar-share`). Revoking access is one click in the Tailscale console —
 disable the key or the guest's node.
 
+### Share tokens & remote shares (Ragnar ↔ Ragnar, across tailnets)
+
+The tag model above needs the sender to live on **your** tailnet. When both sides
+already run their own separate mesh — two Ragnars in different orgs — a node can't
+join a second tailnet, so tag identity can't carry. For that case Ragnar adds a
+**share token**: a secret the receiver issues and the sender presents as an HTTP
+`Authorization: Bearer` header. Auth is the token, not the tailnet, so it works
+over Tailscale **node-sharing** or **Funnel** between separate tailnets. A valid
+token grants exactly one thing — `POST /api/mesh/files/push` into the inbox — and
+honours the same `mesh_file_receive` off-switch. Both sides drive it entirely from
+**Ragnar Mesh → Mesh Share → Outside your mesh**; no Tailscale-console step.
+
+**To let someone send to you** (you are the receiver):
+
+1. **Share tokens → + New token**, name it for the person. The full token
+   (`rgnr-share-…`) is shown **once** — copy it. The list afterwards shows only a
+   masked preview; lost tokens are revoked, not recovered.
+2. Give them that token plus this unit's Tailscale address (`100.x.y.z:8000`, or a
+   MagicDNS name / Funnel URL if the two of you are on different tailnets).
+3. **Revoke** removes the row and the token stops working immediately.
+
+**To send to a remote** (you are the sender):
+
+1. **Remote shares → + Add remote share**: a **name**, their **address**, and the
+   **token** they gave you.
+2. Each saved remote gets a **Send file** button; transfers show up in the normal
+   **Transfers** list with SHA-256 integrity checking, same as a mesh send.
+
+Reaching a remote on a *different* tailnet still needs a network path — share that
+one Ragnar node to the other tailnet (Tailscale **node-sharing**), or expose
+`:8000` with **Funnel**. Same-tailnet remotes just work. Config keys:
+`mesh_share_tokens` (issued tokens, secret) and `mesh_remote_shares` (saved
+targets, holds their tokens) — both live only in this unit's config, never synced.
+
+| Route | Who | What |
+|---|---|---|
+| `POST /api/mesh/files/push` | share-guest **or** valid token | drop one file in the inbox |
+| `GET /api/mesh/share/{local,download}` | share-guest, if `mesh_share_guest_read` | browse/fetch Mesh Share |
+| `GET/POST/DELETE /api/mesh/share/tokens` | operator | issue/list(masked)/revoke tokens |
+| `GET/POST/DELETE /api/mesh/remote-shares[/…]` | operator | manage send targets |
+| `POST /api/mesh/remote-shares/<id>/send` | operator | send a file to a saved remote |
+
 ## Cross-site incident correlation
 
 Each unit pulls its peers' Watchtower alerts and folds them into its **own**
@@ -914,6 +956,8 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_alert_limit` | `50` | Max alerts pulled per peer per poll. |
 | `mesh_share_tag` | `tag:ragnar-share` | Tailscale tag trusted for **share-only guests** (send files to this unit, nothing else). |
 | `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). Off = send-only. |
+| `mesh_share_tokens` | `[]` | Secret **share tokens** this unit issued; a remote presents one (Bearer) to push into the inbox. Managed from the UI. |
+| `mesh_remote_shares` | `[]` | Saved outbound **remote-share** targets (name + address + their token) this unit can send files to. |
 
 Environment variables (imaging / unattended):
 `RAGNAR_MESH_AUTHKEY`, `RAGNAR_MESH_UNIT_ID`, `RAGNAR_MESH_LABEL`,
