@@ -3476,12 +3476,16 @@
 
                 <!-- People outside your mesh: token-based sharing -->
                 <div id="mesh-share-outside-panel" class="glass rounded-xl p-6 mt-4">
-                    <div class="flex items-center gap-2 mb-1">
-                        <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
-                        <h3 class="text-xl font-bold">Outside your mesh</h3>
-                    </div>
-                    <p class="text-sm text-gray-400 mb-3">Share files with someone who is <b>not a unit in your mesh</b>. Tailscale still carries the traffic; the sender is limited to <b>send files only</b> — no dashboard, scans, or other units.</p>
+                    <button type="button" onclick="toggleOutsideMesh()" class="w-full text-left flex items-start gap-2 group">
+                        <svg class="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-xl font-bold">Outside your mesh</h3>
+                            <p class="text-sm text-gray-400 mt-1">Share files with someone who is <b>not a unit in your mesh</b>. Tailscale still carries the traffic; the sender is limited to <b>send files only</b> — no dashboard, scans, or other units.</p>
+                        </div>
+                        <svg id="mesh-share-outside-chevron" class="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5 transition-transform group-hover:text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
 
+                    <div id="mesh-share-outside-body" class="hidden mt-4">
                     <!-- Join a tailnet as share-only (for a box not yet on any tailnet) -->
                     <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-3 mb-6 flex items-center justify-between gap-3 flex-wrap">
                         <div class="min-w-0">
@@ -3505,6 +3509,7 @@
                     </div>
                     <div id="share-tokens-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">No tokens issued.</p></div>
                     <p class="text-xs text-gray-500 mt-2">Hand a token to one outside sender. They add <b>your</b> Ragnar as a remote share using your Tailscale address + this token. The full token is shown once, at creation — revoke any time.</p>
+                    </div>
                 </div>
 
                 <!-- Add remote share modal -->
@@ -7964,7 +7969,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-leave-share"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-outside-collapse"></script>
 
 </body>
 </html>

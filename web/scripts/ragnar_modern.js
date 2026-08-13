@@ -22814,6 +22814,16 @@ function setShareGuestRead(on) {
 
 // ---- Outside-mesh sharing: remote-share targets (send TO) -------------------
 
+// Collapsed by default — only the heading/description show until expanded. Keeps
+// the common case (nothing to configure) quiet while the tools stay one click away.
+function toggleOutsideMesh() {
+    const body = document.getElementById('mesh-share-outside-body');
+    const chev = document.getElementById('mesh-share-outside-chevron');
+    if (!body) return;
+    const open = body.classList.toggle('hidden') === false;
+    if (chev) chev.style.transform = open ? 'rotate(180deg)' : '';
+}
+
 function loadRemoteShares() {
     const el = document.getElementById('remote-shares-list');
     if (!el) return;
