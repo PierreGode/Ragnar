@@ -25,6 +25,7 @@ be logged into renders the mesh; so would any other.
   - [Mesh Nodes list and the node page](#mesh-nodes-list-and-the-node-page)
 - [Unit identity — the Viking army](#unit-identity--the-viking-army)
 - [Tailscale console: one-time setup](#tailscale-console-one-time-setup)
+- [Separate meshes on one tailnet](#separate-meshes-on-one-tailnet)
 - [Deploying a unit](#deploying-a-unit)
   - [Path 1 — during imaging (unattended)](#path-1--during-imaging-unattended)
   - [Path 2 — during install](#path-2--during-install)
@@ -247,6 +248,71 @@ hand), it will be **untagged** — fix it in **Machines → the device → the �
 
 ---
 
+## Separate meshes on one tailnet
+
+One Tailscale account can host **several completely separate Ragnar meshes** at
+once. They are told apart only by their tag:
+
+| Mesh | Mesh tag | Share-guest tag |
+|---|---|---|
+| **Main** (the default) | `tag:ragnar-mesh` | `tag:ragnar-share` |
+| A second, isolated mesh | `tag:ragnar-mesh-2` | `tag:ragnar-share-2` |
+| Named however you like | `tag:ragnar-mesh-lab` | `tag:ragnar-share-lab` |
+
+The separation is real, not cosmetic. Every trust check
+(`caller_is_mesh_peer`) and every peer scan filters on the **exact** tag, so a
+unit tagged `tag:ragnar-mesh-2` is invisible to — and rejected by — a
+`tag:ragnar-mesh` unit even though they share a coordination server. A unit
+publishes to and reads from **only** the mesh whose tag it carries. The share
+tag is derived from the mesh tag automatically, so a share-only guest of
+`ragnar-mesh-2` carries `ragnar-share-2` and can never reach a host on a
+different mesh that happens to share the tailnet.
+
+**When you'd want this:** separate customers or sites that must never see each
+other's findings; a `lab` mesh for testing kept apart from `prod`; a managed-
+service operator running several independent fleets from one Tailscale account.
+
+**The "mesh name" is just a suffix.** Leave it blank and you get the main mesh —
+nothing changes and you can ignore this whole section. Give a short name (`2`,
+`lab`, `jersey`) and the unit joins `tag:ragnar-mesh-<name>` instead. The name
+is lowercased and reduced to a DNS label (`[a-z0-9-]`), so `Lab 1` becomes
+`lab-1`; pasting the whole `tag:ragnar-mesh-2` or `ragnar-mesh-2` also works.
+
+### Console setup for an extra mesh
+
+Each mesh tag is a **separate tag you must own** in the ACL, exactly like the
+default one. Add every mesh (and its paired share tag) under `tagOwners`:
+
+```jsonc
+{
+  "tagOwners": {
+    "tag:ragnar-mesh":    ["autogroup:admin"],
+    "tag:ragnar-share":   ["autogroup:admin"],
+    "tag:ragnar-mesh-2":  ["autogroup:admin"],
+    "tag:ragnar-share-2": ["autogroup:admin"]
+  }
+}
+```
+
+Then generate a tagged auth key carrying `tag:ragnar-mesh-2` for units that
+belong to that mesh, and keep the `grants`/`acls` rules scoped **within** each
+tag (`src` and `dst` both `tag:ragnar-mesh-2`) so the two meshes stay isolated
+at the network layer too, not only in Ragnar.
+
+### How to set the mesh name
+
+- **Web UI (Join form):** the **Mesh name** field. Blank = main mesh.
+- **Installer (interactive):** the installer asks for a mesh name after the site
+  label.
+- **Unattended / boot config:** set `RAGNAR_MESH_SUFFIX="2"` (friendly form) or
+  `RAGNAR_MESH_TAG="tag:ragnar-mesh-2"` (explicit full tag). The explicit tag
+  wins if both are set.
+
+A unit records the mesh it joined in its `mesh_tag` config, so a later re-join
+from the web UI keeps it on the same mesh unless you change the field.
+
+---
+
 ## Deploying a unit
 
 Three paths, all landing in the same place. Pick by how much access you have to
@@ -268,6 +334,9 @@ RAGNAR_MESH_AUTHKEY="tskey-auth-xxxxxxxxxxxxxxxxxxxx"
 RAGNAR_MESH_UNIT_ID="2"
 RAGNAR_MESH_LABEL="Jersey DC"
 RAGNAR_MESH_ROUTES="10.20.0.0/24"
+# Optional — place this box in a separate mesh (see "Separate meshes on one
+# tailnet"). Blank/omitted = the main mesh. The key's tag must match.
+# RAGNAR_MESH_SUFFIX="2"
 ```
 
 The unit names itself; there is no name to supply here.
@@ -306,8 +375,10 @@ Open the **Ragnar Mesh** tab. It is a two-step funnel:
    appears it moves you straight to step 2. (Prefer the shell?
    `curl -fsSL https://tailscale.com/install.sh | sh`, then reload the tab.)
 2. **Join mesh.** Enter unit number, site label, auth key and any LAN subnets to
-   advertise. Joining sets `mesh_enabled`, which is what makes every subsequent
-   `update_ragnar.sh` keep Tailscale installed and current.
+   advertise. Leave **Mesh name** blank for the main mesh, or name a
+   [separate mesh](#separate-meshes-on-one-tailnet). Joining sets `mesh_enabled`,
+   which is what makes every subsequent `update_ragnar.sh` keep Tailscale
+   installed and current.
 
 ### Why `update` does not install Tailscale by itself
 
@@ -868,9 +939,12 @@ between "guest" and "unit" is the **tag + ACL**, not a separate network.
    …then opens `http://<your-ragnar-tailscale-ip>:8000` and sends you files. They
    see only your one unit's send surface — nothing else.
 
-To change the tag Ragnar trusts, set `mesh_share_tag` in config (default
-`tag:ragnar-share`). Revoking access is one click in the Tailscale console —
-disable the key or the guest's node.
+The share tag Ragnar trusts defaults to the one paired with this unit's mesh —
+`tag:ragnar-share` on the main mesh, `tag:ragnar-share-2` on `ragnar-mesh-2`
+(see [Separate meshes on one tailnet](#separate-meshes-on-one-tailnet)), so
+guests stay confined to the mesh they joined. Override it explicitly with
+`mesh_share_tag` in config if you need a different tag. Revoking access is one
+click in the Tailscale console — disable the key or the guest's node.
 
 ### Share tokens & remote shares (Ragnar ↔ Ragnar, across tailnets)
 
@@ -950,7 +1024,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 |---|---|---|
 | `mesh_tab_enabled` | `true` | Show the Ragnar Mesh **tab** in the UI. Cosmetic only — hiding it never joins/leaves the mesh. Toggle in Config → Ragnar Mesh. |
 | `mesh_enabled` | `false` | Master switch. Off means no peer polling at all. |
-| `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls. |
+| `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls — and which mesh this unit belongs to. Suffixed tags (`tag:ragnar-mesh-2`) select a [separate mesh](#separate-meshes-on-one-tailnet). Set via the Join form's **Mesh name**, not usually by hand. |
 | `mesh_unit_id` | `0` | This unit's number. `0` = unassigned. |
 | `mesh_viking_name` | `""` | This unit's name. Blank = derive from the machine itself. |
 | `mesh_site_label` | `""` | Where the box physically is ("Jersey DC"). |
@@ -959,14 +1033,16 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_poll_timeout` | `6` | Per-peer HTTP timeout. Kept short so one dead unit cannot stall the view. |
 | `mesh_aggregate_alerts` | `true` | Pull peers' alerts into the local incident engine. |
 | `mesh_alert_limit` | `50` | Max alerts pulled per peer per poll. |
-| `mesh_share_tag` | `tag:ragnar-share` | Tailscale tag trusted for **share-only guests** (send files to this unit, nothing else). |
+| `mesh_share_tag` | derived from `mesh_tag` | Tailscale tag trusted for **share-only guests** (send files to this unit, nothing else). Defaults to the share tag paired with this unit's mesh (`tag:ragnar-share`, or `tag:ragnar-share-2` on `ragnar-mesh-2`); set explicitly only to override. |
 | `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). Off = send-only. |
 | `mesh_share_tokens` | `[]` | Secret **share tokens** this unit issued; a remote presents one (Bearer) to push into the inbox. Managed from the UI. |
 | `mesh_remote_shares` | `[]` | Saved outbound **remote-share** targets (name + address + their token) this unit can send files to. |
 
 Environment variables (imaging / unattended):
 `RAGNAR_MESH_AUTHKEY`, `RAGNAR_MESH_UNIT_ID`, `RAGNAR_MESH_LABEL`,
-`RAGNAR_MESH_ROUTES`, `RAGNAR_MESH_HOSTNAME`, `RAGNAR_MESH_TAG`.
+`RAGNAR_MESH_ROUTES`, `RAGNAR_MESH_HOSTNAME`, `RAGNAR_MESH_TAG`,
+`RAGNAR_MESH_SUFFIX` (friendly form of the mesh tag — `2` ⇒ `tag:ragnar-mesh-2`;
+`RAGNAR_MESH_TAG` wins if both are set).
 
 ### CLI
 

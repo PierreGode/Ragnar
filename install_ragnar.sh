@@ -1868,9 +1868,14 @@ setup_ragnar_mesh() {
     if [ -n "$mesh_key" ]; then
         read -p "Unit number for this box (1-99, blank to set later): " mesh_unit
         read -p "Site label (e.g. Jersey DC, blank to skip): " mesh_label
+        echo -e "Mesh name: ${YELLOW}blank${NC} joins the main mesh. A short name (e.g. ${GREEN}2${NC} or"
+        echo -e "${GREEN}lab${NC}) puts this box in a separate, isolated mesh (tag:ragnar-mesh-<name>)"
+        echo -e "on the same Tailscale account — meshes never see or trust each other."
+        read -p "Mesh name (blank = main mesh): " mesh_suffix
         RAGNAR_MESH_AUTHKEY="$mesh_key" \
         RAGNAR_MESH_UNIT_ID="$mesh_unit" \
         RAGNAR_MESH_LABEL="$mesh_label" \
+        RAGNAR_MESH_SUFFIX="$mesh_suffix" \
             bash "$script" provision \
             || log "WARNING" "Joining the mesh failed — retry from the web UI"
     else

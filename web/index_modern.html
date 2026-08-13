@@ -3182,6 +3182,18 @@
                         <p id="mesh-join-gender-hint" class="text-[11px] text-gray-500 mt-1">Known names set this automatically.</p>
                     </div>
                     <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Mesh name <span class="text-gray-600 normal-case">(optional)</span></label>
+                        <input id="mesh-suffix-input" type="text" placeholder="blank = main mesh (ragnar-mesh)"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            Leave blank to join the main mesh. Type a short name — e.g. <code>2</code> or <code>lab</code> —
+                            to place this unit in a <strong>separate, isolated mesh</strong>
+                            (<code>tag:ragnar-mesh-&lt;name&gt;</code>) on the same Tailscale account. Units in
+                            different meshes never see or trust each other. The tag must exist under
+                            <code>tagOwners</code> in your Tailscale ACL.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
                         <input id="mesh-authkey-input" type="password" placeholder="tskey-auth-…" autocomplete="off"
                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
@@ -3553,6 +3565,9 @@
                         <input id="sj-authkey" type="text" placeholder="tskey-auth-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3 font-mono">
                         <label class="block text-sm text-gray-400 mb-1">Name for this unit <span class="text-gray-600">(optional)</span></label>
                         <input id="sj-hostname" type="text" placeholder="e.g. bjorn-share" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-4">
+                        <label class="block text-sm text-gray-400 mb-1">Mesh name <span class="text-gray-600">(optional)</span></label>
+                        <input id="sj-mesh-suffix" type="text" placeholder="blank = main mesh (ragnar-share)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-[11px] text-gray-500 mb-4">Match the host's mesh. Blank ⇒ <code>tag:ragnar-share</code>; a name (e.g. <code>2</code>) ⇒ <code>tag:ragnar-share-&lt;name&gt;</code>, the guest tag for that separate mesh.</p>
                         <div id="sj-status" class="hidden text-sm mb-3"></div>
                         <div class="flex justify-end gap-2">
                             <button onclick="closeShareJoinModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
@@ -7969,7 +7984,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-mesh-mobile"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-multi-mesh"></script>
 
 </body>
 </html>

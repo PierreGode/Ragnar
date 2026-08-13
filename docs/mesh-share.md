@@ -311,7 +311,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | Key | Default | Meaning |
 |---|---|---|
 | `mesh_file_receive` | `true` | Master **Accept incoming** switch. Off ⇒ no unit, guest or token can push. |
-| `mesh_share_tag` | `tag:ragnar-share` | Tailscale tag trusted as a share-only guest. |
+| `mesh_share_tag` | derived from `mesh_tag` | Tailscale tag trusted as a share-only guest. Defaults to the share tag paired with this unit's mesh (`tag:ragnar-share`, or `tag:ragnar-share-2` on a `ragnar-mesh-2` unit — see [Separate meshes on one tailnet](mesh.md#separate-meshes-on-one-tailnet)); set explicitly to override. |
 | `mesh_share_only` | `false` | Set when **this** unit joined as a share-only guest (2B). Hides the mesh from its own UI. Cleared on leave / normal join. |
 | `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). |
 | `mesh_share_tokens` | `[]` | Secret share tokens this unit issued (each: id, label, token, created). |

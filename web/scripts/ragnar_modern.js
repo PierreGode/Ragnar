@@ -22953,7 +22953,7 @@ function closeShareTokenReveal() {
 // ---- Join a tailnet as a share-only guest (no terminal) --------------------
 
 function openShareJoinModal() {
-    ['sj-authkey', 'sj-hostname'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
+    ['sj-authkey', 'sj-hostname', 'sj-mesh-suffix'].forEach(id => { const i = document.getElementById(id); if (i) i.value = ''; });
     const st = document.getElementById('sj-status');
     if (st) { st.classList.add('hidden'); st.textContent = ''; }
     const m = document.getElementById('share-join-modal');
@@ -22968,6 +22968,7 @@ function closeShareJoinModal() {
 function shareJoinTailnet() {
     const key = (document.getElementById('sj-authkey') || {}).value || '';
     const hostname = (document.getElementById('sj-hostname') || {}).value || '';
+    const meshSuffix = (document.getElementById('sj-mesh-suffix') || {}).value || '';
     const st = document.getElementById('sj-status');
     const btn = document.getElementById('sj-join-btn');
     if (!key.trim()) { showNotification('Paste the auth key first', 'error'); return; }
@@ -22978,7 +22979,10 @@ function shareJoinTailnet() {
         body: JSON.stringify({
             auth_key: key.trim(),
             hostname: hostname.trim(),
-            tags: ['tag:ragnar-share'],
+            // Join share-only, scoped to the host's mesh: the server advertises
+            // the paired share tag (tag:ragnar-share[-<suffix>]) for this mesh.
+            share_only: true,
+            mesh_suffix: meshSuffix.trim(),
             enable_ssh: false,
             accept_routes: false,
             switch_tailnet: true
@@ -33100,6 +33104,12 @@ function renderMesh(data) {
         if (vikingField && !vikingField.value && data.viking_name) {
             vikingField.value = data.viking_name;
         }
+        // Prefill the mesh name from whatever this box is already scoped to, so
+        // a re-join keeps it on the same mesh unless the operator changes it.
+        const suffixField = document.getElementById('mesh-suffix-input');
+        if (suffixField && !suffixField.value && data.mesh_suffix) {
+            suffixField.value = data.mesh_suffix;
+        }
         // Load the roster so the dice and the gender hint work before join too.
         meshLoadVikingNames().then(() => meshOnJoinVikingInput());
     }
@@ -33605,6 +33615,7 @@ async function meshJoin() {
     const label = document.getElementById('mesh-label-input').value.trim();
     const viking = document.getElementById('mesh-viking-input').value.trim();
     const gender = document.getElementById('mesh-viking-gender').value;
+    const meshSuffix = (document.getElementById('mesh-suffix-input') || {}).value || '';
     const routes = document.getElementById('mesh-routes-input').value
         .split(',').map(r => r.trim()).filter(Boolean);
 
@@ -33645,6 +33656,9 @@ async function meshJoin() {
             body: JSON.stringify({
                 auth_key: authKey,
                 hostname: label ? label.toLowerCase().replace(/[^a-z0-9-]+/g, '-') : '',
+                // '' joins the main mesh; a name puts this box in a separate,
+                // isolated mesh (tag:ragnar-mesh-<name>) on the same tailnet.
+                mesh_suffix: meshSuffix.trim(),
                 advertise_routes: routes,
                 enable_ssh: document.getElementById('mesh-ssh-input').checked
             })

@@ -644,3 +644,50 @@ def test_serve_state_not_serving(monkeypatch):
 def test_serve_state_not_installed(monkeypatch):
     monkeypatch.setattr(mesh_manager, 'installed', lambda: False)
     assert mesh_manager.serve_state() == {'published': False, 'url': '', 'scheme': '', 'host': ''}
+
+# ── Separate meshes on one tailnet: tag derivation ──────────────────────────
+# One tailnet can hold several isolated Ragnar meshes, told apart only by tag.
+# The suffix helpers are the single source of truth for those tags, so their
+# round-trip and the mesh⇄share pairing have to be exact — a mismatch would
+# either merge two meshes or strand a share guest outside the one it joined.
+
+def test_default_mesh_has_no_suffix():
+    assert mesh_manager.mesh_tag_for_suffix('') == mesh_manager.DEFAULT_MESH_TAG
+    assert mesh_manager.mesh_tag_for_suffix(None) == mesh_manager.DEFAULT_MESH_TAG
+    assert mesh_manager.suffix_of_mesh_tag(mesh_manager.DEFAULT_MESH_TAG) == ''
+
+
+def test_suffix_builds_isolated_mesh_tag():
+    assert mesh_manager.mesh_tag_for_suffix('2') == 'tag:ragnar-mesh-2'
+    assert mesh_manager.mesh_tag_for_suffix('lab') == 'tag:ragnar-mesh-lab'
+    assert mesh_manager.suffix_of_mesh_tag('tag:ragnar-mesh-2') == '2'
+    assert mesh_manager.suffix_of_mesh_tag('tag:ragnar-mesh-lab') == 'lab'
+
+
+def test_suffix_is_sanitised_to_a_dns_label():
+    # Uppercase, spaces and junk collapse the same way the install script's sed
+    # does, so a value typed in the web UI and one typed at the installer agree.
+    assert mesh_manager.mesh_tag_for_suffix(' Lab 1 ') == 'tag:ragnar-mesh-lab-1'
+    assert mesh_manager.mesh_tag_for_suffix('weird!!name') == 'tag:ragnar-mesh-weird-name'
+    # Garbage that reduces to nothing is the default mesh, never a dangling dash.
+    assert mesh_manager.mesh_tag_for_suffix('!!!') == mesh_manager.DEFAULT_MESH_TAG
+
+
+def test_operator_may_paste_the_whole_tag():
+    for form in ('ragnar-mesh-3', 'tag:ragnar-mesh-3'):
+        assert mesh_manager.mesh_tag_for_suffix(form) == 'tag:ragnar-mesh-3'
+
+
+def test_share_tag_is_paired_with_the_mesh():
+    # A share guest of mesh-2 must carry ragnar-share-2, not the bare share tag,
+    # or it could reach a host on a different mesh sharing the tailnet.
+    assert mesh_manager.share_tag_for_mesh_tag('tag:ragnar-mesh') == 'tag:ragnar-share'
+    assert mesh_manager.share_tag_for_mesh_tag('tag:ragnar-mesh-2') == 'tag:ragnar-share-2'
+    assert mesh_manager.share_tag_for_mesh_tag('tag:ragnar-mesh-lab') == 'tag:ragnar-share-lab'
+
+
+def test_fully_custom_mesh_tag_falls_back_to_default_share():
+    # An operator running Ragnar under a foreign tag has no derivable suffix;
+    # fall back rather than invent tag:ragnar-share-<garbage>.
+    assert mesh_manager.share_tag_for_mesh_tag('tag:acme') == mesh_manager.DEFAULT_SHARE_TAG
+    assert mesh_manager.suffix_of_mesh_tag('tag:acme') == ''

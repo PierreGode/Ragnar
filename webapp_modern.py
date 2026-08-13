@@ -448,8 +448,20 @@ def _is_mesh_peer_request():
 
 
 def _mesh_share_tag():
-    """The Tailscale tag that marks a share-only guest (default tag:ragnar-share)."""
-    return shared_data.config.get('mesh_share_tag') or 'tag:ragnar-share'
+    """The Tailscale tag that marks a share-only guest for THIS unit's mesh.
+
+    An explicit mesh_share_tag config wins. Otherwise the share tag is derived
+    from the mesh tag so it stays paired with it: a unit on the default mesh
+    trusts tag:ragnar-share, a unit on tag:ragnar-mesh-2 trusts tag:ragnar-share-2.
+    That keeps share guests confined to one mesh even when several separate
+    meshes share a tailnet.
+    """
+    explicit = shared_data.config.get('mesh_share_tag')
+    if explicit:
+        return explicit
+    if mesh_available:
+        return mesh_manager.share_tag_for_mesh_tag(_mesh_tag())
+    return 'tag:ragnar-share'
 
 
 def _this_unit_is_share_only():
@@ -3711,6 +3723,9 @@ def mesh_status():
         'version': state.get('version', ''),
         'magic_dns_suffix': state.get('magic_dns_suffix', ''),
         'mesh_tag': tag,
+        # The suffix that names this unit's mesh ('' = the default ragnar-mesh).
+        # Several isolated meshes can share one tailnet, told apart by this.
+        'mesh_suffix': mesh_manager.suffix_of_mesh_tag(tag) if mesh_available else '',
         # Whether THIS unit is tagged into the mesh. False + available means
         # "on the tailnet but not in the mesh" — the state to explain loudly.
         'self_tagged': self_tagged,
@@ -3985,7 +4000,25 @@ def mesh_join():
     data = request.get_json(silent=True) or {}
     auth_key = (data.get('auth_key') or '').strip()
     hostname = (data.get('hostname') or '').strip()
-    tags = data.get('tags') or [_mesh_tag()]
+
+    # Which Ragnar mesh does this box belong to? An optional suffix selects a
+    # separate, isolated mesh (ragnar-mesh-2, …) under the same tailnet; blank or
+    # absent means the default mesh. mesh_suffix is the source of truth here — it
+    # decides both the mesh tag advertised and the paired share tag.
+    if data.get('mesh_suffix') is not None:
+        mesh_tag = mesh_manager.mesh_tag_for_suffix(data.get('mesh_suffix'))
+    else:
+        mesh_tag = _mesh_tag()
+
+    # What to advertise. An explicit tags list wins (back-compat / power users).
+    # A share-only join carries the share tag paired with the chosen mesh, never
+    # the mesh tag; a full join carries the mesh tag.
+    if data.get('tags'):
+        tags = data.get('tags')
+    elif data.get('share_only'):
+        tags = [mesh_manager.share_tag_for_mesh_tag(mesh_tag)]
+    else:
+        tags = [mesh_tag]
     routes = [r.strip() for r in (data.get('advertise_routes') or []) if r.strip()]
     ok, message = mesh_manager.join(
         auth_key,
@@ -4001,6 +4034,12 @@ def mesh_join():
         shared_data.config['mesh_enabled'] = True
         if hostname and not shared_data.config.get('mesh_site_label'):
             shared_data.config['mesh_site_label'] = hostname
+        # Pin the mesh this box now belongs to, so every later peer scan and
+        # trust check filters on it (and _mesh_share_tag derives from it). A
+        # share-only guest records the mesh it is guesting too, so its own share
+        # tag matches the host's. Only persisted when the operator chose one.
+        if data.get('mesh_suffix') is not None:
+            shared_data.config['mesh_tag'] = mesh_tag
         # Remember HOW this box joined. A share-only guest carries the share tag
         # and NOT the mesh tag: it is here to send/receive files, not to be a
         # mesh peer. We record that locally rather than trusting what Tailscale
