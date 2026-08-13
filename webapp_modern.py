@@ -3556,6 +3556,7 @@ def mesh_status():
 
     self_node = state.get('self')
     self_tagged = False
+    self_share_tagged = False
     if self_node:
         self_node = dict(self_node)
         # Is THIS unit tagged into the mesh? A unit can be fully on the tailnet
@@ -3564,7 +3565,12 @@ def mesh_status():
         # whole mesh keys off the tag, and an interactive `tailscale up` login
         # never applies one.
         self_tagged = tag in self_node.get('tags', [])
+        # A share-only guest deliberately joins with tag:ragnar-share and NO
+        # mesh tag. That is a valid, intended state — not the "forgot to tag"
+        # misconfiguration — so the UI must not nag it to add the mesh tag.
+        self_share_tagged = _mesh_share_tag() in self_node.get('tags', [])
         self_node['is_ragnar'] = self_tagged
+        self_node['is_share_guest'] = self_share_tagged and not self_tagged
         self_node['health'] = _mesh_local_health()
         self_node['findings'] = dict(_mesh_local_findings(),
                                      features=_mesh_local_features())
@@ -3628,6 +3634,11 @@ def mesh_status():
         # Whether THIS unit is tagged into the mesh. False + available means
         # "on the tailnet but not in the mesh" — the state to explain loudly.
         'self_tagged': self_tagged,
+        # Whether this unit joined as a share-only guest (carries the share tag
+        # but not the mesh tag). A deliberate state, so the UI explains it as
+        # "share-only" rather than nagging to add the mesh tag.
+        'self_share_tagged': self_share_tagged and not self_tagged,
+        'share_tag': _mesh_share_tag(),
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),

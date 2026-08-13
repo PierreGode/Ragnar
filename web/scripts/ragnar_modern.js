@@ -33046,6 +33046,8 @@ function renderMesh(data) {
         pillText = 'Tailscale not installed';
     } else if (!joined) {
         pillText = data.backend_state || 'Not connected';
+    } else if (data.self_share_tagged) {
+        pillText = 'Share-only · on tailnet';
     } else if (!data.self_tagged) {
         pillText = 'On tailnet · not in mesh';
     } else {
@@ -33156,7 +33158,20 @@ function renderMesh(data) {
     // The #1 "they sense each other but don't share data" cause: this unit is
     // on the tailnet but was never tagged into the mesh. An interactive
     // `tailscale up` login never applies a tag, and the whole mesh keys off it.
-    if (joined && data.self && !data.self_tagged) {
+    if (joined && data.self && data.self_share_tagged) {
+        // A deliberate share-only join (tag:ragnar-share, no mesh tag). This is
+        // the intended state for scenario 2B — the box is here to send/receive
+        // files, not to join the mesh — so explain it, don't flag it as broken.
+        const shareTag = escapeHtml(data.share_tag || 'tag:ragnar-share');
+        notes.push(meshWarning(
+            `<strong>This unit is a share-only guest on this tailnet.</strong> ` +
+            `It carries <code>${shareTag}</code>, not the mesh tag, so it is not part of the ` +
+            `mesh: it publishes no reports and reads none. It can only send files to ` +
+            `(and, if the host allows, fetch shared files from) the units that host it — nothing else. ` +
+            `<br>To turn it into a full mesh unit instead, add <code>${tagCode}</code> in the ` +
+            `Tailscale admin console (<em>Machines → this device → ⋯ → Edit ACL tags</em>).`,
+            'info'));
+    } else if (joined && data.self && !data.self_tagged) {
         notes.push(meshWarning(
             `<strong>This unit is on the tailnet, but not in the mesh.</strong> ` +
             `It carries no <code>${tagCode}</code> tag, so Ragnar won't treat it as a mesh ` +
