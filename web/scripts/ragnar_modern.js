@@ -22681,6 +22681,7 @@ function loadXferTransfers() {
     }).catch(() => {});
 }
 
+let _xferInboxSig = null;   // signature of the last rendered inbox
 function loadXferInbox() {
     const el = document.getElementById('xfer-inbox');
     // Fetch the inbox and the Vault lock state together so the "Vault" save
@@ -22698,6 +22699,15 @@ function loadXferInbox() {
         setBadge('mesh-inbox-badge', items.length);
         setFilesNavFlag(items.length);   // keep the Files nav flag in sync
         if (!el) return;
+        // Only rebuild the list when it actually changed — the 2s poll otherwise
+        // destroys the destination <select> mid-interaction (you couldn't pick
+        // Vault because the dropdown was wiped before you clicked it).
+        const sig = JSON.stringify({
+            u: !!(vault && vault.unlocked), c: !!(vault && vault.configured),
+            items: items.map(m => [m.id, m.name, m.size]),
+        });
+        if (sig === _xferInboxSig && el.childElementCount > 0) return;
+        _xferInboxSig = sig;
         if (!items.length) { el.innerHTML = '<p class="text-gray-500 text-sm py-2">Inbox is empty.</p>'; return; }
         // Vault option: enabled only when the Vault is unlocked; shown disabled
         // (with why) when locked; omitted entirely if no Vault is set up.
