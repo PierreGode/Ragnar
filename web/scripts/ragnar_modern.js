@@ -22956,7 +22956,8 @@ function shareJoinTailnet() {
             hostname: hostname.trim(),
             tags: ['tag:ragnar-share'],
             enable_ssh: false,
-            accept_routes: false
+            accept_routes: false,
+            switch_tailnet: true
         })
     }).then(r => r.json()).then(d => {
         if (btn) { btn.disabled = false; btn.textContent = 'Join'; }

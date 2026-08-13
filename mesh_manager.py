@@ -757,17 +757,26 @@ def _valid_auth_key(key):
 
 
 def join(auth_key, hostname='', tags=None, advertise_routes=None,
-         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90):
+         enable_ssh=True, accept_routes=False, accept_dns=True, timeout=90,
+         logout_first=False):
     """Join this node to a tailnet with a pre-authorized key.
 
     This is the unattended-deploy path: everything a remote node needs is
     supplied up front so a technician who plugs the box in never sees a login
     prompt. Returns (ok, message).
+
+    `logout_first` switches tailnets: a node already logged into tailnet A
+    cannot re-`up` straight onto tailnet B, so log out first. Harmless when the
+    node is on no tailnet (logout is then a no-op).
     """
     if not installed():
         return False, 'Tailscale is not installed on this node.'
     if not _valid_auth_key(auth_key):
         return False, 'That does not look like a Tailscale auth key (expected tskey-...).'
+
+    if logout_first:
+        _run(['logout'], timeout=30)  # best-effort; a no-op if already logged out
+        invalidate_cache()
 
     args = ['up', '--authkey', auth_key, '--reset']
     if hostname:

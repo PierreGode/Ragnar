@@ -3541,6 +3541,9 @@
                             </button>
                         </div>
                         <p class="text-sm text-gray-400 mb-3">Ask the tailnet owner for a Tailscale <b>auth key</b> tagged <code class="text-gray-300">tag:ragnar-share</code>. Paste it here and this unit joins as a share-only guest — it can send files to that owner and nothing else.</p>
+                        <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 mb-3 text-xs text-amber-300">
+                            ⚠ A machine can only be on <b>one</b> tailnet at a time. If this unit is currently in your own mesh, joining here <b>removes it from your mesh</b> and moves it onto theirs. To keep it in your mesh, use their <b>node-share + a share token</b> instead.
+                        </div>
                         <label class="block text-sm text-gray-400 mb-1">Auth key</label>
                         <input id="sj-authkey" type="text" placeholder="tskey-auth-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3 font-mono">
                         <label class="block text-sm text-gray-400 mb-1">Name for this unit <span class="text-gray-600">(optional)</span></label>
@@ -7961,7 +7964,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-join-share"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260813-join-switch"></script>
 
 </body>
 </html>

@@ -3895,6 +3895,7 @@ def mesh_join():
         advertise_routes=routes,
         enable_ssh=bool(data.get('enable_ssh', True)),
         accept_routes=bool(data.get('accept_routes', False)),
+        logout_first=bool(data.get('switch_tailnet', False)),
     )
     if ok:
         # Joining is the moment the operator has decided this box is mesh-managed.
