@@ -549,20 +549,25 @@ def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
     path = request.path
     if not auth_mgr.is_configured():
-        # No local login — everyone is otherwise allowed. But a tailnet
-        # SHARE-ONLY guest (tag:ragnar-share) is a deliberately-limited outsider:
-        # it must stay confined to the share allowlist even here, or an open box
-        # would hand it the full dashboard and the guest-read toggle would mean
-        # nothing. (When auth IS configured, the mesh block below enforces the
-        # same confinement.) Identity is proven by tailscaled, fails closed.
-        if shared_data.config.get('mesh_enabled') and _is_mesh_share_request():
-            share_push = request.method == 'POST' and path == '/api/mesh/files/push'
-            share_read = (request.method == 'GET'
-                          and path in ('/api/mesh/share/local', '/api/mesh/share/download')
-                          and bool(shared_data.config.get('mesh_share_guest_read')))
-            if not (share_push or share_read):
-                return jsonify({'error': 'Forbidden',
-                                'detail': 'share-only guest: file share access only'}), 403
+        # No local login — everyone is otherwise allowed. But the two
+        # deliberately-limited OUTSIDER roles must stay confined even here, or an
+        # open box would hand them the full dashboard and the whole point of the
+        # role (tag:ragnar-share, or a share token) would be lost. Same
+        # confinement the mesh block below enforces when auth IS configured, so
+        # 2A/2B (tag) and 2C (token) all behave the same with or without a login.
+        if shared_data.config.get('mesh_enabled'):
+            is_push = request.method == 'POST' and path == '/api/mesh/files/push'
+            if _is_mesh_share_request():            # tailnet share-guest (2A / 2B)
+                share_read = (request.method == 'GET'
+                              and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                              and bool(shared_data.config.get('mesh_share_guest_read')))
+                if not (is_push or share_read):
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share-only guest: file share access only'}), 403
+            elif _valid_share_token():              # cross-tailnet token holder (2C)
+                if not is_push:
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share token: file push only'}), 403
         return  # No auth set up yet, allow everyone else
 
     # Whitelist: paths that must be accessible without authentication
