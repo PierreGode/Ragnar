@@ -3569,6 +3569,10 @@ def mesh_status():
         # mesh tag. That is a valid, intended state — not the "forgot to tag"
         # misconfiguration — so the UI must not nag it to add the mesh tag.
         self_share_tagged = _mesh_share_tag() in self_node.get('tags', [])
+        # Trust the locally-recorded join role too: Self.Tags can lag or omit the
+        # tag, but a box that joined share-only knows it did.
+        if shared_data.config.get('mesh_share_only'):
+            self_share_tagged = True
         self_node['is_ragnar'] = self_tagged
         self_node['is_share_guest'] = self_share_tagged and not self_tagged
         self_node['health'] = _mesh_local_health()
@@ -3581,6 +3585,14 @@ def mesh_status():
         self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
 
     ragnar_peers = [p for p in peers if p['is_ragnar']]
+
+    # A share-only guest is not a mesh member: it has no business enumerating the
+    # host's mesh. Even though Tailscale lets it SEE those machines, Ragnar hides
+    # them so this unit's UI shows no peers, no shared roster — only its own
+    # share-only role. This is a view decision; the ACL is what actually confines
+    # it on the wire.
+    if self_share_tagged and not self_tagged:
+        ragnar_peers = []
 
     # Two units answering to the same number makes every report ambiguous
     # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
@@ -3913,6 +3925,13 @@ def mesh_join():
         shared_data.config['mesh_enabled'] = True
         if hostname and not shared_data.config.get('mesh_site_label'):
             shared_data.config['mesh_site_label'] = hostname
+        # Remember HOW this box joined. A share-only guest carries the share tag
+        # and NOT the mesh tag: it is here to send/receive files, not to be a
+        # mesh peer. We record that locally rather than trusting what Tailscale
+        # reports back for Self.Tags (which can lag or be omitted), so this
+        # unit's own UI reliably shows the share-only role and hides the mesh.
+        share_only = (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+        shared_data.config['mesh_share_only'] = bool(share_only)
         shared_data.save_config()
         logger.success(f"[mesh] joined tailnet as {hostname or socket.gethostname()}")
     else:
@@ -3926,6 +3945,10 @@ def mesh_leave():
     if not mesh_available:
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     ok, message = mesh_manager.leave()
+    if ok:
+        # Leaving drops the share-only role too; a later normal join re-derives it.
+        shared_data.config['mesh_share_only'] = False
+        shared_data.save_config()
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
@@ -20477,7 +20500,10 @@ def mesh_share_all():
     for f in _mesh_share_list_local():
         items.append({**f, 'owner': _mesh_viking_name() or 'this unit',
                       'owner_id': 'self', 'is_local': True})
-    if _mesh_enabled():
+    # A share-only guest sees only its own shared folder, never the host mesh's.
+    # It joined to send files, not to browse the fleet's shares.
+    share_only = bool(shared_data.config.get('mesh_share_only'))
+    if _mesh_enabled() and not share_only:
         port = _mesh_node_port()
         for node in _mesh_tagged_peers():
             if not node.get('online'):

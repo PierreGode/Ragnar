@@ -33086,12 +33086,15 @@ function renderMesh(data) {
         meshPollInstall();
     }
 
+    // A share-only guest is not a mesh member: it must not see the peer roster,
+    // the fleet summary, or mesh controls — only that it is a share-only guest.
+    const shareOnly = !!data.self_share_tagged;
     selfWrap.classList.toggle('hidden', !data.self);
-    peersWrap.classList.toggle('hidden', !joined);
-    controls.classList.toggle('hidden', !joined);
-    summary.classList.toggle('hidden', !joined);
+    peersWrap.classList.toggle('hidden', !joined || shareOnly);
+    controls.classList.toggle('hidden', !joined || shareOnly);
+    summary.classList.toggle('hidden', !joined || shareOnly);
     const piWrap = document.getElementById('mesh-piconnect-wrap');
-    if (piWrap) piWrap.classList.toggle('hidden', !joined);
+    if (piWrap) piWrap.classList.toggle('hidden', !joined || shareOnly);
 
     // Fill the post-join identity editor from what this unit currently reports,
     // but never yank a field out from under someone mid-edit.

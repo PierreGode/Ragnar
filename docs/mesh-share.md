@@ -137,6 +137,15 @@ and route-acceptance off.
 
 Under the hood this calls `POST /api/mesh/join` with
 `tags:["tag:ragnar-share"]` and `switch_tailnet:true` (the logout-first switch).
+The join is recorded locally (`mesh_share_only`), so this box knows it is a guest
+even if Tailscale doesn't echo the tag back on `Self`.
+
+**What a share-only unit sees on its own screen:** nothing about the host mesh. Its
+Ragnar Mesh tab shows a *"share-only guest"* notice, **no peer roster**, no fleet
+summary or mesh controls, and its Mesh Share tab lists **only its own** shared
+files — never the host fleet's. It joined to send files, not to browse the mesh.
+(The Tailscale ACL is what actually confines it on the wire; the UI just stops it
+enumerating machines it has no business in.)
 
 ---
 
@@ -271,6 +280,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 |---|---|---|
 | `mesh_file_receive` | `true` | Master **Accept incoming** switch. Off ⇒ no unit, guest or token can push. |
 | `mesh_share_tag` | `tag:ragnar-share` | Tailscale tag trusted as a share-only guest. |
+| `mesh_share_only` | `false` | Set when **this** unit joined as a share-only guest (2B). Hides the mesh from its own UI. Cleared on leave / normal join. |
 | `mesh_share_guest_read` | `false` | Also let share-guests browse & fetch the Mesh Share folder (read-only). |
 | `mesh_share_tokens` | `[]` | Secret share tokens this unit issued (each: id, label, token, created). |
 | `mesh_remote_shares` | `[]` | Saved outbound remote-share targets (name + address + their token). |
