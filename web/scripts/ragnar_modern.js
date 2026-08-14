@@ -33626,8 +33626,8 @@ async function meshPollInstall() {
 }
 
 // Stream a freshly generated mesh secret straight to a downloaded file — the
-// operator's single copy. The value is never rendered into the page. Filename
-// carries the mesh so a multi-mesh operator can tell the files apart.
+// operator's primary copy. Filename carries the mesh so a multi-mesh operator
+// can tell the files apart.
 function meshDownloadSecret(secret, suffix) {
     try {
         const clean = String(suffix || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -33642,8 +33642,53 @@ function meshDownloadSecret(secret, suffix) {
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (e) {
-        /* best-effort; the join itself already succeeded */
+        /* best-effort; the copy field in the modal is the fallback */
     }
+}
+
+// One-time modal shown the moment a secret is generated: the file downloads
+// automatically AND the value is here to copy in case the download failed. It
+// blocks on <body> so a background refresh can't wipe it; the page only advances
+// to joined mode when the operator presses Done (onDone runs the refresh). This
+// is the ONLY time the secret is ever shown — there is no way to see it again.
+function meshShowGeneratedSecret(secret, suffix, onDone) {
+    document.getElementById('mesh-secret-modal')?.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'mesh-secret-modal';
+    overlay.className = 'fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4';
+    overlay.innerHTML = `
+        <div class="bg-slate-800 border border-amber-600/60 rounded-xl max-w-lg w-full p-5 shadow-2xl">
+            <div class="text-xs uppercase tracking-wider text-amber-400 mb-2">Mesh secret — saved to a file just now, shown here only once</div>
+            <div id="mesh-secret-modal-value" class="font-mono text-sm text-gray-100 break-all select-all bg-slate-900 border border-slate-700 rounded-lg px-3 py-2"></div>
+            <p class="text-[11px] text-gray-400 mt-2">A file download started automatically — that's your copy. If it didn't, use <strong>Copy</strong> here. Paste this into the <strong>Mesh secret</strong> field when you join the other units. It cannot be shown again: lose it and you Leave + re-join to mint a new one.</p>
+            <div class="flex items-center gap-2 mt-4">
+                <button id="mesh-secret-modal-copy" class="bg-cyan-600 hover:bg-cyan-500 text-white text-sm px-4 py-2 rounded-lg transition-colors">Copy</button>
+                <button id="mesh-secret-modal-dl" class="bg-slate-700 hover:bg-slate-600 text-white text-sm px-4 py-2 rounded-lg transition-colors">Download again</button>
+                <button id="mesh-secret-modal-done" class="ml-auto bg-emerald-600 hover:bg-emerald-500 text-white text-sm px-4 py-2 rounded-lg transition-colors">Done</button>
+            </div>
+        </div>`;
+    overlay.querySelector('#mesh-secret-modal-value').textContent = secret;
+    document.body.appendChild(overlay);
+
+    // Fire the download immediately, alongside showing the modal.
+    meshDownloadSecret(secret, suffix);
+
+    overlay.querySelector('#mesh-secret-modal-dl').onclick = () => meshDownloadSecret(secret, suffix);
+    overlay.querySelector('#mesh-secret-modal-copy').onclick = async (e) => {
+        try {
+            await navigator.clipboard.writeText(secret);
+        } catch (_) {
+            const r = document.createRange();
+            r.selectNodeContents(overlay.querySelector('#mesh-secret-modal-value'));
+            const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+            try { document.execCommand('copy'); } catch (__) {}
+        }
+        e.target.textContent = 'Copied ✓';
+    };
+    overlay.querySelector('#mesh-secret-modal-done').onclick = () => {
+        overlay.remove();
+        if (typeof onDone === 'function') onDone();
+    };
 }
 
 async function meshJoin() {
@@ -33718,18 +33763,16 @@ async function meshJoin() {
             // Restore the default (generate a fresh secret) for the next join.
             document.getElementById('mesh-secret-generate').checked = true;
             showNotification('This unit joined the mesh', 'success');
-            // A freshly generated secret comes back exactly once and is NEVER
-            // shown in the UI. Stream it straight to a downloaded file — the
-            // operator's one copy — then it is gone (recover only by leaving and
-            // re-joining, which mints a new one).
+            // A freshly generated secret comes back exactly once. Show the modal
+            // (which also fires the download) and DEFER the refresh into joined
+            // mode until the operator presses Done — so the copy field can't be
+            // yanked away mid-copy. With no secret, refresh straight away.
             if (data.mesh_secret) {
-                meshDownloadSecret(data.mesh_secret, meshSuffix.trim());
-                out.innerHTML += `<div class="mt-3 text-xs text-amber-300">
-                    Mesh secret downloaded as a file — keep it safe and paste it into the
-                    <strong>Mesh secret</strong> field when you join the other units. It is not shown
-                    anywhere and cannot be retrieved; if you lose it, Leave and re-join to mint a new one.</div>`;
+                meshShowGeneratedSecret(data.mesh_secret, meshSuffix.trim(),
+                    () => refreshMesh(true));
+            } else {
+                await refreshMesh(true);
             }
-            await refreshMesh(true);
         }
     } catch (err) {
         out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
