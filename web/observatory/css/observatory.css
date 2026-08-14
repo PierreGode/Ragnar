@@ -3,7 +3,9 @@
    Warm dark background, electric green wireframe, amber data
    ============================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+/* Fonts are intentionally NOT loaded from Google Fonts: the same-origin CSP
+   blocks external stylesheets/fonts and Ragnar runs offline in the field.
+   Inter / JetBrains Mono fall back to the system sans/mono stacks below. */
 
 :root {
   --bg-deep:     #080c14;

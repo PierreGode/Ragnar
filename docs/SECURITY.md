@@ -84,7 +84,7 @@ Every response from the web server carries a baseline set of security headers, a
 
 **No wildcard CORS.** Ragnar is a same-origin dashboard (the mobile app talks to it over native HTTP), so it does **not** emit `Access-Control-Allow-Origin: *`. Cross-origin access can be re-enabled explicitly by listing trusted origins in the `RAGNAR_CORS_ORIGINS` env var (comma-separated); the same list is applied to the Socket.IO handshake.
 
-**Vendored frontend libraries.** Socket.IO, d3, Leaflet and Leaflet.markercluster are served locally from `web/vendor/` instead of a third-party CDN. This removes the cross-origin script-inclusion / Sub-Resource-Integrity exposure and lets the dashboard load with no internet access in the field. Map tiles are still fetched from OpenStreetMap over HTTPS (allowed by the CSP `img-src`).
+**Vendored frontend libraries.** Socket.IO, d3, Leaflet, Leaflet.markercluster and Three.js (r160 + the post-processing/OrbitControls addons used by the RuSense Observatory) are served locally from `web/vendor/` instead of a third-party CDN. This removes the cross-origin script-inclusion / Sub-Resource-Integrity exposure and lets the dashboard — including the 3D Observatory — load with no internet access in the field. The Observatory's importmap points at the vendored Three.js, and its fonts fall back to the system stack instead of Google Fonts. Map tiles are still fetched from OpenStreetMap over HTTPS (allowed by the CSP `img-src`).
 
 ## Crash recovery
 
