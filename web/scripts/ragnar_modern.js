@@ -22936,13 +22936,10 @@ function createShareToken() {
 function copyShareToken() {
     const v = document.getElementById('share-token-reveal-value');
     if (!v) return;
-    const txt = v.textContent || '';
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(txt).then(() => showNotification('Token copied', 'success'))
-            .catch(() => showNotification('Copy failed — select it manually', 'error'));
-    } else {
-        showNotification('Copy not available — select the token manually', 'error');
-    }
+    // Route through copyToClipboard: a plain-HTTP Ragnar (http://100.x:8000) is
+    // not a secure context, so navigator.clipboard is undefined — the execCommand
+    // textarea fallback is what actually copies there.
+    copyToClipboard(v.textContent || '');
 }
 
 function closeShareTokenReveal() {
@@ -33674,15 +33671,10 @@ function meshShowGeneratedSecret(secret, suffix, onDone) {
     meshDownloadSecret(secret, suffix);
 
     overlay.querySelector('#mesh-secret-modal-dl').onclick = () => meshDownloadSecret(secret, suffix);
-    overlay.querySelector('#mesh-secret-modal-copy').onclick = async (e) => {
-        try {
-            await navigator.clipboard.writeText(secret);
-        } catch (_) {
-            const r = document.createRange();
-            r.selectNodeContents(overlay.querySelector('#mesh-secret-modal-value'));
-            const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-            try { document.execCommand('copy'); } catch (__) {}
-        }
+    overlay.querySelector('#mesh-secret-modal-copy').onclick = (e) => {
+        // copyToClipboard has the execCommand fallback needed on plain-HTTP
+        // (non-secure-context) Ragnars where navigator.clipboard is undefined.
+        copyToClipboard(secret);
         e.target.textContent = 'Copied ✓';
     };
     overlay.querySelector('#mesh-secret-modal-done').onclick = () => {
