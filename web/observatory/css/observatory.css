@@ -774,4 +774,7 @@ body {
   .data-panel { width: 44vw; max-width: 240px; padding: 10px 12px; background: rgba(8, 16, 28, 0.3); }
   #panel-vitals { left: 10px; right: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom left; }
   #panel-signal { right: 10px; left: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom right; }
+  /* Pin the DEMO flag to the free top-left corner so it can't overlap the
+     scenario dropdown (top-right) on narrow phone screens. */
+  #demo-flag { left: 12px; top: 20px; transform: none; padding: 5px 12px; font-size: 11px; letter-spacing: 1px; }
 }
