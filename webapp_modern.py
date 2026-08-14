@@ -53,6 +53,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+from safe_vault import SafeVault, SafeError, SafeLockedError
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
 from logger import Logger
@@ -432,6 +433,12 @@ def _is_mesh_peer_request():
       100.64/10 (or fd7a:115c:a1e0::/48) source address.
 
     Any failure — Tailscale missing, tailscaled silent, tag absent — is False.
+
+    Two-factor when a mesh secret is set: the tag proves "in mesh X" but on a
+    shared tailnet that is only as strong as the ACL's tagOwners. If this unit
+    has a mesh secret, the caller must ALSO present a fresh HMAC proof of it (see
+    mesh_manager.verify_mesh_proof) — so a node that merely forged the tag, with
+    no secret, is rejected. No secret set ⇒ tag-only, exactly as before.
     """
     if not mesh_available:
         return False
@@ -440,20 +447,158 @@ def _is_mesh_peer_request():
         return False
     try:
         mesh_tag = shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
-        return mesh_manager.caller_is_mesh_peer(remote, mesh_tag)
+        if not mesh_manager.caller_is_mesh_peer(remote, mesh_tag):
+            return False
+        secret = _mesh_secret()
+        if secret and not mesh_manager.verify_mesh_proof(
+                secret, request.method, request.path,
+                request.headers.get(mesh_manager.MESH_TS_HEADER),
+                request.headers.get(mesh_manager.MESH_PROOF_HEADER)):
+            logger.warning(f"[mesh] peer {remote} carries the tag but presented no "
+                           "valid mesh-secret proof — rejected")
+            return False
+        return True
     except Exception as exc:
         logger.warning(f"[mesh] peer identity check failed for {remote}: {exc}")
         return False
 
 
+def _mesh_share_tag():
+    """The Tailscale tag that marks a share-only guest for THIS unit's mesh.
+
+    An explicit mesh_share_tag config wins. Otherwise the share tag is derived
+    from the mesh tag so it stays paired with it: a unit on the default mesh
+    trusts tag:ragnar-share, a unit on tag:ragnar-mesh-2 trusts tag:ragnar-share-2.
+    That keeps share guests confined to one mesh even when several separate
+    meshes share a tailnet.
+    """
+    explicit = shared_data.config.get('mesh_share_tag')
+    if explicit:
+        return explicit
+    if mesh_available:
+        return mesh_manager.share_tag_for_mesh_tag(_mesh_tag())
+    return 'tag:ragnar-share'
+
+
+def _this_unit_is_share_only():
+    """True when THIS unit joined as a share-only guest (not a mesh member).
+
+    Two signals, either is enough: the role recorded locally at join time
+    (mesh_share_only — survives even when Tailscale doesn't echo the tag), or a
+    live Self that carries the share tag but not the mesh tag. Used to strip the
+    host mesh out of a guest's own UI. Fails open to "not share-only" on error,
+    so a normal unit is never accidentally treated as a guest.
+    """
+    if shared_data.config.get('mesh_share_only'):
+        return True
+    if not mesh_available:
+        return False
+    try:
+        self_node = (mesh_manager.status() or {}).get('self') or {}
+        tags = self_node.get('tags', [])
+        return (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+    except Exception:
+        return False
+
+
+def _is_mesh_share_request():
+    """True when the request came from a share-only guest over the tailnet.
+
+    A share guest carries the share tag (tag:ragnar-share) but NOT the mesh tag,
+    so it is never treated as a peer Ragnar. Same source paranoia as the peer
+    check — loopback rejected, real tailnet address required, tag proven by
+    tailscaled. Fails closed on any error.
+    """
+    if not mesh_available:
+        return False
+    remote = request.remote_addr or ''
+    if remote in ('127.0.0.1', '::1'):
+        return False
+    try:
+        return mesh_manager.caller_is_mesh_peer(remote, _mesh_share_tag())
+    except Exception as exc:
+        logger.warning(f"[mesh] share-guest identity check failed for {remote}: {exc}")
+        return False
+
+
+def _share_tokens():
+    """Incoming share tokens this unit accepts (operator-issued, handed out)."""
+    toks = shared_data.config.get('mesh_share_tokens')
+    return toks if isinstance(toks, list) else []
+
+
+def _valid_share_token():
+    """True when the request carries a Bearer token this unit has issued.
+
+    This authenticates a remote purely by the secret token — independent of
+    tailnet identity — so a remote reaching us over Tailscale node-sharing or
+    Funnel (a separate tailnet) can still push a file to our inbox. The token
+    grants exactly one thing: POST /api/mesh/files/push. Constant-time compared.
+    """
+    import hmac
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return False
+    presented = auth[7:].strip()
+    if not presented:
+        return False
+    for t in _share_tokens():
+        stored = t.get('token') if isinstance(t, dict) else None
+        if stored and hmac.compare_digest(str(stored), presented):
+            return True
+    return False
+
+
+def _remote_shares():
+    """Outbound remote-share targets (address + token) this unit can send to."""
+    v = shared_data.config.get('mesh_remote_shares')
+    return v if isinstance(v, list) else []
+
+
+def _get_remote_share(rid):
+    for r in _remote_shares():
+        if isinstance(r, dict) and r.get('id') == rid:
+            return r
+    return None
+
+
+def _remote_share_push_url(address):
+    """Build the push URL for a saved remote address (host[:port] or full URL)."""
+    address = (address or '').strip()
+    if not address:
+        return ''
+    if not address.startswith(('http://', 'https://')):
+        address = 'http://' + address
+    return address.rstrip('/') + '/api/mesh/files/push'
+
+
 @app.before_request
 def check_authentication():
     """Enforce authentication on all endpoints when auth is configured."""
+    path = request.path
     if not auth_mgr.is_configured():
-        return  # No auth set up yet, allow everything
+        # No local login — everyone is otherwise allowed. But the two
+        # deliberately-limited OUTSIDER roles must stay confined even here, or an
+        # open box would hand them the full dashboard and the whole point of the
+        # role (tag:ragnar-share, or a share token) would be lost. Same
+        # confinement the mesh block below enforces when auth IS configured, so
+        # 2A/2B (tag) and 2C (token) all behave the same with or without a login.
+        if shared_data.config.get('mesh_enabled'):
+            is_push = request.method == 'POST' and path == '/api/mesh/files/push'
+            if _is_mesh_share_request():            # tailnet share-guest (2A / 2B)
+                share_read = (request.method == 'GET'
+                              and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                              and bool(shared_data.config.get('mesh_share_guest_read')))
+                if not (is_push or share_read):
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share-only guest: file share access only'}), 403
+            elif _valid_share_token():              # cross-tailnet token holder (2C)
+                if not is_push:
+                    return jsonify({'error': 'Forbidden',
+                                    'detail': 'share token: file push only'}), 403
+        return  # No auth set up yet, allow everyone else
 
     # Whitelist: paths that must be accessible without authentication
-    path = request.path
     whitelist_prefixes = ['/login', '/api/auth/', '/api/kill', '/api/provenance']
     if any(path.startswith(p) for p in whitelist_prefixes):
         return
@@ -518,7 +663,36 @@ def check_authentication():
         # the handler only ever runs git_updater against this checkout — a peer
         # cannot pick what runs, only that an update runs.
         peer_update = request.method == 'POST' and path == '/api/mesh/update'
-        if (peer_read or peer_control or peer_scan_write or peer_update) and _is_mesh_peer_request():
+        # File transfer: a peer may push a file to this unit's quarantined inbox.
+        # Exact-path allowlisted; the handler itself only ever writes into the
+        # inbox (never a live path) and can be turned off (mesh_file_receive).
+        peer_file_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        if (peer_read or peer_control or peer_scan_write or peer_update
+                or peer_file_push) and _is_mesh_peer_request():
+            return
+
+        # Share-only guest role. A device carrying the SHARE tag (tag:ragnar-share)
+        # but NOT the mesh tag may ONLY drop a file into this unit's inbox — no
+        # roster, no reads, no scans, no control. It never appears as a mesh unit
+        # and cannot enumerate anything about this box. Optionally (operator
+        # opt-in) it may also browse/fetch this unit's Mesh Share folder. The push
+        # handler still honours mesh_file_receive, so "stop accepting" also stops
+        # guests. Exact-path allowlisted and fail-closed.
+        share_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        share_read = (request.method == 'GET'
+                      and path in ('/api/mesh/share/local', '/api/mesh/share/download')
+                      and bool(shared_data.config.get('mesh_share_guest_read')))
+        if (share_push or share_read) and _is_mesh_share_request():
+            return
+
+        # Share-token role. A remote holding a valid share token (one this unit's
+        # operator generated and handed out) may ONLY push a file to the inbox.
+        # Authenticated purely by the bearer token — no tailnet identity needed —
+        # so it works across separate tailnets (node-sharing / Funnel) where
+        # WireGuard-identity tagging does not carry. Same inbox-only handler,
+        # same mesh_file_receive off-switch, exact-path allowlisted, fail-closed.
+        token_push = request.method == 'POST' and path == '/api/mesh/files/push'
+        if token_push and _valid_share_token():
             return
 
     # Check if user is authenticated via Flask session
@@ -2302,6 +2476,24 @@ def _mesh_tag():
     return shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
 
 
+def _mesh_secret():
+    """THIS unit's mesh secret, or '' when this mesh has none (opt-in feature).
+
+    When set, it is the second factor over the tag: peers must prove they hold it
+    and outbound requests carry a proof of it. Read live from config so a rotate
+    or a Leave takes effect immediately.
+    """
+    s = shared_data.config.get('mesh_secret')
+    return str(s).strip() if s else ''
+
+
+# Let mesh_manager's outbound helpers read this unit's secret without threading
+# it through every call site. hasattr-guarded so a partially-updated box with an
+# older mesh_manager still imports (it just sends no proof — fail-closed).
+if mesh_available and hasattr(mesh_manager, 'set_secret_provider'):
+    mesh_manager.set_secret_provider(_mesh_secret)
+
+
 def _mesh_node_port():
     try:
         return int(shared_data.config.get('mesh_node_port', 8000))
@@ -3032,6 +3224,34 @@ def _mesh_tagged_peers():
     return [p for p in state.get('peers', []) if tag in p.get('tags', [])]
 
 
+def _mesh_share_guest_nodes():
+    """Tailnet nodes that are share-only guests: they carry the share tag but
+    NOT the mesh tag. Deliberately kept OUT of the mesh roster (they are not
+    units to monitor), but they ARE valid file recipients — a mesh unit can send
+    files to a guest's inbox. Returns clean node dicts for the recipient picker.
+    """
+    if not _mesh_enabled():
+        return []
+    state = mesh_manager.status()
+    if not state.get('available'):
+        return []
+    mesh_tag, share_tag = _mesh_tag(), _mesh_share_tag()
+    out = []
+    for p in state.get('peers', []):
+        tags = p.get('tags', [])
+        if share_tag in tags and mesh_tag not in tags:
+            out.append(p)
+    return out
+
+
+def _resolve_share_guest_node(node_id):
+    """Find a share-only guest node by its stable Tailscale node id."""
+    for p in _mesh_share_guest_nodes():
+        if p.get('id') and p.get('id') == node_id:
+            return p
+    return None
+
+
 def _resolve_delegate_node(node_id):
     """Find a tagged peer node by its stable Tailscale node id.
 
@@ -3450,6 +3670,7 @@ def mesh_status():
 
     self_node = state.get('self')
     self_tagged = False
+    self_share_tagged = False
     if self_node:
         self_node = dict(self_node)
         # Is THIS unit tagged into the mesh? A unit can be fully on the tailnet
@@ -3458,7 +3679,16 @@ def mesh_status():
         # whole mesh keys off the tag, and an interactive `tailscale up` login
         # never applies one.
         self_tagged = tag in self_node.get('tags', [])
+        # A share-only guest deliberately joins with tag:ragnar-share and NO
+        # mesh tag. That is a valid, intended state — not the "forgot to tag"
+        # misconfiguration — so the UI must not nag it to add the mesh tag.
+        self_share_tagged = _mesh_share_tag() in self_node.get('tags', [])
+        # Trust the locally-recorded join role too: Self.Tags can lag or omit the
+        # tag, but a box that joined share-only knows it did.
+        if shared_data.config.get('mesh_share_only'):
+            self_share_tagged = True
         self_node['is_ragnar'] = self_tagged
+        self_node['is_share_guest'] = self_share_tagged and not self_tagged
         self_node['health'] = _mesh_local_health()
         self_node['findings'] = dict(_mesh_local_findings(),
                                      features=_mesh_local_features())
@@ -3469,6 +3699,14 @@ def mesh_status():
         self_node['label'] = cfg.get('mesh_site_label') or self_node.get('short_name', '')
 
     ragnar_peers = [p for p in peers if p['is_ragnar']]
+
+    # A share-only guest is not a mesh member: it has no business enumerating the
+    # host's mesh. Even though Tailscale lets it SEE those machines, Ragnar hides
+    # them so this unit's UI shows no peers, no shared roster — only its own
+    # share-only role. This is a view decision; the ACL is what actually confines
+    # it on the wire.
+    if self_share_tagged and not self_tagged:
+        ragnar_peers = []
 
     # Two units answering to the same number makes every report ambiguous
     # ("Unit 03 is offline" — which one?). Nothing prevents it, since units are
@@ -3519,9 +3757,20 @@ def mesh_status():
         'version': state.get('version', ''),
         'magic_dns_suffix': state.get('magic_dns_suffix', ''),
         'mesh_tag': tag,
+        # The suffix that names this unit's mesh ('' = the default ragnar-mesh).
+        # Several isolated meshes can share one tailnet, told apart by this.
+        'mesh_suffix': mesh_manager.suffix_of_mesh_tag(tag) if mesh_available else '',
+        # Whether this mesh has a secret set (the opt-in second factor over the
+        # tag). Boolean only — the secret itself is never sent to the UI.
+        'mesh_secret_set': bool(_mesh_secret()),
         # Whether THIS unit is tagged into the mesh. False + available means
         # "on the tailnet but not in the mesh" — the state to explain loudly.
         'self_tagged': self_tagged,
+        # Whether this unit joined as a share-only guest (carries the share tag
+        # but not the mesh tag). A deliberate state, so the UI explains it as
+        # "share-only" rather than nagging to add the mesh tag.
+        'self_share_tagged': self_share_tagged and not self_tagged,
+        'share_tag': _mesh_share_tag(),
         'unit_id': _mesh_unit_id(),
         'unit_name': _mesh_unit_name(),
         'viking_name': _mesh_viking_name(),
@@ -3555,6 +3804,14 @@ def mesh_status():
         # phones, unrelated services) are intentionally not listed — they are
         # not the mesh's business and naming them just leaks the tailnet roster.
         'peers': ragnar_peers,
+        # Share-only guests are NOT roster units, but they ARE valid file
+        # recipients — the File Transfer picker lists them so a mesh unit can
+        # send files to a guest. Empty on a guest's own view (it hosts none).
+        'share_guests': ([] if (self_share_tagged and not self_tagged) else [
+            {'id': g.get('id'), 'short_name': g.get('short_name', ''),
+             'label': g.get('label', '') or g.get('short_name', ''),
+             'online': bool(g.get('online'))}
+            for g in _mesh_share_guest_nodes()]),
         'summary': {
             'total': len(ragnar_peers) + (1 if self_node else 0),
             'ragnar_nodes': len(ragnar_peers) + (1 if self_tagged else 0),
@@ -3721,8 +3978,6 @@ def mesh_update_all():
     if not _mesh_enabled():
         return jsonify({'success': False, 'error': 'Mesh is not enabled on this unit.'}), 400
     try:
-        import concurrent.futures
-
         state = mesh_manager.status()
         tag = _mesh_tag()
         port = _mesh_node_port()
@@ -3734,21 +3989,29 @@ def mesh_update_all():
         peer_timeout = 120
 
         def _one(peer):
-            reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
-                                           port=port, timeout=peer_timeout)
+            name = peer.get('short_name') or peer.get('hostname') or 'peer'
+            # Keep a raising peer as a reported unreachable result rather than
+            # letting it drop out of the fan-out.
+            try:
+                reply = mesh_manager.post_peer(peer, '/api/mesh/update', {},
+                                               port=port, timeout=peer_timeout)
+            except Exception as e:
+                reply = {'reachable': False, 'error': str(e)}
             return {
                 'node_id': str(peer.get('id', '')),
-                'name': peer.get('short_name') or peer.get('hostname') or 'peer',
+                'name': name,
                 'self': False,
                 'reachable': bool(reply.get('reachable')),
                 'result': reply,
             }
 
-        peer_results = []
-        if peers:
-            with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=min(8, len(peers))) as ex:
-                peer_results = list(ex.map(_one, peers))
+        # Manual thread pool (see _concurrent_map): avoids concurrent.futures'
+        # interpreter-shutdown flag that breaks ThreadPoolExecutor under
+        # async_mode='threading'. Allow for the slow, restart-triggering update.
+        peer_results = _concurrent_map(
+            _one, peers, max_workers=8, overall_timeout=peer_timeout + 30
+        )
+        peer_results.sort(key=lambda r: (r['name'] or '').lower())
 
         # Self last: updating this unit restarts it, so let the peer fan-out land
         # first. The restart is detached, so this response still flushes.
@@ -3774,8 +4037,39 @@ def mesh_join():
     data = request.get_json(silent=True) or {}
     auth_key = (data.get('auth_key') or '').strip()
     hostname = (data.get('hostname') or '').strip()
-    tags = data.get('tags') or [_mesh_tag()]
+
+    # Which Ragnar mesh does this box belong to? An optional suffix selects a
+    # separate, isolated mesh (ragnar-mesh-2, …) under the same tailnet; blank or
+    # absent means the default mesh. mesh_suffix is the source of truth here — it
+    # decides both the mesh tag advertised and the paired share tag.
+    if data.get('mesh_suffix') is not None:
+        mesh_tag = mesh_manager.mesh_tag_for_suffix(data.get('mesh_suffix'))
+    else:
+        mesh_tag = _mesh_tag()
+
+    # What to advertise. An explicit tags list wins (back-compat / power users).
+    # A share-only join carries the share tag paired with the chosen mesh, never
+    # the mesh tag; a full join carries the mesh tag.
+    if data.get('tags'):
+        tags = data.get('tags')
+    elif data.get('share_only'):
+        tags = [mesh_manager.share_tag_for_mesh_tag(mesh_tag)]
+    else:
+        tags = [mesh_tag]
     routes = [r.strip() for r in (data.get('advertise_routes') or []) if r.strip()]
+
+    # Mesh secret (opt-in second factor over the tag). Only meaningful for a full
+    # member join — a share-only guest is gated by the share tag, never the
+    # secret. `generate_secret` mints a fresh one to display once; an explicit
+    # `mesh_secret` is stored as given (the operator copied it from another unit).
+    # Absent ⇒ leave whatever this box already had (a re-join keeps the mesh).
+    new_secret = None
+    if not data.get('share_only'):
+        if data.get('generate_secret'):
+            new_secret = mesh_manager.generate_mesh_secret()
+        elif (data.get('mesh_secret') or '').strip():
+            new_secret = data.get('mesh_secret').strip()
+
     ok, message = mesh_manager.join(
         auth_key,
         hostname=hostname,
@@ -3783,17 +4077,41 @@ def mesh_join():
         advertise_routes=routes,
         enable_ssh=bool(data.get('enable_ssh', True)),
         accept_routes=bool(data.get('accept_routes', False)),
+        logout_first=bool(data.get('switch_tailnet', False)),
     )
     if ok:
         # Joining is the moment the operator has decided this box is mesh-managed.
         shared_data.config['mesh_enabled'] = True
         if hostname and not shared_data.config.get('mesh_site_label'):
             shared_data.config['mesh_site_label'] = hostname
+        # Pin the mesh this box now belongs to, so every later peer scan and
+        # trust check filters on it (and _mesh_share_tag derives from it). A
+        # share-only guest records the mesh it is guesting too, so its own share
+        # tag matches the host's. Only persisted when the operator chose one.
+        if data.get('mesh_suffix') is not None:
+            shared_data.config['mesh_tag'] = mesh_tag
+        # Persist the mesh secret if one was set/minted this join. Stored in
+        # config (redacted from exports elsewhere); read live by _mesh_secret().
+        if new_secret is not None:
+            shared_data.config['mesh_secret'] = new_secret
+        # Remember HOW this box joined. A share-only guest carries the share tag
+        # and NOT the mesh tag: it is here to send/receive files, not to be a
+        # mesh peer. We record that locally rather than trusting what Tailscale
+        # reports back for Self.Tags (which can lag or be omitted), so this
+        # unit's own UI reliably shows the share-only role and hides the mesh.
+        share_only = (_mesh_share_tag() in tags) and (_mesh_tag() not in tags)
+        shared_data.config['mesh_share_only'] = bool(share_only)
         shared_data.save_config()
         logger.success(f"[mesh] joined tailnet as {hostname or socket.gethostname()}")
     else:
         logger.warning(f"[mesh] join failed: {message}")
-    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+    resp = {'success': ok, 'message': message}
+    # Echo a freshly *generated* secret exactly once so the operator can copy it
+    # to the mesh's other units. Never echo an operator-supplied one (they have
+    # it) and never on a plain re-join, so it does not leak on every call.
+    if ok and new_secret is not None and data.get('generate_secret'):
+        resp['mesh_secret'] = new_secret
+    return jsonify(resp), (200 if ok else 400)
 
 
 @app.route('/api/mesh/leave', methods=['POST'])
@@ -3802,6 +4120,15 @@ def mesh_leave():
     if not mesh_available:
         return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
     ok, message = mesh_manager.leave()
+    if ok:
+        # Leaving drops the share-only role too; a later normal join re-derives it.
+        shared_data.config['mesh_share_only'] = False
+        # Drop this mesh's secret. Leaving is how you move meshes (log out, then
+        # join a new one with its own key + secret); keeping a stale secret would
+        # make the box demand a proof the new mesh's peers cannot give. A re-join
+        # to the same mesh simply re-supplies it.
+        shared_data.config['mesh_secret'] = ''
+        shared_data.save_config()
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
@@ -8122,12 +8449,18 @@ def _apply_config_update(data):
         shared_data.screen_reversed = normalize_rotation(shared_data.config.get('screen_reversed', 0))
         shared_data.web_screen_reversed = normalize_rotation(shared_data.config.get('web_screen_reversed', 0))
         
-        # Reload AI service if ai_enabled was changed
-        if 'ai_enabled' in data:
+        # Reload AI service when the enable flag OR the endpoint config changes
+        # (base URL / model / api style), so pointing at a self-hosted endpoint
+        # takes effect without also toggling ai_enabled. The config dict was
+        # already updated above, so read the effective enabled state from it.
+        ai_endpoint_keys = ('ai_base_url', 'ai_model', 'ai_api_style')
+        ai_config_touched = 'ai_enabled' in data or any(k in data for k in ai_endpoint_keys)
+        ai_now_enabled = bool(shared_data.config.get('ai_enabled', False))
+        if ai_config_touched:
             ai_service = getattr(shared_data, 'ai_service', None)
-            
+
             # If AI service doesn't exist and user enabled it, try to initialize
-            if not ai_service and data['ai_enabled']:
+            if not ai_service and ai_now_enabled:
                 try:
                     shared_data.initialize_ai_service()
                     ai_service = shared_data.ai_service
@@ -8141,7 +8474,7 @@ def _apply_config_update(data):
                     ai_reload_error = str(e)
             # If AI service exists, reload or disable it
             elif ai_service:
-                if data['ai_enabled']:
+                if ai_now_enabled:
                     ai_reload_success = ai_service.reload_token()
                     if not ai_reload_success:
                         ai_reload_error = getattr(ai_service, 'initialization_error', None)
@@ -8560,6 +8893,89 @@ def manage_scan_subnets():
     except Exception as e:
         logger.error(f"Error managing scan subnets: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+_MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$')
+
+
+@app.route('/api/config/scan-blacklist', methods=['GET', 'POST', 'DELETE'])
+def manage_scan_blacklist():
+    """Manage the per-device scan ignore lists (MAC and IP).
+
+    These lists are honored across every scan/action path when the master
+    ``blacklistcheck`` toggle is on, so adding a host here makes Ragnar skip
+    it. Backs the per-device "Ignore" button on the Network tab (issue #459).
+
+    GET:    Return {"macs": [...], "ips": [...], "enabled": bool}.
+    POST:   Add a host   (body: {"mac": "aa:bb:.."} and/or {"ip": "1.2.3.4"}).
+    DELETE: Remove a host (same body shape).
+    """
+    import ipaddress as _ip
+    try:
+        macs = list(shared_data.config.get('mac_scan_blacklist', []))
+        ips = list(shared_data.config.get('ip_scan_blacklist', []))
+
+        if request.method == 'GET':
+            return jsonify({
+                'macs': macs,
+                'ips': ips,
+                'enabled': bool(shared_data.config.get('blacklistcheck', True)),
+            })
+
+        data = request.get_json(silent=True) or {}
+        raw_mac = str(data.get('mac', '') or '').strip().lower()
+        raw_ip = str(data.get('ip', '') or '').strip()
+
+        # 'unknown'/'00:..:00' placeholders aren't real identifiers to ignore.
+        if raw_mac in ('unknown', '00:00:00:00:00:00'):
+            raw_mac = ''
+        if raw_ip.lower() in ('unknown', ''):
+            raw_ip = ''
+
+        # Validate whatever was supplied; require at least one usable field.
+        if raw_mac and not _MAC_RE.match(raw_mac):
+            return jsonify({'error': f'Invalid MAC: {raw_mac}'}), 400
+        if raw_ip:
+            try:
+                raw_ip = str(_ip.ip_address(raw_ip))
+            except ValueError:
+                return jsonify({'error': f'Invalid IP: {raw_ip}'}), 400
+        if not raw_mac and not raw_ip:
+            return jsonify({'error': 'Provide a mac and/or ip to ignore'}), 400
+
+        changed = False
+        if request.method == 'POST':
+            if raw_mac and raw_mac not in macs:
+                macs.append(raw_mac)
+                changed = True
+            if raw_ip and raw_ip not in ips:
+                ips.append(raw_ip)
+                changed = True
+        else:  # DELETE
+            if raw_mac and raw_mac in macs:
+                macs = [m for m in macs if m != raw_mac]
+                changed = True
+            if raw_ip and raw_ip in ips:
+                ips = [i for i in ips if i != raw_ip]
+                changed = True
+
+        if changed:
+            shared_data.config['mac_scan_blacklist'] = macs
+            shared_data.config['ip_scan_blacklist'] = ips
+            shared_data.mac_scan_blacklist = macs
+            shared_data.ip_scan_blacklist = ips
+            shared_data.save_config()
+
+        return jsonify({
+            'macs': macs,
+            'ips': ips,
+            'enabled': bool(shared_data.config.get('blacklistcheck', True)),
+        })
+
+    except Exception as e:
+        logger.error(f"Error managing scan blacklist: {e}")
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/config/scan-subnets/trigger', methods=['POST'])
 def trigger_subnet_scan():
@@ -19424,7 +19840,13 @@ def preview_file_api():
                            '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
         IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
 
-        if ext in IMAGE_EXTENSIONS:
+        if ext == '.pdf' or mime_type == 'application/pdf':
+            # Rendered inline by the browser via an iframe pointed at the
+            # download endpoint (?inline=1) — no base64 blob in the JSON.
+            return jsonify({'type': 'pdf', 'size': file_size,
+                            'name': os.path.basename(actual_path)})
+
+        elif ext in IMAGE_EXTENSIONS:
             if file_size > 5 * 1024 * 1024:  # 5MB limit for images
                 return jsonify({'type': 'too_large', 'size': file_size, 'name': os.path.basename(actual_path)})
             with open(actual_path, 'rb') as f:
@@ -19502,12 +19924,15 @@ def download_file_api():
         if not os.path.isfile(actual_path):
             return jsonify({'error': 'File not found'}), 404
 
+        # inline=1 serves the file for in-browser display (e.g. PDF preview)
+        # instead of forcing a download.
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
         return send_from_directory(
             os.path.dirname(actual_path),
             os.path.basename(actual_path),
-            as_attachment=True
+            as_attachment=not inline
         )
-        
+
     except Exception as e:
         logger.error(f"Error downloading file: {e}")
         return jsonify({'error': str(e)}), 500
@@ -19582,49 +20007,185 @@ def delete_file_api():
         return jsonify({'error': str(e)}), 500
 
 
+def _resolve_upload_target(target_path):
+    """Map an /uploads or /backups virtual dir (possibly nested) to a real dir.
+
+    Returns the actual directory path, or raises ValueError on a bad/escaping
+    path. Only the writable uploads and backups trees are allowed as targets.
+    """
+    if target_path == '/uploads' or target_path.startswith('/uploads/'):
+        return _resolve_legacy_path('/uploads', shared_data.upload_dir, target_path)
+    if target_path == '/backups' or target_path.startswith('/backups/'):
+        return _resolve_legacy_path('/backups', shared_data.backupdir, target_path)
+    raise ValueError('Invalid upload path')
+
+
+def _resolve_readable_path(file_path):
+    """Map any browsable virtual file path to a real path for READING.
+
+    Mirrors the download endpoint's mapping (loot dirs, scans, logs, backups,
+    uploads) so a file the operator can see in the Files tab can also be sent
+    over the mesh. Raises ValueError on an invalid/escaping path.
+    """
+    loot = {
+        '/data_stolen': 'loot/data_stolen',
+        '/scan_results': 'output/scan_results',
+        '/crackedpwd': 'loot/credentials',
+        '/vulnerabilities': 'output/vulnerabilities',
+    }
+    for root, rel in loot.items():
+        if file_path == root or file_path.startswith(root + '/'):
+            resolved = _resolve_loot_path(root, rel, file_path)
+            if resolved is None:
+                raise ValueError('Invalid path')
+            return resolved
+    if file_path == '/logs' or file_path.startswith('/logs/'):
+        return _resolve_legacy_path('/logs', os.path.join(shared_data.datadir, 'logs'), file_path)
+    if file_path == '/backups' or file_path.startswith('/backups/'):
+        return _resolve_legacy_path('/backups', shared_data.backupdir, file_path)
+    if file_path == '/uploads' or file_path.startswith('/uploads/'):
+        return _resolve_legacy_path('/uploads', shared_data.upload_dir, file_path)
+    raise ValueError('Invalid path')
+
+
 @app.route('/api/files/upload', methods=['POST'])
 def upload_file_api():
-    """Upload a file"""
+    """Upload one or more files into an /uploads or /backups folder."""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'No file provided'}), 400
-        
-        file = request.files['file']
+
         target_path = request.form.get('path', '/uploads')
-        
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        # Map virtual path to actual path
-        actual_dir = ""
-        if target_path.startswith('/uploads'):
-            actual_dir = shared_data.upload_dir
-        elif target_path.startswith('/backups'):
-            actual_dir = shared_data.backupdir
-        else:
+        try:
+            actual_dir = _resolve_upload_target(target_path)
+        except ValueError:
             return jsonify({'error': 'Invalid upload path'}), 400
-        
-        # Create directory if it doesn't exist
+
+        # Create the (possibly nested) directory if it doesn't exist.
         os.makedirs(actual_dir, exist_ok=True)
-        
-        # Save file
-        filename = file.filename
-        if not filename:
-            return jsonify({'error': 'Invalid filename'}), 400
-            
-        actual_path = os.path.join(actual_dir, filename)
-        file.save(actual_path)
-        
-        logger.info(f"File uploaded: {actual_path}")
-        
+
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            filename = os.path.basename(file.filename)  # strip any client path
+            if not filename:
+                continue
+            file.save(os.path.join(actual_dir, filename))
+            stored.append(filename)
+
+        if not stored:
+            return jsonify({'error': 'No file selected'}), 400
+
+        logger.info(f"Uploaded {len(stored)} file(s) to {actual_dir}")
         return jsonify({
             'success': True,
             'message': 'File uploaded successfully',
-            'filename': filename
+            'filename': stored[0],
+            'stored': len(stored),
         })
-        
+
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files/mkdir', methods=['POST'])
+def mkdir_file_api():
+    """Create a subfolder under /uploads or /backups."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('path', '/uploads') or '/uploads'
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'error': 'Folder name required'}), 400
+        # A single new folder name only — reject separators and traversal.
+        if '/' in name or '\\' in name or name in ('.', '..'):
+            return jsonify({'error': 'Invalid folder name'}), 400
+
+        target = parent.rstrip('/') + '/' + name
+        try:
+            actual_dir = _resolve_upload_target(target)
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+
+        os.makedirs(actual_dir, exist_ok=True)
+        logger.info(f"Created folder: {actual_dir}")
+        return jsonify({'success': True, 'path': target, 'name': name})
+
+    except Exception as e:
+        logger.error(f"Error creating folder: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files/rename', methods=['POST'])
+def rename_file_api():
+    """Rename a file or folder under /uploads or /backups (same directory)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        path = data.get('path', '')
+        new_name = (data.get('name') or '').strip()
+        if not path or not new_name:
+            return jsonify({'error': 'Path and new name are required'}), 400
+        if '/' in new_name or '\\' in new_name or new_name in ('.', '..'):
+            return jsonify({'error': 'Invalid name'}), 400
+
+        try:
+            actual = _resolve_upload_target(path)   # source; writable trees only
+        except ValueError:
+            return jsonify({'error': 'Invalid path'}), 400
+        if not os.path.exists(actual):
+            return jsonify({'error': 'File not found'}), 404
+
+        dest = os.path.join(os.path.dirname(actual), new_name)
+        # dest stays in the same (already-validated) directory; new_name has no
+        # separators, so it cannot escape it.
+        if os.path.exists(dest):
+            return jsonify({'error': 'A file with that name already exists'}), 400
+        os.rename(actual, dest)
+        logger.info(f"Renamed {actual} -> {dest}")
+        return jsonify({'success': True, 'name': new_name})
+
+    except Exception as e:
+        logger.error(f"Error renaming: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files/move', methods=['POST'])
+def move_file_api():
+    """Move a file or folder to another /uploads|/backups directory."""
+    try:
+        data = request.get_json(silent=True) or {}
+        src = data.get('path', '')
+        dest_dir = data.get('dir', '')
+        if not src or not dest_dir:
+            return jsonify({'error': 'Source and destination are required'}), 400
+        try:
+            src_actual = _resolve_upload_target(src)      # writable trees only
+            dest_actual = _resolve_upload_target(dest_dir)
+        except ValueError:
+            return jsonify({'error': 'Files can only be moved within Uploads or Backups'}), 400
+        if not os.path.exists(src_actual):
+            return jsonify({'error': 'File not found'}), 404
+
+        src_real = os.path.realpath(src_actual)
+        dest_real = os.path.realpath(dest_actual)
+        # Already there — nothing to do.
+        if os.path.dirname(src_real) == dest_real:
+            return jsonify({'success': True, 'noop': True})
+        # Don't move a folder into itself or its own subtree.
+        if os.path.isdir(src_real) and (dest_real == src_real or dest_real.startswith(src_real + os.sep)):
+            return jsonify({'error': "A folder can't be moved into itself"}), 400
+
+        os.makedirs(dest_actual, exist_ok=True)
+        dest_path = _unique_dest(dest_actual, os.path.basename(src_actual))
+        import shutil as _sh
+        _sh.move(src_actual, dest_path)
+        logger.info(f"Moved {src_actual} -> {dest_path}")
+        return jsonify({'success': True, 'name': os.path.basename(dest_path)})
+
+    except Exception as e:
+        logger.error(f"Error moving: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -19687,6 +20248,872 @@ def clear_files_api():
     except Exception as e:
         logger.error(f"Error clearing files: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Safe — password-protected, size-capped encrypted vault (Files tab)
+# ---------------------------------------------------------------------------
+
+_safe_vault = None
+_safe_vault_lock = threading.Lock()
+
+
+def _get_safe_vault():
+    """Lazily build the single SafeVault instance under the data directory."""
+    global _safe_vault
+    if _safe_vault is None:
+        with _safe_vault_lock:
+            if _safe_vault is None:
+                base_dir = os.path.join(shared_data.datadir, 'safe')
+                _safe_vault = SafeVault(base_dir)
+    return _safe_vault
+
+
+# ---------------------------------------------------------------------------
+# Mesh file transfer — move files between Ragnar units over Tailscale
+# ---------------------------------------------------------------------------
+_mesh_transfer = None
+_mesh_transfer_lock = threading.Lock()
+
+
+def _get_mesh_transfer():
+    """Lazily build the single MeshTransfer instance (inbox under datadir)."""
+    global _mesh_transfer
+    if _mesh_transfer is None:
+        with _mesh_transfer_lock:
+            if _mesh_transfer is None:
+                from mesh_transfer import MeshTransfer
+                _mesh_transfer = MeshTransfer(os.path.join(shared_data.datadir, 'mesh_inbox'))
+    return _mesh_transfer
+
+
+def _mesh_receive_enabled():
+    # Default on when mesh is enabled; operator can turn off receiving.
+    return bool(shared_data.config.get('mesh_file_receive', True))
+
+
+def _unique_dest(directory, filename):
+    """A non-colliding path in `directory` for `filename` (adds ' (2)', …)."""
+    base, ext = os.path.splitext(filename)
+    candidate = os.path.join(directory, filename)
+    n = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(directory, f'{base} ({n}){ext}')
+        n += 1
+    return candidate
+
+
+@app.route('/api/mesh/files/push', methods=['POST'])
+def mesh_files_push():
+    """Receive a file from a peer into this unit's quarantined inbox.
+
+    Reachable by a tagged peer (allowlisted in check_authentication) or the
+    local session. Streams the raw body to disk; never touches a live folder.
+    """
+    if not _mesh_receive_enabled():
+        return jsonify({'success': False, 'error': 'This unit is not accepting transfers'}), 403
+    try:
+        filename = request.headers.get('X-Filename') or 'file'
+        sender = request.headers.get('X-Sender-Name') or ''
+        try:
+            sender_id = int(request.headers.get('X-Sender-Id') or 0)
+        except (TypeError, ValueError):
+            sender_id = 0
+        meta = _get_mesh_transfer().receive_stream(
+            request.stream, request.content_length or 0, filename, sender, sender_id,
+            expected_sha=request.headers.get('X-Content-SHA256'))
+        logger.info(f"Mesh inbox: received {meta['name']} ({meta['size']} bytes) from {meta['sender']}")
+        return jsonify({'success': True, 'id': meta['id']})
+    except ValueError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh push error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+class _OutboundError(Exception):
+    """A staging/validation failure with an HTTP status for the caller."""
+    def __init__(self, message, code=400):
+        super().__init__(message)
+        self.code = code
+
+
+def _prepare_outbound_file(multipart, body):
+    """Stage and validate one outbound file for a mesh transfer.
+
+    Source is one of: a drag-dropped upload (multipart 'file'), an /uploads or
+    /backups path ('source':'path'), or an unlocked Vault file ('source':'vault').
+    Returns (src_path, filename, cleanup). Raises _OutboundError for a bad source,
+    or SafeLockedError/SafeError when a locked Vault file is requested. Shared by
+    the mesh-peer send and the token-based remote-share send.
+    """
+    import tempfile
+    mt = _get_mesh_transfer()
+    if multipart:
+        f = request.files['file']
+        filename = os.path.basename(f.filename or 'file')
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        os.close(fd)
+        f.save(src_path)
+        cleanup = True
+    elif body.get('source') == 'vault':
+        entry, data = _get_safe_vault().read_file(body.get('vault_id', ''))  # needs unlock
+        filename = os.path.basename(entry.get('name', 'file'))
+        fd, src_path = tempfile.mkstemp(prefix='meshsend_', dir=shared_data.datadir)
+        with os.fdopen(fd, 'wb') as w:
+            w.write(data)
+        cleanup = True
+    else:  # a real file the operator can browse on this unit
+        try:
+            src_path = _resolve_readable_path(body.get('path', ''))
+        except ValueError:
+            raise _OutboundError('Invalid source path')
+        if not os.path.isfile(src_path):
+            raise _OutboundError('Source file not found', 404)
+        filename = os.path.basename(src_path)
+        cleanup = False
+
+    def _cleanup_staged():
+        if cleanup:
+            try:
+                os.remove(src_path)
+            except OSError:
+                pass
+    try:
+        src_size = os.path.getsize(src_path)
+    except OSError:
+        _cleanup_staged()
+        raise _OutboundError('Source file not found', 404)
+    if src_size == 0:
+        _cleanup_staged()
+        raise _OutboundError('That file is empty — nothing to send')
+    if src_size > mt.max_bytes:
+        _cleanup_staged()
+        raise _OutboundError('File is larger than the %d GB transfer limit'
+                             % (mt.max_bytes // (1024 ** 3)))
+    return src_path, filename, cleanup
+
+
+@app.route('/api/mesh/files/send', methods=['POST'])
+def mesh_files_send():
+    """Operator: stream a file from this unit to a peer (runs in background)."""
+    try:
+        mt = _get_mesh_transfer()
+        multipart = bool(request.files.get('file'))
+        body = {} if multipart else (request.get_json(silent=True) or {})
+        target_id = (request.form.get('target_id') if multipart else body.get('target_id')) or ''
+
+        # A recipient is either a mesh unit or a share-only guest (guests can be
+        # sent to, they just aren't part of the monitored roster).
+        node = _resolve_delegate_node(target_id) or _resolve_share_guest_node(target_id)
+        if not node:
+            return jsonify({'success': False, 'error': 'Target unit not found in mesh'}), 400
+        # Prefer the peer's self-reported Viking name (from the poll cache) over
+        # the bare tailnet label, so transfers read "→ Kara the Great" not "here-1".
+        _ph = _mesh_peer_health.get(node.get('id'), {}) if isinstance(_mesh_peer_health, dict) else {}
+        dest_name = (node.get('viking_name') or _ph.get('viking_name')
+                     or node.get('label') or _ph.get('label')
+                     or node.get('short_name') or 'peer')
+        url = mesh_manager.peer_url(node, _mesh_node_port(), '/api/mesh/files/push')
+        if not url:
+            return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
+
+        headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id())}
+        # Prove mesh membership on the push too, when this mesh has a secret. A
+        # share-guest / token sender takes a different code path (no mesh secret);
+        # this is the peer-to-peer send between full members.
+        headers.update(mesh_manager.auth_headers('POST', '/api/mesh/files/push'))
+        try:
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
+
+        tid = mt.registry.create(filename, dest_name)
+        mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
+        return jsonify({'success': True, 'transfer_id': tid, 'dest': dest_name})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first to send a Vault file'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/transfers')
+def mesh_transfers_list():
+    """Outbound transfer progress/history for the UI to poll."""
+    return jsonify({'success': True, 'transfers': _get_mesh_transfer().registry.list()})
+
+
+# --- Share tokens: this unit issues them; a remote presents one to push here ---
+
+@app.route('/api/mesh/share/tokens', methods=['GET'])
+def mesh_share_tokens_list():
+    """Operator: list the incoming share tokens this unit accepts.
+
+    Only a masked preview is returned — the full secret is shown once, at
+    creation. (A peer Ragnar can GET any /api/mesh/* path, so the raw token
+    must never appear here.) Lost a token? Revoke it and mint a new one.
+    """
+    return jsonify({'success': True, 'tokens': [
+        {'id': t.get('id'), 'label': t.get('label', ''),
+         'preview': '…' + str(t.get('token', ''))[-6:], 'created': t.get('created', '')}
+        for t in _share_tokens() if isinstance(t, dict)]})
+
+
+@app.route('/api/mesh/share/tokens', methods=['POST'])
+def mesh_share_tokens_create():
+    """Operator: mint a new share token to hand to one outside sender."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    label = (data.get('label') or '').strip()[:60]
+    entry = {'id': secrets.token_hex(6),
+             'label': label,
+             'token': 'rgnr-share-' + secrets.token_urlsafe(24),
+             'created': datetime.now().isoformat(timespec='seconds')}
+    toks = _share_tokens() + [entry]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True, 'token': entry})
+
+
+@app.route('/api/mesh/share/tokens/<tid>', methods=['DELETE'])
+def mesh_share_tokens_delete(tid):
+    """Operator: revoke one share token (that sender can no longer push)."""
+    toks = [t for t in _share_tokens() if isinstance(t, dict) and t.get('id') != tid]
+    shared_data.config['mesh_share_tokens'] = toks
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+# --- Remote shares: saved outbound targets (address + token) to send files to ---
+
+def _remote_share_public(r):
+    """Strip the secret token for listing."""
+    return {'id': r.get('id'), 'name': r.get('name', ''), 'address': r.get('address', ''),
+            'created': r.get('created', '')}
+
+
+@app.route('/api/mesh/remote-shares', methods=['GET'])
+def mesh_remote_shares_list():
+    """Operator: saved remote-share targets (tokens masked)."""
+    return jsonify({'success': True,
+                    'remotes': [_remote_share_public(r) for r in _remote_shares() if isinstance(r, dict)]})
+
+
+@app.route('/api/mesh/remote-shares', methods=['POST'])
+def mesh_remote_shares_add():
+    """Operator: add a remote to send files to (name + address + their token)."""
+    import secrets
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()[:60]
+    address = (data.get('address') or '').strip()
+    token = (data.get('token') or '').strip()
+    if not name or not address or not token:
+        return jsonify({'success': False, 'error': 'Name, address and token are all required'}), 400
+    if not _remote_share_push_url(address):
+        return jsonify({'success': False, 'error': 'That address is not valid'}), 400
+    entry = {'id': secrets.token_hex(6), 'name': name, 'address': address, 'token': token,
+             'created': datetime.now().isoformat(timespec='seconds')}
+    remotes = _remote_shares() + [entry]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True, 'remote': _remote_share_public(entry)})
+
+
+@app.route('/api/mesh/remote-shares/<rid>', methods=['DELETE'])
+def mesh_remote_shares_delete(rid):
+    """Operator: forget a remote-share target."""
+    remotes = [r for r in _remote_shares() if isinstance(r, dict) and r.get('id') != rid]
+    shared_data.config['mesh_remote_shares'] = remotes
+    shared_data.save_config()
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/remote-shares/<rid>/send', methods=['POST'])
+def mesh_remote_shares_send(rid):
+    """Operator: stream a file to a saved remote share, authenticated by its token.
+
+    Same staging/validation as a peer send, but the destination is an arbitrary
+    address and the auth is the bearer token — so it reaches a Ragnar on a
+    separate tailnet (node-sharing / Funnel), not just a mesh peer.
+    """
+    remote = _get_remote_share(rid)
+    if not remote:
+        return jsonify({'success': False, 'error': 'Remote share not found'}), 404
+    url = _remote_share_push_url(remote.get('address'))
+    if not url:
+        return jsonify({'success': False, 'error': 'Remote has no valid address'}), 400
+    try:
+        mt = _get_mesh_transfer()
+        multipart = bool(request.files.get('file'))
+        body = {} if multipart else (request.get_json(silent=True) or {})
+        headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id()),
+                   'Authorization': 'Bearer ' + str(remote.get('token', ''))}
+        try:
+            src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
+        except _OutboundError as oe:
+            return jsonify({'success': False, 'error': str(oe)}), oe.code
+        tid = mt.registry.create(filename, remote.get('name', 'remote'))
+        mt.send_file_async(url, src_path, filename, headers, tid, cleanup_source=cleanup)
+        return jsonify({'success': True, 'transfer_id': tid, 'dest': remote.get('name', 'remote')})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first to send a Vault file'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh remote-share send error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/inbox')
+def mesh_inbox_list():
+    """Files received into this unit's inbox, awaiting the operator's choice."""
+    return jsonify({'success': True,
+                    'items': _get_mesh_transfer().list_inbox(),
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    'share_tag': _mesh_share_tag()})
+
+
+@app.route('/api/mesh/inbox/save', methods=['POST'])
+def mesh_inbox_save():
+    """File an inbox item into a chosen folder: an /uploads|/backups path, or
+    the Vault (dest 'vault' or 'vault:<subfolder>')."""
+    data = request.get_json(silent=True) or {}
+    item_id = data.get('id', '')
+    dest = data.get('dest', '/uploads') or '/uploads'
+    mt = _get_mesh_transfer()
+    meta = mt.get_item(item_id)
+    if not meta:
+        return jsonify({'success': False, 'error': 'Inbox item not found'}), 404
+    try:
+        if dest == 'vault' or dest.startswith('vault:'):
+            vault_dir = dest.split(':', 1)[1] if ':' in dest else ''
+            _m, blob = mt.read_item(item_id)
+            _get_safe_vault().add_file(meta['name'], blob, None, dir=vault_dir)
+        else:
+            try:
+                actual_dir = _resolve_upload_target(dest)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid destination'}), 400
+            os.makedirs(actual_dir, exist_ok=True)
+            import shutil as _sh
+            _sh.copy2(mt.blob_path_for(item_id),
+                      _unique_dest(actual_dir, os.path.basename(meta['name'])))
+        mt.discard(item_id)
+        logger.info(f"Mesh inbox: saved {meta['name']} to {dest}")
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh inbox save error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/inbox/discard', methods=['POST'])
+def mesh_inbox_discard():
+    data = request.get_json(silent=True) or {}
+    _get_mesh_transfer().discard(data.get('id', ''))
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/files/config', methods=['POST'])
+def mesh_files_config():
+    """Toggle whether this unit accepts incoming transfers, and whether
+    share-only guests may browse this unit's Mesh Share folder."""
+    data = request.get_json(silent=True) or {}
+    if 'receive' in data:
+        shared_data.config['mesh_file_receive'] = bool(data.get('receive'))
+    if 'share_read' in data:
+        shared_data.config['mesh_share_guest_read'] = bool(data.get('share_read'))
+    shared_data.save_config()
+    return jsonify({'success': True,
+                    'receive_enabled': _mesh_receive_enabled(),
+                    'share_guest_read': bool(shared_data.config.get('mesh_share_guest_read'))})
+
+
+# ---------------------------------------------------------------------------
+# Mesh Share — a folder each unit publishes to the whole mesh. Files stay on
+# their owner; peers see the catalog and fetch on demand.
+# ---------------------------------------------------------------------------
+def _mesh_share_dir():
+    d = os.path.join(shared_data.datadir, 'mesh_share')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _mesh_share_list_local():
+    out = []
+    try:
+        for entry in os.scandir(_mesh_share_dir()):
+            if entry.is_file():
+                st = entry.stat()
+                out.append({'name': entry.name, 'size': st.st_size, 'modified': st.st_mtime})
+    except OSError:
+        pass
+    out.sort(key=lambda x: x['name'].lower())
+    return out
+
+
+@app.route('/api/mesh/share/local')
+def mesh_share_local():
+    """This unit's shared-folder listing — peer-readable (GET under /api/mesh/)."""
+    return jsonify({'success': True, 'files': _mesh_share_list_local(),
+                    'owner': _mesh_viking_name() or 'a unit', 'owner_id': _mesh_unit_id()})
+
+
+@app.route('/api/mesh/share/download')
+def mesh_share_download():
+    """Stream one shared file to a requesting peer/operator (read-only, own dir)."""
+    name = os.path.basename(request.args.get('name', ''))
+    if not name:
+        return jsonify({'success': False, 'error': 'name required'}), 400
+    d = _mesh_share_dir()
+    if not os.path.isfile(os.path.join(d, name)):
+        return jsonify({'success': False, 'error': 'not found'}), 404
+    inline = request.args.get('inline') in ('1', 'true', 'yes')
+    return send_from_directory(d, name, as_attachment=not inline)
+
+
+@app.route('/api/mesh/share')
+def mesh_share_all():
+    """Aggregate catalog: this unit's shared files plus every online peer's."""
+    items = []
+    for f in _mesh_share_list_local():
+        items.append({**f, 'owner': _mesh_viking_name() or 'this unit',
+                      'owner_id': 'self', 'is_local': True})
+    # Even a share-only guest is a participant in the shared FOLDER: it sees every
+    # unit's shared files and can fetch them (subject to each host's guest-read
+    # opt-in). Only the device ROSTER is hidden from a guest, not the share.
+    if _mesh_enabled():
+        port = _mesh_node_port()
+        # Poll mesh units AND share-only guests: the shared folder spans both.
+        # A guest's files are read via the same /share/local (a mesh peer poll is
+        # authorized on the guest as a peer read; a guest polling a unit needs
+        # that unit's guest-read opt-in).
+        for node in _mesh_tagged_peers() + _mesh_share_guest_nodes():
+            if not node.get('online'):
+                continue
+            rep = mesh_manager.poll_peer(node, port=port, timeout=6, path='/api/mesh/share/local')
+            if not rep.get('reachable') or not rep.get('success'):
+                continue
+            owner = rep.get('owner') or node.get('label') or node.get('id')
+            for f in rep.get('files', []):
+                items.append({**f, 'owner': owner, 'owner_id': node.get('id'), 'is_local': False})
+    items.sort(key=lambda x: (str(x.get('owner', '')).lower(), x['name'].lower()))
+    return jsonify({'success': True, 'items': items,
+                    'guest_read': bool(shared_data.config.get('mesh_share_guest_read')),
+                    # Lets the Mesh Share tab hide host-only tooling (guest-read
+                    # toggle, tokens, remote shares, join) on a share-only guest.
+                    'share_only': _this_unit_is_share_only()})
+
+
+@app.route('/api/mesh/share/add', methods=['POST'])
+def mesh_share_add():
+    """Publish file(s) to this unit's shared folder (upload or an existing path)."""
+    try:
+        d = _mesh_share_dir()
+        if request.files.get('file'):
+            stored = 0
+            for f in request.files.getlist('file'):
+                if not f or not f.filename:
+                    continue
+                f.save(_unique_dest(d, os.path.basename(f.filename)))
+                stored += 1
+            if not stored:
+                return jsonify({'success': False, 'error': 'No file selected'}), 400
+            return jsonify({'success': True, 'stored': stored})
+        data = request.get_json(silent=True) or {}
+        if data.get('path'):
+            try:
+                src = _resolve_readable_path(data['path'])
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid path'}), 400
+            if not os.path.isfile(src):
+                return jsonify({'success': False, 'error': 'File not found'}), 404
+            import shutil as _sh
+            _sh.copy2(src, _unique_dest(d, os.path.basename(src)))
+            return jsonify({'success': True})
+        return jsonify({'success': False, 'error': 'No file provided'}), 400
+    except Exception as e:
+        logger.error(f"Mesh share add error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/mesh/share/remove', methods=['POST'])
+def mesh_share_remove():
+    """Unshare one of this unit's own shared files."""
+    data = request.get_json(silent=True) or {}
+    name = os.path.basename(data.get('name', ''))
+    if name:
+        p = os.path.join(_mesh_share_dir(), name)
+        try:
+            if os.path.isfile(p):
+                os.remove(p)
+        except OSError as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    return jsonify({'success': True})
+
+
+@app.route('/api/mesh/share/fetch', methods=['POST'])
+def mesh_share_fetch():
+    """Fetch a shared file (from its owner) and save it into a chosen folder."""
+    import requests as _rq
+    from urllib.parse import quote
+    try:
+        data = request.get_json(silent=True) or {}
+        name = os.path.basename(data.get('name', ''))
+        owner_id = data.get('owner_id', '')
+        dest = data.get('dest', '/uploads') or '/uploads'
+        if not name:
+            return jsonify({'success': False, 'error': 'name required'}), 400
+
+        # Get the bytes: locally (our own share) or streamed from the owner peer.
+        if owner_id == 'self':
+            src = os.path.join(_mesh_share_dir(), name)
+            if not os.path.isfile(src):
+                return jsonify({'success': False, 'error': 'File not found'}), 404
+            with open(src, 'rb') as f:
+                blob = f.read()
+        else:
+            node = _resolve_delegate_node(owner_id)
+            if not node:
+                return jsonify({'success': False, 'error': 'Owner unit not found in mesh'}), 400
+            url = mesh_manager.peer_url(node, _mesh_node_port(),
+                                        '/api/mesh/share/download?name=' + quote(name))
+            if not url:
+                return jsonify({'success': False, 'error': 'Owner has no address'}), 400
+            r = _rq.get(url, timeout=120)
+            if r.status_code != 200:
+                return jsonify({'success': False,
+                                'error': 'Owner returned HTTP %d' % r.status_code}), 400
+            blob = r.content
+
+        # Save into the chosen folder: an /uploads|/backups path, or the Vault.
+        if dest == 'vault' or dest.startswith('vault:'):
+            vdir = dest.split(':', 1)[1] if ':' in dest else ''
+            _get_safe_vault().add_file(name, blob, None, dir=vdir)   # needs unlock
+        else:
+            try:
+                actual_dir = _resolve_upload_target(dest)
+            except ValueError:
+                return jsonify({'success': False, 'error': 'Invalid destination'}), 400
+            os.makedirs(actual_dir, exist_ok=True)
+            with open(_unique_dest(actual_dir, name), 'wb') as f:
+                f.write(blob)
+        logger.info(f"Mesh share: fetched {name} -> {dest}")
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'error': 'Unlock the Vault first'}), 400
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Mesh share fetch error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/status')
+def safe_status_api():
+    """Report whether the Safe is set up, unlocked, and its usage."""
+    try:
+        info = _get_safe_vault().status()
+        # Advertise the configurable size window so the UI can build its picker.
+        from safe_vault import MIN_SIZE_BYTES, MAX_SIZE_BYTES
+        info['min_size_bytes'] = MIN_SIZE_BYTES
+        info['max_size_bytes'] = MAX_SIZE_BYTES
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            info['disk_free_bytes'] = usage.free
+            info['disk_total_bytes'] = usage.total
+        except OSError:
+            pass
+        return jsonify({'success': True, **info})
+    except Exception as e:
+        logger.error(f"Safe status error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/setup', methods=['POST'])
+def safe_setup_api():
+    """Create the Safe for the first time: choose password + size cap."""
+    try:
+        data = request.get_json(silent=True) or {}
+        password = data.get('password') or ''
+        # Accept size in MB from the UI; clamp against disk free space.
+        size_mb = _safe_int(data.get('size_mb'), 0, min_v=0)
+        size_bytes = size_mb * 1024 * 1024
+        try:
+            usage = shutil.disk_usage(shared_data.datadir)
+            # Leave a small margin so we never fill the card completely.
+            if size_bytes > max(0, usage.free - 32 * 1024 * 1024):
+                return jsonify({'success': False,
+                                'error': 'Requested size exceeds available disk space'}), 400
+        except OSError:
+            pass
+        _get_safe_vault().setup(password, size_bytes)
+        logger.info("Safe created (%d MB cap)" % size_mb)
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe setup error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/unlock', methods=['POST'])
+def safe_unlock_api():
+    """Unlock the Safe with the password for this server session."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().unlock(data.get('password') or '')
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe unlock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/lock', methods=['POST'])
+def safe_lock_api():
+    """Wipe the in-memory key so the Safe requires the password again."""
+    try:
+        _get_safe_vault().lock()
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Safe lock error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/destroy', methods=['POST'])
+def safe_destroy_api():
+    """Permanently erase the Safe (verifies the password first)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        _get_safe_vault().destroy(data.get('password') or '')
+        logger.info("Safe permanently deleted by user request")
+        return jsonify({'success': True})
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe destroy error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/list')
+def safe_list_api():
+    """List a folder in the Safe: its files and immediate subfolders (unlock)."""
+    try:
+        listing = _get_safe_vault().list_dir(request.args.get('dir', ''))
+        return jsonify({
+            'success': True,
+            'dir': listing['dir'],
+            'folders': [{'name': f['name'], 'path': f['path']} for f in listing['folders']],
+            'files': [{
+                'id': e['id'],
+                'name': e.get('name', ''),
+                'size': e.get('size', 0),
+                'mime': e.get('mime', ''),
+                'modified': e.get('modified'),
+            } for e in listing['files']],
+        })
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe list error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/mkdir', methods=['POST'])
+def safe_mkdir_api():
+    """Create a folder inside the Safe (requires unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        parent = data.get('dir', '') or ''
+        name = (data.get('name') or '').strip()
+        if not name:
+            return jsonify({'success': False, 'error': 'Folder name required'}), 400
+        # A single new folder name — no path separators from the user.
+        if '/' in name or '\\' in name:
+            return jsonify({'success': False, 'error': 'Folder name cannot contain slashes'}), 400
+        path = (parent + '/' + name) if parent else name
+        created = _get_safe_vault().mkdir(path)
+        return jsonify({'success': True, 'path': created})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe mkdir error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/upload', methods=['POST'])
+def safe_upload_api():
+    """Encrypt and store one or more files into a Safe folder (requires unlock)."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'No file provided'}), 400
+        target_dir = request.form.get('dir', '') or ''
+        vault = _get_safe_vault()
+        stored = []
+        for file in request.files.getlist('file'):
+            if not file or not file.filename:
+                continue
+            data = file.read()
+            mime = file.mimetype or 'application/octet-stream'
+            vault.add_file(os.path.basename(file.filename), data, mime, dir=target_dir)
+            stored.append(file.filename)
+        if not stored:
+            return jsonify({'success': False, 'error': 'No file selected'}), 400
+        logger.info("Safe: stored %d encrypted file(s)" % len(stored))
+        return jsonify({'success': True, 'stored': len(stored)})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe upload error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/download')
+def safe_download_api():
+    """Decrypt and stream a stored file as an attachment (requires unlock)."""
+    try:
+        import mimetypes
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        resp = make_response(data)
+        safe_name = os.path.basename(entry.get('name', 'file'))
+        # Prefer the stored mime, but fall back to the extension so PDFs (and
+        # friends) stored with a generic type still render inline under nosniff.
+        mime = entry.get('mime') or 'application/octet-stream'
+        if mime == 'application/octet-stream':
+            mime = mimetypes.guess_type(safe_name)[0] or mime
+        resp.headers['Content-Type'] = mime
+        # inline=1 lets the browser render it in place (e.g. PDF preview).
+        inline = request.args.get('inline') in ('1', 'true', 'yes')
+        disposition = 'inline' if inline else 'attachment'
+        resp.headers['Content-Disposition'] = '%s; filename="%s"' % (disposition, safe_name)
+        resp.headers['Content-Length'] = str(len(data))
+        return resp
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe download error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/preview')
+def safe_preview_api():
+    """Decrypt a stored file in memory and return an inline preview payload."""
+    import mimetypes
+    try:
+        file_id = request.args.get('id', '')
+        entry, data = _get_safe_vault().read_file(file_id)
+        name = os.path.basename(entry.get('name', 'file'))
+        mime = entry.get('mime') or mimetypes.guess_type(name)[0] or 'application/octet-stream'
+        ext = os.path.splitext(name)[1].lower()
+
+        TEXT_EXTENSIONS = {'.txt', '.log', '.csv', '.json', '.xml', '.yaml', '.yml',
+                           '.md', '.conf', '.cfg', '.ini', '.nmap', '.gnmap', '.sh', '.py'}
+        IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg'}
+
+        if ext == '.pdf' or mime == 'application/pdf':
+            return jsonify({'type': 'pdf', 'size': len(data), 'name': name})
+        elif ext in IMAGE_EXTENSIONS:
+            if len(data) > 5 * 1024 * 1024:
+                return jsonify({'type': 'too_large', 'size': len(data), 'name': name})
+            return jsonify({'type': 'image', 'mime': mime,
+                            'data': base64.b64encode(data).decode('ascii'), 'name': name})
+        elif ext in TEXT_EXTENSIONS or (mime and mime.startswith('text/')):
+            truncated = len(data) > 512 * 1024
+            text = data[:512 * 1024].decode('utf-8', errors='replace')
+            return jsonify({'type': 'text', 'content': text, 'truncated': truncated,
+                            'size': len(data), 'name': name})
+        else:
+            return jsonify({'type': 'binary', 'mime': mime, 'size': len(data), 'name': name})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe preview error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/delete', methods=['POST'])
+def safe_delete_api():
+    """Remove a file, or a folder and its contents, from the Safe (unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        folder = data.get('folder')
+        if folder:
+            _get_safe_vault().delete_folder(folder)
+        else:
+            _get_safe_vault().delete_file(data.get('id', ''))
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe delete error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/rename', methods=['POST'])
+def safe_rename_api():
+    """Rename a file (by id) or a folder (by path) in the Safe (unlock)."""
+    try:
+        data = request.get_json(silent=True) or {}
+        name = data.get('name', '')
+        if data.get('folder'):
+            _get_safe_vault().rename_folder(data['folder'], name)
+        elif data.get('id'):
+            _get_safe_vault().rename_file(data['id'], name)
+        else:
+            return jsonify({'success': False, 'error': 'Nothing to rename'}), 400
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe rename error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/safe/move', methods=['POST'])
+def safe_move_api():
+    """Move a file (by id) or folder (by path) to `dir` within the Safe."""
+    try:
+        data = request.get_json(silent=True) or {}
+        dest = data.get('dir', '')
+        if data.get('folder'):
+            _get_safe_vault().move_folder(data['folder'], dest)
+        elif data.get('id'):
+            _get_safe_vault().move_file(data['id'], dest)
+        else:
+            return jsonify({'success': False, 'error': 'Nothing to move'}), 400
+        return jsonify({'success': True})
+    except SafeLockedError:
+        return jsonify({'success': False, 'locked': True, 'error': 'Safe is locked'}), 403
+    except SafeError as e:
+        return jsonify({'success': False, 'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Safe move error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 
 # Legacy endpoint compatibility
 @app.route('/list_files')
@@ -22465,6 +23892,8 @@ def get_ai_status():
             'config_enabled': config_enabled,  # User's intent from config
             'available': True,  # Always assume SDK is installed
             'model': getattr(ai_service, 'model', None),
+            'endpoint': getattr(ai_service, 'base_url', '') or 'openai',
+            'fallback_active': bool(getattr(ai_service, 'fallback_active', False)),
             'capabilities': {
                 'network_insights': getattr(ai_service, 'network_insights', False),
                 'vulnerability_summaries': getattr(ai_service, 'vulnerability_summaries', False)
@@ -22997,6 +24426,248 @@ def clear_ai_cache():
     except Exception as e:
         logger.error(f"Error clearing AI cache: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ai/models', methods=['POST'])
+def list_ai_models():
+    """List models offered by an OpenAI-compatible endpoint (issue #462).
+
+    Proxied through the backend: the browser can't reach a remote Ollama /
+    LocalAI server directly (CORS / mixed-content), and the Pi shares the same
+    network vantage that the real AI calls use. Body: {base_url?, api_key?} —
+    falls back to the saved ai_base_url and the stored token.
+    """
+    try:
+        from ai_service import normalize_base_url
+        data = request.get_json(silent=True) or {}
+        raw_url = str(data.get('base_url', '') or '').strip()
+        if not raw_url:
+            raw_url = str(shared_data.config.get('ai_base_url', '') or '').strip()
+        if not raw_url:
+            return jsonify({
+                'success': False,
+                'error': 'Enter an endpoint URL first (e.g. http://host:11434/v1).'
+            }), 400
+        base_url = normalize_base_url(raw_url)
+        # A host without an explicit port is the most common Connect failure
+        # (Ollama listens on 11434, LocalAI on 8080, …) — hint at it.
+        from urllib.parse import urlparse as _urlparse
+        port_hint = '' if _urlparse(base_url).port else ' Tip: include the port (Ollama uses :11434), e.g. http://host:11434/v1.'
+
+        api_key = str(data.get('api_key', '') or '').strip()
+        if not api_key:
+            try:
+                from env_manager import EnvManager
+                api_key = EnvManager().get_token() or ''
+            except Exception:
+                api_key = ''
+
+        from openai import OpenAI
+        client = OpenAI(
+            api_key=api_key or 'ragnar-local',
+            base_url=base_url,
+            timeout=10.0,
+            max_retries=0,
+        )
+        try:
+            resp = client.models.list()
+        except Exception as e:
+            logger.warning(f"AI model listing failed for {base_url}: {e}")
+            return jsonify({
+                'success': False,
+                'error': f'Could not reach {base_url} — check the URL and that the server is running.{port_hint}'
+            }), 502
+
+        models = sorted({
+            getattr(m, 'id', None)
+            for m in (getattr(resp, 'data', None) or [])
+            if getattr(m, 'id', None)
+        })
+        return jsonify({
+            'success': True,
+            'models': models,
+            'base_url': base_url,
+            'count': len(models),
+        })
+    except Exception as e:
+        logger.error(f"Error listing AI models: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+def _concurrent_map(fn, items, max_workers=32, overall_timeout=25):
+    """Run ``fn`` over ``items`` across a small, manually managed thread pool,
+    collecting the non-None results.
+
+    Deliberately avoids ``concurrent.futures``: under Flask-SocketIO's
+    ``async_mode='threading'`` its module-global shutdown flag can end up set in
+    a still-live process, after which ``ThreadPoolExecutor.submit`` permanently
+    raises "cannot schedule new futures after interpreter shutdown" (seen on a
+    Pi Zero). Plain threads don't consult that flag. Thread-start failures and
+    an overall deadline are handled so a constrained board degrades instead of
+    erroring.
+    """
+    import queue as _queue
+    if not items:
+        return []
+
+    work_q = _queue.Queue()
+    for it in items:
+        work_q.put(it)
+
+    results = []
+    lock = threading.Lock()
+
+    def _worker():
+        while True:
+            try:
+                it = work_q.get_nowait()
+            except _queue.Empty:
+                return
+            try:
+                r = fn(it)
+            except Exception:
+                r = None
+            if r is not None:
+                with lock:
+                    results.append(r)
+
+    n = max(1, min(max_workers, len(items)))
+    threads = []
+    for _ in range(n):
+        t = threading.Thread(target=_worker, daemon=True)
+        try:
+            t.start()
+        except RuntimeError:
+            break  # out of threads — those already started drain the queue
+        threads.append(t)
+
+    deadline = time.time() + overall_timeout
+    for t in threads:
+        t.join(timeout=max(0.1, deadline - time.time()))
+    return results
+
+
+def _probe_ollama(ip, port=11434, connect_timeout=0.6, read_timeout=2.5):
+    """Return a sorted model list if an OpenAI-compatible/Ollama server answers
+    on ip:port, else None. A fast TCP pre-check avoids waiting the full HTTP
+    timeout on the many closed ports in a subnet sweep. An empty list means the
+    server answered but has no models pulled (still a valid, reachable endpoint).
+    """
+    import socket as _socket
+    try:
+        with _socket.create_connection((ip, port), timeout=connect_timeout):
+            pass
+    except OSError:
+        return None
+
+    import json as _json
+    from urllib.request import urlopen, Request
+    base = f"http://{ip}:{port}"
+    # OpenAI-compatible path first (Ollama, LocalAI, vLLM, LM Studio), then
+    # Ollama's native /api/tags as a fallback.
+    for path, extract in (
+        ('/v1/models', lambda d: [m.get('id') for m in (d.get('data') or [])]),
+        ('/api/tags', lambda d: [m.get('name') for m in (d.get('models') or [])]),
+    ):
+        try:
+            req = Request(base + path, headers={'Accept': 'application/json'})
+            with urlopen(req, timeout=read_timeout) as resp:
+                payload = _json.loads(resp.read().decode('utf-8', 'replace'))
+            return sorted({m for m in extract(payload) if m})
+        except Exception:
+            continue
+    return None  # port open but not an OpenAI/Ollama server
+
+
+@app.route('/api/ai/discover', methods=['POST'])
+def discover_ai_endpoints():
+    """Scan the tailnet and the local subnet for OpenAI/Ollama servers (#462).
+
+    Tailnet peers come from mesh_manager; local hosts from the primary /24.
+    Every candidate is probed on :11434 concurrently; responders are returned
+    with their model lists so the UI can offer them as one-click endpoints.
+    """
+    from ai_service import normalize_base_url
+    try:
+        candidates = {}  # ip -> {name, os, source}
+
+        # --- Tailnet peers (Ragnar Mesh already speaks Tailscale) ---
+        tailnet_available = False
+        try:
+            import mesh_manager
+            st = mesh_manager.status()
+            tailnet_available = bool(st.get('available'))
+            nodes = ([st['self']] if st.get('self') else []) + (st.get('peers') or [])
+            for n in nodes:
+                ip = n.get('ip')
+                if ip and n.get('online', False):
+                    candidates.setdefault(ip, {
+                        'name': n.get('short_name') or n.get('hostname') or '',
+                        'os': n.get('os') or '',
+                        'source': 'tailnet',
+                    })
+        except Exception as e:
+            logger.debug(f"Tailnet enumeration failed during AI discovery: {e}")
+
+        # --- Local subnet (primary interface /24) ---
+        try:
+            import netifaces
+            gw = netifaces.gateways().get('default', {}).get(netifaces.AF_INET)
+            if gw:
+                addrs = netifaces.ifaddresses(gw[1]).get(netifaces.AF_INET) or []
+                if addrs:
+                    my_ip = addrs[0]['addr']
+                    mask = addrs[0].get('netmask', '255.255.255.0')
+                    bits = sum(bin(int(x)).count('1') for x in mask.split('.'))
+                    bits = max(bits, 24)  # cap the sweep at a /24
+                    net = ipaddress.ip_network(f"{my_ip}/{bits}", strict=False)
+                    # Nicer labels for hosts Ragnar already knows.
+                    db_names = {}
+                    try:
+                        for h in (shared_data.db.get_all_hosts() or []):
+                            if h.get('ip'):
+                                db_names[h['ip']] = h.get('hostname') or ''
+                    except Exception:
+                        pass
+                    for host in net.hosts():
+                        s = str(host)
+                        if s == my_ip:
+                            continue
+                        candidates.setdefault(s, {'name': db_names.get(s, ''), 'os': '', 'source': 'local'})
+        except Exception as e:
+            logger.debug(f"Local subnet enumeration failed during AI discovery: {e}")
+
+        if not candidates:
+            return jsonify({
+                'success': True, 'results': [], 'tailnet_available': tailnet_available,
+                'hint': 'No candidate hosts found — is this box on a network or tailnet?'
+            })
+
+        def work(ip):
+            models = _probe_ollama(ip)
+            if models is None:
+                return None
+            meta = candidates[ip]
+            return {
+                'ip': ip, 'name': meta['name'], 'os': meta['os'], 'source': meta['source'],
+                'port': 11434, 'base_url': normalize_base_url(f"http://{ip}:11434"),
+                'models': models,
+            }
+
+        results = _concurrent_map(work, list(candidates.keys()), max_workers=32)
+        results.sort(key=lambda r: (r['source'] != 'tailnet', (r['name'] or '').lower(), r['ip']))
+
+        return jsonify({
+            'success': True,
+            'results': results,
+            'tailnet_available': tailnet_available,
+            'scanned': len(candidates),
+            'hint': ("If your Ollama host isn't listed, make it listen beyond localhost: set "
+                     "OLLAMA_HOST=0.0.0.0:11434 on that machine and allow port 11434 through its firewall."),
+        })
+    except Exception as e:
+        logger.error(f"Error discovering AI endpoints: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/ai/token', methods=['GET'])

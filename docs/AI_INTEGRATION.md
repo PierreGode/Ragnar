@@ -36,13 +36,65 @@ Identifies potential attack vectors and security gaps in your network:
 3. Configure the following settings:
 
 - **ai_enabled**: Set to `true` to enable AI features
-- **openai_api_token**: Your OpenAI API token (required)
-- **ai_model**: Model to use (default: "gpt-5.4-nano")
+- **openai_api_token**: Your OpenAI API token (required for OpenAI's cloud; optional for a self-hosted endpoint)
+- **ai_model**: Model to use (default: "gpt-5.4-nano"; for a local server use its model tag, e.g. `qwen2.5:7b`)
+- **ai_base_url**: Optional OpenAI-compatible endpoint (see below). Blank = OpenAI cloud
+- **ai_api_style**: `auto` (default), `responses`, or `chat` — overrides which API dialect Ragnar speaks
 - **ai_analysis_enabled**: Enable/disable AI analysis
 - **ai_vulnerability_summaries**: Enable vulnerability summaries
 - **ai_network_insights**: Enable network insights
 - **ai_max_tokens**: Maximum tokens per response (default: 500)
 - **ai_temperature**: Creativity setting (default: 0.7)
+
+### Self-hosted / local AI endpoints (issue #462)
+
+Ragnar can talk to any **OpenAI-compatible** server instead of OpenAI's cloud —
+[Ollama](https://ollama.com/), [LocalAI](https://localai.io/), vLLM, or LM Studio.
+Set **ai_base_url** (in Settings → AI → *Self-Hosted / Custom Endpoint*) to the
+server's `/v1` URL, e.g. `http://192.168.1.50:11434/v1`, and set **ai_model** to
+that server's model tag. When a base URL is present:
+
+- Ragnar uses the **Chat Completions** API (`/v1/chat/completions`) — local
+  servers implement this, not OpenAI's proprietary Responses API. `ai_api_style`
+  lets you force `responses` or `chat` if auto-detection guesses wrong.
+- The API token becomes **optional** (most local servers accept any key).
+
+Click **Connect** next to the endpoint field to list the models the server
+offers and pick one from the dropdown (backed by `POST /api/ai/models`, which
+the Pi proxies so it works even though the browser can't reach the remote server
+directly). Then click **Save Endpoint**. URLs are tidied automatically — a
+missing `http://` or `/v1` is added, so `192.168.1.50:11434` becomes
+`http://192.168.1.50:11434/v1`.
+
+**Scan Network** (auto-discovery): the button beside *Connect* sweeps your
+**Tailscale peers** (via the Ragnar Mesh) *and* the **local subnet** for a
+running Ollama on port 11434 (`POST /api/ai/discover`), then lists every
+responder with its model count. Click one to fill the endpoint + model dropdown,
+then **Save Endpoint**. This is how you reach an Ollama on another machine over
+Tailscale — join that machine to the same tailnet and it shows up here.
+
+> Ollama binds to `127.0.0.1` by default, so it is *not* reachable over Tailscale
+> or the LAN until you set **`OLLAMA_HOST=0.0.0.0:11434`** on that machine and
+> allow port 11434 through its firewall. The scan says so when nothing answers.
+
+**Cloud fallback:** if a self-hosted endpoint becomes unreachable (connection
+lost / timeout) mid-run and an OpenAI token is configured, Ragnar automatically
+falls back to OpenAI's cloud so insights keep flowing. The dashboard header
+shows `… → OpenAI fallback` while this is active, and reverts once the local
+endpoint answers again. Set **ai_fallback_model** to choose the cloud model used
+(blank = `gpt-5.4-nano`). The dashboard AI card's title and footer always show
+the model actually in use.
+
+**The model runs on whatever host you point at — not on the Pi.** The Pi stays a
+thin HTTP client, exactly as it is with OpenAI. This pairs naturally with a
+fleet: a small board (e.g. a Pi Zero 2W) can offload inference to a capable box
+running Ollama on the LAN or mesh.
+
+> **Running a model on the Pi itself:** a Pi 5 (16 GB) *can* self-host a small
+> quantized model (e.g. a 3B–8B Q4 via Ollama) — point `ai_base_url` at
+> `http://localhost:11434/v1` — but expect **triage-grade** quality and only a
+> few tokens/sec on CPU. A Pi Zero 2W (512 MB) cannot run a useful model; use it
+> as a client to a remote endpoint instead.
 
 ### 2. Get an OpenAI API Token
 
@@ -76,6 +128,11 @@ Click the "Refresh" button in the AI Insights section to:
 ## API Endpoints
 
 The following API endpoints are available for programmatic access:
+
+### POST /api/ai/models
+Lists the models offered by an OpenAI-compatible endpoint (self-hosted support).
+Body: `{ "base_url": "http://host:11434/v1", "api_key": "optional" }` — both
+fall back to the saved config. Returns `{ "success": true, "models": [...] }`.
 
 ### GET /api/ai/status
 Returns AI service status and configuration

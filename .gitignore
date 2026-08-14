@@ -142,6 +142,15 @@ data/output/
 backup/backups/
 backup/uploads/
 
+# Encrypted Safe vault — user data, must never be committed
+data/safe/
+
+# Mesh file-transfer inbox — received files, must never be committed
+data/mesh_inbox/
+
+# Mesh Share — files this unit publishes to the mesh, must never be committed
+data/mesh_share/
+
 # Configuration files (contains sensitive data)
 config/shared_config.json
 

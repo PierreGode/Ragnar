@@ -271,7 +271,9 @@
   | `ai_enabled` | False | Enables AI insights; requires token. |
   | `release_gate_enabled` | False | Lock UI/API until passphrase provided (demo mode). |
   | `steal_file_names` | [...] | Keyword list used by loot modules. |
-  | `mac_scan_blacklist` | [] | MACs excluded from scanning/attacks. |
+  | `mac_scan_blacklist` | [] | MACs excluded from scanning/attacks. Managed from the Network tab's per-host **Ignore** button (or Settings) via `POST/DELETE /api/config/scan-blacklist`. |
+  | `ip_scan_blacklist` | [] | IPs excluded from scanning/attacks. Same management path as `mac_scan_blacklist`. |
+- The `blacklistcheck` toggle ("Honor Scan Blacklists", Settings → General) is the master switch that enables/disables enforcement of both ignore lists.
 - Runtime modules reference `shared_data.config` live; writes through the Web UI call `SharedData.save_config()` which flushes JSON, updates in-memory attributes, and triggers downstream watchers (e.g., Wi-Fi manager reloading known networks, display toggling `screen_reversed`).
 - Config headings (`__title_*`) are used purely for UI grouping; the parser strips these keys automatically when exporting to Python dicts.
 

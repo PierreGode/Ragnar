@@ -802,7 +802,7 @@
                 <button onclick="showTab('adv-vuln')" data-tab="adv-vuln" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Adv Scan</button>
                 <button onclick="showTab('wardriving')" data-tab="wardriving" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 wardriving-feature hidden">Wardriving</button>
                 <button onclick="showTab('epaper')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700 requires-display">Display</button>
-                <button onclick="showTab('files')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
+                <button onclick="showTab('files')" data-tab="files" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Files</button>
                 <button onclick="showTab('system')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">System</button>
                 <button onclick="showTab('connect')" class="block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Connect</button>
                 <button onclick="showTab('mesh')" class="mesh-nav block w-full text-left px-3 py-2 rounded-lg hover:bg-slate-700">Ragnar Mesh</button>
@@ -1087,7 +1087,7 @@
                         <svg class="w-6 h-6 mr-2 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
                         </svg>
-                        AI Insights (GPT-5.4 Nano)
+                        AI Insights (<span id="ai-insights-model">GPT-5.4 Nano</span>)
                     </span>
                     <button onclick="refreshAIInsights()" class="text-sm bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded transition-colors">
                         <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3103,7 +3103,16 @@
 
                 <!-- Problems the mesh detects about itself -->
                 <div id="mesh-warnings" class="space-y-2 mb-4"></div>
+
+                <!-- Sub-view nav: Overview vs File Transfer -->
+                <div class="flex flex-wrap items-center gap-2 mt-2">
+                    <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
+                    <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
+                    <button id="mesh-nav-share" onclick="showMeshView('share')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">Mesh Share</button>
+                </div>
             </div>
+
+            <div id="mesh-view-overview">
 
             <!-- Install step: shown when Tailscale is not on this unit yet. -->
             <div id="mesh-install" class="glass rounded-xl p-6 mb-6 hidden">
@@ -3171,6 +3180,35 @@
                             <option value="female">Female</option>
                         </select>
                         <p id="mesh-join-gender-hint" class="text-[11px] text-gray-500 mt-1">Known names set this automatically.</p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Mesh name <span class="text-gray-600 normal-case">(optional)</span></label>
+                        <input id="mesh-suffix-input" type="text" placeholder="blank = main mesh (ragnar-mesh)"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            Leave blank to join the main mesh. Type a short name — e.g. <code>2</code> or <code>lab</code> —
+                            to place this unit in a <strong>separate, isolated mesh</strong>
+                            (<code>tag:ragnar-mesh-&lt;name&gt;</code>) on the same Tailscale account. Units in
+                            different meshes never see or trust each other. The tag must exist under
+                            <code>tagOwners</code> in your Tailscale ACL.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Mesh secret <span class="text-gray-600 normal-case">(optional, recommended for shared tailnets)</span></label>
+                        <input id="mesh-secret-input" type="password" placeholder="paste this mesh's secret, or leave blank to Generate" autocomplete="off"
+                               oninput="if(this.value){var g=document.getElementById('mesh-secret-generate'); if(g) g.checked=false;}"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <label class="flex items-center gap-2 text-xs text-gray-300 mt-2">
+                            <input id="mesh-secret-generate" type="checkbox" checked class="rounded bg-slate-900 border-slate-700">
+                            Generate a new secret (starting a brand-new mesh — shown once after joining, copy it to the other units)
+                        </label>
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            A <strong>second factor over the tag</strong>. Every unit of one mesh holds the same secret;
+                            a box that only forged the tag — e.g. through a mis-set <code>tagOwners</code> on a shared
+                            Tailscale account — has no secret and is <strong>rejected</strong>. Leave blank to keep the
+                            tag-only behaviour. Moving meshes? Use <em>Leave the mesh</em>, then join the new one with its
+                            own key and secret.
+                        </p>
                     </div>
                     <div class="md:col-span-2">
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
@@ -3244,6 +3282,9 @@
                 </div>
                 <div id="mesh-peer-cards" class="space-y-2"></div>
                 <p id="mesh-last-poll" class="text-xs text-gray-500 mt-3"></p>
+                <!-- Mesh-secret nudge (only when a separate mesh has none) lives
+                     at the bottom. The secret itself is never shown in the UI. -->
+                <div id="mesh-secret-footer" class="mt-4"></div>
             </div>
 
             <!-- The generic node page: full info + controls for whichever node
@@ -3308,7 +3349,7 @@
                             never the public internet.
                         </p>
                         <div id="mesh-https-note" class="hidden text-[11px] rounded border px-2 py-1.5 mb-2"></div>
-                        <div class="flex gap-2">
+                        <div class="flex flex-wrap gap-2">
                             <button onclick="meshServe(true, false)"
                                     class="flex-1 bg-Ragnar-600 hover:bg-Ragnar-700 text-white py-2 px-3 rounded text-sm transition-colors"
                                     title="Plain HTTP on port 80 — tailnet-only, no certificate needed. The way in most units use.">Publish</button>
@@ -3370,6 +3411,227 @@
                     </div>
                 </div>
                 <div id="mesh-update-results" class="space-y-1"></div>
+            </div>
+            </div><!-- /mesh-view-overview -->
+
+            <!-- File Transfer view -->
+            <div id="mesh-view-transfer" class="hidden">
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center gap-2 mb-1">
+                        <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                        <h3 class="text-xl font-bold">File Transfer</h3>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-5">Move files across your Viking mesh over Tailscale — every byte is WireGuard-encrypted in transit. Received files land in this unit's Inbox for you to file.</p>
+
+                    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Send -->
+                        <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-4">
+                            <h4 class="font-semibold mb-3">Send</h4>
+                            <label class="block text-sm text-gray-400 mb-1">Destination unit</label>
+                            <select id="xfer-dest" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-4">
+                                <option value="">Loading units…</option>
+                            </select>
+                            <div id="xfer-drop" onclick="xferPickComputerFile()"
+                                class="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center text-gray-400 hover:border-sky-500 cursor-pointer transition-colors">
+                                <div class="text-3xl mb-2">⬆</div>
+                                <div class="text-sm">Drop files here to send</div>
+                                <div class="text-xs text-gray-500">or click to browse your computer</div>
+                            </div>
+                            <div class="flex items-center gap-2 my-3"><div class="flex-1 border-t border-slate-700"></div><span class="text-xs text-gray-500">or</span><div class="flex-1 border-t border-slate-700"></div></div>
+                            <button onclick="openXferPicker()" class="w-full bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">📁 Send a file from this unit</button>
+                            <p class="text-xs text-gray-500 mt-2">You can also use the <b>Send</b> (paper-plane) action on any row in the <b>Files</b> tab.</p>
+                        </div>
+
+                        <!-- Activity -->
+                        <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-4">
+                            <div class="flex items-center justify-between mb-2">
+                                <h4 class="font-semibold">Transfers</h4>
+                                <span class="text-xs text-gray-500">live</span>
+                            </div>
+                            <div id="xfer-list"><p class="text-gray-500 text-sm py-2">No transfers yet.</p></div>
+
+                            <div class="flex items-center justify-between mt-5 mb-2">
+                                <h4 class="font-semibold">Inbox <span id="xfer-inbox-count" class="hidden text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></h4>
+                                <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer">
+                                    <input id="xfer-receive-toggle" type="checkbox" onchange="xferSetReceive(this.checked)" class="rounded bg-slate-900 border-slate-700">
+                                    Accept incoming
+                                </label>
+                            </div>
+                            <div id="xfer-inbox"><p class="text-gray-500 text-sm py-2">Inbox is empty.</p></div>
+                        </div>
+                    </div>
+
+                    <div id="xfer-units" class="mt-5 flex items-center gap-2 flex-wrap"></div>
+                </div>
+
+                <!-- Pick a file already on this unit to send to a peer -->
+                <div id="xfer-pick-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-2xl flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                        <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <button onclick="xferPickerBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <span class="font-semibold">Send from this unit</span>
+                                <span id="xfer-pick-path" class="text-sm text-gray-400 truncate">/</span>
+                            </div>
+                            <button onclick="closeXferPicker()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="px-3 py-2 text-xs text-gray-400 border-b border-slate-700 flex-shrink-0">Sending to <b id="xfer-pick-dest" class="text-sky-300">—</b> · click a file to send it</div>
+                        <div id="xfer-pick-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Mesh Share view -->
+            <div id="mesh-view-share" class="hidden">
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-5 h-5 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2H5a2 2 0 00-2 2z"></path></svg>
+                            <h3 class="text-xl font-bold">Mesh Share</h3>
+                        </div>
+                        <div class="flex gap-2">
+                            <button onclick="shareUploadFiles()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">⬆ Share files</button>
+                            <button onclick="loadMeshShare()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-3">A folder every unit publishes to the whole mesh. Files stay on their <b>owner</b> — anyone can <b>Fetch</b> a copy into a folder of their choice. Your own files can be <b>Unshared</b>.</p>
+                    <label id="share-guest-read-row" class="flex items-start gap-2 text-xs text-gray-400 cursor-pointer mb-4">
+                        <input id="share-guest-read-toggle" type="checkbox" onchange="setShareGuestRead(this.checked)" class="rounded bg-slate-900 border-slate-700 flex-shrink-0 mt-0.5">
+                        Let <b class="text-gray-300">share-guests</b> (<code class="text-gray-500">tag:ragnar-share</code>) browse &amp; fetch this folder — off means they can only send files to you.
+                    </label>
+                    <div id="mesh-share-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
+                </div>
+
+                <!-- People outside your mesh: token-based sharing -->
+                <div id="mesh-share-outside-panel" class="glass rounded-xl p-6 mt-4">
+                    <button type="button" onclick="toggleOutsideMesh()" class="w-full text-left flex items-start gap-2 group">
+                        <svg class="w-5 h-5 text-sky-400 flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-1.13a4 4 0 10-4 0m6 5a4 4 0 00-8 0"></path></svg>
+                        <div class="min-w-0 flex-1">
+                            <h3 class="text-xl font-bold">Outside your mesh</h3>
+                            <p class="text-sm text-gray-400 mt-1">Share files with someone who is <b>not a unit in your mesh</b>. Tailscale still carries the traffic; the sender is limited to <b>send files only</b> — no dashboard, scans, or other units.</p>
+                        </div>
+                        <svg id="mesh-share-outside-chevron" class="w-5 h-5 text-gray-400 flex-shrink-0 mt-0.5 transition-transform group-hover:text-gray-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                    </button>
+
+                    <div id="mesh-share-outside-body" class="hidden mt-4">
+                    <!-- Join a tailnet as share-only (for a box not yet on any tailnet) -->
+                    <div class="bg-slate-800/40 border border-slate-700 rounded-lg p-3 mb-6 flex items-center justify-between gap-3 flex-wrap">
+                        <div class="min-w-0">
+                            <div class="text-sm font-semibold">This unit isn't on a tailnet?</div>
+                            <div class="text-xs text-gray-500">Paste an auth key to join <b>share-only</b> (tag <code class="text-gray-400">ragnar-share</code>) — no terminal needed.</div>
+                        </div>
+                        <button onclick="openShareJoinModal()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors flex-shrink-0">🔗 Join a tailnet (share-only)</button>
+                    </div>
+
+                    <!-- Remotes I can send TO -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Remote shares <span class="text-xs text-gray-500 font-normal">— send files to</span></h4>
+                        <button onclick="openRemoteShareModal()" class="bg-sky-600 hover:bg-sky-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ Add remote share</button>
+                    </div>
+                    <div id="remote-shares-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50 mb-6"><p class="text-gray-500 text-sm p-4">No remote shares yet.</p></div>
+
+                    <!-- Tokens that let someone send TO me -->
+                    <div class="flex items-center justify-between gap-2 mb-2">
+                        <h4 class="font-semibold">Share tokens <span class="text-xs text-gray-500 font-normal">— let someone send to you</span></h4>
+                        <button onclick="createShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">+ New token</button>
+                    </div>
+                    <div id="share-tokens-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">No tokens issued.</p></div>
+                    <p class="text-xs text-gray-500 mt-2">Hand a token to one outside sender. They add <b>your</b> Ragnar as a remote share using your Tailscale address + this token. The full token is shown once, at creation — revoke any time.</p>
+                    </div>
+                </div>
+
+                <!-- Add remote share modal -->
+                <div id="remote-share-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-bold text-lg">Add remote share</h3>
+                            <button onclick="closeRemoteShareModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <label class="block text-sm text-gray-400 mb-1">Name</label>
+                        <input id="rs-name" type="text" placeholder="Alice's Ragnar" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3">
+                        <label class="block text-sm text-gray-400 mb-1">Tailscale address</label>
+                        <input id="rs-address" type="text" placeholder="100.x.y.z:8000  or  their-host:8000" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1">
+                        <p class="text-xs text-gray-500 mb-3">Their Ragnar's Tailscale IP or MagicDNS name, with the port (usually 8000).</p>
+                        <label class="block text-sm text-gray-400 mb-1">Share token</label>
+                        <input id="rs-token" type="text" placeholder="rgnr-share-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-xs text-gray-500 mb-3">The token they generated and gave you.</p>
+                        <div class="flex justify-end gap-2">
+                            <button onclick="closeRemoteShareModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                            <button onclick="saveRemoteShare()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Save</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Join a tailnet (share-only) modal -->
+                <div id="share-join-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5 max-h-[calc(100vh-1.5rem)] overflow-y-auto">
+                        <div class="flex items-center justify-between mb-3">
+                            <h3 class="font-bold text-lg">Join a tailnet — share-only</h3>
+                            <button onclick="closeShareJoinModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <p class="text-sm text-gray-400 mb-3">Ask the tailnet owner for a Tailscale <b>auth key</b> tagged <code class="text-gray-300">tag:ragnar-share</code>. Paste it here and this unit joins as a share-only guest — it can send files to that owner and nothing else.</p>
+                        <div class="bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 mb-3 text-xs text-amber-300">
+                            ⚠ A machine can only be on <b>one</b> tailnet at a time. If this unit is currently in your own mesh, joining here <b>removes it from your mesh</b> and moves it onto theirs. To keep it in your mesh, use their <b>node-share + a share token</b> instead.
+                        </div>
+                        <label class="block text-sm text-gray-400 mb-1">Auth key</label>
+                        <input id="sj-authkey" type="text" placeholder="tskey-auth-…" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-3 font-mono">
+                        <label class="block text-sm text-gray-400 mb-1">Name for this unit <span class="text-gray-600">(optional)</span></label>
+                        <input id="sj-hostname" type="text" placeholder="e.g. bjorn-share" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-4">
+                        <label class="block text-sm text-gray-400 mb-1">Mesh name <span class="text-gray-600">(optional)</span></label>
+                        <input id="sj-mesh-suffix" type="text" placeholder="blank = main mesh (ragnar-share)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm mb-1 font-mono">
+                        <p class="text-[11px] text-gray-500 mb-4">Match the host's mesh. Blank ⇒ <code>tag:ragnar-share</code>; a name (e.g. <code>2</code>) ⇒ <code>tag:ragnar-share-&lt;name&gt;</code>, the guest tag for that separate mesh.</p>
+                        <div id="sj-status" class="hidden text-sm mb-3"></div>
+                        <div class="flex justify-end gap-2">
+                            <button onclick="closeShareJoinModal()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm">Cancel</button>
+                            <button id="sj-join-btn" onclick="shareJoinTailnet()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm">Join</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- New token reveal modal (shown once) -->
+                <div id="share-token-reveal-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-md p-5">
+                        <h3 class="font-bold text-lg mb-1">New share token</h3>
+                        <p class="text-sm text-gray-400 mb-3">Copy it now — it is shown only once. Give it, plus this unit's Tailscale address, to the person who should be able to send you files.</p>
+                        <div class="flex items-center gap-2 bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 mb-4">
+                            <code id="share-token-reveal-value" class="text-sm text-emerald-300 font-mono break-all flex-1"></code>
+                            <button onclick="copyShareToken()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-2.5 py-1.5 rounded flex-shrink-0">Copy</button>
+                        </div>
+                        <div class="flex justify-end">
+                            <button onclick="closeShareTokenReveal()" class="bg-sky-600 hover:bg-sky-700 text-white px-4 py-2 rounded-lg text-sm">Done</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Fetch destination folder picker -->
+                <div id="share-dest-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                    <div class="glass rounded-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                        <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <button onclick="shareDestBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                </button>
+                                <span id="share-dest-title" class="font-semibold truncate">Save to…</span>
+                            </div>
+                            <button onclick="closeShareDest()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                            </button>
+                        </div>
+                        <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 flex-shrink-0">
+                            <span id="share-dest-path" class="text-sm text-gray-400 truncate">Choose a folder</span>
+                            <button id="share-dest-here" onclick="shareDoFetch()" class="hidden bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-3 py-1.5 rounded-lg flex-shrink-0 transition-colors">Save here</button>
+                        </div>
+                        <div id="share-dest-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                    </div>
+                </div>
             </div>
         </div>
 
@@ -4403,24 +4665,36 @@
         </div>
 
         <div id="files-tab" class="tab-content hidden">
-            <div class="glass rounded-xl p-6">
-                <div class="flex items-center justify-between mb-6">
-                    <h2 class="text-2xl font-bold">File Management</h2>
-                    <div class="flex space-x-3">
-                        <button onclick="uploadFile()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="glass rounded-xl p-4 sm:p-6 lg:h-[calc(100vh-7rem)] lg:flex lg:flex-col lg:overflow-hidden">
+                <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6 lg:flex-shrink-0">
+                    <h2 class="text-xl sm:text-2xl font-bold">File Management</h2>
+                    <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-2">
+                        <button onclick="uploadFile()" class="flex items-center justify-center bg-green-600 hover:bg-green-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
                             </svg>
                             Upload
                         </button>
-                        <button onclick="clearFiles()" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <button id="safe-toggle-btn" onclick="toggleSafeLock()" class="flex items-center justify-center bg-amber-600 hover:bg-amber-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg id="safe-toggle-icon" class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                            </svg>
+                            <span id="safe-toggle-label" class="whitespace-nowrap">Vault</span>
+                        </button>
+                        <button onclick="uploadOrOpenSafe()" class="flex items-center justify-center bg-amber-700 hover:bg-amber-800 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+                            </svg>
+                            <span class="whitespace-nowrap">Upload to Vault</span>
+                        </button>
+                        <button onclick="clearFiles()" class="flex items-center justify-center bg-red-600 hover:bg-red-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path>
                             </svg>
-                            Clear Files
+                            <span class="whitespace-nowrap">Clear Files</span>
                         </button>
-                        <button onclick="refreshFiles()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors">
-                            <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <button onclick="refreshFiles()" class="refresh-btn flex items-center justify-center bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 sm:px-4 py-2 rounded-lg text-sm sm:text-base transition-colors">
+                            <svg class="w-4 h-4 inline mr-1.5 sm:mr-2 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
                             </svg>
                             Refresh
@@ -4429,23 +4703,31 @@
                 </div>
                 
                 <!-- File Browser -->
-                <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6 lg:flex-1 lg:min-h-0">
                     <!-- Directory Tree -->
-                    <div class="lg:col-span-1">
-                        <h3 class="text-lg font-semibold mb-3">Directories</h3>
-                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                    <div class="lg:col-span-1 lg:flex lg:flex-col lg:min-h-0">
+                        <h3 class="text-lg font-semibold mb-3 lg:flex-shrink-0">Directories</h3>
+                        <div class="glass-card h-48 lg:h-auto lg:flex-1 lg:min-h-0 overflow-y-auto scrollbar-thin bg-slate-800/40 border border-slate-700 rounded-lg">
                             <div id="directory-tree" class="p-4">
                                 <p class="text-gray-400">Loading directories...</p>
                             </div>
                         </div>
                     </div>
-                    
+
                     <!-- File List -->
-                    <div class="lg:col-span-2">
-                        <div class="flex flex-col gap-2 mb-3">
-                            <div class="flex items-center justify-between">
-                                <h3 class="text-lg font-semibold">Files</h3>
-                                <div class="text-sm text-gray-400">
+                    <div class="lg:col-span-2 lg:flex lg:flex-col lg:min-h-0">
+                        <div class="flex flex-col gap-2 mb-3 lg:flex-shrink-0">
+                            <div class="flex items-center justify-between gap-2">
+                                <div class="flex items-center gap-1.5 min-w-0">
+                                    <button onclick="fileGoBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors flex-shrink-0">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                                    </button>
+                                    <button onclick="fileGoUp()" title="Up one folder" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors flex-shrink-0">
+                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>
+                                    </button>
+                                    <h3 class="text-lg font-semibold ml-1">Files</h3>
+                                </div>
+                                <div class="text-sm text-gray-400 truncate">
                                     <span id="current-path">/</span>
                                 </div>
                             </div>
@@ -4469,7 +4751,7 @@
                                 </div>
                             </div>
                         </div>
-                        <div class="glass-card h-96 overflow-y-auto scrollbar-thin">
+                        <div class="glass-card h-96 lg:h-auto lg:flex-1 lg:min-h-0 overflow-y-auto scrollbar-thin bg-slate-800/40 border border-slate-700 rounded-lg">
                             <div id="file-list" class="p-4">
                                 <p class="text-gray-400">Select a directory to view files</p>
                             </div>
@@ -4480,20 +4762,20 @@
             </div>
 
             <!-- File Preview Modal -->
-            <div id="file-preview-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-4">
-                <div class="glass rounded-xl w-full max-w-4xl flex flex-col overflow-hidden" style="max-height:calc(100vh - 2rem)">
+            <div id="file-preview-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-2 sm:p-4">
+                <div class="glass rounded-xl w-full max-w-4xl flex flex-col overflow-hidden max-h-[calc(100vh-1rem)] sm:max-h-[calc(100vh-2rem)]">
                     <!-- Modal header -->
-                    <div class="flex items-center justify-between p-4 border-b border-slate-700 flex-shrink-0">
-                        <div class="flex items-center gap-3">
-                            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <div class="flex items-center justify-between gap-2 p-3 sm:p-4 border-b border-slate-700 flex-shrink-0">
+                        <div class="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+                            <svg class="w-5 h-5 flex-shrink-0 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                             </svg>
-                            <span id="preview-filename" class="font-semibold truncate max-w-md"></span>
-                            <span id="preview-truncated-badge" class="hidden text-xs bg-yellow-700 text-yellow-200 px-2 py-0.5 rounded">Truncated — file too large</span>
+                            <span id="preview-filename" class="font-semibold truncate"></span>
+                            <span id="preview-truncated-badge" class="hidden flex-shrink-0 text-xs bg-yellow-700 text-yellow-200 px-2 py-0.5 rounded">Truncated</span>
                         </div>
-                        <div class="flex items-center gap-2">
-                            <button id="preview-download-btn" onclick="" class="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">Download</button>
-                            <button onclick="closeFilePreview()" class="p-1.5 hover:bg-slate-700 rounded-lg transition-colors">
+                        <div class="flex items-center gap-2 flex-shrink-0">
+                            <button id="preview-download-btn" onclick="" class="bg-blue-600 hover:bg-blue-700 text-white px-2.5 sm:px-3 py-1.5 rounded-lg text-sm transition-colors">Download</button>
+                            <button onclick="closeFilePreview()" aria-label="Close" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors">
                                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
                                 </svg>
@@ -4501,7 +4783,7 @@
                         </div>
                     </div>
                     <!-- Modal content -->
-                    <div id="preview-content" class="flex-1 overflow-y-auto p-4 min-h-0"></div>
+                    <div id="preview-content" class="flex-1 overflow-y-auto p-3 sm:p-4 min-h-0"></div>
                 </div>
             </div>
 
@@ -4523,9 +4805,70 @@
                 </div>
             </div>
 
+            <!-- Move-to-folder picker -->
+            <div id="move-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-3 sm:p-4">
+                <div class="glass rounded-xl w-full max-w-lg flex flex-col overflow-hidden max-h-[calc(100vh-1rem)]">
+                    <div class="flex items-center justify-between gap-2 p-3 border-b border-slate-700 flex-shrink-0">
+                        <div class="flex items-center gap-2 min-w-0">
+                            <button onclick="moveModalBack()" title="Back" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+                            </button>
+                            <span id="move-title" class="font-semibold truncate">Move to…</span>
+                        </div>
+                        <button onclick="closeMoveModal()" class="p-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg flex-shrink-0" aria-label="Close">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-slate-700 flex-shrink-0">
+                        <span id="move-path" class="text-sm text-gray-400 truncate">/</span>
+                        <button id="move-here-btn" onclick="doMove()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white text-sm px-3 py-1.5 rounded-lg flex-shrink-0 transition-colors">Move here</button>
+                    </div>
+                    <div id="move-list" class="flex-1 overflow-y-auto p-2 min-h-0"></div>
+                </div>
+            </div>
+
+            <!-- Vault (encrypted) Modal -->
+            <div id="safe-modal" class="fixed inset-0 bg-black bg-opacity-75 hidden items-center justify-center z-50 p-4">
+                <div class="glass rounded-xl w-full max-w-3xl flex flex-col overflow-hidden" style="max-height:calc(100vh - 2rem)">
+                    <!-- Header -->
+                    <div class="flex items-center justify-between p-4 border-b border-slate-700 flex-shrink-0">
+                        <div class="flex items-center gap-3">
+                            <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path>
+                            </svg>
+                            <span class="font-semibold">Vault</span>
+                            <span id="safe-status-badge" class="hidden text-xs px-2 py-0.5 rounded"></span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button id="safe-lock-btn" onclick="lockSafe()" class="hidden bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm transition-colors">Lock</button>
+                            <button onclick="closeSafe()" class="p-1.5 hover:bg-slate-700 rounded-lg transition-colors">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Body (state machine: setup / locked / unlocked) -->
+                    <div id="safe-body" class="flex-1 overflow-y-auto p-4 min-h-0"></div>
+                </div>
+            </div>
+
+            <!-- Full-screen image viewer (shared by file + Safe previews) -->
+            <!-- Tapping anywhere closes it; the ✕ and Esc also work. -->
+            <div id="image-fullscreen-overlay" class="fixed inset-0 bg-black hidden items-center justify-center overflow-auto cursor-zoom-out" style="z-index:60">
+                <img id="image-fullscreen-img" src="" alt="" title="Tap to close" class="max-w-full max-h-full object-contain select-none">
+                <button onclick="closeImageFullscreen()" title="Close (Esc)"
+                    class="fixed top-4 right-4 flex items-center gap-1.5 pl-3 pr-4 py-2 bg-black/60 hover:bg-black/80 rounded-lg text-white text-sm font-medium transition-colors" style="z-index:61">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                    </svg>
+                    Close
+                </button>
+            </div>
+
 
         </div>
-        
+
         <!-- System Tab -->
         <div id="system-tab" class="tab-content hidden">
             <div class="glass rounded-xl p-6">
@@ -7160,6 +7503,41 @@
                                             Get your API key from <a href="https://platform.openai.com/api-keys" target="_blank" class="text-purple-400 hover:text-purple-300 underline">OpenAI Platform</a>
                                         </p>
                                     </div>
+                                    <div class="border-t border-slate-700 pt-3 mt-1">
+                                        <label for="ai-base-url" class="block text-sm font-medium text-gray-300 mb-2">Self-Hosted / Custom Endpoint <span class="text-gray-500 font-normal">(optional)</span></label>
+                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                            <input type="text" id="ai-base-url" autocomplete="off" placeholder="http://192.168.1.50:11434/v1"
+                                                   class="flex-1 w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                            <button onclick="connectAIEndpoint()" id="ai-connect-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                Connect
+                                            </button>
+                                            <button onclick="scanAIEndpoints()" id="ai-scan-btn" class="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                Scan Network
+                                            </button>
+                                        </div>
+                                        <p class="text-xs text-gray-500 mt-1">
+                                            Point at an OpenAI-compatible server (Ollama, LocalAI, vLLM, LM Studio) on your LAN or mesh. Leave blank to use OpenAI's cloud. When set, Ragnar uses the Chat Completions API and the token above becomes optional. <strong class="text-gray-400">Connect</strong> loads the models the endpoint offers; <strong class="text-gray-400">Scan Network</strong> searches your Tailscale peers and local subnet for a running Ollama.
+                                        </p>
+                                        <div id="ai-discover-results" class="mt-3 hidden"></div>
+                                        <div id="ai-models-row" class="mt-3 hidden">
+                                            <label for="ai-model-select" class="block text-sm font-medium text-gray-300 mb-2">Available Models <span class="text-gray-500 font-normal">(from endpoint)</span></label>
+                                            <select id="ai-model-select" onchange="onAIModelSelect()"
+                                                    class="w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                                <option value="">Select a model…</option>
+                                            </select>
+                                        </div>
+                                        <div class="mt-3">
+                                            <label for="ai-model-input" class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                                            <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+                                                <input type="text" id="ai-model-input" autocomplete="off" placeholder="gpt-5.4-nano  ·  or e.g. qwen2.5:7b"
+                                                       class="flex-1 w-full bg-slate-700 border border-slate-600 text-white py-2 px-3 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent">
+                                                <button onclick="saveAIEndpoint()" class="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg transition-colors whitespace-nowrap w-full sm:w-auto">
+                                                    Save Endpoint
+                                                </button>
+                                            </div>
+                                            <p class="text-xs text-gray-500 mt-1">Pick from the dropdown above, or type a model tag. For OpenAI leave the default; for a local server use its model tag.</p>
+                                        </div>
+                                    </div>
                                     <div id="ai-config-status" class="hidden p-3 rounded-lg text-sm">
                                         <span id="ai-config-status-message"></span>
                                     </div>
@@ -7172,8 +7550,8 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
                                 </svg>
                                 <div class="text-xs text-gray-400">
-                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> API calls are sent directly to OpenAI.</p>
-                                    <p><strong class="text-gray-300">Cost:</strong> AI features consume OpenAI API credits based on usage. Monitor your usage at OpenAI's platform.</p>
+                                    <p class="mb-1"><strong class="text-gray-300">Privacy:</strong> With no custom endpoint, API calls go directly to OpenAI. Set a self-hosted endpoint to keep all inference on hardware you control.</p>
+                                    <p><strong class="text-gray-300">Cost:</strong> OpenAI features consume API credits based on usage. A self-hosted endpoint has no per-call cost.</p>
                                 </div>
                             </div>
                         </div>
@@ -7626,7 +8004,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260810-status-dot"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260814-mesh-secret-8"></script>
 
 </body>
 </html>
