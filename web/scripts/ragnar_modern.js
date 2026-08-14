@@ -33192,6 +33192,21 @@ function renderMesh(data) {
 
     const tagCode = escapeHtml(data.mesh_tag || 'tag:ragnar-mesh');
 
+    // Second-factor posture. Armed: peers must prove a shared secret on top of
+    // the tag, so a mis-set tagOwners on a shared tailnet is no longer a breach.
+    // Not armed on a separate mesh: nudge — that is exactly the multi-tenant
+    // case where a forged tag would otherwise be accepted.
+    if (inMesh && data.mesh_secret_set) {
+        notes.push(meshWarning(
+            `<strong>Mesh secret armed.</strong> Peers must prove a shared secret in addition to the ` +
+            `<code>${tagCode}</code> tag, so a box that only forged the tag is rejected.`, 'info'));
+    } else if (inMesh && data.mesh_suffix) {
+        notes.push(meshWarning(
+            `<strong>This separate mesh has no secret set.</strong> On a shared Tailscale account, arming a ` +
+            `mesh secret stops a mis-tagged box from being trusted. Use <em>Leave the mesh</em>, then re-join ` +
+            `with a secret (tick <em>Generate</em> on the first unit, paste it on the rest).`, 'warn'));
+    }
+
     // The #1 "they sense each other but don't share data" cause: this unit is
     // on the tailnet but was never tagged into the mesh. An interactive
     // `tailscale up` login never applies a tag, and the whole mesh keys off it.
@@ -33616,6 +33631,8 @@ async function meshJoin() {
     const viking = document.getElementById('mesh-viking-input').value.trim();
     const gender = document.getElementById('mesh-viking-gender').value;
     const meshSuffix = (document.getElementById('mesh-suffix-input') || {}).value || '';
+    const meshSecret = (document.getElementById('mesh-secret-input') || {}).value || '';
+    const genSecret = !!(document.getElementById('mesh-secret-generate') || {}).checked;
     const routes = document.getElementById('mesh-routes-input').value
         .split(',').map(r => r.trim()).filter(Boolean);
 
@@ -33659,6 +33676,10 @@ async function meshJoin() {
                 // '' joins the main mesh; a name puts this box in a separate,
                 // isolated mesh (tag:ragnar-mesh-<name>) on the same tailnet.
                 mesh_suffix: meshSuffix.trim(),
+                // Opt-in second factor over the tag. Generate mints a new one
+                // (shown once below); otherwise the pasted secret is stored.
+                generate_secret: genSecret,
+                mesh_secret: genSecret ? '' : meshSecret.trim(),
                 advertise_routes: routes,
                 enable_ssh: document.getElementById('mesh-ssh-input').checked
             })
@@ -33669,6 +33690,17 @@ async function meshJoin() {
             : `<span class="text-red-400">${escapeHtml(data.message || 'Join failed.')}</span>`;
         if (data.success) {
             document.getElementById('mesh-authkey-input').value = '';
+            document.getElementById('mesh-secret-input').value = '';
+            document.getElementById('mesh-secret-generate').checked = false;
+            // A freshly generated secret comes back exactly once — surface it so
+            // the operator can copy it to the mesh's other units before it's gone.
+            if (data.mesh_secret) {
+                out.innerHTML += `<div class="mt-3 p-3 rounded-lg bg-slate-900 border border-amber-600/50">
+                    <div class="text-xs uppercase tracking-wider text-amber-400 mb-1">New mesh secret — copy it now, shown only once</div>
+                    <div class="font-mono text-sm text-gray-200 break-all select-all">${escapeHtml(data.mesh_secret)}</div>
+                    <div class="text-[11px] text-gray-500 mt-1">Paste this into the <strong>Mesh secret</strong> field when you join every other unit of this mesh.</div>
+                </div>`;
+            }
             showNotification('This unit joined the mesh', 'success');
             await refreshMesh(true);
         }

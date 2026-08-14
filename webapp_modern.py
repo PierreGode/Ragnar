@@ -433,6 +433,12 @@ def _is_mesh_peer_request():
       100.64/10 (or fd7a:115c:a1e0::/48) source address.
 
     Any failure — Tailscale missing, tailscaled silent, tag absent — is False.
+
+    Two-factor when a mesh secret is set: the tag proves "in mesh X" but on a
+    shared tailnet that is only as strong as the ACL's tagOwners. If this unit
+    has a mesh secret, the caller must ALSO present a fresh HMAC proof of it (see
+    mesh_manager.verify_mesh_proof) — so a node that merely forged the tag, with
+    no secret, is rejected. No secret set ⇒ tag-only, exactly as before.
     """
     if not mesh_available:
         return False
@@ -441,7 +447,17 @@ def _is_mesh_peer_request():
         return False
     try:
         mesh_tag = shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
-        return mesh_manager.caller_is_mesh_peer(remote, mesh_tag)
+        if not mesh_manager.caller_is_mesh_peer(remote, mesh_tag):
+            return False
+        secret = _mesh_secret()
+        if secret and not mesh_manager.verify_mesh_proof(
+                secret, request.method, request.path,
+                request.headers.get(mesh_manager.MESH_TS_HEADER),
+                request.headers.get(mesh_manager.MESH_PROOF_HEADER)):
+            logger.warning(f"[mesh] peer {remote} carries the tag but presented no "
+                           "valid mesh-secret proof — rejected")
+            return False
+        return True
     except Exception as exc:
         logger.warning(f"[mesh] peer identity check failed for {remote}: {exc}")
         return False
@@ -2460,6 +2476,24 @@ def _mesh_tag():
     return shared_data.config.get('mesh_tag') or mesh_manager.DEFAULT_MESH_TAG
 
 
+def _mesh_secret():
+    """THIS unit's mesh secret, or '' when this mesh has none (opt-in feature).
+
+    When set, it is the second factor over the tag: peers must prove they hold it
+    and outbound requests carry a proof of it. Read live from config so a rotate
+    or a Leave takes effect immediately.
+    """
+    s = shared_data.config.get('mesh_secret')
+    return str(s).strip() if s else ''
+
+
+# Let mesh_manager's outbound helpers read this unit's secret without threading
+# it through every call site. hasattr-guarded so a partially-updated box with an
+# older mesh_manager still imports (it just sends no proof — fail-closed).
+if mesh_available and hasattr(mesh_manager, 'set_secret_provider'):
+    mesh_manager.set_secret_provider(_mesh_secret)
+
+
 def _mesh_node_port():
     try:
         return int(shared_data.config.get('mesh_node_port', 8000))
@@ -3726,6 +3760,9 @@ def mesh_status():
         # The suffix that names this unit's mesh ('' = the default ragnar-mesh).
         # Several isolated meshes can share one tailnet, told apart by this.
         'mesh_suffix': mesh_manager.suffix_of_mesh_tag(tag) if mesh_available else '',
+        # Whether this mesh has a secret set (the opt-in second factor over the
+        # tag). Boolean only — the secret itself is never sent to the UI.
+        'mesh_secret_set': bool(_mesh_secret()),
         # Whether THIS unit is tagged into the mesh. False + available means
         # "on the tailnet but not in the mesh" — the state to explain loudly.
         'self_tagged': self_tagged,
@@ -4020,6 +4057,19 @@ def mesh_join():
     else:
         tags = [mesh_tag]
     routes = [r.strip() for r in (data.get('advertise_routes') or []) if r.strip()]
+
+    # Mesh secret (opt-in second factor over the tag). Only meaningful for a full
+    # member join — a share-only guest is gated by the share tag, never the
+    # secret. `generate_secret` mints a fresh one to display once; an explicit
+    # `mesh_secret` is stored as given (the operator copied it from another unit).
+    # Absent ⇒ leave whatever this box already had (a re-join keeps the mesh).
+    new_secret = None
+    if not data.get('share_only'):
+        if data.get('generate_secret'):
+            new_secret = mesh_manager.generate_mesh_secret()
+        elif (data.get('mesh_secret') or '').strip():
+            new_secret = data.get('mesh_secret').strip()
+
     ok, message = mesh_manager.join(
         auth_key,
         hostname=hostname,
@@ -4040,6 +4090,10 @@ def mesh_join():
         # tag matches the host's. Only persisted when the operator chose one.
         if data.get('mesh_suffix') is not None:
             shared_data.config['mesh_tag'] = mesh_tag
+        # Persist the mesh secret if one was set/minted this join. Stored in
+        # config (redacted from exports elsewhere); read live by _mesh_secret().
+        if new_secret is not None:
+            shared_data.config['mesh_secret'] = new_secret
         # Remember HOW this box joined. A share-only guest carries the share tag
         # and NOT the mesh tag: it is here to send/receive files, not to be a
         # mesh peer. We record that locally rather than trusting what Tailscale
@@ -4051,7 +4105,13 @@ def mesh_join():
         logger.success(f"[mesh] joined tailnet as {hostname or socket.gethostname()}")
     else:
         logger.warning(f"[mesh] join failed: {message}")
-    return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
+    resp = {'success': ok, 'message': message}
+    # Echo a freshly *generated* secret exactly once so the operator can copy it
+    # to the mesh's other units. Never echo an operator-supplied one (they have
+    # it) and never on a plain re-join, so it does not leak on every call.
+    if ok and new_secret is not None and data.get('generate_secret'):
+        resp['mesh_secret'] = new_secret
+    return jsonify(resp), (200 if ok else 400)
 
 
 @app.route('/api/mesh/leave', methods=['POST'])
@@ -4063,6 +4123,11 @@ def mesh_leave():
     if ok:
         # Leaving drops the share-only role too; a later normal join re-derives it.
         shared_data.config['mesh_share_only'] = False
+        # Drop this mesh's secret. Leaving is how you move meshes (log out, then
+        # join a new one with its own key + secret); keeping a stale secret would
+        # make the box demand a proof the new mesh's peers cannot give. A re-join
+        # to the same mesh simply re-supplies it.
+        shared_data.config['mesh_secret'] = ''
         shared_data.save_config()
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
@@ -20354,6 +20419,10 @@ def mesh_files_send():
             return jsonify({'success': False, 'error': 'Target has no tailnet address'}), 400
 
         headers = {'X-Sender-Name': _mesh_viking_name(), 'X-Sender-Id': str(_mesh_unit_id())}
+        # Prove mesh membership on the push too, when this mesh has a secret. A
+        # share-guest / token sender takes a different code path (no mesh secret);
+        # this is the peer-to-peer send between full members.
+        headers.update(mesh_manager.auth_headers('POST', '/api/mesh/files/push'))
         try:
             src_path, filename, cleanup = _prepare_outbound_file(multipart, body)
         except _OutboundError as oe:

@@ -3194,6 +3194,22 @@
                         </p>
                     </div>
                     <div class="md:col-span-2">
+                        <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Mesh secret <span class="text-gray-600 normal-case">(optional, recommended for shared tailnets)</span></label>
+                        <input id="mesh-secret-input" type="password" placeholder="paste this mesh's secret, or tick Generate below" autocomplete="off"
+                               class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
+                        <label class="flex items-center gap-2 text-xs text-gray-300 mt-2">
+                            <input id="mesh-secret-generate" type="checkbox" class="rounded bg-slate-900 border-slate-700">
+                            Generate a new secret (starting a brand-new mesh — shown once after joining, copy it to the other units)
+                        </label>
+                        <p class="text-[11px] text-gray-500 mt-1">
+                            A <strong>second factor over the tag</strong>. Every unit of one mesh holds the same secret;
+                            a box that only forged the tag — e.g. through a mis-set <code>tagOwners</code> on a shared
+                            Tailscale account — has no secret and is <strong>rejected</strong>. Leave blank to keep the
+                            tag-only behaviour. Moving meshes? Use <em>Leave the mesh</em>, then join the new one with its
+                            own key and secret.
+                        </p>
+                    </div>
+                    <div class="md:col-span-2">
                         <label class="block text-xs uppercase tracking-wider text-gray-400 mb-1">Tailscale auth key</label>
                         <input id="mesh-authkey-input" type="password" placeholder="tskey-auth-…" autocomplete="off"
                                class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm font-mono">
@@ -7984,7 +8000,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260813-multi-mesh"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260814-mesh-secret"></script>
 
 </body>
 </html>

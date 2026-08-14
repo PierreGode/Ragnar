@@ -11,8 +11,9 @@
 # them:
 #
 #   1. Imaging / unattended. Set RAGNAR_MESH_AUTHKEY (plus optionally
-#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES, and
-#      RAGNAR_MESH_SUFFIX to place the box in a separate mesh) in the
+#      RAGNAR_MESH_UNIT_ID, RAGNAR_MESH_LABEL, RAGNAR_MESH_ROUTES,
+#      RAGNAR_MESH_SUFFIX to place the box in a separate mesh, and
+#      RAGNAR_MESH_SECRET to arm the opt-in per-mesh second factor) in the
 #      environment or in /boot/ragnar-mesh.conf. The unit joins on first boot
 #      with nobody logged in — the technician plugs in power and ethernet and
 #      walks away.
@@ -179,7 +180,7 @@ join_mesh() {
 # yet; Ragnar will write its defaults and the UI can set these later.
 apply_ragnar_config() {
     [ ! -f "$RAGNAR_CONFIG" ] && return 0
-    [ -z "${RAGNAR_MESH_AUTHKEY:-}${RAGNAR_MESH_UNIT_ID:-}${RAGNAR_MESH_LABEL:-}" ] && return 0
+    [ -z "${RAGNAR_MESH_AUTHKEY:-}${RAGNAR_MESH_UNIT_ID:-}${RAGNAR_MESH_LABEL:-}${RAGNAR_MESH_SECRET:-}" ] && return 0
 
     python3 - "$RAGNAR_CONFIG" <<'PYEOF'
 import json, os, sys
@@ -216,6 +217,13 @@ if label and cfg.get('mesh_site_label') != label:
 tag = os.environ.get('RAGNAR_MESH_TAG')
 if tag and cfg.get('mesh_tag') != tag:
     cfg['mesh_tag'] = tag
+    changed = True
+
+# Opt-in mesh secret: the second factor over the tag. Every unit of one mesh
+# must carry the SAME secret, so a technician images the fleet with it set.
+secret = os.environ.get('RAGNAR_MESH_SECRET')
+if secret and cfg.get('mesh_secret') != secret:
+    cfg['mesh_secret'] = secret
     changed = True
 
 if changed:

@@ -17,6 +17,7 @@ them identically. Two properties carry the weight:
 """
 
 import ipaddress
+import time
 
 import pytest
 
@@ -691,3 +692,82 @@ def test_fully_custom_mesh_tag_falls_back_to_default_share():
     # fall back rather than invent tag:ragnar-share-<garbage>.
     assert mesh_manager.share_tag_for_mesh_tag('tag:acme') == mesh_manager.DEFAULT_SHARE_TAG
     assert mesh_manager.suffix_of_mesh_tag('tag:acme') == ''
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mesh secret: the opt-in second factor over the tag
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_generated_secret_is_strong_and_prefixed():
+    a = mesh_manager.generate_mesh_secret()
+    b = mesh_manager.generate_mesh_secret()
+    assert a.startswith('rms_') and b.startswith('rms_')
+    assert a != b                      # not a constant
+    assert len(a) > 20                 # meaningful entropy
+
+
+def test_proof_round_trips_for_the_holder():
+    secret = 'rms_test_secret'
+    ts = int(time.time())
+    proof = mesh_manager.mesh_proof(secret, 'GET', '/api/mesh/unit', ts)
+    assert mesh_manager.verify_mesh_proof(secret, 'GET', '/api/mesh/unit', ts, proof)
+
+
+def test_proof_ignores_the_query_string():
+    # The client signs the path a peer requests (with a ?query); the server sees
+    # request.path (no query). They must still agree.
+    secret = 'rms_test_secret'
+    ts = int(time.time())
+    signed = mesh_manager.mesh_proof(secret, 'GET', '/api/mesh/findings?limit=40', ts)
+    assert mesh_manager.verify_mesh_proof(secret, 'GET', '/api/mesh/findings', ts, signed)
+
+
+def test_wrong_secret_is_rejected():
+    ts = int(time.time())
+    proof = mesh_manager.mesh_proof('rms_customer1', 'GET', '/api/mesh/unit', ts)
+    # A box re-tagged into this mesh but holding customer1's (or no) secret fails.
+    assert not mesh_manager.verify_mesh_proof('rms_customer2', 'GET', '/api/mesh/unit', ts, proof)
+
+
+def test_tampered_method_or_path_is_rejected():
+    secret = 'rms_test_secret'
+    ts = int(time.time())
+    proof = mesh_manager.mesh_proof(secret, 'GET', '/api/mesh/unit', ts)
+    assert not mesh_manager.verify_mesh_proof(secret, 'POST', '/api/mesh/unit', ts, proof)
+    assert not mesh_manager.verify_mesh_proof(secret, 'GET', '/api/mesh/control', ts, proof)
+
+
+def test_stale_and_future_proofs_are_rejected():
+    secret = 'rms_test_secret'
+    now = int(time.time())
+    old = mesh_manager.mesh_proof(secret, 'GET', '/api/mesh/unit', now - 10_000)
+    future = mesh_manager.mesh_proof(secret, 'GET', '/api/mesh/unit', now + 10_000)
+    assert not mesh_manager.verify_mesh_proof(secret, 'GET', '/api/mesh/unit', now - 10_000, old)
+    assert not mesh_manager.verify_mesh_proof(secret, 'GET', '/api/mesh/unit', now + 10_000, future)
+
+
+def test_missing_proof_or_secret_fails_closed():
+    ts = int(time.time())
+    assert not mesh_manager.verify_mesh_proof('', 'GET', '/x', ts, 'anything')
+    assert not mesh_manager.verify_mesh_proof('s', 'GET', '/x', ts, '')
+    assert not mesh_manager.verify_mesh_proof('s', 'GET', '/x', None, 'p')
+    assert not mesh_manager.verify_mesh_proof('s', 'GET', '/x', 'not-a-number', 'p')
+
+
+def test_auth_headers_empty_without_a_secret_provider():
+    mesh_manager.set_secret_provider(lambda: '')
+    assert mesh_manager.auth_headers('GET', '/api/mesh/unit') == {}
+
+
+def test_auth_headers_are_verifiable_end_to_end():
+    secret = mesh_manager.generate_mesh_secret()
+    mesh_manager.set_secret_provider(lambda: secret)
+    try:
+        h = mesh_manager.auth_headers('GET', '/api/mesh/findings?limit=40')
+        assert mesh_manager.MESH_PROOF_HEADER in h and mesh_manager.MESH_TS_HEADER in h
+        # What the server does: verify against request.path (no query).
+        assert mesh_manager.verify_mesh_proof(
+            secret, 'GET', '/api/mesh/findings',
+            h[mesh_manager.MESH_TS_HEADER], h[mesh_manager.MESH_PROOF_HEADER])
+    finally:
+        mesh_manager.set_secret_provider(lambda: '')
