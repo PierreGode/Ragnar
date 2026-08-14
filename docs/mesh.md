@@ -311,6 +311,50 @@ at the network layer too, not only in Ragnar.
 A unit records the mesh it joined in its `mesh_tag` config, so a later re-join
 from the web UI keeps it on the same mesh unless you change the field.
 
+### Hardening a shared tailnet: the mesh secret
+
+The tag says "this node is in mesh X". On a **shared** tailnet that is only as
+trustworthy as your ACL's `tagOwners`: a misconfiguration — or anyone with
+console/admin access to the account — could tag a hostile box into another
+customer's mesh, and the tag check alone would then accept it. The **mesh
+secret** closes that gap.
+
+It is a per-mesh pre-shared key. Every legitimate unit of one mesh holds the
+same secret; each request carries an HMAC proof of it (never the raw secret, so
+a connecting attacker cannot harvest it). A box that merely forged the tag has
+no secret, produces no valid proof, and is **rejected**. Membership now needs
+**both** the tag **and** the secret — one ACL slip is no longer a breach.
+
+- **Opt-in.** Enforced only when a mesh has a secret set. A mesh with no secret
+  behaves exactly as before, so nothing breaks on update.
+- **It does not replace locking `tagOwners`** — it is the safety net so a single
+  misconfiguration is not fatal. Keep doing both.
+- **It is a shared secret.** Whoever can already read files off a member box has
+  it — but they would already own that box.
+
+**Arm it:**
+
+- **Web UI (Join form):** the **Mesh secret** field. On the *first* unit of a new
+  mesh, tick **Generate** — the moment the unit joins, Ragnar mints a strong
+  secret, **downloads it as a file**, and shows it **once** in a dialog with a
+  **Copy** button (in case the download failed). Press **Done** to continue. That
+  is the **only** time it is ever shown — it **cannot be retrieved** afterwards.
+  Paste the value into the **Mesh secret** field when you join every other unit
+  of that mesh. Lost it? **Leave** and re-join to mint a new one.
+- **Unattended / boot config:** set `RAGNAR_MESH_SECRET="rms_…"` (the same value
+  on every unit of the mesh).
+
+**Moving a unit to another mesh** is deliberately a re-provision, not a silent
+edit: **Leave the mesh** (this logs the unit out of the tailnet — it stays
+installed and drops its old secret), then **Join** the new mesh with its own
+auth key *and* its own secret. Editing the tag in the Tailscale console alone
+does **not** move a unit cleanly.
+
+> **Genuinely separate customers?** The strongest isolation is still a separate
+> Tailscale account per customer — one account is one administrative trust
+> boundary. Tags + a mesh secret segment *within* one account and are solid
+> defence-in-depth, but they cannot undo an admin who can retag from the console.
+
 ---
 
 ## Deploying a unit
@@ -337,6 +381,8 @@ RAGNAR_MESH_ROUTES="10.20.0.0/24"
 # Optional — place this box in a separate mesh (see "Separate meshes on one
 # tailnet"). Blank/omitted = the main mesh. The key's tag must match.
 # RAGNAR_MESH_SUFFIX="2"
+# Optional — arm the mesh secret (same value on every unit of the mesh).
+# RAGNAR_MESH_SECRET="rms_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 The unit names itself; there is no name to supply here.
@@ -1025,6 +1071,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_tab_enabled` | `true` | Show the Ragnar Mesh **tab** in the UI. Cosmetic only — hiding it never joins/leaves the mesh. Toggle in Config → Ragnar Mesh. |
 | `mesh_enabled` | `false` | Master switch. Off means no peer polling at all. |
 | `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls — and which mesh this unit belongs to. Suffixed tags (`tag:ragnar-mesh-2`) select a [separate mesh](#separate-meshes-on-one-tailnet). Set via the Join form's **Mesh name**, not usually by hand. |
+| `mesh_secret` | `""` | Opt-in **second factor over the tag** (see [Hardening a shared tailnet](#hardening-a-shared-tailnet-the-mesh-secret)). All units of one mesh share it; peers must prove it in addition to the tag. Blank = tag-only. Set via the Join form's **Mesh secret**; cleared on **Leave**. A generated secret is **downloaded once** at join and shown once in a dialog, then never retrievable through the UI (status exposes only a "set" boolean). |
 | `mesh_unit_id` | `0` | This unit's number. `0` = unassigned. |
 | `mesh_viking_name` | `""` | This unit's name. Blank = derive from the machine itself. |
 | `mesh_site_label` | `""` | Where the box physically is ("Jersey DC"). |
@@ -1042,7 +1089,8 @@ Environment variables (imaging / unattended):
 `RAGNAR_MESH_AUTHKEY`, `RAGNAR_MESH_UNIT_ID`, `RAGNAR_MESH_LABEL`,
 `RAGNAR_MESH_ROUTES`, `RAGNAR_MESH_HOSTNAME`, `RAGNAR_MESH_TAG`,
 `RAGNAR_MESH_SUFFIX` (friendly form of the mesh tag — `2` ⇒ `tag:ragnar-mesh-2`;
-`RAGNAR_MESH_TAG` wins if both are set).
+`RAGNAR_MESH_TAG` wins if both are set), `RAGNAR_MESH_SECRET` (the opt-in mesh
+secret — set the same value on every unit of the mesh).
 
 ### CLI
 

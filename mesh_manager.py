@@ -116,6 +116,110 @@ def share_tag_for_mesh_tag(mesh_tag):
     s = suffix_of_mesh_tag(mesh_tag)
     return f'{_SHARE_TAG_PREFIX}-{s}' if s else DEFAULT_SHARE_TAG
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mesh secret: a per-mesh pre-shared key, defence-in-depth over the tag
+# ─────────────────────────────────────────────────────────────────────────────
+# The Tailscale tag says "this node is in mesh X". On a *shared* tailnet that is
+# only as trustworthy as the ACL's tagOwners: a misconfiguration (or an operator
+# with console access) could tag a hostile box into another customer's mesh, and
+# the tag check alone would then accept it. The mesh secret closes that gap.
+#
+# Every legitimate member of a mesh holds the same secret. A peer proves it on
+# each request with an HMAC over method+path+timestamp — never the raw secret, so
+# a connecting attacker cannot harvest it. A re-tagged node forges the tag but
+# has no secret, so it can produce no valid proof and is rejected. Membership now
+# needs BOTH the tag AND the secret; one ACL slip is no longer a breach.
+#
+# It is deliberately opt-in: enforced only when a mesh has a secret set, so an
+# existing single-mesh deployment with no secret behaves exactly as before. It
+# does NOT replace locking tagOwners — it is the safety net so a single misconfig
+# is not fatal. And it is a shared secret: whoever can already read files off a
+# member box has it, but they would already own that box.
+MESH_PROOF_HEADER = 'X-Ragnar-Mesh-Proof'
+MESH_TS_HEADER = 'X-Ragnar-Mesh-Ts'
+# Tolerated age/clock-skew for a proof. The tunnel is WireGuard-encrypted, so an
+# off-path attacker cannot capture a proof to replay; a short window bounds the
+# on-path (already-a-member) case without demanding tight clock sync across a
+# field fleet.
+MESH_PROOF_WINDOW = 300
+
+# Set by the host app to expose THIS unit's mesh secret to the outbound helpers
+# without threading it through every call site. A callable returning the current
+# secret (or ''), so it always reflects live config. Unset ⇒ no proof is sent,
+# which is correct for a mesh that has no secret.
+_SECRET_PROVIDER = None
+
+
+def set_secret_provider(provider):
+    """Register a callable returning THIS unit's mesh secret (or '')."""
+    global _SECRET_PROVIDER
+    _SECRET_PROVIDER = provider
+
+
+def _local_secret():
+    if _SECRET_PROVIDER is None:
+        return ''
+    try:
+        return str(_SECRET_PROVIDER() or '').strip()
+    except Exception:
+        return ''
+
+
+def generate_mesh_secret():
+    """Mint a strong, URL-safe mesh secret. Prefixed so it is recognisable."""
+    import secrets
+    return 'rms_' + secrets.token_urlsafe(32)
+
+
+def _proof_message(method, path, ts):
+    # Sign the path WITHOUT its query string, so it matches Flask's request.path
+    # on the receiving side (poll paths like /api/mesh/findings?limit=40 carry a
+    # query the server never sees in request.path).
+    bare = (path or '').split('?', 1)[0]
+    return f'{(method or "GET").upper()}\n{bare}\n{int(ts)}'.encode('utf-8')
+
+
+def mesh_proof(secret, method, path, ts):
+    """HMAC-SHA256 hex proof that the caller holds `secret` for this request."""
+    import hashlib
+    import hmac
+    return hmac.new(str(secret).encode('utf-8'),
+                    _proof_message(method, path, ts), hashlib.sha256).hexdigest()
+
+
+def verify_mesh_proof(secret, method, path, ts, proof, window=MESH_PROOF_WINDOW):
+    """True when `proof` is a fresh, valid HMAC for this request under `secret`.
+
+    Fails closed on anything missing or malformed, on a stale/future timestamp
+    outside `window`, or on an HMAC mismatch (constant-time compared).
+    """
+    import hmac
+    if not secret or not proof or ts in (None, ''):
+        return False
+    try:
+        ts = int(ts)
+    except (TypeError, ValueError):
+        return False
+    if abs(int(time.time()) - ts) > window:
+        return False
+    expected = mesh_proof(secret, method, path, ts)
+    return hmac.compare_digest(expected, str(proof))
+
+
+def auth_headers(method, path):
+    """Proof headers for an outbound peer request; empty dict when no secret.
+
+    Reads THIS unit's secret from the registered provider, so an opt-out mesh
+    (no secret) sends nothing extra and old peers are unaffected.
+    """
+    secret = _local_secret()
+    if not secret:
+        return {}
+    ts = int(time.time())
+    return {MESH_TS_HEADER: str(ts), MESH_PROOF_HEADER: mesh_proof(secret, method, path, ts)}
+
+
 # Port a peer Ragnar serves its web API on. Mesh polling assumes the mesh is
 # homogeneous; a node on a different port can be overridden per-node in config.
 DEFAULT_NODE_PORT = 8000
@@ -1126,7 +1230,9 @@ def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh'})
+        headers = {'User-Agent': 'Ragnar-Mesh'}
+        headers.update(auth_headers('GET', path))
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return {'reachable': False, 'error': f'HTTP {resp.status}'}
@@ -1137,7 +1243,7 @@ def poll_peer(node, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit'):
         # 401 is worth distinguishing: the node is alive and Ragnar answered,
         # we just are not tagged into its mesh (or it cannot see our tag).
         if exc.code == 401:
-            return {'reachable': False, 'error': 'not authorized by peer — check the mesh tag'}
+            return {'reachable': False, 'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         return {'reachable': False, 'error': f'HTTP {exc.code}'}
     except Exception as exc:  # socket errors, timeouts, bad JSON
         return {'reachable': False, 'error': type(exc).__name__}
@@ -1173,7 +1279,9 @@ def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
     import urllib.error
     import urllib.request
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Ragnar-Mesh-Diagnose'})
+        headers = {'User-Agent': 'Ragnar-Mesh-Diagnose'}
+        headers.update(auth_headers('GET', path))
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result['status'] = getattr(resp, 'status', None) or resp.getcode()
             body = resp.read(65536)
@@ -1198,7 +1306,8 @@ def diagnose_peer(ip, port=DEFAULT_NODE_PORT, timeout=6, path='/api/mesh/unit',
                           hint=('The peer answered but rejected this unit. It has login enabled and '
                                 'did not recognize this unit as a tagged mesh peer. Confirm THIS '
                                 f'unit carries {mesh_tag} (the peer authorizes the *caller* by tag), '
-                                'and that tailscaled is running on the peer so it can identify it.'))
+                                'that tailscaled is running on the peer so it can identify it, and — '
+                                'if this mesh uses a secret — that both units share the SAME mesh secret.'))
         else:
             result.update(category='http', error=f'HTTP {exc.code}',
                           hint=f'The peer returned HTTP {exc.code}.')
@@ -1305,9 +1414,9 @@ def post_peer(node, path, payload, port=DEFAULT_NODE_PORT, timeout=20):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            url, data=body, method='POST',
-            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        headers = {'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'}
+        headers.update(auth_headers('POST', path))
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             reply = json.loads(resp.read().decode('utf-8'))
         reply['reachable'] = True
@@ -1315,7 +1424,7 @@ def post_peer(node, path, payload, port=DEFAULT_NODE_PORT, timeout=20):
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             return {'reachable': False, 'success': False,
-                    'error': 'not authorized by peer — check the mesh tag'}
+                    'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         try:
             reply = json.loads(exc.read().decode('utf-8'))
             reply.setdefault('success', False)
@@ -1345,9 +1454,9 @@ def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):
     try:
         import urllib.error
         import urllib.request
-        req = urllib.request.Request(
-            url, data=body, method='POST',
-            headers={'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'})
+        headers = {'User-Agent': 'Ragnar-Mesh', 'Content-Type': 'application/json'}
+        headers.update(auth_headers('POST', '/api/mesh/control'))
+        req = urllib.request.Request(url, data=body, method='POST', headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.loads(resp.read().decode('utf-8'))
         payload['reachable'] = True
@@ -1355,7 +1464,7 @@ def command_peer(node, feature, action, port=DEFAULT_NODE_PORT, timeout=15):
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
             return {'reachable': False, 'success': False,
-                    'error': 'not authorized by peer — check the mesh tag'}
+                    'error': 'not authorized by peer — check the mesh tag (and secret, if this mesh uses one)'}
         try:
             payload = json.loads(exc.read().decode('utf-8'))
             payload.setdefault('success', False)
