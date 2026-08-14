@@ -335,9 +335,11 @@ no secret, produces no valid proof, and is **rejected**. Membership now needs
 **Arm it:**
 
 - **Web UI (Join form):** the **Mesh secret** field. On the *first* unit of a new
-  mesh, tick **Generate** — Ragnar mints a strong secret and shows it once. Copy
-  it, and paste it into the **Mesh secret** field when you join every other unit
-  of that mesh.
+  mesh, tick **Generate** — Ragnar mints a strong secret and **downloads it as a
+  file** the moment the unit joins. The secret is **never shown on screen and
+  cannot be retrieved** afterwards; that download is your one copy. Open the file
+  and paste the value into the **Mesh secret** field when you join every other
+  unit of that mesh. Lost it? **Leave** and re-join to mint a new one.
 - **Unattended / boot config:** set `RAGNAR_MESH_SECRET="rms_…"` (the same value
   on every unit of the mesh).
 
@@ -1068,7 +1070,7 @@ Config tab → **Ragnar Mesh (Tailscale)**, or `config/shared_config.json`.
 | `mesh_tab_enabled` | `true` | Show the Ragnar Mesh **tab** in the UI. Cosmetic only — hiding it never joins/leaves the mesh. Toggle in Config → Ragnar Mesh. |
 | `mesh_enabled` | `false` | Master switch. Off means no peer polling at all. |
 | `mesh_tag` | `tag:ragnar-mesh` | Authorization boundary for unit-to-unit calls — and which mesh this unit belongs to. Suffixed tags (`tag:ragnar-mesh-2`) select a [separate mesh](#separate-meshes-on-one-tailnet). Set via the Join form's **Mesh name**, not usually by hand. |
-| `mesh_secret` | `""` | Opt-in **second factor over the tag** (see [Hardening a shared tailnet](#hardening-a-shared-tailnet-the-mesh-secret)). All units of one mesh share it; peers must prove it in addition to the tag. Blank = tag-only. Set via the Join form's **Mesh secret**; cleared on **Leave**. Never sent to the UI (only a "set" boolean). |
+| `mesh_secret` | `""` | Opt-in **second factor over the tag** (see [Hardening a shared tailnet](#hardening-a-shared-tailnet-the-mesh-secret)). All units of one mesh share it; peers must prove it in addition to the tag. Blank = tag-only. Set via the Join form's **Mesh secret**; cleared on **Leave**. A generated secret is **downloaded once** at join and never shown on screen or retrievable through the UI (status exposes only a "set" boolean). |
 | `mesh_unit_id` | `0` | This unit's number. `0` = unassigned. |
 | `mesh_viking_name` | `""` | This unit's name. Blank = derive from the machine itself. |
 | `mesh_site_label` | `""` | Where the box physically is ("Jersey DC"). |

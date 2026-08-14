@@ -33196,22 +33196,15 @@ function renderMesh(data) {
     // the tag, so a mis-set tagOwners on a shared tailnet is no longer a breach.
     // Not armed on a separate mesh: nudge — that is exactly the multi-tenant
     // case where a forged tag would otherwise be accepted.
-    // The armed note + Show-mesh-secret is rendered at the BOTTOM of the page
-    // (mesh-secret-footer), not up here in the operational warnings.
+    // Bottom-of-page mesh-secret footer. The secret is never shown, so an armed
+    // mesh gets no callout here — only the nudge when a separate mesh has none.
     const secretFooter = document.getElementById('mesh-secret-footer');
     if (secretFooter) {
-        if (inMesh && data.mesh_secret_set) {
-            secretFooter.innerHTML = meshWarning(
-                `<strong>Mesh secret armed.</strong> Peers must prove a shared secret in addition to the ` +
-                `<code>${tagCode}</code> tag, so a box that only forged the tag is rejected.` +
-                `<br><button onclick="meshRevealSecret(this)" class="mt-3 inline-block bg-slate-700 hover:bg-slate-600 ` +
-                `text-white text-xs px-3 py-1.5 rounded transition-colors">Show mesh secret</button>` +
-                `<span id="mesh-secret-reveal" class="ml-2 font-mono text-sm text-gray-200 break-all select-all"></span>`, 'info');
-        } else if (inMesh && data.mesh_suffix) {
+        if (inMesh && !data.mesh_secret_set && data.mesh_suffix) {
             secretFooter.innerHTML = meshWarning(
                 `<strong>This separate mesh has no secret set.</strong> On a shared Tailscale account, arming a ` +
                 `mesh secret stops a mis-tagged box from being trusted. Use <em>Leave the mesh</em>, then re-join ` +
-                `with a secret (tick <em>Generate</em> on the first unit, paste it on the rest).`, 'warn');
+                `with a secret (tick <em>Generate</em> on the first unit, and import the downloaded secret on the rest).`, 'warn');
         } else {
             secretFooter.innerHTML = '';
         }
@@ -33632,57 +33625,24 @@ async function meshPollInstall() {
     tick();
 }
 
-// A blocking modal for a freshly generated mesh secret, appended to <body> so a
-// background mesh refresh cannot wipe it. Stays until the operator clicks Done.
-function meshShowGeneratedSecret(secret) {
-    document.getElementById('mesh-secret-modal')?.remove();
-    const overlay = document.createElement('div');
-    overlay.id = 'mesh-secret-modal';
-    overlay.className = 'fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4';
-    overlay.innerHTML = `
-        <div class="bg-slate-800 border border-amber-600/60 rounded-xl max-w-lg w-full p-5 shadow-2xl">
-            <div class="text-xs uppercase tracking-wider text-amber-400 mb-2">New mesh secret — copy it now, shown only once</div>
-            <div id="mesh-secret-modal-value" class="font-mono text-sm text-gray-100 break-all select-all bg-slate-900 border border-slate-700 rounded-lg px-3 py-2"></div>
-            <p class="text-[11px] text-gray-400 mt-2">Paste this into the <strong>Mesh secret</strong> field when you join every other unit of this mesh. You can also get it back later from <strong>Show mesh secret</strong> at the bottom of this page.</p>
-            <div class="flex items-center gap-2 mt-4">
-                <button id="mesh-secret-modal-copy" class="bg-cyan-600 hover:bg-cyan-500 text-white text-sm px-4 py-2 rounded-lg transition-colors">Copy</button>
-                <button id="mesh-secret-modal-done" class="bg-slate-700 hover:bg-slate-600 text-white text-sm px-4 py-2 rounded-lg transition-colors">Done</button>
-            </div>
-        </div>`;
-    overlay.querySelector('#mesh-secret-modal-value').textContent = secret;
-    document.body.appendChild(overlay);
-    overlay.querySelector('#mesh-secret-modal-done').onclick = () => overlay.remove();
-    overlay.querySelector('#mesh-secret-modal-copy').onclick = async (e) => {
-        try {
-            await navigator.clipboard.writeText(secret);
-        } catch (_) {
-            // Clipboard API needs a secure context; fall back to a selection.
-            const r = document.createRange();
-            r.selectNodeContents(overlay.querySelector('#mesh-secret-modal-value'));
-            const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
-            try { document.execCommand('copy'); } catch (__) {}
-        }
-        e.target.textContent = 'Copied ✓';
-    };
-}
-window.meshShowGeneratedSecret = meshShowGeneratedSecret;
-
-// Reveal this unit's mesh secret on demand — for when the one-time display at
-// generation was missed. Session-gated endpoint; the value is this box's own.
-async function meshRevealSecret(btn) {
-    const out = document.getElementById('mesh-secret-reveal');
-    if (!out) return;
+// Stream a freshly generated mesh secret straight to a downloaded file — the
+// operator's single copy. The value is never rendered into the page. Filename
+// carries the mesh so a multi-mesh operator can tell the files apart.
+function meshDownloadSecret(secret, suffix) {
     try {
-        const resp = await fetch('/api/mesh/secret/reveal', { method: 'POST' });
-        const data = await resp.json();
-        if (data.success && data.mesh_secret) {
-            out.textContent = data.mesh_secret;
-            if (btn) btn.remove();
-        } else {
-            out.innerHTML = `<span class="text-red-400">${escapeHtml(data.error || 'Could not read the secret.')}</span>`;
-        }
-    } catch (err) {
-        out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
+        const clean = String(suffix || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+        const name = 'ragnar-mesh-secret' + (clean ? '-' + clean : '') + '.txt';
+        const blob = new Blob([secret + '\n'], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+        /* best-effort; the join itself already succeeded */
     }
 }
 
@@ -33758,12 +33718,17 @@ async function meshJoin() {
             // Restore the default (generate a fresh secret) for the next join.
             document.getElementById('mesh-secret-generate').checked = true;
             showNotification('This unit joined the mesh', 'success');
-            // A freshly generated secret comes back exactly once. Show it in a
-            // MODAL that stays put until the operator dismisses it — the mesh
-            // view refreshes into "joined" mode underneath, which used to wipe an
-            // inline message before it could be copied. (It's also always
-            // recoverable afterwards via Show mesh secret at the bottom.)
-            if (data.mesh_secret) meshShowGeneratedSecret(data.mesh_secret);
+            // A freshly generated secret comes back exactly once and is NEVER
+            // shown in the UI. Stream it straight to a downloaded file — the
+            // operator's one copy — then it is gone (recover only by leaving and
+            // re-joining, which mints a new one).
+            if (data.mesh_secret) {
+                meshDownloadSecret(data.mesh_secret, meshSuffix.trim());
+                out.innerHTML += `<div class="mt-3 text-xs text-amber-300">
+                    Mesh secret downloaded as a file — keep it safe and paste it into the
+                    <strong>Mesh secret</strong> field when you join the other units. It is not shown
+                    anywhere and cannot be retrieved; if you lose it, Leave and re-join to mint a new one.</div>`;
+            }
             await refreshMesh(true);
         }
     } catch (err) {

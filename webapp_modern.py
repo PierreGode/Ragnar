@@ -4132,24 +4132,6 @@ def mesh_leave():
     return jsonify({'success': ok, 'message': message}), (200 if ok else 400)
 
 
-@app.route('/api/mesh/secret/reveal', methods=['POST'])
-def mesh_secret_reveal():
-    """Operator: show THIS unit's mesh secret again (e.g. missed the one-time
-    display at generation) so it can be copied to the mesh's other units.
-
-    Session-gated on purpose: it is a POST, so the peer-auth allowlist (which
-    only lets a peer POST to a fixed set of paths) never reaches it — a peer
-    Ragnar cannot read it, only the logged-in operator can. The value already
-    lives in this box's config; this just surfaces it without a shell.
-    """
-    if not mesh_available:
-        return jsonify({'success': False, 'error': 'mesh_manager unavailable'}), 503
-    secret = _mesh_secret()
-    if not secret:
-        return jsonify({'success': False, 'error': 'This mesh has no secret set.'}), 404
-    return jsonify({'success': True, 'mesh_secret': secret})
-
-
 @app.route('/api/mesh/diagnose', methods=['POST'])
 def mesh_diagnose():
     """Probe a specific peer from this unit and classify why it does/doesn't
