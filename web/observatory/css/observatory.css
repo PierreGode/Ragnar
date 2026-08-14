@@ -775,6 +775,13 @@ body {
   #panel-vitals { left: 10px; right: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom left; }
   #panel-signal { right: 10px; left: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom right; }
   /* Pin the DEMO flag to the free top-left corner so it can't overlap the
-     scenario dropdown (top-right) on narrow phone screens. */
-  #demo-flag { left: 12px; top: 20px; transform: none; padding: 5px 12px; font-size: 11px; letter-spacing: 1px; }
+     scenario dropdown (top-right) on narrow phone screens. Respect the notch. */
+  #demo-flag {
+    left: max(12px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top));
+    transform: none; padding: 5px 12px; font-size: 11px; letter-spacing: 1px;
+  }
+  /* Keep the top bar clear of the notch and give the fullscreen button a
+     proper (>=42px) touch target. */
+  #status-bar { top: max(16px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
+  #fullscreen-btn { width: 42px; height: 42px; font-size: 20px; }
 }
