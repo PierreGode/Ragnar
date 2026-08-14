@@ -102,11 +102,22 @@ body {
   color: var(--green-glow);
 }
 
-/* Demo flag — top-center pill, visible until a real node streams a live frame. */
-#demo-flag {
+/* Left stack — top-left column holding the DEMO flag and, below it, the
+   auto-cycle scenario picker. Normal flow inside, so hiding the DEMO flag lets
+   the picker rise into its place with no JS. Children opt back into pointer
+   events (the #hud overlay is pointer-events:none). */
+#left-stack {
   position: absolute;
-  top: 24px; left: 50%;
-  transform: translateX(-50%);
+  top: 24px; left: 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  z-index: 20;
+}
+
+/* Demo flag — amber pill, visible until a real node streams a live frame. */
+#demo-flag {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -120,7 +131,6 @@ body {
   letter-spacing: 1.5px;
   color: var(--amber);
   pointer-events: none;
-  z-index: 20;
 }
 #demo-flag.demo-flag--hidden { display: none; }
 .demo-flag__dot {
@@ -774,14 +784,16 @@ body {
   .data-panel { width: 44vw; max-width: 240px; padding: 10px 12px; background: rgba(8, 16, 28, 0.3); }
   #panel-vitals { left: 10px; right: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom left; }
   #panel-signal { right: 10px; left: auto; top: auto; bottom: 14px; transform: scale(0.7); transform-origin: bottom right; }
-  /* Pin the DEMO flag to the free top-left corner so it can't overlap the
-     scenario dropdown (top-right) on narrow phone screens. Respect the notch. */
-  #demo-flag {
+  /* Keep the left stack (DEMO flag + auto-cycle) clear of the notch. It sits
+     top-left, away from the fullscreen button (top-right). */
+  #left-stack {
     left: max(12px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top));
-    transform: none; padding: 5px 12px; font-size: 11px; letter-spacing: 1px;
   }
+  #demo-flag { padding: 5px 12px; font-size: 11px; letter-spacing: 1px; }
   /* Keep the top bar clear of the notch and give the fullscreen button a
      proper (>=42px) touch target. */
   #status-bar { top: max(16px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
   #fullscreen-btn { width: 42px; height: 42px; font-size: 20px; }
+  /* Tight on phones — the picker label already names the scenario. */
+  #scenario-description { display: none; }
 }

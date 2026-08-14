@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RuView Observatory — WiFi DensePose</title>
-  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260815-demoflag3">
+  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260815-leftstack">
 </head>
 <body>
   <canvas id="observatory-canvas"></canvas>
@@ -12,15 +12,16 @@
   <!-- ======= HUD Overlay ======= -->
   <div id="hud">
 
-    <!-- Demo flag: shown whenever the view is running on simulated demo data,
-         i.e. until a real sensing node connects and streams a live frame. -->
-    <div id="demo-flag" class="demo-flag--hidden"
-         title="No sensing node connected — showing simulated demo data. Connect an ESP32 node (or set Data Source to Live WebSocket) to see real readings.">
-      <span class="demo-flag__dot"></span><span class="demo-flag__text">DEMO — no node connected</span>
-    </div>
-
-    <!-- Top-right: Connection + status + gear -->
-    <div id="status-bar">
+    <!-- Left stack: DEMO flag on top, the auto-cycle scenario picker below it.
+         Both are laid out in normal flow, so when the DEMO flag hides (a real
+         node connects) the auto-cycle picker rises into its place automatically. -->
+    <div id="left-stack">
+      <!-- Demo flag: shown whenever the view is running on simulated demo data,
+           i.e. until a real sensing node connects and streams a live frame. -->
+      <div id="demo-flag" class="demo-flag--hidden"
+           title="No sensing node connected — showing simulated demo data. Connect an ESP32 node (or set Data Source to Live WebSocket) to see real readings.">
+        <span class="demo-flag__dot"></span><span class="demo-flag__text">DEMO — no node connected</span>
+      </div>
       <div id="scenario-area">
         <select id="scenario-quick-select" title="Change scenario">
           <option value="auto">Auto-Cycle</option>
@@ -38,6 +39,10 @@
           <option value="security_patrol">Security Patrol</option>
         </select>
       </div>
+    </div>
+
+    <!-- Top-right: status + fullscreen -->
+    <div id="status-bar">
       <div id="scenario-description"></div>
       <div id="fps-counter" style="display:none">60 FPS</div>
       <button id="fullscreen-btn" title="Toggle Fullscreen">&#9974;</button>
