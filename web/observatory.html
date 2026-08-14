@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RuView Observatory — WiFi DensePose</title>
-  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260701-mobilecards2">
+  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260814-csp-localfonts">
 </head>
 <body>
   <canvas id="observatory-canvas"></canvas>
@@ -115,16 +115,18 @@
     </div>
   </div>
 
-  <!-- Three.js r160 + addons from CDN -->
+  <!-- Three.js r160 + addons, vendored locally under web/vendor/three/ so the
+       Observatory loads under the same-origin CSP (script-src 'self') and with
+       no internet access in the field. -->
   <script type="importmap">
   {
     "imports": {
-      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three": "/web/vendor/three/three.module.js",
+      "three/addons/": "/web/vendor/three/examples/jsm/"
     }
   }
   </script>
 
-  <script type="module" src="observatory/js/main.js?v=20260704-obsgate"></script>
+  <script type="module" src="observatory/js/main.js?v=20260814-csp-vendorthree"></script>
 </body>
 </html>
