@@ -23391,8 +23391,14 @@ function showFileConfirmModal(title, content, onConfirm) {
     const newConfirmBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
     
-    // Add new listener
-    newConfirmBtn.addEventListener('click', onConfirm);
+    // Add new listener. Dismiss the dialog immediately on confirm — the work in
+    // onConfirm runs async (fetch + .then), so waiting on it would leave the modal
+    // up until the request returns. Some callbacks also call closeFileModal() in
+    // their .then; that's now a harmless no-op.
+    newConfirmBtn.addEventListener('click', function () {
+        closeFileModal();
+        onConfirm();
+    });
     
     modal.classList.remove('hidden');
     modal.classList.add('flex');
