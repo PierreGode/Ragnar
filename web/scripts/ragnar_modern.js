@@ -33691,7 +33691,8 @@ async function meshJoin() {
         if (data.success) {
             document.getElementById('mesh-authkey-input').value = '';
             document.getElementById('mesh-secret-input').value = '';
-            document.getElementById('mesh-secret-generate').checked = false;
+            // Restore the default (generate a fresh secret) for the next join.
+            document.getElementById('mesh-secret-generate').checked = true;
             // A freshly generated secret comes back exactly once — surface it so
             // the operator can copy it to the mesh's other units before it's gone.
             if (data.mesh_secret) {
