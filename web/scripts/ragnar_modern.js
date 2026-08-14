@@ -33199,7 +33199,10 @@ function renderMesh(data) {
     if (inMesh && data.mesh_secret_set) {
         notes.push(meshWarning(
             `<strong>Mesh secret armed.</strong> Peers must prove a shared secret in addition to the ` +
-            `<code>${tagCode}</code> tag, so a box that only forged the tag is rejected.`, 'info'));
+            `<code>${tagCode}</code> tag, so a box that only forged the tag is rejected.` +
+            `<br><button onclick="meshRevealSecret(this)" class="mt-3 inline-block bg-slate-700 hover:bg-slate-600 ` +
+            `text-white text-xs px-3 py-1.5 rounded transition-colors">Show mesh secret</button>` +
+            `<span id="mesh-secret-reveal" class="ml-2 font-mono text-sm text-gray-200 break-all select-all"></span>`, 'info'));
     } else if (inMesh && data.mesh_suffix) {
         notes.push(meshWarning(
             `<strong>This separate mesh has no secret set.</strong> On a shared Tailscale account, arming a ` +
@@ -33620,6 +33623,25 @@ async function meshPollInstall() {
         setTimeout(tick, 2500);
     };
     tick();
+}
+
+// Reveal this unit's mesh secret on demand — for when the one-time display at
+// generation was missed. Session-gated endpoint; the value is this box's own.
+async function meshRevealSecret(btn) {
+    const out = document.getElementById('mesh-secret-reveal');
+    if (!out) return;
+    try {
+        const resp = await fetch('/api/mesh/secret/reveal', { method: 'POST' });
+        const data = await resp.json();
+        if (data.success && data.mesh_secret) {
+            out.textContent = data.mesh_secret;
+            if (btn) btn.remove();
+        } else {
+            out.innerHTML = `<span class="text-red-400">${escapeHtml(data.error || 'Could not read the secret.')}</span>`;
+        }
+    } catch (err) {
+        out.innerHTML = `<span class="text-red-400">${escapeHtml(String(err))}</span>`;
+    }
 }
 
 async function meshJoin() {
