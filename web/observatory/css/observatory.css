@@ -102,6 +102,35 @@ body {
   color: var(--green-glow);
 }
 
+/* Demo flag — top-center pill, visible until a real node streams a live frame. */
+#demo-flag {
+  position: absolute;
+  top: 24px; left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-radius: 20px;
+  background: rgba(255, 176, 32, 0.12);
+  border: 1px solid rgba(255, 176, 32, 0.4);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 1.5px;
+  color: var(--amber);
+  pointer-events: none;
+  z-index: 20;
+}
+#demo-flag.demo-flag--hidden { display: none; }
+.demo-flag__dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 8px var(--amber);
+  animation: pulse-dot 2s infinite;
+}
+
 .dot {
   width: 7px; height: 7px;
   border-radius: 50%;

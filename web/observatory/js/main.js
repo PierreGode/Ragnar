@@ -304,8 +304,19 @@ class Observatory {
   }
 
   _nodeLabel(id) {
+    // While the view is running on simulated demo data (no real node streaming),
+    // the marker is not a real sensor — never dress it in a configured node name
+    // like "s3". Label it plainly so the demo is unmistakable.
+    if (this._isDemo) return 'demo';
     const t = this.settings.nodeLabels && this.settings.nodeLabels[id];
     return (t && String(t).trim()) ? String(t) : `Node ${id}`;
+  }
+
+  // Show/hide the on-screen DEMO flag. Visible whenever the view is running on
+  // simulated demo data (no real sensing node has streamed a live frame).
+  _updateDemoFlag(isDemo) {
+    const el = document.getElementById('demo-flag');
+    if (el) el.classList.toggle('demo-flag--hidden', !isDemo);
   }
 
   _makeNodeMarker(id, idx, total) {
@@ -712,13 +723,33 @@ class Observatory {
     const dt = Math.min(this._clock.getDelta(), 0.1);
     const elapsed = this._clock.getElapsedTime();
 
-    // Data source
-    if (this.settings.dataSource === 'ws' && this._liveData) {
+    // Data source. Render a live frame when we have one; otherwise the built-in
+    // demo generator. Kept separate from `_isDemo` below so a server-simulated
+    // frame still renders while being honestly flagged as demo.
+    const hasLive = this.settings.dataSource === 'ws' && this._liveData;
+    if (hasLive) {
       this._currentData = this._liveData;
     } else {
       this._currentData = this._demoData.update(dt);
     }
     let data = this._currentData;
+
+    // Demo state drives the on-screen DEMO flag and the node marker label, so
+    // the view can never masquerade a simulation as a real sensor. It's demo
+    // unless a live frame is in hand from a *real* source (esp32/wifi). A frame
+    // the server tags "simulated" (no hardware, e.g. --source auto) still counts
+    // as demo. An absent source field is assumed real (matches sensing.service).
+    const liveSrc = hasLive ? this._liveData.source : null;
+    const isDemo = !hasLive || liveSrc === 'simulated' || liveSrc === 'simulate';
+
+    // React to a demo<->live transition: toggle the flag and force the node
+    // markers to relabel (a real node may reuse a demo node_id, so the id-set
+    // change-detector in _syncNodes can't be relied on to trigger the relabel).
+    if (isDemo !== this._isDemo) {
+      this._isDemo = isDemo;
+      this._updateDemoFlag(isDemo);
+      try { this._syncNodes(this._connIds ? [...this._connIds] : [], true); } catch {}
+    }
 
     // Authoritative presence gate: the 3D scene draws people straight from the
     // engine's persons/estimated_persons/motion_level, which a freshly over-fit

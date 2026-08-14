@@ -4,13 +4,20 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>RuView Observatory — WiFi DensePose</title>
-  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260814-csp-localfonts">
+  <link rel="stylesheet" href="observatory/css/observatory.css?v=20260815-demoflag">
 </head>
 <body>
   <canvas id="observatory-canvas"></canvas>
 
   <!-- ======= HUD Overlay ======= -->
   <div id="hud">
+
+    <!-- Demo flag: shown whenever the view is running on simulated demo data,
+         i.e. until a real sensing node connects and streams a live frame. -->
+    <div id="demo-flag" class="demo-flag--hidden"
+         title="No sensing node connected — showing simulated demo data. Connect an ESP32 node (or set Data Source to Live WebSocket) to see real readings.">
+      <span class="demo-flag__dot"></span><span class="demo-flag__text">DEMO — no node connected</span>
+    </div>
 
     <!-- Top-right: Connection + status + gear -->
     <div id="status-bar">
@@ -127,6 +134,6 @@
   }
   </script>
 
-  <script type="module" src="observatory/js/main.js?v=20260814-csp-vendorthree"></script>
+  <script type="module" src="observatory/js/main.js?v=20260815-demoflag"></script>
 </body>
 </html>
