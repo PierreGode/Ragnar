@@ -612,13 +612,22 @@ class Observatory {
       this.settings.wsUrl = wsUrl;
       this._connectWS(wsUrl);
     }
-    // Probe sensing server health on same origin, then common ports
+    // Probe sensing server health on same origin, then common ports.
+    // The cross-port candidates (:8765/:3000) are only tried when we're NOT
+    // already connecting over the same-origin /ws/sensing proxy: they are a
+    // different origin, so under the dashboard's CSP (connect-src 'self') the
+    // fetch is blocked anyway, and when dataSource==='ws' we're already live
+    // via the proxy, so probing them just spams CSP violations for no gain.
     const host = window.location.hostname || 'localhost';
     const candidates = [
-      window.location.origin,                   // same origin (e.g. :3000)
-      `http://${host}:8765`,                     // default WS port
-      `http://${host}:3000`,                     // default HTTP port
+      window.location.origin,                   // same origin (proxied sensing)
     ];
+    if (this.settings.dataSource !== 'ws') {
+      candidates.push(
+        `http://${host}:8765`,                   // standalone sensing WS port
+        `http://${host}:3000`,                   // standalone sensing HTTP port
+      );
+    }
     // Deduplicate
     const unique = [...new Set(candidates)];
 
