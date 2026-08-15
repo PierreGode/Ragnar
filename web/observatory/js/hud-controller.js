@@ -215,19 +215,22 @@ export class HudController {
   // ============================================================
 
   initSettings() {
+    // Fullscreen toggle — wired FIRST, independently of the settings dialog.
+    // The dialog now lives in the RuSense Settings tab and is absent from this
+    // page, so the guard below returns early; keep this above it or the
+    // fullscreen button never gets a click handler (dead button on all devices).
+    const fsBtn = document.getElementById('fullscreen-btn');
+    if (fsBtn) fsBtn.addEventListener('click', () => this.toggleFullscreen());
+
     const overlay = document.getElementById('settings-overlay');
     const btn = document.getElementById('settings-btn');
     const closeBtn = document.getElementById('settings-close');
     // The settings dialog now lives in the RuSense Settings tab. If its
-    // markup has been removed from this page there is nothing to wire.
+    // markup has been removed from this page there is nothing else to wire.
     if (!overlay || !btn || !closeBtn) return;
     btn.addEventListener('click', () => this.toggleSettings());
     closeBtn.addEventListener('click', () => this.toggleSettings());
     overlay.addEventListener('click', (e) => { if (e.target === overlay) this.toggleSettings(); });
-
-    // Fullscreen toggle
-    const fsBtn = document.getElementById('fullscreen-btn');
-    if (fsBtn) fsBtn.addEventListener('click', () => this.toggleFullscreen());
 
     // Tab switching
     document.querySelectorAll('.stab').forEach(tab => {
