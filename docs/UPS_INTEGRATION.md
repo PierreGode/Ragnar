@@ -20,6 +20,12 @@ This script runs an independent background loop, handles hardware register scali
 
 **File Location on Raspberry Pi:** `/home/ragnar/ups_api.py`
 
+# Ragnar OS — UPS Integration Codes
+
+This file contains only the verified stable source codes for the UPS backend daemon (`ups_api.py`) and the web frontend card interface (`index_modern.html`).
+
+## 1. Backend Code (`ups_api.py`)
+
 ```python
 #!/usr/bin/env python3
 import struct
@@ -29,69 +35,63 @@ import json
 import threading
 import os
 from flask import Flask, request, jsonify
-from flask\\\_cors import CORS
+from flask_cors import CORS
 
-app = Flask(\\\_\\\_name\\\_\\\_)
+app = Flask(__name__)
 CORS(app)
 
-CONFIG\\\_FILE = "/home/ragnar/ups\\\_config.json"
-OUTPUT\\\_PATH = "/home/ragnar/Ragnar/web/battery.json"
+CONFIG_FILE = "/home/ragnar/ups_config.json"
+OUTPUT_PATH = "/home/ragnar/Ragnar/web/battery.json"
 
-def load\\\_config():
-    """Loads saved I2C configuration profile from local storage."""
-    if os.path.exists(CONFIG\\\_FILE):
+def load_config():
+    if os.path.exists(CONFIG_FILE):
         try:
-            with open(CONFIG\\\_FILE, "r") as f:
+            with open(CONFIG_FILE, "r") as f:
                 return json.load(f)
         except Exception:
             pass
-    return {"forced\\\_address": "auto"}
+    return {"forced_address": "auto"}
 
-def save\\\_config(config\\\_data):
-    """Persists user selected I2C configuration block to disk."""
+def save_config(config_data):
     try:
-        with open(CONFIG\\\_FILE, "w") as f:
-            json.dump(config\\\_data, f)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(config_data, f)
     except Exception:
         pass
 
-def get\\\_i2c\\\_address(bus):
-    """Determines active hardware target address based on config or discovery routines."""
-    current\\\_config = load\\\_config()
-    if current\\\_config.get("forced\\\_address", "auto") != "auto":
-        addr = int(current\\\_config\\\["forced\\\_address"], 16)
+def get_i2c_address(bus):
+    current_config = load_config()
+    if current_config.get("forced_address", "auto") != "auto":
         try:
-            bus.read\\\_word\\\_data(addr, 0x02)
+            addr = int(current_config["forced_address"], 16)
+            bus.read_word_data(addr, 0x02)
             return addr
-        except IOError:
+        except (IOError, ValueError):
             return None
             
-    # Sequential auto-detection scanning
-    for addr in \\\[0x36, 0x32, 0x62]:
+    for addr in [0x36, 0x32, 0x62]:
         try:
-            bus.read\\\_word\\\_data(addr, 0x02)
+            bus.read_word_data(addr, 0x02)
             return addr
         except IOError:
             continue
     return None
 
-def read\\\_voltage(bus, address):
-    """Extracts raw cell voltage registers and maps values across hardware variants."""
+def read_voltage(bus, address):
     try:
-        read = bus.read\\\_word\\\_data(address, 0x02)
-        swapped = struct.unpack("<H", struct.pack(">H", read))
+        read = bus.read_word_data(address, 0x02)
+        swapped = struct.unpack("<H", struct.pack(">H", read))[0]
         if address == 0x62:
-            return (swapped \\\* 0.305) / 1000
+            return (swapped * 0.305) / 1000
         else:
-            return swapped \\\* 1.25 / 1000 / 16
+            return swapped * 1.25 / 1000 / 16
     except Exception:
         return 0.0
 
-def read\\\_capacity(bus, address):
-    """Extracts state of charge percentage calculation metrics from the active registry."""
+def read_capacity(bus, address):
     try:
-        read = bus.read\\\_word\\\_data(address, 0x04)
-        swapped = struct.unpack("<H", struct.pack(">H", read))
+        read = bus.read_word_data(address, 0x04)
+        swapped = struct.unpack("<H", struct.pack(">H", read))[0]
         if address == 0x62:
             return swapped / 256
         else:
@@ -99,196 +99,189 @@ def read\\\_capacity(bus, address):
     except Exception:
         return 0.0
 
-def battery\\\_logger():
-    """Independent asynchronous core worker threading bus reads at 60-second intervals."""
+def battery_logger():
+    time.sleep(10)
     while True:
+        bus = None
         try:
             bus = smbus.SMBus(1)
-            address = get\\\_i2c\\\_address(bus)
-            current\\\_config = load\\\_config()
+            address = get_i2c_address(bus)
+            current_config = load_config()
             
             if address:
-                voltage = read\\\_voltage(bus, address)
-                capacity = read\\\_capacity(bus, address)
+                voltage = read_voltage(bus, address)
+                capacity = read_capacity(bus, address)
                 capacity = max(0.0, min(100.0, capacity))
+                
+                is_charging = False
+                if voltage >= 4.10:
+                    is_charging = True
                 
                 data = {
                     "status": "ok",
                     "capacity": int(capacity),
                     "voltage": round(voltage, 2),
-                    "active\\\_address": hex(address),
-                    "saved\\\_address": current\\\_config.get("forced\\\_address", "auto")
+                    "charging": is_charging,
+                    "active_address": hex(address),
+                    "saved_address": current_config.get("forced_address", "auto")
                 }
                 
-                # CRITICAL THRESHOLD TRIGGER (Safe Shutdown Guard)
-                # Shuts down the operating system safely if capacity hits <= 3% OR voltage falls below 3.45V
                 if (capacity <= 3 and capacity > 0) or (voltage <= 3.45 and voltage > 2.0):
-                    data\\\["status"] = "shutdown\\\_triggered"
-                    with open(OUTPUT\\\_PATH, "w") as f:
+                    data["status"] = "shutdown_triggered"
+                    with open(OUTPUT_PATH, "w") as f:
                         json.dump(data, f)
-                    
                     os.system("sudo shutdown -h now")
-                    
             else:
                 data = {
                     "status": "error", 
                     "message": "UPS Not Found",
-                    "saved\\\_address": current\\\_config.get("forced\\\_address", "auto")
+                    "charging": False,
+                    "saved_address": current_config.get("forced_address", "auto")
                 }
                 
-            with open(OUTPUT\\\_PATH, "w") as f:
+            with open(OUTPUT_PATH, "w") as f:
                 json.dump(data, f)
-        except Exception:
-            pass
+                
+        except Exception as e:
+            try:
+                with open(OUTPUT_PATH, "w") as f:
+                    json.dump({"status": "error", "message": f"I2C Bus Error: {str(e)}", "charging": False}, f)
+            except Exception:
+                pass
+        finally:
+            if bus is not None:
+                try:
+                    bus.close()
+                except Exception:
+                    pass
         time.sleep(60)
 
-@app.route('/api/set\\\_address')
-def set\\\_address():
-    """Webhook entry-point endpoint storing manual UI register modifications."""
+@app.route('/api/set_address')
+def set_address():
     addr = request.args.get('addr', 'auto')
-    if addr in \\\['auto', '0x32', '0x36', '0x62']:
-        config\\\_data = {"forced\\\_address": addr}
-        save\\\_config(config\\\_data)
+    if addr in ['auto', '0x32', '0x36', '0x62']:
+        config_data = {"forced_address": addr}
+        save_config(config_data)
         return jsonify({"status": "success", "address": addr})
     return jsonify({"status": "error", "message": "Invalid address"}), 400
 
-if \\\_\\\_name\\\_\\\_ == '\\\_\\\_main\\\_\\\_':
-    threading.Thread(target=battery\\\_logger, daemon=True).start()
+if __name__ == '__main__':
+    threading.Thread(target=battery_logger, daemon=True).start()
     app.run(host='0.0.0.0', port=8080)
 ```
 
-\---
-
-## Step 2: Establish the systemd Linux Daemon
-
-Register the background service inside the system systemd directory.
-
-**File Location on Raspberry Pi:** `/etc/systemd/system/ups-api.service`
-
-```ini
-\\\[Unit]
-Description=UPS Lite Clone API Daemon for Ragnar OS
-After=network.target
-
-\\\[Service]
-Type=simple
-ExecStart=/usr/bin/python3 /home/ragnar/ups\\\_api.py
-Restart=always
-User=root
-
-\\\[Install]
-WantedBy=multi-user.target
-```
-
-**Service Lifecycle Commands:**
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable ups-api.service
-sudo systemctl start ups-api.service
-```
-
-\---
-
-## Step 3: Frontend WebUI Custom Component Injection
-
-Modify Ragnar's visual layout tree to draw the glassmorphism component block inside the Configuration panel wrapper.
-
-**Target File Location on Raspberry Pi:** `/home/ragnar/Ragnar/web/index\_modern.html`
-
-### A. The HTML Visual Element
-
-Search for the `<!-- Service Control Card -->` baseline comment. Paste this template block **exactly above** that location marker line:
+## 2. Frontend Code (`index_modern.html`)
 
 ```html
-<!-- UPS Lite Management Card -->
-<div class="glass rounded-lg p-4 mb-3 border border-gray-700/30">
-    <div class="flex items-center justify-between mb-4">
-        <div class="flex items-center gap-3">
-            <!-- Graphical Miniature Battery Vector Component -->
-            <div class="relative w-10 h-6 border-2 border-gray-400 rounded-md p-0.5 flex items-center">
-                <div class="absolute -right-\\\[5px] top-\\\[4px] w-\\\[3px] h-\\\[10px] bg-gray-400 rounded-r-sm"></div>
-                <div id="mini-bat-fill" class="h-full bg-green-500 rounded-sm transition-all duration-500" style="width: 0%;"></div>
-            </div>
-            <div>
-                <div class="text-xs font-semibold text-gray-200">UPS Power</div>
-                <div id="mini-bat-volt" class="text-\\\[10px] text-gray-400 font-mono">-- V</div>
-            </div>
+<!-- HTML Card Layout -->
+<div class="glass-card p-4 flex flex-col justify-between">
+    <div class="flex items-center justify-between mb-2">
+        <h3 class="font-semibold text-sm text-gray-200">Power & UPS</h3>
+        <div class="relative w-10 h-6 border-2 border-gray-500 rounded p-0.5 flex items-center bg-gray-950/40">
+            <div class="absolute -right-[5px] top-[5px] w-[3px] h-[10px] bg-gray-400 rounded-r-sm"></div>
+            <div id="mini-bat-fill" class="h-full bg-emerald-500 rounded-sm transition-all duration-500" style="width: 0%;"></div>
         </div>
-        <!-- Absolute Numeric Percentage Output -->
-        <div id="mini-bat-pct" class="text-2xl font-bold text-white font-sans">--%</div>
     </div>
-
-    <!-- Interface I2C Device Address Settings Dropdown Selector -->
-    <div class="flex items-center justify-between pt-2 border-t border-gray-700/40">
-        <label for="i2c-select" class="text-xs font-medium text-gray-400">I2C Device Address:</label>
-        <select id="i2c-select" class="bg-gray-800/80 border border-gray-700 text-gray-200 text-xs rounded-md p-1 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 font-mono" onchange="changeI2CAddress(this.value)">
+    <div class="flex items-baseline justify-between mt-2">
+        <div id="mini-bat-pct" class="text-2xl font-bold text-white">--%</div>
+        <div id="mini-bat-volt" class="text-xs text-gray-400 font-mono">-- V</div>
+    </div>
+    <div class="flex items-center justify-between pt-2 mt-3 border-t border-gray-700/40">
+        <label for="i2c-select" class="text-[10px] font-medium text-gray-400 uppercase tracking-wider">I2C Address:</label>
+        <select id="i2c-select" class="bg-gray-900 border border-gray-700 text-white text-xs rounded p-1 focus:ring-1 focus:ring-indigo-500 font-mono cursor-pointer" onchange="changeI2CAddress(this.value)">
             <option value="auto">Auto-Detect</option>
-            <option value="0x32">0x32 (Clone v1.2)</option>
+            <option value="0x32">0x32 (Clone)</option>
             <option value="0x36">0x36 (Original)</option>
             <option value="0x62">0x62 (Alternative)</option>
         </select>
     </div>
 </div>
-```
 
-### B. The JavaScript Telemetry Client Implementation
-
-Scroll to the very bottom area of the file. Paste this control loop script block **exactly above** the closing HTML `</body>` tag footprint element:
-
-```html
+<!-- JavaScript Telemetry Routine -->
 <script>
-function updateUPSMiniature() {
+function runBatteryTelemetry() {
     fetch('/battery.json')
         .then(response => response.json())
         .then(data => {
-            // Restore persisted selection element alignment upon browser load instances
-            if (data.saved\\\_address) {
-                const selectEl = document.getElementById('i2c-select');
-                if (selectEl \\\&\\\& selectEl.value !== data.saved\\\_address) {
-                    selectEl.value = data.saved\\\_address;
+            const pctTxt = document.getElementById('mini-bat-pct');
+            const voltTxt = document.getElementById('mini-bat-volt');
+            const fill = document.getElementById('mini-bat-fill');
+            const selectEl = document.getElementById('i2c-select');
+            
+            if (data.saved_address && selectEl) {
+                if (selectEl.value !== data.saved_address) {
+                    selectEl.value = data.saved_address;
                 }
             }
 
             if (data.status === 'ok') {
                 const pct = data.capacity;
                 const volt = data.voltage;
+                const isCharging = data.charging;
                 
-                const fill = document.getElementById('mini-bat-fill');
-                const pctTxt = document.getElementById('mini-bat-pct');
-                const voltTxt = document.getElementById('mini-bat-volt');
+                if (pctTxt) {
+                    pctTxt.innerText = isCharging ? '⚡ ' + pct + '%' : pct + '%';
+                    if (isCharging) {
+                        pctTxt.className = "text-2xl font-bold text-emerald-400 font-sans animate-pulse";
+                    } else if (pct <= 15) {
+                        pctTxt.className = "text-2xl font-bold text-red-500 font-sans animate-pulse";
+                    } else if (pct <= 40) {
+                        pctTxt.className = "text-2xl font-bold text-amber-500 font-sans";
+                    } else {
+                        pctTxt.className = "text-2xl font-bold text-white font-sans";
+                    }
+                }
                 
-                pctTxt.innerText = pct + '%';
-                voltTxt.innerText = volt.toFixed(2) + ' V';
-                fill.style.width = pct + '%';
+                if (voltTxt) {
+                    voltTxt.innerText = volt.toFixed(2) + (isCharging ? ' V (Charging)' : ' V');
+                }
                 
-                // Color threshold engine state updates (Tailwind mapping utilities)
-                fill.className = "h-full rounded-sm transition-all duration-500";
-                if (pct <= 15) {
-                    fill.classList.add('bg-red-500', 'animate-pulse');
-                    pctTxt.className = "text-2xl font-bold text-red-500 font-sans animate-pulse";
-                } else if (pct <= 40) {
-                    fill.classList.add('bg-amber-500');
-                    pctTxt.className = "text-2xl font-bold text-amber-500 font-sans";
-                } else {
-                    fill.classList.add('bg-emerald-500');
-                    pctTxt.className = "text-2xl font-bold text-white font-sans";
+                if (fill) {
+                    fill.style.display = 'block';
+                    fill.style.height = '100%';
+                    fill.style.width = pct + '%';
+                    fill.style.transition = 'width 0.5s ease';
+                    fill.className = "rounded-sm";
+
+                    if (isCharging) {
+                        fill.style.backgroundColor = '#34d399';
+                    } else {
+                        if (pct <= 15) {
+                            fill.style.backgroundColor = '#ef4444';
+                        } else if (pct <= 40) {
+                            fill.style.backgroundColor = '#f59e0b';
+                        } else {
+                            fill.style.backgroundColor = '#10b981';
+                        }
+                    }
+                }
+            } else {
+                if (pctTxt) {
+                    pctTxt.innerText = "--%";
+                    pctTxt.className = "text-2xl font-bold text-gray-500 font-sans";
+                }
+                if (voltTxt) {
+                    voltTxt.innerText = "-- V";
+                }
+                if (fill) {
+                    fill.style.width = '0%';
+                    fill.style.backgroundColor = 'transparent';
+                    fill.className = "rounded-sm";
                 }
             }
         })
-        .catch(err => console.log('UPS Battery telemetry fetch error:', err));
+        .catch(err => console.log('UPS Telemetry Sync Error:', err));
 }
 
 function changeI2CAddress(val) {
-    // Post new target preferences directly to the persistence webhook handler pipeline
-    fetch('http://' + window.location.hostname + ':8080/api/set\\\_address?addr=' + val, { mode: 'no-cors' })
-        .then(() => console.log('I2C device address override pushed: ' + val))
+    fetch('http://' + window.location.hostname + ':8080/api/set_address?addr=' + val)
+        .then(response => response.json())
+        .then(data => console.log('I2C device address updated successfully:', data))
         .catch(err => console.log('I2C address push webhook failed:', err));
 }
 
-// Instantiate sequence routines on render and lock interval cycles to exactly 60 seconds
-updateUPSMiniature();
-setInterval(updateUPSMiniature, 60000);
+runBatteryTelemetry();
+setInterval(runBatteryTelemetry, 60000);
 </script>
 ```
-
+EOF

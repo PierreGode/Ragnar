@@ -266,3 +266,15 @@ var/log/
 
 # HA integration bytecode
 custom_components/**/__pycache__/
+
+
+# Python temporary bytecode files from UPS 1.2 lite
+__pycache__/
+*.pyc
+
+# Local runtime telemetry and config selection files
+battery.json
+ups_config.json
+
+# Environment or system logs
+*.log
