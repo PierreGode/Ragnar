@@ -1,0 +1,12 @@
+[Unit]
+Description=UPS Lite Clone API Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/ragnar/ups_api.py
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
