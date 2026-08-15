@@ -5020,6 +5020,36 @@
                         <div class="text-2xl font-bold" id="power-card-status">--</div>
                         <div class="text-xs text-gray-400" id="power-card-details">Supply health</div>
                     </div>
+
+                    <!-- UPS Lite Management Card -->
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center gap-3">
+                                <!-- Graphical Miniature Battery Vector Component -->
+                                <div class="relative w-10 h-6 border-2 border-gray-400 rounded-md p-0.5 flex items-center">
+                                    <div class="absolute -right-[5px] top-[4px] w-[3px] h-[10px] bg-gray-400 rounded-r-sm"></div>
+                                    <div id="mini-bat-fill" class="h-full bg-green-500 rounded-sm transition-all duration-500" style="width: 0%;"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-semibold text-gray-200">UPS Power</div>
+                                    <div id="mini-bat-volt" class="text-[10px] text-gray-400 font-mono">-- V</div>
+                                </div>
+                            </div>
+                            <!-- Absolute Numeric Percentage Output -->
+                            <div id="mini-bat-pct" class="text-2xl font-bold text-white font-sans">--%</div>
+                        </div>
+
+                        <!-- Interface I2C Device Address Settings Dropdown Selector -->
+                        <div class="flex items-center justify-between pt-2 border-t border-gray-700/40">
+                            <label for="i2c-select" class="text-xs font-medium text-gray-400">I2C Device Address:</label>
+                            <select id="i2c-select" class="bg-gray-900 border border-gray-700 text-white text-xs rounded-md p-1 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 font-mono cursor-pointer" onchange="changeI2CAddress(this.value)">
+                                <option value="auto" class="bg-gray-900 text-white">Auto-Detect</option>
+                                <option value="0x32" class="bg-gray-900 text-white">0x32 (Clone v1.2)</option>
+                                <option value="0x36" class="bg-gray-900 text-white">0x36 (Original)</option>
+                                <option value="0x62" class="bg-gray-900 text-white">0x62 (Alternative)</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Power & Supply detail — throttle flags + estimated draw budget -->
