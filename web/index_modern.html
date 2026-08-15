@@ -4991,6 +4991,36 @@
                         <div class="text-2xl font-bold" id="power-card-status">--</div>
                         <div class="text-xs text-gray-400" id="power-card-details">Supply health</div>
                     </div>
+
+                    <!-- UPS Lite Management Card -->
+                    <div class="glass-card p-4 flex flex-col justify-between">
+                        <div class="flex items-center justify-between mb-4">
+                            <div class="flex items-center gap-3">
+                                <!-- Graphical Miniature Battery Vector Component -->
+                                <div class="relative w-10 h-6 border-2 border-gray-400 rounded-md p-0.5 flex items-center">
+                                    <div class="absolute -right-[5px] top-[4px] w-[3px] h-[10px] bg-gray-400 rounded-r-sm"></div>
+                                    <div id="mini-bat-fill" class="h-full bg-green-500 rounded-sm transition-all duration-500" style="width: 0%;"></div>
+                                </div>
+                                <div>
+                                    <div class="text-xs font-semibold text-gray-200">UPS Power</div>
+                                    <div id="mini-bat-volt" class="text-[10px] text-gray-400 font-mono">-- V</div>
+                                </div>
+                            </div>
+                            <!-- Absolute Numeric Percentage Output -->
+                            <div id="mini-bat-pct" class="text-2xl font-bold text-white font-sans">--%</div>
+                        </div>
+
+                        <!-- Interface I2C Device Address Settings Dropdown Selector -->
+                        <div class="flex items-center justify-between pt-2 border-t border-gray-700/40">
+                            <label for="i2c-select" class="text-xs font-medium text-gray-400">I2C Device Address:</label>
+                            <select id="i2c-select" class="bg-gray-900 border border-gray-700 text-white text-xs rounded-md p-1 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 font-mono cursor-pointer" onchange="changeI2CAddress(this.value)">
+                                <option value="auto" class="bg-gray-900 text-white">Auto-Detect</option>
+                                <option value="0x32" class="bg-gray-900 text-white">0x32 (Clone v1.2)</option>
+                                <option value="0x36" class="bg-gray-900 text-white">0x36 (Original)</option>
+                                <option value="0x62" class="bg-gray-900 text-white">0x62 (Alternative)</option>
+                            </select>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Power & Supply detail — throttle flags + estimated draw budget -->
@@ -8006,6 +8036,87 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
     <script src="/web/scripts/ragnar_modern.js?v=20260814-mesh-secret-8"></script>
+
+
+<script>
+function updateUPSMiniature() {
+    fetch('/battery.json')
+        .then(response => response.json())
+        .then(data => {
+            // Restore saved dropdown address state automatically
+            if (data.saved_address) {
+                const selectEl = document.getElementById('i2c-select');
+                if (selectEl && selectEl.value !== data.saved_address) {
+                    selectEl.value = data.saved_address;
+                }
+            }
+
+            if (data.status === 'ok') {
+                const pct = data.capacity;
+                const volt = data.voltage;
+                const isCharging = data.charging;
+                
+                const fill = document.getElementById('mini-bat-fill');
+                const pctTxt = document.getElementById('mini-bat-pct');
+                const voltTxt = document.getElementById('mini-bat-volt');
+                
+                // 1. Always enforce battery width fill dynamically to prevent empty spaces
+                fill.style.width = pct + '%';
+                fill.className = "h-full rounded-sm transition-all duration-500";
+                
+                // 2. Text layout rendering strings (Charging vs Discharging)
+                if (isCharging) {
+                    if (pct >= 100) {
+                        pctTxt.innerText = '⚡ ' + pct + '%';
+                        voltTxt.innerText = volt.toFixed(2) + ' V (Full)';
+                    } else {
+                        pctTxt.innerText = '⚡ ' + pct + '%';
+                        voltTxt.innerText = volt.toFixed(2) + ' V (Charging)';
+                    }
+                } else {
+                    pctTxt.innerText = pct + '%';
+                    voltTxt.innerText = volt.toFixed(2) + ' V';
+                }
+                
+                // 3. Color threshold and state animation mapping updates (Tailwind CSS)
+                if (isCharging) {
+                    if (pct >= 100) {
+                        fill.classList.add('bg-emerald-500');
+                        pctTxt.className = "text-2xl font-bold text-emerald-500 font-sans";
+                    } else {
+                        fill.classList.add('bg-emerald-400', 'animate-pulse');
+                        pctTxt.className = "text-2xl font-bold text-emerald-400 font-sans";
+                    }
+                } else {
+                    if (pct <= 15) {
+                        fill.classList.add('bg-red-500', 'animate-pulse');
+                        pctTxt.className = "text-2xl font-bold text-red-500 font-sans animate-pulse";
+                    } else if (pct <= 40) {
+                        fill.classList.add('bg-amber-500');
+                        pctTxt.className = "text-2xl font-bold text-amber-500 font-sans";
+                    } else {
+                        fill.classList.add('bg-emerald-500');
+                        pctTxt.className = "text-2xl font-bold text-white font-sans";
+                    }
+                }
+            }
+        })
+        .catch(err => console.log('UPS Battery telemetry fetch error:', err));
+}
+
+function changeI2CAddress(val) {
+    // Post selected configurations to the backend listener endpoint
+    fetch('http://' + window.location.hostname + ':8080/api/set_address?addr=' + val, { mode: 'no-cors' })
+        .then(() => console.log('I2C device address override pushed: ' + val))
+        .catch(err => console.log('I2C address push webhook failed:', err));
+}
+
+// Bind active sequence on render and lock interval loop ticks to 60s
+updateUPSMiniature();
+setInterval(updateUPSMiniature, 60000);
+</script>
+
+
 
 </body>
 </html>
