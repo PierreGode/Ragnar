@@ -3364,6 +3364,133 @@ def do_dns_doctor(name):
             'poison': poison}
 
 
+def _dns_selftest():
+    """Offline self-test for the DNS-poison helpers ported from dns_poison_checker:
+    the hand-rolled DNS A-record parser (the security-critical byte path), the
+    Team-Cymru ASN set logic, and the anchor table. No network, no root."""
+    scenarios = []
+
+    def ck(name, cond, got=''):
+        scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                          'pass': bool(cond)})
+
+    scapy_result = {'ran': False, 'reason': 'scapy unavailable'}
+    try:
+        from scapy.all import DNS, DNSQR, DNSRR, raw as _raw
+        single = _raw(DNS(id=1, qr=1, ancount=1, qd=DNSQR(qname='a.com'),
+                          an=DNSRR(rrname='a.com', type='A', rdata='93.184.216.34')))
+        ck('parse single A', _parse_dns_a_answers(single) == ['93.184.216.34'])
+        multi = _raw(DNS(id=1, qr=1, ancount=2, qd=DNSQR(qname='a.com'),
+                         an=DNSRR(rrname='a.com', type='A', rdata='1.2.3.4')
+                         / DNSRR(rrname='a.com', type='A', rdata='5.6.7.8')))
+        ck('parse two A (compression)', _parse_dns_a_answers(multi) == ['1.2.3.4', '5.6.7.8'])
+        cname = _raw(DNS(id=1, qr=1, ancount=2, qd=DNSQR(qname='www.a.com'),
+                         an=DNSRR(rrname='www.a.com', type='CNAME', rdata='a.com')
+                         / DNSRR(rrname='a.com', type='A', rdata='10.11.12.13')))
+        ck('parse CNAME+A skips CNAME', _parse_dns_a_answers(cname) == ['10.11.12.13'])
+        scapy_result = {'ran': True, 'pass': all(s['pass'] for s in scenarios)}
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    # Byte-level negatives (no scapy needed): malformed input must not raise.
+    ck('parse truncated -> []', _parse_dns_a_answers(b'\x00' * 8) == [])
+    ck('parse garbage -> []', _parse_dns_a_answers(b'\xff' * 40) == [])
+    # ASN set logic over an injected cache (no live Cymru query).
+    _cymru_asn_cache.update({'1.1.1.1': '13335', '9.9.9.9': '19281'})
+    ck('asn_set maps ips', _asn_set(['1.1.1.1', '9.9.9.9']) == {'13335', '19281'})
+    ck('asn_set drops unknown', _asn_set(['203.0.113.7']) == set(),
+       got=_asn_set(['203.0.113.7']))
+    # Anchor table shape.
+    ck('anchors present', bool(_DNS_ANCHORS) and 'dns.google' in _DNS_ANCHORS)
+
+    return {'success': all(s['pass'] for s in scenarios),
+            'scenarios': scenarios, 'scapy': scapy_result}
+
+
+def _arp_selftest():
+    """Offline self-test for the ARP-check HSRP/VRRP virtual-MAC awareness: the
+    shape classifier, the FHRP-Watch cross-pivot, and the do_arp_check verdict
+    branches (confirmed failover vs hijack vs spoofable shape-match). No root, no
+    live traffic; monkeypatches the neighbour-table seams and restores them."""
+    import tempfile
+    scenarios = []
+
+    def ck(name, cond, got=''):
+        scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                          'pass': bool(cond)})
+
+    # -- classifier + describe --
+    ck('classify HSRPv1', _arp_fhrp_classify('00:00:0c:07:ac:01') == ('HSRPv1', 1))
+    ck('classify HSRPv2', _arp_fhrp_classify('00:00:0c:9f:f0:63') == ('HSRPv2', 99))
+    ck('classify VRRP', _arp_fhrp_classify('00:00:5e:00:01:05') == ('VRRP', 5))
+    ck('classify ordinary -> None', _arp_fhrp_classify('aa:bb:cc:dd:ee:ff') is None)
+    ck('describe', _arp_fhrp_desc(('HSRPv1', 1)) == 'HSRPv1 group 1')
+
+    # -- cross-pivot from a temp FHRP-Watch baseline --
+    gw, vmac = '10.0.0.1', '00:00:0c:07:ac:01'
+    fpath = tempfile.mktemp(suffix='.json')
+    json.dump({'groups': {'hsrp/1': {'proto': 'hsrp', 'group': 1, 'vips': [gw]}}},
+              open(fpath, 'w'))
+    saved_fw = _FHRP_WATCH_PATH
+    saved_bl = _ARP_BASELINE_PATH
+    saved_gw = _default_gateway
+    saved_nm = _neigh_mac
+    saved_ne = _neigh_entries
+    g = globals()
+    try:
+        g['_FHRP_WATCH_PATH'] = fpath
+        ck('suggest_fhrp derives vmac', _arp_suggest_fhrp() == {gw: vmac},
+           got=_arp_suggest_fhrp())
+
+        # -- verdict branches via monkeypatched neighbour table --
+        cur = {'mac': vmac}
+        bpath = tempfile.mktemp(suffix='.json')
+        g['_ARP_BASELINE_PATH'] = bpath
+        g['_default_gateway'] = lambda: gw
+        g['_neigh_mac'] = lambda ip: cur['mac']
+        g['_neigh_entries'] = lambda iface=None: [(gw, cur['mac'], 'REACHABLE')]
+
+        def _set(bl):
+            json.dump(bl, open(bpath, 'w'))
+
+        _set({'gateways': {gw: 'aa:aa:aa:00:00:01'}, 'fhrp_gateways': {gw: vmac}})
+        cur['mac'] = vmac
+        r = do_arp_check(learn=False)
+        ck('failover INTO confirmed vmac -> clean',
+           r['verdict'] == 'clean' and r['gateway']['fhrp_confirmed'], got=r['verdict'])
+
+        _set({'gateways': {gw: vmac}, 'fhrp_gateways': {gw: vmac}})
+        cur['mac'] = 'de:ad:be:ef:00:99'
+        r = do_arp_check(learn=False)
+        ck('move AWAY from confirmed vmac -> spoofed',
+           r['verdict'] == 'spoofed', got=r['verdict'])
+
+        _set({'gateways': {gw: 'aa:aa:aa:00:00:01'}})     # shape match, unconfirmed
+        cur['mac'] = vmac
+        r = do_arp_check(learn=False)
+        ck('unconfirmed shape-match change -> still spoofed + annotated',
+           r['verdict'] == 'spoofed'
+           and any('virtual-MAC range' in x for x in r['reasons']), got=r['verdict'])
+
+        try:
+            os.remove(bpath)
+        except OSError:
+            pass
+    finally:
+        g['_FHRP_WATCH_PATH'] = saved_fw
+        g['_ARP_BASELINE_PATH'] = saved_bl
+        g['_default_gateway'] = saved_gw
+        g['_neigh_mac'] = saved_nm
+        g['_neigh_entries'] = saved_ne
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
+
+    return {'success': all(s['pass'] for s in scenarios),
+            'scenarios': scenarios, 'scapy': {'ran': False, 'reason': 'offline only'}}
+
+
 def _tcp_reachable(host, port, timeout=4):
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -14367,6 +14494,7 @@ def do_routing_selftest():
               'fhrp': _fhrp_selftest(), 'tls': _tls_selftest(),
               'ldap': _ldap_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
+              'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
