@@ -10843,20 +10843,21 @@ def _apply_cdpwn(result, findings):
     without overriding a more severe verdict."""
     if not findings:
         return
-    result['cdpwn'] = findings
-    lines = []
-    for f in findings:
-        cve = (' [' + ', '.join(f['cves']) + ']') if f['cves'] else ''
-        lines.append('%s %s %s: %s%s' % (f['code'], f['severity'].upper(),
-                                         f['src'], f['detail'], cve))
-    if any(f['code'] in _CDPWN_ATTACK_CODES for f in findings) and \
-            result.get('verdict') in ('clean', 'cdp-enabled', 'trailing-data', None):
+    result['cdpwn'] = findings                 # full per-finding detail for the UI
+    attack = [f for f in findings if f['code'] in _CDPWN_ATTACK_CODES]
+    if attack and result.get('verdict') in ('clean', 'cdp-enabled',
+                                            'trailing-data', None):
         result['verdict'] = 'cdpwn'
+    cves = sorted({c for f in findings for c in f['cves']})
+    summary = 'CDPwn: %d exploit-shape/CVE finding(s)%s%s' % (
+        len(findings),
+        ' incl. %d attack shape(s)' % len(attack) if attack else '',
+        ' — ' + ', '.join(cves) if cves else '')
     rs = result.get('reasons') or []
     if len(rs) == 1 and (rs[0].startswith('No ')
                          or 'match the trusted baseline' in rs[0]):
         rs = []
-    result['reasons'] = lines + rs
+    result['reasons'] = [summary] + rs
 
 
 def _cdp_capture(interface, seconds):

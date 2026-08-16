@@ -8450,6 +8450,8 @@ const _CDP_VERDICT_STYLE = {
     'cdp-enabled': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ CDP is enabled here — it leaks IOS version / mgmt IP / native VLAN in clear'],
     spoof:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue CDP speaker — spoofed neighbour (possible fake IP phone / VoIP-VLAN-hop)'],
     flood:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDP flood — neighbour-table / CPU exhaustion DoS (Yersinia)'],
+    cdpwn:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDPwn exploit shape — malformed CDP TLV matching an Armis CDPwn CVE (CVE-2020-3110/3111/3118/3119/3120)'],
+    'trailing-data': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Trailing data after the declared length — smuggled bytes / Etherleak (CVE-2003-0001)'],
     unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _cdpFillIfaces() {
@@ -8491,6 +8493,20 @@ async function runCdpWatch() {
         const [cls, label] = _CDP_VERDICT_STYLE[d.verdict] || _CDP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
         html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} CDP frame(s), ${d.speaker_count} speaker(s)${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        if (d.cdpwn && d.cdpwn.length) {
+            const _sev = {
+                critical: 'text-red-300 border-red-800 bg-red-950/50',
+                high:     'text-orange-300 border-orange-800 bg-orange-950/40',
+                medium:   'text-amber-300 border-amber-800 bg-amber-950/40',
+                low:      'text-yellow-300 border-yellow-800 bg-yellow-950/30',
+            };
+            html += '<div class="mb-2"><div class="text-xs text-red-300 font-semibold mb-1">CDPwn — CDP exploit-shape / CVE screening</div>' +
+                d.cdpwn.map(f => {
+                    const c = _sev[f.severity] || 'text-gray-300 border-slate-700 bg-slate-900/40';
+                    const cves = (f.cves || []).length ? ' <span class="font-mono text-cyan-300">[' + f.cves.map(escapeHtml).join(', ') + ']</span>' : '';
+                    return `<div class="px-3 py-1.5 rounded border text-xs mb-1 ${c}"><span class="font-mono">${escapeHtml(f.code)}</span> <span class="uppercase text-[10px] opacity-80">${escapeHtml(f.severity)}</span> · <span class="font-mono text-gray-400">${escapeHtml(f.src)}</span> — ${escapeHtml(f.detail)}${cves}</div>`;
+                }).join('') + '</div>';
+        }
         if ((d.speakers || []).length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Device-ID</th><th class="px-2 py-1">Platform</th><th class="px-2 py-1">IOS / version</th><th class="px-2 py-1">Mgmt IP</th><th class="px-2 py-1">Native VLAN</th><th class="px-2 py-1">Voice VLAN</th><th class="px-2 py-1">Port</th><th class="px-2 py-1">Trust</th></tr>' +
