@@ -9875,6 +9875,157 @@ def _stp_selftest():
 
 
 # --------------------------------------------------------------------------
+# Shared: passive trailing-data / Etherleak detector for the control-plane
+# watchers (CDP / DTP / VTP / EIGRP / FHRP / OSPF).
+# --------------------------------------------------------------------------
+# The tcpdump-text watchers below can't see the bytes *past* a frame's declared
+# length — but that region is where two real problems hide: a NIC/driver leaking
+# adjacent kernel memory into the Ethernet pad (Etherleak, CVE-2003-0001) and
+# data deliberately smuggled behind a valid advert (covert channel). Both look
+# the same on the wire: NON-ZERO bytes after the declared length, because honest
+# frame padding is all zeros. We add `-xx` to the capture, reconstruct the raw
+# frames from the hex, and flag non-zero trailers. Mirrors the standalone
+# modules' cdpwatch CDP-052 / vtpwatch VTP-016 / ospfwatch OSPF_TRAILING_DATA.
+_TCPDUMP_HEX_RE = re.compile(r'^\s*0x[0-9a-fA-F]+:\s+([0-9a-fA-F ]+)$')
+
+
+def _split_tcpdump_xx(output):
+    r"""Split `tcpdump -e -v -xx` output into (text_without_hex, [raw_frames]).
+
+    The hex block (`\t0x0000:  0100 0ccc ...`) that -xx appends after each packet
+    is stripped back out, so the existing regex parsers see exactly the text they
+    saw before -xx was added, and is reassembled into raw L2 frame bytes for the
+    byte-level trailing-data check."""
+    text_lines = []
+    frames = []
+    cur = bytearray()
+
+    def flush():
+        if cur:
+            frames.append(bytes(cur))
+            del cur[:]
+
+    for line in output.splitlines():
+        m = _TCPDUMP_HEX_RE.match(line)
+        if m:
+            try:
+                cur.extend(bytes.fromhex(m.group(1).replace(' ', '')))
+            except ValueError:
+                pass
+        else:
+            flush()
+            text_lines.append(line)
+    flush()
+    return '\n'.join(text_lines), frames
+
+
+def _frame_trailing_data(frame, kind):
+    """(trailer_len, nonzero, pad_hex) for the bytes past a frame's declared
+    length. kind='8023' bounds by the 802.3 length field (SNAP control frames:
+    CDP/DTP/VTP); kind='ip' bounds by the IPv4 total-length field (EIGRP/FHRP/
+    OSPF). A kept 4-byte FCS is excluded so it isn't mistaken for a leak. Returns
+    (0, False, '') when there is no trailer, or the frame is too short/uncertain."""
+    if len(frame) < 14:
+        return (0, False, '')
+    off = 14
+    field = int.from_bytes(frame[12:14], 'big')
+    while field == 0x8100 and len(frame) >= off + 4:      # step over 802.1Q tags
+        field = int.from_bytes(frame[off + 2:off + 4], 'big')
+        off += 4
+    if kind == '8023':
+        if off < 2 or not (0 < field <= 1500):            # a length, not an ethertype
+            return (0, False, '')
+        end = off + field
+    else:  # ip
+        if field != 0x0800 or len(frame) < off + 20:
+            return (0, False, '')
+        ihl = (frame[off] & 0x0f) * 4
+        total = int.from_bytes(frame[off + 2:off + 4], 'big')
+        if total < ihl:
+            return (0, False, '')
+        end = off + total
+    if end <= 0 or end >= len(frame):
+        return (0, False, '')
+    trailer = frame[end:]
+    pad = trailer[:-4] if len(trailer) > 4 else b''       # exclude a kept 4-byte FCS
+    return (len(trailer), bool(pad.strip(b'\x00')), pad.hex())
+
+
+def _scan_trailing(frames, kind):
+    """Return [{src, trailer_len, pad_hex}] for frames carrying non-zero bytes
+    past their declared length (Etherleak / smuggled data), de-duplicated."""
+    out = []
+    seen = set()
+    for fr in frames:
+        tlen, nonzero, ph = _frame_trailing_data(fr, kind)
+        if not nonzero:
+            continue
+        src = ':'.join('%02x' % b for b in fr[6:12])
+        key = (src, ph)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({'src': src, 'trailer_len': tlen, 'pad_hex': ph[:96]})
+    return out
+
+
+def _read_pcap_frames(path, limit=20000):
+    """Yield raw L2 frame bytes from a classic pcap file (little/big-endian).
+    Pure Python, no scapy; returns [] on any error or non-Ethernet linktype."""
+    frames = []
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return frames
+    if len(data) < 24:
+        return frames
+    magic = data[:4]
+    if magic == b'\xd4\xc3\xb2\xa1':
+        bo = 'little'
+    elif magic == b'\xa1\xb2\xc3\xd4':
+        bo = 'big'
+    else:
+        return frames                      # pcapng or unknown: skip (best-effort)
+    if int.from_bytes(data[20:24], bo) != 1:
+        return frames                      # linktype != EN10MB(Ethernet)
+    off = 24
+    while off + 16 <= len(data) and len(frames) < limit:
+        caplen = int.from_bytes(data[off + 8:off + 12], bo)
+        off += 16
+        if caplen > len(data) - off:
+            break
+        frames.append(data[off:off + caplen])
+        off += caplen
+    return frames
+
+
+def _apply_trailing(result, trailing, proto):
+    """Fold non-zero-trailer findings into a watcher result: record them, add a
+    reason, and escalate a clean/`*-enabled` verdict to 'trailing-data' (so the
+    do_*_watch event log picks it up). A more severe verdict is left in place."""
+    if not trailing:
+        return
+    result['trailing_data'] = trailing
+    srcs = ', '.join(sorted({t['src'] for t in trailing}))
+    reason = (
+        f"{proto}: {len(trailing)} frame(s) carry NON-ZERO bytes after the "
+        f"declared length from {srcs} — data smuggled behind a valid advert "
+        f"(covert channel), or a NIC/driver leaking kernel memory into the "
+        f"Ethernet pad (Etherleak, CVE-2003-0001). Honest padding is all zeros; "
+        f"investigate the sender.")
+    v = result.get('verdict')
+    if v == 'clean' or (v and v.endswith('-enabled')) or v is None:
+        result['verdict'] = 'trailing-data'
+    rs = result.get('reasons') or []
+    # drop a benign "all clean / none seen" summary line so the alert leads
+    if len(rs) == 1 and (rs[0].startswith('No ')
+                         or 'match the trusted baseline' in rs[0]):
+        rs = []
+    result['reasons'] = [reason] + rs
+
+
+# --------------------------------------------------------------------------
 # DTP Watch: passive Dynamic Trunking Protocol / VLAN-hopping scanner (Cisco)
 # --------------------------------------------------------------------------
 # DTP (Cisco proprietary, group MAC 01:00:0c:cc:cc:cc, SNAP OUI 0x00000c PID 0x2004)
@@ -10088,7 +10239,7 @@ def _dtp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2004'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '128', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10113,11 +10264,13 @@ def do_dtp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_dtp_capture(text)
 
     with _dtp_watch_lock:
         baseline = _dtp_watch_load()
         result = _dtp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'DTP')
         if result.get('learned'):
             _dtp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'dtp-enabled'):
@@ -10201,6 +10354,24 @@ def _dtp_selftest():
                   and _dtp_status(e.get('status'))[1] is True)
             scapy_result = {'ran': True, 'src': e.get('src'), 'status': e.get('status'),
                             'pass': ok, 'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data leg: zero pad benign, non-zero smuggle flagged (802.3).
+            from scapy.all import Ether as _E, raw as _sr
+            _fb = _sr(pkt)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 12, False),
+                                        ('smuggle', b'\x00\x00SMUGGLED', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as _tf:
+                    _pp = _tf.name
+                wrpcap(_pp, [_E(_fb + _extra)])
+                _xo = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-xx', '-r', _pp],
+                           timeout=10)['out']
+                _, _frs = _split_tcpdump_xx(_xo)
+                _got = bool(_scan_trailing(_frs, '8023'))
+                scenarios.append({'name': f'dtp-trailing-{_lbl}', 'expect': _want,
+                                  'got': _got, 'pass': _got == _want})
+                try:
+                    os.remove(_pp)
+                except OSError:
+                    pass
             try:
                 os.remove(pcap_path)
             except OSError:
@@ -10480,7 +10651,7 @@ def _cdp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '1500', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '1500', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10506,11 +10677,13 @@ def do_cdp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_cdp_capture(text)
 
     with _cdp_watch_lock:
         baseline = _cdp_watch_load()
         result = _cdp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'CDP')
         if result.get('learned'):
             _cdp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'cdp-enabled'):
@@ -10620,6 +10793,32 @@ def _cdp_selftest():
                             'platform': e.get('platform'),
                             'pass': bool(evs) and e.get('device_id') == 'rogue-sw',
                             'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data / Etherleak leg: a real frame padded with zeros (benign)
+            # vs. one carrying non-zero smuggled bytes past the 802.3 length. Drive
+            # the exact production path: tcpdump -xx -> _split_tcpdump_xx -> _scan.
+            from scapy.all import Ether, raw as _sraw
+            fb = _sraw(pkt)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 10, False),
+                                        ('smuggle', b'\x00\x00leak!!', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf2:
+                    pp = tf2.name
+                wrpcap(pp, [Ether(fb + _extra)])
+                xo = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-xx', '-r', pp],
+                          timeout=10)['out']
+                _txt, _frames = _split_tcpdump_xx(xo)
+                got = bool(_scan_trailing(_frames, '8023'))
+                scenarios.append({'name': f'cdp-trailing-{_lbl}',
+                                  'expect': _want, 'got': got, 'pass': got == _want})
+                # the stripped text must still parse the CDP frame (no hex leakage)
+                if _lbl == 'zero-pad':
+                    scenarios.append({'name': 'cdp-trailing-text-clean',
+                                      'expect': 'device-id parsed',
+                                      'got': bool(_parse_cdp_capture(_txt)),
+                                      'pass': bool(_parse_cdp_capture(_txt))})
+                try:
+                    os.remove(pp)
+                except OSError:
+                    pass
             try:
                 os.remove(pcap_path)
             except OSError:
@@ -10873,7 +11072,7 @@ def _vtp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2003'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10899,11 +11098,13 @@ def do_vtp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_vtp_capture(text)
 
     with _vtp_watch_lock:
         baseline = _vtp_watch_load()
         result = _vtp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'VTP')
         if result.get('learned'):
             _vtp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'vtp-enabled'):
@@ -11307,7 +11508,7 @@ def _eigrp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ip proto 88 or ip6 proto 88'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -11333,11 +11534,13 @@ def do_eigrp_watch(interface=None, seconds=15, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_eigrp_capture(text)
 
     with _eigrp_watch_lock:
         baseline = _eigrp_watch_load()
         result = _eigrp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'EIGRP')
         if result.get('learned'):
             _eigrp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -11983,7 +12186,7 @@ def _fhrp_capture(interface, seconds):
     fd, path = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-p',
-                '-nn', '-s', '512', '-c', '20000', '-w', path, bpf],
+                '-nn', '-s', '0', '-c', '20000', '-w', path, bpf],
                timeout=seconds + 8)
     try:
         if (os.path.getsize(path) <= 24 and res['err']
@@ -11991,10 +12194,11 @@ def _fhrp_capture(interface, seconds):
                      or "couldn't" in res['err'].lower()
                      or 'no such device' in res['err'].lower()
                      or 'syntax error' in res['err'].lower())):
-            return '', [], res['err'].strip()[:200]
+            return '', [], [], res['err'].strip()[:200]
         text = _run(['tcpdump', '-nn', '-t', '-v', '-r', path], timeout=20)['out']
         glbp = _fhrp_glbp_extract(path)
-        return text, glbp, None
+        frames = _read_pcap_frames(path)
+        return text, glbp, frames, None
     finally:
         try:
             os.remove(path)
@@ -12014,7 +12218,7 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 15, 4, 40)
 
-    text, glbp_pkts, err = _fhrp_capture(iface, seconds)
+    text, glbp_pkts, frames, err = _fhrp_capture(iface, seconds)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
@@ -12031,6 +12235,7 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
     with _fhrp_watch_lock:
         baseline = _fhrp_watch_load()
         result = _fhrp_analyze(events, seconds, baseline, learn=learn, glbp_vf=glbp_vf)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'FHRP')
         if result.get('learned'):
             _fhrp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -12664,7 +12869,7 @@ def _ospf_capture(interface, seconds):
     if not _have('tcpdump'):
         return '', 'tcpdump is not installed. Click Install to add it.'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', 'proto', 'ospf'],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', 'proto', 'ospf'],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -12690,11 +12895,13 @@ def do_ospf_watch(interface=None, seconds=15, learn=True, quick=False):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     packets = _parse_ospf_capture(text)
 
     with _ospf_watch_lock:
         baseline = _ospf_watch_load()
         result = _ospf_analyze(packets, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'OSPF')
         if result.get('learned'):
             _ospf_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -12815,6 +13022,24 @@ def _ospf_selftest():
                             'no_ghost_lsa': no_ghost, 'lsas': len(lsas),
                             'pass': len(parsed) >= 1 and seq_ok and no_ghost,
                             'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data leg (ip): zero pad benign, non-zero smuggle flagged.
+            from scapy.all import raw as _sr
+            _fb = _sr(hello)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 12, False),
+                                        ('smuggle', b'\x00\x00SMUGGLED', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as _tf:
+                    _pp = _tf.name
+                wrpcap(_pp, [Ether(_fb + _extra)])
+                _xo = _run(['tcpdump', '-nn', '-t', '-v', '-xx', '-r', _pp],
+                           timeout=10)['out']
+                _, _frs = _split_tcpdump_xx(_xo)
+                _got = bool(_scan_trailing(_frs, 'ip'))
+                scenarios.append({'name': f'ospf-trailing-{_lbl}', 'expect': _want,
+                                  'got': _got, 'pass': _got == _want})
+                try:
+                    os.remove(_pp)
+                except OSError:
+                    pass
             try:
                 os.remove(pcap_path)
             except OSError:
