@@ -143,6 +143,63 @@ def run(verbose=True):
     g.process_packet(arp(REPLY, A_MAC, '10.0.0.5', A_MAC, '10.0.0.5', eth_dst='ff:ff:ff:ff:ff:ff'), ts=1)
     h.ck('single gratuitous announce is silent', not al)
 
+    # ---- FHRP (HSRP/VRRP) virtual-MAC awareness ----------------------------
+    VIP, VMAC = '10.0.0.1', '00:00:0c:07:ac:01'   # HSRP group 1 virtual MAC
+    fhrp_cfg = {'trusted_fhrp_groups': [
+        {'protocol': 'hsrp', 'group': 1, 'virtual_ip': VIP, 'virtual_mac': VMAC}]}
+
+    # a clean failover (physical MAC -> confirmed virtual MAC) is de-escalated to
+    # info (FHRP_TRANSITION), not treated as poisoning.
+    g, al = _guard(fhrp_cfg)
+    g.process_packet(arp(REPLY, GW_MAC, VIP, GW_MAC, VIP, eth_dst='ff:ff:ff:ff:ff:ff'), ts=1)
+    g.process_packet(arp(REPLY, VMAC, VIP, VMAC, VIP, eth_dst='ff:ff:ff:ff:ff:ff'), ts=2)
+    h.ck('FHRP failover -> info fhrp_transition',
+         any('fhrp_transition' in a['codes'] and a['severity'] == 'info' for a in al))
+
+    # moving AWAY from the confirmed virtual MAC (gateway identity theft) is the
+    # dangerous direction — escalated to critical, never suppressed.
+    g, al = _guard(fhrp_cfg)
+    g.process_packet(arp(REPLY, VMAC, VIP, VMAC, VIP, eth_dst='ff:ff:ff:ff:ff:ff'), ts=1)
+    g.process_packet(arp(REPLY, ATT_MAC, VIP, ATT_MAC, VIP, eth_dst='ff:ff:ff:ff:ff:ff'), ts=2)
+    h.ck('FHRP virtual-MAC hijack -> critical',
+         any('fhrp_hijack' in a['codes'] and a['severity'] == 'critical' for a in al))
+
+    # a confirmed virtual MAC announcing its own IP repeatedly (failover churn) is
+    # NOT a gratuitous flood.
+    g, al = _guard(fhrp_cfg)
+    for i in range(8):
+        g.process_packet(arp(REPLY, VMAC, VIP, VMAC, VIP, eth_dst='ff:ff:ff:ff:ff:ff'), ts=1 + i * 0.1)
+    h.ck('confirmed FHRP gratuitous is suppressed', not al)
+
+    # an UNTRUSTED MAC that merely *looks* like an FHRP virtual MAC (shape match,
+    # not pinned) is still flagged, with an annotation — a spoofable shape is not
+    # a basis for trust.
+    g, al = _guard({'garp_rate_threshold': 5, 'garp_breadth_threshold': 99})
+    SHAPED = '00:00:0c:07:ac:63'                  # HSRP-range MAC, not in config
+    for i in range(6):
+        g.process_packet(arp(REPLY, SHAPED, '10.0.0.7', SHAPED, '10.0.0.7',
+                             eth_dst='ff:ff:ff:ff:ff:ff'), ts=1 + i * 0.1)
+    h.ck('shape-only FHRP MAC is still flagged + annotated',
+         any('garp_rate_flood' in a['codes'] for a in al)
+         and any('not in trusted_fhrp_groups' in a['summary'] for a in al))
+
+    # classify + derive round-trip: the derived MAC re-classifies to the same group.
+    h.ck('classify HSRPv1 virtual MAC', ag._classify_virtual_mac('00:00:0c:07:ac:01') == ('hsrp', 1, 1))
+    h.ck('classify VRRP virtual MAC', ag._classify_virtual_mac('00:00:5e:00:01:05') == ('vrrp', 5, None))
+    h.ck('ordinary MAC is not FHRP-shaped', ag._classify_virtual_mac(A_MAC) is None)
+    h.ck('derive HSRP vmac', ag._derive_fhrp_vmac('hsrp', 1) == '00:00:0c:07:ac:01')
+    h.ck('derive VRRP vmac', ag._derive_fhrp_vmac('vrrp', 5) == '00:00:5e:00:01:05')
+
+    # cross-pivot: FHRP-Watch baseline -> suggested trusted_fhrp_groups.
+    import json as _json, tempfile as _tmp, os as _os
+    fd, p = _tmp.mkstemp(suffix='.json'); _os.close(fd)
+    _json.dump({'groups': {'hsrp/1': {'proto': 'hsrp', 'group': 1, 'vips': [VIP]}}},
+               open(p, 'w'))
+    sug = ag.suggest_fhrp_groups(p)
+    _os.remove(p)
+    h.ck('suggest_fhrp_groups derives (ip, vmac) pair',
+         len(sug) == 1 and sug[0]['virtual_ip'] == VIP and sug[0]['virtual_mac'] == VMAC)
+
     total = h.n
     passed = total - h.fail
     print('arp_guard self-test: %d/%d %s' % (passed, total, 'OK' if h.fail == 0 else 'FAILED'))

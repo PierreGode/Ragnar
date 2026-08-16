@@ -6839,6 +6839,7 @@ async function runArpCheck() {
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Gateway</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.ip || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Current MAC</td><td class="px-3 py-1.5 font-mono ${mismatch ? 'text-red-400' : ''}">${escapeHtml(gw.mac || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Trusted MAC</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.baseline || '—')}${gw.learned ? ' <span class="text-xs text-gray-500">(learned now)</span>' : ''}</td></tr>` +
+            (gw.fhrp_shape ? `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">FHRP</td><td class="px-3 py-1.5">${escapeHtml(gw.fhrp_shape)} virtual MAC ${gw.fhrp_confirmed ? '<span class="text-green-400">✓ confirmed (expected HSRP/VRRP gateway)</span>' : '<span class="text-amber-300">shape match — confirm via FHRP Watch</span>'}</td></tr>` : '') +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Neighbours</td><td class="px-3 py-1.5">${d.neighbor_count != null ? d.neighbor_count : '—'}</td></tr>` +
             '</tbody></table>';
         if (d.impersonators && d.impersonators.length) {
@@ -8450,6 +8451,8 @@ const _CDP_VERDICT_STYLE = {
     'cdp-enabled': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ CDP is enabled here — it leaks IOS version / mgmt IP / native VLAN in clear'],
     spoof:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue CDP speaker — spoofed neighbour (possible fake IP phone / VoIP-VLAN-hop)'],
     flood:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDP flood — neighbour-table / CPU exhaustion DoS (Yersinia)'],
+    cdpwn:         ['bg-red-950/60 border-red-800 text-red-300', '🛑 CDPwn exploit shape — malformed CDP TLV matching an Armis CDPwn CVE (CVE-2020-3110/3111/3118/3119/3120)'],
+    'trailing-data': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Trailing data after the declared length — smuggled bytes / Etherleak (CVE-2003-0001)'],
     unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _cdpFillIfaces() {
@@ -8491,6 +8494,20 @@ async function runCdpWatch() {
         const [cls, label] = _CDP_VERDICT_STYLE[d.verdict] || _CDP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
         html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · ${d.packet_count} CDP frame(s), ${d.speaker_count} speaker(s)${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        if (d.cdpwn && d.cdpwn.length) {
+            const _sev = {
+                critical: 'text-red-300 border-red-800 bg-red-950/50',
+                high:     'text-orange-300 border-orange-800 bg-orange-950/40',
+                medium:   'text-amber-300 border-amber-800 bg-amber-950/40',
+                low:      'text-yellow-300 border-yellow-800 bg-yellow-950/30',
+            };
+            html += '<div class="mb-2"><div class="text-xs text-red-300 font-semibold mb-1">CDPwn — CDP exploit-shape / CVE screening</div>' +
+                d.cdpwn.map(f => {
+                    const c = _sev[f.severity] || 'text-gray-300 border-slate-700 bg-slate-900/40';
+                    const cves = (f.cves || []).length ? ' <span class="font-mono text-cyan-300">[' + f.cves.map(escapeHtml).join(', ') + ']</span>' : '';
+                    return `<div class="px-3 py-1.5 rounded border text-xs mb-1 ${c}"><span class="font-mono">${escapeHtml(f.code)}</span> <span class="uppercase text-[10px] opacity-80">${escapeHtml(f.severity)}</span> · <span class="font-mono text-gray-400">${escapeHtml(f.src)}</span> — ${escapeHtml(f.detail)}${cves}</div>`;
+                }).join('') + '</div>';
+        }
         if ((d.speakers || []).length) {
             html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
                 '<tr class="text-left text-gray-500"><th class="px-2 py-1">Device-ID</th><th class="px-2 py-1">Platform</th><th class="px-2 py-1">IOS / version</th><th class="px-2 py-1">Mgmt IP</th><th class="px-2 py-1">Native VLAN</th><th class="px-2 py-1">Voice VLAN</th><th class="px-2 py-1">Port</th><th class="px-2 py-1">Trust</th></tr>' +
@@ -9170,7 +9187,12 @@ async function runPathAsymmetry() {
 function _scapyLegLabel(sc) {
     if (!sc) return '';
     if (sc.ran) return sc.pass ? '<span class="text-green-400">e2e ✓</span>' : '<span class="text-red-300">e2e ✗</span>';
-    return '<span class="text-gray-500">e2e skipped</span>';
+    // Distinguish "no packet path to exercise" (detector reads a table, not the
+    // wire — the offline scenarios ARE the full path) from "Scapy not installed".
+    const reason = (sc.reason || '').toLowerCase();
+    if (reason.includes('offline only') || reason.includes('n/a'))
+        return '<span class="text-gray-500" title="This detector reads the kernel table, not captured packets — the offline scenarios already cover its full code path.">e2e n/a</span>';
+    return '<span class="text-gray-500" title="Install Scapy to run the packet-crafting end-to-end leg.">e2e skipped</span>';
 }
 async function runRoutingSelftest() {
     const out = document.getElementById('routing-selftest-results');
@@ -9194,6 +9216,7 @@ async function runRoutingSelftest() {
         if (instBtn) instBtn.classList.toggle('hidden', !!d.scapy_available);
 
         const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
+                        arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
         const overall = d.success
             ? '<div class="mb-2 px-3 py-2 rounded border bg-green-950/40 border-green-900 text-green-400 text-sm">✓ All detector self-tests passed' + (d.scapy_available ? ' (including Scapy end-to-end)' : ' — install Scapy for the end-to-end leg') + '</div>'
@@ -9202,11 +9225,11 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'stp', 'smb', 'relay', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'bgp', 'bgp_speaker', 'path_asymmetry'].forEach(k => {
+        ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'dns', 'bgp', 'bgp_speaker', 'path_asymmetry'].forEach(k => {
             const s = d.suites[k]; if (!s) return;
             const okAll = s.success;
             html += `<tr class="border-t border-slate-800">
-                <td class="px-2 py-1">${names[k]}</td>
+                <td class="px-2 py-1">${names[k] || k}</td>
                 <td class="px-2 py-1 font-mono ${okAll ? 'text-gray-300' : 'text-red-300'}">${s.passed}/${s.total}</td>
                 <td class="px-2 py-1">${_scapyLegLabel(s.scapy)}</td>
                 <td class="px-2 py-1">${okAll ? '<span class="text-green-400">PASS</span>' : '<span class="text-red-300">FAIL</span>'}</td>

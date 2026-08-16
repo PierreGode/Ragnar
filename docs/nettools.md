@@ -347,9 +347,23 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
 - **DoH cross-check** — resolves the same name over Cloudflare DoH (encrypted,
   tamper-resistant) and compares to the plaintext answer; a mismatch is a strong
   sign of on-path :53 spoofing.
+- **Known-answer anchors** — checks domains with a stable, published answer
+  (`dns.google`→8.8.8.8); a resolver whose answer
+  shares nothing with the documented set is drift/poisoning.
+- **ASN-level consensus** — maps each resolver's answers to their origin ASN (via
+  Team Cymru) and flags a system resolver answering in a *different ASN* than the
+  public resolvers. Unlike the raw-IP "divergence" soft signal, this survives
+  CDN/anycast (which share an ASN), so an ASN mismatch is a **strong** signal.
+- **DNSSEC negative control** — `dnssec-failed.org` *must* SERVFAIL on a
+  validating resolver; if it resolves, DNSSEC validation is broken here
+  (downgrade/stripping) and the AD/SERVFAIL signals can't be trusted this cycle.
+- **Transport race** — sends one query and briefly listens for a *second,
+  conflicting* answer — the signature of an off-path spoofer racing the real
+  resolver (Kaminsky cache-poisoning). Plain UDP; needs no elevated privileges.
 
-Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch) → **hijacked**;
-soft signals (SERVFAIL, divergence) → **suspicious**. The verdict is shown as a
+Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch, anchor mismatch,
+ASN divergence, failed DNSSEC control, transport race) → **hijacked**; soft
+signals (SERVFAIL, raw-IP divergence) → **suspicious**. The verdict is shown as a
 banner in the web panel, is available on the e-Paper **KEY4-long** result page,
 and drives the [Network Integrity Monitor](#-network-integrity-monitor).
 
@@ -1460,6 +1474,17 @@ classic VLAN hop. DTP should never appear on an access segment; the fix is
 - **trunk-negotiation** — trunk-forming DTP present at all (the port isn't
   `nonegotiate`, so it's exploitable) even from a known switch.
 - **dtp-enabled** — DTP frames present but not negotiating a trunk. Advisory / learn.
+- **trailing-data** — non-zero bytes *after* a frame's declared length (see the
+  shared note below). Shared with CDP/VTP/EIGRP/FHRP/OSPF Watch.
+
+> **Trailing-data / Etherleak (CDP · DTP · VTP · EIGRP · FHRP · OSPF Watch).**
+> Honest Ethernet padding is all zeros, so *non-zero* bytes past a frame's
+> declared length (the 802.3 length field for the Cisco SNAP protocols, the IPv4
+> total-length for the IP ones) mean data smuggled behind a valid advert (covert
+> channel) or a NIC/driver leaking kernel memory into the pad (Etherleak,
+> CVE-2003-0001). These watchers capture with `-xx`, reconstruct the raw frames,
+> and raise a **trailing-data** verdict on any non-zero trailer (a kept 4-byte
+> FCS is excluded). A more severe verdict on the same scan is left in place.
 
 The scan uses `tcpdump -e` (to capture the sender's MAC) with the BPF
 `ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2004`, which isolates DTP from the
@@ -1491,6 +1516,18 @@ CDP Watch looks at the same frames from the attacker's side and flags their abus
 - **cdp-enabled** — CDP is present at all: the scan surfaces **exactly what it leaks**
   here (IOS version, model, management IP, native/voice VLAN) so you can see the
   reconnaissance an attacker on that port gets for free. Advisory / learn.
+- **cdpwn** — an **attack-in-flight exploit shape** for the five Armis **CDPwn**
+  CVEs. A byte-level TLV parser runs over the reconstructed frames and flags:
+  oversized **DeviceID** (`CDP-042`, CVE-2020-3110) / **PortID** (`CDP-043`,
+  CVE-2020-3111) / generic string (`CDP-044`), **format-string** metacharacters in
+  a string TLV (`CDP-045`, CVE-2020-3118, printf-accurate `%n` scan), malformed
+  **Power-Request** with absurd level count (`CDP-046`, CVE-2020-3119), an absurd
+  **Addresses** count (`CDP-047`, CVE-2020-3120), and TLV length over/underrun
+  (`CDP-040`/`CDP-041`). It also does **version screening** (`CDP-020…024`): a
+  platform/version/device-id match (IP Phone, IP Camera, IOS-XR, NX-OS, FXOS/
+  Firepower — plain IOS/IOS-XE deliberately excluded, per Cisco's advisory)
+  attaches the CVEs to verify that device against. `TTL=0` withdrawals (`CDP-050`)
+  and the shared trailing-data check (`CDP-052`) round it out.
 
 The scan uses `tcpdump -e` with the BPF
 `ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000`, isolating CDP from the other
