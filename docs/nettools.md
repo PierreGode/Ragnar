@@ -1460,6 +1460,17 @@ classic VLAN hop. DTP should never appear on an access segment; the fix is
 - **trunk-negotiation** — trunk-forming DTP present at all (the port isn't
   `nonegotiate`, so it's exploitable) even from a known switch.
 - **dtp-enabled** — DTP frames present but not negotiating a trunk. Advisory / learn.
+- **trailing-data** — non-zero bytes *after* a frame's declared length (see the
+  shared note below). Shared with CDP/VTP/EIGRP/FHRP/OSPF Watch.
+
+> **Trailing-data / Etherleak (CDP · DTP · VTP · EIGRP · FHRP · OSPF Watch).**
+> Honest Ethernet padding is all zeros, so *non-zero* bytes past a frame's
+> declared length (the 802.3 length field for the Cisco SNAP protocols, the IPv4
+> total-length for the IP ones) mean data smuggled behind a valid advert (covert
+> channel) or a NIC/driver leaking kernel memory into the pad (Etherleak,
+> CVE-2003-0001). These watchers capture with `-xx`, reconstruct the raw frames,
+> and raise a **trailing-data** verdict on any non-zero trailer (a kept 4-byte
+> FCS is excluded). A more severe verdict on the same scan is left in place.
 
 The scan uses `tcpdump -e` (to capture the sender's MAC) with the BPF
 `ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2004`, which isolates DTP from the
