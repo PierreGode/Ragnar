@@ -151,6 +151,15 @@ Open Ragnar's dashboard at `http://<ragnar-ip>:8000` and use the RuSense tabs:
 5. **Settings** — configure **push notifications** for sensing events (see below),
    the **geofence**, and your **node names / positions** (Observatory → Room & Nodes).
 
+> **Demo vs. live.** The **Observatory** 3D view falls back to a built-in demo
+> reel whenever no real sensing node is streaming (no ESP32 connected, or the
+> server is running synthetic `--source auto`/`simulated` data). In that state it
+> shows an amber **"DEMO — no node connected"** flag and labels the placeholder
+> node **demo** — it never wears your configured node name (e.g. "s3"). The flag
+> clears and real node names return the instant a live frame arrives from an
+> `esp32`/`wifi` source. Data Source (Demo Generator / Live WebSocket) is set in
+> **Settings → Observatory**.
+
 ---
 
 ## Push notifications (alerts)
