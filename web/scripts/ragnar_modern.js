@@ -9187,7 +9187,12 @@ async function runPathAsymmetry() {
 function _scapyLegLabel(sc) {
     if (!sc) return '';
     if (sc.ran) return sc.pass ? '<span class="text-green-400">e2e ✓</span>' : '<span class="text-red-300">e2e ✗</span>';
-    return '<span class="text-gray-500">e2e skipped</span>';
+    // Distinguish "no packet path to exercise" (detector reads a table, not the
+    // wire — the offline scenarios ARE the full path) from "Scapy not installed".
+    const reason = (sc.reason || '').toLowerCase();
+    if (reason.includes('offline only') || reason.includes('n/a'))
+        return '<span class="text-gray-500" title="This detector reads the kernel table, not captured packets — the offline scenarios already cover its full code path.">e2e n/a</span>';
+    return '<span class="text-gray-500" title="Install Scapy to run the packet-crafting end-to-end leg.">e2e skipped</span>';
 }
 async function runRoutingSelftest() {
     const out = document.getElementById('routing-selftest-results');
