@@ -790,15 +790,89 @@ def _arp_baseline_save(d):
         pass
 
 
+# --- FHRP (HSRP/VRRP) virtual-MAC awareness for the gateway spoof check --------
+# A redundant gateway pair (HSRP/VRRP) answers for the virtual gateway IP with a
+# reserved *virtual* MAC, and moves it between physical routers on failover — so a
+# gateway MAC that is (or becomes) an FHRP virtual MAC is expected, not a MITM.
+# Recognition is a pure shape match (informational); real de-escalation needs an
+# operator-confirmed pin (a MAC is spoofable), mirroring python/arp_guard.py.
+def _arp_fhrp_classify(mac):
+    """(proto, group) if `mac` is in an HSRP/VRRP virtual-MAC range, else None.
+    HSRPv1 00:00:0c:07:ac:GG, HSRPv2 00:00:0c:9f:fG:GG, VRRP 00:00:5e:00:01:VV."""
+    try:
+        b = bytes(int(p, 16) for p in (mac or '').split(':'))
+    except (ValueError, AttributeError):
+        return None
+    if len(b) != 6:
+        return None
+    if b[:5] == b'\x00\x00\x0c\x07\xac':
+        return ('HSRPv1', b[5])
+    if b[:4] == b'\x00\x00\x0c\x9f' and (b[4] & 0xf0) == 0xf0:
+        return ('HSRPv2', ((b[4] & 0x0f) << 8) | b[5])
+    if b[:5] == b'\x00\x00\x5e\x00\x01':
+        return ('VRRP', b[5])
+    return None
+
+
+def _arp_fhrp_desc(info):
+    return None if not info else '%s group %d' % info
+
+
+def _arp_suggest_fhrp():
+    """Cross-pivot: derive confirmable {gateway_ip: virtual_mac} pins from FHRP
+    Watch's learned groups (data/fhrp_watch.json). HSRP/VRRP virtual MACs are
+    protocol-derived from the group number; GLBP is skipped. Suggestion only —
+    the operator confirms before it de-escalates anything."""
+    out = {}
+    try:
+        with open(_FHRP_WATCH_PATH) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return out
+    for g in (data.get('groups') or {}).values():
+        proto = (g.get('proto') or '').lower()
+        grp = g.get('group')
+        try:
+            grp = int(grp)
+        except (TypeError, ValueError):
+            continue
+        if proto == 'hsrp' and 0 <= grp <= 255:
+            vmac = '00:00:0c:07:ac:%02x' % grp
+        elif proto == 'hsrp' and grp <= 4095:
+            vmac = '00:00:0c:9f:f%x:%02x' % ((grp >> 8) & 0x0f, grp & 0xff)
+        elif proto == 'vrrp' and 0 <= grp <= 255:
+            vmac = '00:00:5e:00:01:%02x' % grp
+        else:
+            continue
+        for vip in (g.get('vips') or []):
+            out[vip] = vmac
+    return out
+
+
 def do_arp_baseline(action='get'):
     """Manage the trusted gateway IP->MAC baseline the spoof check compares
     against. action='reset' clears it so the current binding is re-learned on
-    the next check (use after a legitimate router/gateway change)."""
+    the next check (use after a legitimate router/gateway change).
+
+    FHRP actions: 'suggest_fhrp' proposes confirmable gateway->virtual-MAC pins
+    from FHRP Watch's learned groups; 'trust_fhrp' stores them so a gateway MAC
+    that equals its confirmed virtual MAC is treated as an expected FHRP gateway
+    rather than a spoof."""
     with _arp_baseline_lock:
         if action == 'reset':
             _arp_baseline_save({})
             return {'success': True, 'reset': True, 'gateways': {}}
-        return {'success': True, 'gateways': (_arp_baseline_load().get('gateways') or {})}
+        if action == 'suggest_fhrp':
+            return {'success': True, 'fhrp_suggested': _arp_suggest_fhrp()}
+        if action == 'trust_fhrp':
+            b = _arp_baseline_load()
+            pins = _arp_suggest_fhrp()
+            b['fhrp_gateways'] = {**(b.get('fhrp_gateways') or {}), **pins}
+            _arp_baseline_save(b)
+            return {'success': True, 'fhrp_gateways': b['fhrp_gateways']}
+        b = _arp_baseline_load()
+        return {'success': True, 'gateways': (b.get('gateways') or {}),
+                'fhrp_gateways': (b.get('fhrp_gateways') or {})}
 
 
 def do_arp_check(interface=None, learn=True):
@@ -834,19 +908,50 @@ def do_arp_check(interface=None, learn=True):
         baseline = _arp_baseline_load()
         gws = baseline.setdefault('gateways', {})
         base_mac = gws.get(gw)
+        fhrp_pins = baseline.get('fhrp_gateways') or {}
         if gw_mac and not base_mac and learn:
             gws[gw] = gw_mac
             _arp_baseline_save(baseline)
             base_mac = gw_mac
             learned = True
 
+    # FHRP (HSRP/VRRP) awareness: a confirmed virtual MAC for this gateway IP is
+    # the trust anchor; a shape-only match is annotated but never trusted.
+    confirmed_vmac = (fhrp_pins.get(gw) or '').lower() or None
+    fhrp_shape = _arp_fhrp_desc(_arp_fhrp_classify(gw_mac)) if gw_mac else None
+    fhrp_note = None
+
     if not gw_mac:
         verdict = 'unknown'
         reasons.append(f'could not resolve the gateway {gw} MAC (no ARP reply)')
     elif base_mac and gw_mac != base_mac:
-        verdict = 'spoofed'
-        reasons.append(f'gateway {gw} MAC changed from trusted {base_mac} to {gw_mac} '
-                       '— classic ARP-spoofing / MITM signature')
+        if confirmed_vmac and gw_mac.lower() == confirmed_vmac:
+            # Moved INTO the operator-confirmed virtual MAC — expected HSRP/VRRP
+            # failover/convergence, not a spoof.
+            fhrp_note = (f'gateway {gw} MAC is its confirmed {fhrp_shape or "FHRP"} '
+                         f'virtual MAC {gw_mac} — expected HSRP/VRRP failover, not a spoof')
+            reasons.append(fhrp_note)
+        elif confirmed_vmac and base_mac.lower() == confirmed_vmac:
+            # Moved AWAY from a confirmed virtual MAC — the first-hop-hijack
+            # direction; more dangerous than an ordinary change, never softened.
+            verdict = 'spoofed'
+            reasons.append(f'gateway {gw} was the confirmed FHRP virtual MAC {base_mac} '
+                           f'and is now {gw_mac} — first-hop gateway impersonation')
+        else:
+            verdict = 'spoofed'
+            msg = (f'gateway {gw} MAC changed from trusted {base_mac} to {gw_mac} '
+                   '— classic ARP-spoofing / MITM signature')
+            if fhrp_shape:
+                # A spoofable shape match: flag it, but don't trust it away.
+                msg += (f' [note: {gw_mac} is in the {fhrp_shape} virtual-MAC range — '
+                        'expected if this is a real HSRP/VRRP failover; confirm via '
+                        'FHRP Watch, then "Trust current gateway"]')
+            reasons.append(msg)
+    elif gw_mac and fhrp_shape and verdict == 'clean':
+        # Stable gateway that IS an FHRP virtual MAC — reassure, don't alarm.
+        fhrp_note = (f'gateway {gw} is served by an {fhrp_shape} virtual MAC '
+                     '(redundant-gateway pair) — normal for an HSRP/VRRP deployment')
+        reasons.append(fhrp_note)
 
     # One MAC claiming many IPs (attacker impersonating multiple hosts). The
     # gateway MAC is excluded — a router legitimately fronts its own address.
@@ -868,7 +973,10 @@ def do_arp_check(interface=None, learn=True):
 
     return {'success': True, 'verdict': verdict, 'interface': iface,
             'gateway': {'ip': gw, 'mac': gw_mac, 'baseline': base_mac,
-                        'learned': learned},
+                        'learned': learned, 'fhrp_shape': fhrp_shape,
+                        'fhrp_confirmed': bool(confirmed_vmac
+                                               and gw_mac and gw_mac.lower() == confirmed_vmac),
+                        'fhrp_note': fhrp_note},
             'impersonators': impersonators,
             'neighbor_count': len(entries),
             'reasons': reasons}
@@ -15439,10 +15547,13 @@ def register_network_diagnostics(app, logger=None):
     def net_arp_baseline():
         # POST {action:'reset'} clears the trusted gateway baseline so the
         # current binding is re-learned (after a legitimate gateway change).
+        # 'suggest_fhrp' / 'trust_fhrp' cross-pivot HSRP/VRRP virtual-gateway pins
+        # from FHRP Watch (see do_arp_baseline).
         action = 'get'
         if request.method == 'POST':
             data = request.get_json(silent=True) or {}
-            action = 'reset' if (data.get('action') == 'reset') else 'get'
+            req = data.get('action')
+            action = req if req in ('reset', 'suggest_fhrp', 'trust_fhrp') else 'get'
         _log(f"net/arp-baseline {action}")
         return jsonify(do_arp_baseline(action))
 

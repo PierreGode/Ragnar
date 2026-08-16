@@ -6839,6 +6839,7 @@ async function runArpCheck() {
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Gateway</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.ip || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Current MAC</td><td class="px-3 py-1.5 font-mono ${mismatch ? 'text-red-400' : ''}">${escapeHtml(gw.mac || '—')}</td></tr>` +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Trusted MAC</td><td class="px-3 py-1.5 font-mono">${escapeHtml(gw.baseline || '—')}${gw.learned ? ' <span class="text-xs text-gray-500">(learned now)</span>' : ''}</td></tr>` +
+            (gw.fhrp_shape ? `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">FHRP</td><td class="px-3 py-1.5">${escapeHtml(gw.fhrp_shape)} virtual MAC ${gw.fhrp_confirmed ? '<span class="text-green-400">✓ confirmed (expected HSRP/VRRP gateway)</span>' : '<span class="text-amber-300">shape match — confirm via FHRP Watch</span>'}</td></tr>` : '') +
             `<tr class="border-t border-slate-800"><td class="px-3 py-1.5 text-gray-500">Neighbours</td><td class="px-3 py-1.5">${d.neighbor_count != null ? d.neighbor_count : '—'}</td></tr>` +
             '</tbody></table>';
         if (d.impersonators && d.impersonators.length) {

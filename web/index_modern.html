@@ -1717,8 +1717,8 @@
                     <!-- ARP Poisoning -->
                     <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                         <h3 class="text-lg font-semibold mb-1">ARP Poisoning</h3>
-                        <p class="text-xs text-amber-300/90 mb-2">Checks for ARP spoofing / MITM — the default gateway's MAC changed from the trusted baseline, or one MAC answering for many IPs (subnet impersonation).</p>
-                        <p class="text-sm text-gray-400 mb-3">Reads the kernel neighbour table (no capture). The first check learns the gateway's MAC as the trusted baseline; after a legitimate router change, click "Trust current gateway" to re-learn it.</p>
+                        <p class="text-xs text-amber-300/90 mb-2">Checks for ARP spoofing / MITM — the default gateway's MAC changed from the trusted baseline, or one MAC answering for many IPs (subnet impersonation). <strong>HSRP/VRRP virtual-MAC awareness</strong>: a gateway served by an FHRP virtual MAC is recognised, so a legitimate failover isn't mistaken for a spoof — a move <em>into</em> a confirmed virtual MAC is expected, a move <em>away</em> from one is escalated as gateway impersonation, and an unconfirmed shape match is annotated (never trusted — a MAC is spoofable).</p>
+                        <p class="text-sm text-gray-400 mb-3">Reads the kernel neighbour table (no capture). The first check learns the gateway's MAC as the trusted baseline; after a legitimate router change, click "Trust current gateway" to re-learn it. Confirm HSRP/VRRP virtual gateways by cross-pivoting from FHRP Watch (<span class="font-mono">arp-baseline</span> <span class="font-mono">suggest_fhrp</span> / <span class="font-mono">trust_fhrp</span>).</p>
                         <div class="flex flex-wrap gap-2">
                             <select id="arp-check-iface" onfocus="_arpFillIfaces()" title="Interface to check — scopes to that segment's gateway + neighbours (for a multi-homed box); Auto uses the default route" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                                 <option value="">Auto (default route)</option>
@@ -8035,7 +8035,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260816-cdpwn-1"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260816-arp-fhrp-1"></script>
 
 
 <script>
