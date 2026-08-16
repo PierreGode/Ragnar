@@ -296,6 +296,13 @@ if ! command -v tshark >/dev/null 2>&1; then
     echo "wireshark-common wireshark-common/install-setuid boolean false" | debconf-set-selections 2>/dev/null || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tshark >/dev/null 2>&1 || true
 fi
+# dig (dnsutils) is a hard requirement for DNS Doctor (do_dns_doctor: multi-
+# resolver consensus, NXDOMAIN/bogon probes, DNSSEC negative control, Team-Cymru
+# ASN lookups). It degrades to a "Click Install" prompt in the UI when missing,
+# but DNS Doctor is a core diagnostic, so ensure it on update-only boxes too.
+if ! command -v dig >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends dnsutils >/dev/null 2>&1 || true
+fi
 if command -v tcpdump >/dev/null 2>&1; then
     if [ ! -f /etc/sudoers.d/ragnar-traffic ]; then
         cat > /etc/sudoers.d/ragnar-traffic << 'EOF'

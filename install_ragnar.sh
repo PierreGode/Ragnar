@@ -555,6 +555,7 @@ install_dependencies() {
         "sqlite3"
         "arp-scan"
         "tcpdump"
+        "dnsutils"
         "traceroute"
         "mtr-tiny"
         "whois"
