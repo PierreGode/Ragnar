@@ -1502,6 +1502,18 @@ CDP Watch looks at the same frames from the attacker's side and flags their abus
 - **cdp-enabled** — CDP is present at all: the scan surfaces **exactly what it leaks**
   here (IOS version, model, management IP, native/voice VLAN) so you can see the
   reconnaissance an attacker on that port gets for free. Advisory / learn.
+- **cdpwn** — an **attack-in-flight exploit shape** for the five Armis **CDPwn**
+  CVEs. A byte-level TLV parser runs over the reconstructed frames and flags:
+  oversized **DeviceID** (`CDP-042`, CVE-2020-3110) / **PortID** (`CDP-043`,
+  CVE-2020-3111) / generic string (`CDP-044`), **format-string** metacharacters in
+  a string TLV (`CDP-045`, CVE-2020-3118, printf-accurate `%n` scan), malformed
+  **Power-Request** with absurd level count (`CDP-046`, CVE-2020-3119), an absurd
+  **Addresses** count (`CDP-047`, CVE-2020-3120), and TLV length over/underrun
+  (`CDP-040`/`CDP-041`). It also does **version screening** (`CDP-020…024`): a
+  platform/version/device-id match (IP Phone, IP Camera, IOS-XR, NX-OS, FXOS/
+  Firepower — plain IOS/IOS-XE deliberately excluded, per Cisco's advisory)
+  attaches the CVEs to verify that device against. `TTL=0` withdrawals (`CDP-050`)
+  and the shared trailing-data check (`CDP-052`) round it out.
 
 The scan uses `tcpdump -e` with the BPF
 `ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000`, isolating CDP from the other

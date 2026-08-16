@@ -10643,6 +10643,222 @@ def _cdp_analyze(events, seconds, baseline, learn=True):
     }
 
 
+# --------------------------------------------------------------------------
+# CDPwn: byte-level CDP parser + attack-in-flight / CVE-screening detectors.
+# --------------------------------------------------------------------------
+# The tcpdump-text CDP path above sees flood / spoof / info-leak, but not the
+# malformed-TLV *exploit shapes* behind the five Armis "CDPwn" CVEs
+# (CVE-2020-3110/3111/3118/3119/3120: oversized DeviceID/PortID, format-string
+# TLVs, malformed Power-Request, absurd Addresses count, TLV length over/underrun).
+# Those need a bounds-checked byte parser, which runs here over the raw frames the
+# capture reconstructs (-xx). Ported from the standalone cdpwatch v3 (CDPawn).
+_CDP_SNAP_SIG = b'\xaa\xaa\x03\x00\x00\x0c\x20\x00'   # LLC/SNAP + OUI Cisco + PID CDP
+_CDP_STRING_TLVS = {0x0001: 'device_id', 0x0003: 'port_id', 0x0005: 'version',
+                    0x0006: 'platform', 0x0009: 'vtp_domain'}
+# field -> (byte ceiling, code, CVE-or-None, label). Real hostnames/ifnames are
+# short; version banners run long, so version/platform get a higher ceiling.
+_CDP_CEILINGS = {'device_id': (256, 'CDP-042', 'CVE-2020-3110', 'DeviceID'),
+                 'port_id': (128, 'CDP-043', 'CVE-2020-3111', 'PortID'),
+                 'version': (512, 'CDP-044', None, 'version'),
+                 'platform': (512, 'CDP-044', None, 'platform'),
+                 'vtp_domain': (512, 'CDP-044', None, 'vtp_domain')}
+_CDP_MAX_POWER_LEVELS = 8      # a real PoE request carries 1-3
+_CDP_MAX_ADDRESSES = 64        # >64 advertised mgmt addresses is absurd (DoS shape)
+_CDP_FMT_FLAGS = "-+ #'0123456789.*$"
+_CDP_FMT_LENGTH = "hlLqjztZ"
+_CDP_FMT_WRITE = "nN"          # writes through a pointer -> CRITICAL
+_CDP_FMT_READ = "diouxXeEfFgGaAcspm"
+_CDP_FMT_READ_MIN = 2          # a lone %-x is noise; a run is a leak probe
+_CDPWN_FAMILIES = [
+    (re.compile(r"IP\s*Phone|SIP\d{2,}|SEP[0-9A-Fa-f]{12}"), 'CDP-020',
+     ['CVE-2020-3111'],
+     "Cisco IP Phone — verify firmware against CVE-2020-3111 (PortID stack overflow)"),
+    (re.compile(r"IP\s*Camera|Video\s*Surveillance|CIVS-IPC"), 'CDP-021',
+     ['CVE-2020-3110'],
+     "Cisco Video Surveillance 8000 IP Camera — verify against CVE-2020-3110 (DeviceID heap overflow)"),
+    (re.compile(r"IOS[\s-]?XR"), 'CDP-022', ['CVE-2020-3118', 'CVE-2020-3120'],
+     "Cisco IOS XR — verify against CVE-2020-3118 (format string) + CVE-2020-3120 (Addresses DoS)"),
+    (re.compile(r"NX[\s-]?OS|Nexus"), 'CDP-023', ['CVE-2020-3119', 'CVE-2020-3120'],
+     "Cisco NX-OS — verify against CVE-2020-3119 (Power Request overflow) + CVE-2020-3120 (Addresses DoS)"),
+    (re.compile(r"FXOS|Firepower\s*(4100|9300)|UCS\s*6\d{3}|Fabric\s*Interconnect"),
+     'CDP-024', ['CVE-2020-3120'],
+     "Cisco FXOS / Firepower 4100/9300 / UCS FI — verify against CVE-2020-3120 (Addresses DoS)"),
+]
+# Cisco's advisory says plain IOS / IOS-XE routers+switches are NOT CDPwn-affected,
+# so those platforms are deliberately absent from the family table (false-positive
+# avoidance).
+_CDPWN_SEV = {'CDP-020': 'high', 'CDP-021': 'high', 'CDP-022': 'high',
+              'CDP-023': 'high', 'CDP-024': 'medium', 'CDP-040': 'critical',
+              'CDP-041': 'critical', 'CDP-042': 'critical', 'CDP-043': 'critical',
+              'CDP-044': 'high', 'CDP-045': 'critical', 'CDP-046': 'critical',
+              'CDP-047': 'high', 'CDP-050': 'low'}
+_CDPWN_ATTACK_CODES = ('CDP-040', 'CDP-041', 'CDP-042', 'CDP-043', 'CDP-044',
+                       'CDP-045', 'CDP-046', 'CDP-047')
+
+
+def _cdp_scan_format_specifiers(s):
+    """printf-accurate scan: return [(specifier, 'write'|'read')]. Honours '%%'
+    (literal) and positional/dynamic flags so it neither false-fires on '100%%'
+    nor misses '%1$n' / '%*n' (the evasion gap a naive regex leaves)."""
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] != '%':
+            i += 1
+            continue
+        if i + 1 < n and s[i + 1] == '%':
+            i += 2                       # literal percent, per printf
+            continue
+        j = i + 1
+        while j < n and s[j] in _CDP_FMT_FLAGS:
+            j += 1
+        while j < n and s[j] in _CDP_FMT_LENGTH:
+            j += 1
+        if j < n and s[j] in _CDP_FMT_WRITE:
+            out.append((s[i:j + 1], 'write'))
+        elif j < n and s[j] in _CDP_FMT_READ:
+            out.append((s[i:j + 1], 'read'))
+        i = j + 1
+    return out
+
+
+def _cdp_dispatch_tlv(r, ttype, value):
+    if ttype in _CDP_STRING_TLVS:
+        r['tlvs'][_CDP_STRING_TLVS[ttype]] = value.decode('latin-1', 'replace')
+    elif ttype in (0x0016, 0x0002) and len(value) >= 4:   # Mgmt-Addr / Addresses
+        r['address_count'] = int.from_bytes(value[:4], 'big')
+    elif ttype in (0x001a, 0x001b, 0x0010):               # Power Req/Avail/Consumption
+        r['tlvs']['power'] = True
+        if ttype == 0x001a and len(value) >= 4:           # Power Request: 4B hdr + levels
+            r['power_levels'] = (len(value) - 4) // 4
+
+
+def _cdp_parse_frame(raw):
+    """Bounds-checked byte-level CDP parse of one raw L2 frame. Returns
+    {is_cdp, src, ttl, tlvs, malformations, power_levels, address_count} or None.
+    The TLV walk is bounded by the 802.3 length field (padding-safe); it records
+    malformations (CDP-040 overrun / CDP-041 underflow) and never raises."""
+    if len(raw) < 14:
+        return None
+    idx = raw.find(_CDP_SNAP_SIG)
+    if idx < 2 or idx > 32:
+        return None
+    off = idx + len(_CDP_SNAP_SIG)
+    end = len(raw)
+    lenfield = int.from_bytes(raw[idx - 2:idx], 'big')
+    if 0 < lenfield <= 1500 and idx + lenfield <= len(raw):
+        end = idx + lenfield              # trust the 802.3 length, strip padding
+    r = {'is_cdp': True, 'src': ':'.join('%02x' % b for b in raw[6:12]), 'ttl': None,
+         'tlvs': {}, 'malformations': [], 'power_levels': None, 'address_count': None}
+    if off + 4 > end:
+        r['malformations'].append(('CDP-040', 'truncated CDP header'))
+        return r
+    r['ttl'] = raw[off + 1]
+    p = off + 4                           # first TLV (after version/ttl/checksum)
+    while p + 4 <= end:
+        ttype = int.from_bytes(raw[p:p + 2], 'big')
+        tlen = int.from_bytes(raw[p + 2:p + 4], 'big')
+        if tlen < 4:
+            r['malformations'].append(
+                ('CDP-041', 'TLV type 0x%04x length %d < 4 (underflow)' % (ttype, tlen)))
+            break
+        ve = p + tlen
+        overran = ve > end
+        if overran:
+            r['malformations'].append(
+                ('CDP-040', 'TLV type 0x%04x length %d overruns frame' % (ttype, tlen)))
+            ve = end
+        _cdp_dispatch_tlv(r, ttype, raw[p + 4:ve])
+        if overran:
+            break
+        p = ve
+    return r
+
+
+def _cdp_cdpwn_scan(frames):
+    """Run the CDPwn attack-in-flight (CDP-040..047, 050) + CVE version-screening
+    (CDP-020..024) detectors over raw CDP frames. Returns deduped findings, each
+    {code, severity, src, detail, cves}."""
+    out = []
+    seen = set()
+
+    def add(code, src, detail, cves=None):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({'code': code, 'severity': _CDPWN_SEV.get(code, 'medium'),
+                    'src': src, 'detail': detail, 'cves': cves or []})
+
+    for fr in frames:
+        pr = _cdp_parse_frame(fr)
+        if not pr:
+            continue
+        src = pr['src']
+        for code, detail in pr['malformations']:
+            add(code, src, detail)
+        tl = pr['tlvs']
+        for fld, (ceil, code, cve, label) in _CDP_CEILINGS.items():
+            v = tl.get(fld)
+            if v is not None and len(v) > ceil:
+                add(code, src, '%s length %d > %d%s' % (
+                    label, len(v), ceil,
+                    ' (%s overflow shape)' % cve if cve else ''),
+                    [cve] if cve else None)
+        for fld, v in tl.items():
+            if not isinstance(v, str):
+                continue
+            specs = _cdp_scan_format_specifiers(v)
+            writes = [t for t, k in specs if k == 'write']
+            if writes:
+                add('CDP-045', src, "format-string write %r in %s TLV (CVE-2020-3118 shape)"
+                    % (writes[0], fld), ['CVE-2020-3118'])
+            elif len(specs) >= _CDP_FMT_READ_MIN:
+                add('CDP-045', src, "%d format-string read specifiers in %s TLV "
+                    "(CVE-2020-3118 memory-leak probe shape)" % (len(specs), fld),
+                    ['CVE-2020-3118'])
+        if pr['power_levels'] is not None and pr['power_levels'] > _CDP_MAX_POWER_LEVELS:
+            add('CDP-046', src, "Power Request TLV carries %d power levels > %d "
+                "(CVE-2020-3119 NX-OS shape)" % (pr['power_levels'], _CDP_MAX_POWER_LEVELS),
+                ['CVE-2020-3119'])
+        if pr['address_count'] is not None and pr['address_count'] > _CDP_MAX_ADDRESSES:
+            add('CDP-047', src, "Addresses/Mgmt-Addr TLV claims %d addresses > %d "
+                "(CVE-2020-3120 DoS shape)" % (pr['address_count'], _CDP_MAX_ADDRESSES),
+                ['CVE-2020-3120'])
+        if pr['ttl'] == 0:
+            add('CDP-050', src, "CDP TTL=0 (neighbour withdrawal) — a flood of these "
+                "flushes neighbour tables")
+        hay = ' '.join(str(tl.get(k, '')) for k in ('platform', 'version', 'device_id'))
+        if hay.strip():
+            for rx, code, cves, note in _CDPWN_FAMILIES:
+                if rx.search(hay):
+                    add(code, src, note, cves)
+    return out
+
+
+def _apply_cdpwn(result, findings):
+    """Fold CDPwn findings into a CDP watch result. An attack-in-flight exploit
+    shape (CDP-040..047) escalates a clean/cdp-enabled/trailing-data verdict to
+    'cdpwn'; version screening (CDP-020..024) and TTL=0 (CDP-050) are surfaced
+    without overriding a more severe verdict."""
+    if not findings:
+        return
+    result['cdpwn'] = findings
+    lines = []
+    for f in findings:
+        cve = (' [' + ', '.join(f['cves']) + ']') if f['cves'] else ''
+        lines.append('%s %s %s: %s%s' % (f['code'], f['severity'].upper(),
+                                         f['src'], f['detail'], cve))
+    if any(f['code'] in _CDPWN_ATTACK_CODES for f in findings) and \
+            result.get('verdict') in ('clean', 'cdp-enabled', 'trailing-data', None):
+        result['verdict'] = 'cdpwn'
+    rs = result.get('reasons') or []
+    if len(rs) == 1 and (rs[0].startswith('No ')
+                         or 'match the trusted baseline' in rs[0]):
+        rs = []
+    result['reasons'] = lines + rs
+
+
 def _cdp_capture(interface, seconds):
     """One passive tcpdump window over CDP frames -> (raw, error). Uses -e for the
     sending MAC; the BPF isolates CDP (PID 0x2000) from the other protocols that
@@ -10684,6 +10900,7 @@ def do_cdp_watch(interface=None, seconds=30, learn=True):
         baseline = _cdp_watch_load()
         result = _cdp_analyze(events, seconds, baseline, learn=learn)
         _apply_trailing(result, _scan_trailing(frames, '8023'), 'CDP')
+        _apply_cdpwn(result, _cdp_cdpwn_scan(frames))
         if result.get('learned'):
             _cdp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'cdp-enabled'):
@@ -10819,6 +11036,45 @@ def _cdp_selftest():
                     os.remove(pp)
                 except OSError:
                     pass
+
+            # CDPwn leg: build byte-level exploit shapes, confirm each fires and a
+            # benign frame is silent. Drives _cdp_parse_frame + _cdp_cdpwn_scan.
+            def _cdp_bytes(tlvs, ttl=180):
+                pay = bytes([2, ttl, 0, 0]) + tlvs
+                return _sraw(Dot3(dst='01:00:0c:cc:cc:cc', src='de:ad:be:ef:00:0c')
+                             / LLC(dsap=0xaa, ssap=0xaa, ctrl=3)
+                             / SNAP(OUI=0x00000c, code=0x2000) / pay)
+
+            def _cdp_tlv(t, v):
+                return t.to_bytes(2, 'big') + (len(v) + 4).to_bytes(2, 'big') + v
+
+            cdpwn_cases = [
+                ('cdpwn-oversized-deviceid', _cdp_bytes(_cdp_tlv(0x0001, b'A' * 300)), 'CDP-042'),
+                ('cdpwn-oversized-portid', _cdp_bytes(_cdp_tlv(0x0003, b'B' * 200)), 'CDP-043'),
+                ('cdpwn-format-string', _cdp_bytes(_cdp_tlv(0x0005, b'%n%n hi')), 'CDP-045'),
+                ('cdpwn-malformed-power',
+                 _cdp_bytes(_cdp_tlv(0x001a, b'\x00' * 4 + b'\x00' * 80)), 'CDP-046'),
+                ('cdpwn-absurd-addresses',
+                 _cdp_bytes(_cdp_tlv(0x0016, (100).to_bytes(4, 'big'))), 'CDP-047'),
+                ('cdpwn-ttl-zero', _cdp_bytes(_cdp_tlv(0x0001, b'sw1'), ttl=0), 'CDP-050'),
+                ('cdpwn-nxos-screen',
+                 _cdp_bytes(_cdp_tlv(0x0006, b'cisco Nexus N9K')), 'CDP-023'),
+                ('cdpwn-tlv-underflow', _cdp_bytes(b'\x00\x01\x00\x02'), 'CDP-041'),
+            ]
+            for _nm, _fr, _code in cdpwn_cases:
+                _codes = {x['code'] for x in _cdp_cdpwn_scan([_fr])}
+                scenarios.append({'name': _nm, 'expect': _code,
+                                  'got': sorted(_codes), 'pass': _code in _codes})
+            _benign = _cdp_bytes(_cdp_tlv(0x0001, b'switch1') + _cdp_tlv(0x0006, b'cisco WS-C3560'))
+            scenarios.append({'name': 'cdpwn-benign-silent', 'expect': 'no findings',
+                              'got': [x['code'] for x in _cdp_cdpwn_scan([_benign])],
+                              'pass': not _cdp_cdpwn_scan([_benign])})
+            # verdict escalation: an attack shape sets verdict 'cdpwn'
+            _res = {'verdict': 'clean', 'reasons': ['CDP speakers all match the trusted baseline']}
+            _apply_cdpwn(_res, _cdp_cdpwn_scan([cdpwn_cases[0][1]]))
+            scenarios.append({'name': 'cdpwn-verdict-escalates', 'expect': 'cdpwn',
+                              'got': _res['verdict'], 'pass': _res['verdict'] == 'cdpwn'})
+
             try:
                 os.remove(pcap_path)
             except OSError:
