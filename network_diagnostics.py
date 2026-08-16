@@ -14504,7 +14504,11 @@ def do_routing_selftest():
             'passed': sum(1 for s in v['scenarios'] if s['pass']),
             'total': len(v['scenarios']),
             'scenarios': v['scenarios'],
-            'scapy': v.get('scapy') or v.get('e2e'),
+            # A suite that reports no Scapy/e2e leg is offline-only by design (it
+            # crafts no packet — e.g. codec/FSM/RIB, OWD math), so label it 'n/a'
+            # rather than leaving the column blank.
+            'scapy': v.get('scapy') or v.get('e2e')
+            or {'ran': False, 'reason': 'offline only'},
         } for k, v in suites.items()},
     }
 
