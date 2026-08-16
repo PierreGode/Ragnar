@@ -348,7 +348,7 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
   tamper-resistant) and compares to the plaintext answer; a mismatch is a strong
   sign of on-path :53 spoofing.
 - **Known-answer anchors** — checks domains with a stable, published answer
-  (`one.one.one.one`→1.1.1.1, `dns.google`→8.8.8.8); a resolver whose answer
+  (`dns.google`→8.8.8.8); a resolver whose answer
   shares nothing with the documented set is drift/poisoning.
 - **ASN-level consensus** — maps each resolver's answers to their origin ASN (via
   Team Cymru) and flags a system resolver answering in a *different ASN* than the

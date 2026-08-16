@@ -2937,7 +2937,6 @@ def _doh_lookup(name, rtype='A'):
 # Domains with a stable, publicly documented answer — drift here is a strong
 # poisoning signal that needs no trust anchor to interpret.
 _DNS_ANCHORS = {
-    'one.one.one.one': {'1.1.1.1', '1.0.0.1'},
     'dns.google': {'8.8.8.8', '8.8.4.4'},
 }
 # A deliberately mis-signed domain: a validating resolver MUST SERVFAIL it. If it
@@ -3077,7 +3076,7 @@ def do_dns_doctor(name):
     random name that must not resolve), a private-IP-for-a-public-name check, a
     SERVFAIL/DNSSEC-bogus check, and a DoH cross-check comparing the encrypted
     answer against the plaintext one. Ported from the standalone dns_poison_checker:
-    known-answer **anchors** (drift on one.one.one.one / dns.google), **ASN-level
+    known-answer **anchors** (drift on dns.google), **ASN-level
     consensus** (Team Cymru — survives CDN/anycast where a raw-IP compare can't),
     a live **DNSSEC negative control** (dnssec-failed.org must SERVFAIL, else the
     DNSSEC signals are untrustworthy), and a **transport-race** probe (a second,
