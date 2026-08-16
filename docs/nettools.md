@@ -347,9 +347,23 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
 - **DoH cross-check** — resolves the same name over Cloudflare DoH (encrypted,
   tamper-resistant) and compares to the plaintext answer; a mismatch is a strong
   sign of on-path :53 spoofing.
+- **Known-answer anchors** — checks domains with a stable, published answer
+  (`one.one.one.one`→1.1.1.1, `dns.google`→8.8.8.8); a resolver whose answer
+  shares nothing with the documented set is drift/poisoning.
+- **ASN-level consensus** — maps each resolver's answers to their origin ASN (via
+  Team Cymru) and flags a system resolver answering in a *different ASN* than the
+  public resolvers. Unlike the raw-IP "divergence" soft signal, this survives
+  CDN/anycast (which share an ASN), so an ASN mismatch is a **strong** signal.
+- **DNSSEC negative control** — `dnssec-failed.org` *must* SERVFAIL on a
+  validating resolver; if it resolves, DNSSEC validation is broken here
+  (downgrade/stripping) and the AD/SERVFAIL signals can't be trusted this cycle.
+- **Transport race** — sends one query and briefly listens for a *second,
+  conflicting* answer — the signature of an off-path spoofer racing the real
+  resolver (Kaminsky cache-poisoning). Plain UDP; needs no elevated privileges.
 
-Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch) → **hijacked**;
-soft signals (SERVFAIL, divergence) → **suspicious**. The verdict is shown as a
+Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch, anchor mismatch,
+ASN divergence, failed DNSSEC control, transport race) → **hijacked**; soft
+signals (SERVFAIL, raw-IP divergence) → **suspicious**. The verdict is shown as a
 banner in the web panel, is available on the e-Paper **KEY4-long** result page,
 and drives the [Network Integrity Monitor](#-network-integrity-monitor).
 

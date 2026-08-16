@@ -2928,6 +2928,146 @@ def _doh_lookup(name, rtype='A'):
             if a.get('type') == 1 and a.get('data')}   # type 1 = A record
 
 
+# ---------------------------------------------------------------------------
+# DNS-poison extras ported from the standalone dns_poison_checker: known-answer
+# anchors, ASN-level consensus (Team Cymru), a live DNSSEC negative control, and
+# an active transport-race probe. All fail OPEN (a check that can't run just
+# doesn't contribute a finding) so they never break the core DNS-Doctor verdict.
+# ---------------------------------------------------------------------------
+# Domains with a stable, publicly documented answer — drift here is a strong
+# poisoning signal that needs no trust anchor to interpret.
+_DNS_ANCHORS = {
+    'one.one.one.one': {'1.1.1.1', '1.0.0.1'},
+    'dns.google': {'8.8.8.8', '8.8.4.4'},
+}
+# A deliberately mis-signed domain: a validating resolver MUST SERVFAIL it. If it
+# resolves, this cycle's DNSSEC signals (AD/SERVFAIL) can't be trusted.
+_DNS_DNSSEC_NEGCTRL = 'dnssec-failed.org'
+_cymru_asn_cache = {}
+
+
+def _cymru_asn(ip):
+    """Origin ASN string for an IPv4 address via Team Cymru's DNS service, or
+    None. One cached TXT lookup; never connects to the address itself."""
+    if ip in _cymru_asn_cache:
+        return _cymru_asn_cache[ip]
+    asn = None
+    octets = (ip or '').split('.')
+    if len(octets) == 4 and all(o.isdigit() for o in octets):
+        q = '.'.join(reversed(octets)) + '.origin.asn.cymru.com'
+        res = _run(['dig', '+short', '+tries=1', '+time=3', 'TXT', q], timeout=8)
+        m = re.search(r'"?\s*(\d+)', res['out'])   # "ASN | prefix | CC | reg | date"
+        asn = m.group(1) if m else None
+    _cymru_asn_cache[ip] = asn
+    return asn
+
+
+def _asn_set(ips):
+    """{ASN} for a set of IPs (Nones dropped)."""
+    return {a for a in (_cymru_asn(ip) for ip in ips) if a}
+
+
+def _dns_anchor_check(resolvers):
+    """Query the known-answer anchor domains through each resolver; a resolver
+    whose answer shares NOTHING with the documented set is drift/poisoning."""
+    out = []
+    for dom, expected in _DNS_ANCHORS.items():
+        for resolver, kind in resolvers:
+            ans = set(_dig(dom, resolver)['answers'])
+            if ans and ans.isdisjoint(expected):
+                out.append({'domain': dom, 'resolver': resolver, 'kind': kind,
+                            'answers': sorted(ans), 'expected': sorted(expected)})
+    return out
+
+
+def _dns_dnssec_negctrl(resolver='1.1.1.1'):
+    """The DNSSEC layer's own control: `dnssec-failed.org` must SERVFAIL on a
+    validating resolver. trustworthy=False means DNSSEC results are unreliable."""
+    d = _dig(_DNS_DNSSEC_NEGCTRL, resolver)
+    if d['status'] is None:
+        return {'checked': False, 'trustworthy': None}
+    return {'checked': True, 'resolver': resolver, 'status': d['status'],
+            'trustworthy': d['status'] == 'SERVFAIL'}
+
+
+def _dns_skip_name(data, i):
+    """Advance past a DNS name at offset i (handles a compression pointer)."""
+    while i < len(data):
+        b = data[i]
+        if b == 0:
+            return i + 1
+        if b & 0xc0 == 0xc0:
+            return i + 2
+        i += 1 + b
+    return i
+
+
+def _parse_dns_a_answers(data):
+    """Extract A-record IPs from a raw DNS response, or [] on any malformation."""
+    try:
+        qd = int.from_bytes(data[4:6], 'big')
+        an = int.from_bytes(data[6:8], 'big')
+        i = 12
+        for _ in range(qd):
+            i = _dns_skip_name(data, i) + 4      # + qtype/qclass
+        ips = []
+        for _ in range(an):
+            i = _dns_skip_name(data, i)
+            if i + 10 > len(data):
+                break
+            rtype = int.from_bytes(data[i:i + 2], 'big')
+            rdlen = int.from_bytes(data[i + 8:i + 10], 'big')
+            i += 10
+            rdata = data[i:i + rdlen]
+            i += rdlen
+            if rtype == 1 and rdlen == 4:
+                ips.append('.'.join(str(b) for b in rdata))
+        return ips
+    except (IndexError, ValueError):
+        return []
+
+
+def _dns_race_probe(resolver, name, window=0.6):
+    """Send ONE A query to resolver:53 and listen briefly for more than one
+    answer to our txid — the signature of a spoofer racing the real resolver
+    (Kaminsky-style). Plain UDP client: no raw socket / capability needed.
+    conflicting=True means two responses to our query disagreed."""
+    import struct as _st
+    txid = secrets.randbelow(0x10000)
+
+    def _enc(n):
+        return b''.join(bytes([len(x)]) + x.encode('idna' if any(ord(c) > 127 for c in x)
+                        else 'ascii', 'ignore')
+                        for x in n.rstrip('.').split('.') if x) + b'\x00'
+    try:
+        query = (_st.pack('>HHHHHH', txid, 0x0100, 1, 0, 0, 0)
+                 + _enc(name) + _st.pack('>HH', 1, 1))
+    except (UnicodeError, ValueError):
+        return {'checked': False}
+    sets = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(window)
+        s.sendto(query, (resolver, 53))
+        end = time.time() + window
+        while time.time() < end:
+            try:
+                data, _src = s.recvfrom(4096)
+            except socket.timeout:
+                break
+            except OSError:
+                break
+            if len(data) >= 12 and int.from_bytes(data[:2], 'big') == txid:
+                sets.append(frozenset(_parse_dns_a_answers(data)))
+        s.close()
+    except OSError:
+        return {'checked': False}
+    distinct = {x for x in sets if x}          # ignore empty (NODATA) responses
+    return {'checked': True, 'responses': len(sets),
+            'conflicting': len(distinct) > 1,
+            'answer_sets': [sorted(x) for x in distinct]}
+
+
 def do_dns_doctor(name):
     """Resolve `name` through every system resolver plus public 1.1.1.1 / 8.8.8.8,
     reporting per-resolver answers, query latency and the DNSSEC AD flag, whether
@@ -2936,7 +3076,13 @@ def do_dns_doctor(name):
     Also runs active DNS-poisoning / hijack probes: an NXDOMAIN-rewrite test (a
     random name that must not resolve), a private-IP-for-a-public-name check, a
     SERVFAIL/DNSSEC-bogus check, and a DoH cross-check comparing the encrypted
-    answer against the plaintext one. The combined verdict is in `poison`."""
+    answer against the plaintext one. Ported from the standalone dns_poison_checker:
+    known-answer **anchors** (drift on one.one.one.one / dns.google), **ASN-level
+    consensus** (Team Cymru — survives CDN/anycast where a raw-IP compare can't),
+    a live **DNSSEC negative control** (dnssec-failed.org must SERVFAIL, else the
+    DNSSEC signals are untrustworthy), and a **transport-race** probe (a second,
+    conflicting answer to one query = an off-path spoofer racing the resolver).
+    The combined verdict is in `poison`."""
     name = (name or '').strip()
     if not name:
         return {'success': False, 'error': 'hostname required'}
@@ -3032,8 +3178,58 @@ def do_dns_doctor(name):
             reasons.append('DoH (encrypted) answer disjoint from the plaintext answer '
                            '— strong sign of on-path DNS spoofing')
 
+    # 6. Known-answer anchors: a resolver whose answer for a documented anchor
+    #    domain shares nothing with the published set (poison_checker anchors).
+    anchor_hits = _dns_anchor_check(tested)
+    if anchor_hits:
+        who = ', '.join('%s@%s' % (a['domain'], a['resolver']) for a in anchor_hits)
+        reasons.append('anchor mismatch: %s did not resolve to its documented '
+                       'answer — DNS poisoning/redirect' % who)
+
+    # 7. ASN-level consensus: a system resolver whose answer sits in a different
+    #    ASN than the public resolvers is a stronger hijack signal than a raw-IP
+    #    difference (CDN/anycast share an ASN, so this survives that noise).
+    public_asns = _asn_set(public_union)
+    asn_disjoint = []
+    for r in results:
+        if r['kind'] == 'system' and r['answers'] and public_asns:
+            ra = _asn_set(r['answers'])
+            r['asns'] = sorted(ra)
+            if ra and ra.isdisjoint(public_asns):
+                asn_disjoint.append({'resolver': r['resolver'], 'asns': sorted(ra)})
+    if asn_disjoint:
+        who = ', '.join('%s (AS%s)' % (a['resolver'], '/'.join(a['asns']))
+                        for a in asn_disjoint)
+        reasons.append('%s answered in a different ASN than the public resolvers '
+                       '(AS%s) — redirect to a different network operator'
+                       % (who, '/'.join(sorted(public_asns))))
+
+    # 8. DNSSEC negative control: if dnssec-failed.org does NOT SERVFAIL on a
+    #    validating resolver, DNSSEC validation is broken here, so the AD/SERVFAIL
+    #    signals above can't be trusted this cycle.
+    negctrl = _dns_dnssec_negctrl()
+    if negctrl.get('checked') and negctrl.get('trustworthy') is False:
+        reasons.append('DNSSEC negative control failed: %s did not SERVFAIL '
+                       'dnssec-failed.org — DNSSEC validation is not working here '
+                       '(downgrade/stripping), so AD/SERVFAIL signals are unreliable'
+                       % negctrl.get('resolver'))
+
+    # 9. Transport race: a second, conflicting answer to one query is an off-path
+    #    spoofer racing the real resolver (Kaminsky cache-poisoning attempt).
+    race = {'checked': False}
+    race_resolver = next((r for r, k in tested if k == 'system'), None) \
+        or (tested[0][0] if tested else None)
+    if race_resolver and public_name:
+        race = _dns_race_probe(race_resolver, name)
+    if race.get('conflicting'):
+        reasons.append('two conflicting answers to a single query from %s — an '
+                       'off-path spoofer is racing the real resolver (cache-'
+                       'poisoning attempt in progress)' % race_resolver)
+
     # Strong = confirmed tampering; soft = worth a second look.
-    strong = bool(nx_rewriters or bogon_hits or doh['mismatch'])
+    strong = bool(nx_rewriters or bogon_hits or doh['mismatch'] or anchor_hits
+                  or asn_disjoint or race.get('conflicting')
+                  or (negctrl.get('checked') and negctrl.get('trustworthy') is False))
     soft = bool(servfail or sys_disjoint)
     verdict = 'hijacked' if strong else ('suspicious' if soft else 'clean')
 
@@ -3047,6 +3243,10 @@ def do_dns_doctor(name):
         'servfail_resolvers': servfail,
         'system_disjoint_resolvers': sys_disjoint,
         'doh': doh,
+        'anchor_mismatches': anchor_hits,
+        'asn_disjoint': asn_disjoint,
+        'dnssec_negctrl': negctrl,
+        'transport_race': race,
     }
 
     return {'success': True, 'name': name, 'results': results,
