@@ -51,9 +51,18 @@ core link.
 | `ISIS-HELLO-PADDING` | info | Hello padding (TLV 8) — bandwidth waste / amplification vector |
 | `ISIS-NARROW-METRICS` | low | Legacy narrow metrics (TLV 2/128/130) instead of wide (RFC 5305) |
 | `ISIS-MALFORMED` | medium | Structurally inconsistent PDU (crafted packet / truncation) |
+| `ISIS-TRAILING-DATA` | medium | Non-zero bytes after the declared PDU length — data smuggled past the PDU end (covert channel / Etherleak, CVE-2003-0001) |
 
 \* `ISIS-AUTH-MISSING` escalates from medium → high when the baseline declares
 `expected_auth`.
+
+The TLV walk is bounded by the IS-IS **PDU Length** header field, not the
+captured frame length. The kernel/NIC pads every frame to the 60-byte Ethernet
+minimum, so a short PDU arrives with trailing zeros; walking those as TLVs would
+parse them as `type=0/len=0` (and a kept FCS or a snaplen cut would trip a bogus
+`ISIS-MALFORMED`). Bytes past the PDU end are classified: all-zero padding is
+benign and ignored, any non-zero trailer raises `ISIS-TRAILING-DATA` (a kept
+4-byte FCS is excluded so it isn't mistaken for a leak).
 
 Findings are **deduplicated and counted** (per code + system + level) with
 first/last-seen timestamps, and sorted by severity in the snapshot.

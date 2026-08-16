@@ -140,7 +140,8 @@ def parse_isis_frame(raw):
            'holding_time': None, 'lifetime': None, 'seq': None, 'overload': False,
            'lsp_id': None, 'three_way': False, 'padding': False,
            'narrow_metrics': False, 'tlv_types': [], 'malformed': None,
-           'pdu_type': None}
+           'pdu_type': None, 'pdu_len_field': None,
+           'trailing_len': 0, 'trailing_nonzero': False}
     b = raw[off:]
     try:
         if len(b) < 8:
@@ -152,6 +153,7 @@ def parse_isis_frame(raw):
         pdu['pdu_type'] = ptype
         max_area = b[7]  # noqa: F841 (parsed for completeness)
         body = b[8:]
+        plen = None                              # IS-IS PDU Length field (from 0x83)
 
         if ptype in _LAN_IIH or ptype == PDU_P2P_IIH:
             pdu['kind'] = 'iih'
@@ -166,7 +168,7 @@ def parse_isis_frame(raw):
             j = 1                                   # skip circuit type
             pdu['system_id'] = _fmt_id(body[j:j + id_len]); j += id_len
             pdu['holding_time'] = struct.unpack('!H', body[j:j + 2])[0]; j += 2
-            j += 2                                   # PDU length
+            plen = struct.unpack('!H', body[j:j + 2])[0]; j += 2   # PDU length
             if ptype in _LAN_IIH:
                 if len(body) < j + 1 + (id_len + 1):
                     raise _Malformed('LAN IIH header truncated')
@@ -184,7 +186,7 @@ def parse_isis_frame(raw):
             need = 2 + 2 + (id_len + 2) + 4 + 2 + 1
             if len(body) < need:
                 raise _Malformed('LSP header truncated')
-            j = 2                                    # PDU length
+            plen = struct.unpack('!H', body[0:2])[0]; j = 2        # PDU length
             pdu['lifetime'] = struct.unpack('!H', body[j:j + 2])[0]; j += 2
             lspid = body[j:j + id_len + 2]; j += id_len + 2
             pdu['lsp_id'] = _fmt_lspid(lspid)
@@ -200,7 +202,7 @@ def parse_isis_frame(raw):
             pdu['level'] = 1 if ptype in (PDU_L1_CSNP, PDU_L1_PSNP) else 2
             if len(body) < 2 + (id_len + 1):
                 raise _Malformed('SNP header truncated')
-            j = 2
+            plen = struct.unpack('!H', body[0:2])[0]; j = 2        # PDU length
             pdu['system_id'] = _fmt_id(body[j:j + id_len])   # source id
             j += id_len + 1
             if ptype in _CSNP:
@@ -208,6 +210,29 @@ def parse_isis_frame(raw):
             tlvs = body[j:]
         else:
             return None                               # unknown PDU type: ignore
+
+        # Bound the TLV region by the IS-IS PDU Length field. The kernel/NIC pads
+        # every frame to the 60-byte Ethernet minimum, so a short PDU arrives with
+        # trailing zeros; walking to the captured end parses them as type=0/len=0
+        # TLVs (or trips a bogus overrun on a kept FCS / snaplen cut). PDU Length is
+        # the authoritative end of the PDU — everything past it is padding-or-smuggle.
+        pdu['pdu_len_field'] = plen
+        tlv_start = len(body) - len(tlvs)             # == j
+        if plen and 8 <= plen and tlv_start <= (plen - 8) <= len(body):
+            trailing = tlvs[(plen - 8) - tlv_start:]
+            tlvs = tlvs[:(plen - 8) - tlv_start]
+        elif plen and (plen - 8) > len(body):
+            trailing = b''                            # PDU claims more than captured
+            pdu['malformed'] = pdu['malformed'] or \
+                'pdu-length {} exceeds captured {} bytes'.format(plen, len(body) + 8)
+        else:
+            trailing = b''                            # no/implausible length: fall back
+        # All-zero trailer is benign Ethernet padding; any non-zero byte is data
+        # smuggled past the PDU end (covert channel / Etherleak) — surface it.
+        if trailing:
+            pdu['trailing_len'] = len(trailing)
+            if trailing.strip(b'\x00'):
+                pdu['trailing_nonzero'] = True
 
         for ttype, val in _walk_tlvs(tlvs):
             pdu['tlv_types'].append(ttype)
@@ -298,6 +323,11 @@ class IsisWatch:
             self._add('ISIS-MALFORMED', 'medium', sid or '?', lvl,
                       'structurally inconsistent PDU: ' + pdu['malformed'], now)
             return
+        if pdu.get('trailing_nonzero'):
+            self._add('ISIS-TRAILING-DATA', 'medium', sid or '?', lvl,
+                      '{} non-zero byte(s) after the declared PDU length — data '
+                      'smuggled past the PDU end (covert channel / Etherleak)'
+                      .format(pdu.get('trailing_len') or 0), now)
         if not sid:
             return
 

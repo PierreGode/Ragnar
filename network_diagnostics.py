@@ -790,15 +790,89 @@ def _arp_baseline_save(d):
         pass
 
 
+# --- FHRP (HSRP/VRRP) virtual-MAC awareness for the gateway spoof check --------
+# A redundant gateway pair (HSRP/VRRP) answers for the virtual gateway IP with a
+# reserved *virtual* MAC, and moves it between physical routers on failover — so a
+# gateway MAC that is (or becomes) an FHRP virtual MAC is expected, not a MITM.
+# Recognition is a pure shape match (informational); real de-escalation needs an
+# operator-confirmed pin (a MAC is spoofable), mirroring python/arp_guard.py.
+def _arp_fhrp_classify(mac):
+    """(proto, group) if `mac` is in an HSRP/VRRP virtual-MAC range, else None.
+    HSRPv1 00:00:0c:07:ac:GG, HSRPv2 00:00:0c:9f:fG:GG, VRRP 00:00:5e:00:01:VV."""
+    try:
+        b = bytes(int(p, 16) for p in (mac or '').split(':'))
+    except (ValueError, AttributeError):
+        return None
+    if len(b) != 6:
+        return None
+    if b[:5] == b'\x00\x00\x0c\x07\xac':
+        return ('HSRPv1', b[5])
+    if b[:4] == b'\x00\x00\x0c\x9f' and (b[4] & 0xf0) == 0xf0:
+        return ('HSRPv2', ((b[4] & 0x0f) << 8) | b[5])
+    if b[:5] == b'\x00\x00\x5e\x00\x01':
+        return ('VRRP', b[5])
+    return None
+
+
+def _arp_fhrp_desc(info):
+    return None if not info else '%s group %d' % info
+
+
+def _arp_suggest_fhrp():
+    """Cross-pivot: derive confirmable {gateway_ip: virtual_mac} pins from FHRP
+    Watch's learned groups (data/fhrp_watch.json). HSRP/VRRP virtual MACs are
+    protocol-derived from the group number; GLBP is skipped. Suggestion only —
+    the operator confirms before it de-escalates anything."""
+    out = {}
+    try:
+        with open(_FHRP_WATCH_PATH) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return out
+    for g in (data.get('groups') or {}).values():
+        proto = (g.get('proto') or '').lower()
+        grp = g.get('group')
+        try:
+            grp = int(grp)
+        except (TypeError, ValueError):
+            continue
+        if proto == 'hsrp' and 0 <= grp <= 255:
+            vmac = '00:00:0c:07:ac:%02x' % grp
+        elif proto == 'hsrp' and grp <= 4095:
+            vmac = '00:00:0c:9f:f%x:%02x' % ((grp >> 8) & 0x0f, grp & 0xff)
+        elif proto == 'vrrp' and 0 <= grp <= 255:
+            vmac = '00:00:5e:00:01:%02x' % grp
+        else:
+            continue
+        for vip in (g.get('vips') or []):
+            out[vip] = vmac
+    return out
+
+
 def do_arp_baseline(action='get'):
     """Manage the trusted gateway IP->MAC baseline the spoof check compares
     against. action='reset' clears it so the current binding is re-learned on
-    the next check (use after a legitimate router/gateway change)."""
+    the next check (use after a legitimate router/gateway change).
+
+    FHRP actions: 'suggest_fhrp' proposes confirmable gateway->virtual-MAC pins
+    from FHRP Watch's learned groups; 'trust_fhrp' stores them so a gateway MAC
+    that equals its confirmed virtual MAC is treated as an expected FHRP gateway
+    rather than a spoof."""
     with _arp_baseline_lock:
         if action == 'reset':
             _arp_baseline_save({})
             return {'success': True, 'reset': True, 'gateways': {}}
-        return {'success': True, 'gateways': (_arp_baseline_load().get('gateways') or {})}
+        if action == 'suggest_fhrp':
+            return {'success': True, 'fhrp_suggested': _arp_suggest_fhrp()}
+        if action == 'trust_fhrp':
+            b = _arp_baseline_load()
+            pins = _arp_suggest_fhrp()
+            b['fhrp_gateways'] = {**(b.get('fhrp_gateways') or {}), **pins}
+            _arp_baseline_save(b)
+            return {'success': True, 'fhrp_gateways': b['fhrp_gateways']}
+        b = _arp_baseline_load()
+        return {'success': True, 'gateways': (b.get('gateways') or {}),
+                'fhrp_gateways': (b.get('fhrp_gateways') or {})}
 
 
 def do_arp_check(interface=None, learn=True):
@@ -834,19 +908,50 @@ def do_arp_check(interface=None, learn=True):
         baseline = _arp_baseline_load()
         gws = baseline.setdefault('gateways', {})
         base_mac = gws.get(gw)
+        fhrp_pins = baseline.get('fhrp_gateways') or {}
         if gw_mac and not base_mac and learn:
             gws[gw] = gw_mac
             _arp_baseline_save(baseline)
             base_mac = gw_mac
             learned = True
 
+    # FHRP (HSRP/VRRP) awareness: a confirmed virtual MAC for this gateway IP is
+    # the trust anchor; a shape-only match is annotated but never trusted.
+    confirmed_vmac = (fhrp_pins.get(gw) or '').lower() or None
+    fhrp_shape = _arp_fhrp_desc(_arp_fhrp_classify(gw_mac)) if gw_mac else None
+    fhrp_note = None
+
     if not gw_mac:
         verdict = 'unknown'
         reasons.append(f'could not resolve the gateway {gw} MAC (no ARP reply)')
     elif base_mac and gw_mac != base_mac:
-        verdict = 'spoofed'
-        reasons.append(f'gateway {gw} MAC changed from trusted {base_mac} to {gw_mac} '
-                       '— classic ARP-spoofing / MITM signature')
+        if confirmed_vmac and gw_mac.lower() == confirmed_vmac:
+            # Moved INTO the operator-confirmed virtual MAC — expected HSRP/VRRP
+            # failover/convergence, not a spoof.
+            fhrp_note = (f'gateway {gw} MAC is its confirmed {fhrp_shape or "FHRP"} '
+                         f'virtual MAC {gw_mac} — expected HSRP/VRRP failover, not a spoof')
+            reasons.append(fhrp_note)
+        elif confirmed_vmac and base_mac.lower() == confirmed_vmac:
+            # Moved AWAY from a confirmed virtual MAC — the first-hop-hijack
+            # direction; more dangerous than an ordinary change, never softened.
+            verdict = 'spoofed'
+            reasons.append(f'gateway {gw} was the confirmed FHRP virtual MAC {base_mac} '
+                           f'and is now {gw_mac} — first-hop gateway impersonation')
+        else:
+            verdict = 'spoofed'
+            msg = (f'gateway {gw} MAC changed from trusted {base_mac} to {gw_mac} '
+                   '— classic ARP-spoofing / MITM signature')
+            if fhrp_shape:
+                # A spoofable shape match: flag it, but don't trust it away.
+                msg += (f' [note: {gw_mac} is in the {fhrp_shape} virtual-MAC range — '
+                        'expected if this is a real HSRP/VRRP failover; confirm via '
+                        'FHRP Watch, then "Trust current gateway"]')
+            reasons.append(msg)
+    elif gw_mac and fhrp_shape and verdict == 'clean':
+        # Stable gateway that IS an FHRP virtual MAC — reassure, don't alarm.
+        fhrp_note = (f'gateway {gw} is served by an {fhrp_shape} virtual MAC '
+                     '(redundant-gateway pair) — normal for an HSRP/VRRP deployment')
+        reasons.append(fhrp_note)
 
     # One MAC claiming many IPs (attacker impersonating multiple hosts). The
     # gateway MAC is excluded — a router legitimately fronts its own address.
@@ -868,7 +973,10 @@ def do_arp_check(interface=None, learn=True):
 
     return {'success': True, 'verdict': verdict, 'interface': iface,
             'gateway': {'ip': gw, 'mac': gw_mac, 'baseline': base_mac,
-                        'learned': learned},
+                        'learned': learned, 'fhrp_shape': fhrp_shape,
+                        'fhrp_confirmed': bool(confirmed_vmac
+                                               and gw_mac and gw_mac.lower() == confirmed_vmac),
+                        'fhrp_note': fhrp_note},
             'impersonators': impersonators,
             'neighbor_count': len(entries),
             'reasons': reasons}
@@ -2928,6 +3036,145 @@ def _doh_lookup(name, rtype='A'):
             if a.get('type') == 1 and a.get('data')}   # type 1 = A record
 
 
+# ---------------------------------------------------------------------------
+# DNS-poison extras ported from the standalone dns_poison_checker: known-answer
+# anchors, ASN-level consensus (Team Cymru), a live DNSSEC negative control, and
+# an active transport-race probe. All fail OPEN (a check that can't run just
+# doesn't contribute a finding) so they never break the core DNS-Doctor verdict.
+# ---------------------------------------------------------------------------
+# Domains with a stable, publicly documented answer — drift here is a strong
+# poisoning signal that needs no trust anchor to interpret.
+_DNS_ANCHORS = {
+    'dns.google': {'8.8.8.8', '8.8.4.4'},
+}
+# A deliberately mis-signed domain: a validating resolver MUST SERVFAIL it. If it
+# resolves, this cycle's DNSSEC signals (AD/SERVFAIL) can't be trusted.
+_DNS_DNSSEC_NEGCTRL = 'dnssec-failed.org'
+_cymru_asn_cache = {}
+
+
+def _cymru_asn(ip):
+    """Origin ASN string for an IPv4 address via Team Cymru's DNS service, or
+    None. One cached TXT lookup; never connects to the address itself."""
+    if ip in _cymru_asn_cache:
+        return _cymru_asn_cache[ip]
+    asn = None
+    octets = (ip or '').split('.')
+    if len(octets) == 4 and all(o.isdigit() for o in octets):
+        q = '.'.join(reversed(octets)) + '.origin.asn.cymru.com'
+        res = _run(['dig', '+short', '+tries=1', '+time=3', 'TXT', q], timeout=8)
+        m = re.search(r'"?\s*(\d+)', res['out'])   # "ASN | prefix | CC | reg | date"
+        asn = m.group(1) if m else None
+    _cymru_asn_cache[ip] = asn
+    return asn
+
+
+def _asn_set(ips):
+    """{ASN} for a set of IPs (Nones dropped)."""
+    return {a for a in (_cymru_asn(ip) for ip in ips) if a}
+
+
+def _dns_anchor_check(resolvers):
+    """Query the known-answer anchor domains through each resolver; a resolver
+    whose answer shares NOTHING with the documented set is drift/poisoning."""
+    out = []
+    for dom, expected in _DNS_ANCHORS.items():
+        for resolver, kind in resolvers:
+            ans = set(_dig(dom, resolver)['answers'])
+            if ans and ans.isdisjoint(expected):
+                out.append({'domain': dom, 'resolver': resolver, 'kind': kind,
+                            'answers': sorted(ans), 'expected': sorted(expected)})
+    return out
+
+
+def _dns_dnssec_negctrl(resolver='1.1.1.1'):
+    """The DNSSEC layer's own control: `dnssec-failed.org` must SERVFAIL on a
+    validating resolver. trustworthy=False means DNSSEC results are unreliable."""
+    d = _dig(_DNS_DNSSEC_NEGCTRL, resolver)
+    if d['status'] is None:
+        return {'checked': False, 'trustworthy': None}
+    return {'checked': True, 'resolver': resolver, 'status': d['status'],
+            'trustworthy': d['status'] == 'SERVFAIL'}
+
+
+def _dns_skip_name(data, i):
+    """Advance past a DNS name at offset i (handles a compression pointer)."""
+    while i < len(data):
+        b = data[i]
+        if b == 0:
+            return i + 1
+        if b & 0xc0 == 0xc0:
+            return i + 2
+        i += 1 + b
+    return i
+
+
+def _parse_dns_a_answers(data):
+    """Extract A-record IPs from a raw DNS response, or [] on any malformation."""
+    try:
+        qd = int.from_bytes(data[4:6], 'big')
+        an = int.from_bytes(data[6:8], 'big')
+        i = 12
+        for _ in range(qd):
+            i = _dns_skip_name(data, i) + 4      # + qtype/qclass
+        ips = []
+        for _ in range(an):
+            i = _dns_skip_name(data, i)
+            if i + 10 > len(data):
+                break
+            rtype = int.from_bytes(data[i:i + 2], 'big')
+            rdlen = int.from_bytes(data[i + 8:i + 10], 'big')
+            i += 10
+            rdata = data[i:i + rdlen]
+            i += rdlen
+            if rtype == 1 and rdlen == 4:
+                ips.append('.'.join(str(b) for b in rdata))
+        return ips
+    except (IndexError, ValueError):
+        return []
+
+
+def _dns_race_probe(resolver, name, window=0.6):
+    """Send ONE A query to resolver:53 and listen briefly for more than one
+    answer to our txid — the signature of a spoofer racing the real resolver
+    (Kaminsky-style). Plain UDP client: no raw socket / capability needed.
+    conflicting=True means two responses to our query disagreed."""
+    import struct as _st
+    txid = secrets.randbelow(0x10000)
+
+    def _enc(n):
+        return b''.join(bytes([len(x)]) + x.encode('idna' if any(ord(c) > 127 for c in x)
+                        else 'ascii', 'ignore')
+                        for x in n.rstrip('.').split('.') if x) + b'\x00'
+    try:
+        query = (_st.pack('>HHHHHH', txid, 0x0100, 1, 0, 0, 0)
+                 + _enc(name) + _st.pack('>HH', 1, 1))
+    except (UnicodeError, ValueError):
+        return {'checked': False}
+    sets = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(window)
+        s.sendto(query, (resolver, 53))
+        end = time.time() + window
+        while time.time() < end:
+            try:
+                data, _src = s.recvfrom(4096)
+            except socket.timeout:
+                break
+            except OSError:
+                break
+            if len(data) >= 12 and int.from_bytes(data[:2], 'big') == txid:
+                sets.append(frozenset(_parse_dns_a_answers(data)))
+        s.close()
+    except OSError:
+        return {'checked': False}
+    distinct = {x for x in sets if x}          # ignore empty (NODATA) responses
+    return {'checked': True, 'responses': len(sets),
+            'conflicting': len(distinct) > 1,
+            'answer_sets': [sorted(x) for x in distinct]}
+
+
 def do_dns_doctor(name):
     """Resolve `name` through every system resolver plus public 1.1.1.1 / 8.8.8.8,
     reporting per-resolver answers, query latency and the DNSSEC AD flag, whether
@@ -2936,7 +3183,13 @@ def do_dns_doctor(name):
     Also runs active DNS-poisoning / hijack probes: an NXDOMAIN-rewrite test (a
     random name that must not resolve), a private-IP-for-a-public-name check, a
     SERVFAIL/DNSSEC-bogus check, and a DoH cross-check comparing the encrypted
-    answer against the plaintext one. The combined verdict is in `poison`."""
+    answer against the plaintext one. Ported from the standalone dns_poison_checker:
+    known-answer **anchors** (drift on dns.google), **ASN-level
+    consensus** (Team Cymru — survives CDN/anycast where a raw-IP compare can't),
+    a live **DNSSEC negative control** (dnssec-failed.org must SERVFAIL, else the
+    DNSSEC signals are untrustworthy), and a **transport-race** probe (a second,
+    conflicting answer to one query = an off-path spoofer racing the resolver).
+    The combined verdict is in `poison`."""
     name = (name or '').strip()
     if not name:
         return {'success': False, 'error': 'hostname required'}
@@ -3032,8 +3285,58 @@ def do_dns_doctor(name):
             reasons.append('DoH (encrypted) answer disjoint from the plaintext answer '
                            '— strong sign of on-path DNS spoofing')
 
+    # 6. Known-answer anchors: a resolver whose answer for a documented anchor
+    #    domain shares nothing with the published set (poison_checker anchors).
+    anchor_hits = _dns_anchor_check(tested)
+    if anchor_hits:
+        who = ', '.join('%s@%s' % (a['domain'], a['resolver']) for a in anchor_hits)
+        reasons.append('anchor mismatch: %s did not resolve to its documented '
+                       'answer — DNS poisoning/redirect' % who)
+
+    # 7. ASN-level consensus: a system resolver whose answer sits in a different
+    #    ASN than the public resolvers is a stronger hijack signal than a raw-IP
+    #    difference (CDN/anycast share an ASN, so this survives that noise).
+    public_asns = _asn_set(public_union)
+    asn_disjoint = []
+    for r in results:
+        if r['kind'] == 'system' and r['answers'] and public_asns:
+            ra = _asn_set(r['answers'])
+            r['asns'] = sorted(ra)
+            if ra and ra.isdisjoint(public_asns):
+                asn_disjoint.append({'resolver': r['resolver'], 'asns': sorted(ra)})
+    if asn_disjoint:
+        who = ', '.join('%s (AS%s)' % (a['resolver'], '/'.join(a['asns']))
+                        for a in asn_disjoint)
+        reasons.append('%s answered in a different ASN than the public resolvers '
+                       '(AS%s) — redirect to a different network operator'
+                       % (who, '/'.join(sorted(public_asns))))
+
+    # 8. DNSSEC negative control: if dnssec-failed.org does NOT SERVFAIL on a
+    #    validating resolver, DNSSEC validation is broken here, so the AD/SERVFAIL
+    #    signals above can't be trusted this cycle.
+    negctrl = _dns_dnssec_negctrl()
+    if negctrl.get('checked') and negctrl.get('trustworthy') is False:
+        reasons.append('DNSSEC negative control failed: %s did not SERVFAIL '
+                       'dnssec-failed.org — DNSSEC validation is not working here '
+                       '(downgrade/stripping), so AD/SERVFAIL signals are unreliable'
+                       % negctrl.get('resolver'))
+
+    # 9. Transport race: a second, conflicting answer to one query is an off-path
+    #    spoofer racing the real resolver (Kaminsky cache-poisoning attempt).
+    race = {'checked': False}
+    race_resolver = next((r for r, k in tested if k == 'system'), None) \
+        or (tested[0][0] if tested else None)
+    if race_resolver and public_name:
+        race = _dns_race_probe(race_resolver, name)
+    if race.get('conflicting'):
+        reasons.append('two conflicting answers to a single query from %s — an '
+                       'off-path spoofer is racing the real resolver (cache-'
+                       'poisoning attempt in progress)' % race_resolver)
+
     # Strong = confirmed tampering; soft = worth a second look.
-    strong = bool(nx_rewriters or bogon_hits or doh['mismatch'])
+    strong = bool(nx_rewriters or bogon_hits or doh['mismatch'] or anchor_hits
+                  or asn_disjoint or race.get('conflicting')
+                  or (negctrl.get('checked') and negctrl.get('trustworthy') is False))
     soft = bool(servfail or sys_disjoint)
     verdict = 'hijacked' if strong else ('suspicious' if soft else 'clean')
 
@@ -3047,6 +3350,10 @@ def do_dns_doctor(name):
         'servfail_resolvers': servfail,
         'system_disjoint_resolvers': sys_disjoint,
         'doh': doh,
+        'anchor_mismatches': anchor_hits,
+        'asn_disjoint': asn_disjoint,
+        'dnssec_negctrl': negctrl,
+        'transport_race': race,
     }
 
     return {'success': True, 'name': name, 'results': results,
@@ -3055,6 +3362,133 @@ def do_dns_doctor(name):
             'doh_reachable': _tcp_reachable('1.1.1.1', 443),
             'dot_reachable': _tcp_reachable('1.1.1.1', 853),
             'poison': poison}
+
+
+def _dns_selftest():
+    """Offline self-test for the DNS-poison helpers ported from dns_poison_checker:
+    the hand-rolled DNS A-record parser (the security-critical byte path), the
+    Team-Cymru ASN set logic, and the anchor table. No network, no root."""
+    scenarios = []
+
+    def ck(name, cond, got=''):
+        scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                          'pass': bool(cond)})
+
+    scapy_result = {'ran': False, 'reason': 'scapy unavailable'}
+    try:
+        from scapy.all import DNS, DNSQR, DNSRR, raw as _raw
+        single = _raw(DNS(id=1, qr=1, ancount=1, qd=DNSQR(qname='a.com'),
+                          an=DNSRR(rrname='a.com', type='A', rdata='93.184.216.34')))
+        ck('parse single A', _parse_dns_a_answers(single) == ['93.184.216.34'])
+        multi = _raw(DNS(id=1, qr=1, ancount=2, qd=DNSQR(qname='a.com'),
+                         an=DNSRR(rrname='a.com', type='A', rdata='1.2.3.4')
+                         / DNSRR(rrname='a.com', type='A', rdata='5.6.7.8')))
+        ck('parse two A (compression)', _parse_dns_a_answers(multi) == ['1.2.3.4', '5.6.7.8'])
+        cname = _raw(DNS(id=1, qr=1, ancount=2, qd=DNSQR(qname='www.a.com'),
+                         an=DNSRR(rrname='www.a.com', type='CNAME', rdata='a.com')
+                         / DNSRR(rrname='a.com', type='A', rdata='10.11.12.13')))
+        ck('parse CNAME+A skips CNAME', _parse_dns_a_answers(cname) == ['10.11.12.13'])
+        scapy_result = {'ran': True, 'pass': all(s['pass'] for s in scenarios)}
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    # Byte-level negatives (no scapy needed): malformed input must not raise.
+    ck('parse truncated -> []', _parse_dns_a_answers(b'\x00' * 8) == [])
+    ck('parse garbage -> []', _parse_dns_a_answers(b'\xff' * 40) == [])
+    # ASN set logic over an injected cache (no live Cymru query).
+    _cymru_asn_cache.update({'1.1.1.1': '13335', '9.9.9.9': '19281'})
+    ck('asn_set maps ips', _asn_set(['1.1.1.1', '9.9.9.9']) == {'13335', '19281'})
+    ck('asn_set drops unknown', _asn_set(['203.0.113.7']) == set(),
+       got=_asn_set(['203.0.113.7']))
+    # Anchor table shape.
+    ck('anchors present', bool(_DNS_ANCHORS) and 'dns.google' in _DNS_ANCHORS)
+
+    return {'success': all(s['pass'] for s in scenarios),
+            'scenarios': scenarios, 'scapy': scapy_result}
+
+
+def _arp_selftest():
+    """Offline self-test for the ARP-check HSRP/VRRP virtual-MAC awareness: the
+    shape classifier, the FHRP-Watch cross-pivot, and the do_arp_check verdict
+    branches (confirmed failover vs hijack vs spoofable shape-match). No root, no
+    live traffic; monkeypatches the neighbour-table seams and restores them."""
+    import tempfile
+    scenarios = []
+
+    def ck(name, cond, got=''):
+        scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                          'pass': bool(cond)})
+
+    # -- classifier + describe --
+    ck('classify HSRPv1', _arp_fhrp_classify('00:00:0c:07:ac:01') == ('HSRPv1', 1))
+    ck('classify HSRPv2', _arp_fhrp_classify('00:00:0c:9f:f0:63') == ('HSRPv2', 99))
+    ck('classify VRRP', _arp_fhrp_classify('00:00:5e:00:01:05') == ('VRRP', 5))
+    ck('classify ordinary -> None', _arp_fhrp_classify('aa:bb:cc:dd:ee:ff') is None)
+    ck('describe', _arp_fhrp_desc(('HSRPv1', 1)) == 'HSRPv1 group 1')
+
+    # -- cross-pivot from a temp FHRP-Watch baseline --
+    gw, vmac = '10.0.0.1', '00:00:0c:07:ac:01'
+    fpath = tempfile.mktemp(suffix='.json')
+    json.dump({'groups': {'hsrp/1': {'proto': 'hsrp', 'group': 1, 'vips': [gw]}}},
+              open(fpath, 'w'))
+    saved_fw = _FHRP_WATCH_PATH
+    saved_bl = _ARP_BASELINE_PATH
+    saved_gw = _default_gateway
+    saved_nm = _neigh_mac
+    saved_ne = _neigh_entries
+    g = globals()
+    try:
+        g['_FHRP_WATCH_PATH'] = fpath
+        ck('suggest_fhrp derives vmac', _arp_suggest_fhrp() == {gw: vmac},
+           got=_arp_suggest_fhrp())
+
+        # -- verdict branches via monkeypatched neighbour table --
+        cur = {'mac': vmac}
+        bpath = tempfile.mktemp(suffix='.json')
+        g['_ARP_BASELINE_PATH'] = bpath
+        g['_default_gateway'] = lambda: gw
+        g['_neigh_mac'] = lambda ip: cur['mac']
+        g['_neigh_entries'] = lambda iface=None: [(gw, cur['mac'], 'REACHABLE')]
+
+        def _set(bl):
+            json.dump(bl, open(bpath, 'w'))
+
+        _set({'gateways': {gw: 'aa:aa:aa:00:00:01'}, 'fhrp_gateways': {gw: vmac}})
+        cur['mac'] = vmac
+        r = do_arp_check(learn=False)
+        ck('failover INTO confirmed vmac -> clean',
+           r['verdict'] == 'clean' and r['gateway']['fhrp_confirmed'], got=r['verdict'])
+
+        _set({'gateways': {gw: vmac}, 'fhrp_gateways': {gw: vmac}})
+        cur['mac'] = 'de:ad:be:ef:00:99'
+        r = do_arp_check(learn=False)
+        ck('move AWAY from confirmed vmac -> spoofed',
+           r['verdict'] == 'spoofed', got=r['verdict'])
+
+        _set({'gateways': {gw: 'aa:aa:aa:00:00:01'}})     # shape match, unconfirmed
+        cur['mac'] = vmac
+        r = do_arp_check(learn=False)
+        ck('unconfirmed shape-match change -> still spoofed + annotated',
+           r['verdict'] == 'spoofed'
+           and any('virtual-MAC range' in x for x in r['reasons']), got=r['verdict'])
+
+        try:
+            os.remove(bpath)
+        except OSError:
+            pass
+    finally:
+        g['_FHRP_WATCH_PATH'] = saved_fw
+        g['_ARP_BASELINE_PATH'] = saved_bl
+        g['_default_gateway'] = saved_gw
+        g['_neigh_mac'] = saved_nm
+        g['_neigh_entries'] = saved_ne
+        try:
+            os.remove(fpath)
+        except OSError:
+            pass
+
+    return {'success': all(s['pass'] for s in scenarios),
+            'scenarios': scenarios, 'scapy': {'ran': False, 'reason': 'offline only'}}
 
 
 def _tcp_reachable(host, port, timeout=4):
@@ -9875,6 +10309,157 @@ def _stp_selftest():
 
 
 # --------------------------------------------------------------------------
+# Shared: passive trailing-data / Etherleak detector for the control-plane
+# watchers (CDP / DTP / VTP / EIGRP / FHRP / OSPF).
+# --------------------------------------------------------------------------
+# The tcpdump-text watchers below can't see the bytes *past* a frame's declared
+# length — but that region is where two real problems hide: a NIC/driver leaking
+# adjacent kernel memory into the Ethernet pad (Etherleak, CVE-2003-0001) and
+# data deliberately smuggled behind a valid advert (covert channel). Both look
+# the same on the wire: NON-ZERO bytes after the declared length, because honest
+# frame padding is all zeros. We add `-xx` to the capture, reconstruct the raw
+# frames from the hex, and flag non-zero trailers. Mirrors the standalone
+# modules' cdpwatch CDP-052 / vtpwatch VTP-016 / ospfwatch OSPF_TRAILING_DATA.
+_TCPDUMP_HEX_RE = re.compile(r'^\s*0x[0-9a-fA-F]+:\s+([0-9a-fA-F ]+)$')
+
+
+def _split_tcpdump_xx(output):
+    r"""Split `tcpdump -e -v -xx` output into (text_without_hex, [raw_frames]).
+
+    The hex block (`\t0x0000:  0100 0ccc ...`) that -xx appends after each packet
+    is stripped back out, so the existing regex parsers see exactly the text they
+    saw before -xx was added, and is reassembled into raw L2 frame bytes for the
+    byte-level trailing-data check."""
+    text_lines = []
+    frames = []
+    cur = bytearray()
+
+    def flush():
+        if cur:
+            frames.append(bytes(cur))
+            del cur[:]
+
+    for line in output.splitlines():
+        m = _TCPDUMP_HEX_RE.match(line)
+        if m:
+            try:
+                cur.extend(bytes.fromhex(m.group(1).replace(' ', '')))
+            except ValueError:
+                pass
+        else:
+            flush()
+            text_lines.append(line)
+    flush()
+    return '\n'.join(text_lines), frames
+
+
+def _frame_trailing_data(frame, kind):
+    """(trailer_len, nonzero, pad_hex) for the bytes past a frame's declared
+    length. kind='8023' bounds by the 802.3 length field (SNAP control frames:
+    CDP/DTP/VTP); kind='ip' bounds by the IPv4 total-length field (EIGRP/FHRP/
+    OSPF). A kept 4-byte FCS is excluded so it isn't mistaken for a leak. Returns
+    (0, False, '') when there is no trailer, or the frame is too short/uncertain."""
+    if len(frame) < 14:
+        return (0, False, '')
+    off = 14
+    field = int.from_bytes(frame[12:14], 'big')
+    while field == 0x8100 and len(frame) >= off + 4:      # step over 802.1Q tags
+        field = int.from_bytes(frame[off + 2:off + 4], 'big')
+        off += 4
+    if kind == '8023':
+        if off < 2 or not (0 < field <= 1500):            # a length, not an ethertype
+            return (0, False, '')
+        end = off + field
+    else:  # ip
+        if field != 0x0800 or len(frame) < off + 20:
+            return (0, False, '')
+        ihl = (frame[off] & 0x0f) * 4
+        total = int.from_bytes(frame[off + 2:off + 4], 'big')
+        if total < ihl:
+            return (0, False, '')
+        end = off + total
+    if end <= 0 or end >= len(frame):
+        return (0, False, '')
+    trailer = frame[end:]
+    pad = trailer[:-4] if len(trailer) > 4 else b''       # exclude a kept 4-byte FCS
+    return (len(trailer), bool(pad.strip(b'\x00')), pad.hex())
+
+
+def _scan_trailing(frames, kind):
+    """Return [{src, trailer_len, pad_hex}] for frames carrying non-zero bytes
+    past their declared length (Etherleak / smuggled data), de-duplicated."""
+    out = []
+    seen = set()
+    for fr in frames:
+        tlen, nonzero, ph = _frame_trailing_data(fr, kind)
+        if not nonzero:
+            continue
+        src = ':'.join('%02x' % b for b in fr[6:12])
+        key = (src, ph)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({'src': src, 'trailer_len': tlen, 'pad_hex': ph[:96]})
+    return out
+
+
+def _read_pcap_frames(path, limit=20000):
+    """Yield raw L2 frame bytes from a classic pcap file (little/big-endian).
+    Pure Python, no scapy; returns [] on any error or non-Ethernet linktype."""
+    frames = []
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError:
+        return frames
+    if len(data) < 24:
+        return frames
+    magic = data[:4]
+    if magic == b'\xd4\xc3\xb2\xa1':
+        bo = 'little'
+    elif magic == b'\xa1\xb2\xc3\xd4':
+        bo = 'big'
+    else:
+        return frames                      # pcapng or unknown: skip (best-effort)
+    if int.from_bytes(data[20:24], bo) != 1:
+        return frames                      # linktype != EN10MB(Ethernet)
+    off = 24
+    while off + 16 <= len(data) and len(frames) < limit:
+        caplen = int.from_bytes(data[off + 8:off + 12], bo)
+        off += 16
+        if caplen > len(data) - off:
+            break
+        frames.append(data[off:off + caplen])
+        off += caplen
+    return frames
+
+
+def _apply_trailing(result, trailing, proto):
+    """Fold non-zero-trailer findings into a watcher result: record them, add a
+    reason, and escalate a clean/`*-enabled` verdict to 'trailing-data' (so the
+    do_*_watch event log picks it up). A more severe verdict is left in place."""
+    if not trailing:
+        return
+    result['trailing_data'] = trailing
+    srcs = ', '.join(sorted({t['src'] for t in trailing}))
+    reason = (
+        f"{proto}: {len(trailing)} frame(s) carry NON-ZERO bytes after the "
+        f"declared length from {srcs} — data smuggled behind a valid advert "
+        f"(covert channel), or a NIC/driver leaking kernel memory into the "
+        f"Ethernet pad (Etherleak, CVE-2003-0001). Honest padding is all zeros; "
+        f"investigate the sender.")
+    v = result.get('verdict')
+    if v == 'clean' or (v and v.endswith('-enabled')) or v is None:
+        result['verdict'] = 'trailing-data'
+    rs = result.get('reasons') or []
+    # drop a benign "all clean / none seen" summary line so the alert leads
+    if len(rs) == 1 and (rs[0].startswith('No ')
+                         or 'match the trusted baseline' in rs[0]):
+        rs = []
+    result['reasons'] = [reason] + rs
+
+
+# --------------------------------------------------------------------------
 # DTP Watch: passive Dynamic Trunking Protocol / VLAN-hopping scanner (Cisco)
 # --------------------------------------------------------------------------
 # DTP (Cisco proprietary, group MAC 01:00:0c:cc:cc:cc, SNAP OUI 0x00000c PID 0x2004)
@@ -10088,7 +10673,7 @@ def _dtp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2004'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '128', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10113,11 +10698,13 @@ def do_dtp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_dtp_capture(text)
 
     with _dtp_watch_lock:
         baseline = _dtp_watch_load()
         result = _dtp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'DTP')
         if result.get('learned'):
             _dtp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'dtp-enabled'):
@@ -10201,6 +10788,24 @@ def _dtp_selftest():
                   and _dtp_status(e.get('status'))[1] is True)
             scapy_result = {'ran': True, 'src': e.get('src'), 'status': e.get('status'),
                             'pass': ok, 'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data leg: zero pad benign, non-zero smuggle flagged (802.3).
+            from scapy.all import Ether as _E, raw as _sr
+            _fb = _sr(pkt)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 12, False),
+                                        ('smuggle', b'\x00\x00SMUGGLED', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as _tf:
+                    _pp = _tf.name
+                wrpcap(_pp, [_E(_fb + _extra)])
+                _xo = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-xx', '-r', _pp],
+                           timeout=10)['out']
+                _, _frs = _split_tcpdump_xx(_xo)
+                _got = bool(_scan_trailing(_frs, '8023'))
+                scenarios.append({'name': f'dtp-trailing-{_lbl}', 'expect': _want,
+                                  'got': _got, 'pass': _got == _want})
+                try:
+                    os.remove(_pp)
+                except OSError:
+                    pass
             try:
                 os.remove(pcap_path)
             except OSError:
@@ -10472,6 +11077,223 @@ def _cdp_analyze(events, seconds, baseline, learn=True):
     }
 
 
+# --------------------------------------------------------------------------
+# CDPwn: byte-level CDP parser + attack-in-flight / CVE-screening detectors.
+# --------------------------------------------------------------------------
+# The tcpdump-text CDP path above sees flood / spoof / info-leak, but not the
+# malformed-TLV *exploit shapes* behind the five Armis "CDPwn" CVEs
+# (CVE-2020-3110/3111/3118/3119/3120: oversized DeviceID/PortID, format-string
+# TLVs, malformed Power-Request, absurd Addresses count, TLV length over/underrun).
+# Those need a bounds-checked byte parser, which runs here over the raw frames the
+# capture reconstructs (-xx). Ported from the standalone cdpwatch v3 (CDPawn).
+_CDP_SNAP_SIG = b'\xaa\xaa\x03\x00\x00\x0c\x20\x00'   # LLC/SNAP + OUI Cisco + PID CDP
+_CDP_STRING_TLVS = {0x0001: 'device_id', 0x0003: 'port_id', 0x0005: 'version',
+                    0x0006: 'platform', 0x0009: 'vtp_domain'}
+# field -> (byte ceiling, code, CVE-or-None, label). Real hostnames/ifnames are
+# short; version banners run long, so version/platform get a higher ceiling.
+_CDP_CEILINGS = {'device_id': (256, 'CDP-042', 'CVE-2020-3110', 'DeviceID'),
+                 'port_id': (128, 'CDP-043', 'CVE-2020-3111', 'PortID'),
+                 'version': (512, 'CDP-044', None, 'version'),
+                 'platform': (512, 'CDP-044', None, 'platform'),
+                 'vtp_domain': (512, 'CDP-044', None, 'vtp_domain')}
+_CDP_MAX_POWER_LEVELS = 8      # a real PoE request carries 1-3
+_CDP_MAX_ADDRESSES = 64        # >64 advertised mgmt addresses is absurd (DoS shape)
+_CDP_FMT_FLAGS = "-+ #'0123456789.*$"
+_CDP_FMT_LENGTH = "hlLqjztZ"
+_CDP_FMT_WRITE = "nN"          # writes through a pointer -> CRITICAL
+_CDP_FMT_READ = "diouxXeEfFgGaAcspm"
+_CDP_FMT_READ_MIN = 2          # a lone %-x is noise; a run is a leak probe
+_CDPWN_FAMILIES = [
+    (re.compile(r"IP\s*Phone|SIP\d{2,}|SEP[0-9A-Fa-f]{12}"), 'CDP-020',
+     ['CVE-2020-3111'],
+     "Cisco IP Phone — verify firmware against CVE-2020-3111 (PortID stack overflow)"),
+    (re.compile(r"IP\s*Camera|Video\s*Surveillance|CIVS-IPC"), 'CDP-021',
+     ['CVE-2020-3110'],
+     "Cisco Video Surveillance 8000 IP Camera — verify against CVE-2020-3110 (DeviceID heap overflow)"),
+    (re.compile(r"IOS[\s-]?XR"), 'CDP-022', ['CVE-2020-3118', 'CVE-2020-3120'],
+     "Cisco IOS XR — verify against CVE-2020-3118 (format string) + CVE-2020-3120 (Addresses DoS)"),
+    (re.compile(r"NX[\s-]?OS|Nexus"), 'CDP-023', ['CVE-2020-3119', 'CVE-2020-3120'],
+     "Cisco NX-OS — verify against CVE-2020-3119 (Power Request overflow) + CVE-2020-3120 (Addresses DoS)"),
+    (re.compile(r"FXOS|Firepower\s*(4100|9300)|UCS\s*6\d{3}|Fabric\s*Interconnect"),
+     'CDP-024', ['CVE-2020-3120'],
+     "Cisco FXOS / Firepower 4100/9300 / UCS FI — verify against CVE-2020-3120 (Addresses DoS)"),
+]
+# Cisco's advisory says plain IOS / IOS-XE routers+switches are NOT CDPwn-affected,
+# so those platforms are deliberately absent from the family table (false-positive
+# avoidance).
+_CDPWN_SEV = {'CDP-020': 'high', 'CDP-021': 'high', 'CDP-022': 'high',
+              'CDP-023': 'high', 'CDP-024': 'medium', 'CDP-040': 'critical',
+              'CDP-041': 'critical', 'CDP-042': 'critical', 'CDP-043': 'critical',
+              'CDP-044': 'high', 'CDP-045': 'critical', 'CDP-046': 'critical',
+              'CDP-047': 'high', 'CDP-050': 'low'}
+_CDPWN_ATTACK_CODES = ('CDP-040', 'CDP-041', 'CDP-042', 'CDP-043', 'CDP-044',
+                       'CDP-045', 'CDP-046', 'CDP-047')
+
+
+def _cdp_scan_format_specifiers(s):
+    """printf-accurate scan: return [(specifier, 'write'|'read')]. Honours '%%'
+    (literal) and positional/dynamic flags so it neither false-fires on '100%%'
+    nor misses '%1$n' / '%*n' (the evasion gap a naive regex leaves)."""
+    out = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] != '%':
+            i += 1
+            continue
+        if i + 1 < n and s[i + 1] == '%':
+            i += 2                       # literal percent, per printf
+            continue
+        j = i + 1
+        while j < n and s[j] in _CDP_FMT_FLAGS:
+            j += 1
+        while j < n and s[j] in _CDP_FMT_LENGTH:
+            j += 1
+        if j < n and s[j] in _CDP_FMT_WRITE:
+            out.append((s[i:j + 1], 'write'))
+        elif j < n and s[j] in _CDP_FMT_READ:
+            out.append((s[i:j + 1], 'read'))
+        i = j + 1
+    return out
+
+
+def _cdp_dispatch_tlv(r, ttype, value):
+    if ttype in _CDP_STRING_TLVS:
+        r['tlvs'][_CDP_STRING_TLVS[ttype]] = value.decode('latin-1', 'replace')
+    elif ttype in (0x0016, 0x0002) and len(value) >= 4:   # Mgmt-Addr / Addresses
+        r['address_count'] = int.from_bytes(value[:4], 'big')
+    elif ttype in (0x001a, 0x001b, 0x0010):               # Power Req/Avail/Consumption
+        r['tlvs']['power'] = True
+        if ttype == 0x001a and len(value) >= 4:           # Power Request: 4B hdr + levels
+            r['power_levels'] = (len(value) - 4) // 4
+
+
+def _cdp_parse_frame(raw):
+    """Bounds-checked byte-level CDP parse of one raw L2 frame. Returns
+    {is_cdp, src, ttl, tlvs, malformations, power_levels, address_count} or None.
+    The TLV walk is bounded by the 802.3 length field (padding-safe); it records
+    malformations (CDP-040 overrun / CDP-041 underflow) and never raises."""
+    if len(raw) < 14:
+        return None
+    idx = raw.find(_CDP_SNAP_SIG)
+    if idx < 2 or idx > 32:
+        return None
+    off = idx + len(_CDP_SNAP_SIG)
+    end = len(raw)
+    lenfield = int.from_bytes(raw[idx - 2:idx], 'big')
+    if 0 < lenfield <= 1500 and idx + lenfield <= len(raw):
+        end = idx + lenfield              # trust the 802.3 length, strip padding
+    r = {'is_cdp': True, 'src': ':'.join('%02x' % b for b in raw[6:12]), 'ttl': None,
+         'tlvs': {}, 'malformations': [], 'power_levels': None, 'address_count': None}
+    if off + 4 > end:
+        r['malformations'].append(('CDP-040', 'truncated CDP header'))
+        return r
+    r['ttl'] = raw[off + 1]
+    p = off + 4                           # first TLV (after version/ttl/checksum)
+    while p + 4 <= end:
+        ttype = int.from_bytes(raw[p:p + 2], 'big')
+        tlen = int.from_bytes(raw[p + 2:p + 4], 'big')
+        if tlen < 4:
+            r['malformations'].append(
+                ('CDP-041', 'TLV type 0x%04x length %d < 4 (underflow)' % (ttype, tlen)))
+            break
+        ve = p + tlen
+        overran = ve > end
+        if overran:
+            r['malformations'].append(
+                ('CDP-040', 'TLV type 0x%04x length %d overruns frame' % (ttype, tlen)))
+            ve = end
+        _cdp_dispatch_tlv(r, ttype, raw[p + 4:ve])
+        if overran:
+            break
+        p = ve
+    return r
+
+
+def _cdp_cdpwn_scan(frames):
+    """Run the CDPwn attack-in-flight (CDP-040..047, 050) + CVE version-screening
+    (CDP-020..024) detectors over raw CDP frames. Returns deduped findings, each
+    {code, severity, src, detail, cves}."""
+    out = []
+    seen = set()
+
+    def add(code, src, detail, cves=None):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({'code': code, 'severity': _CDPWN_SEV.get(code, 'medium'),
+                    'src': src, 'detail': detail, 'cves': cves or []})
+
+    for fr in frames:
+        pr = _cdp_parse_frame(fr)
+        if not pr:
+            continue
+        src = pr['src']
+        for code, detail in pr['malformations']:
+            add(code, src, detail)
+        tl = pr['tlvs']
+        for fld, (ceil, code, cve, label) in _CDP_CEILINGS.items():
+            v = tl.get(fld)
+            if v is not None and len(v) > ceil:
+                add(code, src, '%s length %d > %d%s' % (
+                    label, len(v), ceil,
+                    ' (%s overflow shape)' % cve if cve else ''),
+                    [cve] if cve else None)
+        for fld, v in tl.items():
+            if not isinstance(v, str):
+                continue
+            specs = _cdp_scan_format_specifiers(v)
+            writes = [t for t, k in specs if k == 'write']
+            if writes:
+                add('CDP-045', src, "format-string write %r in %s TLV (CVE-2020-3118 shape)"
+                    % (writes[0], fld), ['CVE-2020-3118'])
+            elif len(specs) >= _CDP_FMT_READ_MIN:
+                add('CDP-045', src, "%d format-string read specifiers in %s TLV "
+                    "(CVE-2020-3118 memory-leak probe shape)" % (len(specs), fld),
+                    ['CVE-2020-3118'])
+        if pr['power_levels'] is not None and pr['power_levels'] > _CDP_MAX_POWER_LEVELS:
+            add('CDP-046', src, "Power Request TLV carries %d power levels > %d "
+                "(CVE-2020-3119 NX-OS shape)" % (pr['power_levels'], _CDP_MAX_POWER_LEVELS),
+                ['CVE-2020-3119'])
+        if pr['address_count'] is not None and pr['address_count'] > _CDP_MAX_ADDRESSES:
+            add('CDP-047', src, "Addresses/Mgmt-Addr TLV claims %d addresses > %d "
+                "(CVE-2020-3120 DoS shape)" % (pr['address_count'], _CDP_MAX_ADDRESSES),
+                ['CVE-2020-3120'])
+        if pr['ttl'] == 0:
+            add('CDP-050', src, "CDP TTL=0 (neighbour withdrawal) — a flood of these "
+                "flushes neighbour tables")
+        hay = ' '.join(str(tl.get(k, '')) for k in ('platform', 'version', 'device_id'))
+        if hay.strip():
+            for rx, code, cves, note in _CDPWN_FAMILIES:
+                if rx.search(hay):
+                    add(code, src, note, cves)
+    return out
+
+
+def _apply_cdpwn(result, findings):
+    """Fold CDPwn findings into a CDP watch result. An attack-in-flight exploit
+    shape (CDP-040..047) escalates a clean/cdp-enabled/trailing-data verdict to
+    'cdpwn'; version screening (CDP-020..024) and TTL=0 (CDP-050) are surfaced
+    without overriding a more severe verdict."""
+    if not findings:
+        return
+    result['cdpwn'] = findings                 # full per-finding detail for the UI
+    attack = [f for f in findings if f['code'] in _CDPWN_ATTACK_CODES]
+    if attack and result.get('verdict') in ('clean', 'cdp-enabled',
+                                            'trailing-data', None):
+        result['verdict'] = 'cdpwn'
+    cves = sorted({c for f in findings for c in f['cves']})
+    summary = 'CDPwn: %d exploit-shape/CVE finding(s)%s%s' % (
+        len(findings),
+        ' incl. %d attack shape(s)' % len(attack) if attack else '',
+        ' — ' + ', '.join(cves) if cves else '')
+    rs = result.get('reasons') or []
+    if len(rs) == 1 and (rs[0].startswith('No ')
+                         or 'match the trusted baseline' in rs[0]):
+        rs = []
+    result['reasons'] = [summary] + rs
+
+
 def _cdp_capture(interface, seconds):
     """One passive tcpdump window over CDP frames -> (raw, error). Uses -e for the
     sending MAC; the BPF isolates CDP (PID 0x2000) from the other protocols that
@@ -10480,7 +11302,7 @@ def _cdp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2000'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '1500', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '1500', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10506,11 +11328,14 @@ def do_cdp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_cdp_capture(text)
 
     with _cdp_watch_lock:
         baseline = _cdp_watch_load()
         result = _cdp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'CDP')
+        _apply_cdpwn(result, _cdp_cdpwn_scan(frames))
         if result.get('learned'):
             _cdp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'cdp-enabled'):
@@ -10620,6 +11445,71 @@ def _cdp_selftest():
                             'platform': e.get('platform'),
                             'pass': bool(evs) and e.get('device_id') == 'rogue-sw',
                             'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data / Etherleak leg: a real frame padded with zeros (benign)
+            # vs. one carrying non-zero smuggled bytes past the 802.3 length. Drive
+            # the exact production path: tcpdump -xx -> _split_tcpdump_xx -> _scan.
+            from scapy.all import Ether, raw as _sraw
+            fb = _sraw(pkt)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 10, False),
+                                        ('smuggle', b'\x00\x00leak!!', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf2:
+                    pp = tf2.name
+                wrpcap(pp, [Ether(fb + _extra)])
+                xo = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-xx', '-r', pp],
+                          timeout=10)['out']
+                _txt, _frames = _split_tcpdump_xx(xo)
+                got = bool(_scan_trailing(_frames, '8023'))
+                scenarios.append({'name': f'cdp-trailing-{_lbl}',
+                                  'expect': _want, 'got': got, 'pass': got == _want})
+                # the stripped text must still parse the CDP frame (no hex leakage)
+                if _lbl == 'zero-pad':
+                    scenarios.append({'name': 'cdp-trailing-text-clean',
+                                      'expect': 'device-id parsed',
+                                      'got': bool(_parse_cdp_capture(_txt)),
+                                      'pass': bool(_parse_cdp_capture(_txt))})
+                try:
+                    os.remove(pp)
+                except OSError:
+                    pass
+
+            # CDPwn leg: build byte-level exploit shapes, confirm each fires and a
+            # benign frame is silent. Drives _cdp_parse_frame + _cdp_cdpwn_scan.
+            def _cdp_bytes(tlvs, ttl=180):
+                pay = bytes([2, ttl, 0, 0]) + tlvs
+                return _sraw(Dot3(dst='01:00:0c:cc:cc:cc', src='de:ad:be:ef:00:0c')
+                             / LLC(dsap=0xaa, ssap=0xaa, ctrl=3)
+                             / SNAP(OUI=0x00000c, code=0x2000) / pay)
+
+            def _cdp_tlv(t, v):
+                return t.to_bytes(2, 'big') + (len(v) + 4).to_bytes(2, 'big') + v
+
+            cdpwn_cases = [
+                ('cdpwn-oversized-deviceid', _cdp_bytes(_cdp_tlv(0x0001, b'A' * 300)), 'CDP-042'),
+                ('cdpwn-oversized-portid', _cdp_bytes(_cdp_tlv(0x0003, b'B' * 200)), 'CDP-043'),
+                ('cdpwn-format-string', _cdp_bytes(_cdp_tlv(0x0005, b'%n%n hi')), 'CDP-045'),
+                ('cdpwn-malformed-power',
+                 _cdp_bytes(_cdp_tlv(0x001a, b'\x00' * 4 + b'\x00' * 80)), 'CDP-046'),
+                ('cdpwn-absurd-addresses',
+                 _cdp_bytes(_cdp_tlv(0x0016, (100).to_bytes(4, 'big'))), 'CDP-047'),
+                ('cdpwn-ttl-zero', _cdp_bytes(_cdp_tlv(0x0001, b'sw1'), ttl=0), 'CDP-050'),
+                ('cdpwn-nxos-screen',
+                 _cdp_bytes(_cdp_tlv(0x0006, b'cisco Nexus N9K')), 'CDP-023'),
+                ('cdpwn-tlv-underflow', _cdp_bytes(b'\x00\x01\x00\x02'), 'CDP-041'),
+            ]
+            for _nm, _fr, _code in cdpwn_cases:
+                _codes = {x['code'] for x in _cdp_cdpwn_scan([_fr])}
+                scenarios.append({'name': _nm, 'expect': _code,
+                                  'got': sorted(_codes), 'pass': _code in _codes})
+            _benign = _cdp_bytes(_cdp_tlv(0x0001, b'switch1') + _cdp_tlv(0x0006, b'cisco WS-C3560'))
+            scenarios.append({'name': 'cdpwn-benign-silent', 'expect': 'no findings',
+                              'got': [x['code'] for x in _cdp_cdpwn_scan([_benign])],
+                              'pass': not _cdp_cdpwn_scan([_benign])})
+            # verdict escalation: an attack shape sets verdict 'cdpwn'
+            _res = {'verdict': 'clean', 'reasons': ['CDP speakers all match the trusted baseline']}
+            _apply_cdpwn(_res, _cdp_cdpwn_scan([cdpwn_cases[0][1]]))
+            scenarios.append({'name': 'cdpwn-verdict-escalates', 'expect': 'cdpwn',
+                              'got': _res['verdict'], 'pass': _res['verdict'] == 'cdpwn'})
+
             try:
                 os.remove(pcap_path)
             except OSError:
@@ -10873,7 +11763,7 @@ def _vtp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ether dst 01:00:0c:cc:cc:cc and ether[20:2] = 0x2003'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-e',
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -10899,11 +11789,13 @@ def do_vtp_watch(interface=None, seconds=30, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_vtp_capture(text)
 
     with _vtp_watch_lock:
         baseline = _vtp_watch_load()
         result = _vtp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, '8023'), 'VTP')
         if result.get('learned'):
             _vtp_watch_save(baseline)
         if result['verdict'] not in ('clean', 'vtp-enabled'):
@@ -11307,7 +12199,7 @@ def _eigrp_capture(interface, seconds):
         return '', 'tcpdump is not installed. Click Install to add it.'
     bpf = 'ip proto 88 or ip6 proto 88'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', bpf],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', bpf],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -11333,11 +12225,13 @@ def do_eigrp_watch(interface=None, seconds=15, learn=True):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     events = _parse_eigrp_capture(text)
 
     with _eigrp_watch_lock:
         baseline = _eigrp_watch_load()
         result = _eigrp_analyze(events, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'EIGRP')
         if result.get('learned'):
             _eigrp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -11983,7 +12877,7 @@ def _fhrp_capture(interface, seconds):
     fd, path = tempfile.mkstemp(suffix='.pcap')
     os.close(fd)
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-p',
-                '-nn', '-s', '512', '-c', '20000', '-w', path, bpf],
+                '-nn', '-s', '0', '-c', '20000', '-w', path, bpf],
                timeout=seconds + 8)
     try:
         if (os.path.getsize(path) <= 24 and res['err']
@@ -11991,10 +12885,11 @@ def _fhrp_capture(interface, seconds):
                      or "couldn't" in res['err'].lower()
                      or 'no such device' in res['err'].lower()
                      or 'syntax error' in res['err'].lower())):
-            return '', [], res['err'].strip()[:200]
+            return '', [], [], res['err'].strip()[:200]
         text = _run(['tcpdump', '-nn', '-t', '-v', '-r', path], timeout=20)['out']
         glbp = _fhrp_glbp_extract(path)
-        return text, glbp, None
+        frames = _read_pcap_frames(path)
+        return text, glbp, frames, None
     finally:
         try:
             os.remove(path)
@@ -12014,7 +12909,7 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 15, 4, 40)
 
-    text, glbp_pkts, err = _fhrp_capture(iface, seconds)
+    text, glbp_pkts, frames, err = _fhrp_capture(iface, seconds)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
@@ -12031,6 +12926,7 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
     with _fhrp_watch_lock:
         baseline = _fhrp_watch_load()
         result = _fhrp_analyze(events, seconds, baseline, learn=learn, glbp_vf=glbp_vf)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'FHRP')
         if result.get('learned'):
             _fhrp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -12664,7 +13560,7 @@ def _ospf_capture(interface, seconds):
     if not _have('tcpdump'):
         return '', 'tcpdump is not installed. Click Install to add it.'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-t', '-v', '-s', '512', '-c', '20000', 'proto', 'ospf'],
+                '-nn', '-t', '-v', '-xx', '-s', '0', '-c', '20000', 'proto', 'ospf'],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -12690,11 +13586,13 @@ def do_ospf_watch(interface=None, seconds=15, learn=True, quick=False):
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
+    text, frames = _split_tcpdump_xx(text)
     packets = _parse_ospf_capture(text)
 
     with _ospf_watch_lock:
         baseline = _ospf_watch_load()
         result = _ospf_analyze(packets, seconds, baseline, learn=learn)
+        _apply_trailing(result, _scan_trailing(frames, 'ip'), 'OSPF')
         if result.get('learned'):
             _ospf_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -12815,6 +13713,24 @@ def _ospf_selftest():
                             'no_ghost_lsa': no_ghost, 'lsas': len(lsas),
                             'pass': len(parsed) >= 1 and seq_ok and no_ghost,
                             'tcpdump_out': res['out'].strip()[:200]}
+            # Trailing-data leg (ip): zero pad benign, non-zero smuggle flagged.
+            from scapy.all import raw as _sr
+            _fb = _sr(hello)
+            for _lbl, _extra, _want in (('zero-pad', b'\x00' * 12, False),
+                                        ('smuggle', b'\x00\x00SMUGGLED', True)):
+                with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as _tf:
+                    _pp = _tf.name
+                wrpcap(_pp, [Ether(_fb + _extra)])
+                _xo = _run(['tcpdump', '-nn', '-t', '-v', '-xx', '-r', _pp],
+                           timeout=10)['out']
+                _, _frs = _split_tcpdump_xx(_xo)
+                _got = bool(_scan_trailing(_frs, 'ip'))
+                scenarios.append({'name': f'ospf-trailing-{_lbl}', 'expect': _want,
+                                  'got': _got, 'pass': _got == _want})
+                try:
+                    os.remove(_pp)
+                except OSError:
+                    pass
             try:
                 os.remove(pcap_path)
             except OSError:
@@ -13578,6 +14494,7 @@ def do_routing_selftest():
               'fhrp': _fhrp_selftest(), 'tls': _tls_selftest(),
               'ldap': _ldap_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
+              'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
@@ -13587,7 +14504,11 @@ def do_routing_selftest():
             'passed': sum(1 for s in v['scenarios'] if s['pass']),
             'total': len(v['scenarios']),
             'scenarios': v['scenarios'],
-            'scapy': v.get('scapy') or v.get('e2e'),
+            # A suite that reports no Scapy/e2e leg is offline-only by design (it
+            # crafts no packet — e.g. codec/FSM/RIB, OWD math), so label it 'n/a'
+            # rather than leaving the column blank.
+            'scapy': v.get('scapy') or v.get('e2e')
+            or {'ran': False, 'reason': 'offline only'},
         } for k, v in suites.items()},
     }
 
@@ -14758,10 +15679,13 @@ def register_network_diagnostics(app, logger=None):
     def net_arp_baseline():
         # POST {action:'reset'} clears the trusted gateway baseline so the
         # current binding is re-learned (after a legitimate gateway change).
+        # 'suggest_fhrp' / 'trust_fhrp' cross-pivot HSRP/VRRP virtual-gateway pins
+        # from FHRP Watch (see do_arp_baseline).
         action = 'get'
         if request.method == 'POST':
             data = request.get_json(silent=True) or {}
-            action = 'reset' if (data.get('action') == 'reset') else 'get'
+            req = data.get('action')
+            action = req if req in ('reset', 'suggest_fhrp', 'trust_fhrp') else 'get'
         _log(f"net/arp-baseline {action}")
         return jsonify(do_arp_baseline(action))
 
