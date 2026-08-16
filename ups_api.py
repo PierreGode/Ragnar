@@ -15,6 +15,7 @@ CONFIG_FILE = "/home/ragnar/ups_config.json"
 OUTPUT_PATH = "/home/ragnar/Ragnar/web/battery.json"
 
 def load_config():
+    """Loads saved I2C configuration profile from local storage."""
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
@@ -24,6 +25,7 @@ def load_config():
     return {"forced_address": "auto"}
 
 def save_config(config_data):
+    """Persists user selected I2C configuration block to disk."""
     try:
         with open(CONFIG_FILE, "w") as f:
             json.dump(config_data, f)
@@ -31,15 +33,17 @@ def save_config(config_data):
         pass
 
 def get_i2c_address(bus):
+    """Determines active hardware target address based on config or discovery routines."""
     current_config = load_config()
     if current_config.get("forced_address", "auto") != "auto":
-        addr = int(current_config["forced_address"], 16)
         try:
+            addr = int(current_config["forced_address"], 16)
             bus.read_word_data(addr, 0x02)
             return addr
-        except IOError:
+        except (IOError, ValueError):
             return None
             
+    # Sequential auto-detection scanning across known device versions
     for addr in [0x36, 0x32, 0x62]:
         try:
             bus.read_word_data(addr, 0x02)
@@ -49,9 +53,10 @@ def get_i2c_address(bus):
     return None
 
 def read_voltage(bus, address):
+    """Extracts raw cell voltage registers and maps values across hardware variants."""
     try:
         read = bus.read_word_data(address, 0x02)
-        # FIX: Dodano, aby wyciągnąć liczbę z krotki struct.unpack
+        # Fix: Unpack tuple using index [0] to get the raw integer value
         swapped = struct.unpack("<H", struct.pack(">H", read))[0]
         if address == 0x62:
             return (swapped * 0.305) / 1000
@@ -61,9 +66,10 @@ def read_voltage(bus, address):
         return 0.0
 
 def read_capacity(bus, address):
+    """Extracts state of charge percentage calculation metrics from the active registry."""
     try:
         read = bus.read_word_data(address, 0x04)
-        # FIX: Dodano, aby wyciągnąć liczbę z krotki struct.unpack
+        # Fix: Unpack tuple using index [0] to get the raw integer value
         swapped = struct.unpack("<H", struct.pack(">H", read))[0]
         if address == 0x62:
             return swapped / 256
@@ -73,9 +79,11 @@ def read_capacity(bus, address):
         return 0.0
 
 def battery_logger():
-    time.sleep(2)
+    """Independent asynchronous core worker threading bus reads at 60-second intervals."""
+    time.sleep(10)
     
     while True:
+        bus = None
         try:
             bus = smbus.SMBus(1)
             address = get_i2c_address(bus)
@@ -86,9 +94,8 @@ def battery_logger():
                 capacity = read_capacity(bus, address)
                 capacity = max(0.0, min(100.0, capacity))
                 
-                # Detekcja ładowania na podstawie bezpiecznego progu 4.09V
                 is_charging = False
-                if voltage >= 4.09:
+                if voltage >= 4.10:
                     is_charging = True
                 
                 data = {
@@ -100,6 +107,7 @@ def battery_logger():
                     "saved_address": current_config.get("forced_address", "auto")
                 }
                 
+                # CRITICAL THRESHOLD TRIGGER (Safe Shutdown Guard)
                 if (capacity <= 3 and capacity > 0) or (voltage <= 3.45 and voltage > 2.0):
                     data["status"] = "shutdown_triggered"
                     with open(OUTPUT_PATH, "w") as f:
@@ -115,12 +123,25 @@ def battery_logger():
                 
             with open(OUTPUT_PATH, "w") as f:
                 json.dump(data, f)
-        except Exception:
-            pass
+                
+        except Exception as e:
+            try:
+                with open(OUTPUT_PATH, "w") as f:
+                    json.dump({"status": "error", "message": f"I2C Bus Error: {str(e)}", "charging": False}, f)
+            except Exception:
+                pass
+        finally:
+            if bus is not None:
+                try:
+                    bus.close()
+                except Exception:
+                    pass
+                    
         time.sleep(60)
 
 @app.route('/api/set_address')
 def set_address():
+    """Webhook entry-point endpoint storing manual UI register modifications."""
     addr = request.args.get('addr', 'auto')
     if addr in ['auto', '0x32', '0x36', '0x62']:
         config_data = {"forced_address": addr}
