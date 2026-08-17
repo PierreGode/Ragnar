@@ -940,7 +940,7 @@
                 <div class="flex items-center justify-between gap-4 mb-3">
                     <div class="min-w-0">
                         <h3 class="text-lg font-semibold">Watchtower</h3>
-                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Cert · SNMP · IS-IS · IGMP</p>
+                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP (plus any other watcher writing JSONL)</p>
                     </div>
                     <button onclick="showTab('diagnostics')" class="shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Open pane</button>
                 </div>
@@ -1601,7 +1601,7 @@
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Watchtower <span class="text-xs font-normal text-gray-500">— unified watcher alerts</span></h3>
-                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong>. Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. Each watcher must be installed and running (its systemd unit) to appear here.</p>
+                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong> (plus any other watcher dropping a JSONL log in the watched dir). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. Each watcher must be installed and running (its systemd unit) to appear here.</p>
                         </div>
                         <label class="toggle-switch relative inline-flex items-center cursor-pointer shrink-0">
                             <input type="checkbox" id="watchtower-enabled" class="sr-only peer" onchange="onWatchtowerToggled(this)">
