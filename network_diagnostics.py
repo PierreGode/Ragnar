@@ -1553,18 +1553,25 @@ def _parse_dhcp_capture(output):
     chaddr is what a starvation tool spoofs, so distinct chaddrs is the signal."""
     requests = 0
     clients = set()
-    kind = None
+    # tcpdump prints the BOOTP fixed fields (Client-Ethernet-Address) BEFORE the
+    # option that carries the message type (DHCP-Message: Discover), so hold the
+    # chaddr as it goes by and attribute it once the message type is known. The
+    # earlier order-assumption dropped the first client and mis-shifted the rest.
+    pending_mac = None
     for raw in output.splitlines():
         line = raw.strip()
+        m = re.search(r'Client-Ethernet-Address\s+([0-9a-fA-F:]{17})', line)
+        if m:
+            pending_mac = m.group(1).lower()
+            continue
         m = re.search(r'DHCP-Message.*?:\s*(\w+)', line)
         if m:
             kind = m.group(1).lower()
             if kind in ('discover', 'request'):
                 requests += 1
-            continue
-        m = re.search(r'Client-Ethernet-Address\s+([0-9a-fA-F:]{17})', line)
-        if m and kind in ('discover', 'request'):
-            clients.add(m.group(1).lower())
+                if pending_mac:
+                    clients.add(pending_mac)
+            pending_mac = None          # each option block ends this packet's chaddr
     return requests, clients
 
 
@@ -3489,6 +3496,178 @@ def _arp_selftest():
 
     return {'success': all(s['pass'] for s in scenarios),
             'scenarios': scenarios, 'scapy': {'ran': False, 'reason': 'offline only'}}
+
+
+def _mac_selftest():
+    """Self-test the MAC-spoofing classifier, plus a Scapy end-to-end leg that
+    reads a crafted frame's source MAC back off the wire (tcpdump -e) and
+    classifies it — proving the capture→extract→classify path, not just the
+    string classifier. No root, no live traffic."""
+    scenarios = []
+
+    def run(name, mac, expect):
+        got = _classify_mac(mac)['klass']
+        scenarios.append({'name': name, 'expect': expect, 'got': got,
+                          'pass': got == expect})
+
+    # b8:27:eb is a seeded Raspberry Pi OUI (deterministic without the OUI CSV).
+    run('mac-universal', 'b8:27:eb:11:22:33', 'universal')
+    # same OUI with the locally-administered bit set -> vendor-OUI impersonation.
+    run('mac-spoofed-vendor-oui', 'ba:27:eb:11:22:33', 'spoofed_vendor_oui')
+    run('mac-virtual-laa', '02:42:ac:11:00:02', 'virtual_laa')          # Docker
+    run('mac-randomized', 'f6:11:22:33:44:55', 'randomized')            # LAA, no vendor
+    run('mac-invalid-mcast', '01:00:5e:00:00:01', 'invalid')
+
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, wrpcap
+        if _have('tcpdump'):
+            frames, want = [], {}
+            for mac, exp in (('b8:27:eb:44:55:66', 'universal'),
+                             ('ba:27:eb:44:55:66', 'spoofed_vendor_oui'),
+                             ('02:42:ac:11:00:09', 'virtual_laa')):
+                frames.append(Ether(src=mac, dst='ff:ff:ff:ff:ff:ff', type=0x0800)
+                              / (b'\x00' * 40))
+                want[mac] = exp
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, frames)
+            res = _run(['tcpdump', '-e', '-nn', '-t', '-r', pcap_path], timeout=10)
+            ok = True
+            for line in res['out'].splitlines():
+                m = re.match(r'\s*([0-9a-fA-F:]{17})\s*>', line)
+                if m and m.group(1).lower() in want:
+                    src = m.group(1).lower()
+                    if _classify_mac(src)['klass'] != want.pop(src):
+                        ok = False
+            ok = ok and not want           # every crafted MAC was seen + classified
+            scenarios.append({'name': 'mac-scapy-e2e', 'expect': 'wire MAC classified',
+                              'got': 'ok' if ok else 'mismatch/missing', 'pass': ok})
+            scapy_result = {'ran': True, 'pass': ok,
+                            'tcpdump_out': res['out'].strip()[:200]}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (not scapy_result.get('ran')
+                                                    or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+def _dhcp_selftest():
+    """Self-test the DHCP Guardian text parsers and verdict logic (rogue server /
+    starvation / clean), plus a Scapy end-to-end leg that crafts real DHCP
+    DISCOVERs and reads them back through tcpdump. No root, no live traffic;
+    the verdict leg monkeypatches the discover/capture seams and restores them."""
+    scenarios = []
+
+    def ck(name, cond, got=''):
+        scenarios.append({'name': name, 'expect': 'pass', 'got': str(got),
+                          'pass': bool(cond)})
+
+    # -- parsers (pure) --
+    # Real tcpdump order: the BOOTP chaddr (Client-Ethernet-Address) prints BEFORE
+    # the DHCP-Message option that names the type.
+    cap_text = (
+        "  Client-Ethernet-Address de:ad:be:ef:00:01\n"
+        "    DHCP-Message (53), length 1: Discover\n"
+        "  Client-Ethernet-Address de:ad:be:ef:00:02\n"
+        "    DHCP-Message (53), length 1: Discover\n"
+        "  Client-Ethernet-Address de:ad:be:ef:00:03\n"
+        "    DHCP-Message (53), length 1: Request\n")
+    req, clients = _parse_dhcp_capture(cap_text)
+    ck('capture: counts requests', req == 3, got=req)
+    ck('capture: distinct client MACs', len(clients) == 3, got=len(clients))
+    disc_text = ("|_broadcast-dhcp-discover:\n"
+                 "|   Response 1 of 1:\n"
+                 "|     Server Identifier: 192.168.1.1\n"
+                 "|     Router: 192.168.1.1\n"
+                 "|     Domain Name Server: 1.1.1.1, 8.8.8.8\n"
+                 "|     IP Offered: 192.168.1.50\n")
+    offers = _parse_dhcp_discover(disc_text)
+    ck('discover: one offer parsed',
+       len(offers) == 1 and offers[0]['server_id'] == '192.168.1.1', got=offers)
+    ck('discover: DNS list parsed',
+       offers and offers[0]['dns'] == ['1.1.1.1', '8.8.8.8'])
+
+    # -- verdict logic via monkeypatched discover/capture seams --
+    import tempfile
+    g = globals()
+    saved = {k: g[k] for k in ('_dhcp_discover', '_dhcp_capture',
+                               '_default_gateway', 'do_arp_check',
+                               '_DHCP_BASELINE_PATH')}
+    try:
+        g['_default_gateway'] = lambda: '192.168.1.1'
+        g['do_arp_check'] = lambda *a, **k: {'verdict': 'clean'}
+        state = {'offers': [], 'err': None, 'req': 0, 'clients': 0}
+        g['_dhcp_discover'] = lambda iface, t=0: (state['offers'], state['err'])
+        g['_dhcp_capture'] = lambda iface, s: (state['req'], state['clients'], None)
+
+        def _fresh():
+            g['_DHCP_BASELINE_PATH'] = tempfile.mktemp(suffix='.json')
+
+        # rogue: two servers, none trusted yet.
+        _fresh()
+        state['offers'] = [{'server_id': '192.168.1.1', 'router': '192.168.1.1', 'dns': []},
+                           {'server_id': '10.6.6.6', 'router': '10.6.6.6', 'dns': []}]
+        ck('verdict rogue (2 servers)', do_dhcp_guardian(learn=False)['verdict'] == 'rogue',
+           got=do_dhcp_guardian(learn=False)['verdict'])
+
+        # starvation: many distinct clients.
+        _fresh()
+        state['offers'] = [{'server_id': '192.168.1.1', 'router': '192.168.1.1', 'dns': []}]
+        state['clients'] = _DHCP_STARV_MIN_CLIENTS + 2
+        ck('verdict starvation', do_dhcp_guardian(learn=False)['verdict'] == 'starvation',
+           got=do_dhcp_guardian(learn=False)['verdict'])
+
+        # clean: single trusted server, no starvation.
+        _fresh()
+        state['clients'] = 0
+        ck('verdict clean (single server)', do_dhcp_guardian(learn=True)['verdict'] == 'clean',
+           got=do_dhcp_guardian(learn=True)['verdict'])
+    finally:
+        for k, v in saved.items():
+            g[k] = v
+
+    # -- Scapy end-to-end: craft DHCP DISCOVERs -> pcap -> tcpdump -> parse --
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, IP, UDP, BOOTP, DHCP, wrpcap
+        if _have('tcpdump'):
+            pkts = []
+            for i in range(3):
+                mac = '02:00:00:00:00:%02x' % (i + 1)
+                chaddr = bytes(int(x, 16) for x in mac.split(':')) + b'\x00' * 10
+                pkts.append(Ether(src=mac, dst='ff:ff:ff:ff:ff:ff')
+                            / IP(src='0.0.0.0', dst='255.255.255.255')
+                            / UDP(sport=68, dport=67) / BOOTP(chaddr=chaddr)
+                            / DHCP(options=[('message-type', 'discover'), 'end']))
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, pkts)
+            res = _run(['tcpdump', '-e', '-nn', '-t', '-v', '-r', pcap_path,
+                        'udp and (port 67 or port 68)'], timeout=10)
+            req2, clients2 = _parse_dhcp_capture(res['out'])
+            ok = req2 == 3 and len(clients2) == 3
+            scenarios.append({'name': 'dhcp-scapy-e2e', 'expect': '3 discovers / 3 clients',
+                              'got': f'{req2} req / {len(clients2)} clients', 'pass': ok})
+            scapy_result = {'ran': True, 'pass': ok,
+                            'tcpdump_out': res['out'].strip()[:200]}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (not scapy_result.get('ran')
+                                                    or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
 
 
 def _tcp_reachable(host, port, timeout=4):
@@ -14495,6 +14674,7 @@ def do_routing_selftest():
               'ldap': _ldap_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
+              'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
