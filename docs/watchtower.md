@@ -2,7 +2,8 @@
 
 Ragnar ships a family of deep, continuous passive monitors that each run as their
 own daemon: [`arp_guard`](arp_guard.md), [`ndpwatch`](ndpwatch.md),
-[`wifiwatch`](wifiwatch.md), [`certwatch`](certwatch.md),
+[`wifiwatch`](wifiwatch.md), [`legacywatch`](legacywatch.md),
+[`wpswatch`](wpswatch.md), [`certwatch`](certwatch.md),
 [`snmpwatch`](snmpwatch.md), [`isiswatch`](isiswatch.md) and
 [`igmpwatch`](igmpwatch.md). They are the suite's sharpest detectors — but each
 wrote to its own log with its own schema, so there was **no single place to see
@@ -113,7 +114,7 @@ them (`●` present, `○` no log found / not running).
 
 **Dashboard** — a Watchtower card sits under the stats grid on the landing tab:
 severity chips (or a green *All clear*), the five newest findings, and a
-`3/7 watchers logging: ● ARP Guard ○ Cert Watch …` source line. It refreshes with
+`3/9 watchers logging: ● ARP Guard ○ Cert Watch …` source line. It refreshes with
 the dashboard (on open, then every 20s), so an active attack is visible without
 digging.
 

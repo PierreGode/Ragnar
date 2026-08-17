@@ -1837,7 +1837,8 @@ def _ni_save_memory():
 # clean-or-critical is treated as a rank-1 finding, so a new scanner's verdicts still
 # surface without needing to be enumerated here.
 _NI_CLEAN = {'clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a',
-             'no-traffic', 'disabled', 'not-applicable'}
+             'no-traffic', 'disabled', 'not-applicable',
+             'randomization'}       # mac: privacy-MAC inventory is benign, not an alert
 _NI_CRITICAL = {
     'hijacked', 'spoofed', 'rogue', 'starvation', 'compromised',        # dns/arp/dhcp
     'root-hijack', 'bpdu-flood',                                        # stp
@@ -1849,6 +1850,7 @@ _NI_CRITICAL = {
     'coercion-attempt', 'relay-suspected',                             # relay
     'rogue-speaker',                                                    # fhrp
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
+    'cdpwn',                                                            # cdp (Armis CDPwn CVE exploit shape)
 }
 
 
@@ -1900,7 +1902,10 @@ def _net_integrity_check_once():
     # Fast core — cheap enough to run every cycle.
     fast = [('dns', 'DNS', run_dns),
             ('arp', 'ARP', lambda: watch(nd.do_arp_check)),
-            ('raguard', 'RA-Guard', lambda: watch(nd.do_raguard, action='check'))]
+            ('raguard', 'RA-Guard', lambda: watch(nd.do_raguard, action='check')),
+            # MAC spoof/clone is cheap (neighbour-table read, no capture), so run
+            # it every cycle. scan=False keeps it passive (no arp-scan sweep).
+            ('mac', 'MAC', lambda: watch(nd.do_mac_watch, scan=False))]
     if cfg.get('net_integrity_check_dhcp', True):
         fast.append(('dhcp', 'DHCP', lambda: watch(nd.do_dhcp_guardian, quick=True,
                                                    interface=cap_iface)))

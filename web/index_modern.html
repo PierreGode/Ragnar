@@ -940,7 +940,7 @@
                 <div class="flex items-center justify-between gap-4 mb-3">
                     <div class="min-w-0">
                         <h3 class="text-lg font-semibold">Watchtower</h3>
-                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Cert · SNMP · IS-IS · IGMP</p>
+                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP (plus any other watcher writing JSONL)</p>
                     </div>
                     <button onclick="showTab('diagnostics')" class="shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Open pane</button>
                 </div>
@@ -1569,7 +1569,7 @@
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Network Integrity Monitor</h3>
-                            <p class="text-sm text-gray-400">Periodically checks for <strong>DNS poisoning</strong>, <strong>ARP spoofing</strong> (gateway-MAC watch + subnet impersonation) and <strong>rogue DHCP servers</strong> in the background, and sends a Pushover alert if the verdict goes bad. With <strong>extended monitoring</strong> it also rotates the full passive-scanner suite — STP root-hijack, DTP VLAN-hop, FHRP/OSPF/EIGRP/IS-IS/BGP routing hijack & injection, SMB poisoning, NTLM relay/coercion, IGMP/IPv6/ICMP/NTP/SNMP/Cert and RA-Guard posture — a few per cycle so each stays light. Makes outbound DNS/DoH calls each cycle — off by default.</p>
+                            <p class="text-sm text-gray-400">Periodically checks for <strong>DNS poisoning</strong>, <strong>ARP spoofing</strong> (gateway-MAC watch incl. HSRP/VRRP virtual-MAC awareness + subnet impersonation), <strong>MAC spoof/clone</strong>, <strong>rogue &amp; starvation DHCP</strong> and <strong>IPv6 RA-Guard</strong> posture every cycle in the background, and sends a Pushover alert if the verdict goes bad. With <strong>extended monitoring</strong> it also rotates the full passive-scanner suite — STP root-hijack, DTP VLAN-hop, CDP (incl. <strong>CDPwn</strong> CVE screening)/VTP, FHRP/OSPF/EIGRP/IS-IS/BGP routing hijack &amp; injection, SMB poisoning, NTLM relay/coercion, LDAP, and NDP/IGMP/IPv6/ICMP/NTP/SNMP/Cert/TLS — a few per cycle so each stays light. Makes outbound DNS/DoH calls each cycle — off by default.</p>
                         </div>
                         <label class="toggle-switch relative inline-flex items-center cursor-pointer shrink-0">
                             <input type="checkbox" id="netint-enabled" class="sr-only peer" onchange="onNetIntegrityToggled(this)">
@@ -1601,7 +1601,7 @@
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Watchtower <span class="text-xs font-normal text-gray-500">— unified watcher alerts</span></h3>
-                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong>. Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. Each watcher must be installed and running (its systemd unit) to appear here.</p>
+                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong> (plus any other watcher dropping a JSONL log in the watched dir). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. Each watcher must be installed and running (its systemd unit) to appear here.</p>
                         </div>
                         <label class="toggle-switch relative inline-flex items-center cursor-pointer shrink-0">
                             <input type="checkbox" id="watchtower-enabled" class="sr-only peer" onchange="onWatchtowerToggled(this)">
