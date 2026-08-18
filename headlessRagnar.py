@@ -15,6 +15,13 @@ import sys
 import subprocess
 import logging
 
+# Headless mode: never touch the physical display. SharedData() initializes the
+# EPD at import time (constructing EPDHelper / running auto_detect), which drives
+# SPI0 + control GPIOs and blanks a DPI/HDMI panel on shared-pin boards like the
+# HackBerry Pi. Set the guard BEFORE importing shared_data so the EPD init is
+# skipped regardless of how this entrypoint was launched (systemd, CLI, etc.).
+os.environ['RAGNAR_HEADLESS'] = '1'
+
 from init_shared import shared_data
 from comment import Commentaireia
 from webapp_modern import run_server

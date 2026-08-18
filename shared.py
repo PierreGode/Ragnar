@@ -211,6 +211,11 @@ class SharedData:
     def __init__(self):
         # Detect Pager mode (set by pager_payload.sh before Python launch)
         self._pager_mode = os.environ.get('RAGNAR_PAGER_MODE') == '1'
+        # Detect Headless mode (set by headlessRagnar.py / systemd on web-only
+        # installs). Like Pager mode it must never initialize the EPD, which
+        # would seize SPI0 + GPIO and blank a DPI/HDMI panel on shared-pin
+        # boards (HackBerry Pi and similar).
+        self._headless_mode = os.environ.get('RAGNAR_HEADLESS') == '1'
 
         self.initialize_paths() # Initialize the paths used by the application
 
@@ -1117,8 +1122,8 @@ class SharedData:
     #         raise
     def initialize_epd_display(self):
         """Initialize the e-paper display."""
-        if EPDHelper is None or self._pager_mode:
-            logger.info("EPD not available (Pager mode or missing module) - skipping EPD init")
+        if EPDHelper is None or self._pager_mode or self._headless_mode:
+            logger.info("EPD not available (Pager/Headless mode or missing module) - skipping EPD init")
             self.epd_helper = None
             fallback_profile = DISPLAY_PROFILES.get(DEFAULT_EPD_TYPE, {"ref_width": 122, "ref_height": 250, "default_flip": False})
             epd_type = self.config.get('epd_type') or DEFAULT_EPD_TYPE

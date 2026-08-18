@@ -1511,6 +1511,16 @@ ExecStartPre=-/usr/bin/python3 -OO /home/ragnar/Ragnar/wipe_epd.py
 EOF
     fi
 
+    if [ "$HEADLESS_MODE" = true ]; then
+        # Never initialize the EPD on headless (web-only) installs. SharedData()
+        # inits the display at import time, which seizes SPI0 + GPIO and blanks a
+        # DPI/HDMI panel on shared-pin boards (HackBerry Pi). The headless
+        # entrypoint also sets this itself; this makes it explicit in the unit.
+        cat >> /etc/systemd/system/ragnar.service << EOF
+Environment=RAGNAR_HEADLESS=1
+EOF
+    fi
+
     cat >> /etc/systemd/system/ragnar.service << EOF
 ExecStart=/usr/bin/python3 -OO /home/ragnar/Ragnar/${entrypoint_file}
 WorkingDirectory=/home/ragnar/Ragnar

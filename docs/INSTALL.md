@@ -106,6 +106,23 @@ If you *did* pick a display profile on non-Pi hardware, the driver summary will
 honestly report the display types that will not work — that is expected, not a
 failed install.
 
+#### Boards with a built-in DPI/HDMI panel (HackBerry Pi and similar)
+
+Some Pi-based devices ship with their own DPI/HDMI screen that already owns SPI0
+and the display GPIOs (e.g. the HackBerry Pi, HyperPixel, or any
+`dtoverlay=vc4-kms-dpi` panel). Ragnar's e-Paper/TFT driver drives those same
+pins, so a **display** install would blank that panel. For these boards pick a
+**headless (web-only) profile** — `Raspberry Pi headless` or `hbp0_ragnar`
+(HackBerry Pi) — which runs `headlessRagnar.py` and never touches the display.
+
+Headless installs set `RAGNAR_HEADLESS=1` (in the entrypoint and in the systemd
+unit), which skips EPD initialization entirely. This matters because the display
+is initialized at import time: without the guard, simply importing Ragnar's
+shared state would seize SPI0 + GPIO and blank the DPI panel — regardless of
+which entrypoint launched. If a device with a DPI panel was accidentally set up
+with a display profile, `sudo bash update_ragnar.sh` repoints an already-headless
+unit and adds the guard, or re-run the installer and choose a headless profile.
+
 #### Changing your screen
 
 The installer asks which screen you have, but that is only a starting value —
