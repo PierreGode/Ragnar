@@ -54,6 +54,8 @@ except Exception:
 print("KIOSK_URL=" + shlex.quote(str(d.get("kiosk_url", "http://localhost:8000"))))
 print("KIOSK_ROTATION=" + shlex.quote(str(d.get("kiosk_rotation", 0))))
 print("KIOSK_HIDE_CURSOR=" + ("true" if d.get("kiosk_hide_cursor", True) else "false"))
+print("KIOSK_HANDHELD=" + ("true" if d.get("kiosk_handheld", False) else "false"))
+print("KIOSK_SCALE_CFG=" + shlex.quote(str(d.get("kiosk_scale", "") or "")))
 print("WARDRIVING_ENABLED=" + ("true" if d.get("wardriving_enabled", False) else "false"))
 ' 2>/dev/null || true)"
         if [[ -n "$parsed" ]]; then eval "$parsed"; fi
@@ -118,6 +120,24 @@ if [[ "$LOW_MEM" -eq 1 ]]; then
     echo "[kiosk-run] low-memory board — applied Chromium low-end flags"
 fi
 
+# Small square panels (e.g. the Hackberry Pi CM5's 720x720 4" TFT) read better
+# with a Chromium device scale factor for bigger text/touch targets. Explicit
+# RAGNAR_KIOSK_SCALE wins; otherwise the handheld config scale (Settings → Kiosk)
+# applies when handheld mode is on. Unset = native rendering (unchanged default).
+SCALE_EFF="${RAGNAR_KIOSK_SCALE:-}"
+if [[ -z "$SCALE_EFF" && "${KIOSK_HANDHELD:-false}" == "true" && -n "${KIOSK_SCALE_CFG:-}" ]]; then
+    SCALE_EFF="$KIOSK_SCALE_CFG"
+fi
+if [[ -n "$SCALE_EFF" ]]; then
+    # Numeric-only (guards the awk range check below against injection), 0.5-3.0.
+    if [[ "$SCALE_EFF" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk "BEGIN{exit !($SCALE_EFF>=0.5 && $SCALE_EFF<=3.0)}"; then
+        CHROMIUM_ARGS+=( --force-device-scale-factor="$SCALE_EFF" )
+        echo "[kiosk-run] device scale factor: $SCALE_EFF"
+    else
+        echo "[kiosk-run] WARN: ignoring invalid kiosk scale '$SCALE_EFF' (want a number 0.5-3.0)"
+    fi
+fi
+
 # Input detection: decide (a) whether to force Chromium touch events, and
 # (b) whether to launch an on-screen keyboard. The OSK is wanted for a touch
 # screen OR a keyboardless setup — a mouse-only HDMI kiosk still needs a way to
@@ -157,6 +177,59 @@ if [[ "$TOUCH_PRESENT" -eq 1 ]]; then
     CHROMIUM_ARGS+=( --touch-events=enabled )
 fi
 echo "[kiosk-run] input: touchscreen=$TOUCH_PRESENT keyboard=$KBD_PRESENT -> touch_events=$TOUCH_PRESENT osk=$OSK_WANTED (touch=$TOUCH_MODE osk=$OSK_MODE)"
+
+# Escape hatch. Chromium runs in --kiosk (locked full-screen). On a normal HDMI
+# appliance with a full keyboard that's fine (Alt+F4 etc.), but on a handheld like
+# the Hackberry Pi CM5 — BlackBerry keyboard, no obvious Ctrl/F-keys — it would
+# trap you in the dashboard. When enabled we float a touch ✕ button in a corner
+# and (on X) bind Ctrl+Alt+Q, both running ragnar_kiosk_exit.sh to close the kiosk.
+#   RAGNAR_KIOSK_EXIT=on|off|auto   (default auto = on when a touchscreen is present)
+#   RAGNAR_KIOSK_EXIT_CORNER=ne|nw|se|sw  (default se — clear of Ragnar's top menu)
+# RAGNAR_KIOSK_EXIT env wins; otherwise auto = on for a touchscreen OR when
+# handheld mode is set in Settings → Kiosk (the Hackberry CM5 case).
+EXIT_MODE="${RAGNAR_KIOSK_EXIT:-auto}"
+EXIT_HATCH=0
+case "$EXIT_MODE" in
+    on)  EXIT_HATCH=1 ;;
+    off) EXIT_HATCH=0 ;;
+    *)   { [[ "$TOUCH_PRESENT" -eq 1 ]] || [[ "${KIOSK_HANDHELD:-false}" == "true" ]]; } && EXIT_HATCH=1 ;;
+esac
+EXIT_CORNER="${RAGNAR_KIOSK_EXIT_CORNER:-se}"
+# Resolve the exit scripts from the repo. In autostart mode the wrapper is run
+# from its /usr/local/bin copy without RAGNAR_REPO, so REPO_ROOT can misresolve —
+# fall back to the standard install path so the hatch still works after a bare
+# `git pull` (older .desktop entries) without a kiosk re-install.
+EXIT_SCRIPT_DIR="$REPO_ROOT/scripts"
+if [[ ! -x "$EXIT_SCRIPT_DIR/ragnar_kiosk_exit.sh" && -x /home/ragnar/Ragnar/scripts/ragnar_kiosk_exit.sh ]]; then
+    EXIT_SCRIPT_DIR="/home/ragnar/Ragnar/scripts"
+fi
+EXIT_SCRIPT="$EXIT_SCRIPT_DIR/ragnar_kiosk_exit.sh"
+EXIT_BUTTON_PY="$EXIT_SCRIPT_DIR/ragnar_kiosk_exit_button.py"
+echo "[kiosk-run] escape hatch: enabled=$EXIT_HATCH (mode=$EXIT_MODE corner=$EXIT_CORNER)"
+
+# Launch the escape-hatch bits (best-effort, backgrounded — never blocks the
+# kiosk). Reused by both launch modes below.
+launch_exit_hatch() {
+    [[ "$EXIT_HATCH" -eq 1 ]] || return 0
+    [[ -x "$EXIT_SCRIPT" ]] || return 0
+    # Global Ctrl+Alt+Q hotkey — X sessions only (xbindkeys can't grab keys under
+    # Wayland). The touch ✕ button below is the reliable escape either way.
+    if [[ -z "${WAYLAND_DISPLAY:-}" && -n "${DISPLAY:-}" ]] && command -v xbindkeys >/dev/null 2>&1; then
+        local xbk; xbk="$(mktemp --tmpdir ragnar-kiosk-xbk-XXXXXX 2>/dev/null || echo /tmp/ragnar-kiosk-xbk)"
+        printf '"%s"\n  control+alt + q\n' "$EXIT_SCRIPT" > "$xbk"
+        echo "[kiosk-run] binding Ctrl+Alt+Q -> kiosk exit"
+        xbindkeys -n -f "$xbk" >/dev/null 2>&1 &
+    fi
+    # Floating touch ✕ button (tkinter; works under X and XWayland).
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import tkinter' >/dev/null 2>&1; then
+        echo "[kiosk-run] launching on-screen exit button ($EXIT_CORNER)"
+        KIOSK_EXIT_SCRIPT="$EXIT_SCRIPT" KIOSK_EXIT_CORNER="$EXIT_CORNER" \
+        KIOSK_PROFILE="$PROFILE_DIR" \
+            python3 "$EXIT_BUTTON_PY" >/dev/null 2>&1 &
+    else
+        echo "[kiosk-run] WARN: exit button wanted but python3-tk missing — Ctrl+Alt+Q (X only) still works"
+    fi
+}
 
 # Launch an on-screen keyboard when wanted. Best-effort and backgrounded — never
 # blocks or fails the kiosk. Wayland uses squeekboard (follows text-input focus);
@@ -220,6 +293,7 @@ if [[ -n "${WAYLAND_DISPLAY:-}" || -n "${DISPLAY:-}" ]]; then
     esac
 
     if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then launch_osk wayland; else launch_osk x; fi
+    launch_exit_hatch
     exec "$BROWSER" "${CHROMIUM_ARGS[@]}"
 fi
 
@@ -318,6 +392,21 @@ if [[ "$OSK_WANTED" -eq 1 ]]; then
         matchbox-keyboard >/dev/null 2>&1 &
     elif command -v onboard >/dev/null 2>&1; then
         onboard >/dev/null 2>&1 &
+    fi
+fi
+
+# Kiosk escape hatch (floating ✕ button + Ctrl+Alt+Q). This path is always X, so
+# both work. Values baked in by the parent; see launch_exit_hatch() there.
+if [[ "$EXIT_HATCH" -eq 1 && -x "$EXIT_SCRIPT" ]]; then
+    if command -v xbindkeys >/dev/null 2>&1; then
+        XBK="\$(mktemp --tmpdir ragnar-kiosk-xbk-XXXXXX 2>/dev/null || echo /tmp/ragnar-kiosk-xbk)"
+        printf '"%s"\n  control+alt + q\n' "$EXIT_SCRIPT" > "\$XBK"
+        xbindkeys -n -f "\$XBK" >/dev/null 2>&1 &
+    fi
+    if command -v python3 >/dev/null 2>&1 && python3 -c 'import tkinter' >/dev/null 2>&1; then
+        KIOSK_EXIT_SCRIPT="$EXIT_SCRIPT" KIOSK_EXIT_CORNER="$EXIT_CORNER" \
+        KIOSK_PROFILE="$PROFILE_DIR" \
+            python3 "$EXIT_BUTTON_PY" >/dev/null 2>&1 &
     fi
 fi
 

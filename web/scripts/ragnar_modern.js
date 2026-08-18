@@ -28456,11 +28456,15 @@ async function loadKioskState() {
         const url = document.getElementById('kiosk-url');
         const rot = document.getElementById('kiosk-rotation');
         const cur = document.getElementById('kiosk-hide-cursor');
+        const hand = document.getElementById('kiosk-handheld');
+        const scale = document.getElementById('kiosk-scale');
         const cfgPanel = document.getElementById('kiosk-config');
         if (enabledCb) enabledCb.checked = !!data.enabled;
         if (url && data.url) url.value = data.url;
         if (rot) rot.value = String(data.rotation ?? 0);
         if (cur) cur.checked = !!data.hide_cursor;
+        if (hand) hand.checked = !!data.handheld;
+        if (scale && data.scale != null) scale.value = String(data.scale);
         if (cfgPanel) cfgPanel.classList.toggle('hidden', !data.enabled);
         _setKioskBadge(data.service_state || 'unknown');
     } catch (e) {
@@ -28501,10 +28505,19 @@ function onKioskSettingChanged() {
         const url = document.getElementById('kiosk-url');
         const rot = document.getElementById('kiosk-rotation');
         const cur = document.getElementById('kiosk-hide-cursor');
+        const hand = document.getElementById('kiosk-handheld');
+        const scaleEl = document.getElementById('kiosk-scale');
+        // Clamp scale to the range the wrapper accepts; fall back to native 1.0.
+        let scaleVal = scaleEl ? parseFloat(scaleEl.value) : 1.0;
+        if (!isFinite(scaleVal)) scaleVal = 1.0;
+        scaleVal = Math.min(3.0, Math.max(0.5, scaleVal));
+        if (scaleEl) scaleEl.value = String(scaleVal);
         const payload = {
             kiosk_url: url ? url.value : 'http://localhost:8000',
             kiosk_rotation: rot ? parseInt(rot.value, 10) || 0 : 0,
             kiosk_hide_cursor: cur ? !!cur.checked : true,
+            kiosk_handheld: hand ? !!hand.checked : false,
+            kiosk_scale: scaleVal,
         };
         try {
             const res = await fetch('/api/config', {

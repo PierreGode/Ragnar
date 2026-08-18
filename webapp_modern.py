@@ -8383,7 +8383,8 @@ def _apply_config_update(data):
             if not kiosk_ok:
                 logger.warning(f"[kiosk] enable rejected: {kiosk_reason}")
                 return {'success': False, 'error': kiosk_reason}, 400
-        kiosk_settings_keys = {'kiosk_url', 'kiosk_rotation', 'kiosk_hide_cursor'}
+        kiosk_settings_keys = {'kiosk_url', 'kiosk_rotation', 'kiosk_hide_cursor',
+                               'kiosk_handheld', 'kiosk_scale'}
         kiosk_settings_changed = any(
             k in data and data[k] != shared_data.config.get(k)
             for k in kiosk_settings_keys
@@ -8697,6 +8698,8 @@ def kiosk_status():
             'url': shared_data.config.get('kiosk_url', 'http://localhost:8000'),
             'rotation': shared_data.config.get('kiosk_rotation', 0),
             'hide_cursor': bool(shared_data.config.get('kiosk_hide_cursor', True)),
+            'handheld': bool(shared_data.config.get('kiosk_handheld', False)),
+            'scale': shared_data.config.get('kiosk_scale', 1.0),
         })
     except Exception as exc:
         logger.error(f"Error getting kiosk status: {exc}")

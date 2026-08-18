@@ -6879,6 +6879,19 @@
                                         <div class="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-600"></div>
                                     </label>
                                 </div>
+                                <div class="flex items-center justify-between pt-1">
+                                    <label class="text-xs text-gray-500" title="For handheld decks like the Hackberry Pi CM5: adds an on-screen ✕ button and a Ctrl+Alt+Q hotkey to leave the locked full-screen kiosk (whose keyboard has no easy Ctrl).">Handheld deck (Hackberry CM5)</label>
+                                    <label class="relative inline-flex items-center cursor-pointer">
+                                        <input type="checkbox" id="kiosk-handheld" class="sr-only peer" onchange="onKioskSettingChanged()">
+                                        <div class="w-9 h-5 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-600"></div>
+                                    </label>
+                                </div>
+                                <div class="flex items-center justify-between pt-1">
+                                    <label class="text-xs text-gray-500" title="Chromium device scale factor for small panels (e.g. the CM5's 720×720). 1.0 = native; raise toward 1.3–1.5 for bigger text/touch targets.">Display scale</label>
+                                    <input type="number" id="kiosk-scale" min="0.5" max="3.0" step="0.1" value="1.0"
+                                           class="w-20 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs text-gray-300 text-right"
+                                           onchange="onKioskSettingChanged()">
+                                </div>
                             </div>
                             <div class="flex items-center justify-between mt-3 pt-2 border-t border-gray-700/50">
                                 <span class="text-xs text-gray-500">Service</span>
@@ -8067,7 +8080,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260818-sdr-waterfall-res"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260818-kiosk-handheld"></script>
 
 
 

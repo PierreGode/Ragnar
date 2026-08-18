@@ -250,6 +250,20 @@ if [[ -n "$OSK_PKG" ]]; then
         || echo "[kiosk-install] WARN: could not install $OSK_PKG — touch keyboard unavailable"
 fi
 
+# Kiosk escape hatch (floating ✕ touch button + Ctrl+Alt+Q hotkey). Needed on
+# handhelds like the Hackberry Pi CM5 whose keyboard has no easy Ctrl/F-keys, so
+# Chromium's --kiosk would otherwise trap you in the dashboard. python3-tk draws
+# the touch button; xbindkeys binds the hotkey on X. Best-effort — a miss just
+# leaves that affordance off (the wrapper auto-enables it only for touchscreens).
+HATCH_PKGS=()
+python3 -c 'import tkinter' >/dev/null 2>&1 || HATCH_PKGS+=(python3-tk)
+command -v xbindkeys >/dev/null 2>&1 || HATCH_PKGS+=(xbindkeys)
+if [[ "${#HATCH_PKGS[@]}" -gt 0 ]]; then
+    echo "[kiosk-install] installing kiosk escape-hatch deps: ${HATCH_PKGS[*]} (best-effort)"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${HATCH_PKGS[@]}" \
+        || echo "[kiosk-install] WARN: could not install ${HATCH_PKGS[*]} — the ✕/Ctrl+Alt+Q exit may be limited"
+fi
+
 # Re-detect browser after install
 if [[ -z "$BROWSER_BIN" ]]; then
     for bin in chromium-browser chromium firefox-esr; do
@@ -312,7 +326,7 @@ if [[ "$MODE" == "autostart" ]]; then
 Type=Application
 Name=Ragnar Kiosk
 Comment=Ragnar on-screen UI
-Exec=$WRAPPER_DST
+Exec=env RAGNAR_REPO=$REPO_ROOT $WRAPPER_DST
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 Terminal=false
@@ -374,6 +388,22 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 echo "[kiosk-install] systemd unit installed -> $SERVICE_FILE"
+
+# Let the kiosk escape hatch stop the unit in service mode (autostart mode kills
+# the browser directly and needs no sudo). Scoped to exactly this one command so
+# the ✕ button / Ctrl+Alt+Q can close a service-mode kiosk instead of it just
+# respawning. Validated before install so a malformed rule can't wedge sudo.
+KIOSK_SUDOERS="/etc/sudoers.d/ragnar-kiosk"
+KIOSK_SUDOERS_TMP="$(mktemp)"
+printf '%s ALL=(root) NOPASSWD: /bin/systemctl stop ragnar-kiosk.service, /usr/bin/systemctl stop ragnar-kiosk.service\n' \
+    "$KIOSK_USER" > "$KIOSK_SUDOERS_TMP"
+if visudo -c -f "$KIOSK_SUDOERS_TMP" >/dev/null 2>&1; then
+    install -m 0440 "$KIOSK_SUDOERS_TMP" "$KIOSK_SUDOERS"
+    echo "[kiosk-install] escape-hatch sudoers installed -> $KIOSK_SUDOERS"
+else
+    echo "[kiosk-install] WARN: sudoers validation failed — service-mode ✕/Ctrl+Alt+Q may only respawn the kiosk"
+fi
+rm -f "$KIOSK_SUDOERS_TMP"
 
 systemctl daemon-reload
 
