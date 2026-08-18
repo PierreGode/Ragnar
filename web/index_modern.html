@@ -1734,7 +1734,7 @@
                             <div class="min-w-0">
                                 <h3 class="text-lg font-semibold mb-1">MAC Watch</h3>
                                 <p class="text-xs text-amber-300/90 mb-2">Detection-only MAC-spoofing + randomization monitor — never spoofs anything. Flags a vendor OUI wearing the locally-administered bit (disguised vendor), a MAC cloned across several IPs, and an IP whose MAC changed identity (current <em>and</em> past spoofing).</p>
-                                <p class="text-sm text-gray-400 mb-3">Also inventories privacy-randomized MACs on the segment, and <strong>tracks</strong> a device that rotates through several randomized addresses — following it across the MACs it hides behind. Reads the neighbour table (+ optional arp-scan sweep); history persists so past events survive restarts. Cross-MAC tracking here is IP-anchored (capture-free); true fingerprint tracking needs monitor mode.</p>
+                                <p class="text-sm text-gray-400 mb-3">Also inventories privacy-randomized MACs on the segment, and <strong>tracks</strong> a device that rotates through several randomized addresses — following it across the MACs it hides behind. Adds <strong>HSRP/VRRP/GLBP virtual-MAC awareness</strong>: it recognizes first-hop-redundancy virtual MACs so a shared gateway MAC that legitimately moves between routers on failover never reads as a spoof/clone — and flags the inverse, an FHRP redundancy VIP suddenly answered by a <em>non-virtual</em> MAC, as a gateway hijack (the arp_guard / FHRP-Watch cross-pivot). Reads the neighbour table (+ optional arp-scan sweep); history persists so past events survive restarts. Cross-MAC tracking here is IP-anchored (capture-free); true fingerprint tracking needs monitor mode.</p>
                             </div>
                         </div>
                         <div class="flex flex-wrap items-center gap-2">
@@ -2283,7 +2283,7 @@
                         <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · DTP · CDP · VTP · SMB · Relay · EIGRP · IS-IS · FHRP · OSPF · LDAP · ARP · MAC · DHCP · DNS · BGP · speaker · OWD)</span></h3>
                         <div id="scapy-status" class="text-xs text-gray-400"></div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
+                    <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <button onclick="runRoutingSelftest()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Run self-test</button>
                         <button id="scapy-install-btn" onclick="installNetTool('scapy', this, runRoutingSelftest)" class="hidden bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Install the Scapy Python module for the end-to-end packet-crafting self-test">Install Scapy</button>
@@ -8067,7 +8067,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260816-selftest-4"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260818-macwatch-fhrp"></script>
 
 
 

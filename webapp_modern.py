@@ -1838,7 +1838,8 @@ def _ni_save_memory():
 # surface without needing to be enumerated here.
 _NI_CLEAN = {'clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a',
              'no-traffic', 'disabled', 'not-applicable',
-             'randomization'}       # mac: privacy-MAC inventory is benign, not an alert
+             'randomization',       # mac: privacy-MAC inventory is benign, not an alert
+             'fhrp'}                # mac: HSRP/VRRP/GLBP virtual-MAC inventory is expected
 _NI_CRITICAL = {
     'hijacked', 'spoofed', 'rogue', 'starvation', 'compromised',        # dns/arp/dhcp
     'root-hijack', 'bpdu-flood',                                        # stp
