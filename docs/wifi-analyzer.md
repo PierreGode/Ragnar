@@ -444,8 +444,11 @@ which makes the display lurch: a burst of rows jumps in, then it freezes — the
 sweeps are **time-integrated (max-hold) into one row every ~100 ms**. That is
 how a real spectrum-analyzer waterfall dwells: the scroll is smooth and steady
 regardless of sweep speed, and each row still catches short bursts that fired
-between frames. Frames stream to the browser. **Receive-only** — an SDR sweep
-never transmits.
+between frames. Frames stream to the browser. Each frame is **512 frequency
+columns** and the browser keeps **600 rows** of history, so the heatmap stays
+crisp — no chunky cells — even stretched full-screen; the sweep's FFT bin width
+is held finer than a column so every column is fed real data. **Receive-only** —
+an SDR sweep never transmits.
 
 **Hardware.** Needs a **HackRF One** (1 MHz–6 GHz — covers 2.4 *and* 5 GHz).
 The cheap RTL-SDR only reaches ~1.7 GHz and **cannot** see these bands. Install
