@@ -334,8 +334,9 @@ Ragnar is built on the shoulders of great work by others:
 |---|---|---|
 | [Bjorn](https://github.com/infinition/Bjorn) | infinition | Original project that Ragnar is forked from |
 | [PagerBjorn / Loki](https://github.com/pineapple-pager-projects/pineapple_pager_loki) | [brAinphreAk](https://github.com/brainphreak) | WiFi Pineapple Pager adaptation layer — display system, hardware control wrapper (`pagerctl.py`), pager menu UI, and all MIPS-compiled binaries and libraries |
+| [Pwnagotchi](https://github.com/jayofelony/pwnagotchi) | jayofelony | side by side Ragnar Pwnagotchi install with swap function |
 | [RuView](https://github.com/ruvnet/ruview) | ruvnet | WiFi-CSI sensing engine and ESP32 CSI-node firmware behind [RuSense](docs/rusense.md) — camera-free presence, motion, people-count, pose and vital-sign sensing. Ragnar vendors bins from the [PierreGode/RuView](https://github.com/PierreGode/RuView) fork |
-| — | [Solarflere](https://www.instagram.com/solarflere) | Co-author of the [Authority Verification](docs/nettools.md) suite (Diagnostics, Switch & L2/L3, Interfaces) |
+| Networking and more | [Solarflere](https://www.instagram.com/solarflere) | Co-author of the [Authority Verification](docs/nettools.md) suite (Diagnostics, Switch & L2/L3, Interfaces) |
 
 ---
 
