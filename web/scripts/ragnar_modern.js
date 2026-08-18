@@ -2019,7 +2019,7 @@ function _wifiSdrPoll() {
         if (typeof d.floor_dbm === 'number') s.floor = d.floor_dbm;
         if (d.max_hold) s.maxhold = d.max_hold;
         (d.frames || []).forEach(f => { s.seq = f.seq; s.rows.unshift(f.power); });
-        if (s.rows.length > 260) s.rows.length = 260;
+        if (s.rows.length > 600) s.rows.length = 600;
         if (_wifiState.view === 'waterfall') _wifiDrawWaterfall();
     }).catch(() => {});
 }

@@ -69,10 +69,14 @@ BANDS = {
     "6":   (5925, 6425),
 }
 
-_GRID_BINS = 256          # display columns per frame (band binned into this many)
-_RING_FRAMES = 300        # rolling history of sweep frames kept in memory
+_GRID_BINS = 512          # display columns per frame (band binned into this many)
+_RING_FRAMES = 600        # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120         # sentinel for a bucket no sweep bin landed in
-_BIN_WIDTH_HZ = 250000    # hackrf_sweep FFT resolution (250 kHz -> fast sweeps)
+# FFT resolution must stay finer than one display column or some columns get no
+# raw bin and paint a permanent floor streak. 512 columns over the 100 MHz 2.4
+# band is ~195 kHz/column, so 150 kHz keeps every column fed (~667 raw bins ->
+# 512 buckets) while sweeps stay fast enough for the steady cadence below.
+_BIN_WIDTH_HZ = 150000    # hackrf_sweep FFT resolution (finer than a display column)
 _DEFAULT_LNA = 24         # HackRF LNA gain (0-40, 8 dB steps)
 _DEFAULT_VGA = 20         # HackRF VGA/baseband gain (0-62, 2 dB steps)
 # hackrf_sweep finishes a full band far faster (and far more irregularly) than a
