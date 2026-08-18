@@ -275,6 +275,8 @@ class SweepCapture:
         self._error = None
         self._lna = _DEFAULT_LNA
         self._vga = _DEFAULT_VGA
+        self._stderr_tail = None   # last stderr line, kept for exit diagnostics
+        self._detect_cache = None  # last good detect(), reused while streaming
 
     # -- lifecycle ---------------------------------------------------------
     def start(self, band="2.4", lna=None, vga=None):
@@ -323,6 +325,7 @@ class SweepCapture:
         cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (lo, hi),
                "-w", str(_BIN_WIDTH_HZ), "-l", str(self._lna),
                "-g", str(self._vga)]
+        self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                           stderr=subprocess.PIPE, text=True,
@@ -330,6 +333,23 @@ class SweepCapture:
         except Exception as exc:
             self._error = "failed to launch hackrf_sweep: %s" % exc
             return
+        # hackrf_sweep prints a stats line to stderr every second. If we only
+        # read stdout, that stderr pipe (64 KB) fills over a long session and
+        # hackrf_sweep blocks writing to it — the stream stalls mid-run. Drain
+        # stderr continuously on its own thread, keeping the last line so an
+        # early-exit reason is still reportable.
+        def _drain_stderr(pipe):
+            try:
+                for eline in pipe:
+                    eline = eline.strip()
+                    if eline:
+                        self._stderr_tail = eline[:200]
+            except Exception:  # pragma: no cover - pipe closed on teardown
+                pass
+        serr_thread = threading.Thread(target=_drain_stderr,
+                                       args=(self._proc.stderr,),
+                                       daemon=True, name="hackrf-stderr")
+        serr_thread.start()
         # Coalesce however many raw sweeps arrive into one display row every
         # _DISPLAY_INTERVAL seconds, so the waterfall scrolls at a steady rate
         # no matter how fast (or how burstily) hackrf_sweep retunes the band.
@@ -355,10 +375,12 @@ class SweepCapture:
             self._error = str(exc)
         finally:
             # Surface a device error hackrf_sweep printed to stderr on early exit.
-            if self._proc and self._proc.poll() not in (None, 0) and not self._error:
-                err = (self._proc.stderr.read() if self._proc.stderr else "") or ""
-                if err.strip():
-                    self._error = err.strip().splitlines()[-1][:200]
+            # The drain thread already has it; give it a moment to catch the last
+            # line the process wrote as it died.
+            serr_thread.join(timeout=1)
+            if (self._proc and self._proc.poll() not in (None, 0)
+                    and not self._error and self._stderr_tail):
+                self._error = self._stderr_tail
 
     def _push_frame(self, grid):
         ints = [int(round(v)) for v in grid]
@@ -414,6 +436,7 @@ def start(band="2.4", lna=None, vga=None):
     d = detect()
     if not d.get("available"):
         return {"ok": False, "error": d.get("error", "no SDR")}
+    _capture._detect_cache = d
     return _capture.start(band, lna=lna, vga=vga)
 
 
@@ -423,7 +446,20 @@ def stop():
 
 def status():
     st = _capture.status()
-    st["detect"] = detect()
+    if st.get("running"):
+        # A sweep already holds the HackRF over USB. Calling detect() here runs
+        # hackrf_info, which opens the *same* device concurrently and knocks the
+        # streaming sweep offline within seconds — the "dies after ~7s" bug, hit
+        # whenever the UI's 15s status poll landed mid-capture. While streaming,
+        # report availability from the last known-good probe instead of touching
+        # the bus.
+        d = dict(_capture._detect_cache or {})
+        d.update({"available": True, "tools_installed": True,
+                  "device_present": True, "streaming": True})
+        d.setdefault("bands", sorted(BANDS.keys()))
+        st["detect"] = d
+    else:
+        st["detect"] = detect()
     return st
 
 
@@ -528,6 +564,26 @@ def selftest():
     acc = _merge_max(acc, [-40, -95, -90])
     check("coalesce: keeps the per-bucket peak across sweeps",
           acc == [-40, -30, -90], str(acc))
+
+    # --- status() must not re-probe the HackRF while a sweep is streaming ---
+    # Opening hackrf_info over USB during a live sweep knocks it offline a few
+    # seconds in; status() must report availability from cache instead. Fake a
+    # running capture and assert detect() is never called.
+    import sys as _sys
+    _mod = _sys.modules[__name__]
+    _saved_status, _saved_detect = _capture.status, _mod.detect
+    _probe_calls = []
+    _capture._detect_cache = {"board": "HackRF One"}
+    _capture.status = lambda: {"running": True, "band": "2.4", "error": None}
+    _mod.detect = lambda *a, **k: (_probe_calls.append(1) or {"available": False})
+    try:
+        _st = status()
+        check("status: no HackRF re-probe while streaming",
+              not _probe_calls and _st["detect"].get("streaming") is True
+              and _st["detect"].get("available") is True, str(_st["detect"]))
+    finally:
+        _capture.status, _mod.detect = _saved_status, _saved_detect
+        _capture._detect_cache = None
 
     # --- band table ---
     check("bands: 2.4 and 5 present", "2.4" in BANDS and "5" in BANDS)
