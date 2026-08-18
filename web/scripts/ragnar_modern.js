@@ -1995,7 +1995,10 @@ function _wifiSdrStart() {
             if (res && res.error) { s.error = res.error; _wifiDrawWaterfall(); return; }
             if (s.poll) clearInterval(s.poll);
             s.running = true;
-            s.poll = setInterval(_wifiSdrPoll, 400);
+            // Poll faster than the backend's ~10 rows/s cadence so each row is
+            // pulled in and painted individually — a smooth scroll rather than a
+            // burst of rows jumping in every poll.
+            s.poll = setInterval(_wifiSdrPoll, 200);
         }).catch(() => { s.error = 'Failed to start SDR'; _wifiDrawWaterfall(); });
 }
 
@@ -2009,7 +2012,9 @@ function _wifiSdrStop() {
 function _wifiSdrPoll() {
     const s = _wifiState.sdr;
     fetch('/api/net/sdr/frames?since=' + s.seq).then(r => r.json()).then(d => {
-        if (d.error) s.error = d.error;
+        // Assign (don't OR-in) so a transient backend hiccup that clears can't
+        // leave a stale error pinned over the waterfall forever.
+        s.error = d.error || null;
         if (d.band_mhz) s.bandMhz = d.band_mhz;
         if (typeof d.floor_dbm === 'number') s.floor = d.floor_dbm;
         if (d.max_hold) s.maxhold = d.max_hold;
