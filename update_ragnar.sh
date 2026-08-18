@@ -389,6 +389,19 @@ if [ -f "$SENSING_UNIT" ] && grep -q '^Environment=WDP_GUARD_INTERVAL_US=200000'
     echo -e "${GREEN}Raised sensing fusion guard to 350 ms (was 200 ms).${NC}"
 fi
 
+# Headless (web-only) installs must never initialize the EPD: SharedData() inits
+# the display at import time, seizing SPI0 + GPIO and blanking a DPI/HDMI panel
+# on shared-pin boards (HackBerry Pi). The headless entrypoint now sets
+# RAGNAR_HEADLESS=1 itself, but make it explicit in the unit too. Idempotent:
+# only touches units that already run headlessRagnar.py and lack the var.
+RAGNAR_UNIT="/etc/systemd/system/ragnar.service"
+if [ -f "$RAGNAR_UNIT" ] && grep -q 'headlessRagnar\.py' "$RAGNAR_UNIT" \
+        && ! grep -q '^Environment=RAGNAR_HEADLESS=1' "$RAGNAR_UNIT"; then
+    sed -i '/^ExecStart=.*headlessRagnar\.py/i Environment=RAGNAR_HEADLESS=1' "$RAGNAR_UNIT"
+    systemctl daemon-reload
+    echo -e "${GREEN}Set RAGNAR_HEADLESS=1 on ragnar.service (protects DPI/HDMI panel).${NC}"
+fi
+
 echo -e "${BLUE}Step 6.6: Ensuring hardware watchdog (auto-reboot on hard hang)...${NC}"
 # Unattended / inline devices should reboot fast if the Pi wedges rather than
 # black-holing the link. Enable the BCM watchdog and have systemd pet it.
