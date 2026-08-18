@@ -75,6 +75,16 @@ _FLOOR_DBM = -120         # sentinel for a bucket no sweep bin landed in
 _BIN_WIDTH_HZ = 250000    # hackrf_sweep FFT resolution (250 kHz -> fast sweeps)
 _DEFAULT_LNA = 24         # HackRF LNA gain (0-40, 8 dB steps)
 _DEFAULT_VGA = 20         # HackRF VGA/baseband gain (0-62, 2 dB steps)
+# hackrf_sweep finishes a full band far faster (and far more irregularly) than a
+# waterfall wants to scroll: for a 100 MHz band it can complete 20-30 sweeps a
+# second, then briefly stall on a USB hiccup or a retune. Emitting every raw
+# sweep as its own row makes the display lurch — a burst of rows jumps in at
+# once, then it freezes with nothing new. Instead we time-integrate raw sweeps
+# (max-hold) into rows produced at a fixed cadence, the way a real spectrum-
+# analyzer waterfall dwells. That yields a smooth, steady scroll and, as a
+# bonus, each row now catches bursty transmitters that fired between frames.
+_DISPLAY_HZ = 10          # waterfall rows emitted per second (steady scroll rate)
+_DISPLAY_INTERVAL = 1.0 / _DISPLAY_HZ
 
 
 # --------------------------------------------------------------------------
@@ -175,6 +185,22 @@ def parse_sweep_line(line):
     if bin_hz <= 0 or not dbs:
         return None
     return hz_low, hz_high, bin_hz, dbs
+
+
+def _merge_max(accum, frame):
+    """Fold ``frame`` into ``accum`` in place (bucket-wise max), returning accum.
+
+    This is the time-integration of the waterfall dwell: every raw sweep that
+    lands inside one display interval keeps the strongest reading per bucket, so
+    a short burst between frames still paints a row instead of being dropped.
+    Passing ``accum=None`` starts a fresh dwell from a copy of ``frame``.
+    """
+    if accum is None:
+        return list(frame)
+    for i, v in enumerate(frame):
+        if v > accum[i]:
+            accum[i] = v
+    return accum
 
 
 class _FrameBuilder:
@@ -300,6 +326,11 @@ class SweepCapture:
         except Exception as exc:
             self._error = "failed to launch hackrf_sweep: %s" % exc
             return
+        # Coalesce however many raw sweeps arrive into one display row every
+        # _DISPLAY_INTERVAL seconds, so the waterfall scrolls at a steady rate
+        # no matter how fast (or how burstily) hackrf_sweep retunes the band.
+        accum = None
+        last_push = time.time()
         try:
             for line in self._proc.stdout:
                 if self._stop.is_set():
@@ -308,8 +339,14 @@ class SweepCapture:
                 if not parsed:
                     continue
                 frame = builder.add(*parsed)
-                if frame is not None:
-                    self._push_frame(frame)
+                if frame is None:
+                    continue
+                accum = _merge_max(accum, frame)
+                now = time.time()
+                if now - last_push >= _DISPLAY_INTERVAL:
+                    self._push_frame(accum)
+                    accum = None
+                    last_push = now
         except Exception as exc:  # pragma: no cover - defensive
             self._error = str(exc)
         finally:
@@ -478,6 +515,15 @@ def selftest():
     fr = cap.get_frames(since=1)
     check("frames: since-filter returns only newer", len(fr["frames"]) == 1
           and fr["frames"][0]["seq"] == 2)
+
+    # --- display-dwell coalescing (max-hold across sweeps in one frame) ---
+    acc = _merge_max(None, [-90, -90, -90])
+    check("coalesce: None seed copies the frame",
+          acc == [-90, -90, -90] and acc is not None)
+    acc = _merge_max(acc, [-90, -30, -90])
+    acc = _merge_max(acc, [-40, -95, -90])
+    check("coalesce: keeps the per-bucket peak across sweeps",
+          acc == [-40, -30, -90], str(acc))
 
     # --- band table ---
     check("bands: 2.4 and 5 present", "2.4" in BANDS and "5" in BANDS)

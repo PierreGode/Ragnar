@@ -436,9 +436,16 @@ scrolling **time × frequency × power waterfall**, with your Wi-Fi channel tick
 the band selector to retune the sweep (2.4 / 5 GHz).
 
 **How it works** — `sdr_spectrum.py` runs `hackrf_sweep -f LO:HI`, parses its
-power-per-bin CSV, assembles each sweep into a fixed-width frame plus a
-cumulative max-hold, and streams frames to the browser. **Receive-only** — an
-SDR sweep never transmits.
+power-per-bin CSV, and assembles each sweep into a fixed-width frame plus a
+cumulative max-hold. `hackrf_sweep` finishes a band far faster and more
+irregularly than a waterfall should scroll (tens of sweeps a second, then a
+brief stall on a USB hiccup or retune), so rather than paint every raw sweep —
+which makes the display lurch: a burst of rows jumps in, then it freezes — the
+sweeps are **time-integrated (max-hold) into one row every ~100 ms**. That is
+how a real spectrum-analyzer waterfall dwells: the scroll is smooth and steady
+regardless of sweep speed, and each row still catches short bursts that fired
+between frames. Frames stream to the browser. **Receive-only** — an SDR sweep
+never transmits.
 
 **Hardware.** Needs a **HackRF One** (1 MHz–6 GHz — covers 2.4 *and* 5 GHz).
 The cheap RTL-SDR only reaches ~1.7 GHz and **cannot** see these bands. Install
