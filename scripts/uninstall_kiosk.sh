@@ -25,13 +25,17 @@ fi
 rm -f "$SERVICE_FILE"
 rm -f "$WRAPPER_DST"
 rm -f "$AUTOLOGIN_DROPIN"
+rm -f /etc/sudoers.d/ragnar-kiosk
 
 if [[ -d "$(dirname "$AUTOLOGIN_DROPIN")" ]]; then
     rmdir --ignore-fail-on-non-empty "$(dirname "$AUTOLOGIN_DROPIN")" || true
 fi
 
-# Try to kill any running kiosk chromium (autostart mode users).
+# Try to kill any running kiosk chromium (autostart mode users) + the escape-hatch
+# button/hotkey we may have launched alongside it.
 pkill -f 'ragnar-kiosk-chromium' 2>/dev/null || true
+pkill -f 'ragnar_kiosk_exit_button\.py' 2>/dev/null || true
+pkill -f 'ragnar-kiosk-xbk' 2>/dev/null || true
 
 # Autostart entries — scan every regular user's home for the .desktop file.
 getent passwd | awk -F: '$3 >= 1000 && $3 < 65534 {print $6}' | while read -r home; do

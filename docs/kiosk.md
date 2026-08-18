@@ -108,6 +108,40 @@ On-screen keyboard by session type:
 The keyboard packages are installed best-effort at kiosk install/update time and
 never block the install if unavailable.
 
+## Handheld decks — escape hatch & scaling (Hackberry Pi CM5)
+
+The kiosk runs Chromium in hard `--kiosk` (locked full-screen). On a normal HDMI
+appliance with a full keyboard that is fine — Alt+F4 gets you out. But on a
+handheld like the **Hackberry Pi CM5**, whose BlackBerry keyboard has no obvious
+Ctrl/F-keys, `--kiosk` would trap you in the dashboard with no way back to the
+desktop. Two knobs make the kiosk usable there:
+
+**Escape hatch** — a floating touch **✕ button** (bottom-right by default) plus a
+global **Ctrl+Alt+Q** hotkey, both of which close the kiosk: in autostart mode
+they kill the kiosk browser (returning to the desktop); in service mode they stop
+`ragnar-kiosk.service` (via a scoped, `visudo`-validated sudoers rule limited to
+that one `systemctl stop`). The ✕ button is drawn by `python3-tk` and floats over
+the full-screen browser; the hotkey uses `xbindkeys` (X sessions only — the
+button is the reliable escape under Wayland/XWayland). Both deps are installed
+best-effort at kiosk install/update time.
+
+- `RAGNAR_KIOSK_EXIT=on|off|auto` — show the escape hatch (default `auto`: on
+  when a touchscreen is present, off on a plain HDMI + keyboard appliance).
+- `RAGNAR_KIOSK_EXIT_CORNER=ne|nw|se|sw` — which corner the ✕ sits in
+  (default `se`, clear of Ragnar's top-right menu).
+
+**Small-screen scaling** — the CM5's square 4" 720×720 panel packs the dashboard
+tightly at native scale. Bump Chromium's device scale factor for bigger text and
+touch targets:
+
+- `RAGNAR_KIOSK_SCALE=1.0–1.5` — Chromium `--force-device-scale-factor` (unset =
+  native, the unchanged default).
+
+All three are read from the environment, so set them on the systemd unit
+(`Environment=…` in service mode) or export them in the desktop session
+(autostart mode). Existing kiosk installs pick up the escape hatch on a plain
+`git pull` + update — no re-install needed.
+
 ## Troubleshooting
 
 **"Kiosk state did not settle"** in the web UI means the poll gave up: no

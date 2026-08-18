@@ -443,6 +443,18 @@ if [ -f /usr/local/bin/ragnar-kiosk-run ] && [ -f "$KIOSK_WRAPPER_SRC" ]; then
             && echo -e "  ${GREEN}✓${NC} On-screen keyboard installed ($OSK_PKG)" \
             || echo -e "  ${YELLOW}⚠${NC} Could not install on-screen keyboard ($OSK_PKG)"
     fi
+    # Seed the kiosk escape-hatch deps (touch ✕ button + Ctrl+Alt+Q hotkey) so
+    # existing kiosk installs gain an exit path too — vital on handhelds like the
+    # Hackberry Pi CM5 whose keyboard has no easy Ctrl. Best-effort, idempotent;
+    # the wrapper only shows the ✕/hotkey when a touchscreen is detected.
+    HATCH_PKGS=()
+    python3 -c 'import tkinter' >/dev/null 2>&1 || HATCH_PKGS+=(python3-tk)
+    command -v xbindkeys >/dev/null 2>&1 || HATCH_PKGS+=(xbindkeys)
+    if [ "${#HATCH_PKGS[@]}" -gt 0 ]; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${HATCH_PKGS[@]}" >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Kiosk escape-hatch deps installed (${HATCH_PKGS[*]})" \
+            || echo -e "  ${YELLOW}⚠${NC} Could not install kiosk escape-hatch deps (${HATCH_PKGS[*]})"
+    fi
     # Cap the kiosk restart loop on existing service-mode installs (drop-in, so
     # we don't rewrite the generated unit). Idempotent.
     if [ -f /etc/systemd/system/ragnar-kiosk.service ]; then
