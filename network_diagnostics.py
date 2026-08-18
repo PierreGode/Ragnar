@@ -797,8 +797,10 @@ def _arp_baseline_save(d):
 # Recognition is a pure shape match (informational); real de-escalation needs an
 # operator-confirmed pin (a MAC is spoofable), mirroring python/arp_guard.py.
 def _arp_fhrp_classify(mac):
-    """(proto, group) if `mac` is in an HSRP/VRRP virtual-MAC range, else None.
-    HSRPv1 00:00:0c:07:ac:GG, HSRPv2 00:00:0c:9f:fG:GG, VRRP 00:00:5e:00:01:VV."""
+    """(proto, group) if `mac` is in an HSRP/VRRP/GLBP virtual-MAC range, else
+    None. HSRPv1 00:00:0c:07:ac:GG, HSRPv2 00:00:0c:9f:fG:GG,
+    VRRP(IPv4) 00:00:5e:00:01:VV, VRRPv3(IPv6) 00:00:5e:00:02:VV,
+    GLBP 00:07:b4:xx:xx:xx (group/forwarder suffix left raw, so group is None)."""
     try:
         b = bytes(int(p, 16) for p in (mac or '').split(':'))
     except (ValueError, AttributeError):
@@ -811,11 +813,18 @@ def _arp_fhrp_classify(mac):
         return ('HSRPv2', ((b[4] & 0x0f) << 8) | b[5])
     if b[:5] == b'\x00\x00\x5e\x00\x01':
         return ('VRRP', b[5])
+    if b[:5] == b'\x00\x00\x5e\x00\x02':
+        return ('VRRPv3-IPv6', b[5])
+    if b[:3] == b'\x00\x07\xb4':
+        return ('GLBP', None)
     return None
 
 
 def _arp_fhrp_desc(info):
-    return None if not info else '%s group %d' % info
+    if not info:
+        return None
+    proto, group = info
+    return proto if group is None else '%s group %d' % (proto, group)
 
 
 def _arp_suggest_fhrp():
@@ -1140,11 +1149,13 @@ def _vendor_for_prefix(prefix6):
 def _classify_mac(mac):
     """Classify one MAC. Returns {klass, vendor, note}.
 
-    klass ∈ {'universal', 'spoofed_vendor_oui', 'virtual_laa', 'randomized',
-             'invalid'}. A universal address is a normal burned-in NIC; the
-    three LAA buckets are kept distinct so privacy randomization (benign, an
-    aggregate) never gets conflated with a vendor OUI wearing the LAA bit
-    (impersonation) or with a VM/container NIC."""
+    klass ∈ {'universal', 'fhrp_virtual', 'spoofed_vendor_oui', 'virtual_laa',
+             'randomized', 'invalid'}. A universal address is a normal burned-in
+    NIC; fhrp_virtual is an HSRP/VRRP/GLBP redundancy virtual MAC (legitimately
+    shared and moved between routers on failover, so it must not read as a
+    clone/spoof); the two LAA buckets past that are kept distinct so privacy
+    randomization (benign, an aggregate) never gets conflated with a vendor OUI
+    wearing the LAA bit (impersonation) or with a VM/container NIC."""
     m = _mac_norm(mac)
     if not m:
         return {'klass': 'invalid', 'vendor': None, 'note': 'not a MAC'}
@@ -1153,6 +1164,15 @@ def _classify_mac(mac):
     if b0 & 0x01:  # multicast/broadcast — never a valid source address
         return {'klass': 'invalid', 'vendor': None, 'note': 'multicast/broadcast'}
     if not (b0 & 0x02):  # universal — legitimately-registered OUI
+        # FHRP (HSRP/VRRP/GLBP) virtual MACs use real universal OUIs (Cisco/IANA)
+        # that a bare vendor lookup would miss, reading them as an unregistered
+        # universal address. Recognize the redundancy shapes so the gateway's
+        # virtual MAC is inventoried (INFO), never mistaken for a spoof — and so
+        # VIP-hijack detection can tell a virtual owner from a non-virtual one.
+        fhrp = _arp_fhrp_classify(m)
+        if fhrp:
+            return {'klass': 'fhrp_virtual', 'vendor': fhrp[0],
+                    'note': (_arp_fhrp_desc(fhrp) or fhrp[0]) + ' virtual MAC'}
         vendor = _vendor_for_prefix(prefix6)
         return {'klass': 'universal', 'vendor': vendor, 'note': None}
     # Locally-administered: virtual, disguised-vendor, or privacy randomization.
@@ -1260,12 +1280,38 @@ def do_mac_watch(scan=True, interface=None):
                         'klass': info['klass'], 'vendor': info['vendor'],
                         'note': info['note']})
 
+    # Which MAC currently answers for each IP, and which IPs are answered right
+    # now by an FHRP (HSRP/VRRP/GLBP) virtual MAC — the redundancy VIPs. Used by
+    # the FHRP-awareness pass below to learn VIPs and catch a VIP hijack.
+    ip_to_mac = {}
+    for c in current:
+        for ip in c['ips']:
+            ip_to_mac.setdefault(ip, c['mac'])
+    fhrp_now = {}  # vip -> {mac, proto, group}
+    for c in current:
+        if c['klass'] != 'fhrp_virtual':
+            continue
+        info = _arp_fhrp_classify(c['mac'])
+        for ip in c['ips']:
+            fhrp_now[ip] = {'mac': c['mac'], 'proto': info[0] if info else None,
+                            'group': info[1] if info else None}
+
     # --- update the persistent store (this is what makes "past" possible) ----
     with _mac_watch_lock:
         store = _mac_watch_load()
         macs = store.setdefault('macs', {})
         ip_hist = store.setdefault('ip_history', {})
         events = store.setdefault('events', [])
+        # Learn FHRP VIPs: any IP ever answered by a virtual MAC is a redundancy
+        # VIP whose true owner is a virtual MAC. Persisted so hijack detection
+        # survives a reboot and works even when the virtual MAC is momentarily
+        # absent (failover). Operators can also declare VIPs up front via the
+        # 'fhrp_declared_vips' store key so hijack detection works on first scan.
+        fhrp_vips = store.setdefault('fhrp_vips', {})
+        for ip, meta in fhrp_now.items():
+            rec = fhrp_vips.setdefault(ip, {'first': now})
+            rec.update({'mac': meta['mac'], 'proto': meta['proto'],
+                        'group': meta['group'], 'last': now})
 
         for c in current:
             rec = macs.setdefault(c['mac'], {'first': now, 'count': 0,
@@ -1316,9 +1362,11 @@ def do_mac_watch(scan=True, interface=None):
                        f"locally-administered bit set — MAC-spoofing signature "
                        f"(IP {', '.join(c['ips']) or 'unknown'})")
 
-    # (2) Clones — one MAC currently bound to several IPs (gateway excluded).
+    # (2) Clones — one MAC currently bound to several IPs (gateway + FHRP virtual
+    # MACs excluded: a redundancy virtual MAC legitimately answers for its VIP).
     clones = [c for c in current
-              if len(c['ips']) >= _MAC_CLONE_MIN_IPS and c['mac'] != gw_mac]
+              if len(c['ips']) >= _MAC_CLONE_MIN_IPS and c['mac'] != gw_mac
+              and c['klass'] != 'fhrp_virtual']
     for c in clones:
         reasons.append(f"{c['mac']} answers for {len(c['ips'])} IPs "
                        f"({', '.join(c['ips'][:4])}"
@@ -1379,10 +1427,43 @@ def do_mac_watch(scan=True, interface=None):
         reasons.append(f"device at {t['ip']} rotated through {len(t['macs'])} "
                        f"randomized MACs — tracked across its address changes")
 
-    if spoofed or clones or hi_events:
+    # (6) FHRP (HSRP/VRRP/GLBP) awareness — inventory the redundancy virtual MACs
+    # (INFO), and flag any learned/declared VIP now answered by a *non-virtual*
+    # MAC as a gateway hijack (an ARP-spoof of the redundancy group — CRITICAL).
+    # The arp_guard / fhrpwatch cross-pivot, from the identity-forensics side.
+    with _mac_watch_lock:
+        store = _mac_watch_load()
+        known_vips = dict(store.get('fhrp_vips') or {})
+        declared_vips = [v for v in (store.get('fhrp_declared_vips') or []) if v]
+    fhrp_virtuals = [c for c in current if c['klass'] == 'fhrp_virtual']
+    for c in fhrp_virtuals:
+        reasons.append(f"{c['mac']} is an {c['note']} answering for "
+                       f"{', '.join(c['ips']) or 'no IP'} — FHRP redundancy (expected)")
+    fhrp_hijacks = []
+    for vip in sorted(set(list(known_vips) + declared_vips)):
+        cur_mac = ip_to_mac.get(vip)
+        if not cur_mac or _classify_mac(cur_mac)['klass'] == 'fhrp_virtual':
+            continue  # unanswered this pass, or still owned by a virtual MAC
+        meta = known_vips.get(vip) or {}
+        proto = meta.get('proto') or 'FHRP'
+        fhrp_hijacks.append({'vip': vip, 'mac': cur_mac, 'proto': proto,
+                             'expected_mac': meta.get('mac')})
+        reasons.append(f"FHRP VIP {vip} is answered by non-virtual MAC {cur_mac} "
+                       f"(a {proto} redundancy address is expected) — possible "
+                       f"gateway hijack / ARP-spoof of the redundancy group")
+    fhrp = {
+        'virtual': [{'mac': c['mac'], 'ips': c['ips'], 'proto': c['vendor'],
+                     'note': c['note']} for c in fhrp_virtuals],
+        'vips': sorted(set(list(known_vips) + declared_vips)),
+        'declared_vips': declared_vips,
+        'hijacks': fhrp_hijacks,
+    }
+
+    if spoofed or clones or hi_events or fhrp_hijacks:
         verdict = 'spoofed'
-    elif tracks or randomized:
-        verdict = 'suspicious' if tracks else 'randomization'
+    elif tracks or randomized or fhrp_virtuals:
+        verdict = 'suspicious' if tracks else ('fhrp' if fhrp_virtuals and not randomized
+                                               else 'randomization')
 
     return {
         'success': True, 'verdict': verdict,
@@ -1394,9 +1475,12 @@ def do_mac_watch(scan=True, interface=None):
             'randomized': len(randomized),
             'virtual': len(virtual),
             'tracks': len(tracks),
+            'fhrp_virtual': len(fhrp_virtuals),
+            'fhrp_hijacks': len(fhrp_hijacks),
         },
         'spoofed': spoofed,
         'clones': clones,
+        'fhrp': fhrp,
         # Every MAC seen this pass, worst class first, so the UI can list them.
         'observed_macs': sorted(
             current,
@@ -3517,6 +3601,47 @@ def _mac_selftest():
     run('mac-virtual-laa', '02:42:ac:11:00:02', 'virtual_laa')          # Docker
     run('mac-randomized', 'f6:11:22:33:44:55', 'randomized')            # LAA, no vendor
     run('mac-invalid-mcast', '01:00:5e:00:00:01', 'invalid')
+    # FHRP (HSRP/VRRP/GLBP) virtual MACs must classify as fhrp_virtual, not as an
+    # unregistered universal address that would read as a clone/spoof.
+    run('mac-fhrp-hsrpv1', '00:00:0c:07:ac:0a', 'fhrp_virtual')
+    run('mac-fhrp-hsrpv2', '00:00:0c:9f:f0:63', 'fhrp_virtual')
+    run('mac-fhrp-vrrp', '00:00:5e:00:01:05', 'fhrp_virtual')
+    run('mac-fhrp-vrrpv3', '00:00:5e:00:02:05', 'fhrp_virtual')
+    run('mac-fhrp-glbp', '00:07:b4:00:01:02', 'fhrp_virtual')
+
+    # VIP-hijack verdict leg: a learned FHRP VIP now answered by a non-virtual MAC
+    # is a redundancy-group hijack (verdict 'spoofed'); the clean case (VIP still
+    # owned by its virtual MAC) must stay benign. Monkeypatch the neighbour-table
+    # + store seams and restore them, so this needs no wire and no root.
+    g = globals()
+    saved = {k: g[k] for k in ('_neigh_entries', '_default_gateway', '_neigh_mac',
+                               '_local_macs', '_mac_watch_load', '_mac_watch_save',
+                               '_have')}
+    try:
+        vip = '10.9.9.1'
+        state = {'store': {'fhrp_vips': {vip: {'mac': '00:00:5e:00:01:05',
+                                               'proto': 'VRRP', 'group': 5}}}}
+        g['_default_gateway'] = lambda: None
+        g['_neigh_mac'] = lambda ip: None
+        g['_local_macs'] = lambda: set()
+        g['_have'] = lambda tool: False        # no arp-scan sweep
+        g['_mac_watch_load'] = lambda: state['store']
+        g['_mac_watch_save'] = lambda d: state.__setitem__('store', d)
+        # clean: VIP still answered by its VRRP virtual MAC
+        g['_neigh_entries'] = lambda: [(vip, '00:00:5e:00:01:05', 'REACHABLE')]
+        clean = do_mac_watch(scan=False)
+        scenarios.append({'name': 'mac-fhrp-vip-clean', 'expect': 'not spoofed',
+                          'got': clean.get('verdict'),
+                          'pass': not clean.get('fhrp', {}).get('hijacks')})
+        # hijack: VIP now answered by an ordinary vendor (non-virtual) MAC
+        g['_neigh_entries'] = lambda: [(vip, 'b8:27:eb:aa:bb:cc', 'REACHABLE')]
+        hij = do_mac_watch(scan=False)
+        scenarios.append({'name': 'mac-fhrp-vip-hijack', 'expect': 'spoofed',
+                          'got': hij.get('verdict'),
+                          'pass': hij.get('verdict') == 'spoofed'
+                          and bool(hij.get('fhrp', {}).get('hijacks'))})
+    finally:
+        g.update(saved)
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
@@ -3526,6 +3651,7 @@ def _mac_selftest():
             frames, want = [], {}
             for mac, exp in (('b8:27:eb:44:55:66', 'universal'),
                              ('ba:27:eb:44:55:66', 'spoofed_vendor_oui'),
+                             ('00:00:5e:00:01:2a', 'fhrp_virtual'),
                              ('02:42:ac:11:00:09', 'virtual_laa')):
                 frames.append(Ether(src=mac, dst='ff:ff:ff:ff:ff:ff', type=0x0800)
                               / (b'\x00' * 40))

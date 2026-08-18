@@ -408,7 +408,8 @@ neighbour-table snapshot can't see.
 **Detection-only** MAC-spoofing + randomization monitor — it *never spoofs or
 randomizes anything itself*. Passive: it reads the kernel neighbour table
 (`ip neigh`) and, optionally, runs an `arp-scan` sweep to widen coverage. Three
-jobs, rolled into one **clean / randomization / suspicious / spoofed** verdict:
+jobs, rolled into one **clean / randomization / fhrp / suspicious / spoofed**
+verdict:
 
 1. **Spoofing / cloning** (current *and* past):
    - **Disguised vendor** — a registered vendor OUI wearing the
@@ -427,8 +428,22 @@ jobs, rolled into one **clean / randomization / suspicious / spoofed** verdict:
 3. **Tracking** — an IP that cycles through **≥2 randomized MACs** over time is
    one device rotating to hide; its addresses are grouped into a followable
    track so it can be traced across the MACs it hides behind.
+4. **FHRP (HSRP/VRRP/GLBP) virtual-MAC awareness** — first-hop-redundancy
+   protocols give several physical routers one shared *virtual* MAC that is
+   legitimately shared and **moves between boxes on failover** — behaviour a
+   naive identity monitor misreads as spoofing. MAC Watch recognizes the
+   virtual-MAC formats (HSRP v1 `00:00:0c:07:ac:GG`, HSRP v2 `00:00:0c:9f:fX:XX`,
+   VRRP `00:00:5e:00:01:VV`, VRRPv3/IPv6 `00:00:5e:00:02:VV`, GLBP `00:07:b4:…`)
+   so the gateway's redundancy MAC is **inventoried (INFO), never flagged as a
+   clone/spoof**. The inverse is the alarm: it learns which IPs are FHRP VIPs
+   (any IP ever answered by a virtual MAC, plus declared `fhrp_declared_vips`)
+   and raises **spoofed** if a VIP is suddenly answered by a *non-virtual* MAC —
+   an ARP-spoof of the redundancy group. This is the identity-forensics side of
+   the `arp_guard` / [FHRP Watch](#fhrp-watch) cross-pivot; reconcile its
+   inventory against FHRP Watch findings.
 
-Every MAC is classified as **Vendor** (universal/burned-in), **Spoofed**
+Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
+(HSRP/VRRP/GLBP redundancy), **Spoofed**
 (vendor OUI + LAA bit), **Randomized** (privacy), or **Virtual/VM**. Vendor
 names come from the `arp-scan` / `nmap` OUI database
 (`/usr/share/arp-scan/ieee-oui.txt`, ~35k prefixes) with a built-in seed

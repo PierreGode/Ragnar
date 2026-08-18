@@ -6407,7 +6407,7 @@ const _NETINT_STYLE = {
 // A verdict is clean/informational, an active attack (critical, red), or — anything
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
-const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled']);
+const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp']);
 const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
@@ -9217,7 +9217,7 @@ async function runRoutingSelftest() {
 
         const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
-                        mac: 'MAC Watch (spoof / vendor-OUI / randomization)', dhcp: 'DHCP Guardian (rogue server / starvation)',
+                        mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
         const overall = d.success
             ? '<div class="mb-2 px-3 py-2 rounded border bg-green-950/40 border-green-900 text-green-400 text-sm">✓ All detector self-tests passed' + (d.scapy_available ? ' (including Scapy end-to-end)' : ' — install Scapy for the end-to-end leg') + '</div>'
@@ -9361,6 +9361,7 @@ async function runDhcpSnoop() {
 const _MACWATCH_VERDICT_STYLE = {
     clean:         ['bg-green-950/40 border-green-900 text-green-400', '✓ No MAC spoofing or rotation detected'],
     randomization: ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ Privacy-randomized MACs present (no spoofing)'],
+    fhrp:          ['bg-sky-950/40 border-sky-900 text-sky-300', 'ℹ FHRP (HSRP/VRRP/GLBP) redundancy virtual MAC present (expected)'],
     suspicious:    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Device rotating randomized MACs — being tracked'],
     spoofed:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 MAC spoofing / cloning detected'],
     unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
@@ -9416,6 +9417,8 @@ async function runMacWatch(scan) {
             chip(s.randomized || 0, ' randomized') +
             chip(s.virtual || 0, ' virtual') +
             chip(s.tracks || 0, ' tracked devices') +
+            chip(s.fhrp_virtual || 0, ' FHRP virtual') +
+            chip(s.fhrp_hijacks || 0, ' FHRP hijacks', true) +
             '</div>';
 
         // Spoofed / disguised-vendor MACs
@@ -9430,6 +9433,22 @@ async function runMacWatch(scan) {
             html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">Cloned (one MAC, several IPs)</p>' +
                 '<ul class="text-xs text-gray-300 list-disc pl-5">' +
                 d.clones.map(c => `<li class="font-mono">${escapeHtml(c.mac)} → ${escapeHtml((c.ips || []).slice(0, 6).join(', '))}${(c.ips || []).length > 6 ? '…' : ''}</li>`).join('') +
+                '</ul>';
+        }
+        // FHRP (HSRP/VRRP/GLBP) VIP hijack — a redundancy VIP answered by a
+        // non-virtual MAC (ARP-spoof of the gateway group). Critical.
+        const fhrp = d.fhrp || {};
+        if (fhrp.hijacks && fhrp.hijacks.length) {
+            html += '<p class="text-xs uppercase text-red-400 mt-3 mb-1">FHRP VIP hijack (redundancy gateway spoof)</p>' +
+                '<ul class="text-xs text-gray-300 list-disc pl-5">' +
+                fhrp.hijacks.map(h => `<li class="font-mono">${escapeHtml(h.vip)} answered by ${escapeHtml(h.mac)} <span class="text-gray-500">(non-virtual — ${escapeHtml(h.proto || 'FHRP')} virtual MAC expected${h.expected_mac ? ', was ' + escapeHtml(h.expected_mac) : ''})</span></li>`).join('') +
+                '</ul>';
+        }
+        // FHRP virtual-MAC inventory (benign redundancy addresses on the segment).
+        if (fhrp.virtual && fhrp.virtual.length) {
+            html += '<p class="text-xs uppercase text-sky-400 mt-3 mb-1">FHRP redundancy virtual MACs (expected)</p>' +
+                '<ul class="text-xs text-gray-400 list-disc pl-5">' +
+                fhrp.virtual.map(v => `<li class="font-mono">${escapeHtml(v.mac)} <span class="text-gray-500">(${escapeHtml(v.note || v.proto || 'FHRP')})</span> → ${escapeHtml((v.ips || []).join(', ') || 'no IP')}</li>`).join('') +
                 '</ul>';
         }
         // Tracked devices (rotating randomized MACs)
@@ -9462,6 +9481,7 @@ async function runMacWatch(scan) {
             const KLASS = {
                 spoofed_vendor_oui: ['Spoofed', 'text-red-300'],
                 universal:          ['Vendor', 'text-gray-300'],
+                fhrp_virtual:       ['FHRP virtual', 'text-sky-300'],
                 randomized:         ['Randomized', 'text-sky-300'],
                 virtual_laa:        ['Virtual/VM', 'text-gray-400'],
             };
@@ -9509,13 +9529,15 @@ async function macWatchReset() {
 function exportMacWatchCsv() {
     const d = _ndLastMacWatch;
     const TYPE = { spoofed_vendor_oui: 'Spoofed', universal: 'Vendor',
-                  randomized: 'Randomized', virtual_laa: 'Virtual/VM' };
+                  fhrp_virtual: 'FHRP virtual', randomized: 'Randomized',
+                  virtual_laa: 'Virtual/VM' };
     _ndDownloadCsv('mac_watch' + (d && d.interface ? '_' + d.interface : ''),
         ['MAC', 'Type', 'Vendor', 'IPs', 'Flag', 'Note'],
         ((d && d.observed_macs) || []).map(c => {
             const ips = c.ips || [];
             const flag = c.klass === 'spoofed_vendor_oui' ? 'SPOOFED'
-                : (ips.length > 1 ? 'CLONE (multiple IPs)' : '');
+                : (c.klass === 'fhrp_virtual' ? 'FHRP redundancy'
+                : (ips.length > 1 ? 'CLONE (multiple IPs)' : ''));
             return [c.mac, TYPE[c.klass] || c.klass, c.vendor || '',
                     ips.join(' '), flag, c.note || ''];
         }));
