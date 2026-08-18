@@ -143,6 +143,16 @@ See [Gen 2 Hardware Requirements](docs/hardware-gen2.md) for the full BOM, assem
 - Python3 + nmap (auto-installed on first run)
 - MIPS-compiled Python libraries bundled in `pager_lib/` (or sourced from PAGERCTL payload)
 
+### Hackberry Pi CM5 (community port)
+
+A community wrapper runs Ragnar in headless/server mode on the
+[Hackberry Pi CM5](https://github.com/ZitaoTech/HackberryPiCM5) handheld cyberdeck
+— a 720×720 touch panel with a BlackBerry-style keyboard. It installs Ragnar
+**unmodified** (vendored as a dependency, so upstream updates pull cleanly), adds a
+full-screen touch dashboard sized for the 4" panel plus a keyboard-driven control
+panel, and keeps everything off system Python via an isolated virtualenv.
+See [**DezusAZ/ragnar-cyberdeck**](https://github.com/DezusAZ/ragnar-cyberdeck).
+
 ---
 
 ## 🔨 Installation Details
