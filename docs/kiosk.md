@@ -137,10 +137,15 @@ touch targets:
 - `RAGNAR_KIOSK_SCALE=1.0–1.5` — Chromium `--force-device-scale-factor` (unset =
   native, the unchanged default).
 
-All three are read from the environment, so set them on the systemd unit
-(`Environment=…` in service mode) or export them in the desktop session
-(autostart mode). Existing kiosk installs pick up the escape hatch on a plain
-`git pull` + update — no re-install needed.
+**From the UI:** the kiosk card in **Config → On-screen Display** has a
+**Handheld deck (Hackberry CM5)** toggle and a **Display scale** field. Turning
+the toggle on forces the escape hatch on and applies the scale (saved to
+`/api/config`, picked up on the kiosk's next launch) — no env editing needed. The
+environment variables above still override the saved values at launch, so set
+them on the systemd unit (`Environment=…` in service mode) or export them in the
+desktop session (autostart mode) when you want a per-box override. Existing kiosk
+installs pick up the escape hatch on a plain `git pull` + update — no re-install
+needed.
 
 ## Troubleshooting
 

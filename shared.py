@@ -949,7 +949,14 @@ class SharedData:
             "kiosk_enabled": False,
             "kiosk_url": "http://localhost:8000",
             "kiosk_rotation": 0,
-            "kiosk_hide_cursor": True
+            "kiosk_hide_cursor": True,
+            # Handheld / small-screen decks (e.g. Hackberry Pi CM5): force the
+            # on-screen ✕ + Ctrl+Alt+Q escape hatch on (Chromium --kiosk otherwise
+            # traps you on a keyboard with no easy Ctrl), and scale the dense
+            # dashboard up for the square 720x720 panel. Env RAGNAR_KIOSK_EXIT /
+            # RAGNAR_KIOSK_SCALE still override these at launch.
+            "kiosk_handheld": False,
+            "kiosk_scale": 1.0
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):
