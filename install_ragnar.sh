@@ -1602,7 +1602,7 @@ configure_usb_gadget() {
     sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
 
     # Modify config.txt
-    echo "dtoverlay=dwc2" >> /boot/firmware/config.txt
+    # echo "dtoverlay=dwc2" >> /boot/firmware/config.txt
 
     # Create USB gadget script
     cat > /usr/local/bin/usb-gadget.sh << 'EOF'
