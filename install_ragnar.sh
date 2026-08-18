@@ -227,6 +227,16 @@ detect_platform() {
         *) IS_ARM=false ;;
     esac
 
+    # Distinguish real Raspberry Pi hardware from any other Linux host (a generic
+    # Ubuntu/Debian server, an x86 box, a VM). Only a Pi has the SPI/I2C/GPIO
+    # peripherals the display drivers, raspi-config, and the spi/gpio/i2c groups
+    # depend on — everything gated on IS_PI is a no-op / hard error elsewhere.
+    IS_PI=false
+    if grep -qi "Raspberry Pi" /proc/cpuinfo 2>/dev/null \
+       || grep -qi "Raspberry Pi" /proc/device-tree/model 2>/dev/null; then
+        IS_PI=true
+    fi
+
     case "$OS_ID" in
         debian|ubuntu|raspbian)
             PKG_MGR="apt"
@@ -1087,8 +1097,14 @@ print('SUCCESS: Set shared_config.json epd_type to $EPD_VERSION')
         return $?
     }
     
-    # Try to install RPi.GPIO and spidev
-    if ! check_python_package "RPi.GPIO"; then
+    # RPi.GPIO + spidev drive the GPIO-attached displays, so they are only
+    # meaningful on real Raspberry Pi hardware. On a generic Ubuntu/Debian server
+    # RPi.GPIO fails to build (or installs but crashes on import, since there is
+    # no /dev/gpiomem), which showed up as alarming errors on headless installs
+    # where no display is used at all. Skip it off-Pi.
+    if [ "$IS_PI" != true ]; then
+        log "INFO" "Non-Raspberry Pi host — skipping RPi.GPIO/spidev (no GPIO displays)"
+    elif ! check_python_package "RPi.GPIO"; then
         log "INFO" "Installing RPi.GPIO and spidev..."
         pip3 install --break-system-packages RPi.GPIO==0.7.1 spidev==3.5 || {
             log "WARNING" "Failed to install RPi.GPIO or spidev, trying without version pinning..."
@@ -1378,8 +1394,26 @@ except Exception as e:
     print(f"ERROR validating actions.json: {e}")
 PYTHON_EOF
     
-    # Add ragnar user to necessary groups (including sudo for WiFi management)
-    usermod -a -G spi,gpio,i2c,sudo,netdev $ragnar_USER
+    # Add ragnar user to necessary groups (including sudo for WiFi management).
+    #
+    # usermod is all-or-nothing: naming a single non-existent group makes it fail
+    # and add the user to NONE of the listed groups. The spi/gpio/i2c groups only
+    # exist on Raspberry Pi OS, so on a generic Ubuntu/Debian server the old
+    # `-G spi,gpio,i2c,sudo,netdev` aborted with "group 'spi' does not exist" and
+    # the user silently never got sudo/netdev — breaking WiFi management. Add only
+    # the groups that actually exist on this host.
+    local target_groups=()
+    for grp in spi gpio i2c sudo netdev; do
+        if getent group "$grp" >/dev/null 2>&1; then
+            target_groups+=("$grp")
+        fi
+    done
+    if [ ${#target_groups[@]} -gt 0 ]; then
+        local joined_groups
+        joined_groups=$(IFS=,; echo "${target_groups[*]}")
+        usermod -a -G "$joined_groups" "$ragnar_USER"
+        log "INFO" "Added $ragnar_USER to groups: $joined_groups"
+    fi
     
     # Configure sudo for WiFi management commands without password
     log "INFO" "Configuring sudo permissions for WiFi management..."
@@ -1901,10 +1935,8 @@ main() {
         exit 1
     fi
 
-    local is_pi=false
-    if grep -qi "Raspberry Pi" /proc/cpuinfo 2>/dev/null; then
-        is_pi=true
-    fi
+    # IS_PI is set by detect_platform (called above); reuse it for the menu.
+    local is_pi=$IS_PI
 
     # Display menu and handle selection (loops on invalid input)
     local profile_choice=""

@@ -85,6 +85,27 @@ Two steps in the install are also slow and silent, which can look like a hang on
 a Pi Zero 2 W — the pip build of `sslyze`/`cryptography`, and
 `nmap --script-updatedb`. Give them time before interrupting.
 
+#### Headless install on Ubuntu / a non-Pi server — display driver noise
+
+On a generic Ubuntu/Debian server (or any host that is not a Raspberry Pi) the
+installer skips every Pi-only display step, because there is no SPI/I2C/GPIO
+peripheral to drive a screen. Specifically, when the platform is not a Pi it:
+
+- **skips `RPi.GPIO` / `spidev`** — these only exist for GPIO-attached displays.
+  `RPi.GPIO` fails to build (or installs and then crashes on import, since there
+  is no `/dev/gpiomem`) off-Pi, which used to surface as alarming errors on
+  headless installs that never use a display at all.
+- **only adds the groups that exist** — the `spi`, `gpio`, and `i2c` groups ship
+  with Raspberry Pi OS but not with stock Ubuntu/Debian. `usermod` is
+  all-or-nothing, so naming a missing group used to abort the whole call and
+  leave the `ragnar` user out of `sudo`/`netdev` too (breaking WiFi management).
+  The installer now filters the list down to the groups present on the host.
+- **skips `raspi-config`** SPI/I2C enablement and the Waveshare e-Paper library.
+
+If you *did* pick a display profile on non-Pi hardware, the driver summary will
+honestly report the display types that will not work — that is expected, not a
+failed install.
+
 #### Changing your screen
 
 The installer asks which screen you have, but that is only a starting value —
