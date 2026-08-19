@@ -1,0 +1,61 @@
+name: CodeQL
+
+# Advanced CodeQL setup, committed to the repo so we control exactly what is
+# analyzed. This REPLACES GitHub's "default setup" — that one auto-detects
+# languages and, because pager_lib/cffi ships vendored C headers (*.h) with no
+# .c sources and no build system, it tries to autobuild C/C++ and fails.
+#
+# Ragnar is Python + JavaScript only (plus shell, which CodeQL does not scan),
+# and neither needs a build, so we pin the languages and use build-mode: none.
+#
+# NOTE: after this lands, disable "Default setup" under
+#   Settings -> Code security -> Code scanning
+# or GitHub keeps running the failing default alongside this workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so long-lived branches keep getting scanned.
+    - cron: '27 5 * * 1'
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      packages: read
+      actions: read
+      contents: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Skip vendored third-party sources (cffi ships prebuilt C glue).
+          config: |
+            paths-ignore:
+              - pager_lib/cffi
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:${{ matrix.language }}'
