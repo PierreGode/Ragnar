@@ -169,9 +169,11 @@ you can retune live with `systemctl edit`/`daemon-reload`.
 | `X` | Clear fingerprints (back to the activity centroid). |
 | `H` | Hide / show the pose skeletons (the mist blob + field stay). |
 
-Fingerprints are stored in the **browser only** (localStorage), per machine — nothing is
-written to Ragnar. The live feed can carry phantom tracker duplicates near center; the
-Observatory collapses them to a single blob at the best position estimate.
+Fingerprints are stored **server-side** on Ragnar (via `/api/config`, key
+`rusense_observatory_fingerprints`), so a calibration done on one machine is shared with
+every browser; localStorage is only an offline cache seeded from the server at load. The
+live feed can carry phantom tracker duplicates near center; the Observatory collapses them
+to a single blob at the best position estimate.
 
 ---
 

@@ -9,9 +9,13 @@
  * centroid can't — e.g. "node 2 reads hottest" mapping to *center*, not node 2.
  *
  * Signature = per-node motion normalized to sum 1 (the spatial *pattern*, scale-
- * free), in fixed node_id order 1,2,3. Persisted in localStorage (per browser/room).
+ * free), in fixed node_id order 1,2,3.
+ *
+ * Persistence: server config (POST /api/config under SERVER_KEY) so fingerprints
+ * are shared across browsers, with localStorage as an offline cache seeded on load.
  */
-const STORE_KEY = 'ragnar_observatory_fingerprints_v1';
+const STORE_KEY = 'ragnar_observatory_fingerprints_v1';   // localStorage cache
+const SERVER_KEY = 'rusense_observatory_fingerprints';     // /api/config key (cross-browser)
 
 export class Fingerprinter {
   constructor() {
@@ -19,7 +23,8 @@ export class Fingerprinter {
     this._live = [0, 0, 0];    // smoothed live signature
     this._liveInit = false;
     this._rec = null;          // { pos, acc:[3], n }
-    this.load();
+    this._pushTimer = null;
+    this.load();               // localStorage first (instant); server seed overrides later
   }
 
   get count() { return this.fps.length; }
@@ -92,9 +97,46 @@ export class Fingerprinter {
 
   clear() { this.fps = []; this.save(); }
 
-  save() { try { localStorage.setItem(STORE_KEY, JSON.stringify(this.fps)); } catch (_) {} }
+  save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(this.fps)); } catch (_) {}
+    this._pushToServer();
+  }
+
   load() {
     try { this.fps = JSON.parse(localStorage.getItem(STORE_KEY) || '[]') || []; }
     catch (_) { this.fps = []; }
+  }
+
+  /**
+   * Seed from the server config fetched at startup (shared across browsers).
+   * Server is authoritative. If the server has none but this browser cached some
+   * (recorded before cross-browser sync), migrate the local set up to the server.
+   */
+  seedFromServer(cfg) {
+    try {
+      const arr = cfg && cfg[SERVER_KEY];
+      if (Array.isArray(arr) && arr.length) {
+        this.fps = arr;
+        try { localStorage.setItem(STORE_KEY, JSON.stringify(arr)); } catch (_) {}
+        return true;
+      }
+      if (this.fps.length) this._pushToServer();   // migrate local -> server
+    } catch (_) {}
+    return false;
+  }
+
+  /** Debounced POST of the fingerprint set to the server config (cross-browser). */
+  _pushToServer() {
+    clearTimeout(this._pushTimer);
+    const fps = this.fps;
+    this._pushTimer = setTimeout(() => {
+      try {
+        fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [SERVER_KEY]: fps }),
+        }).catch(() => {});
+      } catch (_) {}
+    }, 400);
   }
 }

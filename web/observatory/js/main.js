@@ -1090,9 +1090,13 @@ class Observatory {
 // localStorage. Falls back to the localStorage seed in the constructor if the
 // config endpoint is unreachable.
 (async () => {
+  let cfg = null;
   try {
     const res = await fetch('/api/config');
-    if (res.ok) seedObsFromServerConfig(await res.json());
+    if (res.ok) { cfg = await res.json(); seedObsFromServerConfig(cfg); }
   } catch { /* offline — constructor's localStorage seed still applies */ }
-  new Observatory();
+  const obs = new Observatory();
+  // Seed fingerprints from the shared server config so calibration is available
+  // on every browser (localStorage is only an offline cache).
+  if (cfg) { try { obs._fp.seedFromServer(cfg); } catch { /* non-fatal */ } }
 })();
