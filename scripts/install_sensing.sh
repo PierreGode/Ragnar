@@ -25,7 +25,7 @@ LOG_FILE="${SENSING_INSTALL_LOG:-$RAGNAR_DIR/data/sensing_install.log}"
 # RuView source (only used for the build-from-source fallback). Pinned so a
 # rebuild is reproducible and can't drift under us.
 RUVIEW_REPO="${RUVIEW_REPO:-https://github.com/PierreGode/RuView.git}"
-RUVIEW_PIN="${RUVIEW_PIN:-1853bbd5b1909a342b878188f51fb5a39decf0d5}"
+RUVIEW_PIN="${RUVIEW_PIN:-43090a7feec3e93b09a02d3bf6d6e10d3962211f}"
 RUVIEW_CRATE="wifi-densepose-sensing-server"
 
 # Runtime tuning (matches the validated working deployment).
@@ -42,6 +42,14 @@ UDP_PORT="${SENSING_UDP_PORT:-5005}"
 # unauthenticated either way). Set SENSING_UDP_BIND=127.0.0.1 to hard-disable.
 UDP_BIND="${SENSING_UDP_BIND:-0.0.0.0}"
 UDP_ALLOW="${SENSING_UDP_ALLOW:-}"
+# Coarse Observatory localization: the per-room node geometry (metres),
+# "x,y,z;x,y,z;..." ordered by ascending node_id from 1. When set, the blob
+# drifts toward whichever node flares most above its own baseline. Unset =
+# off (blob falls back to the centred field peak). SENSING_LOCALIZE_POWER
+# sharpens the pull (default 2). Both are persisted as a drop-in so the
+# config UI / manual edits can retune without a reinstall.
+NODE_POSITIONS="${SENSING_NODE_POSITIONS:-}"
+LOCALIZE_POWER="${SENSING_LOCALIZE_POWER:-2}"
 TICK_MS="${SENSING_TICK_MS:-500}"
 SOURCE="${SENSING_SOURCE:-esp32}"
 RUN_USER="${SENSING_RUN_USER:-$(stat -c '%U' "$RAGNAR_DIR")}"
@@ -196,6 +204,19 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+if [ -n "$NODE_POSITIONS" ]; then
+    DROPIN_DIR="/etc/systemd/system/$UNIT_NAME.d"
+    as_root mkdir -p "$DROPIN_DIR"
+    as_root tee "$DROPIN_DIR/node-positions.conf" >/dev/null <<DROPIN
+# Coarse Observatory activity-centroid localization. Metres; ordered by
+# ascending node_id from 1. Survives reinstall; retune live via the drop-in.
+[Service]
+Environment="SENSING_NODE_POSITIONS=$NODE_POSITIONS"
+Environment=RUVIEW_LOCALIZE_POWER=$LOCALIZE_POWER
+DROPIN
+    log "Wrote node-positions drop-in ($NODE_POSITIONS, power $LOCALIZE_POWER)."
+fi
 
 as_root systemctl daemon-reload
 as_root systemctl reset-failed "$UNIT_NAME" 2>/dev/null || true
