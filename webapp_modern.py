@@ -1941,6 +1941,7 @@ def _net_integrity_check_once():
         ('cisco_guard', 'Cisco', lambda: watch(nd.do_cisco_guard, quick=True, interface=cap_iface)),
         ('juniper_guard', 'Juniper', lambda: watch(nd.do_juniper_guard, quick=True, interface=cap_iface)),
         ('arista_guard', 'Arista', lambda: watch(nd.do_arista_guard, quick=True, interface=cap_iface)),
+        ('comware_guard', 'Comware', lambda: watch(nd.do_comware_guard, quick=True, interface=cap_iface)),
     ]
 
     to_run = list(fast)

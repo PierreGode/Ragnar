@@ -15281,6 +15281,55 @@ def _guard_record_event(path, lock, result):
         _guard_events_save(path, d)
 
 
+# --- Watchtower feed: guards emit JSON-lines so the unified alert pane tails them ---
+_GUARD_JSONL_DIR = os.environ.get('RAGNAR_WATCH_LOG_DIR', '/var/log/ragnar')
+_guard_jsonl_lock = threading.Lock()
+_guard_jsonl_seen = {}          # (module, code, src) -> last-emitted epoch
+_GUARD_JSONL_DEDUP_S = 300      # don't re-log the same standing finding within 5 min
+
+
+def _guard_emit_jsonl(module, result):
+    """Append each finding as a normalized JSON-lines record to
+    <log-dir>/<module>.jsonl so Watchtower (which globs *.jsonl) folds the in-app
+    guards into the unified alert pane and single Pushover path. Time-window
+    deduplicated so the background rotation can't spam the log with a standing
+    condition. Best-effort; never raises into the scan."""
+    findings = result.get('findings') or []
+    if not findings:
+        return
+    now = time.time()
+    iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lines = []
+    with _guard_jsonl_lock:
+        for fi in findings:
+            key = (module, fi['code'], fi.get('src'))
+            last = _guard_jsonl_seen.get(key)
+            if last is not None and now - last < _GUARD_JSONL_DEDUP_S:
+                continue
+            _guard_jsonl_seen[key] = now
+            lines.append(json.dumps({
+                'module': module, 'ts': now, 'iso': iso,
+                'iface': result.get('interface'),
+                'code': fi['code'], 'name': fi['name'],
+                'severity': fi['severity'], 'class': fi['klass'],
+                'src': fi.get('src'), 'cves': fi.get('cves', []),
+                'summary': '%s (%s)' % (fi['name'], fi['klass']),
+                'detail': fi.get('detail', {})}))
+        # Bound the dedup table.
+        if len(_guard_jsonl_seen) > 4096:
+            cutoff = now - _GUARD_JSONL_DEDUP_S
+            for k in [k for k, t in _guard_jsonl_seen.items() if t < cutoff]:
+                _guard_jsonl_seen.pop(k, None)
+    if not lines:
+        return
+    try:
+        os.makedirs(_GUARD_JSONL_DIR, exist_ok=True)
+        with open(os.path.join(_GUARD_JSONL_DIR, module + '.jsonl'), 'a') as f:
+            f.write('\n'.join(lines) + '\n')
+    except OSError:
+        pass
+
+
 def _cisco_screen_version(iosxe=None, nxos=None):
     """Return the list of CVEs whose fixed release the observed train sits below.
     Conservative: a train we don't have a table for is reported as unscreenable
@@ -15331,6 +15380,7 @@ def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
     result['seconds'] = seconds
     if not quick:
         _guard_record_event(_CISCO_GUARD_PATH, _cisco_guard_lock, result)
+    _guard_emit_jsonl('cisco_guard', result)
     return result
 
 
@@ -15521,6 +15571,7 @@ def do_juniper_guard(interface=None, seconds=20, learn=True, quick=False):
     result['seconds'] = seconds
     if not quick:
         _guard_record_event(_JUNIPER_GUARD_PATH, _juniper_guard_lock, result)
+    _guard_emit_jsonl('juniper_guard', result)
     return result
 
 
@@ -15679,6 +15730,7 @@ def do_arista_guard(interface=None, seconds=20, learn=True, quick=False):
     result['seconds'] = seconds
     if not quick:
         _guard_record_event(_ARISTA_GUARD_PATH, _arista_guard_lock, result)
+    _guard_emit_jsonl('arista_guard', result)
     return result
 
 
@@ -15766,6 +15818,453 @@ def _arista_analyze(records):
                                     'threshold': _ARISTA_MAX_VLAN_TAGS})
 
     return _guard_finish('arista_guard', None, None, findings, records)
+
+
+# ==========================================================================
+# Comware Guard — passive VRF-hopping / MPLS label-injection monitor
+# ==========================================================================
+# Ported from the standalone vrfwatch. Detects the HPE Comware VRF-hopping CVE
+# (CVE-2015-5434) and the identical-signature Huawei bug (CVE-2015-8087): an
+# attacker on a PE-CE attachment circuit pre-encapsulates an MPLS shim so the PE
+# forwards their frame into another tenant's VRF. The detection is structural —
+# a labelled frame (ethertype 0x8847/0x8848) on a customer/access segment should
+# not exist by construction, the same zero-false-positive property as inline DHCP
+# snooping. Keys on the FRAME, not a vendor string, so one rule set covers both.
+_COMWARE_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'data', 'comware_guard.json')
+_comware_guard_lock = threading.Lock()
+_ETH_MPLS_UNICAST = 0x8847
+_ETH_MPLS_MULTICAST = 0x8848
+_ETH_IPV4 = 0x0800
+_ETH_IPV6 = 0x86DD
+_ETH_LLDP = 0x88CC
+_MPLS_ETHERTYPES = frozenset((_ETH_MPLS_UNICAST, _ETH_MPLS_MULTICAST))
+_VLAN_ETHERTYPES = frozenset((0x8100, 0x88A8, 0x9100, 0x9200))
+_MPLS_RESERVED_MAX = 15
+_MPLS_LABEL_NEVER_ON_WIRE = frozenset((3,))  # Implicit NULL is signalling-only
+_MPLS_RESERVED_MEANING = {
+    0: 'IPv4 Explicit NULL', 1: 'Router Alert', 2: 'IPv6 Explicit NULL',
+    3: 'Implicit NULL', 7: 'Entropy Label Indicator', 13: 'GAL',
+    14: 'OAM Alert Label', 15: 'Extension Label'}
+_LDP_PORT = 646
+_CDP_DEST_MAC = '01:00:0c:cc:cc:cc'
+_LLDP_DEST_MACS = frozenset(('01:80:c2:00:00:0e', '01:80:c2:00:00:03',
+                             '01:80:c2:00:00:00'))
+_COMWARE_PLATFORM_TOKENS = ('comware', 'h3c', 'hpe comware', 'hp comware')
+# With `tcpdump -e` the packet header line starts with a bare timestamp followed
+# by the Ethernet src MAC (not `IP`), so the block boundary is the leading ts.
+_COMWARE_HDR_RE = re.compile(r'^(\d+\.\d+)\s')
+# Thresholds (standalone defaults).
+_MPLS_SWEEP_DISTINCT = 8       # distinct labels/window -> VRF-002
+_MPLS_SWEEP_SEQ_RUN = 8        # longest contiguous run -> VRF-003
+_MPLS_RATE_THRESHOLD = 200     # labelled frames/window -> VRF-018
+_MPLS_MAX_STACK_DEPTH = 8      # VRF-007
+_MPLS_MIN_TTL, _MPLS_MAX_TTL = 1, 255   # VRF-008 (0 or >255 impossible)
+_MPLS_BOS_IMPLAUSIBLE_ZERO_TTL = 2      # VRF-006 zero-TTL shim count
+
+
+def _mac_str(buf, off):
+    return ':'.join('%02x' % b for b in buf[off:off + 6])
+
+
+def _guard_frame_from_block(block_lines):
+    """Reconstruct the full Ethernet frame bytes from a tcpdump `-xx` hex dump
+    (which, unlike -x, includes the link-layer header). Returns bytes or None."""
+    hexchars = []
+    for ln in block_lines:
+        m = _GUARD_HEX_RE.match(ln)
+        if m:
+            hexchars.append(re.sub(r'[^0-9a-fA-F]', '', m.group(1)))
+    if not hexchars:
+        return None
+    try:
+        data = bytes.fromhex(''.join(hexchars))
+    except ValueError:
+        return None
+    return data if len(data) >= 14 else None
+
+
+def _mpls_parse_frame(buf):
+    """Parse an Ethernet frame far enough to answer the VRF questions. Returns a
+    dict of frame facts (ported from vrfwatch parse_frame). Never raises."""
+    if not buf or len(buf) < 14:
+        return None
+    fr = {'dst_mac': _mac_str(buf, 0), 'src_mac': _mac_str(buf, 6),
+          'ethertype': 0, 'vlan_tags': [], 'mpls_stack': [], 'raw_len': len(buf),
+          'truncated': False, 'stack_terminator': None, 'payload_offset': 14,
+          'inner_family': None, 'inner_proto': None, 'inner_src': None,
+          'inner_dst': None, 'inner_dst_int': None, 'inner_first_nibble': None,
+          'trailing_nonzero': False, 'trailing_bytes': 0}
+    off = 12
+    etype = int.from_bytes(buf[off:off + 2], 'big')
+    off += 2
+    while etype in _VLAN_ETHERTYPES:
+        if off + 4 > len(buf):
+            fr['truncated'] = True
+            fr['ethertype'] = etype
+            return fr
+        tci = int.from_bytes(buf[off:off + 2], 'big')
+        fr['vlan_tags'].append((etype, tci & 0x0FFF))
+        off += 2
+        etype = int.from_bytes(buf[off:off + 2], 'big')
+        off += 2
+        if len(fr['vlan_tags']) > 8:
+            break
+    fr['ethertype'] = etype
+    if etype not in _MPLS_ETHERTYPES:
+        fr['payload_offset'] = off
+        return fr
+    # MPLS label stack (each shim: 20b label, 3b TC, 1b S, 8b TTL).
+    depth = 0
+    while depth < 32:
+        if off + 4 > len(buf):
+            fr['truncated'] = True
+            fr['stack_terminator'] = 'truncated'
+            return fr
+        word = int.from_bytes(buf[off:off + 4], 'big')
+        shim = {'label': (word >> 12) & 0xFFFFF, 'tc': (word >> 9) & 0x7,
+                's': (word >> 8) & 0x1, 'ttl': word & 0xFF, 'offset': off}
+        fr['mpls_stack'].append(shim)
+        off += 4
+        depth += 1
+        if shim['s']:
+            fr['stack_terminator'] = 's_bit'
+            break
+    else:
+        fr['stack_terminator'] = 'cap'
+    fr['payload_offset'] = off
+    if off >= len(buf):
+        fr['truncated'] = True
+        return fr
+    _mpls_parse_inner(fr, buf, off)
+    return fr
+
+
+def _mpls_parse_inner(fr, buf, off):
+    first = buf[off]
+    nibble = (first >> 4) & 0xF
+    fr['inner_first_nibble'] = nibble
+    if nibble == 4 and off + 20 <= len(buf):
+        ihl = (first & 0x0F) * 4
+        total_len = int.from_bytes(buf[off + 2:off + 4], 'big')
+        fr['inner_family'] = 4
+        fr['inner_proto'] = buf[off + 9]
+        fr['inner_dst_int'] = int.from_bytes(buf[off + 16:off + 20], 'big')
+        fr['inner_src'] = socket.inet_ntop(socket.AF_INET, buf[off + 12:off + 16])
+        fr['inner_dst'] = socket.inet_ntop(socket.AF_INET, buf[off + 16:off + 20])
+        if total_len:
+            end = off + total_len
+            if end < len(buf):
+                tail = buf[end:]
+                fr['trailing_bytes'] = len(tail)
+                fr['trailing_nonzero'] = any(b for b in tail)
+    elif nibble == 6 and off + 40 <= len(buf):
+        fr['inner_family'] = 6
+        fr['inner_proto'] = buf[off + 6]
+        fr['inner_dst_int'] = int.from_bytes(buf[off + 24:off + 40], 'big')
+        fr['inner_src'] = socket.inet_ntop(socket.AF_INET6, buf[off + 8:off + 24])
+        fr['inner_dst'] = socket.inet_ntop(socket.AF_INET6, buf[off + 24:off + 40])
+
+
+def _mpls_longest_sequential_run(values):
+    ordered = sorted(set(int(v) for v in values))
+    if not ordered:
+        return 0
+    best = run = 1
+    for prev, cur in zip(ordered, ordered[1:]):
+        run = run + 1 if cur == prev + 1 else 1
+        best = max(best, run)
+    return best
+
+
+def _comware_frames(text):
+    """Parse `tcpdump -e -nn -tt -v -xx` output into per-frame MPLS facts. Each
+    record is the _mpls_parse_frame dict plus 'ts' and 'buf'. With -e the header
+    line begins `<ts> <src-mac> > <dst-mac>, ethertype ...`, so the packet
+    boundary is a bare leading timestamp (field/hex lines are indented)."""
+    records = []
+    blocks, cur = [], []
+    for raw in text.splitlines():
+        if _COMWARE_HDR_RE.match(raw):
+            if cur:
+                blocks.append(cur)
+            cur = [raw]
+        elif cur:
+            cur.append(raw)
+    if cur:
+        blocks.append(cur)
+    for block in blocks:
+        head = _COMWARE_HDR_RE.match(block[0])
+        try:
+            ts = float(head.group(1))
+        except (TypeError, ValueError):
+            ts = 0.0
+        buf = _guard_frame_from_block(block)
+        if not buf:
+            continue
+        fr = _mpls_parse_frame(buf)
+        if not fr:
+            continue
+        fr['ts'] = ts
+        fr['buf'] = buf
+        records.append(fr)
+    return records
+
+
+def do_comware_guard(interface=None, seconds=20, role='unknown', learn=True,
+                     quick=False, local_prefixes=None, lsr_macs=None):
+    """Passive HPE Comware / Huawei VRF-hopping guard (detection-only). Watches a
+    segment for MPLS-labelled frames (ethertype 0x8847/0x8848) that should not
+    exist on a customer/access port — the CVE-2015-5434 / CVE-2015-8087 attack —
+    plus label sweeps, reserved labels, malformed stacks, LDP exposure and
+    Comware/H3C platform adjacency. Ported from the standalone vrfwatch."""
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return {'success': False, 'error': 'no interface to capture on'}
+    if iface not in _list_iface_names(include_virtual=True):
+        return {'success': False, 'error': f'unknown interface: {iface}'}
+    seconds = _clamp_int(seconds, 20, 5, 40)
+    role = role if role in ('ce', 'core', 'unknown') else 'unknown'
+    # Empty-ish targeted BPF: untagged + single-tagged MPLS, LDP, LLDP. (The
+    # standalone runs with NO filter because on physical NICs the kernel can strip
+    # the outer VLAN tag before BPF; 'mpls' still catches the stripped case.)
+    bpf = ('mpls or (vlan and mpls) or udp port 646 or tcp port 646 or '
+           'ether proto 0x88cc or ether host 01:00:0c:cc:cc:cc')
+    if not _have('tcpdump'):
+        return {'success': False, 'interface': iface,
+                'error': 'tcpdump is not installed. Click Install to add it.',
+                'missing_tool': 'tcpdump'}
+    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-e', '-nn',
+                '-tt', '-v', '-xx', '-s', '1600', '-c', '20000', bpf],
+               timeout=seconds + 8)
+    out = res['out']
+    if not out and res['err'] and any(k in res['err'].lower() for k in (
+            'permission', "couldn't", 'no such device', 'syntax error')):
+        return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+    records = _comware_frames(out)
+    result = _comware_analyze(records, role=role, local_prefixes=local_prefixes,
+                              lsr_macs=lsr_macs)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    result['role'] = role
+    if not quick:
+        _guard_record_event(_COMWARE_GUARD_PATH, _comware_guard_lock, result)
+    _guard_emit_jsonl('comware_guard', result)
+    return result
+
+
+def _comware_analyze(records, role='unknown', local_prefixes=None, lsr_macs=None):
+    """Pure classifier over parsed MPLS frames → VRF findings + verdict. Maintains
+    per-scan sweep / rate / label-reuse / platform state. role 'unknown' is
+    treated as 'ce' so detection fails loud (and raises VRF-011)."""
+    findings = []
+    seen = set()
+    ce = role in ('ce', 'unknown')
+    lsr_macs = set(m.lower() for m in (lsr_macs or []))
+    sweeps = {}          # src_mac -> {label: last_ts}
+    label_srcs = {}      # label -> set(src_mac)
+    rate_ts = []         # labelled-frame timestamps
+    platforms = {}       # src_mac -> token
+    seen_mpls_on_ce = False
+
+    def add(code, name, sev, klass, src, cves, detail):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'code': code, 'name': name, 'severity': sev,
+                         'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
+
+    if role == 'unknown':
+        add('VRF-011', 'IFACE_ROLE_UNDECLARED', 'MEDIUM', 'POSTURE', None, [],
+            {'note': 'segment role undeclared — treated as CE so detection fails loud'})
+
+    records = sorted(records, key=lambda r: r.get('ts', 0.0))
+    for fr in records:
+        if fr['ethertype'] in _MPLS_ETHERTYPES:
+            _comware_mpls_rules(fr, ce, role, lsr_macs, local_prefixes, sweeps,
+                                label_srcs, rate_ts, platforms, add)
+            if ce:
+                seen_mpls_on_ce = True
+        else:
+            _comware_nonmpls_rules(fr, ce, platforms, seen_mpls_on_ce, add)
+
+    return _guard_finish('comware_guard', None, None, findings, records)
+
+
+def _comware_mpls_rules(fr, ce, role, lsr_macs, local_prefixes, sweeps,
+                        label_srcs, rate_ts, platforms, add):
+    stack = fr['mpls_stack']
+    base_src = fr['src_mac']
+    cve = ['CVE-2015-5434', 'CVE-2015-8087']
+    labels = [s['label'] for s in stack]
+    # VRF-001 / VRF-017: presence on a segment that should have none.
+    if ce:
+        if fr['ethertype'] == _ETH_MPLS_MULTICAST:
+            add('VRF-017', 'MPLS_MULTICAST_ON_CE', 'HIGH', 'ATTACK', base_src,
+                ['CVE-2015-5434'], {'labels': labels})
+        else:
+            add('VRF-001', 'MPLS_ON_CE_PORT', 'CRITICAL', 'ATTACK', base_src, cve,
+                {'labels': labels, 'stack_depth': len(stack),
+                 'why': 'no MPLS label should exist on a customer/access segment'})
+        if platforms:
+            add('VRF-016', 'VRF_HOP_CORRELATED', 'CRITICAL', 'EXPOSURE', base_src,
+                cve, {'affected_platforms': dict(platforms), 'confidence': 'high'})
+    # VRF-014: labelled frame inside a VLAN tag.
+    if fr['vlan_tags']:
+        add('VRF-014', 'MPLS_INSIDE_VLAN_TAG', 'HIGH', 'POSTURE', base_src, [],
+            {'vlan_tags': [v for _, v in fr['vlan_tags']]})
+    # VRF-005: source not a declared LSR.
+    if ce and lsr_macs and base_src.lower() not in lsr_macs:
+        add('VRF-005', 'MPLS_FROM_UNAUTHORIZED_MAC', 'HIGH', 'ATTACK', base_src,
+            ['CVE-2015-5434'], {'declared_lsr_count': len(lsr_macs)})
+    # VRF-006: implausible stack termination (BOS never set, or zero-TTL run).
+    if stack:
+        zero_ttl = sum(1 for s in stack if s['ttl'] == 0)
+        if fr['stack_terminator'] != 's_bit':
+            add('VRF-006', 'MPLS_BOS_VIOLATION', 'HIGH', 'ATTACK', base_src, [],
+                {'reason': 'no bottom-of-stack bit within the ceiling',
+                 'stack_terminator': fr['stack_terminator']})
+        elif zero_ttl >= _MPLS_BOS_IMPLAUSIBLE_ZERO_TTL:
+            add('VRF-006', 'MPLS_BOS_VIOLATION', 'HIGH', 'ATTACK', base_src, [],
+                {'reason': 'S bit set but %d shims carry TTL 0' % zero_ttl,
+                 'zero_ttl_shims': zero_ttl})
+        if len(stack) > _MPLS_MAX_STACK_DEPTH:
+            add('VRF-007', 'MPLS_STACK_DEPTH_ANOMALY', 'MEDIUM', 'ATTACK', base_src,
+                [], {'stack_depth': len(stack), 'max': _MPLS_MAX_STACK_DEPTH})
+        for s in stack:
+            if s['ttl'] < _MPLS_MIN_TTL:
+                add('VRF-008', 'MPLS_TTL_ANOMALY', 'LOW', 'ATTACK', base_src, [],
+                    {'shim_ttl': s['ttl']})
+                break
+        if fr['trailing_nonzero']:
+            add('VRF-019', 'MPLS_TRAILING_DATA', 'MEDIUM', 'ATTACK', base_src, [],
+                {'trailing_bytes': fr['trailing_bytes']})
+    # VRF-009: reserved label in the stack.
+    for s in stack:
+        if s['label'] <= _MPLS_RESERVED_MAX:
+            add('VRF-009', 'MPLS_RESERVED_LABEL', 'HIGH', 'ATTACK', base_src, [],
+                {'reserved_label': s['label'],
+                 'meaning': _MPLS_RESERVED_MEANING.get(s['label'], 'reserved'),
+                 'never_legal_on_wire': s['label'] in _MPLS_LABEL_NEVER_ON_WIRE})
+            break
+    # VRF-002 / VRF-003: label sweep (distinct labels per src within window).
+    now = fr['ts']
+    cw = sweeps.setdefault(base_src, {})
+    for s in stack:
+        cw[s['label']] = now
+    live = {lab for lab, t in cw.items() if now - t <= 10.0}
+    for lab in [lab for lab, t in cw.items() if now - t > 10.0]:
+        cw.pop(lab, None)
+    if len(live) >= _MPLS_SWEEP_DISTINCT:
+        add('VRF-002', 'MPLS_LABEL_SWEEP', 'CRITICAL', 'ATTACK', base_src, cve,
+            {'distinct_labels': len(live), 'label_min': min(live),
+             'label_max': max(live)})
+        run = _mpls_longest_sequential_run(live)
+        if run >= _MPLS_SWEEP_SEQ_RUN:
+            add('VRF-003', 'MPLS_SWEEP_SEQUENTIAL', 'CRITICAL', 'ATTACK', base_src,
+                cve, {'longest_sequential_run': run,
+                      'signature': 'contiguous label run — scripted enumeration'})
+    # VRF-020: same label from more than one source MAC.
+    for s in stack:
+        srcs = label_srcs.setdefault(s['label'], set())
+        srcs.add(base_src)
+        if len(srcs) > 1:
+            add('VRF-020', 'MPLS_LABEL_REUSE_CROSS_SRC', 'MEDIUM', 'ATTACK',
+                base_src, [], {'label': s['label'], 'source_macs': sorted(srcs)})
+            break
+    # VRF-004: inner destination outside declared local reachability.
+    if ce and local_prefixes and fr['inner_dst_int'] is not None and not fr['truncated']:
+        inside = any(_comware_in_prefix(fr['inner_family'], fr['inner_dst_int'], p)
+                     for p in local_prefixes)
+        if not inside:
+            add('VRF-004', 'MPLS_INNER_DST_OFFNET', 'HIGH', 'ATTACK', base_src,
+                ['CVE-2015-5434'], {'inner_dst': fr['inner_dst']})
+    # VRF-010: inner payload is neither IPv4/IPv6 nor a known PW control word.
+    if not fr['truncated'] and fr['inner_family'] is None:
+        nib = fr['inner_first_nibble']
+        if nib not in (0, 1):
+            add('VRF-010', 'MPLS_INNER_PROTO_UNKNOWN', 'MEDIUM', 'ATTACK', base_src,
+                [], {'inner_first_nibble': nib})
+    # VRF-018: volumetric burst of labelled frames.
+    rate_ts.append(now)
+    while rate_ts and now - rate_ts[0] > 10.0:
+        rate_ts.pop(0)
+    if len(rate_ts) > _MPLS_RATE_THRESHOLD:
+        add('VRF-018', 'MPLS_RATE_BURST', 'HIGH', 'ATTACK', base_src, cve,
+            {'labelled_frames_in_window': len(rate_ts)})
+
+
+def _comware_nonmpls_rules(fr, ce, platforms, seen_mpls_on_ce, add):
+    buf = fr['buf']
+    # VRF-012 / VRF-013: LDP (port 646) — the label-distribution control plane.
+    if fr['ethertype'] in (_ETH_IPV4, _ETH_IPV6):
+        off = fr['payload_offset']
+        sport = dport = None
+        try:
+            if fr['ethertype'] == _ETH_IPV4 and off + 20 <= len(buf):
+                ihl = (buf[off] & 0x0F) * 4
+                proto = buf[off + 9]
+                l4 = off + ihl
+                if proto in (6, 17) and l4 + 4 <= len(buf):
+                    sport = int.from_bytes(buf[l4:l4 + 2], 'big')
+                    dport = int.from_bytes(buf[l4 + 2:l4 + 4], 'big')
+            elif fr['ethertype'] == _ETH_IPV6 and off + 40 <= len(buf):
+                proto = buf[off + 6]
+                l4 = off + 40
+                if proto in (6, 17) and l4 + 4 <= len(buf):
+                    sport = int.from_bytes(buf[l4:l4 + 2], 'big')
+                    dport = int.from_bytes(buf[l4 + 2:l4 + 4], 'big')
+        except (IndexError, ValueError):
+            pass
+        if _LDP_PORT in (sport, dport) and ce:
+            add('VRF-012', 'LDP_ON_CE_SEGMENT', 'HIGH', 'POSTURE', fr['src_mac'],
+                [], {'sport': sport, 'dport': dport,
+                     'why': 'label-distribution control plane visible on CE side'})
+    # VRF-015: passive Comware/H3C/HP platform identification via LLDP / CDP.
+    text = None
+    source = None
+    if fr['ethertype'] == _ETH_LLDP or fr['dst_mac'] in _LLDP_DEST_MACS:
+        text = _comware_printable(buf[fr['payload_offset']:])
+        source = 'lldp'
+    elif fr['dst_mac'] == _CDP_DEST_MAC:
+        text = _comware_printable(buf[14:])
+        source = 'cdp'
+    if text:
+        low = text.lower()
+        for token in _COMWARE_PLATFORM_TOKENS:
+            if token in low and fr['src_mac'] not in platforms:
+                platforms[fr['src_mac']] = token
+                add('VRF-015', 'COMWARE_PE_ADJACENT', 'MEDIUM', 'EXPOSURE',
+                    fr['src_mac'], ['CVE-2015-5434'],
+                    {'source': source, 'matched_token': token,
+                     'excerpt': text[:120]})
+                break
+
+
+def _comware_printable(data, min_run=4):
+    """Extract printable ASCII runs from a TLV blob (LLDP/CDP), space-joined."""
+    out, run = [], []
+    for b in data:
+        if 0x20 <= b < 0x7F:
+            run.append(chr(b))
+        else:
+            if len(run) >= min_run:
+                out.append(''.join(run))
+            run = []
+    if len(run) >= min_run:
+        out.append(''.join(run))
+    return ' '.join(out)
+
+
+def _comware_in_prefix(family, addr_int, prefix):
+    try:
+        net = ipaddress.ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    if (family == 4) != (net.version == 4):
+        return False
+    return int(net.network_address) <= addr_int <= int(net.broadcast_address)
 
 
 def _guard_rec(proto=None, src='10.0.0.9', sport=40000, dst='10.0.0.1',
@@ -16051,6 +16550,129 @@ def _arista_selftest():
     return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
 
 
+def _mpls_shim_word(label, tc=0, s=1, ttl=64):
+    return ((label & 0xFFFFF) << 12 | (tc & 0x7) << 9 | (s & 1) << 8
+            | (ttl & 0xFF)).to_bytes(4, 'big')
+
+
+def _mpls_test_frame(labels, inner_dst='10.9.9.9', src_mac=b'\x02\x00\x00\x00\x00\xaa',
+                     dst_mac=b'\x02\x00\x00\x00\x00\xbb', multicast=False, vlan=None,
+                     ttls=None, bos_last=True):
+    """Craft an Ethernet+MPLS(+inner IPv4) frame for the Comware self-test.
+    `labels` is a list; the last shim gets S=1 unless bos_last=False."""
+    eth = dst_mac + src_mac
+    if vlan is not None:
+        eth += (0x8100).to_bytes(2, 'big') + (vlan & 0xFFF).to_bytes(2, 'big')
+    eth += (0x8848 if multicast else 0x8847).to_bytes(2, 'big')
+    shims = b''
+    for i, lab in enumerate(labels):
+        last = (i == len(labels) - 1)
+        ttl = (ttls[i] if ttls else 64)
+        shims += _mpls_shim_word(lab, s=1 if (last and bos_last) else 0, ttl=ttl)
+    # Minimal inner IPv4 header (20 bytes): ver/ihl, tos, total_len=20, ... dst.
+    import struct as _st
+    ip = _st.pack('!BBHHHBBH4s4s', 0x45, 0, 20, 0, 0, 64, 6, 0,
+                  socket.inet_aton('10.0.0.1'), socket.inet_aton(inner_dst))
+    return eth + shims + ip
+
+
+def _mpls_rec(buf, ts=1780000000.0):
+    fr = _mpls_parse_frame(buf)
+    fr['ts'] = ts
+    fr['buf'] = buf
+    return fr
+
+
+def _comware_selftest():
+    """Self-test the Comware/VRF guard detectors with synthetic frames + a scapy
+    end-to-end leg (crafted MPLS-on-CE -> pcap -> tcpdump -xx -> parse)."""
+    scenarios = []
+
+    def check(name, recs, role, expect_verdict, expect_codes=(), absent=()):
+        res = _comware_analyze(recs, role=role)
+        codes = {f['code'] for f in res['findings']}
+        ok = (res['verdict'] == expect_verdict
+              and all(c in codes for c in expect_codes)
+              and all(c not in codes for c in absent))
+        scenarios.append({'name': name, 'expect': f'{expect_verdict}/{list(expect_codes)}',
+                          'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
+        return res
+
+    # parse: a single-label frame decodes label + BOS + inner dst.
+    fr = _mpls_parse_frame(_mpls_test_frame([1000]))
+    p_ok = (fr and fr['ethertype'] == 0x8847 and len(fr['mpls_stack']) == 1
+            and fr['mpls_stack'][0]['label'] == 1000 and fr['mpls_stack'][0]['s'] == 1
+            and fr['inner_dst'] == '10.9.9.9')
+    scenarios.append({'name': 'comware-parse', 'expect': 'label1000+BOS+inner',
+                      'got': str(fr and fr['mpls_stack'])[:80], 'pass': p_ok})
+
+    check('comware-clean', [], 'ce', 'clean')
+    # VRF-001: a labelled frame on a CE port IS the attack.
+    check('comware-vrf001', [_mpls_rec(_mpls_test_frame([1000]))], 'ce',
+          'attack', ['VRF-001'])
+    # VRF-001 silent on a core segment (MPLS is normal there).
+    check('comware-core-silent', [_mpls_rec(_mpls_test_frame([1000]))], 'core',
+          'clean', absent=['VRF-001'])
+    # role unknown -> treated as CE AND raises VRF-011.
+    check('comware-unknown-role', [_mpls_rec(_mpls_test_frame([1000]))], 'unknown',
+          'attack', ['VRF-001', 'VRF-011'])
+    # VRF-017: multicast MPLS on CE.
+    check('comware-multicast', [_mpls_rec(_mpls_test_frame([1000], multicast=True))],
+          'ce', 'attack', ['VRF-017'])
+    # VRF-009: reserved label (Implicit NULL, never legal on the wire).
+    check('comware-reserved', [_mpls_rec(_mpls_test_frame([3]))], 'ce',
+          'attack', ['VRF-001', 'VRF-009'])
+    # VRF-006: bottom-of-stack bit never set.
+    check('comware-nobos', [_mpls_rec(_mpls_test_frame([1000], bos_last=False))],
+          'ce', 'attack', ['VRF-006'])
+    # VRF-007: an implausibly deep label stack.
+    check('comware-deepstack', [_mpls_rec(_mpls_test_frame(list(range(100, 112))))],
+          'ce', 'attack', ['VRF-007'])
+    # VRF-014: labelled frame inside a VLAN tag (the LESSON-F case).
+    check('comware-vlan', [_mpls_rec(_mpls_test_frame([1000], vlan=100))], 'ce',
+          'attack', ['VRF-001', 'VRF-014'])
+    # VRF-002 / VRF-003: a label sweep (8 distinct sequential labels, one src).
+    sweep = [_mpls_rec(_mpls_test_frame([lab]), ts=1780000000.0 + i * 0.01)
+             for i, lab in enumerate(range(1000, 1010))]
+    check('comware-sweep', sweep, 'ce', 'attack', ['VRF-002', 'VRF-003'])
+    # VRF-015: passive Comware platform ID via an LLDP frame.
+    lldp = (b'\x01\x80\xc2\x00\x00\x0e' + b'\x02\x00\x00\x00\x00\x0c'
+            + (0x88CC).to_bytes(2, 'big')
+            + b'\x0a\x0cHPE Comware Software, Version 7.1.070\x00')
+    check('comware-platform', [_mpls_rec(lldp)], 'ce', 'exposure', ['VRF-015'])
+
+    # --- Scapy end-to-end: craft an MPLS-on-CE frame -> pcap -> tcpdump -xx. ---
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, wrpcap
+        if _have('tcpdump'):
+            frames = [Ether(_mpls_test_frame([1000, 1001], inner_dst='198.51.100.9')),
+                      Ether(_mpls_test_frame([1002]))]
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, frames)
+            res = _run(['tcpdump', '-e', '-nn', '-tt', '-v', '-xx', '-r', pcap_path],
+                       timeout=10)
+            recs = _comware_frames(res['out'])
+            out = _comware_analyze(recs, role='ce')
+            codes = {f['code'] for f in out['findings']}
+            ok = ('VRF-001' in codes and out['verdict'] == 'attack'
+                  and len(recs) == 2)
+            scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
+                            'codes': sorted(codes), 'frames': len(recs)}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (
+        not scapy_result.get('ran') or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
 def do_routing_selftest():
     """Run the IGMP / OSPF / BGP detector self-tests and report a combined result
     plus whether Scapy is available for the end-to-end packet-crafting leg. Drives
@@ -16069,7 +16691,7 @@ def do_routing_selftest():
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
               'cisco_guard': _cisco_selftest(), 'juniper_guard': _juniper_selftest(),
-              'arista_guard': _arista_selftest(),
+              'arista_guard': _arista_selftest(), 'comware_guard': _comware_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
@@ -17668,6 +18290,18 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/arista-guard iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_arista_guard(interface=iface, seconds=secs))
 
+    @app.route('/api/net/comware-guard', methods=['GET'])
+    def net_comware_guard():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 40)
+        role = (request.args.get('role') or 'unknown').strip().lower()
+        if role not in ('ce', 'core', 'unknown'):
+            role = 'unknown'
+        _log(f"net/comware-guard iface={iface or 'default-route'} secs={secs} role={role}")
+        return jsonify(do_comware_guard(interface=iface, seconds=secs, role=role))
+
     @app.route('/api/net/fhrp-baseline', methods=['GET', 'POST'])
     def net_fhrp_baseline():
         action = 'get'
@@ -18496,11 +19130,15 @@ def _cli(argv=None):
 
     for _gname, _ghelp in (('cisco', 'Cisco router/switch/edge'),
                            ('juniper', 'Juniper J-Web/SSR/Junos-Space'),
-                           ('arista', 'Arista EOS switch/router')):
+                           ('arista', 'Arista EOS switch/router'),
+                           ('comware', 'HPE Comware / Huawei VRF-hopping (MPLS)')):
         gp = sub.add_parser('%s-guard' % _gname,
                             help='passive %s CVE guard (posture/exposure/attack)' % _ghelp)
         gp.add_argument('--iface', '-i', default=None, help='interface (default: route)')
         gp.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-40)')
+        if _gname == 'comware':
+            gp.add_argument('--role', default='unknown', choices=('ce', 'core', 'unknown'),
+                            help='segment role (ce/core/unknown; unknown=>ce)')
         gp.add_argument('--json', action='store_true', help='emit JSON')
         gs = sub.add_parser('%s-guard-selftest' % _gname,
                             help='self-test the %s guard detectors (no root)' % _gname)
@@ -19318,10 +19956,14 @@ def _cli(argv=None):
         'cisco-guard': (do_cisco_guard, 'Cisco'),
         'juniper-guard': (do_juniper_guard, 'Juniper'),
         'arista-guard': (do_arista_guard, 'Arista'),
+        'comware-guard': (do_comware_guard, 'Comware'),
     }
     if args.cmd in _GUARD_CLI:
         fn, label = _GUARD_CLI[args.cmd]
-        r = fn(interface=args.iface, seconds=args.seconds)
+        kw = {'interface': args.iface, 'seconds': args.seconds}
+        if args.cmd == 'comware-guard':
+            kw['role'] = getattr(args, 'role', 'unknown')
+        r = fn(**kw)
         if args.json:
             print(json.dumps(r, indent=2))
         elif not r.get('success'):
@@ -19342,6 +19984,7 @@ def _cli(argv=None):
         'cisco-guard-selftest': (_cisco_selftest, 'Cisco'),
         'juniper-guard-selftest': (_juniper_selftest, 'Juniper'),
         'arista-guard-selftest': (_arista_selftest, 'Arista'),
+        'comware-guard-selftest': (_comware_selftest, 'Comware'),
     }
     if args.cmd in _GUARD_SELFTEST_CLI:
         fn, label = _GUARD_SELFTEST_CLI[args.cmd]
