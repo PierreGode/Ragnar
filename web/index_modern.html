@@ -2236,7 +2236,7 @@
                 </div>
                 <!-- Cisco Switch & Router Guard -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
-                    <h3 class="text-lg font-semibold mb-1">Cisco Guard <span class="text-xs font-normal text-gray-500">(IOS / IOS-XE / NX-OS · switch · router · edge)</span></h3>
+                    <h3 class="text-lg font-semibold mb-1">Cisco Switch and Router Guard <span class="text-xs font-normal text-gray-500">(IOS / IOS-XE / NX-OS · switch · router · edge)</span></h3>
                     <p class="text-xs text-amber-300/90 mb-2">Passive Cisco router/switch CVE guard — <strong>detection-only</strong>, never transmits, probes or authenticates. Reports three classes of evidence about a tracked CVE set: <strong>posture</strong> (a version/platform fingerprint screened against the catalog — a "verify THIS device" note, never a verdict), <strong>exposure</strong> (an enabling condition on the wire — cleartext SNMP, a default community, an HTTP UI or Telnet to infrastructure) and <strong>attack</strong> (an exploitation primitive in transit — the CVE-2025-20352 SNMP overflow shape, an oversized field, a VLAN tag-stack anomaly, or an NX-OS Telnet shell-escape / CVE-2024-20399). Firewalls (ASA/Firepower/FTD) are screened out of scope, not misclassified.</p>
                     <p class="text-sm text-gray-400 mb-3">One short passive capture over the Cisco management + attack surface (SNMP 161/162, Telnet 23, HTTP UIs 80/8080/8443, IKEv2 500/4500). SNMP is BER-parsed for the community, OID-arc depth and field sizes; no TCP reassembly, so a segmented HTTP/Telnet attack is best-effort (a hit is high-confidence, a miss inconclusive).</p>
                     <div class="flex flex-wrap items-center gap-2">
