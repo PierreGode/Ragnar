@@ -121,11 +121,19 @@ class Observatory {
     // Fingerprint positioning: learns per-spot motion signatures for THIS room.
     // Calibration reference points (scene coords, matching the server node geometry).
     this._fp = new Fingerprinter();
+    // Up to 9 calibration points laid out numpad-style on the floor (stand on the
+    // cell, press the matching number). Rows: 1-2-3 = near wall (node1/node3),
+    // 4-5-6 = middle, 7-8-9 = far wall (node2). Columns: left / center / right.
     this._fpPoints = {
-      '1': { pos: [-4, 0, -3.5], name: 'node 1' },
-      '2': { pos: [0, 0, 3.5], name: 'node 2' },
-      '3': { pos: [4, 0, -3.5], name: 'node 3' },
-      '0': { pos: [0, 0, 0], name: 'center' },
+      '1': { pos: [-4, 0, -3.5], name: 'front-left (node 1)' },
+      '2': { pos: [0, 0, -3.5], name: 'front-center' },
+      '3': { pos: [4, 0, -3.5], name: 'front-right (node 3)' },
+      '4': { pos: [-4, 0, 0], name: 'mid-left' },
+      '5': { pos: [0, 0, 0], name: 'center' },
+      '6': { pos: [4, 0, 0], name: 'mid-right' },
+      '7': { pos: [-4, 0, 3.5], name: 'back-left' },
+      '8': { pos: [0, 0, 3.5], name: 'back-center (node 2)' },
+      '9': { pos: [4, 0, 3.5], name: 'back-right' },
     };
     this._buildDotMatrixMist();
     this._buildParticleTrail();
@@ -601,11 +609,10 @@ class Observatory {
           this._showFigures = this._showFigures === false;
           if (!this._showFigures) this._figurePool.hideAll();
           break;
-        case '1':
-        case '2':
-        case '3':
-        case '0':
-          // Calibrate a fingerprint: stand at the named spot and press the key.
+        case '1': case '2': case '3':
+        case '4': case '5': case '6':
+        case '7': case '8': case '9':
+          // Calibrate a fingerprint: stand on the numpad cell and press the key.
           this._recordFingerprint(e.key);
           break;
         case 'x':

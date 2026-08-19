@@ -165,13 +165,13 @@ you can retune live with `systemctl edit`/`daemon-reload`.
 
 | Key | Action |
 |---|---|
-| `1` `2` `3` `0` | Record a **fingerprint** at node 1 / 2 / 3 / center — stand there, move a little for ~6 s. With ≥2 points the blob switches from the centroid to per-room fingerprint matching (k-NN on the live motion pattern; learned mapping beats the centroid for rooms where the busiest link isn't the nearest node). |
+| `1`–`9` | Record a **fingerprint** on a 3×3 floor grid, numpad-style — `1/2/3` = near wall (node 1 / center / node 3), `4/5/6` = middle row, `7/8/9` = far wall (`8` = node 2). Stand on the cell and move a little for ~6 s. With ≥2 points the blob switches from the centroid to per-room fingerprint matching (k-NN on the live motion pattern; the learned mapping beats the centroid for rooms where the busiest link isn't the nearest node — the more cells you record, the sharper it gets). |
 | `X` | Clear fingerprints (back to the activity centroid). |
 | `H` | Hide / show the pose skeletons (the mist blob + field stay). |
 
-Fingerprints are stored in the browser (localStorage), per machine. The live feed can
-carry phantom tracker duplicates near center; the Observatory collapses them to a single
-blob at the best position estimate.
+Fingerprints are stored in the **browser only** (localStorage), per machine — nothing is
+written to Ragnar. The live feed can carry phantom tracker duplicates near center; the
+Observatory collapses them to a single blob at the best position estimate.
 
 ---
 
