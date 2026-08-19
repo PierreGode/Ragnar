@@ -6412,8 +6412,8 @@ const _NETINT_STYLE = {
 // A verdict is clean/informational, an active attack (critical, red), or — anything
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
-const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn']);
+const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -7437,6 +7437,8 @@ const _NTP_VERDICT_STYLE = {
     kod:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP Kiss-o\'-Death — time-sync DoS'],
     'rogue-server':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue NTP server answering on the segment'],
     'time-injection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP time injection — a source is serving a skewed clock'],
+    autokey:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTP Autokey extension field on the wire — deprecated (CVE-2014-9295 surface)'],
+    'autokey-exploit':['bg-red-950/60 border-red-800 text-red-300', '🛑 Malformed NTP Autokey EF — crypto_recv() overflow signature (CVE-2014-9295 RCE)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _ntpFillIfaces() {
@@ -7477,7 +7479,7 @@ async function runNtpWatch() {
         }
         const [cls, label] = _NTP_VERDICT_STYLE[d.verdict] || _NTP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.autokey_count ? ' · <span class="text-amber-400">' + d.autokey_count + ' Autokey EF' + (d.autokey_malformed ? ', ' + d.autokey_malformed + ' malformed' : '') + '</span>' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
         const servers = d.servers || [];
         if (servers.length) {
             html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Time sources (' + servers.length + ')</p>' +
@@ -7524,6 +7526,115 @@ async function ntpTrustBaseline() {
         addConsoleMessage('Failed to reset NTP baseline: ' + e.message, 'error');
     }
 }
+
+// ---- Vendor CVE Guards (Cisco / Juniper / Arista) --------------------------
+const _GUARD_VERDICT_STYLE = {
+    clean:    ['bg-green-950/40 border-green-900 text-green-400', '✓ No tracked CVE evidence on the segment'],
+    observed: ['bg-slate-800 border-slate-700 text-slate-300', 'ℹ Vendor device observed — no CVE-relevant finding'],
+    posture:  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ A version/platform screens into a tracked CVE range — verify THIS device'],
+    exposure: ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠ A CVE enabling-condition is exposed on the wire'],
+    attack:   ['bg-red-950/60 border-red-800 text-red-300', '🛑 An exploitation primitive was observed in transit'],
+    unknown:  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _GUARD_SEV_STYLE = {
+    CRITICAL: 'bg-red-900/70 text-red-200',
+    HIGH:     'bg-orange-900/60 text-orange-200',
+    MEDIUM:   'bg-amber-900/50 text-amber-200',
+    LOW:      'bg-slate-700 text-slate-200',
+    INFO:     'bg-slate-800 text-slate-400',
+};
+const _GUARD_KLASS_STYLE = {
+    POSTURE:  'text-slate-400', EXPOSURE: 'text-orange-300', ATTACK: 'text-red-300',
+};
+function _guardFillIfaces(selId) {
+    const sel = document.getElementById(selId);
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+function _guardDetailStr(det) {
+    if (!det || typeof det !== 'object') return '';
+    const parts = [];
+    for (const k of Object.keys(det)) parts.push(k + '=' + det[k]);
+    return parts.join(' · ');
+}
+function _renderGuardResult(d) {
+    const [cls, label] = _GUARD_VERDICT_STYLE[d.verdict] || _GUARD_VERDICT_STYLE.unknown;
+    const cc = d.class_counts || {};
+    let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+    html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.packet_count} pkts · ${d.finding_count} finding(s)`;
+    const bits = [];
+    if (cc.POSTURE) bits.push(cc.POSTURE + ' posture');
+    if (cc.EXPOSURE) bits.push(cc.EXPOSURE + ' exposure');
+    if (cc.ATTACK) bits.push(cc.ATTACK + ' attack');
+    if (bits.length) html += ' · ' + bits.join(', ');
+    html += '</p>';
+    if ((d.cves || []).length) {
+        html += '<p class="text-xs text-gray-400 mb-2">CVEs in scope: <span class="font-mono text-amber-300">' + d.cves.map(escapeHtml).join(', ') + '</span></p>';
+    }
+    const fs = d.findings || [];
+    if (fs.length) {
+        html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+            '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Finding</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">Source</th><th class="px-2 py-1">CVEs</th><th class="px-2 py-1">Detail</th></tr>' +
+            '</thead><tbody>' +
+            fs.map(f => {
+                const sev = _GUARD_SEV_STYLE[f.severity] || 'bg-slate-800 text-slate-400';
+                const kl = _GUARD_KLASS_STYLE[f.klass] || 'text-gray-400';
+                return '<tr class="border-t border-slate-800">' +
+                    `<td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded ${sev} text-[10px] font-semibold">${escapeHtml(f.severity)}</span></td>` +
+                    `<td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.code)}</td>` +
+                    `<td class="px-2 py-1">${escapeHtml(f.name)}</td>` +
+                    `<td class="px-2 py-1 ${kl}">${escapeHtml(f.klass)}</td>` +
+                    `<td class="px-2 py-1 font-mono">${escapeHtml(f.src || '—')}</td>` +
+                    `<td class="px-2 py-1 font-mono text-amber-300/80">${escapeHtml((f.cves || []).join(', ') || '—')}</td>` +
+                    `<td class="px-2 py-1 text-gray-500">${escapeHtml(_guardDetailStr(f.detail))}</td>` +
+                    '</tr>';
+            }).join('') +
+            '</tbody></table>';
+    } else if (d.verdict === 'clean') {
+        html += '<p class="text-xs text-gray-500">Segment quiet — no vendor management or attack traffic seen in the window.</p>';
+    }
+    return html;
+}
+async function _runGuard(module, label, btn) {
+    const out = document.getElementById(module + '-guard-results');
+    if (!out) return;
+    const ifaceSel = document.getElementById(module + '-guard-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById(module + '-guard-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Capturing…');
+    out.classList.remove('hidden');
+    out.innerHTML = `<p class="text-sm text-gray-400">Passively capturing the ${escapeHtml(label)} attack surface…</p>`;
+    try {
+        _guardFillIfaces(module + '-guard-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/' + module + '-guard' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, run' + label + 'Guard)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        out.innerHTML = _renderGuardResult(d);
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+function runCiscoGuard() { _runGuard('cisco', 'Cisco', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runJuniperGuard() { _runGuard('juniper', 'Juniper', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
+function runAristaGuard() { _runGuard('arista', 'Arista', (typeof event !== 'undefined' && event && event.target) ? event.target : null); }
 
 // ---- ICMP Watch (passive ICMP-redirect / L3 route injection) ---------------
 const _ICMP_VERDICT_STYLE = {
@@ -9223,6 +9334,7 @@ async function runRoutingSelftest() {
         const names = { igmp: 'IGMP Watch', ipv6: 'IPv6 First-Hop Watch', ndp: 'NDP Watch (IPv6 neighbor spoofing)', raguard: 'IPv6 RA Guard', ntp: 'NTP Watch', icmp: 'ICMP Watch', snmp: 'SNMP Watch', cert: 'Cert Watch', tls: 'TLS Watch (passive JA4/QUIC)', stp: 'STP/BPDU Watch (spanning tree)', smb: 'SMB Watch (SMBv1 + poisoning + Kerberos downgrade)', relay: 'Relay/Coercion Watch (NTLM relay)', ldap: 'LDAP Watch (Active Directory)', dtp: 'DTP Watch (VLAN hopping)', cdp: 'CDP Watch (Cisco Discovery leak/flood)', vtp: 'VTP Watch (VTP bomb / VLAN-DB wipe)', eigrp: 'EIGRP Watch (Cisco IGP)', isis: 'IS-IS Watch (IGP)', fhrp: 'FHRP Watch (HSRP/VRRP/GLBP/CARP)', ospf: 'OSPF Scanner', bgp: 'BGP Path Watch',
                         arp: 'ARP Poisoning (incl. HSRP/VRRP virtual-MAC awareness)', dns: 'DNS Doctor (poison parser / anchors / ASN)',
                         mac: 'MAC Watch (spoof / vendor-OUI / randomization / HSRP-VRRP virtual-MAC)', dhcp: 'DHCP Guardian (rogue server / starvation)',
+                        cisco_guard: 'Cisco Guard (IOS/IOS-XE/NX-OS CVEs)', juniper_guard: 'Juniper Guard (J-Web/SSR/Space CVEs)', arista_guard: 'Arista Guard (EOS CVEs)',
                         bgp_speaker: 'BGP Speaker (codec/FSM/RIB)', path_asymmetry: 'Path Asymmetry (OWD)' };
         const overall = d.success
             ? '<div class="mb-2 px-3 py-2 rounded border bg-green-950/40 border-green-900 text-green-400 text-sm">✓ All detector self-tests passed' + (d.scapy_available ? ' (including Scapy end-to-end)' : ' — install Scapy for the end-to-end leg') + '</div>'
@@ -9231,7 +9343,7 @@ async function runRoutingSelftest() {
             '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
             '<tr class="text-left text-gray-500"><th class="px-2 py-1">Scanner</th><th class="px-2 py-1">Scenarios</th><th class="px-2 py-1">End-to-end</th><th class="px-2 py-1">Result</th></tr>' +
             '</thead><tbody>';
-        ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'bgp_speaker', 'path_asymmetry'].forEach(k => {
+        ['igmp', 'ipv6', 'ndp', 'raguard', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'stp', 'smb', 'relay', 'ldap', 'dtp', 'cdp', 'vtp', 'eigrp', 'isis', 'fhrp', 'ospf', 'arp', 'mac', 'dhcp', 'dns', 'bgp', 'cisco_guard', 'juniper_guard', 'arista_guard', 'bgp_speaker', 'path_asymmetry'].forEach(k => {
             const s = d.suites[k]; if (!s) return;
             const okAll = s.success;
             html += `<tr class="border-t border-slate-800">
