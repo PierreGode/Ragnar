@@ -144,6 +144,8 @@ backup/uploads/
 
 # Encrypted Safe vault — user data, must never be committed
 data/safe/
+# sensing-server browser-session secret (generated at runtime; never track)
+data/session-secret
 
 # Mesh file-transfer inbox — received files, must never be committed
 data/mesh_inbox/
