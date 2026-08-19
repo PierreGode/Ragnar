@@ -17,6 +17,7 @@ import { PostProcessing } from './post-processing.js';
 import { FigurePool, SKELETON_PAIRS } from './figure-pool.js';
 import { PoseSystem } from './pose-system.js';
 import { ScenarioProps } from './scenario-props.js';
+import { Fingerprinter } from './fingerprint.js';
 import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES, seedObsFromServerConfig } from './hud-controller.js?v=20260815-fsbtn';
 
 // ---- Palette ----
@@ -117,6 +118,15 @@ class Observatory {
     this._poseSystem = new PoseSystem();
     this._figurePool = new FigurePool(this._scene, this.settings, this._poseSystem);
     this._scenarioProps = new ScenarioProps(this._scene);
+    // Fingerprint positioning: learns per-spot motion signatures for THIS room.
+    // Calibration reference points (scene coords, matching the server node geometry).
+    this._fp = new Fingerprinter();
+    this._fpPoints = {
+      '1': { pos: [-4, 0, -3.5], name: 'node 1' },
+      '2': { pos: [0, 0, 3.5], name: 'node 2' },
+      '3': { pos: [4, 0, -3.5], name: 'node 3' },
+      '0': { pos: [0, 0, 0], name: 'center' },
+    };
     this._buildDotMatrixMist();
     this._buildParticleTrail();
     this._buildWifiWaves();
@@ -584,12 +594,58 @@ class Observatory {
           document.getElementById('fps-counter').style.display = this._showFps ? 'block' : 'none';
           break;
         case 's': this._hud.toggleSettings(); break;
+        case 'h':
+          // Hide/show the pose skeletons (the mist blob + field stay). The
+          // synthetic COCO skeletons are the twitchy part; hiding them leaves
+          // the calmer activity blob.
+          this._showFigures = this._showFigures === false;
+          if (!this._showFigures) this._figurePool.hideAll();
+          break;
+        case '1':
+        case '2':
+        case '3':
+        case '0':
+          // Calibrate a fingerprint: stand at the named spot and press the key.
+          this._recordFingerprint(e.key);
+          break;
+        case 'x':
+          this._fp.clear();
+          this._fpFlash('Fingerprints cleared — blob back to activity centroid.');
+          break;
         case ' ':
           e.preventDefault();
           this._demoData.paused = !this._demoData.paused;
           break;
       }
     });
+  }
+
+  // ---- Fingerprint calibration ----
+
+  _recordFingerprint(key) {
+    const ref = this._fpPoints[key];
+    if (!ref || this._fp.recording) return;
+    const secs = 6;
+    this._fp.startRecording(ref.pos);
+    this._fpFlash(`Recording fingerprint at ${ref.name} — stand there and move a little (${secs}s)…`);
+    setTimeout(() => {
+      const res = this._fp.finishRecording();
+      if (res) {
+        this._fpFlash(`Saved ${ref.name} (${res.samples} samples) · ${this._fp.count} point(s) calibrated`);
+      } else {
+        this._fpFlash(`Not enough motion for ${ref.name} — retry while moving at the spot.`);
+      }
+    }, secs * 1000);
+  }
+
+  _fpFlash(msg) {
+    const el = document.getElementById('scenario-description');
+    if (el) {
+      el.textContent = msg;
+      clearTimeout(this._fpFlashTimer);
+      this._fpFlashTimer = setTimeout(() => { el.textContent = ''; }, 4500);
+    }
+    console.log('[Observatory/fingerprint]', msg);
   }
 
   // ---- Settings / HUD methods delegated to HudController ----
@@ -779,12 +835,30 @@ class Observatory {
       ? new Set(data.nodes.map(n => n.node_id))
       : null;
 
+    // Fingerprint positioning: feed the live per-node signature, and once the
+    // room is calibrated (>=2 fingerprints) override the primary person's
+    // position with the learned k-NN estimate. Live data + present only.
+    if (hasLive) {
+      this._fp.feed(data.node_features || []);
+      if (data.persons && data.persons.length &&
+          data.classification && data.classification.presence) {
+        // The live feed often carries several phantom tracker duplicates parked
+        // near centre — they read as a permanent "centre blob". Collapse to ONE
+        // blob at the best position estimate: fingerprint match if the room is
+        // calibrated (>=2 points), else the server's activity centroid.
+        const loc = (this._fp.count >= 2 ? this._fp.locate() : null) || data.persons[0].position;
+        const p0 = Object.assign({}, data.persons[0], { position: loc });
+        data = Object.assign({}, data, { persons: [p0], estimated_persons: 1 });
+      }
+    }
+
     // Updates (guarded: a single updater throwing on an unexpected live-data
     // shape must not abort the frame — otherwise controls/render below are
     // skipped and the page freezes).
     try {
       this._nebula.update(dt, elapsed);
-      this._figurePool.update(data, elapsed);
+      if (this._showFigures === false) this._figurePool.hideAll();
+      else this._figurePool.update(data, elapsed);
       this._scenarioProps.update(data, this._demoData.currentScenario);
       this._updateDotMatrixMist(data, elapsed);
       this._updateParticleTrail(data, dt, elapsed);

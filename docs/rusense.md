@@ -161,6 +161,18 @@ you can retune live with `systemctl edit`/`daemon-reload`.
 > drift toward the right region, not pinpoint you. Precise localization would need true
 > multistatic RTI, which single-link CSI can't provide.
 
+**In-view Observatory controls (keyboard):**
+
+| Key | Action |
+|---|---|
+| `1` `2` `3` `0` | Record a **fingerprint** at node 1 / 2 / 3 / center — stand there, move a little for ~6 s. With ≥2 points the blob switches from the centroid to per-room fingerprint matching (k-NN on the live motion pattern; learned mapping beats the centroid for rooms where the busiest link isn't the nearest node). |
+| `X` | Clear fingerprints (back to the activity centroid). |
+| `H` | Hide / show the pose skeletons (the mist blob + field stay). |
+
+Fingerprints are stored in the browser (localStorage), per machine. The live feed can
+carry phantom tracker duplicates near center; the Observatory collapses them to a single
+blob at the best position estimate.
+
 ---
 
 ## Using it from the web UI

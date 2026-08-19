@@ -25,7 +25,7 @@ LOG_FILE="${SENSING_INSTALL_LOG:-$RAGNAR_DIR/data/sensing_install.log}"
 # RuView source (only used for the build-from-source fallback). Pinned so a
 # rebuild is reproducible and can't drift under us.
 RUVIEW_REPO="${RUVIEW_REPO:-https://github.com/PierreGode/RuView.git}"
-RUVIEW_PIN="${RUVIEW_PIN:-43090a7feec3e93b09a02d3bf6d6e10d3962211f}"
+RUVIEW_PIN="${RUVIEW_PIN:-9452f774d42f3abe9124b8e643473c9100ee8777}"
 RUVIEW_CRATE="wifi-densepose-sensing-server"
 
 # Runtime tuning (matches the validated working deployment).

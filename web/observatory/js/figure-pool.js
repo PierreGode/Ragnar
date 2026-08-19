@@ -479,6 +479,14 @@ export class FigurePool {
     fig._initialized = false;
   }
 
+  /** Hide every figure in the pool (used by the Observatory "hide figures" toggle). */
+  hideAll() {
+    for (const fig of this._figures) {
+      this.hide(fig);
+      fig.visible = false;
+    }
+  }
+
   /**
    * Apply wire and joint colors to all figures in the pool.
    * @param {THREE.Color} wireColor
