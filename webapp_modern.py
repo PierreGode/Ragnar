@@ -1852,6 +1852,7 @@ _NI_CRITICAL = {
     'rogue-speaker',                                                    # fhrp
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
     'cdpwn',                                                            # cdp (Armis CDPwn CVE exploit shape)
+    'autokey-exploit',                                                 # ntp (CVE-2014-9295 crypto_recv overflow signature)
 }
 
 

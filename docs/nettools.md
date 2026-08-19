@@ -698,6 +698,20 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   or amplification abuse.
 - **Anomaly** — an implausible **root dispersion**, a **leap-alarm** (unsynchronized)
   source, or a **reference-ID loop** (refid equals the source's own address).
+- **Autokey** — an **Autokey** (RFC 5906) **extension field** on the wire. Autokey is
+  deprecated and is the network-reachable attack surface for **CVE-2014-9295** (the
+  `ntpd` `crypto_recv()` stack-overflow → **RCE** as the ntpd user) and its siblings
+  (CVE-2014-9750, CVE-2016-1547). The capture adds `-x`, so the NTP payload bytes are
+  reconstructed and the extension field is parsed directly (independent of the
+  dissector). Fires on **any** NTP packet — server replies *and* inbound client/peer
+  packets — because the overflow is delivered *to* the victim. Ordinary symmetric-key
+  authentication (a 4/20/24-octet MAC) is **not** Autokey and never trips it — the
+  28-octet RFC 7822 extension-field floor separates the two.
+- **Autokey exploit** — a **malformed** Autokey EF: the declared length or the
+  internal **value length** (`crypto_recv()`'s copy length) runs **past the packet**,
+  is **misaligned**, or is structurally impossible. That value-length overflow is the
+  specific signature of **CVE-2014-9295 / CVE-2014-9750** and escalates to a
+  **critical** verdict (ranked as such by the Network Integrity Monitor).
 
 The **first scan learns** the trusted time source(s) + their stratum into
 `data/ntp_watch.json`; after a legitimate NTP change, click **Trust current** to

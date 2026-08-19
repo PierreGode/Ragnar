@@ -6413,7 +6413,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -7437,6 +7437,8 @@ const _NTP_VERDICT_STYLE = {
     kod:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP Kiss-o\'-Death — time-sync DoS'],
     'rogue-server':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 Rogue NTP server answering on the segment'],
     'time-injection': ['bg-red-950/60 border-red-800 text-red-300', '🛑 NTP time injection — a source is serving a skewed clock'],
+    autokey:          ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTP Autokey extension field on the wire — deprecated (CVE-2014-9295 surface)'],
+    'autokey-exploit':['bg-red-950/60 border-red-800 text-red-300', '🛑 Malformed NTP Autokey EF — crypto_recv() overflow signature (CVE-2014-9295 RCE)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 function _ntpFillIfaces() {
@@ -7477,7 +7479,7 @@ async function runNtpWatch() {
         }
         const [cls, label] = _NTP_VERDICT_STYLE[d.verdict] || _NTP_VERDICT_STYLE.unknown;
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.server_count} source(s) · ${d.packet_count} pkts (${d.rate}/s)${d.control_count ? ' · ' + d.control_count + ' mode-6/7' : ''}${d.autokey_count ? ' · <span class="text-amber-400">' + d.autokey_count + ' Autokey EF' + (d.autokey_malformed ? ', ' + d.autokey_malformed + ' malformed' : '') + '</span>' : ''}${d.learned ? ' · <span class="text-gray-400">baseline learned now</span>' : ''}</p>`;
         const servers = d.servers || [];
         if (servers.length) {
             html += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Time sources (' + servers.length + ')</p>' +

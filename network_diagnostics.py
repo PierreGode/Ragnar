@@ -20,6 +20,7 @@ import json
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import ipaddress
 import os
@@ -5988,6 +5989,11 @@ def _raguard_selftest():
 #     or amplification abuse.
 #   * anomaly        — implausible root dispersion, a leap-alarm (unsynced) source,
 #     or a reference-ID loop.
+#   * autokey        — an Autokey (RFC 5906) extension field on the wire. Autokey is
+#     deprecated and is the network-reachable attack surface for CVE-2014-9295 (the
+#     ntpd crypto_recv() stack overflow → RCE) and its siblings. A *malformed* EF —
+#     declared/value length running past the packet, misaligned, or structurally
+#     impossible — is the specific exploit signature and escalates to critical.
 _NTP_WATCH_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                'data', 'ntp_watch.json')
 _ntp_watch_lock = threading.Lock()
@@ -6011,10 +6017,116 @@ _NTP_CONTROL_MODES = ('Control Message', 'Private', 'Reserved')
 _NTP_KOD_CODES = frozenset(('DENY', 'RSTR', 'RATE', 'ACST', 'AUTH', 'AUTO', 'BCST',
                             'CRYP', 'DROP', 'MCST', 'NKEY', 'RMOT', 'INIT', 'STEP'))
 
+# --- Autokey / extension-field layout (RFC 5906 Autokey, RFC 7822 EF format) ---
+# The standard NTP header is 48 octets. Anything after it is zero or more extension
+# fields followed by an optional MAC. A MAC is 0 (none), 4 (crypto-NAK), 20
+# (keyid+MD5) or 24 (keyid+SHA-1) octets; a valid extension field is >= 28 octets
+# (RFC 7822). That size split is exactly how we tell an Autokey EF apart from
+# ordinary symmetric-key authentication, so plain keyed NTP never trips the detector.
+_NTP_HEADER_LEN = 48
+_NTP_EF_MIN_LEN = 28              # RFC 7822 minimum extension-field length
+_NTP_EF_LEN_FLOOR = 8            # absolute floor: type(2)+len(2)+4 body
+_NTP_MAC_SIZES = frozenset((0, 4, 20, 24))   # none / crypto-NAK / MD5 / SHA-1
+_NTP_EF_OFF_LEN = 2              # u16 total EF length (incl. header + padding)
+_NTP_EF_OFF_VALLEN = 16         # u32 value length — the crypto_recv() copy length
+_NTP_EF_VALUE_START = 20        # first octet of the value payload
+# Autokey opcodes (RFC 5906 §11) — low 6 bits of the field type.
+_NTP_AUTOKEY_OPCODES = {1: 'ASSOC', 2: 'CERT', 3: 'COOKIE', 4: 'AUTO', 5: 'LEAP',
+                        6: 'SIGN', 7: 'IFF', 8: 'GQ', 9: 'MV'}
+
 _NTP_HDR_RE = re.compile(r'^(\d+\.\d+)\s+IP6?\b')
 _NTP_SRC_RE = re.compile(
     r'(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+):\s*'
-    r'NTPv(\d+),\s*([^,]+?),\s*length')
+    r'NTPv(\d+),\s*([^,]+?),\s*length\s+(\d+)')
+# tcpdump -x hex-dump line: `\t0x0010:  4500 004c 0000 4000 ...`
+_NTP_HEX_RE = re.compile(r'^\s*0x[0-9a-fA-F]+:\s+((?:[0-9a-fA-F]{2,4}\s*)+)')
+
+
+def _parse_autokey_ef(payload):
+    """Inspect raw NTP payload bytes for an Autokey (crypto) extension field.
+
+    Detects the network-reachable attack surface of CVE-2014-9295 — the ntpd
+    ``crypto_recv()`` stack buffer overflow reached via a crafted Autokey
+    extension field — plus the closely related CVE-2014-9750 value-length flaw.
+    Works directly on the wire bytes so it is independent of any dissector
+    recognising Autokey opcodes. Returns (present, info, reasons); a non-empty
+    ``reasons`` list means the EF is malformed in the way an exploit packet is.
+    Ported from the standalone ntpwatch _parse_autokey_ef."""
+    try:
+        if payload is None or len(payload) < _NTP_HEADER_LEN:
+            return (False, None, [])
+        remaining = len(payload) - _NTP_HEADER_LEN
+        # Trailing region is a MAC (or nothing) -> symmetric-key auth, not Autokey.
+        if remaining in _NTP_MAC_SIZES:
+            return (False, None, [])
+        # Too large for a MAC but too small for a valid EF -> broken EF.
+        if remaining < _NTP_EF_MIN_LEN:
+            return (True, {'ef_len': None, 'region': remaining},
+                    ['ef_region_undersized'])
+        ef = payload[_NTP_HEADER_LEN:]
+        ef_type = struct.unpack_from('!H', ef, 0)[0]
+        ef_len = struct.unpack_from('!H', ef, _NTP_EF_OFF_LEN)[0]
+        opcode = ef_type & 0x3F
+        info = {'ef_type': ef_type, 'opcode': opcode,
+                'opcode_name': _NTP_AUTOKEY_OPCODES.get(opcode, 'UNKNOWN'),
+                'flags': (ef_type >> 8) & 0xFF, 'ef_len': ef_len, 'region': remaining}
+        reasons = []
+        # crypto_recv() / crypto overflow signatures.
+        if ef_len == 0:
+            reasons.append('ef_len_zero')
+        elif ef_len < _NTP_EF_LEN_FLOOR:
+            reasons.append('ef_len_below_floor')
+        if ef_len % 4 != 0:
+            reasons.append('ef_len_misaligned')
+        if ef_len > len(ef):
+            reasons.append('ef_len_exceeds_packet')
+        # Value-length overflow: the copy length crypto_recv() trusts. A value that
+        # cannot fit the declared EF (or the wire bytes) is the exploit signature.
+        if len(ef) >= _NTP_EF_VALUE_START:
+            vallen = struct.unpack_from('!I', ef, _NTP_EF_OFF_VALLEN)[0]
+            info['value_len'] = vallen
+            wire_budget = len(ef) - _NTP_EF_VALUE_START
+            if vallen > wire_budget or (ef_len >= _NTP_EF_VALUE_START
+                                        and vallen > ef_len - _NTP_EF_VALUE_START):
+                reasons.append('value_length_overflow')
+        return (True, info, reasons)
+    except Exception:
+        return (True, {'ef_len': None, 'region': None}, ['ef_parse_error'])
+
+
+def _ntp_payload_from_block(block_lines):
+    """Reconstruct the NTP payload bytes from a tcpdump `-x` hex dump block.
+    tcpdump -x prints packet bytes from the IP header on (link layer stripped);
+    we reassemble the hex, walk the IPv4/IPv6 + UDP headers, and return the UDP
+    payload (the NTP message). Returns bytes or None if not reconstructable."""
+    hexchars = []
+    for ln in block_lines:
+        m = _NTP_HEX_RE.match(ln)
+        if m:
+            hexchars.append(re.sub(r'[^0-9a-fA-F]', '', m.group(1)))
+    if not hexchars:
+        return None
+    try:
+        data = bytes.fromhex(''.join(hexchars))
+    except ValueError:
+        return None
+    if len(data) < 1:
+        return None
+    ver = data[0] >> 4
+    if ver == 4:
+        if len(data) < 20:
+            return None
+        ihl = (data[0] & 0x0F) * 4
+        if ihl < 20 or data[9] != 17 or len(data) < ihl + 8:  # proto 17 = UDP
+            return None
+        udp_off = ihl
+    elif ver == 6:
+        if len(data) < 48 or data[6] != 17:  # next-header 17 = UDP (no ext hdrs)
+            return None
+        udp_off = 40
+    else:
+        return None
+    return data[udp_off + 8:]  # skip the 8-byte UDP header
 
 
 def _parse_ntp_capture(output):
@@ -6055,8 +6167,28 @@ def _parse_ntp_capture(output):
         rec = {'rx_epoch': rx_epoch, 'src': sm.group(1), 'sport': int(sm.group(2)),
                'dst': sm.group(3), 'dport': int(sm.group(4)),
                'ver': int(sm.group(5)), 'mode': sm.group(6).strip(),
+               'ntp_len': int(sm.group(7)),
                'stratum': None, 'sdesc': '', 'refid': '', 'disp': 0.0,
-               'leap': None, 'xmit_unix': None, 'offset': None}
+               'leap': None, 'xmit_unix': None, 'offset': None,
+               'autokey': False, 'autokey_info': None, 'autokey_reasons': []}
+
+        # Autokey / extension-field inspection. Prefer the exact wire bytes from the
+        # -x hex dump (lets us catch a malformed EF = the CVE-2014-9295 exploit
+        # signature); fall back to the tcpdump-reported length so EF *presence* is
+        # still surfaced even when the hex was truncated by the capture snaplen.
+        payload = _ntp_payload_from_block(block)
+        if payload is not None:
+            present, info, ak_reasons = _parse_autokey_ef(payload)
+            rec['autokey'] = present
+            rec['autokey_info'] = info
+            rec['autokey_reasons'] = ak_reasons
+        elif rec['ntp_len'] is not None:
+            trailer = rec['ntp_len'] - _NTP_HEADER_LEN
+            if trailer > 0 and trailer not in _NTP_MAC_SIZES:
+                rec['autokey'] = True
+                if trailer < _NTP_EF_MIN_LEN:
+                    rec['autokey_reasons'] = ['ef_region_undersized']
+                    rec['autokey_info'] = {'ef_len': None, 'region': trailer}
 
         st = re.search(r'Stratum\s+(\d+)\s*\(([^)]*)\)', text)
         if st:
@@ -6183,8 +6315,8 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
         known = dict(baseline['servers'])
         had_baseline = True
 
-    PRIORITY = ['time-injection', 'rogue-server', 'kod', 'stratum-spoof',
-                'broadcast', 'recon', 'anomaly', 'clean']
+    PRIORITY = ['autokey-exploit', 'time-injection', 'rogue-server', 'kod',
+                'stratum-spoof', 'broadcast', 'recon', 'autokey', 'anomaly', 'clean']
     verdict = 'clean'
     reasons = []
 
@@ -6282,6 +6414,29 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
             f"— reconnaissance or amplification abuse; disable 'monitor' and restrict "
             f"mode 6/7")
 
+    # --- autokey: RFC 5906 Autokey extension field (CVE-2014-9295 surface) ---
+    # Fires on ANY NTP packet (server replies AND inbound client/peer packets),
+    # because the crypto_recv() overflow is delivered *to* the victim ntpd. A
+    # malformed EF is the exploit signature and escalates to autokey-exploit.
+    ak_seen = [r for r in records if r.get('autokey')]
+    ak_bad = [r for r in ak_seen if r.get('autokey_reasons')]
+    if ak_bad:
+        for r in ak_bad[:6]:
+            bump('autokey-exploit')
+            why = ', '.join(r['autokey_reasons'])
+            reasons.append(
+                f"Malformed Autokey extension field from {r['src']} ({why}) — the "
+                f"ntpd crypto_recv() stack-overflow signature (CVE-2014-9295 / "
+                f"CVE-2014-9750): remote code execution as the ntpd user")
+    if ak_seen and not ak_bad:
+        srcs = sorted({r['src'] for r in ak_seen})
+        bump('autokey')
+        reasons.append(
+            f"NTP Autokey (RFC 5906) extension field on the wire from "
+            f"{', '.join(srcs[:8])} — Autokey is deprecated and is the attack "
+            f"surface for CVE-2014-9295 and its siblings; disable it and use NTS "
+            f"or symmetric keys")
+
     # --- anomaly: unusable / forged time source ---
     for src in sorted(servers):
         s = servers[src]
@@ -6302,12 +6457,17 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
                 f"loop / forged sync chain")
 
     advisories = []
-    if servers or control_recs:
+    if servers or control_recs or ak_seen:
         advisories.append(
             "Pin clients to known NTP servers (prefer authenticated NTS or symmetric "
             "keys), restrict inbound/outbound UDP 123 to expected hosts, and disable "
             "mode 6/7 (monlist) on servers. On precision-critical segments "
             "(lab/medical/finance/industrial) alert on any new time source or skew.")
+    if ak_seen:
+        advisories.append(
+            "Autokey (RFC 5906) is deprecated and carries the CVE-2014-9295 "
+            "crypto_recv() RCE surface. Disable Autokey on ntpd, upgrade to ntp "
+            ">= 4.2.8, and migrate authentication to NTS (RFC 8915) or symmetric keys.")
 
     def _pub(s):
         off = offsets_by_server.get(s['src'])
@@ -6319,7 +6479,7 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
 
     if reasons:
         summary = reasons
-    elif not (servers or control_recs):
+    elif not (servers or control_recs or ak_seen):
         summary = ['No NTP traffic seen — segment quiet on UDP/123']
     else:
         summary = ['All time sources match the trusted baseline and agree on time']
@@ -6333,6 +6493,8 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
         'packet_count': len(records),
         'client_count': len(client_recs),
         'control_count': len(control_recs),
+        'autokey_count': len(ak_seen),
+        'autokey_malformed': len(ak_bad),
         'rate': round(len(records) / seconds, 2),
         'servers': [_pub(servers[s]) for s in sorted(servers)],
         'advisories': advisories,
@@ -6345,7 +6507,8 @@ def _ntp_capture(interface, seconds):
     if not _have('tcpdump'):
         return '', 'tcpdump is not installed. Click Install to add it.'
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-tt', '-v', '-s', '512', '-c', '20000', 'udp port 123'],
+                '-nn', '-tt', '-v', '-x', '-s', '512', '-c', '20000',
+                'udp port 123'],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -6481,10 +6644,37 @@ def _ntp_selftest():
     scenarios.append({'name': 'ntp-parse', 'expect': 'stratum2+refid+offset~0',
                       'got': str(pr[0] if pr else None)[:90], 'pass': p_ok})
 
+    # --- Autokey extension-field detector (byte-level, deterministic, no deps) ---
+    def _ak_ef(ef_len, vallen, total=28):
+        """Craft an NTP payload: 48-octet header + one extension field."""
+        ef = bytearray(total)
+        struct.pack_into('!H', ef, 0, 0x0002)          # ef_type: CERT opcode
+        struct.pack_into('!H', ef, _NTP_EF_OFF_LEN, ef_len)
+        struct.pack_into('!I', ef, _NTP_EF_OFF_VALLEN, vallen)
+        return bytes(48) + bytes(ef)
+
+    def ak_case(name, payload, expect_present, expect_bad):
+        present, _info, why = _parse_autokey_ef(payload)
+        ok = (present == expect_present) and (bool(why) == expect_bad)
+        scenarios.append({'name': name, 'expect': f'present={expect_present},bad={expect_bad}',
+                          'got': f'present={present},reasons={why}', 'pass': ok})
+
+    # Well-formed 28-octet Autokey EF (value fits) -> present, not malformed.
+    ak_case('ntp-autokey-wellformed', _ak_ef(28, 8), True, False)
+    # value_length_overflow -> present AND malformed (the CVE-2014-9295 signature).
+    ak_case('ntp-autokey-vallen-overflow', _ak_ef(28, 9999), True, True)
+    # ef_len runs past the packet -> malformed.
+    ak_case('ntp-autokey-eflen-overrun', _ak_ef(400, 8), True, True)
+    # Plain 20-octet MD5 MAC -> NOT Autokey (must not false-positive keyed NTP).
+    ak_case('ntp-autokey-mac-md5', bytes(48) + bytes(20), False, False)
+    # Bare 48-octet packet -> nothing trailing.
+    ak_case('ntp-autokey-none', bytes(48), False, False)
+    # Region too big for a MAC but too small for a valid EF -> broken EF.
+    ak_case('ntp-autokey-undersized', bytes(48) + bytes(12), True, True)
+
     # Optional Scapy end-to-end: craft a real NTP reply -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
-        import struct
         import tempfile
         import time as _time
         from scapy.all import Ether, IP, UDP, Raw, wrpcap
@@ -6495,22 +6685,40 @@ def _ntp_selftest():
             def _ts(u):
                 s = int(u)
                 return struct.pack('!II', s, int((u - s) * (1 << 32)))
-            payload = (struct.pack('!BBBb', 0x24, 2, 10, -23)  # LI0 VN4 Mode4, str2
-                       + struct.pack('!ii', 0, 1310)           # root delay/disp
-                       + bytes((17, 253, 14, 125))             # refid
-                       + _ts(ntp - 3) + _ts(ntp - 1) + _ts(ntp) + _ts(ntp))
-            pkt = (Ether() / IP(src='192.0.2.123', dst='192.0.2.9')
-                   / UDP(sport=123, dport=123) / Raw(payload))
+            header = (struct.pack('!BBBb', 0x24, 2, 10, -23)  # LI0 VN4 Mode4, str2
+                      + struct.pack('!ii', 0, 1310)           # root delay/disp
+                      + bytes((17, 253, 14, 125))             # refid
+                      + _ts(ntp - 3) + _ts(ntp - 1) + _ts(ntp) + _ts(ntp))
+            # A crafted client packet carrying a malformed Autokey EF (the
+            # CVE-2014-9295 crypto_recv() overflow shape: value length past the EF).
+            bad_ef = bytearray(28)
+            struct.pack_into('!H', bad_ef, 0, 0x0002)
+            struct.pack_into('!H', bad_ef, _NTP_EF_OFF_LEN, 28)
+            struct.pack_into('!I', bad_ef, _NTP_EF_OFF_VALLEN, 0xFFFF)
+            ak_header = struct.pack('!BBBb', 0x1B, 4, 10, -23) + header[4:]  # Mode3 client
+            pkts = [
+                (Ether() / IP(src='192.0.2.123', dst='192.0.2.9')
+                 / UDP(sport=123, dport=123) / Raw(header)),
+                (Ether() / IP(src='192.0.2.66', dst='192.0.2.9')
+                 / UDP(sport=40000, dport=123) / Raw(ak_header + bytes(bad_ef))),
+            ]
             with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
                 pcap_path = tf.name
-            wrpcap(pcap_path, [pkt])
-            res = _run(['tcpdump', '-nn', '-tt', '-v', '-r', pcap_path], timeout=10)
+            wrpcap(pcap_path, pkts)
+            res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path],
+                       timeout=10)
             recs = _parse_ntp_capture(res['out'])
             srv = [r for r in recs if r['src'] == '192.0.2.123']
-            ok = bool(srv) and srv[0]['stratum'] == 2 and srv[0]['offset'] is not None
+            akr = [r for r in recs if r['src'] == '192.0.2.66']
+            verdict = _ntp_analyze(recs, 15, {}, learn=False)['verdict']
+            ok = (bool(srv) and srv[0]['stratum'] == 2 and srv[0]['offset'] is not None
+                  and bool(akr) and akr[0]['autokey'] and akr[0]['autokey_reasons']
+                  and verdict == 'autokey-exploit')
             scapy_result = {'ran': True, 'servers': [r['src'] for r in recs],
                             'stratum': srv[0]['stratum'] if srv else None,
-                            'offset': srv[0]['offset'] if srv else None, 'pass': ok,
+                            'offset': srv[0]['offset'] if srv else None,
+                            'autokey_reasons': akr[0]['autokey_reasons'] if akr else None,
+                            'verdict': verdict, 'pass': ok,
                             'tcpdump_out': res['out'].strip()[:200]}
             try:
                 os.remove(pcap_path)
