@@ -161,6 +161,20 @@ you can retune live with `systemctl edit`/`daemon-reload`.
 > drift toward the right region, not pinpoint you. Precise localization would need true
 > multistatic RTI, which single-link CSI can't provide.
 
+**In-view Observatory controls (keyboard):**
+
+| Key | Action |
+|---|---|
+| `1`–`9` | Record a **fingerprint** on a 3×3 floor grid, numpad-style — `1/2/3` = near wall (node 1 / center / node 3), `4/5/6` = middle row, `7/8/9` = far wall (`8` = node 2). Stand on the cell and move a little for ~6 s. With ≥2 points the blob switches from the centroid to per-room fingerprint matching (k-NN on the live motion pattern; the learned mapping beats the centroid for rooms where the busiest link isn't the nearest node — the more cells you record, the sharper it gets). |
+| `X` | Clear fingerprints (back to the activity centroid). |
+| `H` | Hide / show the pose skeletons (the mist blob + field stay). |
+
+Fingerprints are stored **server-side** on Ragnar (via `/api/config`, key
+`rusense_observatory_fingerprints`), so a calibration done on one machine is shared with
+every browser; localStorage is only an offline cache seeded from the server at load. The
+live feed can carry phantom tracker duplicates near center; the Observatory collapses them
+to a single blob at the best position estimate.
+
 ---
 
 ## Using it from the web UI

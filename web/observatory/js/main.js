@@ -17,6 +17,7 @@ import { PostProcessing } from './post-processing.js';
 import { FigurePool, SKELETON_PAIRS } from './figure-pool.js';
 import { PoseSystem } from './pose-system.js';
 import { ScenarioProps } from './scenario-props.js';
+import { Fingerprinter } from './fingerprint.js';
 import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES, seedObsFromServerConfig } from './hud-controller.js?v=20260815-fsbtn';
 
 // ---- Palette ----
@@ -117,6 +118,23 @@ class Observatory {
     this._poseSystem = new PoseSystem();
     this._figurePool = new FigurePool(this._scene, this.settings, this._poseSystem);
     this._scenarioProps = new ScenarioProps(this._scene);
+    // Fingerprint positioning: learns per-spot motion signatures for THIS room.
+    // Calibration reference points (scene coords, matching the server node geometry).
+    this._fp = new Fingerprinter();
+    // Up to 9 calibration points laid out numpad-style on the floor (stand on the
+    // cell, press the matching number). Rows: 1-2-3 = near wall (node1/node3),
+    // 4-5-6 = middle, 7-8-9 = far wall (node2). Columns: left / center / right.
+    this._fpPoints = {
+      '1': { pos: [-4, 0, -3.5], name: 'front-left (node 1)' },
+      '2': { pos: [0, 0, -3.5], name: 'front-center' },
+      '3': { pos: [4, 0, -3.5], name: 'front-right (node 3)' },
+      '4': { pos: [-4, 0, 0], name: 'mid-left' },
+      '5': { pos: [0, 0, 0], name: 'center' },
+      '6': { pos: [4, 0, 0], name: 'mid-right' },
+      '7': { pos: [-4, 0, 3.5], name: 'back-left' },
+      '8': { pos: [0, 0, 3.5], name: 'back-center (node 2)' },
+      '9': { pos: [4, 0, 3.5], name: 'back-right' },
+    };
     this._buildDotMatrixMist();
     this._buildParticleTrail();
     this._buildWifiWaves();
@@ -584,12 +602,57 @@ class Observatory {
           document.getElementById('fps-counter').style.display = this._showFps ? 'block' : 'none';
           break;
         case 's': this._hud.toggleSettings(); break;
+        case 'h':
+          // Hide/show the pose skeletons (the mist blob + field stay). The
+          // synthetic COCO skeletons are the twitchy part; hiding them leaves
+          // the calmer activity blob.
+          this._showFigures = this._showFigures === false;
+          if (!this._showFigures) this._figurePool.hideAll();
+          break;
+        case '1': case '2': case '3':
+        case '4': case '5': case '6':
+        case '7': case '8': case '9':
+          // Calibrate a fingerprint: stand on the numpad cell and press the key.
+          this._recordFingerprint(e.key);
+          break;
+        case 'x':
+          this._fp.clear();
+          this._fpFlash('Fingerprints cleared — blob back to activity centroid.');
+          break;
         case ' ':
           e.preventDefault();
           this._demoData.paused = !this._demoData.paused;
           break;
       }
     });
+  }
+
+  // ---- Fingerprint calibration ----
+
+  _recordFingerprint(key) {
+    const ref = this._fpPoints[key];
+    if (!ref || this._fp.recording) return;
+    const secs = 6;
+    this._fp.startRecording(ref.pos);
+    this._fpFlash(`Recording fingerprint at ${ref.name} — stand there and move a little (${secs}s)…`);
+    setTimeout(() => {
+      const res = this._fp.finishRecording();
+      if (res) {
+        this._fpFlash(`Saved ${ref.name} (${res.samples} samples) · ${this._fp.count} point(s) calibrated`);
+      } else {
+        this._fpFlash(`Not enough motion for ${ref.name} — retry while moving at the spot.`);
+      }
+    }, secs * 1000);
+  }
+
+  _fpFlash(msg) {
+    const el = document.getElementById('scenario-description');
+    if (el) {
+      el.textContent = msg;
+      clearTimeout(this._fpFlashTimer);
+      this._fpFlashTimer = setTimeout(() => { el.textContent = ''; }, 4500);
+    }
+    console.log('[Observatory/fingerprint]', msg);
   }
 
   // ---- Settings / HUD methods delegated to HudController ----
@@ -779,12 +842,30 @@ class Observatory {
       ? new Set(data.nodes.map(n => n.node_id))
       : null;
 
+    // Fingerprint positioning: feed the live per-node signature, and once the
+    // room is calibrated (>=2 fingerprints) override the primary person's
+    // position with the learned k-NN estimate. Live data + present only.
+    if (hasLive) {
+      this._fp.feed(data.node_features || []);
+      if (data.persons && data.persons.length &&
+          data.classification && data.classification.presence) {
+        // The live feed often carries several phantom tracker duplicates parked
+        // near centre — they read as a permanent "centre blob". Collapse to ONE
+        // blob at the best position estimate: fingerprint match if the room is
+        // calibrated (>=2 points), else the server's activity centroid.
+        const loc = (this._fp.count >= 2 ? this._fp.locate() : null) || data.persons[0].position;
+        const p0 = Object.assign({}, data.persons[0], { position: loc });
+        data = Object.assign({}, data, { persons: [p0], estimated_persons: 1 });
+      }
+    }
+
     // Updates (guarded: a single updater throwing on an unexpected live-data
     // shape must not abort the frame — otherwise controls/render below are
     // skipped and the page freezes).
     try {
       this._nebula.update(dt, elapsed);
-      this._figurePool.update(data, elapsed);
+      if (this._showFigures === false) this._figurePool.hideAll();
+      else this._figurePool.update(data, elapsed);
       this._scenarioProps.update(data, this._demoData.currentScenario);
       this._updateDotMatrixMist(data, elapsed);
       this._updateParticleTrail(data, dt, elapsed);
@@ -1009,9 +1090,13 @@ class Observatory {
 // localStorage. Falls back to the localStorage seed in the constructor if the
 // config endpoint is unreachable.
 (async () => {
+  let cfg = null;
   try {
     const res = await fetch('/api/config');
-    if (res.ok) seedObsFromServerConfig(await res.json());
+    if (res.ok) { cfg = await res.json(); seedObsFromServerConfig(cfg); }
   } catch { /* offline — constructor's localStorage seed still applies */ }
-  new Observatory();
+  const obs = new Observatory();
+  // Seed fingerprints from the shared server config so calibration is available
+  // on every browser (localStorage is only an offline cache).
+  if (cfg) { try { obs._fp.seedFromServer(cfg); } catch { /* non-fatal */ } }
 })();
