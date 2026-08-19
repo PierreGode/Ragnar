@@ -190,7 +190,7 @@ export default {
               </div>
 
               <div class="flex items-center gap-2">
-                <button id="cal-record" class="btn-primary flex-1 !py-2 text-sm">Record calibration (6s)</button>
+                <button id="cal-record" class="btn-primary flex-1 !py-2 text-sm">Record calibration (15s)</button>
                 <button id="cal-reset" class="btn-ghost !py-2 text-sm" title="Forget the learned quiet-floor baselines and start fresh">Reset baseline</button>
               </div>
               <p class="text-xs text-ink-muted leading-snug">
@@ -517,14 +517,14 @@ export default {
       cal.open = false;
       if (cal.recTimer) { clearTimeout(cal.recTimer); cal.recTimer = null; }
       cal.rec = null;
-      const rb = $('#cal-record'); if (rb) { rb.disabled = false; rb.textContent = 'Record calibration (6s)'; }
+      const rb = $('#cal-record'); if (rb) { rb.disabled = false; rb.textContent = 'Record calibration (15s)'; }
       const m = $('#cal-modal'); if (m) m.style.display = 'none';
     };
 
     const recordCal = async (btn) => {
       if (cal.rec || cal.nodeId == null) return;
       cal.rec = { n: 0, motion: 0, act: 0, share: 0, rssi: 0, peakShare: 0 };
-      const SECS = 6, started = Date.now();
+      const SECS = 15, started = Date.now();
       btn.disabled = true;
       const tick = () => {
         if (!cal.rec) return;
@@ -535,7 +535,7 @@ export default {
       tick();
       await new Promise((r) => setTimeout(r, SECS * 1000));
       const rec = cal.rec; cal.rec = null;
-      btn.disabled = false; btn.textContent = 'Record calibration (6s)';
+      btn.disabled = false; btn.textContent = 'Record calibration (15s)';
       if (!rec || rec.n < 5) { toast('Not enough live frames — retry while moving near the node.', 'warn'); return; }
       const entry = {
         node_id: Number(cal.nodeId),
