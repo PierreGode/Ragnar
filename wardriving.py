@@ -939,17 +939,21 @@ class WardrivingSession:
 
     def get_networks(self, limit=500, offset=0, sort_by='best_rssi', order='DESC'):
         """Get paginated network list."""
-        allowed_sort = {'best_rssi', 'ssid', 'channel', 'first_seen', 'last_seen', 'scan_count', 'band'}
-        if sort_by not in allowed_sort:
-            sort_by = 'best_rssi'
-        if order.upper() not in ('ASC', 'DESC'):
-            order = 'DESC'
+        # Map user input to literal SQL fragments so the ORDER BY can never carry
+        # attacker-controlled text (sort_by/order are not parameterizable).
+        _SORT_COLS = {
+            'best_rssi': 'best_rssi', 'ssid': 'ssid', 'channel': 'channel',
+            'first_seen': 'first_seen', 'last_seen': 'last_seen',
+            'scan_count': 'scan_count', 'band': 'band',
+        }
+        sort_col = _SORT_COLS.get(sort_by, 'best_rssi')
+        order_sql = 'ASC' if str(order).upper() == 'ASC' else 'DESC'
         with self._lock:
             try:
                 with sqlite3.connect(self.db_path) as conn:
                     conn.row_factory = sqlite3.Row
                     rows = conn.execute(
-                        f"SELECT * FROM networks ORDER BY {sort_by} {order} LIMIT ? OFFSET ?",
+                        "SELECT * FROM networks ORDER BY " + sort_col + " " + order_sql + " LIMIT ? OFFSET ?",
                         (limit, offset)
                     ).fetchall()
                     return [dict(r) for r in rows]
