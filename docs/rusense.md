@@ -175,6 +175,32 @@ every browser; localStorage is only an offline cache seeded from the server at l
 live feed can carry phantom tracker duplicates near center; the Observatory collapses them
 to a single blob at the best position estimate.
 
+### Per-node proximity calibration (Nodes tab)
+
+The Observatory's `1`–`9` fingerprinting calibrates a whole room from fixed floor
+cells. The **Nodes** tab adds a simpler, per-node companion for the same idea: a
+**Calibrate** button on every node row. Press it, walk to that node, and **move
+around** — a large bar **fills and turns green** the closer you are.
+
+The proximity signal is the same one the Observatory localizer uses: each node's
+live `motion_band_power` measured against its **own slowly-learned quiet floor**
+(an asymmetric EMA that rises slowly and falls fast, so a node that always reads
+hot doesn't win by default). With **≥2 nodes streaming** the bar shows the selected
+node's **share** of total activity; with a single node it auto-scales that node's
+activity to its own running peak. A cyan tick marks the **best (peak) proximity**
+seen so you can find and hold the sweet spot.
+
+The panel also shows the **full live output** for the node — raw motion band power,
+the learned baseline, activity above floor, its share, peak proximity and RSSI —
+plus a mini bar per **other** node so you can watch this node win as you approach.
+**Record calibration** samples ~6 s and saves a reference snapshot server-side
+(`/api/config`, key `rusense_node_calibration`, keyed by `node_id`); **Reset
+baseline** forgets the learned quiet floors and relearns them.
+
+> **Honest limits.** WiFi CSI proximity is **near-field** — a moving body perturbs
+> every link, so the bar is sharpest right beside a node and fuzzier mid-room. It's
+> relative guidance for placement and sanity-checking, not survey-grade ranging.
+
 ---
 
 ## Using it from the web UI
@@ -189,7 +215,8 @@ Open Ragnar's dashboard at `http://<ragnar-ip>:8000` and use the RuSense tabs:
    signal-field heatmap for the monitored space.
 3. **Nodes** — provisioned CSI nodes appear here once they start streaming (confirm
    frames-per-second is climbing). Shows each node's custom name, status, RSSI,
-   motion and last-seen. Name your nodes in the Settings tab.
+   motion and last-seen. Name your nodes in the Settings tab. Each row has a
+   **Calibrate** button (see **Per-node proximity calibration** below).
 4. **Training** — the **Record → Train → Active** loop. Record CSI while you act out
    labelled scenarios (empty room, one person, two people, walking, sitting…), then
    train a lightweight on-device adaptive classifier tuned to *your* space. The same
