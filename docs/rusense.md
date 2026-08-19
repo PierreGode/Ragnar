@@ -138,6 +138,29 @@ idempotent — safe to re-run.
 > reached only through Ragnar's web proxy. If you expose it directly, set
 > `RUVIEW_API_TOKEN=<token>` to enforce bearer auth.
 
+### Observatory position tracking (multi-node)
+
+The Observatory's moving figure is a **coarse activity centroid**, not precise
+tracking. With **≥2 nodes** whose positions you've told the server, the blob drifts
+toward whichever node is currently flaring most *relative to its own baseline* (so a
+persistently-noisy node can't hog it, and a quiet node still registers when you
+approach). Configure it at install time:
+
+```bash
+SENSING_NODE_POSITIONS="x,y,z;x,y,z;x,y,z" sudo ./scripts/install_sensing.sh
+```
+
+Positions are in **metres**, ordered by **ascending node_id** (node 1 first), with the
+room centred on the origin. `SENSING_LOCALIZE_POWER` (default `2`) sharpens the pull
+toward a single node (higher = snappier but jumpier). Both are stored in a systemd
+drop-in (`ragnar-sensing.service.d/node-positions.conf`) that survives reinstalls, so
+you can retune live with `systemctl edit`/`daemon-reload`.
+
+> **Honest limit:** a moving person perturbs *every* WiFi link, so this is
+> proximity-by-activity, **not** calibrated (x, z) triangulation. Expect the blob to
+> drift toward the right region, not pinpoint you. Precise localization would need true
+> multistatic RTI, which single-link CSI can't provide.
+
 ---
 
 ## Using it from the web UI
