@@ -6,7 +6,7 @@ import { html, setQueryRoot } from './lib.js?v=20260704-sparkfit';
 import { sensingService } from '../services/sensing.service.js';
 import dashboard from './views/dashboard.js?v=20260704-sparkfit';
 import sensing from './views/sensing.js?v=20260704-sparkfit';
-import nodes from './views/nodes.js?v=20260801-pisync';
+import nodes from './views/nodes.js?v=20260819-nodecal';
 import training from './views/training.js?v=20260705-calpresets';
 import settings from './views/settings.js?v=20260704-disc';
 import about from './views/about.js?v=20260704-sparkfit';
