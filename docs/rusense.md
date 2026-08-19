@@ -193,9 +193,19 @@ seen so you can find and hold the sweet spot.
 The panel also shows the **full live output** for the node — raw motion band power,
 the learned baseline, activity above floor, its share, peak proximity and RSSI —
 plus a mini bar per **other** node so you can watch this node win as you approach.
-**Record calibration** samples ~15 s and saves a reference snapshot server-side
-(`/api/config`, key `rusense_node_calibration`, keyed by `node_id`); **Reset
-baseline** forgets the learned quiet floors and relearns them.
+**Record calibration** samples ~15 s (stand at the node and keep moving the whole
+time) and saves a reference snapshot server-side (`/api/config`, key
+`rusense_node_calibration`, keyed by `node_id`); **Reset baseline** forgets the
+learned quiet floors and relearns them.
+
+Each saved calibration carries a **quality %** — the fraction of the recording
+that was in the **green (close) zone** (proximity ≥ 60 %). A recording where you
+stood right at the node the whole time scores high; one where you drifted away
+scores low. The saved value is **permanent** in Ragnar's config until the next
+recording overwrites it, and the node's row shows a **✓ NN%** *Calibrated* badge
+(green ≥ 60 %, amber ≥ 30 %, red below) with its Calibrate button relabelled
+**Recalibrate**. The badge and the live green % during recording let you judge and
+redo a poor calibration.
 
 > **Honest limits.** WiFi CSI proximity is **near-field** — a moving body perturbs
 > every link, so the bar is sharpest right beside a node and fuzzier mid-room. It's
