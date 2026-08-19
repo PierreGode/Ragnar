@@ -193,7 +193,7 @@ seen so you can find and hold the sweet spot.
 The panel also shows the **full live output** for the node — raw motion band power,
 the learned baseline, activity above floor, its share, peak proximity and RSSI —
 plus a mini bar per **other** node so you can watch this node win as you approach.
-**Record calibration** samples ~6 s and saves a reference snapshot server-side
+**Record calibration** samples ~15 s and saves a reference snapshot server-side
 (`/api/config`, key `rusense_node_calibration`, keyed by `node_id`); **Reset
 baseline** forgets the learned quiet floors and relearns them.
 
