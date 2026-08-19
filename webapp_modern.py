@@ -1839,7 +1839,8 @@ def _ni_save_memory():
 _NI_CLEAN = {'clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a',
              'no-traffic', 'disabled', 'not-applicable',
              'randomization',       # mac: privacy-MAC inventory is benign, not an alert
-             'fhrp'}                # mac: HSRP/VRRP/GLBP virtual-MAC inventory is expected
+             'fhrp',                # mac: HSRP/VRRP/GLBP virtual-MAC inventory is expected
+             'observed'}            # guards: a vendor device seen, no CVE-relevant finding
 _NI_CRITICAL = {
     'hijacked', 'spoofed', 'rogue', 'starvation', 'compromised',        # dns/arp/dhcp
     'root-hijack', 'bpdu-flood',                                        # stp
@@ -1853,6 +1854,7 @@ _NI_CRITICAL = {
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
     'cdpwn',                                                            # cdp (Armis CDPwn CVE exploit shape)
     'autokey-exploit',                                                 # ntp (CVE-2014-9295 crypto_recv overflow signature)
+    'attack',                                                          # vendor guards: an exploitation primitive observed on the wire
 }
 
 
@@ -1936,6 +1938,9 @@ def _net_integrity_check_once():
         ('cert', 'Cert', lambda: watch(nd.do_cert_watch, discover=False)),
         ('tls', 'TLS', lambda: watch(nd.do_tls_watch, interface=cap_iface)),
         ('ldap', 'LDAP', lambda: watch(nd.do_ldap_watch, interface=cap_iface)),
+        ('cisco_guard', 'Cisco', lambda: watch(nd.do_cisco_guard, quick=True, interface=cap_iface)),
+        ('juniper_guard', 'Juniper', lambda: watch(nd.do_juniper_guard, quick=True, interface=cap_iface)),
+        ('arista_guard', 'Arista', lambda: watch(nd.do_arista_guard, quick=True, interface=cap_iface)),
     ]
 
     to_run = list(fast)

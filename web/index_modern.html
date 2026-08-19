@@ -2234,6 +2234,48 @@
                     </div>
                     <div id="bgp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
+                <!-- Cisco Switch & Router Guard -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">Cisco Guard <span class="text-xs font-normal text-gray-500">(IOS / IOS-XE / NX-OS · switch · router · edge)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive Cisco router/switch CVE guard — <strong>detection-only</strong>, never transmits, probes or authenticates. Reports three classes of evidence about a tracked CVE set: <strong>posture</strong> (a version/platform fingerprint screened against the catalog — a "verify THIS device" note, never a verdict), <strong>exposure</strong> (an enabling condition on the wire — cleartext SNMP, a default community, an HTTP UI or Telnet to infrastructure) and <strong>attack</strong> (an exploitation primitive in transit — the CVE-2025-20352 SNMP overflow shape, an oversized field, a VLAN tag-stack anomaly, or an NX-OS Telnet shell-escape / CVE-2024-20399). Firewalls (ASA/Firepower/FTD) are screened out of scope, not misclassified.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture over the Cisco management + attack surface (SNMP 161/162, Telnet 23, HTTP UIs 80/8080/8443, IKEv2 500/4500). SNMP is BER-parsed for the community, OID-arc depth and field sizes; no TCP reassembly, so a segmented HTTP/Telnet attack is best-effort (a hit is high-confidence, a miss inconclusive).</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="cisco-guard-iface" title="Interface for the capture — pick the LAN/uplink NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="cisco-guard-secs" type="number" min="5" max="40" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runCiscoGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Cisco</button>
+                    </div>
+                    <div id="cisco-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
+                <!-- Juniper Switch & Router Guard -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">Juniper Guard <span class="text-xs font-normal text-gray-500">(J-Web · SSR · Junos Space · Junos-Evolved)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive Juniper CVE guard — <strong>detection-only</strong>, never transmits. Fully dissects cleartext HTTP to <strong>J-Web</strong> and the Junos-Evolved <strong>On-Box Anomaly Detection API</strong>, and reads TLS ClientHello SNI. Flags the byte-exact <strong>CVE-2023-36844..36847</strong> J-Web attack shapes — <strong>PHPRC / LD_PRELOAD environment-variable injection</strong>, <strong>unauthenticated file upload</strong>, and the two correlated together as an <strong>RCE chain</strong> — plus the <strong>CVE-2026-21902</strong> anomaly-API RCE and Junos-Space stored-XSS injection attempts.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture over the Juniper web surface (HTTP 80/8080, anomaly API 8160, TLS 443/8443). No TCP reassembly, so a segmented request is best-effort; passive version extraction is a known dead end for this vendor, so version postures are not claimed.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="juniper-guard-iface" title="Interface for the capture — pick the LAN/uplink NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="juniper-guard-secs" type="number" min="5" max="40" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runJuniperGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Juniper</button>
+                    </div>
+                    <div id="juniper-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
+                <!-- Arista Switch & Router Guard -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">Arista Guard <span class="text-xs font-normal text-gray-500">(EOS · switch · router · edge · core)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive Arista EOS CVE guard — <strong>detection-only</strong>, never transmits. Reads the EOS version/platform from <strong>LLDP</strong>, parses <strong>RADIUS</strong> for the <strong>BlastRADIUS</strong> (CVE-2024-3596) conditions — cleartext, a missing Message-Authenticator, an unauthenticated response, or an oversized attribute (forgery shape) — screens <strong>SSH banners</strong> for the <strong>regreSSHion</strong> window (CVE-2024-6387/6409), and flags management listeners (gNMI/gNOI, CVX, VXLAN decap) and VLAN tag-stack CPU-punt anomalies. Non-EOS Arista products (CloudVision/VeloCloud/DANZ) are screened out of scope.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture (RADIUS 1812/1813/1645/1646, SSH 22, gNMI 6030/9339/50051, CVX 9979, VXLAN 4789/8472, LLDP). Thresholds are structural anomaly bounds set well above legitimate traffic, not published vendor constants.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="arista-guard-iface" title="Interface for the capture — pick the LAN/uplink NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="arista-guard-secs" type="number" min="5" max="40" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runAristaGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Arista</button>
+                    </div>
+                    <div id="arista-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
                 <!-- BGP Collector + Path Asymmetry (OWD) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">BGP Collector &amp; Path Asymmetry <span class="text-xs font-normal text-gray-500">(control-plane ↔ data-plane)</span></h3>
@@ -8080,7 +8122,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260818-kiosk-handheld"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260819-vendor-guards"></script>
 
 
 

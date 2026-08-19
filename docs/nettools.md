@@ -70,6 +70,9 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [OSPF Security Scanner](#ospf-security-scanner) | Switch & L2/L3 | `GET /api/net/ospf-watch`, `POST /api/net/ospf-baseline` |
 | [BGP Path Watch](#bgp-path-watch) | Switch & L2/L3 | `GET /api/net/bgp-watch`, `POST /api/net/bgp-baseline` |
 | [BGP Collector & Path Asymmetry](#bgp-collector--path-asymmetry-control-plane--data-plane) | Switch & L2/L3 | `GET/POST /api/net/bgp-collector`, `/api/net/owd-reflector`, `POST /api/net/path-asymmetry` |
+| [Cisco Guard](#cisco-guard) | Switch & L2/L3 | `GET /api/net/cisco-guard` |
+| [Juniper Guard](#juniper-guard) | Switch & L2/L3 | `GET /api/net/juniper-guard` |
+| [Arista Guard](#arista-guard) | Switch & L2/L3 | `GET /api/net/arista-guard` |
 | [Locate Port](#locate-port) | Switch & L2/L3 | `POST /api/net/locate-port` |
 | [PCAP Analyzer](#pcap-analyzer) | Switch & L2/L3 | `POST /api/net/pcap` |
 | [Interfaces](#interface-list) | Interfaces | `GET /api/net/interfaces` |
@@ -500,7 +503,8 @@ check, the [DHCP Guardian](#dhcp-guardian) rogue-server check, and the instant
 **Extended monitoring** (on by default alongside the monitor) additionally
 **rotates the whole passive-scanner suite** through the background poller —
 STP · DTP · CDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP · IS-IS · BGP · SMB ·
-Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP. Because each of those
+Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · Cisco/Juniper/Arista Guards.
+Because each of those
 does a short `tcpdump` capture, they're run a **round-robin batch at a time**
 (default 3 per cycle, configurable) so a cycle stays ~1 minute; a full sweep
 completes over several cycles, and each scanner self-noops cheaply when its
@@ -1929,6 +1933,74 @@ change — the asymmetry is below BGP, e.g. a congested or re-routed transit leg
 - CLI: `python3 path_asymmetry.py reflector [port]` runs a standalone reflector;
   `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()`, aggregated into
   the Detector Self-Test panel (`GET /api/net/routing-selftest`).
+
+### Vendor CVE Guards (Cisco · Juniper · Arista)
+
+Three passive, **detection-only** vendor guards watch a network segment and report
+**three classes** of evidence about a tracked set of router/switch CVEs — never
+transmitting, probing, or authenticating:
+
+- **Posture** — a version/platform fingerprint screened against the CVE catalog.
+  Always a *"verify THIS device"* note, never a vulnerable/not-vulnerable verdict:
+  a banner can be stale or spoofed, and a train absent from an advisory is *inferred
+  from silence, not confirmed patched*.
+- **Exposure** — the enabling condition for a CVE is visibly present on the wire
+  (cleartext SNMP, a default community, an HTTP UI or Telnet to infrastructure, a
+  reachable management listener). Actionable **without** knowing the version.
+- **Attack** — an exploitation primitive observed in transit.
+
+Findings roll up to one verdict per scan: **clean** < **observed** (a vendor device
+seen, no CVE-relevant finding) < **posture** < **exposure** < **attack**. `observed`
+and `clean` rank benign in the Network Integrity Monitor; **attack** ranks critical.
+Each guard captures one short passive `tcpdump` window (`-x`, so the L4 payload bytes
+are reconstructed from the hex dump for byte-level checks). There is **no TCP
+reassembly**, so a segmented HTTP/Telnet attack is best-effort — a hit is
+high-confidence, a miss inconclusive — and thresholds are **structural anomaly
+bounds** set well above legitimate traffic, not published vendor constants. Every
+guard exposes a `selftest()` (synthetic records + a Scapy pcap→`tcpdump`→parse
+end-to-end leg) aggregated into the Detector Self-Test panel.
+
+#### Cisco Guard
+Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
+(ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
+Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
+(500/4500). Detects, among others: **`CG-101` cleartext SNMP** and **`CG-102`
+default community** (the credential half of the actively-exploited **CVE-2025-20352**
+SNMP overflow); **`CG-201`/`CG-202`** the SNMP **OID-arc-flood / oversized-field**
+overflow shape (BER-parsed); **`CG-103`** HTTP web-UI cleartext; **`CG-104`** Telnet
+to infrastructure and **`CG-270`** an NX-OS Telnet **shell-escape** (the in-the-wild
+**CVE-2024-20399** Velvet-Ant shape); **`CG-220`** a VLAN tag-stack anomaly
+(**CVE-2024-20434** Catalyst-9000 DoS); plus IOS-XE / NX-OS version-in-range postures.
+- Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
+
+#### Juniper Guard
+Juniper J-Web (SRX/EX), Session Smart Router, Junos Space and Junos-Evolved. Fully
+dissects cleartext HTTP to **J-Web** (80/8080) and the Junos-Evolved **On-Box Anomaly
+Detection API** (8160), and reads the TLS ClientHello **SNI** (443/8443). Detects the
+byte-exact **CVE-2023-36844..36847** J-Web attack shapes — **`JNPR-011` PHPRC** and
+**`JNPR-012` LD_PRELOAD** environment-variable injection, **`JNPR-010`**
+unauthenticated file upload, and **`JNPR-014`** the two correlated from one source as
+an **RCE chain** — plus **`JNPR-050`/`JNPR-051`** the **CVE-2026-21902** anomaly-API
+RCE and **`JNPR-030`** Junos-Space stored-XSS (**CVE-2025-59978**) injection attempts.
+Passive version extraction is a known dead end for this vendor, so version postures
+are **not** claimed.
+- Endpoint: `GET /api/net/juniper-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py juniper-guard [--iface I] [--seconds N] [--json]`
+
+#### Arista Guard
+Arista **EOS** switches, routers and edge/core devices. Non-EOS Arista products
+(CloudVision / VeloCloud / DANZ / Awake) are **screened out of scope** (`AG-009`).
+Reads the EOS version/platform from **LLDP** (`AG-001`/`AG-005`), parses **RADIUS**
+(1812/1813/1645/1646) for the **BlastRADIUS** (**CVE-2024-3596**) conditions —
+**`AG-101`** cleartext, **`AG-102`** a missing Message-Authenticator, **`AG-202`** an
+unauthenticated response, and **`AG-201`** an oversized attribute (the forgery shape)
+— screens **SSH banners** (22) for the **regreSSHion** window (**`AG-104`**,
+CVE-2024-6387/6409), and flags management listeners **`AG-103`** gNMI/gNOI
+(6030/9339/50051), **`AG-108`** CVX (9979), **`AG-106`** VXLAN decap (4789/8472), plus
+**`AG-205`** a VLAN tag-stack CPU-punt anomaly (**CVE-2024-5872**).
+- Endpoint: `GET /api/net/arista-guard` `{interface, seconds}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py arista-guard [--iface I] [--seconds N] [--json]`
 
 ### Locate Port
 Physically find **which switch port** the device is plugged into — the software

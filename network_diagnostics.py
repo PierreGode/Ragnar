@@ -14992,6 +14992,1065 @@ def _ldap_selftest():
             'scapy': {'ran': True, 'pass': r['success']}}
 
 
+# ==========================================================================
+# Vendor CVE Guards — passive Cisco / Juniper / Arista router+switch monitors
+# ==========================================================================
+# Ported from the standalone ciscoguard / juniperwatch / aristaguard modules into
+# the in-app tcpdump-based watch pattern. Each guard passively captures the
+# vendor's management/attack surface for a few seconds and reports three classes of
+# evidence about a tracked CVE set:
+#   * POSTURE  — a version/platform fingerprint screened against the CVE catalog.
+#                Always a "verify THIS device" note, never a vulnerable/not verdict.
+#   * EXPOSURE — the enabling condition for a CVE is visibly present on the wire
+#                (cleartext SNMP, default community, HTTP/Telnet to infrastructure,
+#                a reachable management listener). Actionable without the version.
+#   * ATTACK   — an exploitation primitive observed in transit.
+# Everything is detection-only: the guards never transmit, probe or authenticate.
+# Findings roll up to one verdict per scan: clean < observed < posture < exposure
+# < attack. 'observed' (a vendor device seen, no CVE-relevant finding) and 'clean'
+# rank benign in the Network Integrity Monitor; 'attack' ranks critical.
+_GUARD_SEVERITY_RANK = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
+_GUARD_FLOW_RE = re.compile(
+    r'(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+):')
+_GUARD_PROTO_RE = re.compile(r'proto (\w+) \((\d+)\)')
+_GUARD_HEX_RE = _NTP_HEX_RE  # `\t0x0010:  4500 004c ...` — shared with NTP
+
+
+def _guard_ip_payload(block_lines):
+    """Reconstruct the L4 payload bytes from a tcpdump `-x`/`-X` hex-dump block.
+    tcpdump prints packet bytes from the IP header on (link layer stripped); we
+    reassemble the hex, walk the IPv4/IPv6 + TCP/UDP headers, and return
+    (ip_ver, proto_num, l4_payload_bytes) or (None, None, None)."""
+    hexchars = []
+    for ln in block_lines:
+        m = _GUARD_HEX_RE.match(ln)
+        if m:
+            hexchars.append(re.sub(r'[^0-9a-fA-F]', '', m.group(1)))
+    if not hexchars:
+        return (None, None, None)
+    try:
+        data = bytes.fromhex(''.join(hexchars))
+    except ValueError:
+        return (None, None, None)
+    if len(data) < 20:
+        return (None, None, None)
+    ver = data[0] >> 4
+    if ver == 4:
+        ihl = (data[0] & 0x0F) * 4
+        if ihl < 20 or len(data) < ihl:
+            return (None, None, None)
+        proto = data[9]
+        l4 = data[ihl:]
+    elif ver == 6:
+        if len(data) < 40:
+            return (None, None, None)
+        proto = data[6]
+        l4 = data[40:]
+    else:
+        return (None, None, None)
+    if proto == 6:      # TCP
+        if len(l4) < 20:
+            return (ver, proto, b'')
+        thl = ((l4[12] >> 4) & 0x0F) * 4
+        return (ver, proto, l4[thl:] if len(l4) >= thl else b'')
+    if proto == 17:     # UDP
+        return (ver, proto, l4[8:] if len(l4) >= 8 else b'')
+    return (ver, proto, l4)
+
+
+def _guard_packets(text):
+    """Parse `tcpdump -nn -tt -v -X <bpf>` output into per-packet records. Each
+    record: {ts, src, sport, dst, dport, proto, ipver, payload (L4 bytes),
+    dissect (block text), vlan_tags (outer-tag count)}."""
+    records = []
+    blocks, cur = [], []
+    for raw in text.splitlines():
+        if _NTP_HDR_RE.match(raw):
+            if cur:
+                blocks.append(cur)
+            cur = [raw]
+        elif cur:
+            cur.append(raw)
+    if cur:
+        blocks.append(cur)
+
+    for block in blocks:
+        head = _NTP_HDR_RE.match(block[0])
+        try:
+            ts = float(head.group(1))
+        except (TypeError, ValueError):
+            continue
+        btext = '\n'.join(block)
+        pm = _GUARD_PROTO_RE.search(btext)
+        proto = pm.group(1) if pm else ''
+        fm = _GUARD_FLOW_RE.search(btext)
+        rec = {'ts': ts, 'proto': proto, 'dissect': btext,
+               'src': None, 'sport': None, 'dst': None, 'dport': None,
+               'ipver': None, 'payload': b'',
+               'vlan_tags': len(re.findall(r'\bvlan\s+\d+', btext))}
+        if fm:
+            rec['src'], rec['sport'] = fm.group(1), int(fm.group(2))
+            rec['dst'], rec['dport'] = fm.group(3), int(fm.group(4))
+        ipver, protonum, payload = _guard_ip_payload(block)
+        rec['ipver'] = ipver
+        if payload is not None:
+            rec['payload'] = payload
+        records.append(rec)
+    return records
+
+
+def _guard_verdict(findings):
+    """Roll a finding list up to one verdict: clean < observed < posture <
+    exposure < attack."""
+    if not findings:
+        return 'clean'
+    klasses = {f['klass'] for f in findings}
+    if 'ATTACK' in klasses:
+        return 'attack'
+    if 'EXPOSURE' in klasses:
+        return 'exposure'
+    # POSTURE only: a version/platform that screens into a CVE range (>= MEDIUM) is
+    # a 'posture' note; a bare INFO device/platform sighting is just 'observed'.
+    if any(_GUARD_SEVERITY_RANK.get(f['severity'], 0) >= 2 for f in findings):
+        return 'posture'
+    return 'observed'
+
+
+def _guard_finish(module, iface, seconds, findings, records, catalog=None):
+    """Common guard result payload builder + events persistence hook value."""
+    findings = sorted(findings, key=lambda f: -_GUARD_SEVERITY_RANK.get(
+        f['severity'], 0))
+    verdict = _guard_verdict(findings)
+    counts = {}
+    for f in findings:
+        counts[f['klass']] = counts.get(f['klass'], 0) + 1
+    cves = sorted({c for f in findings for c in f.get('cves', [])})
+    return {
+        'success': True, 'module': module, 'interface': iface,
+        'seconds': seconds, 'verdict': verdict,
+        'packet_count': len(records),
+        'finding_count': len(findings),
+        'class_counts': counts,
+        'cves': cves,
+        'findings': findings,
+    }
+
+
+# --- Shared minimal SNMP BER walker (defensive; never raises) ----------------
+def _ber_len(buf, i):
+    """Read a BER length at buf[i]. Returns (length, next_index) or (None, i)."""
+    if i >= len(buf):
+        return (None, i)
+    b = buf[i]
+    i += 1
+    if b < 0x80:
+        return (b, i)
+    n = b & 0x7F
+    if n == 0 or i + n > len(buf):
+        return (None, i)
+    val = int.from_bytes(buf[i:i + n], 'big')
+    return (val, i + n)
+
+
+def _ber_oid_arcs(oid_bytes):
+    """Count encoded sub-identifiers in a BER OID value. (True arcs are this + 1,
+    because BER packs the first two arcs into one sub-identifier — the arc-flood
+    threshold is applied to this encoded count, matching the standalone.)"""
+    n = 0
+    for b in oid_bytes:
+        if not (b & 0x80):
+            n += 1
+    return n
+
+
+def _snmp_ber_parse(payload):
+    """Extract SNMP facts from a raw UDP payload without pyasn1. Returns a dict:
+    {version (0=v1,1=v2c,3=v3), community, max_oid_arcs, max_field_len,
+    varbind_count} or None if it is not a plausible SNMP message. Defensive: any
+    structural break returns what was parsed so far."""
+    try:
+        if len(payload) < 2 or payload[0] != 0x30:  # outer SEQUENCE
+            return None
+        total, i = _ber_len(payload, 1)
+        if total is None:
+            return None
+        out = {'version': None, 'community': None, 'max_oid_arcs': 0,
+               'max_field_len': 0, 'varbind_count': 0}
+        # version INTEGER
+        if i >= len(payload) or payload[i] != 0x02:
+            return None
+        vlen, j = _ber_len(payload, i + 1)
+        if vlen is None or j + vlen > len(payload):
+            return None
+        out['version'] = int.from_bytes(payload[j:j + vlen], 'big') if vlen else 0
+        i = j + vlen
+        if out['version'] == 3:
+            # v3 header shape differs; we only need to know it IS v3 (encrypted-ish).
+            return out
+        # community OCTET STRING
+        if i < len(payload) and payload[i] == 0x04:
+            clen, j = _ber_len(payload, i + 1)
+            if clen is not None and j + clen <= len(payload):
+                out['community'] = payload[j:j + clen]
+                out['max_field_len'] = max(out['max_field_len'], clen)
+                i = j + clen
+        # Walk the rest of the buffer for OID (0x06) and long values, counting the
+        # deepest OID and the largest field — enough for the arc-flood / oversized
+        # attack heuristics without a full PDU state machine.
+        k = i
+        while k < len(payload):
+            tag = payload[k]
+            ln, m = _ber_len(payload, k + 1)
+            if ln is None or m + ln > len(payload) + 0:
+                break
+            if tag == 0x06:  # OID
+                out['max_oid_arcs'] = max(out['max_oid_arcs'],
+                                          _ber_oid_arcs(payload[m:m + ln]))
+            if tag == 0x04:  # OCTET STRING value
+                out['max_field_len'] = max(out['max_field_len'], ln)
+            if tag == 0x30 and 0xA0 <= (payload[m] if m < len(payload) else 0):
+                pass
+            # Descend into SEQUENCE / context PDUs; step over primitives.
+            if tag in (0x30, 0x31) or 0xA0 <= tag <= 0xBF:
+                k = m  # descend
+            else:
+                if tag in (0x30, 0x31):
+                    out['varbind_count'] += 1
+                k = m + ln
+        # Count varbinds: the varbind-list is a SEQUENCE of SEQUENCEs; approximate
+        # by counting 0x30 tags after the PDU header.
+        out['varbind_count'] = payload.count(0x30)
+        return out
+    except Exception:
+        return None
+
+
+_CISCO_DEFAULT_COMMUNITIES = frozenset((
+    b'admin', b'cisco', b'community', b'default', b'manager', b'monitor',
+    b'private', b'public', b'read', b'secret', b'snmp', b'write'))
+# CG-201/202 structural anomaly bounds (well above any real NMS; see README).
+_CISCO_SNMP_MAX_OID_ARCS = 128
+_CISCO_SNMP_MAX_FIELD_LEN = 8192
+_CISCO_SNMP_MAX_COMMUNITY = 64
+_CISCO_MAX_VLAN_TAGS = 2
+# Out-of-scope Cisco security appliances (screened out, not misclassified).
+_CISCO_OUT_OF_SCOPE_RE = re.compile(
+    r'\b(ASA|Firepower|FTD|FMC|FXOS|Secure Firewall|Adaptive Security)\b', re.I)
+_CISCO_IOSXE_VER_RE = re.compile(r'(?:IOS[- ]XE|IOS Software).{0,40}?'
+                                 r'Version\s+(\d+\.\d+(?:\.\d+)?[a-z]?)', re.I)
+_CISCO_NXOS_VER_RE = re.compile(r'NX-OS.{0,40}?[Vv]ersion\s+(\d+\.\d+\([^)]+\))', re.I)
+# Telnet CLI shell-escape / command-injection metacharacters (CVE-2024-20399 shape).
+_CISCO_SHELL_ESCAPE_RE = re.compile(rb'[;`|]|\$\(|&&|\|\||>\s*/|run\s+bash|feature\s')
+
+_CISCO_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 'data', 'cisco_guard.json')
+_cisco_guard_lock = threading.Lock()
+_GUARD_EVENTS_CAP = 200
+
+
+def _guard_events_load(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _guard_events_save(path, d):
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(d, f, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _guard_record_event(path, lock, result):
+    if result.get('verdict') in ('clean', 'observed'):
+        return
+    with lock:
+        d = _guard_events_load(path)
+        evs = d.get('events') or []
+        evs.append({'ts': int(time.time()), 'verdict': result['verdict'],
+                    'cves': result.get('cves', [])[:8],
+                    'codes': sorted({f['code'] for f in result.get('findings', [])})[:12]})
+        d['events'] = evs[-_GUARD_EVENTS_CAP:]
+        _guard_events_save(path, d)
+
+
+def _cisco_screen_version(iosxe=None, nxos=None):
+    """Return the list of CVEs whose fixed release the observed train sits below.
+    Conservative: a train we don't have a table for is reported as unscreenable
+    rather than clean (the caller decides how to surface that)."""
+    hits = []
+    # IOS XE trains carrying the tracked SNMP / CWE-family CVEs (advisory-sourced,
+    # screened as < fixed). Kept compact: the point is "verify THIS device", so a
+    # coarse major.minor band below the fixed release is the trigger.
+    if iosxe:
+        try:
+            maj = tuple(int(x) for x in re.split(r'[.\s]', iosxe)[:2])
+        except (ValueError, IndexError):
+            maj = None
+        if maj and maj < (17, 15):   # SNMP CVE-2025-20352 fixed in 17.15.x line
+            hits.append('CVE-2025-20352')
+    if nxos:
+        hits.append('CVE-2025-20241')  # tracked NX-OS trains — verify on box
+    return hits
+
+
+def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
+    """Passive Cisco router/switch/edge CVE guard (detection-only). Captures the
+    Cisco management + attack surface (SNMP, Telnet, HTTP UIs, IKEv2) for a few
+    seconds and reports POSTURE / EXPOSURE / ATTACK findings against a tracked CVE
+    set. Ported from the standalone ciscoguard. Never transmits."""
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return {'success': False, 'error': 'no interface to capture on'}
+    if iface not in _list_iface_names(include_virtual=True):
+        return {'success': False, 'error': f'unknown interface: {iface}'}
+    seconds = _clamp_int(seconds, 20, 5, 40)
+    bpf = ('udp port 161 or udp port 162 or tcp port 23 or tcp port 80 or '
+           'tcp port 8080 or tcp port 8443 or udp port 500 or udp port 4500')
+    if not _have('tcpdump'):
+        return {'success': False, 'interface': iface,
+                'error': 'tcpdump is not installed. Click Install to add it.',
+                'missing_tool': 'tcpdump'}
+    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-tt',
+                '-v', '-x', '-s', '1600', '-c', '20000', bpf],
+               timeout=seconds + 8)
+    out = res['out']
+    if not out and res['err'] and any(k in res['err'].lower() for k in (
+            'permission', "couldn't", 'no such device', 'syntax error')):
+        return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+    records = _guard_packets(out)
+    result = _cisco_analyze(records)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    if not quick:
+        _guard_record_event(_CISCO_GUARD_PATH, _cisco_guard_lock, result)
+    return result
+
+
+def _cisco_analyze(records):
+    """Pure classifier over parsed guard packets → Cisco findings + verdict.
+    Separated from capture so the self-test can drive it with synthetic packets."""
+    findings = []
+    seen_codes = set()
+
+    def add(code, name, sev, klass, src, cves, detail):
+        key = (code, src)
+        if key in seen_codes:
+            return
+        seen_codes.add(key)
+        findings.append({'code': code, 'name': name, 'severity': sev,
+                         'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
+
+    iosxe_ver = nxos_ver = None
+    for r in records:
+        text = r['dissect']
+        src, dst = r['src'], r['dst']
+        # --- POSTURE: version / platform fingerprints (SNMP sysDescr, HTTP Server) ---
+        m = _CISCO_IOSXE_VER_RE.search(text)
+        if m:
+            iosxe_ver = m.group(1)
+            add('CG-002', 'IOS_XE_VERSION_OBSERVED', 'INFO', 'POSTURE', src, [],
+                {'version': iosxe_ver})
+        m = _CISCO_NXOS_VER_RE.search(text)
+        if m:
+            nxos_ver = m.group(1)
+            add('CG-003', 'NXOS_VERSION_OBSERVED', 'INFO', 'POSTURE', src, [],
+                {'version': nxos_ver})
+        if _CISCO_OUT_OF_SCOPE_RE.search(text):
+            add('CG-009', 'PLATFORM_OUT_OF_SCOPE_SCREENED', 'INFO', 'POSTURE', src,
+                [], {'note': 'Cisco security appliance — cover with firewall tooling'})
+        elif re.search(r'\bcisco\b', text, re.I):
+            add('CG-001', 'CISCO_DEVICE_OBSERVED', 'INFO', 'POSTURE', src, [], {})
+
+        # --- SNMP (UDP 161/162): exposure + attack ---
+        if r['proto'] == 'UDP' and (r['dport'] in (161, 162) or r['sport'] in (161, 162)):
+            snmp = _snmp_ber_parse(r['payload']) if r['payload'] else None
+            if snmp and snmp['version'] in (0, 1):  # v1 / v2c cleartext
+                add('CG-101', 'SNMP_CLEARTEXT_ON_WIRE', 'HIGH', 'EXPOSURE', src,
+                    ['CVE-2025-20352', 'CVE-2025-20312'],
+                    {'snmp_version': 'v1' if snmp['version'] == 0 else 'v2c'})
+                comm = snmp.get('community')
+                if comm and comm.lower() in _CISCO_DEFAULT_COMMUNITIES:
+                    add('CG-102', 'SNMP_DEFAULT_COMMUNITY', 'CRITICAL', 'EXPOSURE',
+                        src, ['CVE-2025-20352'],
+                        {'community': comm.decode('latin-1', 'replace')})
+                if snmp['max_oid_arcs'] > _CISCO_SNMP_MAX_OID_ARCS:
+                    add('CG-201', 'SNMP_OID_ARC_FLOOD', 'CRITICAL', 'ATTACK', src,
+                        ['CVE-2025-20352', 'CVE-2025-20312'],
+                        {'oid_arcs': snmp['max_oid_arcs'],
+                         'threshold': _CISCO_SNMP_MAX_OID_ARCS})
+                if (snmp['max_field_len'] > _CISCO_SNMP_MAX_FIELD_LEN
+                        or (comm and len(comm) > _CISCO_SNMP_MAX_COMMUNITY)):
+                    add('CG-202', 'SNMP_OVERSIZED_FIELD', 'CRITICAL', 'ATTACK', src,
+                        ['CVE-2025-20352'],
+                        {'max_field_len': snmp['max_field_len'],
+                         'community_len': len(comm) if comm else 0})
+
+        # --- HTTP device web UI (cleartext) ---
+        if r['proto'] == 'TCP' and r['dport'] in (80, 8080):
+            if re.search(rb'^(GET|POST|PUT|HEAD)\s', r['payload'][:8]):
+                add('CG-103', 'HTTP_WEB_UI_CLEARTEXT', 'HIGH', 'EXPOSURE', src,
+                    ['CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
+                     'CVE-2023-20189', 'CVE-2025-20164'], {'dst': dst, 'port': r['dport']})
+                # Oversized request line = SMB-switch overflow shape (no reassembly).
+                line = r['payload'].split(b'\r\n', 1)[0]
+                if len(line) > 4096:
+                    add('CG-260', 'WEB_UI_OVERSIZED_FIELD', 'MEDIUM', 'ATTACK', src,
+                        ['CVE-2023-20159', 'CVE-2023-20160', 'CVE-2023-20161',
+                         'CVE-2023-20189'], {'request_line_len': len(line)})
+
+        # --- Telnet to infrastructure ---
+        if r['proto'] == 'TCP' and (r['dport'] == 23 or r['sport'] == 23):
+            add('CG-104', 'TELNET_TO_INFRASTRUCTURE', 'HIGH', 'EXPOSURE', src,
+                ['CVE-2024-20399'], {'dst': dst})
+            if _CISCO_SHELL_ESCAPE_RE.search(r['payload']):
+                add('CG-270', 'TELNET_SHELL_ESCAPE_ATTEMPT', 'CRITICAL', 'ATTACK',
+                    src, ['CVE-2024-20399'], {'note': 'shell-escape metacharacters'})
+
+        # --- IKEv2 enabled on segment (exposure precondition) ---
+        if r['proto'] == 'UDP' and (r['dport'] in (500, 4500) or r['sport'] in (500, 4500)):
+            add('CG-108', 'IKEV2_ENABLED_ON_SEGMENT', 'LOW', 'EXPOSURE', src,
+                ['CVE-2024-20307', 'CVE-2024-20308'], {})
+
+        # --- VLAN tag-stack anomaly (Catalyst 9000 control-plane DoS shape) ---
+        if r['vlan_tags'] > _CISCO_MAX_VLAN_TAGS:
+            add('CG-220', 'VLAN_TAG_STACK_ANOMALY', 'HIGH', 'ATTACK', src or dst,
+                ['CVE-2024-20434'], {'vlan_tags': r['vlan_tags'],
+                                     'threshold': _CISCO_MAX_VLAN_TAGS})
+
+    # POSTURE version screening → CG-004 / CG-005.
+    screened = _cisco_screen_version(iosxe_ver, nxos_ver)
+    if iosxe_ver and 'CVE-2025-20352' in screened:
+        add('CG-004', 'IOS_XE_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
+            ['CVE-2025-20352'], {'version': iosxe_ver,
+                                 'note': 'verify THIS device against the advisory'})
+    if nxos_ver:
+        add('CG-005', 'NXOS_VERSION_IN_CVE_RANGE', 'MEDIUM', 'POSTURE', None,
+            ['CVE-2025-20241', 'CVE-2024-20399'], {'version': nxos_ver,
+             'note': 'verify THIS device; CVE-2024-20399 is an in-the-wild 0-day'})
+
+    return _guard_finish('cisco_guard', None, None, findings, records)
+
+
+# ==========================================================================
+# Juniper Guard — passive J-Web / SSR / Junos Space / Junos-Evolved CVE monitor
+# ==========================================================================
+_JUNIPER_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'data', 'juniper_guard.json')
+_juniper_guard_lock = threading.Lock()
+# J-Web cleartext HTTP ports and the Junos-Evolved On-Box Anomaly Detection API.
+_JUNIPER_HTTP_PORTS = (80, 8080)
+_JUNIPER_ANOMALY_PORTS = (8160,)
+_JUNIPER_TLS_PORTS = (443, 8443)
+# watchTowr CVE-2023-36844/45 J-Web PHP environment-variable injection signatures.
+_JUNIPER_PHPRC_RE = re.compile(rb'PHPRC', re.I)
+_JUNIPER_LDPRELOAD_RE = re.compile(rb'LD_PRELOAD', re.I)
+_JUNIPER_ENV_SUSPECT_RE = re.compile(
+    rb'auto_prepend_file|allow_url_include|auto_append_file', re.I)
+# CVE-2023-36846/47 unauthenticated file-upload endpoints (multipart POST).
+_JUNIPER_UPLOAD_RE = re.compile(
+    rb'webauth_operation\.php|logging_browse\.php|installAppPackage\.php'
+    rb'|/jsdm/ajax/|Content-Disposition:\s*form-data;[^\r\n]*filename=', re.I)
+_JUNIPER_XSS_RE = re.compile(rb'<script[\s>]|javascript:|onerror\s*=', re.I)
+
+
+def _tls_sni(payload):
+    """Extract the SNI hostname from a TLS ClientHello payload, or None. Minimal
+    parser: content-type 22 (handshake), handshake type 1 (ClientHello), walk to
+    the server_name extension (type 0)."""
+    try:
+        p = payload
+        if len(p) < 45 or p[0] != 0x16 or p[5] != 0x01:  # handshake / ClientHello
+            return None
+        i = 43                       # skip record(5)+hs(4)+ver(2)+random(32)
+        sid = p[i]; i += 1 + sid     # session id
+        cs = int.from_bytes(p[i:i + 2], 'big'); i += 2 + cs   # cipher suites
+        cm = p[i]; i += 1 + cm       # compression methods
+        if i + 2 > len(p):
+            return None
+        ext_total = int.from_bytes(p[i:i + 2], 'big'); i += 2
+        end = min(len(p), i + ext_total)
+        while i + 4 <= end:
+            etype = int.from_bytes(p[i:i + 2], 'big')
+            elen = int.from_bytes(p[i + 2:i + 4], 'big')
+            j = i + 4
+            if etype == 0x0000 and j + 5 <= len(p):   # server_name
+                nlen = int.from_bytes(p[j + 3:j + 5], 'big')
+                name = p[j + 5:j + 5 + nlen]
+                return name.decode('latin-1', 'replace') or None
+            i = j + elen
+    except Exception:
+        return None
+    return None
+
+
+def do_juniper_guard(interface=None, seconds=20, learn=True, quick=False):
+    """Passive Juniper J-Web / SSR / Junos Space / Junos-Evolved CVE guard
+    (detection-only). Dissects cleartext HTTP to J-Web and the On-Box Anomaly API,
+    and reads TLS ClientHello SNI, reporting EXPOSURE / ATTACK findings. Ported
+    from the standalone juniperwatch. Never transmits."""
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return {'success': False, 'error': 'no interface to capture on'}
+    if iface not in _list_iface_names(include_virtual=True):
+        return {'success': False, 'error': f'unknown interface: {iface}'}
+    seconds = _clamp_int(seconds, 20, 5, 40)
+    bpf = ('tcp port 80 or tcp port 8080 or tcp port 8160 or tcp port 443 or '
+           'tcp port 8443')
+    if not _have('tcpdump'):
+        return {'success': False, 'interface': iface,
+                'error': 'tcpdump is not installed. Click Install to add it.',
+                'missing_tool': 'tcpdump'}
+    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-tt',
+                '-v', '-x', '-s', '1600', '-c', '20000', bpf],
+               timeout=seconds + 8)
+    out = res['out']
+    if not out and res['err'] and any(k in res['err'].lower() for k in (
+            'permission', "couldn't", 'no such device', 'syntax error')):
+        return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+    records = _guard_packets(out)
+    result = _juniper_analyze(records)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    if not quick:
+        _guard_record_event(_JUNIPER_GUARD_PATH, _juniper_guard_lock, result)
+    return result
+
+
+def _juniper_analyze(records):
+    """Pure classifier over parsed guard packets → Juniper findings + verdict."""
+    findings = []
+    seen = set()
+    upload_srcs, envinj_srcs, anomaly_srcs = set(), set(), set()
+
+    def add(code, name, sev, klass, src, cves, detail):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'code': code, 'name': name, 'severity': sev,
+                         'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
+
+    for r in records:
+        pl, src, dst = r['payload'], r['src'], r['dst']
+        is_http = r['proto'] == 'TCP' and r['dport'] in _JUNIPER_HTTP_PORTS
+        is_anom = r['proto'] == 'TCP' and r['dport'] in _JUNIPER_ANOMALY_PORTS
+        is_tls = r['proto'] == 'TCP' and r['dport'] in _JUNIPER_TLS_PORTS
+
+        if is_tls:
+            sni = _tls_sni(pl)
+            if sni:
+                add('JNPR-006', 'TLS_SNI_HOSTNAME_OBSERVED', 'INFO', 'POSTURE',
+                    src, [], {'sni': sni, 'dst': dst})
+
+        if is_http and re.match(rb'^(GET|POST|PUT|HEAD)\s', pl[:8]):
+            add('JNPR-001', 'JWEB_CLEARTEXT_EXPOSED', 'MEDIUM', 'EXPOSURE', src,
+                [], {'dst': dst, 'port': r['dport']})
+            if _JUNIPER_UPLOAD_RE.search(pl):
+                upload_srcs.add(src)
+                add('JNPR-010', 'JWEB_UNAUTH_FILE_UPLOAD', 'HIGH', 'ATTACK', src,
+                    ['CVE-2023-36846', 'CVE-2023-36847'], {'dst': dst})
+            if _JUNIPER_PHPRC_RE.search(pl):
+                envinj_srcs.add(src)
+                add('JNPR-011', 'JWEB_ENV_INJECTION_PHPRC', 'CRITICAL', 'ATTACK',
+                    src, ['CVE-2023-36844', 'CVE-2023-36845'], {'dst': dst})
+            if _JUNIPER_LDPRELOAD_RE.search(pl):
+                envinj_srcs.add(src)
+                add('JNPR-012', 'JWEB_ENV_INJECTION_LDPRELOAD', 'CRITICAL', 'ATTACK',
+                    src, ['CVE-2023-36844', 'CVE-2023-36845'], {'dst': dst})
+            if _JUNIPER_ENV_SUSPECT_RE.search(pl):
+                add('JNPR-013', 'JWEB_ENV_INJECTION_SUSPECT', 'MEDIUM', 'ATTACK',
+                    src, ['CVE-2023-36844', 'CVE-2023-36845'],
+                    {'dst': dst, 'note': 'heuristic PHP-ini injection field'})
+            if _JUNIPER_XSS_RE.search(pl):
+                add('JNPR-030', 'SPACE_SCRIPT_INJECTION_ATTEMPT', 'HIGH', 'ATTACK',
+                    src, ['CVE-2025-59978'], {'dst': dst})
+
+        if is_anom and re.match(rb'^(GET|POST|PUT|HEAD)\s', pl[:8]):
+            anomaly_srcs.add(src)
+            add('JNPR-050', 'ANOMALY_API_EXPOSED', 'MEDIUM', 'EXPOSURE', src,
+                ['CVE-2026-21902'], {'dst': dst, 'port': r['dport']})
+            if re.search(rb'command|register|exec|/api/', pl, re.I):
+                add('JNPR-051', 'ANOMALY_API_DANGEROUS_COMMAND_REGISTERED', 'HIGH',
+                    'ATTACK', src, ['CVE-2026-21902'], {'dst': dst})
+
+    # Correlated RCE chains within the capture window.
+    for s in upload_srcs & envinj_srcs:
+        add('JNPR-014', 'JWEB_RCE_CHAIN_CORRELATED', 'CRITICAL', 'ATTACK', s,
+            ['CVE-2023-36844', 'CVE-2023-36845', 'CVE-2023-36846', 'CVE-2023-36847'],
+            {'note': 'file upload + env injection correlated from same source'})
+    return _guard_finish('juniper_guard', None, None, findings, records)
+
+
+# ==========================================================================
+# Arista Guard — passive EOS switch/router CVE monitor
+# ==========================================================================
+_ARISTA_GUARD_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'data', 'arista_guard.json')
+_arista_guard_lock = threading.Lock()
+_ARISTA_RADIUS_AUTH_PORTS = (1812, 1645)
+_ARISTA_RADIUS_ACCT_PORTS = (1813, 1646)
+_ARISTA_GNMI_PORTS = (6030, 9339, 50051)
+_ARISTA_CVX_PORTS = (9979,)
+_ARISTA_VXLAN_PORTS = (4789, 8472)
+_ARISTA_MAX_VLAN_TAGS = 2
+_ARISTA_RADIUS_ATTR_LEN_MAX = 128     # BlastRADIUS structural anomaly bound
+# Non-EOS Arista products actively screened out (AG-009).
+_ARISTA_OOS_RE = re.compile(
+    r'VeloCloud|CloudVision|NG Firewall|Edge Threat|DANZ|Converged Cloud'
+    r'|Awake NDR', re.I)
+_ARISTA_EOS_VER_RE = re.compile(r'\bEOS[- ](?:version\s+)?(\d+\.\d+\.\d+[A-Z0-9.]*)', re.I)
+_ARISTA_SSH_BANNER_RE = re.compile(rb'SSH-2\.0-OpenSSH_(\d+)\.(\d+)(?:p(\d+))?')
+
+
+def _arista_ssh_vulnerable(major, minor, patch):
+    """regreSSHion (CVE-2024-6387/6409) window: OpenSSH < 4.4p1, or 8.5p1 up to
+    (not including) 9.8p1."""
+    v = (major, minor, patch or 0)
+    if v < (4, 4, 1):
+        return True
+    return (8, 5, 1) <= v < (9, 8, 1)
+
+
+def _radius_parse(payload):
+    """Minimal RADIUS parser. Returns {code, has_msg_auth, max_attr_len} or None.
+    RADIUS: code(1) id(1) length(2) authenticator(16) then TLV attributes."""
+    try:
+        if len(payload) < 20:
+            return None
+        code = payload[0]
+        if code not in (1, 2, 3, 4, 5, 11):   # plausible RADIUS codes
+            return None
+        length = int.from_bytes(payload[2:4], 'big')
+        if not (20 <= length <= 4096):
+            return None
+        out = {'code': code, 'has_msg_auth': False, 'max_attr_len': 0}
+        i = 20
+        while i + 2 <= len(payload) and i < length:
+            atype = payload[i]
+            alen = payload[i + 1]
+            if alen < 2 or i + alen > len(payload):
+                break
+            if atype == 80:                    # Message-Authenticator
+                out['has_msg_auth'] = True
+            out['max_attr_len'] = max(out['max_attr_len'], alen)
+            i += alen
+        return out
+    except Exception:
+        return None
+
+
+def do_arista_guard(interface=None, seconds=20, learn=True, quick=False):
+    """Passive Arista EOS switch/router CVE guard (detection-only). Reads LLDP
+    version/platform, RADIUS (BlastRADIUS CVE-2024-3596), SSH banners (regreSSHion),
+    and management listeners (gNMI/CVX/VXLAN), reporting POSTURE / EXPOSURE / ATTACK
+    findings. Ported from the standalone aristaguard. Never transmits."""
+    iface = interface if _valid_iface(interface or '') else _capture_iface()
+    if not iface:
+        return {'success': False, 'error': 'no interface to capture on'}
+    if iface not in _list_iface_names(include_virtual=True):
+        return {'success': False, 'error': f'unknown interface: {iface}'}
+    seconds = _clamp_int(seconds, 20, 5, 40)
+    bpf = ('udp port 1812 or udp port 1813 or udp port 1645 or udp port 1646 or '
+           'tcp port 22 or tcp port 6030 or tcp port 9339 or tcp port 50051 or '
+           'tcp port 9979 or udp port 4789 or udp port 8472 or '
+           'ether proto 0x88cc')     # LLDP
+    if not _have('tcpdump'):
+        return {'success': False, 'interface': iface,
+                'error': 'tcpdump is not installed. Click Install to add it.',
+                'missing_tool': 'tcpdump'}
+    res = _run(['timeout', str(seconds), 'tcpdump', '-i', iface, '-nn', '-tt',
+                '-v', '-x', '-s', '1600', '-c', '20000', bpf],
+               timeout=seconds + 8)
+    out = res['out']
+    if not out and res['err'] and any(k in res['err'].lower() for k in (
+            'permission', "couldn't", 'no such device', 'syntax error')):
+        return {'success': False, 'interface': iface, 'error': res['err'].strip()[:200]}
+    records = _guard_packets(out)
+    result = _arista_analyze(records)
+    result['interface'] = iface
+    result['seconds'] = seconds
+    if not quick:
+        _guard_record_event(_ARISTA_GUARD_PATH, _arista_guard_lock, result)
+    return result
+
+
+def _arista_analyze(records):
+    """Pure classifier over parsed guard packets → Arista findings + verdict."""
+    findings = []
+    seen = set()
+    eos_ver = None
+
+    def add(code, name, sev, klass, src, cves, detail):
+        key = (code, src)
+        if key in seen:
+            return
+        seen.add(key)
+        findings.append({'code': code, 'name': name, 'severity': sev,
+                         'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
+
+    for r in records:
+        pl, text, src, dst = r['payload'], r['dissect'], r['src'], r['dst']
+
+        # --- POSTURE: LLDP EOS version / platform, out-of-scope screen ---
+        if _ARISTA_OOS_RE.search(text):
+            add('AG-009', 'OUT_OF_SCOPE_PLATFORM', 'INFO', 'POSTURE', src, [],
+                {'note': 'non-EOS Arista product — needs its own coverage'})
+        else:
+            m = _ARISTA_EOS_VER_RE.search(text)
+            if m:
+                eos_ver = m.group(1)
+                add('AG-001', 'EOS_VERSION_OBSERVED', 'INFO', 'POSTURE', src, [],
+                    {'version': eos_ver})
+            elif re.search(r'\bArista\b', text, re.I):
+                add('AG-005', 'EOS_PLATFORM_OBSERVED', 'INFO', 'POSTURE', src, [], {})
+
+        # --- RADIUS (BlastRADIUS CVE-2024-3596) ---
+        is_radius = r['proto'] == 'UDP' and (
+            r['dport'] in _ARISTA_RADIUS_AUTH_PORTS + _ARISTA_RADIUS_ACCT_PORTS
+            or r['sport'] in _ARISTA_RADIUS_AUTH_PORTS + _ARISTA_RADIUS_ACCT_PORTS)
+        if is_radius:
+            rad = _radius_parse(pl) if pl else None
+            add('AG-101', 'RADIUS_CLEARTEXT_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
+                ['CVE-2024-3596'], {'dst': dst})
+            if rad:
+                if rad['code'] == 1 and not rad['has_msg_auth']:    # Access-Request
+                    add('AG-102', 'RADIUS_NO_MESSAGE_AUTHENTICATOR', 'HIGH',
+                        'EXPOSURE', src, ['CVE-2024-3596'],
+                        {'note': 'Access-Request without attribute 80'})
+                if rad['code'] in (2, 3, 11) and not rad['has_msg_auth']:  # responses
+                    add('AG-202', 'RADIUS_RESPONSE_UNAUTHENTICATED', 'HIGH', 'ATTACK',
+                        src, ['CVE-2024-3596'],
+                        {'note': 'response protected only by the MD5 authenticator'})
+                if rad['max_attr_len'] > _ARISTA_RADIUS_ATTR_LEN_MAX:
+                    add('AG-201', 'RADIUS_FORGERY_ATTEMPT', 'CRITICAL', 'ATTACK', src,
+                        ['CVE-2024-3596'], {'max_attr_len': rad['max_attr_len'],
+                         'threshold': _ARISTA_RADIUS_ATTR_LEN_MAX,
+                         'note': 'oversized attribute — BlastRADIUS collision shape'})
+
+        # --- SSH banner (regreSSHion CVE-2024-6387/6409) ---
+        if r['proto'] == 'TCP' and (r['dport'] == 22 or r['sport'] == 22):
+            m = _ARISTA_SSH_BANNER_RE.search(pl)
+            if m:
+                mj, mn = int(m.group(1)), int(m.group(2))
+                pt = int(m.group(3)) if m.group(3) else 0
+                if _arista_ssh_vulnerable(mj, mn, pt):
+                    add('AG-104', 'SSH_VULNERABLE_BANNER', 'HIGH', 'EXPOSURE', src,
+                        ['CVE-2024-6387', 'CVE-2024-6409'],
+                        {'banner': f'OpenSSH_{mj}.{mn}' + (f'p{pt}' if pt else '')})
+
+        # --- Management-plane listeners (exposure preconditions) ---
+        if r['proto'] == 'TCP' and r['dport'] in _ARISTA_GNMI_PORTS:
+            add('AG-103', 'GNMI_GNOI_LISTENER_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
+                ['CVE-2025-1259', 'CVE-2025-1260', 'CVE-2025-0936'],
+                {'dst': dst, 'port': r['dport']})
+        if r['proto'] == 'TCP' and r['dport'] in _ARISTA_CVX_PORTS:
+            add('AG-108', 'CVX_SESSION_OBSERVED', 'MEDIUM', 'EXPOSURE', src,
+                ['CVE-2025-5089'], {'dst': dst})
+        if r['proto'] == 'UDP' and (r['dport'] in _ARISTA_VXLAN_PORTS
+                                    or r['sport'] in _ARISTA_VXLAN_PORTS):
+            add('AG-106', 'VXLAN_DECAP_ENDPOINT_OBSERVED', 'LOW', 'EXPOSURE',
+                dst or src, ['CVE-2026-7473'], {'endpoint': dst})
+
+        # --- VLAN tag anomaly (CVE-2024-5872 CPU punt shape) ---
+        if r['vlan_tags'] > _ARISTA_MAX_VLAN_TAGS:
+            add('AG-205', 'VLAN_TAG_ANOMALY_CPU_PUNT', 'MEDIUM', 'ATTACK', src or dst,
+                ['CVE-2024-5872'], {'vlan_tags': r['vlan_tags'],
+                                    'threshold': _ARISTA_MAX_VLAN_TAGS})
+
+    return _guard_finish('arista_guard', None, None, findings, records)
+
+
+def _guard_rec(proto=None, src='10.0.0.9', sport=40000, dst='10.0.0.1',
+               dport=None, payload=b'', dissect='', vlan_tags=0):
+    """Build a synthetic guard packet record for the analyzer self-tests."""
+    return {'ts': 1780000000.0, 'proto': proto, 'src': src, 'sport': sport,
+            'dst': dst, 'dport': dport, 'ipver': 4, 'payload': payload,
+            'dissect': dissect, 'vlan_tags': vlan_tags}
+
+
+def _ber_encode_len(n):
+    """Encode a BER length (short form < 128, else long form)."""
+    if n < 0x80:
+        return bytes([n])
+    b = n.to_bytes((n.bit_length() + 7) // 8, 'big')
+    return bytes([0x80 | len(b)]) + b
+
+
+def _ber_tlv(tag, value):
+    """Encode one BER TLV with a correct short/long-form length."""
+    return bytes([tag]) + _ber_encode_len(len(value)) + value
+
+
+def _snmp_v2c_get(community=b'public', oid_arcs=6, oversized_community=False):
+    """Craft a minimal BER-encoded SNMPv2c GetRequest payload for the self-test.
+    Uses proper long-form lengths so oversized OID/community fixtures stay valid
+    BER (the parser handles long-form via _ber_len)."""
+    if oversized_community:
+        community = b'A' * 100
+    # OID value: 1.3.6.1.2.1... then extra single-byte arcs to reach oid_arcs subids.
+    oid_val = bytes([0x2b, 0x06, 0x01, 0x02, 0x01]) + bytes([0x01]) * max(0, oid_arcs - 5)
+    oid = _ber_tlv(0x06, oid_val)
+    vb = _ber_tlv(0x30, oid + _ber_tlv(0x05, b''))                # varbind: OID + NULL
+    vbl = _ber_tlv(0x30, vb)
+    pdu = _ber_tlv(0xA0, _ber_tlv(0x02, bytes([0x01]))           # request-id
+                   + _ber_tlv(0x02, bytes([0x00]))               # error-status
+                   + _ber_tlv(0x02, bytes([0x00]))               # error-index
+                   + vbl)
+    body = (_ber_tlv(0x02, bytes([0x01]))                        # version v2c
+            + _ber_tlv(0x04, community)                          # community
+            + pdu)
+    return _ber_tlv(0x30, body)
+
+
+def _cisco_selftest():
+    """Self-test the Cisco guard detectors with synthetic records + a scapy
+    end-to-end leg. No root, no live traffic, no persistence."""
+    scenarios = []
+
+    def check(name, recs, expect_verdict, expect_codes=()):
+        res = _cisco_analyze(recs)
+        codes = {f['code'] for f in res['findings']}
+        ok = res['verdict'] == expect_verdict and all(c in codes for c in expect_codes)
+        scenarios.append({'name': name, 'expect': f'{expect_verdict}/{list(expect_codes)}',
+                          'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
+        return res
+
+    # BER parse: SNMPv2c GetRequest, default community.
+    snmp = _snmp_ber_parse(_snmp_v2c_get(b'public'))
+    ber_ok = bool(snmp) and snmp['version'] == 1 and snmp['community'] == b'public'
+    scenarios.append({'name': 'cisco-snmp-ber', 'expect': 'v2c+public',
+                      'got': str(snmp), 'pass': ber_ok})
+
+    # clean: quiet segment.
+    check('cisco-clean', [], 'clean')
+    # observed: a Cisco device sighting, no CVE-relevant finding.
+    check('cisco-observed', [_guard_rec(dissect='Cisco IOS Software ...')],
+          'observed', ['CG-001'])
+    # posture: an IOS XE version that screens into the CVE range.
+    check('cisco-posture', [_guard_rec(
+        dissect='Cisco IOS-XE Software, Version 17.6.3')], 'posture', ['CG-004'])
+    # exposure: cleartext SNMPv2c with a default community.
+    check('cisco-snmp-default', [_guard_rec(
+        proto='UDP', dport=161, payload=_snmp_v2c_get(b'public'))],
+        'exposure', ['CG-101', 'CG-102'])
+    # exposure: telnet to infrastructure.
+    check('cisco-telnet', [_guard_rec(proto='TCP', dport=23, payload=b'\xff\xfd\x18')],
+          'exposure', ['CG-104'])
+    # attack: SNMP OID arc flood.
+    check('cisco-oid-flood', [_guard_rec(
+        proto='UDP', dport=161, payload=_snmp_v2c_get(b'public', oid_arcs=200))],
+        'attack', ['CG-201'])
+    # attack: telnet shell-escape metacharacters (CVE-2024-20399 shape).
+    check('cisco-telnet-escape', [_guard_rec(
+        proto='TCP', dport=23, payload=b'admin\r\nrun bash; cat /etc/passwd\r\n')],
+        'attack', ['CG-270'])
+    # attack: VLAN tag-stack anomaly (Catalyst 9000 DoS shape).
+    check('cisco-vlan-stack', [_guard_rec(
+        proto='UDP', dport=161, vlan_tags=3, payload=_snmp_v2c_get(b'public'))],
+        'attack', ['CG-220'])
+    # out-of-scope firewall is screened, not misclassified as a router.
+    check('cisco-oos', [_guard_rec(dissect='Cisco Adaptive Security Appliance (ASA)')],
+          'observed', ['CG-009'])
+
+    # --- Scapy end-to-end: craft SNMP default-community -> pcap -> tcpdump -X. ---
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, IP, UDP, TCP, Raw, wrpcap
+        if _have('tcpdump'):
+            pkts = [
+                (Ether() / IP(src='10.0.0.5', dst='10.0.0.1')
+                 / UDP(sport=40000, dport=161) / Raw(_snmp_v2c_get(b'public'))),
+                (Ether() / IP(src='10.0.0.6', dst='10.0.0.1')
+                 / TCP(sport=41000, dport=23, flags='PA')
+                 / Raw(b'enable\r\nrun bash; id\r\n')),
+            ]
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, pkts)
+            res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path],
+                       timeout=10)
+            recs = _guard_packets(res['out'])
+            out = _cisco_analyze(recs)
+            codes = {f['code'] for f in out['findings']}
+            ok = ('CG-102' in codes and 'CG-270' in codes and out['verdict'] == 'attack')
+            scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
+                            'codes': sorted(codes),
+                            'packets': len(recs)}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (
+        not scapy_result.get('ran') or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+def _juniper_selftest():
+    """Self-test the Juniper guard detectors with synthetic records + a scapy
+    end-to-end leg (crafted J-Web HTTP -> pcap -> tcpdump -X -> parse)."""
+    scenarios = []
+
+    def check(name, recs, expect_verdict, expect_codes=()):
+        res = _juniper_analyze(recs)
+        codes = {f['code'] for f in res['findings']}
+        ok = res['verdict'] == expect_verdict and all(c in codes for c in expect_codes)
+        scenarios.append({'name': name, 'expect': f'{expect_verdict}/{list(expect_codes)}',
+                          'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
+        return res
+
+    def http(port, body):
+        return _guard_rec(proto='TCP', dport=port, payload=body)
+
+    check('juniper-clean', [], 'clean')
+    check('juniper-cleartext', [http(80, b'GET /login HTTP/1.1\r\nHost: jweb\r\n\r\n')],
+          'exposure', ['JNPR-001'])
+    check('juniper-phprc', [http(80,
+        b'POST /?PHPRC=/tmp/x HTTP/1.1\r\nHost: jweb\r\n\r\nPHPRC=/tmp/php.ini')],
+        'attack', ['JNPR-011'])
+    check('juniper-ldpreload', [http(8080,
+        b'POST / HTTP/1.1\r\n\r\nLD_PRELOAD=/tmp/evil.so')], 'attack', ['JNPR-012'])
+    check('juniper-upload', [http(80,
+        b'POST /webauth_operation.php HTTP/1.1\r\nContent-Type: multipart/form-data\r\n\r\n')],
+        'attack', ['JNPR-010'])
+    # RCE chain: upload + env injection from the same source -> JNPR-014.
+    check('juniper-rce-chain', [
+        _guard_rec(proto='TCP', src='9.9.9.9', dport=80,
+                   payload=b'POST /webauth_operation.php HTTP/1.1\r\n\r\nfilename=x'),
+        _guard_rec(proto='TCP', src='9.9.9.9', dport=80,
+                   payload=b'POST /?PHPRC=/tmp HTTP/1.1\r\n\r\nPHPRC=x')],
+        'attack', ['JNPR-014'])
+    check('juniper-anomaly-api', [http(8160,
+        b'POST /api/command/register HTTP/1.1\r\n\r\n{}')], 'attack', ['JNPR-050', 'JNPR-051'])
+
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, IP, TCP, Raw, wrpcap
+        if _have('tcpdump'):
+            body = (b'POST /webauth_operation.php?PHPRC=/tmp/x HTTP/1.1\r\n'
+                    b'Host: jweb\r\nContent-Type: multipart/form-data; '
+                    b'boundary=b\r\n\r\nPHPRC=/tmp/php.ini filename="a"')
+            pkt = (Ether() / IP(src='10.0.0.7', dst='10.0.0.1')
+                   / TCP(sport=42000, dport=80, flags='PA') / Raw(body))
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, [pkt])
+            res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path], timeout=10)
+            out = _juniper_analyze(_guard_packets(res['out']))
+            codes = {f['code'] for f in out['findings']}
+            ok = 'JNPR-011' in codes and 'JNPR-010' in codes and out['verdict'] == 'attack'
+            scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
+                            'codes': sorted(codes)}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (
+        not scapy_result.get('ran') or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
+def _radius_packet(code=1, attrs=None):
+    """Craft a RADIUS packet for the self-test. attrs: list of (type, value)."""
+    body = b''
+    for atype, val in (attrs or []):
+        body += bytes([atype, len(val) + 2]) + val
+    length = 20 + len(body)
+    return bytes([code, 1]) + length.to_bytes(2, 'big') + bytes(16) + body
+
+
+def _arista_selftest():
+    """Self-test the Arista guard detectors with synthetic records + a scapy
+    end-to-end leg (crafted RADIUS + SSH banner -> pcap -> tcpdump -X -> parse)."""
+    scenarios = []
+
+    def check(name, recs, expect_verdict, expect_codes=()):
+        res = _arista_analyze(recs)
+        codes = {f['code'] for f in res['findings']}
+        ok = res['verdict'] == expect_verdict and all(c in codes for c in expect_codes)
+        scenarios.append({'name': name, 'expect': f'{expect_verdict}/{list(expect_codes)}',
+                          'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
+        return res
+
+    check('arista-clean', [], 'clean')
+    check('arista-observed', [_guard_rec(dissect='Arista Networks EOS-4.29.2F running')],
+          'observed', ['AG-001'])
+    check('arista-oos', [_guard_rec(dissect='Arista CloudVision Portal 2024.1.0')],
+          'observed', ['AG-009'])
+    # RADIUS Access-Request without Message-Authenticator -> AG-101 + AG-102.
+    check('arista-radius-noauth', [_guard_rec(proto='UDP', dport=1812,
+        payload=_radius_packet(1, [(1, b'admin')]))], 'exposure', ['AG-101', 'AG-102'])
+    # RADIUS oversized attribute (BlastRADIUS) -> AG-201 attack.
+    check('arista-radius-forgery', [_guard_rec(proto='UDP', dport=1812,
+        payload=_radius_packet(1, [(24, b'X' * 200)]))], 'attack', ['AG-201'])
+    # RADIUS response without Message-Authenticator -> AG-202 attack.
+    check('arista-radius-resp', [_guard_rec(proto='UDP', sport=1812, dport=41000,
+        payload=_radius_packet(2, [(1, b'ok')]))], 'attack', ['AG-202'])
+    # Vulnerable SSH banner (regreSSHion window) -> AG-104.
+    check('arista-ssh-vuln', [_guard_rec(proto='TCP', sport=22, dport=40000,
+        payload=b'SSH-2.0-OpenSSH_9.6p1 Debian\r\n')], 'exposure', ['AG-104'])
+    # Patched SSH banner -> no AG-104.
+    r = _arista_analyze([_guard_rec(proto='TCP', sport=22, dport=40000,
+        payload=b'SSH-2.0-OpenSSH_9.8p1\r\n')])
+    scenarios.append({'name': 'arista-ssh-patched', 'expect': 'clean/no-AG-104',
+                      'got': r['verdict'],
+                      'pass': all(f['code'] != 'AG-104' for f in r['findings'])})
+    # gNMI listener -> AG-103 exposure.
+    check('arista-gnmi', [_guard_rec(proto='TCP', dport=6030, payload=b'')],
+          'exposure', ['AG-103'])
+    # VLAN tag anomaly -> AG-205 attack.
+    check('arista-vlan', [_guard_rec(proto='UDP', dport=1812, vlan_tags=3,
+        payload=_radius_packet(1, [(80, bytes(16))]))], 'attack', ['AG-205'])
+
+    scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
+    try:
+        import tempfile
+        from scapy.all import Ether, IP, UDP, TCP, Raw, wrpcap
+        if _have('tcpdump'):
+            pkts = [
+                (Ether() / IP(src='10.0.0.8', dst='10.0.0.1')
+                 / UDP(sport=41000, dport=1812)
+                 / Raw(_radius_packet(1, [(1, b'admin'), (24, b'Y' * 200)]))),
+                (Ether() / IP(src='10.0.0.9', dst='10.0.0.2')
+                 / TCP(sport=22, dport=43000, flags='PA')
+                 / Raw(b'SSH-2.0-OpenSSH_9.6p1\r\n')),
+            ]
+            with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
+                pcap_path = tf.name
+            wrpcap(pcap_path, pkts)
+            res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path], timeout=10)
+            out = _arista_analyze(_guard_packets(res['out']))
+            codes = {f['code'] for f in out['findings']}
+            ok = ('AG-201' in codes and 'AG-104' in codes and out['verdict'] == 'attack')
+            scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
+                            'codes': sorted(codes)}
+            try:
+                os.remove(pcap_path)
+            except OSError:
+                pass
+    except Exception as e:
+        scapy_result = {'ran': False, 'reason': f'{type(e).__name__}: {e}'}
+
+    passed = all(s['pass'] for s in scenarios) and (
+        not scapy_result.get('ran') or scapy_result.get('pass'))
+    return {'success': passed, 'scenarios': scenarios, 'scapy': scapy_result}
+
+
 def do_routing_selftest():
     """Run the IGMP / OSPF / BGP detector self-tests and report a combined result
     plus whether Scapy is available for the end-to-end packet-crafting leg. Drives
@@ -15009,6 +16068,8 @@ def do_routing_selftest():
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
+              'cisco_guard': _cisco_selftest(), 'juniper_guard': _juniper_selftest(),
+              'arista_guard': _arista_selftest(),
               'bgp_speaker': bgp_speaker.selftest(), 'path_asymmetry': path_asymmetry.selftest()}
     return {
         'success': all(s['success'] for s in suites.values()),
@@ -16580,6 +17641,33 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/fhrp-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_fhrp_watch(interface=iface, seconds=secs))
 
+    @app.route('/api/net/cisco-guard', methods=['GET'])
+    def net_cisco_guard():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 40)
+        _log(f"net/cisco-guard iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_cisco_guard(interface=iface, seconds=secs))
+
+    @app.route('/api/net/juniper-guard', methods=['GET'])
+    def net_juniper_guard():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 40)
+        _log(f"net/juniper-guard iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_juniper_guard(interface=iface, seconds=secs))
+
+    @app.route('/api/net/arista-guard', methods=['GET'])
+    def net_arista_guard():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 5, 40)
+        _log(f"net/arista-guard iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_arista_guard(interface=iface, seconds=secs))
+
     @app.route('/api/net/fhrp-baseline', methods=['GET', 'POST'])
     def net_fhrp_baseline():
         action = 'get'
@@ -17406,6 +18494,18 @@ def _cli(argv=None):
     fhst = sub.add_parser('fhrp-selftest', help='self-test the FHRP detectors (no root)')
     fhst.add_argument('--json', action='store_true', help='emit JSON')
 
+    for _gname, _ghelp in (('cisco', 'Cisco router/switch/edge'),
+                           ('juniper', 'Juniper J-Web/SSR/Junos-Space'),
+                           ('arista', 'Arista EOS switch/router')):
+        gp = sub.add_parser('%s-guard' % _gname,
+                            help='passive %s CVE guard (posture/exposure/attack)' % _ghelp)
+        gp.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+        gp.add_argument('--seconds', '-s', type=int, default=20, help='capture window (5-40)')
+        gp.add_argument('--json', action='store_true', help='emit JSON')
+        gs = sub.add_parser('%s-guard-selftest' % _gname,
+                            help='self-test the %s guard detectors (no root)' % _gname)
+        gs.add_argument('--json', action='store_true', help='emit JSON')
+
     o = sub.add_parser('ospf-watch', help='passive OSPF security scan')
     o.add_argument('--iface', '-i', default=None, help='interface (default: route)')
     o.add_argument('--seconds', '-s', type=int, default=15, help='capture window (5-40)')
@@ -18212,6 +19312,53 @@ def _cli(argv=None):
             else:
                 print(f"  [skip] scapy-e2e: {sc.get('reason')}")
             print(f"FHRP self-test: {'OK' if r['success'] else 'FAILED'}")
+        return 0 if r['success'] else 1
+
+    _GUARD_CLI = {
+        'cisco-guard': (do_cisco_guard, 'Cisco'),
+        'juniper-guard': (do_juniper_guard, 'Juniper'),
+        'arista-guard': (do_arista_guard, 'Arista'),
+    }
+    if args.cmd in _GUARD_CLI:
+        fn, label = _GUARD_CLI[args.cmd]
+        r = fn(interface=args.iface, seconds=args.seconds)
+        if args.json:
+            print(json.dumps(r, indent=2))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"{label} Guard [{r['interface']}] {r['seconds']}s: "
+                  f"{r['verdict'].upper()}  ({r['packet_count']} pkts, "
+                  f"{r['finding_count']} finding(s))")
+            for f in r.get('findings', []):
+                cves = (' ' + ','.join(f['cves'])) if f.get('cves') else ''
+                print(f"  [{f['severity']}] {f['code']} {f['name']} "
+                      f"({f['klass']}){' src=' + f['src'] if f.get('src') else ''}{cves}")
+            if r.get('cves'):
+                print(f"  CVEs in scope: {', '.join(r['cves'])}")
+        return 0 if r.get('success') else 1
+
+    _GUARD_SELFTEST_CLI = {
+        'cisco-guard-selftest': (_cisco_selftest, 'Cisco'),
+        'juniper-guard-selftest': (_juniper_selftest, 'Juniper'),
+        'arista-guard-selftest': (_arista_selftest, 'Arista'),
+    }
+    if args.cmd in _GUARD_SELFTEST_CLI:
+        fn, label = _GUARD_SELFTEST_CLI[args.cmd]
+        r = fn()
+        if args.json:
+            print(json.dumps(r, indent=2))
+        else:
+            for s in r['scenarios']:
+                print(f"  [{'PASS' if s['pass'] else 'FAIL'}] {s['name']}: "
+                      f"expect={s['expect']} got={s['got']}")
+            sc = r['scapy']
+            if sc.get('ran'):
+                print(f"  [{'PASS' if sc.get('pass') else 'FAIL'}] scapy-e2e: "
+                      f"verdict={sc.get('verdict')} codes={sc.get('codes')}")
+            else:
+                print(f"  [skip] scapy-e2e: {sc.get('reason')}")
+            print(f"{label} Guard self-test: {'OK' if r['success'] else 'FAILED'}")
         return 0 if r['success'] else 1
 
     if args.cmd == 'ospf-watch':
