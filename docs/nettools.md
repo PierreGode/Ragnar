@@ -73,6 +73,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [Cisco Guard](#cisco-guard) | Switch & L2/L3 | `GET /api/net/cisco-guard` |
 | [Juniper Guard](#juniper-guard) | Switch & L2/L3 | `GET /api/net/juniper-guard` |
 | [Arista Guard](#arista-guard) | Switch & L2/L3 | `GET /api/net/arista-guard` |
+| [Comware Guard](#comware-guard) | Switch & L2/L3 | `GET /api/net/comware-guard` |
 | [Locate Port](#locate-port) | Switch & L2/L3 | `POST /api/net/locate-port` |
 | [PCAP Analyzer](#pcap-analyzer) | Switch & L2/L3 | `POST /api/net/pcap` |
 | [Interfaces](#interface-list) | Interfaces | `GET /api/net/interfaces` |
@@ -503,7 +504,7 @@ check, the [DHCP Guardian](#dhcp-guardian) rogue-server check, and the instant
 **Extended monitoring** (on by default alongside the monitor) additionally
 **rotates the whole passive-scanner suite** through the background poller —
 STP · DTP · CDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP · IS-IS · BGP · SMB ·
-Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · Cisco/Juniper/Arista Guards.
+Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · Cisco/Juniper/Arista/Comware Guards.
 Because each of those
 does a short `tcpdump` capture, they're run a **round-robin batch at a time**
 (default 3 per cycle, configurable) so a cycle stays ~1 minute; a full sweep
@@ -2001,6 +2002,33 @@ CVE-2024-6387/6409), and flags management listeners **`AG-103`** gNMI/gNOI
 **`AG-205`** a VLAN tag-stack CPU-punt anomaly (**CVE-2024-5872**).
 - Endpoint: `GET /api/net/arista-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py arista-guard [--iface I] [--seconds N] [--json]`
+
+#### Comware Guard
+HPE Comware / Huawei **VRF-hopping** (MPLS label injection). Detects **CVE-2015-5434**
+(HPE Comware 5/7, H3C, HP) and the identical-signature **CVE-2015-8087** (Huawei): an
+attacker on a PE-CE attachment circuit pre-encapsulates their own **MPLS shim header**
+so the PE forwards the frame into another tenant's VRF, crossing the isolation boundary.
+The detection is **structural** — a labelled frame (ethertype `0x8847`/`0x8848`) on a
+customer/access port *should not exist by construction*, the same zero-false-positive
+property as inline DHCP snooping — and keys on the **frame**, not a vendor string, so one
+rule set covers both vendors. **Segment role is load-bearing:** on a `ce` (customer/access)
+port MPLS presence *is* the attack (**`VRF-001`**, CRITICAL); on a `core` port the presence
+rules go quiet but the structural rules stay armed; `unknown` is treated as `ce` so
+detection fails loud (**`VRF-011`**). Also flags label **sweeps** (**`VRF-002`/`VRF-003`** —
+the published PoC brute-forces labels 1000–1500 in 500 frames), reserved labels
+(**`VRF-009`**), malformed/no-BOS stacks (**`VRF-006`**), stack-depth/TTL/trailing anomalies,
+MPLS inside a VLAN tag (**`VRF-014`**), LDP control-plane exposure on the CE side
+(**`VRF-012`**), and passive **Comware/H3C platform adjacency** from LLDP/CDP
+(**`VRF-015`**) correlated with a labelled frame (**`VRF-016`**, CRITICAL). Full frames are
+reconstructed from the `tcpdump -e -xx` hex dump so the label stack is parsed directly;
+validated against the published PoC pcap (506 frames → `VRF-001/002/003/014/015/016/018`).
+- Endpoint: `GET /api/net/comware-guard` `{interface, seconds, role}` · binary: `tcpdump`
+- CLI: `python3 network_diagnostics.py comware-guard [--iface I] [--seconds N] [--role ce|core|unknown] [--json]`
+
+> **Watchtower feed.** All four vendor guards append their findings as JSON-lines to
+> `/var/log/ragnar/<guard>.jsonl` (time-window deduplicated), so [Watchtower](#watchtower)
+> tails them into the unified alert pane and single Pushover path alongside the standalone
+> watcher daemons — automatically whenever Extended Monitoring is on.
 
 ### Locate Port
 Physically find **which switch port** the device is plugged into — the software

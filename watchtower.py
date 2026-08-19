@@ -93,6 +93,16 @@ DEFAULT_SOURCES = {
     'wpswatch':  {'label': 'WPS Watch',
                   'paths': ['/var/log/ragnar/wpswatch.jsonl',
                             '/var/log/wpswatch/alerts.jsonl']},
+    # In-app vendor CVE guards (network_diagnostics do_*_guard) emit JSON-lines
+    # findings here so Watchtower folds them into the one pane and Pushover path.
+    'cisco_guard':   {'label': 'Cisco Guard (IOS/IOS-XE/NX-OS)',
+                      'paths': ['/var/log/ragnar/cisco_guard.jsonl']},
+    'juniper_guard': {'label': 'Juniper Guard (J-Web/SSR/Space)',
+                      'paths': ['/var/log/ragnar/juniper_guard.jsonl']},
+    'arista_guard':  {'label': 'Arista Guard (EOS)',
+                      'paths': ['/var/log/ragnar/arista_guard.jsonl']},
+    'comware_guard': {'label': 'Comware Guard (VRF-hop / MPLS)',
+                      'paths': ['/var/log/ragnar/comware_guard.jsonl']},
 }
 
 # Directories globbed for `*.jsonl`; the basename becomes the source name. This is

@@ -940,7 +940,7 @@
                 <div class="flex items-center justify-between gap-4 mb-3">
                     <div class="min-w-0">
                         <h3 class="text-lg font-semibold">Watchtower</h3>
-                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP (plus any other watcher writing JSONL)</p>
+                        <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP · Cisco/Juniper/Arista/Comware guards (plus any other watcher writing JSONL)</p>
                     </div>
                     <button onclick="showTab('diagnostics')" class="shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Open pane</button>
                 </div>
@@ -1601,7 +1601,7 @@
                     <div class="flex items-center justify-between gap-4">
                         <div class="min-w-0">
                             <h3 class="text-lg font-semibold">Watchtower <span class="text-xs font-normal text-gray-500">— unified watcher alerts</span></h3>
-                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong> (plus any other watcher dropping a JSONL log in the watched dir). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. Each watcher must be installed and running (its systemd unit) to appear here.</p>
+                            <p class="text-sm text-gray-400">One pane for the deep standalone watchers that each run as their own daemon — <strong>ARP&nbsp;Guard</strong>, <strong>NDP&nbsp;Watch</strong> (IPv6), <strong>Wi-Fi&nbsp;Watch</strong>, <strong>Legacy&nbsp;Wi-Fi</strong>, <strong>WPS&nbsp;Watch</strong>, <strong>Cert&nbsp;Watch</strong>, <strong>SNMP</strong>, <strong>IS-IS</strong> and <strong>IGMP</strong> — <strong>plus the in-app vendor CVE guards</strong> (<strong>Cisco</strong>, <strong>Juniper</strong>, <strong>Arista</strong> and <strong>Comware/VRF-hop</strong>), which now stream their findings into the same feed (any other watcher dropping a JSONL log in the watched dir is picked up automatically too). Watchtower tails each one's JSON-lines log, normalizes them into a single feed, and pages new <strong>high/critical</strong> findings through one deduped Pushover path. Read-only over the logs — it captures nothing itself. The standalone watchers each need their systemd unit running to appear here; the in-app guards feed it automatically whenever Extended Monitoring is on.</p>
                         </div>
                         <label class="toggle-switch relative inline-flex items-center cursor-pointer shrink-0">
                             <input type="checkbox" id="watchtower-enabled" class="sr-only peer" onchange="onWatchtowerToggled(this)">
@@ -2275,6 +2275,25 @@
                         <button onclick="runAristaGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Arista</button>
                     </div>
                     <div id="arista-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
+                <!-- HPE Comware / Huawei VRF-hopping Guard -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">Comware Guard <span class="text-xs font-normal text-gray-500">(HPE Comware / Huawei · VRF-hopping · MPLS)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive VRF-hopping / MPLS label-injection guard — <strong>detection-only</strong>, never transmits. Detects the HPE Comware VRF-hopping CVE (<strong>CVE-2015-5434</strong>) and the identical-signature Huawei bug (<strong>CVE-2015-8087</strong>): an attacker on a PE-CE attachment circuit pre-encapsulates their own <strong>MPLS shim header</strong> so the PE forwards the frame into another tenant's VRF, crossing the isolation boundary. The detection is <strong>structural</strong> — a labelled frame (ethertype 0x8847/0x8848) on a customer/access port <em>should not exist by construction</em>, the same zero-false-positive property as inline DHCP snooping. Keys on the <strong>frame</strong>, not a vendor string, so one rule set covers both vendors. Flags the labelled frame itself (<strong>VRF-001</strong>), <strong>label sweeps</strong> (VRF-002/003, the published PoC brute-forces labels 1000-1500), reserved labels, malformed stacks, LDP control-plane exposure, and Comware/H3C <strong>platform adjacency</strong> (VRF-015/016) correlated from LLDP/CDP.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture over MPLS (0x8847/0x8848, incl. single-tagged), LDP (646) and LLDP/CDP. <strong>Segment role is load-bearing:</strong> on a <span class="font-mono">ce</span> (customer/access) port MPLS presence <em>is</em> the attack; on a <span class="font-mono">core</span> port the presence rules go quiet but the structural rules stay armed; <span class="font-mono">unknown</span> is treated as <span class="font-mono">ce</span> so detection fails loud. Full frames are reconstructed from the <span class="font-mono">tcpdump -e -xx</span> hex so the label stack is parsed directly.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="comware-guard-iface" title="Interface for the capture — pick the CE-facing NIC or a SPAN/mirror of a PE customer port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <select id="comware-guard-role" title="Segment role — CE (customer/access) arms presence detection; core keeps only structural rules" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="unknown">Role: unknown (→ CE)</option>
+                            <option value="ce">Role: CE (customer/access)</option>
+                            <option value="core">Role: core (P/PE)</option>
+                        </select>
+                        <input id="comware-guard-secs" type="number" min="5" max="40" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runComwareGuard()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan Comware</button>
+                    </div>
+                    <div id="comware-guard-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
                 <!-- BGP Collector + Path Asymmetry (OWD) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
@@ -8124,7 +8143,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260819-sensing-restart"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260819-comware-guard"></script>
 
 
 
