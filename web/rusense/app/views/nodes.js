@@ -54,10 +54,12 @@ function piSyncState(relOffUs, stalenessMs, guardUs) {
   return { label: 'desynced', cls: 'badge-bad', key: 'desynced' };
 }
 
-function nodeRow(n, names = {}) {
+function nodeRow(n, names = {}, cals = {}) {
   const h = nodeHealth(n.last_seen_ms);
   const nm = names[String(n.node_id)];
   const label = nm ? `${nm} <span class="text-ink-muted text-xs">#${n.node_id}</span>` : `#${n.node_id}`;
+  const c = cals[String(n.node_id)];
+  const badge = c ? `<span class="${qualityBadgeCls(c.quality)}" title="Calibrated ${new Date(c.ts).toLocaleString()} — ${Math.round((c.quality ?? 0) * 100)}% of the recording was in the green (close) zone">✓ ${Math.round((c.quality ?? 0) * 100)}%</span>` : '';
   return `<tr class="border-b border-ink-3 last:border-0">
     <td class="py-2.5 pr-3 font-mono">${label}</td>
     <td class="py-2.5 pr-3"><span class="${h.badge}" title="last frame ${fmt.ago((n.last_seen_ms ?? 0) / 1000)}"><span class="dot ${h.dot}"></span>${h.label}</span></td>
@@ -65,7 +67,7 @@ function nodeRow(n, names = {}) {
     <td class="py-2.5 pr-3 text-ink-soft">${(n.motion_level || '—').replace(/_/g, ' ')}</td>
     <td class="py-2.5 pr-3 text-right font-mono">${n.person_count ?? 0}</td>
     <td class="py-2.5 pr-3 text-right text-ink-muted">${fmt.ago((n.last_seen_ms ?? 0) / 1000)}</td>
-    <td class="py-2.5 text-right"><button class="btn-ghost !py-1 !px-2.5 text-xs" data-cal-node="${n.node_id}" title="Walk to this node and watch the bar fill green as you get close">Calibrate</button></td>
+    <td class="py-2.5 text-right" style="white-space:nowrap;">${badge ? badge + ' ' : ''}<button class="btn-ghost !py-1 !px-2.5 text-xs" data-cal-node="${n.node_id}" title="Walk to this node and watch the bar fill green as you get close">${c ? 'Recalibrate' : 'Calibrate'}</button></td>
   </tr>`;
 }
 
@@ -74,6 +76,13 @@ function proxColor(v) {
   if (v >= 0.6) return 'rgb(34 197 94)';    // ok / green
   if (v >= 0.34) return 'rgb(245 158 11)';  // warn / amber
   return 'rgb(239 68 68)';                   // bad / red
+}
+
+// Badge class for a saved calibration quality (green-zone fraction, 0..1).
+function qualityBadgeCls(q) {
+  if ((q ?? 0) >= 0.6) return 'badge-ok';
+  if ((q ?? 0) >= 0.3) return 'badge-warn';
+  return 'badge-bad';
 }
 
 export default {
@@ -85,7 +94,13 @@ export default {
     // Custom node names come from Ragnar config (Settings), not the sensing
     // roster; load them once so the table shows names instead of just "#id".
     let nodeNames = {};
-    fetchJSON('/api/config').then((c) => { nodeNames = (c && c.rusense_node_names) || {}; });
+    // Saved per-node calibrations (persist in Ragnar config until a new
+    // recording overwrites them); drives the "✓ NN%" Calibrated badge.
+    let nodeCal = {};
+    fetchJSON('/api/config').then((c) => {
+      nodeNames = (c && c.rusense_node_names) || {};
+      nodeCal = (c && c.rusense_node_calibration) || {};
+    });
 
     root.appendChild(html`
       <section class="space-y-5">
@@ -193,6 +208,7 @@ export default {
                 <button id="cal-record" class="btn-primary flex-1 !py-2 text-sm">Record calibration (15s)</button>
                 <button id="cal-reset" class="btn-ghost !py-2 text-sm" title="Forget the learned quiet-floor baselines and start fresh">Reset baseline</button>
               </div>
+              <div id="cal-saved" class="text-sm text-center" style="display:none;"></div>
               <p class="text-xs text-ink-muted leading-snug">
                 Honest limits: WiFi CSI proximity is <strong>near-field</strong> — a moving body perturbs every
                 link, so the bar is sharpest when you're right beside a node and fuzzier mid-room. This is
@@ -341,7 +357,7 @@ export default {
       $('#n-lagging').textContent = by.lagging;
       $('#n-offline').textContent = by.offline;
       body.innerHTML = list.length
-        ? list.map((n) => nodeRow(n, nodeNames)).join('')
+        ? list.map((n) => nodeRow(n, nodeNames, nodeCal)).join('')
         : '<tr><td colspan="7" class="py-6 text-center text-ink-muted">No nodes reporting. Power on an ESP32 CSI node and provision it to this server.</td></tr>';
       renderMeshHealth(mesh, list, status);
     };
@@ -458,6 +474,7 @@ export default {
           cal.rec.n++; cal.rec.motion += L.motion; cal.rec.act += L.act;
           cal.rec.share += (L.share || 0); cal.rec.rssi += (L.rssi || 0);
           cal.rec.peakShare = Math.max(cal.rec.peakShare, cal.smooth);
+          if (cal.smooth >= 0.6) cal.rec.green++;   // frames spent in the green (close) zone
         }
       }
       if (cal.open) calRender();
@@ -504,6 +521,19 @@ export default {
       }
     };
 
+    // Show the persistent saved-calibration status for a node in the modal.
+    const renderSaved = (nodeId, justSaved) => {
+      const el = $('#cal-saved'); if (!el) return;
+      const c = nodeCal[String(nodeId)];
+      if (!c) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      const q = Math.round((c.quality ?? 0) * 100);
+      const cls = qualityBadgeCls(c.quality);
+      const when = new Date(c.ts).toLocaleString();
+      el.style.display = 'block';
+      el.innerHTML = `${justSaved ? '<span class="text-ok">✓ Saved.</span> ' : ''}Calibrated <span class="${cls}">${q}% quality</span> `
+        + `<span class="text-ink-muted">· ${c.samples} frames · ${when}</span>`;
+    };
+
     const openCal = (nodeId) => {
       cal.open = true; cal.nodeId = String(nodeId);
       cal.peak = 0; cal.smooth = 0; cal.selPeakAct = 0;
@@ -511,6 +541,7 @@ export default {
       const tEl = $('#cal-title'); if (tEl) tEl.textContent = `Calibrate ${nm}`;
       const nEl = $('#cal-nodename'); if (nEl) nEl.textContent = nm;
       const m = $('#cal-modal'); if (m) m.style.display = 'flex';
+      renderSaved(cal.nodeId, false);
       calRender();
     };
     const closeCal = () => {
@@ -523,13 +554,16 @@ export default {
 
     const recordCal = async (btn) => {
       if (cal.rec || cal.nodeId == null) return;
-      cal.rec = { n: 0, motion: 0, act: 0, share: 0, rssi: 0, peakShare: 0 };
+      const nodeId = cal.nodeId;
+      cal.rec = { n: 0, motion: 0, act: 0, share: 0, rssi: 0, peakShare: 0, green: 0 };
+      const savedEl = $('#cal-saved'); if (savedEl) savedEl.style.display = 'none';
       const SECS = 15, started = Date.now();
       btn.disabled = true;
       const tick = () => {
         if (!cal.rec) return;
         const left = Math.max(0, SECS - Math.round((Date.now() - started) / 1000));
-        btn.textContent = `Recording… ${left}s (move near it)`;
+        const q = cal.rec.n ? Math.round((cal.rec.green / cal.rec.n) * 100) : 0;
+        btn.textContent = `Recording… ${left}s · ${q}% green`;
         if (left > 0) cal.recTimer = setTimeout(tick, 250);
       };
       tick();
@@ -537,8 +571,11 @@ export default {
       const rec = cal.rec; cal.rec = null;
       btn.disabled = false; btn.textContent = 'Record calibration (15s)';
       if (!rec || rec.n < 5) { toast('Not enough live frames — retry while moving near the node.', 'warn'); return; }
+      // Quality = fraction of the recording spent in the green (close) zone.
+      const quality = +(rec.green / rec.n).toFixed(3);
       const entry = {
-        node_id: Number(cal.nodeId),
+        node_id: Number(nodeId),
+        quality,
         mean_motion: +(rec.motion / rec.n).toFixed(5),
         mean_activity: +(rec.act / rec.n).toFixed(5),
         mean_share: +(rec.share / rec.n).toFixed(4),
@@ -550,14 +587,18 @@ export default {
       // Merge into the shared per-node calibration map on the server config.
       let store = {};
       try { const c = await fetchJSON('/api/config'); store = (c && c.rusense_node_calibration) || {}; } catch (_) {}
-      store[String(cal.nodeId)] = entry;
+      store[String(nodeId)] = entry;
       try {
         const resp = await fetch('/api/config', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ rusense_node_calibration: store }),
         });
-        if (resp.ok) toast(`Saved calibration for node #${cal.nodeId} (peak ${Math.round(entry.peak_proximity * 100)}%, ${rec.n} frames).`, 'ok');
-        else toast('Save failed — config endpoint rejected the write.', 'bad');
+        if (resp.ok) {
+          nodeCal = store;                        // reflect the new saved state everywhere
+          renderSaved(nodeId, true);              // "✓ Saved · NN% quality" in the modal
+          refresh();                              // repaint the table badge immediately
+          toast(`Saved calibration for node #${nodeId} — ${Math.round(quality * 100)}% quality (${rec.n} frames).`, 'ok');
+        } else toast('Save failed — config endpoint rejected the write.', 'bad');
       } catch (_) { toast('Save failed — could not reach the server.', 'bad'); }
     };
 
