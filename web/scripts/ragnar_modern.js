@@ -1066,6 +1066,7 @@ function refreshSensingInstallCard() {
             const installBtn = document.getElementById('sensing-install-btn');
             const rebuildBtn = document.getElementById('sensing-rebuild-btn');
             const uninstallBtn = document.getElementById('sensing-uninstall-btn');
+            const restartBtn = document.getElementById('sensing-restart-btn');
             const archNote = document.getElementById('sensing-arch-note');
             // Always visible in the RuSense tab: doubles as a status + management panel
             // (Install when absent, Reinstall / Uninstall when present).
@@ -1087,6 +1088,7 @@ function refreshSensingInstallCard() {
             if (installBtn) { installBtn.disabled = busy; installBtn.textContent = s.installed ? 'Reinstall' : 'Install'; }
             if (rebuildBtn) rebuildBtn.disabled = busy;
             if (uninstallBtn) { uninstallBtn.classList.toggle('hidden', !s.installed); uninstallBtn.disabled = busy; }
+            if (restartBtn) { restartBtn.classList.toggle('hidden', !s.installed); restartBtn.disabled = busy; }
             if (s.installing) startSensingLogPoll();
         })
         .catch(() => {});
@@ -1106,6 +1108,27 @@ function uninstallSensingBackend() {
     if (!confirm('Stop and remove the bundled sensing backend?')) return;
     fetch('/api/sensing/uninstall', { method: 'POST' })
         .then(() => startSensingLogPoll()).catch(() => {});
+}
+
+function restartSensingBackend() {
+    const btn = document.getElementById('sensing-restart-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Restarting…'; }
+    fetch('/api/sensing/restart', { method: 'POST' })
+        .then(r => r.json())
+        .then(d => {
+            if (typeof showNotification === 'function') {
+                showNotification(d.success ? (d.message || 'Sensing service restarted')
+                                           : (d.error || 'Restart failed'),
+                                 d.success ? 'success' : 'error');
+            }
+        })
+        .catch(() => {
+            if (typeof showNotification === 'function') showNotification('Restart request failed', 'error');
+        })
+        .finally(() => {
+            if (btn) btn.textContent = 'Restart';
+            refreshSensingInstallCard();
+        });
 }
 
 function startSensingLogPoll() {

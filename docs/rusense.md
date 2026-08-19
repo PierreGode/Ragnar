@@ -115,6 +115,10 @@ cd /home/ragnar/Ragnar
 sudo ./scripts/install_sensing.sh
 ```
 
+The **Sensing backend** card (Config → RuSense) manages this without a shell:
+**Install/Reinstall**, **Build from source**, **Restart** (a quick service bounce —
+e.g. after changing env overrides or to re-bind the UDP receiver), and **Uninstall**.
+
 This installs and starts `ragnar-sensing.service`:
 
 - On **Raspberry Pi (arm64)** it installs the prebuilt binary at `bin/sensing-server`.

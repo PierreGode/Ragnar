@@ -4745,6 +4745,33 @@ def sensing_uninstall():
     return jsonify({'success': True, 'message': 'Sensing backend uninstall started'})
 
 
+@app.route('/api/sensing/restart', methods=['POST'])
+def sensing_restart():
+    """Restart the bundled sensing service (systemctl restart) without a full reinstall.
+
+    Handy after tuning env/overrides, or to re-bind the UDP CSI receiver — a quick
+    bounce instead of the slower Reinstall path. Refuses while an install is running.
+    """
+    with _sensing_install_lock:
+        if _sensing_installing:
+            return jsonify({'success': False, 'error': 'An install is in progress — try again shortly.'}), 409
+    installed, _ = _sensing_unit_state()
+    if not installed:
+        return jsonify({'success': False, 'error': 'Sensing backend is not installed.'}), 400
+    cmd = (['systemctl', 'restart', SENSING_UNIT] if os.geteuid() == 0
+           else ['sudo', '-n', 'systemctl', 'restart', SENSING_UNIT])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except Exception as exc:
+        return jsonify({'success': False, 'error': f'restart failed: {exc}'}), 500
+    if proc.returncode != 0:
+        return jsonify({'success': False,
+                        'error': (proc.stderr or proc.stdout or 'systemctl restart failed').strip()}), 500
+    _, active = _sensing_unit_state()
+    return jsonify({'success': True, 'active': active,
+                    'message': 'Sensing service restarted' + ('' if active else ' (not active — check logs)')})
+
+
 @app.route('/api/sensing/install-log', methods=['GET'])
 def sensing_install_log():
     """Return the live install/uninstall log and current service state."""
