@@ -17052,7 +17052,7 @@ async function scanWifiNetworks() {
         networksList.innerHTML = `
             <div class="text-center text-red-400 py-8">
                 <p>Error scanning for networks</p>
-                <p class="text-sm mt-2">${error.message}</p>
+                <p class="text-sm mt-2">${escapeHtml(error.message)}</p>
             </div>
         `;
     } finally {
@@ -17877,7 +17877,7 @@ async function pairBluetoothDevice() {
         statusDiv.classList.remove('hidden');
         statusDiv.innerHTML = `
             <div class="bg-blue-600 rounded p-3 text-sm">
-                ${device.paired ? 'Unpairing' : 'Pairing'} device ${device.name || address}...
+                ${device.paired ? 'Unpairing' : 'Pairing'} device ${escapeHtml(device.name || address)}...
             </div>
         `;
     }
@@ -17961,7 +17961,7 @@ async function enumerateBluetoothServices() {
         statusDiv.classList.remove('hidden');
         statusDiv.innerHTML = `
             <div class="bg-blue-600 rounded p-3 text-sm">
-                Enumerating services for ${device.name || address}...
+                Enumerating services for ${escapeHtml(device.name || address)}...
             </div>
         `;
     }
@@ -25004,7 +25004,7 @@ function updateEnrichedFindingsTable(findings) {
                             <p>Threat intelligence enrichment requires vulnerability discoveries first.</p>
                             <p class="text-cyan-400">📋 Steps to generate threat intelligence:</p>
                             <ol class="text-left text-xs space-y-1 mt-2">
-                                <li>1. Wait for network discovery to complete (${document.getElementById('target-count')?.textContent || '0'} hosts found)</li>
+                                <li>1. Wait for network discovery to complete (${escapeHtml(document.getElementById('target-count')?.textContent || '0')} hosts found)</li>
                                 <li>2. Run vulnerability scans on discovered hosts</li>
                                 <li>3. Threat intelligence will enrich discovered vulnerabilities</li>
                             </ol>

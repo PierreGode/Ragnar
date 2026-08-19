@@ -50,10 +50,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          # Skip vendored third-party sources (cffi ships prebuilt C glue).
-          config: |
-            paths-ignore:
-              - pager_lib/cffi
+          config-file: ./.github/codeql/codeql-config.yml
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3

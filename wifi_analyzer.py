@@ -2051,7 +2051,7 @@ def selftest():
 
     # --- AP history DB + change detection (Tier 3) — temp file, no real state ---
     global _DB_FILE
-    _orig_db, _DB_FILE = _DB_FILE, __import__("tempfile").mktemp(suffix=".json")
+    _orig_db, _DB_FILE = _DB_FILE, os.path.join(__import__("tempfile").mkdtemp(), "db.json")
     try:
         db_reset()
         base = {"bssid": "a0:00:00:00:00:01", "ssid": "H", "channel_util": 10,
@@ -2082,8 +2082,8 @@ def selftest():
     global _HEATMAP_FILE, _SURVEYS_FILE
     _oh, _os_ = _HEATMAP_FILE, _SURVEYS_FILE
     import tempfile as _tf
-    _HEATMAP_FILE = _tf.mktemp(suffix=".json")
-    _SURVEYS_FILE = _tf.mktemp(suffix=".json")
+    _HEATMAP_FILE = os.path.join(_tf.mkdtemp(), "heatmap.json")
+    _SURVEYS_FILE = os.path.join(_tf.mkdtemp(), "surveys.json")
     try:
         heatmap_add_sample(0.5, 0.5, -55, "b0:00:00:00:00:01", "SurveyNet",
                            snr=25, noise=-90, band="5", channel=36)
@@ -2140,7 +2140,7 @@ def selftest():
     check("iperf3 parse: missing data => None", _parse_iperf3({}) is None)
     # throughput fields flatten onto a heatmap sample (_HEATMAP_FILE already
     # declared global above in this function)
-    _oh2, _HEATMAP_FILE = _HEATMAP_FILE, __import__("tempfile").mktemp(suffix=".json")
+    _oh2, _HEATMAP_FILE = _HEATMAP_FILE, os.path.join(__import__("tempfile").mkdtemp(), "heatmap.json")
     try:
         d = heatmap_add_sample(0.5, 0.5, -55, "aa:bb:cc:00:00:01", "TP",
                                throughput={"method": "iperf3", "down_mbps": 500.0,
@@ -2214,7 +2214,7 @@ def selftest():
     two = predict_point_rssi_multi(0.85, 0.5, [ap_a, ap_b], [])
     check("adding a node never lowers predicted coverage", two >= one, f"{one}->{two}")
     # Persistence round-trips a list and keeps legacy predict_ap in sync.
-    _oh3, _HEATMAP_FILE = _HEATMAP_FILE, _tf.mktemp(suffix=".json")
+    _oh3, _HEATMAP_FILE = _HEATMAP_FILE, os.path.join(_tf.mkdtemp(), "heatmap.json")
     try:
         heatmap_set_predict_aps([ap_a, ap_b])
         hd = heatmap_get()

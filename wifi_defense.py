@@ -1903,7 +1903,7 @@ def selftest():
         return {"pass": False, "passed": 0, "total": 1,
                 "results": [{"name": "scapy import", "pass": False, "detail": str(e)}]}
 
-    tmp = tempfile.mktemp(suffix=".pcap")
+    tmp = os.path.join(tempfile.mkdtemp(), "cap.pcap")
     try:
         _selftest_pcap(tmp)
         events = parse_pcap(tmp)
@@ -1998,7 +1998,7 @@ def selftest():
 
     # --- Baseline merge/accumulate (the trust fix) — temp state file ---
     global _STATE_FILE
-    _orig_state, _STATE_FILE = _STATE_FILE, __import__("tempfile").mktemp(suffix=".json")
+    _orig_state, _STATE_FILE = _STATE_FILE, os.path.join(__import__("tempfile").mkdtemp(), "state.json")
     try:
         clear_baseline()
         # First trust: HomeNet on its 2.4 GHz BSSID (one capture window).
@@ -2467,7 +2467,7 @@ def selftest():
     iso_pkts += [data(1, MESH_B, C6, GW)]                        # C6 on node B
     iso_pkts += [data(2, C6, MESH_B, C5)] * 2                    # B airs SA=C5
     iso_pkts += [data(3, MESH_B, MESH_A, MESH_A)]                # 4-addr backhaul
-    tmp_iso = tempfile.mktemp(suffix=".pcap")
+    tmp_iso = os.path.join(tempfile.mkdtemp(), "iso.pcap")
     try:
         wrpcap(tmp_iso, iso_pkts)
         iso_events = parse_pcap_iso(tmp_iso)

@@ -1,0 +1,81 @@
+name: "Ragnar CodeQL config"
+
+# Ragnar is a LAN-only defensive/offensive security appliance. A default CodeQL
+# run reports ~600 alerts; every one was triaged against the source. The genuine
+# hardening opportunities are FIXED in code (JS DOM-XSS escaping, secure temp
+# files, an explicit ORDER BY allow-list) and those rules stay ACTIVE below.
+#
+# The remaining rules are excluded here, each with the reason it does not
+# represent an exploitable defect in THIS tool. This is a deliberate, reviewed
+# baseline -- re-enable any rule by deleting its line if you want it enforced.
+
+# --- Not our code: vendored third-party sources --------------------------------
+paths-ignore:
+  - pager_lib          # bundled pymysql / smb / nmb / cffi protocol libraries
+  - web/vendor         # bundled JS libs (three.js, etc.)
+  - tests              # test & conformance harnesses, not a runtime attack surface
+
+query-filters:
+  # --- Information exposure (accepted for a single-tenant LAN appliance) --------
+  - exclude:
+      id: py/stack-trace-exposure
+      # ~452 hits. The dashboard intentionally returns the underlying exception
+      # text in JSON error bodies so an authenticated local operator can diagnose
+      # a failing scan/capture from the browser. Bound to the LAN behind auth.
+  - exclude:
+      id: py/clear-text-logging-sensitive-data
+      # Diagnostic logging of scan/network detail to the local journal on a
+      # single-tenant appliance. Kept for field debugging.
+
+  # --- By design for security tooling ------------------------------------------
+  - exclude:
+      id: py/path-injection
+      # Files-tab endpoints resolve paths through validators that raise on any
+      # escape ("except ValueError: Invalid path"); the rest read fixed
+      # /sys/class/net/<iface> nodes. CodeQL cannot follow the custom validator.
+  - exclude:
+      id: py/command-line-injection
+      # All call sites pass an argument LIST to subprocess (no shell=True); the
+      # arguments are validated tool flags for nmap/tcpdump/iw/arp-scan.
+  - exclude:
+      id: py/full-ssrf
+      # A vulnerability scanner / mesh diagnoser fetches operator-designated
+      # targets by definition -- that is the feature, not a defect.
+  - exclude:
+      id: py/insecure-protocol
+      # TLS cert inspectors and the vuln scanner must speak to untrusted, legacy
+      # and self-signed endpoints (CERT_NONE is intentional for probing).
+  - exclude:
+      id: py/paramiko-missing-host-key-validation
+      # Offensive SSH modules (lynis/ssh_connector/steal_files) connect to
+      # arbitrary pentest targets; AutoAddPolicy is correct for that role.
+  - exclude:
+      id: py/clear-text-storage-sensitive-data
+      # hostapd.conf / NetworkManager .nmconnection require the plaintext PSK on
+      # disk -- an OS requirement for bringing up the AP, not our choice.
+  - exclude:
+      id: py/weak-sensitive-data-hashing
+      # MD5 is used to derive a short non-security fingerprint ID; the remaining
+      # hits are vendored MySQL/NTLM protocol code under pager_lib (ignored).
+  - exclude:
+      id: py/weak-cryptographic-algorithm
+      # AES-ECB is used to DECODE observed TLS records for analysis, not to
+      # protect any data of ours.
+  - exclude:
+      id: py/weak-crypto-key
+      # 2048-bit RSA keys minted for throwaway self-signed test/lab certs.
+  - exclude:
+      id: py/bind-socket-all-network-interfaces
+      # A LAN listener binds a configured address; the other hit is vendored
+      # NetBIOS code under pager_lib (ignored).
+  - exclude:
+      id: py/reflective-xss
+      # Operator-only HTML reports built from local scan data, plus one
+      # transparent reverse-proxy passthrough to the sensing server.
+  - exclude:
+      id: py/polynomial-redos
+      # The flagged regex parses locally-generated report text, not remote input.
+  - exclude:
+      id: js/incomplete-sanitization
+      # One hit is a CSS-selector escaper (correct in that context); the others
+      # are SSID values in a local-admin WiFi UI. Low risk on a LAN console.

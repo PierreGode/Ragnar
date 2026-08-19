@@ -3520,7 +3520,7 @@ def _arp_selftest():
 
     # -- cross-pivot from a temp FHRP-Watch baseline --
     gw, vmac = '10.0.0.1', '00:00:0c:07:ac:01'
-    fpath = tempfile.mktemp(suffix='.json')
+    fpath = os.path.join(tempfile.mkdtemp(), 'fhrp.json')
     json.dump({'groups': {'hsrp/1': {'proto': 'hsrp', 'group': 1, 'vips': [gw]}}},
               open(fpath, 'w'))
     saved_fw = _FHRP_WATCH_PATH
@@ -3536,7 +3536,7 @@ def _arp_selftest():
 
         # -- verdict branches via monkeypatched neighbour table --
         cur = {'mac': vmac}
-        bpath = tempfile.mktemp(suffix='.json')
+        bpath = os.path.join(tempfile.mkdtemp(), 'baseline.json')
         g['_ARP_BASELINE_PATH'] = bpath
         g['_default_gateway'] = lambda: gw
         g['_neigh_mac'] = lambda ip: cur['mac']
@@ -3735,7 +3735,7 @@ def _dhcp_selftest():
         g['_dhcp_capture'] = lambda iface, s: (state['req'], state['clients'], None)
 
         def _fresh():
-            g['_DHCP_BASELINE_PATH'] = tempfile.mktemp(suffix='.json')
+            g['_DHCP_BASELINE_PATH'] = os.path.join(tempfile.mkdtemp(), 'dhcp.json')
 
         # rogue: two servers, none trusted yet.
         _fresh()
