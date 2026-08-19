@@ -25,13 +25,23 @@ LOG_FILE="${SENSING_INSTALL_LOG:-$RAGNAR_DIR/data/sensing_install.log}"
 # RuView source (only used for the build-from-source fallback). Pinned so a
 # rebuild is reproducible and can't drift under us.
 RUVIEW_REPO="${RUVIEW_REPO:-https://github.com/PierreGode/RuView.git}"
-RUVIEW_PIN="${RUVIEW_PIN:-309121ccd62d8d76c36ee390d4dbd423ee69c0d1}"
+RUVIEW_PIN="${RUVIEW_PIN:-1853bbd5b1909a342b878188f51fb5a39decf0d5}"
 RUVIEW_CRATE="wifi-densepose-sensing-server"
 
 # Runtime tuning (matches the validated working deployment).
 HTTP_PORT="${SENSING_HTTP_PORT:-3000}"
 WS_PORT="${SENSING_WS_PORT:-3100}"
 UDP_PORT="${SENSING_UDP_PORT:-5005}"
+# UDP CSI-receiver bind address. Newer sensing-server (ADR-296) defaults the UDP
+# data plane to loopback-only (127.0.0.1) and drops LAN senders unless the
+# routable bind is opted into. Ragnar's ESP32 nodes send CSI from the LAN, so
+# bind the routable address by default. Prefer a source allowlist
+# (SENSING_UDP_ALLOW="192.168.1.0/24" — comma-separated CIDRs); with none set we
+# fall back to --udp-insecure-lan, which reproduces the prior accept-any-source
+# behavior (the appliance sits on a trusted local net; the UDP plane is
+# unauthenticated either way). Set SENSING_UDP_BIND=127.0.0.1 to hard-disable.
+UDP_BIND="${SENSING_UDP_BIND:-0.0.0.0}"
+UDP_ALLOW="${SENSING_UDP_ALLOW:-}"
 TICK_MS="${SENSING_TICK_MS:-500}"
 SOURCE="${SENSING_SOURCE:-esp32}"
 RUN_USER="${SENSING_RUN_USER:-$(stat -c '%U' "$RAGNAR_DIR")}"
@@ -130,7 +140,17 @@ LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 HOSTNAME_SHORT="$(hostname)"
 ALLOWED_HOSTS="${LAN_IP}:${HTTP_PORT},${LAN_IP},${HOSTNAME_SHORT}:${HTTP_PORT},${HOSTNAME_SHORT}.local:${HTTP_PORT}"
 
-log "Writing $UNIT_PATH (allowed hosts: $ALLOWED_HOSTS)"
+# Assemble the UDP bind flags (ADR-296). A loopback bind needs nothing; a
+# routable bind needs either an explicit allowlist or the insecure-lan opt-in.
+if [ "$UDP_BIND" = "127.0.0.1" ] || [ "$UDP_BIND" = "localhost" ]; then
+    UDP_ARGS="--udp-bind $UDP_BIND"
+elif [ -n "$UDP_ALLOW" ]; then
+    UDP_ARGS="--udp-bind $UDP_BIND --udp-allow $UDP_ALLOW"
+else
+    UDP_ARGS="--udp-bind $UDP_BIND --udp-insecure-lan"
+fi
+
+log "Writing $UNIT_PATH (allowed hosts: $ALLOWED_HOSTS; udp: $UDP_ARGS)"
 as_root tee "$UNIT_PATH" >/dev/null <<UNIT
 [Unit]
 Description=Ragnar WiFi-CSI sensing backend (bundled sensing-server)
@@ -169,7 +189,7 @@ Environment=RUVIEW_NONVOTING_NODES=1
 # Raising the ceiling only affects meshes that were exceeding it (they now fuse
 # instead of dropping the cycle); a well-synced mesh fuses the same frames.
 Environment=WDP_GUARD_INTERVAL_US=350000
-ExecStart=$INSTALL_BIN --source $SOURCE --tick-ms $TICK_MS --ui-path $UI_PATH --http-port $HTTP_PORT --ws-port $WS_PORT --udp-port $UDP_PORT --bind-addr 0.0.0.0
+ExecStart=$INSTALL_BIN --source $SOURCE --tick-ms $TICK_MS --ui-path $UI_PATH --http-port $HTTP_PORT --ws-port $WS_PORT --udp-port $UDP_PORT --bind-addr 0.0.0.0 $UDP_ARGS
 Restart=on-failure
 RestartSec=3
 

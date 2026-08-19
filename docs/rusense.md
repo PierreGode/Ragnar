@@ -124,6 +124,12 @@ This installs and starts `ragnar-sensing.service`:
 Default ports: HTTP `3000`, WebSocket `3100`, UDP CSI ingest `5005`. The service is
 idempotent — safe to re-run.
 
+> The UDP CSI receiver binds `0.0.0.0` so the ESP32 nodes on your LAN can reach it
+> — newer sensing-server builds default that socket to loopback-only and would
+> otherwise drop LAN frames. To restrict it, set `SENSING_UDP_ALLOW="192.168.1.0/24"`
+> (comma-separated CIDRs) before running the installer, or `SENSING_UDP_BIND=127.0.0.1`
+> to accept loopback only.
+
 > By default the sensing API (`/api/v1/*`) is unauthenticated and bound to localhost,
 > reached only through Ragnar's web proxy. If you expose it directly, set
 > `RUVIEW_API_TOKEN=<token>` to enforce bearer auth.

@@ -389,6 +389,24 @@ if [ -f "$SENSING_UNIT" ] && grep -q '^Environment=WDP_GUARD_INTERVAL_US=200000'
     echo -e "${GREEN}Raised sensing fusion guard to 350 ms (was 200 ms).${NC}"
 fi
 
+# ADR-296 (upstream RuView): the sensing-server UDP CSI receiver now defaults to
+# loopback-only and drops LAN senders unless a routable bind is opted into. Our
+# ESP32 nodes send CSI from the LAN, so a unit whose ExecStart predates the flag
+# would silently stop ingesting once the newer binary is deployed. Add
+# `--udp-bind 0.0.0.0 --udp-insecure-lan` in place — but ONLY when the installed
+# binary actually understands the flag, so an older binary is never fed an
+# unknown arg (which would break its startup). Idempotent: skips a unit that
+# already carries --udp-bind (including a hand-tuned --udp-allow variant).
+if [ -f "$SENSING_UNIT" ] \
+   && grep -q '^ExecStart=.*ragnar-sensing-server' "$SENSING_UNIT" \
+   && ! grep -q -- '--udp-bind' "$SENSING_UNIT" \
+   && /usr/local/bin/ragnar-sensing-server --help 2>/dev/null | grep -q -- '--udp-bind'; then
+    sed -i '/^ExecStart=.*ragnar-sensing-server/ s|$| --udp-bind 0.0.0.0 --udp-insecure-lan|' "$SENSING_UNIT"
+    systemctl daemon-reload
+    systemctl try-restart ragnar-sensing.service 2>/dev/null || true
+    echo -e "${GREEN}Added UDP LAN bind to ragnar-sensing.service (ADR-296 CSI fix).${NC}"
+fi
+
 # Headless (web-only) installs must never initialize the EPD: SharedData() inits
 # the display at import time, seizing SPI0 + GPIO and blanking a DPI/HDMI panel
 # on shared-pin boards (HackBerry Pi). The headless entrypoint now sets
