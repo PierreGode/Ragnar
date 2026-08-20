@@ -412,6 +412,15 @@
     return `<section class="sv-diag-card"><h3>${esc(title)}</h3>${diagRows(rows)}</section>`;
   }
 
+  function gpsUsbDevices(diag) {
+    const devices = (((diag || {}).power || {}).usb_devices || []);
+    return devices.filter(d => {
+      const text = [d.product, d.manufacturer, d.usb_id, (d.interfaces || []).join(' ')]
+        .filter(Boolean).join(' ').toLowerCase();
+      return text.includes('gps') || text.includes('gnss') || text.includes('nmea') || text.includes('u-blox') || text.includes('ttyacm') || text.includes('ttyusb');
+    });
+  }
+
   function renderGpsDiagnosticsPopup(diag, live) {
     const modal = overlay && overlay.querySelector('.sv-diag-modal');
     const body = overlay && overlay.querySelector('.sv-diag-modal-body');
@@ -422,6 +431,12 @@
     const deepGps = diag.gps || {};
     const sky = Array.isArray(deepGps.sky) && deepGps.sky.length ? deepGps.sky : (Array.isArray(gps.sky) ? gps.sky : []);
     const constellations = Array.isArray(deepGps.constellations) ? deepGps.constellations : [];
+    const gpsUsb = gpsUsbDevices(diag);
+    const primaryUsb = gpsUsb[0] || null;
+    const hasGpsManager = deepGps.present !== false && !(gps.error === 'GPS not initialized');
+    const hardwareState = primaryUsb
+      ? 'USB receiver detected'
+      : (deepGps.present === false ? 'GPS manager not initialized' : 'not detected');
     const tracked = sky.filter(s => typeof s.snr === 'number' && s.snr > 0);
     const strongest = tracked.slice().sort((a, b) => b.snr - a.snr)[0];
     const avgSnr = tracked.length
@@ -447,12 +462,16 @@
 
     cards.push(diagCard('Receiver Health', [
       ['Connected', gps.connected],
+      ['Hardware', hardwareState, primaryUsb ? 'good' : (gps.connected ? 'good' : 'warn')],
+      ['Receiver', primaryUsb ? (primaryUsb.product || primaryUsb.manufacturer || primaryUsb.usb_id) : null],
+      ['USB interface', primaryUsb && primaryUsb.interfaces ? primaryUsb.interfaces.join(', ') : null],
       ['Source', gps.source || status.source],
       ['Port', gps.port || status.port],
       ['Satellites', sats],
       ['SNR max', gps.snr_max != null ? gps.snr_max + ' dB' : (strongest ? strongest.snr + ' dB' : null)],
       ['Average SNR', avgSnr],
       ['HDOP', gps.hdop],
+      ['GPS manager', hasGpsManager ? 'initialized' : 'not initialized', hasGpsManager ? 'good' : 'warn'],
       ['GPS error', gps.error || status.error, gps.error || status.error ? 'warn' : null]
     ]));
 
@@ -473,6 +492,15 @@
         : null],
       ['Constellations', constellations.length || [...new Set(sky.map(s => s.constellation).filter(Boolean))].length]
     ]));
+
+    if (primaryUsb && !hasGpsManager) {
+      cards.push(diagCard('Initialization Hint', [
+        ['Device state', 'receiver visible on USB', 'good'],
+        ['Wardriving status', 'disabled or not running', 'warn'],
+        ['Next check', 'enable/start wardriving GPS to initialize live feed'],
+        ['Detected draw', primaryUsb.max_power_ma != null ? primaryUsb.max_power_ma + ' mA' : null]
+      ]));
+    }
 
     const constellationHtml = constellations.length
       ? `<section class="sv-diag-card sv-diag-wide"><h3>Constellation Breakdown</h3><div class="sv-diag-chips">${constellations.map(c => `<span><b>${esc(c.constellation || 'GNSS')}</b>${esc(diagValue(c.in_view))} in view${c.snr_max != null ? ' / ' + esc(c.snr_max + ' dB') : ''}</span>`).join('')}</div></section>`

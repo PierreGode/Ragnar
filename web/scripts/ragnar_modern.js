@@ -27643,8 +27643,13 @@ function wdOpenSkyView() {
 }
 window.wdOpenSkyView = wdOpenSkyView;
 
-function openWardrivingStarEgg() {
+async function openWardrivingStarEgg() {
     if (!window.RagnarSkyView) return;
+    try {
+        await fetch('/api/wardriving/gps/enable', { method: 'POST', cache: 'no-store' });
+    } catch (e) {
+        console.warn('[Wardriving] GPS-only enable failed:', e);
+    }
     const gps = (_wdDiagExtra && _wdDiagExtra.gps) || {};
     window.RagnarSkyView.open({ sky: gps.sky || [], status: gps.status || {}, enhanced: true });
 }
