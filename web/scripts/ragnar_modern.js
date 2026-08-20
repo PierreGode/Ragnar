@@ -27645,13 +27645,16 @@ window.wdOpenSkyView = wdOpenSkyView;
 
 async function openWardrivingStarEgg() {
     if (!window.RagnarSkyView) return;
+    let liveGps = null;
     try {
-        await fetch('/api/wardriving/gps/enable', { method: 'POST', cache: 'no-store' });
+        const res = await fetch('/api/wardriving/gps/enable', { method: 'POST', cache: 'no-store' });
+        const data = res.ok ? await res.json() : null;
+        liveGps = data && data.gps ? data.gps : null;
     } catch (e) {
         console.warn('[Wardriving] GPS-only enable failed:', e);
     }
     const gps = (_wdDiagExtra && _wdDiagExtra.gps) || {};
-    window.RagnarSkyView.open({ sky: gps.sky || [], status: gps.status || {}, enhanced: true });
+    window.RagnarSkyView.open({ sky: (liveGps && liveGps.sky) || gps.sky || [], status: liveGps || gps.status || {}, enhanced: true });
 }
 window.openWardrivingStarEgg = openWardrivingStarEgg;
 
