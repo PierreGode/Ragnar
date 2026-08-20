@@ -114,6 +114,8 @@
   let timer = null, onEsc = null, resizeH = null;
   let enhanced = false;
   let skyZoom = 1;
+  let skyPanX = 0, skyPanY = 0;
+  let suppressNextClick = false;
   // mode: 'live' (this boot's fix) | 'last' (persisted last-known) | 'none'
   let lastData = { sky: [], lat: null, lon: null, mode: 'none', t: null };
   // Screen-space projected objects for click hit-testing.
@@ -160,8 +162,8 @@
     const baseX = (normDeg(az) / 360) * W;
     const baseY = (1 - Math.max(0, Math.min(90, alt)) / 90) * H;
     return {
-      x: W / 2 + (baseX - W / 2) * skyZoom,
-      y: H / 2 + (baseY - H / 2) * skyZoom
+      x: W / 2 + (baseX - W / 2) * skyZoom + skyPanX,
+      y: H / 2 + (baseY - H / 2) * skyZoom + skyPanY
     };
   }
 
@@ -301,7 +303,7 @@
       detailEl.style.display = '';
       detailEl.innerHTML = `<div class="sv-detail-card"><b>Full sky</b><span><i>Projection</i><em>alt/az panorama</em></span><span><i>Zoom</i><em>${skyZoom.toFixed(1)}x</em></span><span><i>Visible stars</i><em>${visibleStars}</em></span></div>
         <div class="sv-detail-card"><b>Objects</b><span><i>Named stars</i><em>${namedStars}</em></span><span><i>Planets</i><em>${hasPos ? planetPositions(date, lat, lon).filter(p => p.alt > 0).length : 0}</em></span><span><i>Tracked sats</i><em>${trackedSats}/${(lastData.sky || []).length}</em></span></div>
-        <div class="sv-detail-card"><b>Signal</b><span><i>Average SNR</i><em>${avgSnr}</em></span><span><i>Strongest</i><em>${strong}</em></span><span><i>Radar</i><em>upper-left inset</em></span></div>`;
+        <div class="sv-detail-card"><b>Signal</b><span><i>Average SNR</i><em>${avgSnr}</em></span><span><i>Strongest</i><em>${strong}</em></span><span><i>Drag</i><em>click-hold pan</em></span></div>`;
     }
   }
 
@@ -553,6 +555,10 @@
   }
 
   function onSvgClick(ev) {
+    if (enhanced && suppressNextClick) {
+      suppressNextClick = false;
+      return;
+    }
     if (infoCard && infoCard.style.display === 'block') {
       infoCard.style.display = 'none';
       return;
@@ -744,6 +750,16 @@
     render();
   }
 
+  function setSkyPan(nextX, nextY) {
+    if (!svg) return;
+    const r = svg.getBoundingClientRect();
+    const maxX = Math.max(0, r.width * (skyZoom - 1) * 0.55 + 160);
+    const maxY = Math.max(0, r.height * (skyZoom - 1) * 0.55 + 120);
+    skyPanX = Math.max(-maxX, Math.min(maxX, nextX));
+    skyPanY = Math.max(-maxY, Math.min(maxY, nextY));
+    render();
+  }
+
   // ---- Public API ------------------------------------------------------
   function open(initial) {
     if (overlay) return;
@@ -829,16 +845,17 @@
         #ragnar-skyview .sv-zoom span{min-width:46px;text-align:center;color:#9fb0c3;font-size:11px;font-family:ui-monospace,monospace;}
         #ragnar-skyview .sv-detail{display:none;position:absolute;right:14px;bottom:14px;z-index:4;
           width:min(360px,calc(100vw - 28px));gap:8px;pointer-events:none;}
-        #ragnar-skyview .sv-detail-card{background:linear-gradient(180deg,rgba(8,20,38,.76),rgba(3,8,18,.64));
-          border:1px solid rgba(125,211,252,.24);border-radius:10px;padding:10px 12px;
-          box-shadow:0 14px 36px rgba(0,0,0,.32), inset 0 1px 0 rgba(255,255,255,.04);backdrop-filter:blur(10px);}
-        #ragnar-skyview .sv-detail-card b{display:block;color:#dbeafe;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;}
-        #ragnar-skyview .sv-detail-card span{display:flex;align-items:baseline;justify-content:space-between;gap:14px;color:#9fb0c3;font-size:11px;line-height:1.55;}
+        #ragnar-skyview .sv-detail-card{background:linear-gradient(180deg,rgba(8,20,38,.34),rgba(3,8,18,.28));
+          border:1px solid rgba(125,211,252,.12);border-radius:10px;padding:10px 12px;opacity:.6;
+          box-shadow:0 14px 36px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.025);backdrop-filter:blur(10px);}
+        #ragnar-skyview .sv-detail-card b{display:block;color:#dbeafe;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;opacity:.78;}
+        #ragnar-skyview .sv-detail-card span{display:flex;align-items:baseline;justify-content:space-between;gap:14px;color:#9fb0c3;font-size:11px;line-height:1.55;opacity:.82;}
         #ragnar-skyview .sv-detail-card i{font-style:normal;color:#7f93ad;}
         #ragnar-skyview .sv-detail-card em{font-style:normal;color:#e2e8f0;text-align:right;max-width:58%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         #ragnar-skyview.sv-enhanced{background:radial-gradient(circle at 50% 35%,#113050 0,#06101f 42%,#02050d 76%);}
         #ragnar-skyview.sv-enhanced .sv-head{background:linear-gradient(90deg,rgba(14,165,233,.14),rgba(15,23,42,.32),rgba(125,211,252,.09));}
-        #ragnar-skyview.sv-enhanced svg{cursor:crosshair;}
+        #ragnar-skyview.sv-enhanced svg{cursor:grab;touch-action:none;}
+        #ragnar-skyview.sv-enhanced.sv-dragging svg{cursor:grabbing;}
         #ragnar-skyview.sv-enhanced .sv-diag-btn{display:inline-flex;}
         #ragnar-skyview.sv-enhanced .sv-brand{display:block;}
         #ragnar-skyview.sv-enhanced .sv-zoom{display:flex;}
@@ -899,6 +916,31 @@
     if (diagModal) diagModal.addEventListener('click', (e) => { if (e.target === diagModal) closeGpsDiagnosticsPopup(); });
     overlay.querySelector('.sv-close').addEventListener('click', close);
     svg.addEventListener('click', onSvgClick);
+    let dragState = null;
+    svg.addEventListener('pointerdown', (e) => {
+      if (!enhanced || e.button !== 0) return;
+      dragState = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: skyPanX, panY: skyPanY, moved: false };
+      svg.setPointerCapture(e.pointerId);
+      overlay.classList.add('sv-dragging');
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (!dragState || e.pointerId !== dragState.id) return;
+      const dx = e.clientX - dragState.x, dy = e.clientY - dragState.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
+      setSkyPan(dragState.panX + dx, dragState.panY + dy);
+    });
+    function finishDrag(e) {
+      if (!dragState || e.pointerId !== dragState.id) return;
+      if (dragState.moved) {
+        suppressNextClick = true;
+        e.preventDefault();
+      }
+      try { svg.releasePointerCapture(e.pointerId); } catch (_) {}
+      overlay.classList.remove('sv-dragging');
+      window.setTimeout(() => { dragState = null; }, 0);
+    }
+    svg.addEventListener('pointerup', finishDrag);
+    svg.addEventListener('pointercancel', finishDrag);
     svg.addEventListener('wheel', (e) => {
       if (!enhanced) return;
       e.preventDefault();
@@ -937,6 +979,8 @@
     svg = infoCard = subtitleEl = noteEl = detailEl = null;
     enhanced = false;
     skyZoom = 1;
+    skyPanX = skyPanY = 0;
+    suppressNextClick = false;
     document.body.style.overflow = '';
   }
 
