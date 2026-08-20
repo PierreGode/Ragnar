@@ -1882,6 +1882,14 @@ def _net_integrity_check_once():
     mon_iface = str(cfg.get('net_integrity_interface') or '').strip() or None
     cap_iface = nd._capture_iface(mon_iface)
 
+    # Vendor switch/router CVE guards (Cisco/Juniper/Arista/Comware) are LAN-only:
+    # their findings only mean anything on a wired uplink or a SPAN/mirror port.
+    # cap_iface can fall back to wlan0 / a plain router uplink, so resolve a
+    # wired-only interface here (None on a Wi-Fi-only unit). The auto rotation
+    # then runs them only when a real LAN link exists — otherwise they'd flood
+    # Watchtower with false positives on a segment that has no switch fabric.
+    lan_iface = nd._wired_capture_iface(mon_iface)
+
     def watch(fn, **kw):
         try:
             r = fn(**kw)
@@ -1938,11 +1946,19 @@ def _net_integrity_check_once():
         ('cert', 'Cert', lambda: watch(nd.do_cert_watch, discover=False)),
         ('tls', 'TLS', lambda: watch(nd.do_tls_watch, interface=cap_iface)),
         ('ldap', 'LDAP', lambda: watch(nd.do_ldap_watch, interface=cap_iface)),
-        ('cisco_guard', 'Cisco', lambda: watch(nd.do_cisco_guard, quick=True, interface=cap_iface)),
-        ('juniper_guard', 'Juniper', lambda: watch(nd.do_juniper_guard, quick=True, interface=cap_iface)),
-        ('arista_guard', 'Arista', lambda: watch(nd.do_arista_guard, quick=True, interface=cap_iface)),
-        ('comware_guard', 'Comware', lambda: watch(nd.do_comware_guard, quick=True, interface=cap_iface)),
     ]
+
+    # LAN-only vendor switch/router guards: only auto-run when a genuine wired
+    # uplink is present (lan_iface), and always over that wired NIC — never
+    # wlan0. On a Wi-Fi-only unit lan_iface is None, so none of them run and
+    # Comware can't falsely report VRF/MPLS findings off wlan.
+    if lan_iface:
+        rotation += [
+            ('cisco_guard', 'Cisco', lambda: watch(nd.do_cisco_guard, quick=True, interface=lan_iface)),
+            ('juniper_guard', 'Juniper', lambda: watch(nd.do_juniper_guard, quick=True, interface=lan_iface)),
+            ('arista_guard', 'Arista', lambda: watch(nd.do_arista_guard, quick=True, interface=lan_iface)),
+            ('comware_guard', 'Comware', lambda: watch(nd.do_comware_guard, quick=True, interface=lan_iface)),
+        ]
 
     to_run = list(fast)
     if cfg.get('net_integrity_extended_enabled', True) and rotation:

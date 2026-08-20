@@ -26,6 +26,13 @@ pane and the same Pushover path as an ARP-poisoning or an evil-twin. Unlike the
 daemons, the guards need no systemd unit — they feed Watchtower automatically
 whenever **Extended Monitoring** is on.
 
+These vendor guards are **LAN-only**: their findings only mean anything on a
+wired switch/router uplink or a SPAN/mirror port, so the background rotation
+runs them **only when a genuine wired LAN interface is up** and always over that
+wired NIC — never `wlan0`. On a Wi-Fi-only unit they simply don't auto-run, so
+Comware can't falsely report VRF/MPLS findings off wlan. A manual scan from the
+dashboard is always available regardless of link type.
+
 ## Why one normalizer, not seven adapters
 
 The watchers disagree on nearly every field, so Watchtower uses a single
