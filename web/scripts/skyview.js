@@ -390,6 +390,128 @@
       .catch(() => {});
   }
 
+  function diagValue(value, fallback) {
+    if (value === undefined || value === null || value === '') return fallback || '—';
+    if (typeof value === 'boolean') return value ? 'yes' : 'no';
+    return String(value);
+  }
+
+  function diagAge(epochSec) {
+    if (typeof epochSec !== 'number' || !isFinite(epochSec) || epochSec <= 0) return '—';
+    return agoText(epochSec);
+  }
+
+  function diagRows(rows) {
+    return rows.map(([label, value, tone]) => {
+      const cls = tone === 'warn' ? ' sv-warn' : (tone === 'good' ? ' sv-good' : '');
+      return `<div class="sv-diag-row${cls}"><span>${esc(label)}</span><b>${esc(diagValue(value))}</b></div>`;
+    }).join('');
+  }
+
+  function diagCard(title, rows) {
+    return `<section class="sv-diag-card"><h3>${esc(title)}</h3>${diagRows(rows)}</section>`;
+  }
+
+  function renderGpsDiagnosticsPopup(diag, live) {
+    const modal = overlay && overlay.querySelector('.sv-diag-modal');
+    const body = overlay && overlay.querySelector('.sv-diag-modal-body');
+    if (!modal || !body) return;
+    diag = diag || {};
+    live = live || {};
+    const gps = live || {};
+    const deepGps = diag.gps || {};
+    const sky = Array.isArray(deepGps.sky) && deepGps.sky.length ? deepGps.sky : (Array.isArray(gps.sky) ? gps.sky : []);
+    const constellations = Array.isArray(deepGps.constellations) ? deepGps.constellations : [];
+    const tracked = sky.filter(s => typeof s.snr === 'number' && s.snr > 0);
+    const strongest = tracked.slice().sort((a, b) => b.snr - a.snr)[0];
+    const avgSnr = tracked.length
+      ? (tracked.reduce((sum, s) => sum + s.snr, 0) / tracked.length).toFixed(1) + ' dB'
+      : '—';
+    const status = gps.status || {};
+    const pos = positionFromStatus(gps);
+    const sats = gps.satellites !== undefined || gps.satellites_in_view !== undefined
+      ? `${gps.satellites || 0} used / ${gps.satellites_in_view || 0} in view`
+      : `${tracked.length} tracked / ${sky.length} in view`;
+    const cards = [];
+
+    cards.push(diagCard('Fix and Position', [
+      ['Fix', gps.has_fix ? 'yes' : 'no', gps.has_fix ? 'good' : 'warn'],
+      ['Fix quality', gps.fix_quality],
+      ['Latitude', pos.lat != null ? pos.lat.toFixed(6) : gps.latitude],
+      ['Longitude', pos.lon != null ? pos.lon.toFixed(6) : gps.longitude],
+      ['Altitude', gps.altitude != null ? Number(gps.altitude).toFixed(1) + ' m' : null],
+      ['Speed', gps.speed_kmh != null ? Number(gps.speed_kmh).toFixed(1) + ' km/h' : null],
+      ['Course', gps.course != null ? Number(gps.course).toFixed(0) + ' deg' : null],
+      ['Position source', pos.mode === 'last' ? 'last-known' : pos.mode]
+    ]));
+
+    cards.push(diagCard('Receiver Health', [
+      ['Connected', gps.connected],
+      ['Source', gps.source || status.source],
+      ['Port', gps.port || status.port],
+      ['Satellites', sats],
+      ['SNR max', gps.snr_max != null ? gps.snr_max + ' dB' : (strongest ? strongest.snr + ' dB' : null)],
+      ['Average SNR', avgSnr],
+      ['HDOP', gps.hdop],
+      ['GPS error', gps.error || status.error, gps.error || status.error ? 'warn' : null]
+    ]));
+
+    cards.push(diagCard('Timing', [
+      ['Last update', diagAge(gps.last_update || status.last_update)],
+      ['Last NMEA', diagAge(gps.last_sentence || status.last_sentence)],
+      ['Time to first fix', gps.ttff_seconds != null ? gps.ttff_seconds + 's' : null],
+      ['Searching for', gps.searching_seconds != null ? Math.round(gps.searching_seconds) + 's' : null,
+        gps.searching_seconds > 120 ? 'warn' : null],
+      ['Diagnostics sampled', diag.generated_at ? diagAge(diag.generated_at) : 'now']
+    ]));
+
+    cards.push(diagCard('Signal Summary', [
+      ['Satellites in sky plot', sky.length],
+      ['Tracked with SNR', tracked.length],
+      ['Strongest satellite', strongest
+        ? `${strongest.constellation || 'sat'} ${strongest.prn != null ? strongest.prn : ''} / ${strongest.snr} dB`
+        : null],
+      ['Constellations', constellations.length || [...new Set(sky.map(s => s.constellation).filter(Boolean))].length]
+    ]));
+
+    const constellationHtml = constellations.length
+      ? `<section class="sv-diag-card sv-diag-wide"><h3>Constellation Breakdown</h3><div class="sv-diag-chips">${constellations.map(c => `<span><b>${esc(c.constellation || 'GNSS')}</b>${esc(diagValue(c.in_view))} in view${c.snr_max != null ? ' / ' + esc(c.snr_max + ' dB') : ''}</span>`).join('')}</div></section>`
+      : '';
+    const skyRows = sky.slice().sort((a, b) => (b.snr || 0) - (a.snr || 0)).map(s =>
+      `<tr><td>${esc(s.constellation || '—')}</td><td>${esc(diagValue(s.prn))}</td><td>${esc(diagValue(s.elev))}</td><td>${esc(diagValue(s.az))}</td><td>${esc(s.snr != null ? s.snr + ' dB' : 'untracked')}</td></tr>`
+    ).join('');
+    const skyTable = `<section class="sv-diag-card sv-diag-wide"><h3>Satellites</h3>
+      <div class="sv-diag-table-wrap"><table><thead><tr><th>System</th><th>PRN</th><th>Elev</th><th>Az</th><th>SNR</th></tr></thead><tbody>${skyRows || '<tr><td colspan="5">No satellite sky data yet.</td></tr>'}</tbody></table></div></section>`;
+
+    body.innerHTML = `<div class="sv-diag-grid">${cards.join('')}${constellationHtml}${skyTable}</div>`;
+    modal.classList.add('open');
+  }
+
+  function openGpsDiagnosticsPopup() {
+    if (!overlay) return;
+    const modal = overlay.querySelector('.sv-diag-modal');
+    const body = overlay.querySelector('.sv-diag-modal-body');
+    if (!modal || !body) return;
+    modal.classList.add('open');
+    body.innerHTML = '<div class="sv-diag-loading">Reading GPS diagnostics...</div>';
+    Promise.all([
+      fetch('/api/wardriving/diagnostics', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/wardriving/gps', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null)
+    ]).then(([diag, live]) => {
+      if (!diag && !live) {
+        body.innerHTML = '<div class="sv-diag-loading sv-warn">GPS diagnostics are unavailable right now.</div>';
+        return;
+      }
+      renderGpsDiagnosticsPopup(diag, live);
+    });
+  }
+
+  function closeGpsDiagnosticsPopup() {
+    if (!overlay) return;
+    const modal = overlay.querySelector('.sv-diag-modal');
+    if (modal) modal.classList.remove('open');
+  }
+
   // ---- Public API ------------------------------------------------------
   function open(initial) {
     if (overlay) return;
@@ -434,6 +556,36 @@
           color:#9fb0c3;padding:1px 0;}
         #ragnar-skyview .sv-info-row b{color:#e2e8f0;font-weight:600;}
         #ragnar-skyview .sv-info-close{margin-top:7px;font-size:10px;color:#5f6f85;text-align:center;}
+        #ragnar-skyview .sv-diag-modal{position:absolute;inset:0;z-index:8;display:none;align-items:center;justify-content:center;
+          padding:24px;background:rgba(1,5,13,.68);backdrop-filter:blur(6px);}
+        #ragnar-skyview .sv-diag-modal.open{display:flex;}
+        #ragnar-skyview .sv-diag-window{width:min(1040px,calc(100vw - 32px));max-height:min(780px,calc(100vh - 32px));
+          display:flex;flex-direction:column;border:1px solid rgba(125,211,252,.25);border-radius:14px;
+          background:linear-gradient(180deg,rgba(8,20,38,.96),rgba(2,6,15,.96));
+          box-shadow:0 28px 80px rgba(0,0,0,.58), inset 0 1px 0 rgba(255,255,255,.05);overflow:hidden;}
+        #ragnar-skyview .sv-diag-top{display:flex;align-items:center;gap:14px;padding:14px 16px;border-bottom:1px solid rgba(125,211,252,.16);}
+        #ragnar-skyview .sv-diag-top h2{margin:0;color:#e2e8f0;font-size:15px;letter-spacing:.12em;text-transform:uppercase;}
+        #ragnar-skyview .sv-diag-top span{color:#7f93ad;font-size:12px;}
+        #ragnar-skyview .sv-diag-top button{margin-left:auto;border:1px solid rgba(148,163,184,.28);background:rgba(15,23,42,.74);color:#e2e8f0;border-radius:8px;width:32px;height:32px;cursor:pointer;}
+        #ragnar-skyview .sv-diag-modal-body{overflow:auto;padding:16px;}
+        #ragnar-skyview .sv-diag-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;}
+        #ragnar-skyview .sv-diag-card{background:rgba(3,8,18,.58);border:1px solid rgba(125,211,252,.16);border-radius:11px;padding:12px;}
+        #ragnar-skyview .sv-diag-card h3{margin:0 0 10px;color:#bae6fd;font-size:11px;text-transform:uppercase;letter-spacing:.11em;}
+        #ragnar-skyview .sv-diag-wide{grid-column:1 / -1;}
+        #ragnar-skyview .sv-diag-row{display:flex;align-items:baseline;justify-content:space-between;gap:18px;padding:4px 0;border-top:1px solid rgba(148,163,184,.08);font-size:12px;}
+        #ragnar-skyview .sv-diag-row:first-of-type{border-top:0;}
+        #ragnar-skyview .sv-diag-row span{color:#7f93ad;}
+        #ragnar-skyview .sv-diag-row b{color:#e2e8f0;font-weight:600;text-align:right;overflow-wrap:anywhere;}
+        #ragnar-skyview .sv-good b{color:#86efac;}
+        #ragnar-skyview .sv-warn b,#ragnar-skyview .sv-warn{color:#fca5a5;}
+        #ragnar-skyview .sv-diag-chips{display:flex;flex-wrap:wrap;gap:8px;}
+        #ragnar-skyview .sv-diag-chips span{border:1px solid rgba(125,211,252,.18);border-radius:999px;padding:6px 9px;color:#9fb0c3;font-size:12px;background:rgba(15,23,42,.46);}
+        #ragnar-skyview .sv-diag-chips b{color:#dbeafe;margin-right:7px;}
+        #ragnar-skyview .sv-diag-table-wrap{overflow:auto;max-height:260px;}
+        #ragnar-skyview .sv-diag-table-wrap table{width:100%;border-collapse:collapse;font-size:12px;}
+        #ragnar-skyview .sv-diag-table-wrap th,#ragnar-skyview .sv-diag-table-wrap td{padding:7px 8px;border-top:1px solid rgba(148,163,184,.1);text-align:left;color:#cbd5e1;}
+        #ragnar-skyview .sv-diag-table-wrap th{position:sticky;top:0;background:#081426;color:#7dd3fc;font-size:10px;text-transform:uppercase;letter-spacing:.08em;}
+        #ragnar-skyview .sv-diag-loading{padding:28px;color:#9fb0c3;text-align:center;font-size:13px;}
         #ragnar-skyview .sv-brand{display:none;position:absolute;left:16px;top:16px;z-index:4;
           pointer-events:none;color:#dbeafe;text-shadow:0 1px 18px rgba(14,165,233,.45);}
         #ragnar-skyview .sv-brand b{display:block;font-size:11px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;}
@@ -453,7 +605,7 @@
         #ragnar-skyview.sv-enhanced .sv-diag-btn{display:inline-flex;}
         #ragnar-skyview.sv-enhanced .sv-brand{display:block;}
         #ragnar-skyview.sv-enhanced .sv-detail{display:grid;}
-        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}}
+        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}#ragnar-skyview .sv-diag-grid{grid-template-columns:1fr;}#ragnar-skyview .sv-diag-modal{padding:12px;}}
       </style>
       <div class="sv-head">
         <span class="sv-title">${enhanced ? 'Ragnar Starview' : 'GPS Sky View'}</span>
@@ -475,6 +627,12 @@
         <div class="sv-note"></div>
         <div class="sv-detail"></div>
         <div class="sv-info"></div>
+        <div class="sv-diag-modal" role="dialog" aria-modal="true" aria-label="GPS diagnostics">
+          <div class="sv-diag-window">
+            <div class="sv-diag-top"><div><h2>GPS Diagnostics</h2><span>live receiver, fix, constellation, and satellite telemetry</span></div><button class="sv-diag-close" type="button" title="Close diagnostics">✕</button></div>
+            <div class="sv-diag-modal-body"></div>
+          </div>
+        </div>
       </div>`;
     document.body.appendChild(overlay);
     if (enhanced) overlay.classList.add('sv-enhanced');
@@ -488,11 +646,12 @@
     infoCard = overlay.querySelector('.sv-info');
     const diagBtn = overlay.querySelector('.sv-diag-btn');
     if (diagBtn) {
-      diagBtn.addEventListener('click', () => {
-        window.dispatchEvent(new CustomEvent('ragnar:open-gps-diagnostics'));
-        close();
-      });
+      diagBtn.addEventListener('click', openGpsDiagnosticsPopup);
     }
+    const diagClose = overlay.querySelector('.sv-diag-close');
+    if (diagClose) diagClose.addEventListener('click', closeGpsDiagnosticsPopup);
+    const diagModal = overlay.querySelector('.sv-diag-modal');
+    if (diagModal) diagModal.addEventListener('click', (e) => { if (e.target === diagModal) closeGpsDiagnosticsPopup(); });
     overlay.querySelector('.sv-close').addEventListener('click', close);
     svg.addEventListener('click', onSvgClick);
 
@@ -505,7 +664,12 @@
     resizeH = syncViewBox;
     window.addEventListener('resize', resizeH);
 
-    onEsc = (e) => { if (e.key === 'Escape') close(); };
+    onEsc = (e) => {
+      if (e.key !== 'Escape') return;
+      const diagModal = overlay && overlay.querySelector('.sv-diag-modal.open');
+      if (diagModal) closeGpsDiagnosticsPopup();
+      else close();
+    };
     document.addEventListener('keydown', onEsc);
 
     loadCatalog().then(() => { syncViewBox(); });
