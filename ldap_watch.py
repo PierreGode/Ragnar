@@ -75,6 +75,13 @@ OID_STARTTLS = '1.3.6.1.4.1.1466.20037'
 OID_WHOAMI = '1.3.6.1.4.1.4203.1.11.3'
 OID_PASSWORD_MODIFY = '1.3.6.1.4.1.4203.1.11.1'
 
+# Referral component of an LDAPResult (RFC 4511 4.1.10) is [3] context-tagged; a
+# SearchResultReference (OP_SEARCH_REF) carries its LDAPURLs directly. A referral
+# that steers a client to an EXTERNAL LDAP/CLDAP host is the LDAPNightmare vector
+# (CVE-2024-49113 Windows LDAP DoS / CVE-2024-49112 LDAP client RCE): the exploit
+# feeds a victim's LDAP client a crafted referral pointing at an attacker server.
+_REFERRAL_CTX = 0xa3            # [3] referral  SEQUENCE OF LDAPURL, in an LDAPResult
+
 # Attributes whose disclosure is sensitive: password material, LAPS, gMSA,
 # delegation, ACLs, and SPNs (Kerberoast recon). Lower-cased for matching.
 SENSITIVE_ATTRS = {
@@ -260,6 +267,7 @@ def parse_ldap_message(buf, start, end):
         elif op_tag == OP_BIND_RESP:
             msg['op'] = 'bind-resp'
             msg['result_code'] = _first_enum(buf, ops, ope)
+            msg['referrals'] = _result_referrals(buf, ops, ope)
         elif op_tag == OP_SEARCH_REQ:
             _decode_search_request(buf, ops, ope, msg)
         elif op_tag == OP_SEARCH_ENTRY:
@@ -269,6 +277,11 @@ def parse_ldap_message(buf, start, end):
         elif op_tag == OP_SEARCH_DONE:
             msg['op'] = 'search-done'
             msg['result_code'] = _first_enum(buf, ops, ope)
+            msg['referrals'] = _result_referrals(buf, ops, ope)
+        elif op_tag == OP_SEARCH_REF:
+            # SearchResultReference == SEQUENCE OF LDAPURL carried directly.
+            msg['op'] = 'search-ref'
+            msg['referrals'] = _referral_urls(buf, ops, ope)
         elif op_tag == OP_EXT_REQ:
             _decode_extended_request(buf, ops, ope, msg)
         elif op_tag == OP_EXT_RESP:
@@ -296,6 +309,29 @@ def _first_enum(buf, start, end):
         if tag == _T_ENUMERATED:
             return ber_int(buf, vs, ve)
     return None
+
+
+def _referral_urls(buf, start, end):
+    """Collect the LDAPURL octet-strings inside a SEQUENCE OF LDAPURL region
+    (either a SearchResultReference body or a [3] referral component)."""
+    urls = []
+    for _tag, vs, ve in ber_children(buf, start, end):
+        try:
+            u = ber_str(buf, vs, ve)
+        except BERError:
+            continue
+        if u:
+            urls.append(u)
+    return urls
+
+
+def _result_referrals(buf, start, end):
+    """An LDAPResult may carry an optional referral component tagged [3] (RFC 4511
+    4.1.10) holding a SEQUENCE OF LDAPURL. Return the URLs, or [] if absent."""
+    for tag, vs, ve in ber_children(buf, start, end):
+        if tag == _REFERRAL_CTX:
+            return _referral_urls(buf, vs, ve)
+    return []
 
 
 def _decode_bind_request(buf, start, end, msg):
@@ -403,7 +439,8 @@ _VERDICT_RANK = {'clean': 0, 'suspicious': 1, 'compromised': 2}
 # Finding codes that mean confirmed exposure/attack, not just weak posture.
 _COMPROMISED_CODES = {'cleartext-bind-credentials', 'sasl-plaintext-cleartext',
                       'cleartext-password-modify', 'starttls-stripped',
-                      'filter-injection', 'brute-force', 'cldap-amplification'}
+                      'filter-injection', 'brute-force', 'cldap-amplification',
+                      'external-referral'}
 
 
 class LdapDetector:
@@ -411,6 +448,7 @@ class LdapDetector:
     Shared by the bounded do_ldap_watch() path and the streaming daemon."""
 
     def __init__(self):
+        self.local_nets = None           # our own subnets, for referral/CLDAP scoping
         self.flow_findings = {}          # flowkey -> [finding, ...]
         self.flow_msgs = {}              # flowkey -> message count
         self.bind_attempts = {}          # client_ip -> count
@@ -448,6 +486,11 @@ class LdapDetector:
         elif op == 'bind-resp':
             if msg.get('result_code') == RC_INVALID_CREDENTIALS:
                 self.bind_failures[dst] = self.bind_failures.get(dst, 0) + 1
+            self._check_referrals(flowkey, msg.get('referrals'))
+        elif op == 'search-done':
+            self._check_referrals(flowkey, msg.get('referrals'))
+        elif op == 'search-ref':
+            self._check_referrals(flowkey, msg.get('referrals'))
         elif op == 'search-req':
             self.stats['searches'] += 1
             self.searches[src] = self.searches.get(src, 0) + 1
@@ -525,6 +568,25 @@ class LdapDetector:
                       "Whole-subtree enumeration of '%s' with filter %s - directory "
                       "dump (BloodHound / ldapdomaindump style)"
                       % (_short_dn(base) or '(root)', _clip(filt, 40)))
+
+    def _check_referrals(self, flowkey, urls):
+        """A referral / SearchResultReference that points a client to an LDAP host
+        OUTSIDE our own subnets is the LDAPNightmare steering vector: a crafted
+        response feeds the victim's LDAP client an attacker-controlled server. We
+        only flag IP-literal targets outside the local nets - hostnames can't be
+        classified passively (no DNS), and an unknown local-net list stays silent -
+        so a legitimate in-forest referral never trips it."""
+        for uri in (urls or []):
+            host = _ldap_url_host(uri)
+            if host and _referral_host_external(host, self.local_nets):
+                self._add(flowkey, 'high', 'external-referral',
+                          "LDAP referral steers a client to EXTERNAL host %s (%s) - "
+                          "the LDAPNightmare vector (CVE-2024-49113 Windows LDAP DoS / "
+                          "CVE-2024-49112 LDAP client RCE): a crafted referral points "
+                          "the victim's LDAP client at an attacker server. Block "
+                          "outbound LDAP/CLDAP from clients and apply the MS LDAP "
+                          "client patch" % (host, _clip(uri, 60)))
+                break
 
     def _check_starttls_response(self, flowkey, msg):
         rev = (flowkey[2], flowkey[3], flowkey[0], flowkey[1])
@@ -668,6 +730,33 @@ def _ip_in_nets(ip, nets):
         return True                              # unknown -> don't false-positive
 
 
+def _ldap_url_host(uri):
+    """Pull the host out of an ldap[s]://host[:port]/... referral URL (RFC 4516).
+    Returns the bare host (IPv6 literals de-bracketed), or None if unparseable."""
+    import re
+    m = re.match(r'\s*ldaps?://(\[[^\]]+\]|[^:/\s]+)', uri or '', re.IGNORECASE)
+    if not m:
+        return None
+    host = m.group(1)
+    return host[1:-1] if host.startswith('[') else host
+
+
+def _referral_host_external(host, nets):
+    """True only when `host` is an IP literal that is NOT in our own subnets. A
+    hostname (needs DNS to place) or an unknown local-net list returns False so we
+    never false-positive on a legitimate in-forest referral."""
+    if nets is None:
+        return False
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(host)          # raises for hostnames -> skip
+    except ValueError:
+        return False
+    if addr.is_loopback or addr.is_link_local:
+        return False
+    return not any(addr in net for net in nets)
+
+
 def _syn_flowkey(ip):
     """A synthetic flowkey to hang aggregate (per-source) findings on."""
     return (ip, 0, ip, 0)
@@ -737,6 +826,7 @@ def analyze_packets(packets, local_nets=None):
     except Exception:
         IPv6 = None
     det = LdapDetector()
+    det.local_nets = local_nets
     tcp = {}
     for p in packets:
         ipl = p.getlayer(IP) or (IPv6 and p.getlayer(IPv6))
@@ -803,6 +893,7 @@ def run_daemon(interface, out_path=None, local_nets=None):
         local_nets = _local_nets(interface)
     reasm = {}                                   # flowkey -> FlowReassembler
     det = LdapDetector()
+    det.local_nets = local_nets
     emitted = set()                              # de-dup of (code, src, dst)
     sink = open(out_path, 'a', buffering=1) if out_path else None
 
@@ -885,8 +976,15 @@ def _bind_req(version, name, simple=None, sasl_mech=None):
     return _ldap_message(1, _tlv(OP_BIND_REQ, _int(version) + _octet(name) + auth))
 
 
-def _bind_resp(rc):
-    return _ldap_message(1, _tlv(OP_BIND_RESP, _enum(rc) + _octet('') + _octet('')))
+def _bind_resp(rc, referrals=None):
+    body = _enum(rc) + _octet('') + _octet('')
+    if referrals:
+        body += _tlv(_REFERRAL_CTX, b''.join(_octet(u) for u in referrals))
+    return _ldap_message(1, _tlv(OP_BIND_RESP, body))
+
+
+def _search_ref(urls):
+    return _ldap_message(4, _tlv(OP_SEARCH_REF, b''.join(_octet(u) for u in urls)))
 
 
 def _search_req(base, scope, filt_bytes, attrs):
@@ -920,8 +1018,10 @@ def selftest():
     def ck(name, got, want=True):
         checks.append({'name': name, 'pass': got == want, 'got': got, 'want': want})
 
-    def detect(msgs, flowkey=('10.0.0.9', 55000, '10.0.0.1', 389), cldap=None):
+    def detect(msgs, flowkey=('10.0.0.9', 55000, '10.0.0.1', 389), cldap=None,
+               local_nets=None):
         det = LdapDetector()
+        det.local_nets = local_nets
         for raw in msgs:
             parsed, _ = split_ldap_messages(raw)
             for m in parsed:
@@ -994,6 +1094,20 @@ def selftest():
     # 12. Clean: a harmless unbind carries no finding.
     r = detect([_ldap_message(5, _tlv(OP_UNBIND_REQ, b''))])
     ck('clean_unbind', r['verdict'], 'clean')
+
+    # 12b. LDAPNightmare: a SearchResultReference to an EXTERNAL IP is flagged and
+    # compromises the verdict; an in-forest (local-subnet) referral does not.
+    import ipaddress as _ipa
+    nets = [_ipa.ip_network('10.0.0.0/24')]
+    r = detect([_search_ref(['ldap://203.0.113.66:389/dc=evil,dc=com'])],
+               local_nets=nets)
+    ck('external_referral_ref', 'external-referral' in codes(r))
+    ck('external_referral_verdict', r['verdict'], 'compromised')
+    r = detect([_bind_resp(RC_SUCCESS, referrals=['ldap://198.51.100.5/'])],
+               local_nets=nets)
+    ck('external_referral_bindresp', 'external-referral' in codes(r))
+    r = detect([_search_ref(['ldap://10.0.0.7/dc=corp'])], local_nets=nets)
+    ck('local_referral_clean', 'external-referral' not in codes(r))
 
     # 13. Malformed BER must not raise (bogus long-form length).
     try:
