@@ -413,6 +413,11 @@
         #ragnar-skyview .sv-spacer{flex:1;}
         #ragnar-skyview .sv-legend{display:flex;flex-wrap:wrap;gap:10px;font-size:11px;color:#9fb0c3;}
         #ragnar-skyview .sv-legend i{display:inline-block;width:8px;height:8px;border-radius:9999px;margin-right:4px;vertical-align:middle;}
+        #ragnar-skyview .sv-diag-btn{display:none;align-items:center;gap:7px;border:1px solid rgba(125,211,252,.28);
+          background:rgba(8,20,38,.72);color:#dbeafe;border-radius:8px;padding:8px 10px;font-size:11px;
+          font-weight:700;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;white-space:nowrap;
+          box-shadow:inset 0 1px 0 rgba(255,255,255,.05);}
+        #ragnar-skyview .sv-diag-btn:hover,#ragnar-skyview .sv-diag-btn:focus{border-color:rgba(125,211,252,.58);background:rgba(14,38,66,.86);outline:none;}
         #ragnar-skyview .sv-close{cursor:pointer;background:#17233a;color:#e2e8f0;border:none;
           border-radius:8px;width:34px;height:34px;font-size:18px;line-height:1;flex:0 0 auto;}
         #ragnar-skyview .sv-close:hover{background:#243350;}
@@ -445,9 +450,10 @@
         #ragnar-skyview.sv-enhanced{background:radial-gradient(circle at 50% 35%,#113050 0,#06101f 42%,#02050d 76%);}
         #ragnar-skyview.sv-enhanced .sv-head{background:linear-gradient(90deg,rgba(14,165,233,.14),rgba(15,23,42,.32),rgba(125,211,252,.09));}
         #ragnar-skyview.sv-enhanced svg{cursor:crosshair;}
+        #ragnar-skyview.sv-enhanced .sv-diag-btn{display:inline-flex;}
         #ragnar-skyview.sv-enhanced .sv-brand{display:block;}
         #ragnar-skyview.sv-enhanced .sv-detail{display:grid;}
-        @media (max-width:760px){#ragnar-skyview.sv-enhanced .sv-detail{display:none;}}
+        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}}
       </style>
       <div class="sv-head">
         <span class="sv-title">${enhanced ? 'Ragnar Starview' : 'GPS Sky View'}</span>
@@ -460,6 +466,7 @@
           <span><i style="background:#fbbf24"></i>BeiDou</span>
           <span><i style="background:#f8f7ff"></i>stars</span>
         </div>
+        <button class="sv-diag-btn" type="button" title="Open full wardriving GPS diagnostics">GPS Diagnostics</button>
         <button class="sv-close" title="Close (Esc)">✕</button>
       </div>
       <div class="sv-stage">
@@ -479,6 +486,13 @@
     noteEl = overlay.querySelector('.sv-note');
     detailEl = overlay.querySelector('.sv-detail');
     infoCard = overlay.querySelector('.sv-info');
+    const diagBtn = overlay.querySelector('.sv-diag-btn');
+    if (diagBtn) {
+      diagBtn.addEventListener('click', () => {
+        window.dispatchEvent(new CustomEvent('ragnar:open-gps-diagnostics'));
+        close();
+      });
+    }
     overlay.querySelector('.sv-close').addEventListener('click', close);
     svg.addEventListener('click', onSvgClick);
 

@@ -27650,6 +27650,21 @@ function openWardrivingStarEgg() {
 }
 window.openWardrivingStarEgg = openWardrivingStarEgg;
 
+function openWardrivingGpsDiagnostics() {
+    if (typeof showTab === 'function') showTab('wardriving');
+    if (typeof loadWardrivingData === 'function') loadWardrivingData();
+    window.setTimeout(() => {
+        const panel = document.getElementById('wd-diag');
+        if (!panel) return;
+        panel.open = true;
+        _wdFetchDiagExtra(true);
+        if (_wdDiagLastStatus) renderWardrivingDiagnostics(_wdDiagLastStatus);
+        panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 120);
+}
+window.openWardrivingGpsDiagnostics = openWardrivingGpsDiagnostics;
+window.addEventListener('ragnar:open-gps-diagnostics', openWardrivingGpsDiagnostics);
+
 function _wdDiagGroup(title, rows) {
     const kept = rows.filter(r => _wdHas(r[1]));
     if (!kept.length) return '';
