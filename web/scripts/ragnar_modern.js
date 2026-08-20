@@ -27643,6 +27643,13 @@ function wdOpenSkyView() {
 }
 window.wdOpenSkyView = wdOpenSkyView;
 
+function openWardrivingStarEgg() {
+    if (!window.RagnarSkyView) return;
+    const gps = (_wdDiagExtra && _wdDiagExtra.gps) || {};
+    window.RagnarSkyView.open({ sky: gps.sky || [], status: gps.status || {}, enhanced: true });
+}
+window.openWardrivingStarEgg = openWardrivingStarEgg;
+
 function _wdDiagGroup(title, rows) {
     const kept = rows.filter(r => _wdHas(r[1]));
     if (!kept.length) return '';
