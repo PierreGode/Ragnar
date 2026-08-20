@@ -505,6 +505,11 @@ check, the [DHCP Guardian](#dhcp-guardian) rogue-server check, and the instant
 **rotates the whole passive-scanner suite** through the background poller —
 STP · DTP · CDP · VTP · IGMP · IPv6 first-hop · NDP · FHRP · OSPF · EIGRP · IS-IS · BGP · SMB ·
 Relay/Coercion · NTP · ICMP · SNMP · Cert · TLS · LDAP · Cisco/Juniper/Arista/Comware Guards.
+The vendor switch/router guards (Cisco/Juniper/Arista/Comware) are **LAN-only** —
+the rotation runs them only when a genuine wired uplink is up (over that wired
+NIC, never `wlan0`), so a Wi-Fi-only unit never auto-runs them and Comware can't
+falsely report VRF/MPLS findings off wlan. Each stays available on demand via
+its **Scan** button regardless of link type.
 Because each of those
 does a short `tcpdump` capture, they're run a **round-robin batch at a time**
 (default 3 per cycle, configurable) so a cycle stays ~1 minute; a full sweep
