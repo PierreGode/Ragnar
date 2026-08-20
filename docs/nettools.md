@@ -1479,6 +1479,15 @@ What it flags:
 - **cldap-reflection** / **cldap-amplification** — a CLDAP query from an off-subnet
   (spoofable) source, or a response several times larger than its query — the DC is a
   usable **UDP reflection/amplification** vector. *(warn / high)*
+- **external-referral** *(new in v3)* — a referral or `SearchResultReference` that
+  steers a client to an LDAP/CLDAP host **outside your own subnets**. This is the
+  **LDAPNightmare** steering primitive: **CVE-2024-49113** (the Windows LDAP / LSASS
+  denial-of-service) and **CVE-2024-49112** (LDAP-client remote code execution) both
+  work by feeding a victim's LDAP client a crafted referral pointing at an
+  attacker-controlled server, so that out-of-subnet referral is caught on the wire.
+  Only **IP-literal** targets outside the local nets fire it — hostnames can't be
+  placed passively and in-forest referrals to your own subnets stay silent, so it
+  does not false-positive on legitimate cross-domain referrals. *(compromised)*
 
 Verdict is **clean → suspicious → compromised**. Capture is a short passive **Scapy**
 sniff (Scapy is imported lazily, so `--selftest` and offline parsing need zero
