@@ -7573,7 +7573,7 @@ function _guardFillIfaces(selId) {
     const sel = document.getElementById(selId);
     if (!sel || sel.dataset.filled === '1') return Promise.resolve();
     return fetchAPI('/api/net/interfaces').then(x => {
-        (x.interfaces || []).forEach(i => {
+        (x.interfaces || []).filter(i => i.type !== 'wifi').forEach(i => {
             const o = document.createElement('option');
             o.value = i.name;
             const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
@@ -27642,6 +27642,21 @@ function wdOpenSkyView() {
     window.RagnarSkyView.open({ sky: gps.sky || [], status: gps.status || {} });
 }
 window.wdOpenSkyView = wdOpenSkyView;
+
+async function openWardrivingStarEgg() {
+    if (!window.RagnarSkyView) return;
+    let liveGps = null;
+    try {
+        const res = await fetch('/api/wardriving/gps/enable', { method: 'POST', cache: 'no-store' });
+        const data = res.ok ? await res.json() : null;
+        liveGps = data && data.gps ? data.gps : null;
+    } catch (e) {
+        console.warn('[Wardriving] GPS-only enable failed:', e);
+    }
+    const gps = (_wdDiagExtra && _wdDiagExtra.gps) || {};
+    window.RagnarSkyView.open({ sky: (liveGps && liveGps.sky) || gps.sky || [], status: liveGps || gps.status || {}, enhanced: true });
+}
+window.openWardrivingStarEgg = openWardrivingStarEgg;
 
 function _wdDiagGroup(title, rows) {
     const kept = rows.filter(r => _wdHas(r[1]));

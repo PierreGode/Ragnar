@@ -12262,6 +12262,43 @@ def wardriving_gps():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/wardriving/gps/enable', methods=['POST'])
+def wardriving_gps_enable():
+    """Initialize GPS without enabling or starting wardriving."""
+    try:
+        import glob as _glob
+        import os
+        from gps_manager import GPSManager
+
+        engine = _get_wardriving_engine()
+        if getattr(engine, '_gps', None):
+            status = engine._gps.get_status()
+            status['sky'] = engine._gps.get_sky_view()
+            return jsonify({'success': True, 'already_running': True, 'gps': status})
+
+        raw_candidates = sorted(_glob.glob('/dev/ttyACM*') + _glob.glob('/dev/ttyUSB*'))
+        esp_exclude = {p for p in raw_candidates if engine._port_is_espressif(p)}
+        try:
+            engine._ensure_gpsd(esp_exclude)
+        except Exception:
+            pass
+
+        gps_port = shared_data.config.get('wardriving_gps_port', None)
+        if gps_port and str(gps_port).lower() == 'auto':
+            gps_port = None
+        engine._gps = GPSManager(
+            port=gps_port,
+            baudrate=shared_data.config.get('wardriving_gps_baudrate', 9600),
+            exclude_ports=esp_exclude,
+            state_file=os.path.join(engine.data_dir, 'last_gps.json'))
+        gps_ok = engine._gps.start()
+        status = engine._gps.get_status()
+        status['sky'] = engine._gps.get_sky_view()
+        return jsonify({'success': bool(gps_ok), 'gps': status, 'error': None if gps_ok else engine._gps.error})
+    except Exception as e:
+        logger.error(f"Wardriving GPS enable error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/wardriving/import', methods=['POST'])
 def wardriving_import_csv():
     """Import a WiGLE CSV file into the current or a new wardriving session."""

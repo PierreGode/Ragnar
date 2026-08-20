@@ -1895,7 +1895,7 @@
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="arp-iface" title="Interface for the ARP scan — pick your WiFi or LAN NIC to scan that segment" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
-                            <option value="">Auto (wired first)</option>
+                            <option value="">Auto (LAN only)</option>
                         </select>
                         <button onclick="runArpScan()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan</button>
                         <button onclick="exportArpCsv()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap">Export CSV</button>
@@ -1938,7 +1938,7 @@
                     <p class="text-sm text-gray-400 mb-3">Provokes every DHCP server on the segment to reply (<span class="font-mono">broadcast-dhcp-discover</span>) and passively watches for a DISCOVER flood. The first scan learns the current server as the trusted baseline (<span class="font-mono">data/dhcp_baseline.json</span>); after a legitimate DHCP/router change, click "Trust current server".</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="dhcp-iface" title="Interface for the DHCP scan — pick your WiFi or LAN NIC to scan that segment" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
-                            <option value="">Auto (wired first)</option>
+                            <option value="">Auto (LAN only)</option>
                         </select>
                         <button onclick="runDhcpGuardian()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan DHCP</button>
                         <button onclick="dhcpTrustCurrent()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Set the current DHCP server(s) as the trusted baseline — use after a legitimate DHCP-server / router change">Trust current server</button>
@@ -1986,7 +1986,7 @@
                     <p class="text-sm text-gray-400 mb-3">Passively captures ICMPv6 <span class="font-mono">RA/RS/Redirect</span> + DHCPv6 and flags a <strong>rogue RA</strong> (new gateway, injected DNS/prefix, <span class="font-mono">pref high</span>, or router-lifetime 0), a <strong>rogue DHCPv6</strong> server (mitm6's DNS-takeover signature), an <strong>RA flood</strong>, and conflicting routers. First scan learns the trusted router(s)+server(s) (<span class="font-mono">data/ipv6_watch.json</span>); "Trust current" re-learns. Mitigate with switch <strong>RA-Guard</strong> (RFC 6105) / DHCPv6 snooping.</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="ipv6-iface" title="Interface for the IPv6 capture — pick the LAN/WiFi NIC for the segment to watch" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
-                            <option value="">Auto (wired first)</option>
+                            <option value="">Auto (LAN only)</option>
                         </select>
                         <input id="ipv6-secs" type="number" min="4" max="40" value="12" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
                         <button onclick="runIpv6Watch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan IPv6</button>
@@ -2001,7 +2001,7 @@
                     <p class="text-sm text-gray-400 mb-3">Passively captures ICMPv6 <span class="font-mono">Neighbor Solicitation / Advertisement</span> (135/136) and flags <strong>spoofed</strong> (two MACs claiming one address, the default router advertised by a rogue MAC, or a learned host's owner-MAC changing), <strong>dad-dos</strong> (one MAC answering every Duplicate Address Detection probe — <span class="font-mono">dos-new-ip6</span>, so no host can pick an address), and an NA <strong>flood</strong>. First scan learns the trusted target→MAC bindings + default router (<span class="font-mono">data/ndp_watch.json</span>); "Trust current" re-learns. Mitigate with switch <strong>IPv6 Snooping / ND Inspection</strong> (SAVI, RFC 6620).</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="ndp-iface" title="Interface for the NDP capture — pick the LAN/WiFi NIC for the segment to watch" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
-                            <option value="">Auto (wired first)</option>
+                            <option value="">Auto (LAN only)</option>
                         </select>
                         <input id="ndp-secs" type="number" min="4" max="40" value="12" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
                         <button onclick="runNdpWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan NDP</button>
@@ -7045,7 +7045,7 @@
 
                 <!-- Wardriving Section -->
                 <div id="wardriving-config-section" class="mb-8">
-                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Wardriving</h3>
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400" role="button" tabindex="0" onclick="openWardrivingStarEgg()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openWardrivingStarEgg();}">Wardriving</h3>
 
                     <!-- Always-visible Enable toggle: gates the rest of the section -->
                     <div class="glass rounded-lg p-4 mb-4">
@@ -8142,8 +8142,8 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/skyview.js?v=20260721-skyview-live"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260819-nodecal3"></script>
+    <script src="/web/scripts/skyview.js?v=20260820-staregg-radarsweep"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260820-gps-enable"></script>
 
 
 

@@ -2553,6 +2553,55 @@ def _capture_iface(preferred=None):
     return dflt
 
 
+def _wired_capture_iface(preferred=None):
+    """Return a physical wired interface only; never fall back to Wi-Fi.
+
+    Used by vendor switch/router guards whose findings are only meaningful on a
+    LAN uplink or SPAN/mirror port. The general _capture_iface() deliberately
+    falls back to the default route for other passive tools, which can be wlan0.
+    """
+    if _valid_iface(preferred or ''):
+        return preferred
+    wired = []
+    for name in _list_iface_names(include_virtual=False):
+        if _is_wireless(name) or name.startswith(_VPN_IFACE_PREFIXES):
+            continue
+        try:
+            with open(f'/sys/class/net/{name}/carrier') as f:
+                if f.read().strip() == '1':
+                    wired.append(name)
+        except OSError:
+            continue
+    dflt = _default_route_iface()
+    if wired:
+        return dflt if dflt in wired else sorted(wired)[0]
+    return None
+
+
+def _lan_guard_iface(interface=None, label='Guard'):
+    iface = _wired_capture_iface(interface)
+    if not iface:
+        return None, {
+            'success': False,
+            'error': f'{label} is LAN-only: no wired capture interface is up. Select an Ethernet/SPAN/mirror NIC; Wi-Fi is intentionally ignored.'
+        }
+    if iface not in _list_iface_names(include_virtual=True):
+        return None, {'success': False, 'error': f'unknown interface: {iface}'}
+    if _is_wireless(iface):
+        return None, {
+            'success': False,
+            'interface': iface,
+            'error': f'{label} is LAN-only: refusing Wi-Fi interface {iface}. Select an Ethernet/SPAN/mirror NIC.'
+        }
+    if iface.startswith(_VPN_IFACE_PREFIXES):
+        return None, {
+            'success': False,
+            'interface': iface,
+            'error': f'{label} is LAN-only: refusing tunnel/VPN interface {iface}. Select an Ethernet/SPAN/mirror NIC.'
+        }
+    return iface, None
+
+
 # Substrings that mark a public egress as a commercial-VPN / VPN-hosting ASN.
 # Brand names are high-confidence; the trailing hosting backbones (M247,
 # DataCamp/DataPacket, 31173 = Mullvad's operator) are where most consumer VPNs
@@ -15355,11 +15404,9 @@ def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
     Cisco management + attack surface (SNMP, Telnet, HTTP UIs, IKEv2) for a few
     seconds and reports POSTURE / EXPOSURE / ATTACK findings against a tracked CVE
     set. Ported from the standalone ciscoguard. Never transmits."""
-    iface = interface if _valid_iface(interface or '') else _capture_iface()
-    if not iface:
-        return {'success': False, 'error': 'no interface to capture on'}
-    if iface not in _list_iface_names(include_virtual=True):
-        return {'success': False, 'error': f'unknown interface: {iface}'}
+    iface, iface_error = _lan_guard_iface(interface, 'Cisco Guard')
+    if iface_error:
+        return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
     bpf = ('udp port 161 or udp port 162 or tcp port 23 or tcp port 80 or '
            'tcp port 8080 or tcp port 8443 or udp port 500 or udp port 4500')
@@ -15546,11 +15593,9 @@ def do_juniper_guard(interface=None, seconds=20, learn=True, quick=False):
     (detection-only). Dissects cleartext HTTP to J-Web and the On-Box Anomaly API,
     and reads TLS ClientHello SNI, reporting EXPOSURE / ATTACK findings. Ported
     from the standalone juniperwatch. Never transmits."""
-    iface = interface if _valid_iface(interface or '') else _capture_iface()
-    if not iface:
-        return {'success': False, 'error': 'no interface to capture on'}
-    if iface not in _list_iface_names(include_virtual=True):
-        return {'success': False, 'error': f'unknown interface: {iface}'}
+    iface, iface_error = _lan_guard_iface(interface, 'Juniper Guard')
+    if iface_error:
+        return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
     bpf = ('tcp port 80 or tcp port 8080 or tcp port 8160 or tcp port 443 or '
            'tcp port 8443')
@@ -15703,11 +15748,9 @@ def do_arista_guard(interface=None, seconds=20, learn=True, quick=False):
     version/platform, RADIUS (BlastRADIUS CVE-2024-3596), SSH banners (regreSSHion),
     and management listeners (gNMI/CVX/VXLAN), reporting POSTURE / EXPOSURE / ATTACK
     findings. Ported from the standalone aristaguard. Never transmits."""
-    iface = interface if _valid_iface(interface or '') else _capture_iface()
-    if not iface:
-        return {'success': False, 'error': 'no interface to capture on'}
-    if iface not in _list_iface_names(include_virtual=True):
-        return {'success': False, 'error': f'unknown interface: {iface}'}
+    iface, iface_error = _lan_guard_iface(interface, 'Arista Guard')
+    if iface_error:
+        return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
     bpf = ('udp port 1812 or udp port 1813 or udp port 1645 or udp port 1646 or '
            'tcp port 22 or tcp port 6030 or tcp port 9339 or tcp port 50051 or '
@@ -16018,11 +16061,9 @@ def do_comware_guard(interface=None, seconds=20, role='unknown', learn=True,
     exist on a customer/access port — the CVE-2015-5434 / CVE-2015-8087 attack —
     plus label sweeps, reserved labels, malformed stacks, LDP exposure and
     Comware/H3C platform adjacency. Ported from the standalone vrfwatch."""
-    iface = interface if _valid_iface(interface or '') else _capture_iface()
-    if not iface:
-        return {'success': False, 'error': 'no interface to capture on'}
-    if iface not in _list_iface_names(include_virtual=True):
-        return {'success': False, 'error': f'unknown interface: {iface}'}
+    iface, iface_error = _lan_guard_iface(interface, 'Comware Guard')
+    if iface_error:
+        return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
     role = role if role in ('ce', 'core', 'unknown') else 'unknown'
     # Empty-ish targeted BPF: untagged + single-tagged MPLS, LDP, LLDP. (The
