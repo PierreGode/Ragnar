@@ -108,8 +108,45 @@
     });
   }
 
+  function moonPosition(date, lat, lon) {
+    const d = julianDay(date) - 2451545.0;
+    const L = normDeg(218.316 + 13.176396 * d);
+    const M = normDeg(134.963 + 13.064993 * d);
+    const F = normDeg(93.272 + 13.229350 * d);
+    const lonMoon = L + 6.289 * Math.sin(M * D2R);
+    const latMoon = 5.128 * Math.sin(F * D2R);
+    const lr = lonMoon * D2R, br = latMoon * D2R;
+    const eq = eclipticToRaDec(Math.cos(br) * Math.cos(lr), Math.cos(br) * Math.sin(lr), Math.sin(br));
+    const sky = raDecToAltAz(eq.ra, eq.dec, lat, lon, date);
+    return { name: 'Moon', ra: eq.ra, dec: eq.dec, alt: sky.alt, az: sky.az, color: '#e5eefb', mag: -12.0 };
+  }
+
+  function eclipticSamples(date, lat, lon, W, H) {
+    const pts = [];
+    for (let deg = 0; deg <= 360; deg += 4) {
+      const lr = deg * D2R;
+      const eq = eclipticToRaDec(Math.cos(lr), Math.sin(lr), 0);
+      const sky = raDecToAltAz(eq.ra, eq.dec, lat, lon, date);
+      if (sky.alt > 0) pts.push(fullSkyPoint(sky.az, sky.alt, W, H));
+    }
+    return pts;
+  }
+
+  function pathFromPoints(points) {
+    if (!points || points.length < 2) return '';
+    return points.map((p, i) => `${i ? 'L' : 'M'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+  }
+
+  function starTone(fill) {
+    const f = String(fill || '').toLowerCase();
+    if (f.includes('ff') && f.includes('d')) return 'warm white';
+    if (f.includes('b') || f.includes('c')) return 'blue-white';
+    if (f.includes('f8')) return 'white';
+    return 'catalog color';
+  }
+
   // ---- State -----------------------------------------------------------
-  let overlay = null, svg = null, infoCard = null, subtitleEl = null, noteEl = null, detailEl = null;
+  let overlay = null, svg = null, infoCard = null, subtitleEl = null, noteEl = null, detailEl = null, cursorEl = null;
   let catalog = null, catalogLoading = null;
   let timer = null, onEsc = null, resizeH = null;
   let enhanced = false;
@@ -167,6 +204,20 @@
     };
   }
 
+  function skyFromScreenPoint(x, y, W, H) {
+    const baseX = W / 2 + (x - skyPanX - W / 2) / skyZoom;
+    const baseY = H / 2 + (y - skyPanY - H / 2) / skyZoom;
+    return {
+      az: normDeg((baseX / W) * 360),
+      alt: Math.max(0, Math.min(90, (1 - baseY / H) * 90))
+    };
+  }
+
+  function cardinalName(az) {
+    const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+    return dirs[Math.round(normDeg(az) / 22.5) % 16];
+  }
+
   function radarPoint(az, elev, c, R) {
     const rr = R * (90 - Math.max(0, Math.min(90, elev))) / 90;
     const a = az * D2R;
@@ -186,14 +237,29 @@
     const radarR = Math.max(58, Math.min(122, W * 0.1, H * 0.17));
     const radarC = { x: 20 + radarR, y: 58 + radarR };
     const starGroups = new Map();
+    const constellationLabels = new Map();
 
     parts.push(`<defs>
       <linearGradient id="sv-full-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#091d33"/><stop offset="46%" stop-color="#041020"/><stop offset="100%" stop-color="#02050d"/></linearGradient>
       <radialGradient id="sv-zenith" cx="50%" cy="12%" r="65%"><stop offset="0" stop-color="rgba(56,189,248,.22)"/><stop offset="65%" stop-color="rgba(56,189,248,0)"/></radialGradient>
+      <linearGradient id="sv-horizon" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgba(251,191,36,0)"/><stop offset="100%" stop-color="rgba(251,191,36,.16)"/></linearGradient>
       <radialGradient id="sv-planet-glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="rgba(255,255,255,.58)"/><stop offset="100%" stop-color="rgba(255,255,255,0)"/></radialGradient>
       <filter id="sv-full-glow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-full-bg)"/>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-zenith)"/>`);
+    parts.push(`<rect x="0" y="${(H * .72).toFixed(1)}" width="${W}" height="${(H * .28).toFixed(1)}" fill="url(#sv-horizon)" opacity=".7"/>`);
+
+    const mw = [];
+    for (let i = 0; i <= 46; i++) {
+      const az = i * (360 / 46);
+      const alt = 42 + Math.sin((i / 46) * Math.PI * 2.2 + 0.7) * 18 + Math.sin((i / 46) * Math.PI * 7) * 5;
+      mw.push(fullSkyPoint(az, Math.max(6, Math.min(86, alt)), W, H));
+    }
+    const mwPath = pathFromPoints(mw);
+    if (mwPath) {
+      parts.push(`<path d="${mwPath}" fill="none" stroke="rgba(186,230,253,.09)" stroke-width="${Math.max(42, H * .11).toFixed(1)}" stroke-linecap="round"/>`);
+      parts.push(`<path d="${mwPath}" fill="none" stroke="rgba(255,255,255,.12)" stroke-width="${Math.max(1.2, H * .003).toFixed(1)}" stroke-linecap="round" stroke-dasharray="3 16"/>`);
+    }
 
     for (let alt = 15; alt <= 75; alt += 15) {
       const y = fullSkyPoint(180, alt, W, H).y;
@@ -207,12 +273,25 @@
       parts.push(`<line x1="${x.toFixed(1)}" y1="0" x2="${x.toFixed(1)}" y2="${H}" stroke="rgba(125,211,252,.075)" stroke-width="1"/>`);
       parts.push(`<text x="${x.toFixed(1)}" y="${H - 16}" fill="#6688a8" font-size="11" text-anchor="middle">${az}</text>`);
     }
+    for (const [label, az] of [['N', 0], ['NE', 45], ['E', 90], ['SE', 135], ['S', 180], ['SW', 225], ['W', 270], ['NW', 315]]) {
+      const p = fullSkyPoint(az, 3, W, H);
+      if (p.x < -40 || p.x > W + 40) continue;
+      parts.push(`<text x="${p.x.toFixed(1)}" y="${Math.min(H - 34, Math.max(28, p.y)).toFixed(1)}" fill="#bae6fd" font-size="18" font-weight="700" text-anchor="middle" opacity=".26" letter-spacing="2">${label}</text>`);
+    }
 
-    for (let i = 0; i < 220; i++) {
+    for (let i = 0; i < 520; i++) {
       const x = ((i * 977 + 37) % 1000) / 1000 * W;
       const y = ((i * 601 + 191) % 1000) / 1000 * H;
-      const op = 0.045 + (i % 11) * 0.01;
+      const op = 0.03 + (i % 17) * 0.006;
       parts.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${(0.35 + (i % 4) * 0.08).toFixed(2)}" fill="#dbeafe" opacity="${op.toFixed(2)}"/>`);
+    }
+
+    if (hasPos) {
+      const ecl = pathFromPoints(eclipticSamples(date, lat, lon, W, H));
+      if (ecl) {
+        parts.push(`<path d="${ecl}" fill="none" stroke="rgba(251,191,36,.26)" stroke-width="1.2" stroke-dasharray="10 12"/>`);
+        parts.push(`<text x="${Math.max(170, W * .18).toFixed(1)}" y="${Math.max(80, H * .18).toFixed(1)}" fill="#f8d58a" font-size="11" opacity=".72">ecliptic plane</text>`);
+      }
     }
 
     if (hasPos && catalog && Array.isArray(catalog.stars)) {
@@ -229,6 +308,10 @@
         const op = Math.max(0.26, Math.min(1, 1.12 - (mag + 1.5) * 0.12));
         const fill = cols[cidx] || '#f8f7ff';
         const pulse = mag < 1.8 ? `<animate attributeName="opacity" values="${op.toFixed(2)};${Math.max(.34, op - .22).toFixed(2)};${op.toFixed(2)}" dur="${(3.8 + (mag + 1.5) * .7).toFixed(1)}s" repeatCount="indefinite"/>` : '';
+        if (mag < 0.9) {
+          const spike = Math.max(5, rad * 3.4);
+          parts.push(`<g opacity=".38"><line x1="${(pt.x - spike).toFixed(1)}" y1="${pt.y.toFixed(1)}" x2="${(pt.x + spike).toFixed(1)}" y2="${pt.y.toFixed(1)}" stroke="${fill}" stroke-width=".8"/><line x1="${pt.x.toFixed(1)}" y1="${(pt.y - spike).toFixed(1)}" x2="${pt.x.toFixed(1)}" y2="${(pt.y + spike).toFixed(1)}" stroke="${fill}" stroke-width=".8"/></g>`);
+        }
         parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rad.toFixed(2)}" fill="${fill}" opacity="${op.toFixed(2)}"${mag < 1.8 ? ' filter="url(#sv-full-glow)"' : ''}>${pulse}</circle>`);
         projected.push({ kind: 'star', x: pt.x, y: pt.y, name, cons, mag, ra, dec, alt: p.alt, az: p.az, color: fill });
         if (name && (mag < 1.2 || (skyZoom > 1.55 && mag < 2.2))) {
@@ -237,6 +320,9 @@
         if (cons && mag < 2.7) {
           if (!starGroups.has(cons)) starGroups.set(cons, []);
           starGroups.get(cons).push({ ...pt, mag });
+          const label = constellationLabels.get(cons) || { x: 0, y: 0, n: 0, mag: 99 };
+          label.x += pt.x; label.y += pt.y; label.n += 1; label.mag = Math.min(label.mag, mag);
+          constellationLabels.set(cons, label);
         }
       }
       [...starGroups.values()].forEach(stars => {
@@ -248,9 +334,30 @@
           parts.push(`<line x1="${prev.x.toFixed(1)}" y1="${prev.y.toFixed(1)}" x2="${st.x.toFixed(1)}" y2="${st.y.toFixed(1)}" stroke="rgba(125,211,252,.13)" stroke-width="1" stroke-dasharray="3 10"/>`);
         });
       });
+      [...constellationLabels.entries()]
+        .filter(([, v]) => v.n >= 2)
+        .sort((a, b) => a[1].mag - b[1].mag)
+        .slice(0, Math.round(10 + skyZoom * 6))
+        .forEach(([cons, v]) => {
+          const name = CONSTELLATIONS[cons] || cons;
+          const x = v.x / v.n, y = v.y / v.n;
+          if (x < 0 || x > W || y < 0 || y > H) return;
+          parts.push(`<text x="${x.toFixed(1)}" y="${y.toFixed(1)}" fill="#93c5fd" font-size="${(10 + skyZoom * .8).toFixed(1)}" text-anchor="middle" opacity=".22" letter-spacing="1.7">${esc(name.toUpperCase())}</text>`);
+        });
     }
 
     if (hasPos) {
+      const moon = moonPosition(date, lat, lon);
+      if (moon.alt > 0) {
+        const mp = fullSkyPoint(moon.az, moon.alt, W, H);
+        if (mp.x > -80 && mp.x < W + 80 && mp.y > -80 && mp.y < H + 80) {
+          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="34" fill="url(#sv-planet-glow)" opacity=".22"/>`);
+          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="9" fill="#dbeafe" opacity=".92" filter="url(#sv-full-glow)"/>`);
+          parts.push(`<circle cx="${(mp.x + 4).toFixed(1)}" cy="${(mp.y - 1).toFixed(1)}" r="8.8" fill="#071120" opacity=".42"/>`);
+          parts.push(`<text x="${(mp.x + 17).toFixed(1)}" y="${(mp.y + 4).toFixed(1)}" fill="#dbeafe" font-size="12" opacity=".88">Moon</text>`);
+          projected.push({ kind: 'planet', x: mp.x, y: mp.y, planet: moon });
+        }
+      }
       for (const planet of planetPositions(date, lat, lon)) {
         if (planet.alt <= 0) continue;
         const pt = fullSkyPoint(planet.az, planet.alt, W, H);
@@ -301,10 +408,22 @@
       const avgSnr = trackedSats ? (snrSum / trackedSats).toFixed(1) + ' dB' : 'none';
       const strong = strongestSat ? `${esc(strongestSat.constellation || 'sat')} ${esc(strongestSat.prn != null ? strongestSat.prn : '')} / ${strongestSnr} dB` : 'none';
       detailEl.style.display = '';
-      detailEl.innerHTML = `<div class="sv-detail-card"><b>Full sky</b><span><i>Projection</i><em>alt/az panorama</em></span><span><i>Zoom</i><em>${skyZoom.toFixed(1)}x</em></span><span><i>Visible stars</i><em>${visibleStars}</em></span></div>
-        <div class="sv-detail-card"><b>Objects</b><span><i>Named stars</i><em>${namedStars}</em></span><span><i>Planets</i><em>${hasPos ? planetPositions(date, lat, lon).filter(p => p.alt > 0).length : 0}</em></span><span><i>Tracked sats</i><em>${trackedSats}/${(lastData.sky || []).length}</em></span></div>
-        <div class="sv-detail-card"><b>Signal</b><span><i>Average SNR</i><em>${avgSnr}</em></span><span><i>Strongest</i><em>${strong}</em></span><span><i>Drag</i><em>click-hold pan</em></span></div>`;
+      detailEl.innerHTML = `<div class="sv-detail-card"><b>Sky model</b><span><i>Projection</i><em>alt/az panorama</em></span><span><i>Reference</i><em>ecliptic + Milky Way</em></span><span><i>Zoom</i><em>${skyZoom.toFixed(1)}x</em></span></div>
+        <div class="sv-detail-card"><b>Catalog</b><span><i>Visible stars</i><em>${visibleStars}</em></span><span><i>Named stars</i><em>${namedStars}</em></span><span><i>Constellation labels</i><em>${constellationLabels.size}</em></span></div>
+        <div class="sv-detail-card"><b>Live layer</b><span><i>Planets + Moon</i><em>${hasPos ? planetPositions(date, lat, lon).filter(p => p.alt > 0).length + (moonPosition(date, lat, lon).alt > 0 ? 1 : 0) : 0}</em></span><span><i>Tracked sats</i><em>${trackedSats}/${(lastData.sky || []).length}</em></span><span><i>Strongest</i><em>${strong}</em></span></div>`;
     }
+  }
+
+  function updateCursorReadout(ev) {
+    if (!enhanced || !cursorEl || !svg) return;
+    const r = svg.getBoundingClientRect();
+    const x = ev.clientX - r.left, y = ev.clientY - r.top;
+    if (x < 0 || y < 0 || x > r.width || y > r.height) {
+      cursorEl.textContent = 'az --  alt --';
+      return;
+    }
+    const sky = skyFromScreenPoint(x, y, r.width, r.height);
+    cursorEl.textContent = `az ${sky.az.toFixed(1)} deg ${cardinalName(sky.az)}  /  alt ${sky.alt.toFixed(1)} deg`;
   }
 
   // ---- Rendering -------------------------------------------------------
@@ -528,7 +647,7 @@
         <div class="sv-info-row">RA <b>${(p.ra / 15).toFixed(2)}h</b></div>
         <div class="sv-info-row">Dec <b>${p.dec.toFixed(1)}°</b></div>
         <div class="sv-info-row">Visual mag <b>${p.mag}</b></div>
-        <div class="sv-info-row">Model <b>low-precision live</b></div>`;
+        <div class="sv-info-row">Model <b>${p.name === 'Moon' ? 'lunar approximation' : 'low-precision live'}</b></div>`;
     } else {
       const nm = obj.name || 'Unnamed star';
       const consFull = obj.cons ? (CONSTELLATIONS[obj.cons] || obj.cons) : null;
@@ -539,7 +658,8 @@
         <div class="sv-info-row">Dec <b>${obj.dec != null ? obj.dec.toFixed(1) + '°' : '—'}</b></div>
         <div class="sv-info-row">Elevation <b>${Math.round(obj.alt)}°</b></div>
         <div class="sv-info-row">Azimuth <b>${Math.round(obj.az)}°</b></div>
-        <div class="sv-info-row">Color <b><span style="color:${esc(obj.color || '#f8f7ff')}">catalog</span></b></div>`;
+        <div class="sv-info-row">Tone <b><span style="color:${esc(obj.color || '#f8f7ff')}">${esc(starTone(obj.color))}</span></b></div>
+        <div class="sv-info-row">Class <b>${obj.mag < 1 ? 'navigation star' : (obj.mag < 3 ? 'bright naked-eye' : 'catalog star')}</b></div>`;
     }
     infoCard.innerHTML = html +
       '<div class="sv-info-close">tap anywhere to dismiss</div>';
@@ -743,20 +863,46 @@
     if (modal) modal.classList.remove('open');
   }
 
-  function setSkyZoom(next) {
-    skyZoom = Math.max(0.75, Math.min(4, next));
+  function clampSkyPan(nextX, nextY, zoom) {
+    if (!svg) return { x: nextX, y: nextY };
+    const r = svg.getBoundingClientRect();
+    const z = zoom == null ? skyZoom : zoom;
+    const maxX = Math.max(0, r.width * (z - 1) * 0.55 + 160);
+    const maxY = Math.max(0, r.height * (z - 1) * 0.55 + 120);
+    return {
+      x: Math.max(-maxX, Math.min(maxX, nextX)),
+      y: Math.max(-maxY, Math.min(maxY, nextY))
+    };
+  }
+
+  function setSkyZoom(next, anchor) {
+    const oldZoom = skyZoom;
+    const newZoom = Math.max(0.75, Math.min(4, next));
+    if (anchor && svg && newZoom !== oldZoom) {
+      const r = svg.getBoundingClientRect();
+      const ax = anchor.x - r.left;
+      const ay = anchor.y - r.top;
+      const cx = r.width / 2;
+      const cy = r.height / 2;
+      const ratio = newZoom / oldZoom;
+      const nextPan = clampSkyPan(
+        ax - cx - (ax - cx - skyPanX) * ratio,
+        ay - cy - (ay - cy - skyPanY) * ratio,
+        newZoom
+      );
+      skyPanX = nextPan.x;
+      skyPanY = nextPan.y;
+    }
+    skyZoom = newZoom;
     const label = overlay && overlay.querySelector('.sv-zoom-label');
     if (label) label.textContent = skyZoom.toFixed(1) + 'x';
     render();
   }
 
   function setSkyPan(nextX, nextY) {
-    if (!svg) return;
-    const r = svg.getBoundingClientRect();
-    const maxX = Math.max(0, r.width * (skyZoom - 1) * 0.55 + 160);
-    const maxY = Math.max(0, r.height * (skyZoom - 1) * 0.55 + 120);
-    skyPanX = Math.max(-maxX, Math.min(maxX, nextX));
-    skyPanY = Math.max(-maxY, Math.min(maxY, nextY));
+    const nextPan = clampSkyPan(nextX, nextY);
+    skyPanX = nextPan.x;
+    skyPanY = nextPan.y;
     render();
   }
 
@@ -838,6 +984,18 @@
           pointer-events:none;color:#dbeafe;text-shadow:0 1px 18px rgba(14,165,233,.45);}
         #ragnar-skyview .sv-brand b{display:block;font-size:11px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;}
         #ragnar-skyview .sv-brand span{display:block;margin-top:3px;color:#7fa7c8;font-size:11px;letter-spacing:.05em;}
+        #ragnar-skyview .sv-cursor{display:none;position:absolute;left:16px;top:48px;z-index:4;color:#9fb0c3;
+          font-family:ui-monospace,monospace;font-size:11px;letter-spacing:.03em;pointer-events:none;
+          background:rgba(3,8,18,.35);border:1px solid rgba(125,211,252,.12);border-radius:8px;padding:5px 8px;}
+        #ragnar-skyview .sv-layer-key{display:none;position:absolute;left:16px;bottom:62px;z-index:4;pointer-events:none;
+          background:rgba(3,8,18,.33);border:1px solid rgba(125,211,252,.12);border-radius:10px;padding:8px 10px;
+          color:#8fb4d1;font-size:10px;line-height:1.65;backdrop-filter:blur(8px);}
+        #ragnar-skyview .sv-layer-key b{display:block;color:#dbeafe;font-size:10px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:3px;opacity:.72;}
+        #ragnar-skyview .sv-layer-key span{display:flex;align-items:center;gap:7px;white-space:nowrap;opacity:.72;}
+        #ragnar-skyview .sv-layer-key i{display:inline-block;width:16px;height:2px;border-radius:999px;background:#7dd3fc;opacity:.7;}
+        #ragnar-skyview .sv-layer-key .ecl i{background:#f8d58a;border-top:1px dashed #f8d58a;}
+        #ragnar-skyview .sv-layer-key .mw i{height:6px;background:rgba(186,230,253,.18);}
+        #ragnar-skyview .sv-layer-key .sat i{height:6px;width:6px;border-radius:999px;background:#34d399;}
         #ragnar-skyview .sv-zoom{display:none;position:absolute;left:16px;bottom:18px;z-index:4;gap:6px;align-items:center;
           background:rgba(3,8,18,.56);border:1px solid rgba(125,211,252,.22);border-radius:10px;padding:6px;backdrop-filter:blur(10px);}
         #ragnar-skyview .sv-zoom button{width:32px;height:30px;border:1px solid rgba(148,163,184,.22);border-radius:7px;background:rgba(15,23,42,.72);color:#dbeafe;font-size:16px;line-height:1;cursor:pointer;}
@@ -858,9 +1016,11 @@
         #ragnar-skyview.sv-enhanced.sv-dragging svg{cursor:grabbing;}
         #ragnar-skyview.sv-enhanced .sv-diag-btn{display:inline-flex;}
         #ragnar-skyview.sv-enhanced .sv-brand{display:block;}
+        #ragnar-skyview.sv-enhanced .sv-cursor{display:block;}
+        #ragnar-skyview.sv-enhanced .sv-layer-key{display:block;}
         #ragnar-skyview.sv-enhanced .sv-zoom{display:flex;}
         #ragnar-skyview.sv-enhanced .sv-detail{display:grid;}
-        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}#ragnar-skyview .sv-diag-grid{grid-template-columns:1fr;}#ragnar-skyview .sv-diag-modal{padding:12px;}}
+        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}#ragnar-skyview .sv-layer-key{display:none;}#ragnar-skyview .sv-diag-grid{grid-template-columns:1fr;}#ragnar-skyview .sv-diag-modal{padding:12px;}}
       </style>
       <div class="sv-head">
         <span class="sv-title">${enhanced ? 'Ragnar Starview' : 'GPS Sky View'}</span>
@@ -878,8 +1038,10 @@
       </div>
       <div class="sv-stage">
         <div class="sv-brand"><b>Ragnar observatory</b><span>live GNSS sky telemetry</span></div>
+        <div class="sv-cursor">az --  alt --</div>
         <svg preserveAspectRatio="xMidYMid meet"></svg>
         <div class="sv-note"></div>
+        <div class="sv-layer-key"><b>Layers</b><span class="mw"><i></i>Milky Way density</span><span class="ecl"><i></i>Ecliptic plane</span><span><i></i>Alt / az grid</span><span class="sat"><i></i>GNSS satellites</span></div>
         <div class="sv-zoom"><button class="sv-zoom-out" type="button" title="Zoom out">−</button><span class="sv-zoom-label">1.0x</span><button class="sv-zoom-in" type="button" title="Zoom in">+</button></div>
         <div class="sv-detail"></div>
         <div class="sv-info"></div>
@@ -899,6 +1061,7 @@
     subtitleEl = overlay.querySelector('#sv-sub');
     noteEl = overlay.querySelector('.sv-note');
     detailEl = overlay.querySelector('.sv-detail');
+    cursorEl = overlay.querySelector('.sv-cursor');
     infoCard = overlay.querySelector('.sv-info');
     const zoomLabel = overlay.querySelector('.sv-zoom-label');
     if (zoomLabel) zoomLabel.textContent = skyZoom.toFixed(1) + 'x';
@@ -924,6 +1087,7 @@
       overlay.classList.add('sv-dragging');
     });
     svg.addEventListener('pointermove', (e) => {
+      updateCursorReadout(e);
       if (!dragState || e.pointerId !== dragState.id) return;
       const dx = e.clientX - dragState.x, dy = e.clientY - dragState.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
@@ -941,10 +1105,11 @@
     }
     svg.addEventListener('pointerup', finishDrag);
     svg.addEventListener('pointercancel', finishDrag);
+    svg.addEventListener('pointerleave', () => { if (cursorEl) cursorEl.textContent = 'az --  alt --'; });
     svg.addEventListener('wheel', (e) => {
       if (!enhanced) return;
       e.preventDefault();
-      setSkyZoom(skyZoom + (e.deltaY < 0 ? 0.18 : -0.18));
+      setSkyZoom(skyZoom + (e.deltaY < 0 ? 0.18 : -0.18), { x: e.clientX, y: e.clientY });
     }, { passive: false });
 
     // Match the SVG viewBox to its pixel size so screen clicks map 1:1.
@@ -976,7 +1141,7 @@
     document.removeEventListener('keydown', onEsc); onEsc = null;
     window.removeEventListener('resize', resizeH); resizeH = null;
     overlay.remove(); overlay = null;
-    svg = infoCard = subtitleEl = noteEl = detailEl = null;
+    svg = infoCard = subtitleEl = noteEl = detailEl = cursorEl = null;
     enhanced = false;
     skyZoom = 1;
     skyPanX = skyPanY = 0;
