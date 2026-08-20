@@ -7573,7 +7573,7 @@ function _guardFillIfaces(selId) {
     const sel = document.getElementById(selId);
     if (!sel || sel.dataset.filled === '1') return Promise.resolve();
     return fetchAPI('/api/net/interfaces').then(x => {
-        (x.interfaces || []).forEach(i => {
+        (x.interfaces || []).filter(i => i.type !== 'wifi').forEach(i => {
             const o = document.createElement('option');
             o.value = i.name;
             const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
