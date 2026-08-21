@@ -2036,8 +2036,12 @@ customer/access port *should not exist by construction*, the same zero-false-pos
 property as inline DHCP snooping — and keys on the **frame**, not a vendor string, so one
 rule set covers both vendors. **Segment role is load-bearing:** on a `ce` (customer/access)
 port MPLS presence *is* the attack (**`VRF-001`**, CRITICAL); on a `core` port the presence
-rules go quiet but the structural rules stay armed; `unknown` is treated as `ce` so
-detection fails loud (**`VRF-011`**). Also flags label **sweeps** (**`VRF-002`/`VRF-003`** —
+rules go quiet but the structural rules stay armed; `unknown` behaves as `ce` — so
+detection still fails loud the instant a label appears — but a *silent* segment with an
+undeclared role stays **clean** rather than self-reporting a bare posture note. **`VRF-011`**
+(role-undeclared posture) is therefore raised only alongside an actual MPLS sighting, not on
+every scan; the selector defaults to `ce`, the intended CE-facing use. Also flags label
+**sweeps** (**`VRF-002`/`VRF-003`** —
 the published PoC brute-forces labels 1000–1500 in 500 frames), reserved labels
 (**`VRF-009`**), malformed/no-BOS stacks (**`VRF-006`**), stack-depth/TTL/trailing anomalies,
 MPLS inside a VLAN tag (**`VRF-014`**), LDP control-plane exposure on the CE side
