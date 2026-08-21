@@ -6764,7 +6764,10 @@ async function watchtowerClear() {
     } catch (err) {
         addConsoleMessage('Failed to clear Watchtower: ' + err.message, 'error');
     }
+    // Refresh both views — the button lives on the Diagnostics pane and the
+    // Dashboard summary card, and clearing empties the same shared ring.
     watchtowerRefresh();
+    if (typeof refreshDashWatchtower === 'function') refreshDashWatchtower();
 }
 async function syncWatchtowerFromServer() {
     const cb = document.getElementById('watchtower-enabled');

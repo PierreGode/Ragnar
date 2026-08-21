@@ -942,7 +942,10 @@
                         <h3 class="text-lg font-semibold">Watchtower</h3>
                         <p class="text-xs text-gray-400">Live findings from the passive watcher daemons — ARP Guard · NDP (IPv6) · Wi-Fi · Legacy Wi-Fi · WPS · Cert · SNMP · IS-IS · IGMP · Cisco/Juniper/Arista/Comware guards (plus any other watcher writing JSONL)</p>
                     </div>
-                    <button onclick="showTab('diagnostics')" class="shrink-0 bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Open pane</button>
+                    <div class="shrink-0 flex items-center gap-2">
+                        <button onclick="watchtowerClear()" title="Clear the alerts shown here. The watchers keep their place in each log, so only genuinely new findings re-appear." class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Clear</button>
+                        <button onclick="showTab('diagnostics')" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Open pane</button>
+                    </div>
                 </div>
                 <div id="dash-incidents" class="space-y-2 mb-3"></div>
                 <div id="dash-watchtower-chips" class="flex flex-wrap items-center gap-2 text-sm"></div>
@@ -8144,7 +8147,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260820-staregg-radarsweep"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260821-watchtower-clear"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260821-watchtower-clear-dash"></script>
 
 
 
