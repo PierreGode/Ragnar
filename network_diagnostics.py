@@ -16097,7 +16097,8 @@ def do_comware_guard(interface=None, seconds=20, role='unknown', learn=True,
 def _comware_analyze(records, role='unknown', local_prefixes=None, lsr_macs=None):
     """Pure classifier over parsed MPLS frames → VRF findings + verdict. Maintains
     per-scan sweep / rate / label-reuse / platform state. role 'unknown' is
-    treated as 'ce' so detection fails loud (and raises VRF-011)."""
+    treated as 'ce' so detection fails loud; VRF-011 (role-undeclared posture) is
+    raised only if MPLS is actually seen, so a silent segment stays clean."""
     findings = []
     seen = set()
     ce = role in ('ce', 'unknown')
@@ -16116,10 +16117,6 @@ def _comware_analyze(records, role='unknown', local_prefixes=None, lsr_macs=None
         findings.append({'code': code, 'name': name, 'severity': sev,
                          'klass': klass, 'src': src, 'cves': cves, 'detail': detail})
 
-    if role == 'unknown':
-        add('VRF-011', 'IFACE_ROLE_UNDECLARED', 'MEDIUM', 'POSTURE', None, [],
-            {'note': 'segment role undeclared — treated as CE so detection fails loud'})
-
     records = sorted(records, key=lambda r: r.get('ts', 0.0))
     for fr in records:
         if fr['ethertype'] in _MPLS_ETHERTYPES:
@@ -16129,6 +16126,15 @@ def _comware_analyze(records, role='unknown', local_prefixes=None, lsr_macs=None
                 seen_mpls_on_ce = True
         else:
             _comware_nonmpls_rules(fr, ce, platforms, seen_mpls_on_ce, add)
+
+    # VRF-011: an undeclared role is only worth a posture note once labelled traffic
+    # has actually appeared while we were treating the segment as CE. A silent segment
+    # with an undeclared role is NOT a finding — otherwise every default scan self-
+    # reports 'posture', breaking the card's zero-false-positive promise. The CE-
+    # default detection still "fails loud" the instant an MPLS frame shows up.
+    if role == 'unknown' and seen_mpls_on_ce:
+        add('VRF-011', 'IFACE_ROLE_UNDECLARED', 'MEDIUM', 'POSTURE', None, [],
+            {'note': 'segment role undeclared — treated as CE, and MPLS was observed'})
 
     return _guard_finish('comware_guard', None, None, findings, records)
 
@@ -16654,9 +16660,12 @@ def _comware_selftest():
     # VRF-001 silent on a core segment (MPLS is normal there).
     check('comware-core-silent', [_mpls_rec(_mpls_test_frame([1000]))], 'core',
           'clean', absent=['VRF-001'])
-    # role unknown -> treated as CE AND raises VRF-011.
+    # role unknown -> treated as CE AND raises VRF-011 (only because MPLS is seen).
     check('comware-unknown-role', [_mpls_rec(_mpls_test_frame([1000]))], 'unknown',
           'attack', ['VRF-001', 'VRF-011'])
+    # role unknown but a SILENT segment (no MPLS) is clean, not a bare VRF-011
+    # 'posture' — the default-config false alarm this guard used to emit.
+    check('comware-unknown-silent', [], 'unknown', 'clean', absent=['VRF-011'])
     # VRF-017: multicast MPLS on CE.
     check('comware-multicast', [_mpls_rec(_mpls_test_frame([1000], multicast=True))],
           'ce', 'attack', ['VRF-017'])
