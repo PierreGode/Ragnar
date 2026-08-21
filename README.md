@@ -217,7 +217,7 @@ Ragnar auto-detects available tools and enables corresponding features in the we
 
 ---
 
-## 📡 RuSense — Camera-Free Surveillance
+## 📡 RuSense — Camera-Free Surveillance.
 
 RuSense turns ordinary 2.4 GHz WiFi into a **no-camera surveillance** system for home,
 office, and anywhere a lens is unwelcome. ESP32 sensor nodes read **WiFi Channel State
