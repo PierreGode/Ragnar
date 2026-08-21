@@ -6765,7 +6765,8 @@ async function watchtowerClear() {
         addConsoleMessage('Failed to clear Watchtower: ' + err.message, 'error');
     }
     // Refresh both views — the button lives on the Diagnostics pane and the
-    // Dashboard summary card, and clearing empties the same shared ring.
+    // Dashboard summary card. Each refresher re-pulls its own incident rows too,
+    // so the fused view empties alongside the raw alerts.
     watchtowerRefresh();
     if (typeof refreshDashWatchtower === 'function') refreshDashWatchtower();
 }

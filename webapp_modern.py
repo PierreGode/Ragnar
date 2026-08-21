@@ -2383,6 +2383,12 @@ def watchtower_clear():
             wt.clear()
             _wt_summary = wt.summary()
             _wt_save(wt)
+            # Also empty the correlated-incident view — it's fused from the same
+            # alert stream, so a Clear that left incidents behind would look broken.
+            try:
+                _inc_get().clear()
+            except Exception as exc:
+                logger.debug(f"[watchtower] incident clear failed: {exc}")
     except Exception as exc:
         logger.debug(f"[watchtower] clear failed: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500

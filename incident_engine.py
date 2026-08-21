@@ -326,6 +326,11 @@ class IncidentEngine:
         self._incidents = collections.OrderedDict()   # id -> Incident
         self._next_id = 1
 
+    def clear(self):
+        """Drop every correlated incident. Used when the operator clears the
+        Watchtower pane so the fused view empties alongside the raw alerts."""
+        self._incidents.clear()
+
     def _expired(self, inc, now):
         return (now - inc.last_ts) > self.window_s
 
