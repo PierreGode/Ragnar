@@ -205,18 +205,253 @@
     return 'ice giant';
   }
 
+  // ---- Sun, Moon phase, twilight --------------------------------------
+  // Low-precision solar ecliptic longitude (deg), good to ~0.01 deg.
+  function sunEclipticLon(date) {
+    const d = julianDay(date) - 2451545.0;
+    const g = normDeg(357.529 + 0.98560028 * d) * D2R;
+    const q = normDeg(280.459 + 0.98564736 * d);
+    return normDeg(q + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g));
+  }
+  function sunPosition(date, lat, lon) {
+    const L = sunEclipticLon(date) * D2R;
+    const eq = eclipticToRaDec(Math.cos(L), Math.sin(L), 0);
+    const sky = raDecToAltAz(eq.ra, eq.dec, lat, lon, date);
+    return { name: 'Sun', ra: eq.ra, dec: eq.dec, alt: sky.alt, az: sky.az, color: '#ffdf7e', mag: -26.7 };
+  }
+  const MOON_PHASES = ['New Moon', 'Waxing Crescent', 'First Quarter', 'Waxing Gibbous',
+    'Full Moon', 'Waning Gibbous', 'Last Quarter', 'Waning Crescent'];
+  function moonIllumination(date) {
+    const d = julianDay(date) - 2451545.0;
+    const Lm = normDeg(218.316 + 13.176396 * d);
+    const M = normDeg(134.963 + 13.064993 * d);
+    const lonMoon = normDeg(Lm + 6.289 * Math.sin(M * D2R));
+    const elong = normDeg(lonMoon - sunEclipticLon(date));   // 0 = new, 180 = full
+    return {
+      elong,
+      illum: (1 - Math.cos(elong * D2R)) / 2,
+      waxing: elong < 180,
+      phase: MOON_PHASES[Math.floor(normDeg(elong + 22.5) / 45) % 8],
+      ageDays: (elong / 360) * 29.53
+    };
+  }
+  function twilightPhase(alt) {
+    if (alt >= -0.833) return { key: 'day', label: 'Daytime', dark: 0 };
+    if (alt >= -6) return { key: 'civil', label: 'Civil twilight', dark: 0.3 };
+    if (alt >= -12) return { key: 'nautical', label: 'Nautical twilight', dark: 0.6 };
+    if (alt >= -18) return { key: 'astro', label: 'Astronomical twilight', dark: 0.85 };
+    return { key: 'night', label: 'Astronomical night', dark: 1 };
+  }
+  // Forward-scan the next crossing of a solar-altitude threshold (5-min steps).
+  function nextSunCrossing(fromMs, lat, lon, threshold, goingUp) {
+    const step = 5 * 60000;
+    let prev = sunPosition(new Date(fromMs), lat, lon).alt - threshold;
+    for (let i = 1; i <= 300; i++) {
+      const t = fromMs + i * step;
+      const cur = sunPosition(new Date(t), lat, lon).alt - threshold;
+      if ((goingUp && prev < 0 && cur >= 0) || (!goingUp && prev > 0 && cur <= 0)) return t;
+      prev = cur;
+    }
+    return null;
+  }
+  function clockUtc(ms) {
+    if (!ms) return '—';
+    return new Date(ms).toISOString().slice(11, 16) + ' UTC';
+  }
+  function inText(ms, fromMs) {
+    if (!ms) return '';
+    const m = Math.round((ms - fromMs) / 60000);
+    if (m <= 0) return 'now';
+    if (m < 60) return 'in ' + m + ' min';
+    return 'in ' + Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  // ---- GNSS geometry (DOP) + integrity --------------------------------
+  // Invert a 4x4 via Gauss-Jordan; null if singular.
+  function invert4(m) {
+    const a = m.map((r, i) => r.concat([0, 0, 0, 0].map((_, j) => (i === j ? 1 : 0))));
+    for (let col = 0; col < 4; col++) {
+      let piv = col;
+      for (let r = col + 1; r < 4; r++) if (Math.abs(a[r][col]) > Math.abs(a[piv][col])) piv = r;
+      if (Math.abs(a[piv][col]) < 1e-9) return null;
+      [a[col], a[piv]] = [a[piv], a[col]];
+      const d = a[col][col];
+      for (let j = 0; j < 8; j++) a[col][j] /= d;
+      for (let r = 0; r < 4; r++) {
+        if (r === col) continue;
+        const f = a[r][col];
+        for (let j = 0; j < 8; j++) a[r][j] -= f * a[col][j];
+      }
+    }
+    return a.map(r => r.slice(4));
+  }
+  // PDOP/HDOP/VDOP/TDOP/GDOP from tracked satellite az/el geometry.
+  function computeDOP(sats) {
+    const rows = [];
+    for (const s of sats) {
+      if (s.az == null || s.elev == null) continue;
+      if (!(typeof s.snr === 'number' && s.snr > 0)) continue;
+      if (s.elev < 3) continue;
+      const el = s.elev * D2R, az = s.az * D2R;
+      const ce = Math.cos(el);
+      rows.push([ce * Math.sin(az), ce * Math.cos(az), Math.sin(el), 1]);
+    }
+    if (rows.length < 4) return { n: rows.length, ok: false };
+    const ata = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
+    for (const r of rows)
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) ata[i][j] += r[i] * r[j];
+    const q = invert4(ata);
+    if (!q) return { n: rows.length, ok: false };
+    const gd = Math.sqrt(Math.max(0, q[0][0] + q[1][1] + q[2][2] + q[3][3]));
+    return {
+      n: rows.length, ok: true,
+      gdop: gd,
+      pdop: Math.sqrt(Math.max(0, q[0][0] + q[1][1] + q[2][2])),
+      hdop: Math.sqrt(Math.max(0, q[0][0] + q[1][1])),
+      vdop: Math.sqrt(Math.max(0, q[2][2])),
+      tdop: Math.sqrt(Math.max(0, q[3][3]))
+    };
+  }
+  function dopVerdict(pdop) {
+    if (pdop == null) return { label: 'insufficient', tone: 'warn' };
+    if (pdop < 2) return { label: 'excellent', tone: 'good' };
+    if (pdop < 4) return { label: 'good', tone: 'good' };
+    if (pdop < 6) return { label: 'moderate', tone: '' };
+    if (pdop < 10) return { label: 'fair', tone: 'warn' };
+    return { label: 'poor geometry', tone: 'warn' };
+  }
+  function stdev(arr) {
+    if (arr.length < 2) return 0;
+    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+    return Math.sqrt(arr.reduce((a, b) => a + (b - m) * (b - m), 0) / arr.length);
+  }
+  function haversineM(a, b) {
+    if (!a || !b) return 0;
+    const R = 6371000, dLat = (b.lat - a.lat) * D2R, dLon = (b.lon - a.lon) * D2R;
+    const s = Math.sin(dLat / 2) ** 2 +
+      Math.cos(a.lat * D2R) * Math.cos(b.lat * D2R) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+  }
+  // Experimental spoofing / jamming heuristics over the live sky snapshot.
+  function integrityCheck(sats, jumpM) {
+    const tracked = sats.filter(s => typeof s.snr === 'number' && s.snr > 0);
+    const reasons = [];
+    let level = 'ok';
+    const bump = (lv) => { if (lv === 'suspect' || level === 'suspect') level = 'suspect'; else if (lv === 'caution') level = 'caution'; };
+    const snrs = tracked.map(s => s.snr);
+    if (tracked.length >= 6) {
+      const sd = stdev(snrs), mean = snrs.reduce((a, b) => a + b, 0) / snrs.length;
+      if (sd < 1.2 && mean > 40) { reasons.push('Uniform high SNR across ' + tracked.length + ' sats (possible spoof)'); bump('suspect'); }
+      else if (sd < 2 && mean > 35) { reasons.push('Low SNR spread — power looks synthetic'); bump('caution'); }
+    }
+    if (snrs.some(v => v > 55)) { reasons.push('Improbably high SNR (>55 dB)'); bump('caution'); }
+    const cons = new Set(tracked.map(s => s.constellation).filter(Boolean));
+    if (tracked.length >= 8 && cons.size === 1) { reasons.push('All tracked sats one constellation'); bump('caution'); }
+    if (jumpM > 3000) { reasons.push('Position jumped ' + Math.round(jumpM) + ' m between polls'); bump('suspect'); }
+    const dup = {};
+    for (const v of snrs) dup[v] = (dup[v] || 0) + 1;
+    const maxDup = Math.max(0, ...Object.values(dup));
+    if (tracked.length >= 6 && maxDup >= Math.ceil(tracked.length * 0.6)) { reasons.push(maxDup + ' sats share an identical SNR value'); bump('suspect'); }
+    if (!reasons.length) reasons.push(tracked.length ? 'No anomalies in current snapshot' : 'No tracked satellites to assess');
+    return { level, reasons, tracked: tracked.length };
+  }
+
+  // ---- GNSS obstruction / multipath sky survey ------------------------
+  // Accumulates, per 5-deg az/el cell, how often a satellite is seen there vs
+  // how often it is actually tracked (has SNR). Cells frequently transited but
+  // rarely locked are obstructed (buildings / trees / antenna mask). Persisted
+  // to localStorage so a survey builds up across visits.
+  const SURVEY_KEY = 'ragnar_skyview_survey_v2';
+  const AZ_BINS = 72, EL_BINS = 18;
+  let survey = { seen: null, lock: null, snr: null, n: 0 };
+  let surveyDirty = 0;
+  function surveyInit() {
+    if (survey.seen) return;
+    survey.seen = new Int32Array(AZ_BINS * EL_BINS);
+    survey.lock = new Int32Array(AZ_BINS * EL_BINS);
+    survey.snr = new Float32Array(AZ_BINS * EL_BINS);
+    survey.n = 0;
+    try {
+      const raw = localStorage.getItem(SURVEY_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        if (o && o.seen && o.seen.length === AZ_BINS * EL_BINS) {
+          survey.seen.set(o.seen); survey.lock.set(o.lock); survey.snr.set(o.snr); survey.n = o.n || 0;
+        }
+      }
+    } catch (_) {}
+  }
+  function surveyPersist() {
+    try {
+      localStorage.setItem(SURVEY_KEY, JSON.stringify({
+        seen: Array.from(survey.seen), lock: Array.from(survey.lock),
+        snr: Array.from(survey.snr, v => Math.round(v)), n: survey.n
+      }));
+    } catch (_) {}
+    surveyDirty = 0;
+  }
+  function surveyBin(az, el) {
+    const a = Math.floor(normDeg(az) / (360 / AZ_BINS)) % AZ_BINS;
+    const e = Math.min(EL_BINS - 1, Math.max(0, Math.floor(Math.max(0, Math.min(90, el)) / (90 / EL_BINS))));
+    return e * AZ_BINS + a;
+  }
+  function surveyAccumulate(sats) {
+    surveyInit();
+    let touched = false;
+    for (const s of sats) {
+      if (s.az == null || s.elev == null || s.elev < 0) continue;
+      const b = surveyBin(s.az, s.elev);
+      survey.seen[b]++;
+      if (typeof s.snr === 'number' && s.snr > 0) { survey.lock[b]++; survey.snr[b] += s.snr; }
+      touched = true;
+    }
+    if (touched) { survey.n++; if (++surveyDirty >= 12) surveyPersist(); }
+  }
+  function surveyReset() {
+    surveyInit();
+    survey.seen.fill(0); survey.lock.fill(0); survey.snr.fill(0); survey.n = 0;
+    surveyPersist();
+  }
+  function surveyStats() {
+    surveyInit();
+    let seenCells = 0, open = 0, blocked = 0, weakest = null;
+    for (let b = 0; b < survey.seen.length; b++) {
+      const seen = survey.seen[b];
+      if (seen < 2) continue;
+      seenCells++;
+      const ratio = survey.lock[b] / seen;
+      if (ratio >= 0.5) open++; else {
+        blocked++;
+        if (!weakest || ratio < weakest.ratio) {
+          const e = Math.floor(b / AZ_BINS), a = b % AZ_BINS;
+          weakest = { ratio, az: a * (360 / AZ_BINS) + (360 / AZ_BINS) / 2, el: e * (90 / EL_BINS) + (90 / EL_BINS) / 2 };
+        }
+      }
+    }
+    return { seenCells, open, blocked, score: seenCells ? Math.round(100 * open / seenCells) : null, samples: survey.n, weakest };
+  }
+
   // ---- State -----------------------------------------------------------
   let overlay = null, svg = null, infoCard = null, subtitleEl = null, noteEl = null, detailEl = null, cursorEl = null;
   let catalog = null, catalogLoading = null;
+  let constLines = null, constLinesLoading = null;
+  let deepSky = null, deepSkyLoading = null;
   let timer = null, onEsc = null, resizeH = null;
   let enhanced = false;
   let skyZoom = 1;
   let skyPanX = 0, skyPanY = 0;
   let suppressNextClick = false;
+  // Layer toggles (enhanced Starview only).
+  let showConstellations = true, showDeepSky = false, showObstruction = false;
+  // Time-travel scrubber offset (ms). 0 = live now.
+  let timeOffsetMs = 0;
+  // Previous fix + last measured jump, for the integrity position-jump check.
+  let prevFix = null, integrityJumpM = 0;
   // mode: 'live' (this boot's fix) | 'last' (persisted last-known) | 'none'
   let lastData = { sky: [], lat: null, lon: null, mode: 'none', t: null };
   // Screen-space projected objects for click hit-testing.
   let projected = [];
+  function viewDate() { return new Date(Date.now() + timeOffsetMs); }
 
   function esc(s) {
     return String(s).replace(/[<>&"]/g, c =>
@@ -255,6 +490,26 @@
     return catalogLoading;
   }
 
+  function loadConstLines() {
+    if (constLines) return Promise.resolve(constLines);
+    if (constLinesLoading) return constLinesLoading;
+    constLinesLoading = fetch('/web/vendor/constellation_lines.json')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { constLines = j; return j; })
+      .catch(() => { constLines = null; return null; });
+    return constLinesLoading;
+  }
+
+  function loadDeepSky() {
+    if (deepSky) return Promise.resolve(deepSky);
+    if (deepSkyLoading) return deepSkyLoading;
+    deepSkyLoading = fetch('/web/vendor/deep_sky.json')
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { deepSky = j; return j; })
+      .catch(() => { deepSky = null; return null; });
+    return deepSkyLoading;
+  }
+
   function fullSkyPoint(az, alt, W, H) {
     const baseX = (normDeg(az) / 360) * W;
     const baseY = (1 - Math.max(0, Math.min(90, alt)) / 90) * H;
@@ -287,9 +542,11 @@
   function renderEnhanced() {
     const rect = svg.getBoundingClientRect();
     const W = Math.max(320, rect.width), H = Math.max(260, rect.height);
-    const date = new Date();
+    const date = viewDate();
+    const isNow = timeOffsetMs === 0;
     const parts = [];
     projected = [];
+    const whatsUp = [];
     let visibleStars = 0, namedStars = 0, trackedSats = 0, snrSum = 0;
     let strongestSat = null, strongestSnr = -1;
     const { lat, lon, mode } = lastData;
@@ -308,6 +565,27 @@
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-full-bg)"/>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-zenith)"/>`);
     parts.push(`<rect x="0" y="${(H * .72).toFixed(1)}" width="${W}" height="${(H * .28).toFixed(1)}" fill="url(#sv-horizon)" opacity=".7"/>`);
+
+    // GNSS obstruction / multipath survey heatmap (az/el cells, live-accumulated).
+    if (showObstruction) {
+      surveyInit();
+      const azStep = 360 / AZ_BINS, elStep = 90 / EL_BINS;
+      for (let e = 0; e < EL_BINS; e++) {
+        for (let a = 0; a < AZ_BINS; a++) {
+          const seen = survey.seen[e * AZ_BINS + a];
+          if (seen < 2) continue;
+          const ratio = survey.lock[e * AZ_BINS + a] / seen;
+          const az0 = a * azStep, el0 = e * elStep;
+          const p1 = fullSkyPoint(az0, el0, W, H), p2 = fullSkyPoint(az0 + azStep, el0, W, H);
+          const p3 = fullSkyPoint(az0 + azStep, el0 + elStep, W, H), p4 = fullSkyPoint(az0, el0 + elStep, W, H);
+          if ([p1, p2, p3, p4].some(p => p.x < -60 || p.x > W + 60 || p.y < -60 || p.y > H + 60)) continue;
+          // green (open) -> amber -> red (obstructed)
+          const hue = Math.round(ratio * 120);
+          const op = (0.1 + Math.min(0.32, seen / 120) * (1 - ratio * 0.5)).toFixed(2);
+          parts.push(`<path d="M${p1.x.toFixed(1)} ${p1.y.toFixed(1)} L${p2.x.toFixed(1)} ${p2.y.toFixed(1)} L${p3.x.toFixed(1)} ${p3.y.toFixed(1)} L${p4.x.toFixed(1)} ${p4.y.toFixed(1)} Z" fill="hsl(${hue},80%,45%)" opacity="${op}"/>`);
+        }
+      }
+    }
 
     const mw = [];
     for (let i = 0; i <= 46; i++) {
@@ -354,6 +632,23 @@
       }
     }
 
+    // Real IAU constellation figures (d3-celestial line data) projected live.
+    if (hasPos && showConstellations && constLines && constLines.lines) {
+      for (const cid in constLines.lines) {
+        for (const seg of constLines.lines[cid]) {
+          let prev = null;
+          for (const [ra, dec] of seg) {
+            const p = raDecToAltAz(ra, dec, lat, lon, date);
+            const cur = p.alt > 0 ? fullSkyPoint(p.az, p.alt, W, H) : null;
+            if (prev && cur && Math.abs(cur.x - prev.x) < W * 0.5) {
+              parts.push(`<line x1="${prev.x.toFixed(1)}" y1="${prev.y.toFixed(1)}" x2="${cur.x.toFixed(1)}" y2="${cur.y.toFixed(1)}" stroke="rgba(125,211,252,.28)" stroke-width="1"/>`);
+            }
+            prev = cur;
+          }
+        }
+      }
+    }
+
     if (hasPos && catalog && Array.isArray(catalog.stars)) {
       const cols = catalog.colors || [];
       for (const st of catalog.stars) {
@@ -362,6 +657,7 @@
         if (p.alt <= 0) continue;
         const pt = fullSkyPoint(p.az, p.alt, W, H);
         if (pt.x < -40 || pt.x > W + 40 || pt.y < -40 || pt.y > H + 40) continue;
+        if (name && mag < 1.6) whatsUp.push({ kind: 'star', name, alt: p.alt, az: p.az, mag });
         visibleStars++;
         if (name) namedStars++;
         const rad = Math.max(0.45, (3.15 - (mag + 1.5) * 0.36) * Math.sqrt(skyZoom));
@@ -385,15 +681,18 @@
           constellationLabels.set(cons, label);
         }
       }
-      [...starGroups.values()].forEach(stars => {
-        stars.sort((a, b) => a.mag - b.mag);
-        stars.slice(0, 5).forEach((st, idx, arr) => {
-          if (!idx) return;
-          const prev = arr[idx - 1], dx = st.x - prev.x, dy = st.y - prev.y;
-          if (dx * dx + dy * dy > 90000) return;
-          parts.push(`<line x1="${prev.x.toFixed(1)}" y1="${prev.y.toFixed(1)}" x2="${st.x.toFixed(1)}" y2="${st.y.toFixed(1)}" stroke="rgba(125,211,252,.13)" stroke-width="1" stroke-dasharray="3 10"/>`);
+      // Fallback join-the-brightest lines only if the real figure data is absent.
+      if (!(showConstellations && constLines && constLines.lines)) {
+        [...starGroups.values()].forEach(stars => {
+          stars.sort((a, b) => a.mag - b.mag);
+          stars.slice(0, 5).forEach((st, idx, arr) => {
+            if (!idx) return;
+            const prev = arr[idx - 1], dx = st.x - prev.x, dy = st.y - prev.y;
+            if (dx * dx + dy * dy > 90000) return;
+            parts.push(`<line x1="${prev.x.toFixed(1)}" y1="${prev.y.toFixed(1)}" x2="${st.x.toFixed(1)}" y2="${st.y.toFixed(1)}" stroke="rgba(125,211,252,.13)" stroke-width="1" stroke-dasharray="3 10"/>`);
+          });
         });
-      });
+      }
       [...constellationLabels.entries()]
         .filter(([, v]) => v.n >= 2)
         .sort((a, b) => a[1].mag - b[1].mag)
@@ -406,17 +705,59 @@
         });
     }
 
+    // Deep-sky (Messier) objects, projected live.
+    if (hasPos && showDeepSky && deepSky && Array.isArray(deepSky.objects)) {
+      const tnames = deepSky.type_names || {};
+      for (const o of deepSky.objects) {
+        const [ra, dec, mag, id, alt, type] = o;
+        const p = raDecToAltAz(ra, dec, lat, lon, date);
+        if (p.alt <= 0) continue;
+        const pt = fullSkyPoint(p.az, p.alt, W, H);
+        if (pt.x < -30 || pt.x > W + 30 || pt.y < -30 || pt.y > H + 30) continue;
+        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="4.4" fill="none" stroke="#c4b5fd" stroke-width="1.1" stroke-dasharray="2 2" opacity=".8"/>`);
+        if (skyZoom > 1.35 || (mag != null && mag < 6)) {
+          parts.push(`<text x="${(pt.x + 7).toFixed(1)}" y="${(pt.y + 3).toFixed(1)}" fill="#c4b5fd" font-size="10" opacity=".7">${esc(alt || id)}</text>`);
+        }
+        projected.push({ kind: 'dso', x: pt.x, y: pt.y, ra, dec, alt: p.alt, az: p.az, mag, id, name: alt, dtype: tnames[type] || type });
+        whatsUp.push({ kind: 'dso', name: alt || id, alt: p.alt, az: p.az, mag });
+      }
+    }
+
     if (hasPos) {
+      // Sun.
+      const sun = sunPosition(date, lat, lon);
+      if (sun.alt > -1) {
+        const sp = fullSkyPoint(sun.az, Math.max(0, sun.alt), W, H);
+        if (sp.x > -80 && sp.x < W + 80) {
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="30" fill="url(#sv-planet-glow)" opacity=".5"/>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="11" fill="#ffdf7e" filter="url(#sv-full-glow)"/>`);
+          parts.push(`<text x="${(sp.x + 18).toFixed(1)}" y="${(sp.y + 4).toFixed(1)}" fill="#ffdf7e" font-size="12" opacity=".9">Sun</text>`);
+          projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
+        }
+      }
+      if (sun.alt > 0) whatsUp.push({ kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az, mag: -26.7 });
+
+      // Moon with a lit-fraction terminator.
       const moon = moonPosition(date, lat, lon);
+      const ill = moonIllumination(date);
+      moon.illum = ill.illum; moon.phase = ill.phase; moon.waxing = ill.waxing; moon.ageDays = ill.ageDays;
       if (moon.alt > 0) {
         const mp = fullSkyPoint(moon.az, moon.alt, W, H);
         if (mp.x > -80 && mp.x < W + 80 && mp.y > -80 && mp.y < H + 80) {
+          const r = 9;
           parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="34" fill="url(#sv-planet-glow)" opacity=".22"/>`);
-          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="9" fill="#dbeafe" opacity=".92" filter="url(#sv-full-glow)"/>`);
-          parts.push(`<circle cx="${(mp.x + 4).toFixed(1)}" cy="${(mp.y - 1).toFixed(1)}" r="8.8" fill="#071120" opacity=".42"/>`);
+          // dark disc, then lit fraction as a clipped bright cap on the correct limb
+          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="#2a3244"/>`);
+          const k = Math.max(0.03, Math.min(0.97, ill.illum));
+          const off = (ill.waxing ? 1 : -1) * r * (1 - 2 * k);
+          const cid = 'sv-moonlit-' + (mp.x | 0) + '-' + (mp.y | 0);
+          parts.push(`<defs><clipPath id="${cid}"><circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}"/></clipPath></defs>`);
+          parts.push(`<circle cx="${(mp.x + off).toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="#e9eefc" clip-path="url(#${cid})"/>`);
+          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="none" stroke="rgba(219,234,254,.5)" stroke-width=".7"/>`);
           parts.push(`<text x="${(mp.x + 17).toFixed(1)}" y="${(mp.y + 4).toFixed(1)}" fill="#dbeafe" font-size="12" opacity=".88">Moon</text>`);
           projected.push({ kind: 'planet', x: mp.x, y: mp.y, planet: moon });
         }
+        whatsUp.push({ kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, mag: -12 });
       }
       for (const planet of planetPositions(date, lat, lon)) {
         if (planet.alt <= 0) continue;
@@ -426,6 +767,7 @@
         parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(planet.size * 0.95).toFixed(1)}" fill="${planet.color}" filter="url(#sv-full-glow)"><animate attributeName="r" values="${(planet.size * .85).toFixed(1)};${(planet.size * 1.05).toFixed(1)};${(planet.size * .85).toFixed(1)}" dur="5.5s" repeatCount="indefinite"/></circle>`);
         parts.push(`<text x="${(pt.x + planet.size + 7).toFixed(1)}" y="${(pt.y + 4).toFixed(1)}" fill="${planet.color}" font-size="12" opacity=".86">${planet.name}</text>`);
         projected.push({ kind: 'planet', x: pt.x, y: pt.y, planet });
+        whatsUp.push({ kind: 'planet', name: planet.name, alt: planet.alt, az: planet.az, mag: planet.mag });
       }
     }
 
@@ -460,19 +802,86 @@
     parts.push(`<text x="${radarC.x}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="middle">GNSS radar</text></g>`);
 
     svg.innerHTML = parts.join('');
+    const nowMs = date.getTime();
     if (subtitleEl) {
       const pos = hasPos ? `${lat.toFixed(4)}, ${lon.toFixed(4)}${mode === 'last' ? ' (last-known)' : ''}` : 'no position';
-      subtitleEl.textContent = `${pos}  ·  zoom ${skyZoom.toFixed(1)}x  ·  ${date.toISOString().replace('T', ' ').slice(0, 19)} UTC`;
+      const sim = isNow ? '' : `  ·  ⏱ ${timeOffsetMs > 0 ? '+' : '−'}${fmtOffset(Math.abs(timeOffsetMs))}`;
+      subtitleEl.textContent = `${pos}  ·  zoom ${skyZoom.toFixed(1)}x  ·  ${date.toISOString().replace('T', ' ').slice(0, 19)} UTC${sim}`;
     }
     if (noteEl) noteEl.style.display = hasPos ? 'none' : '';
     if (detailEl) {
       const avgSnr = trackedSats ? (snrSum / trackedSats).toFixed(1) + ' dB' : 'none';
       const strong = strongestSat ? `${esc(strongestSat.constellation || 'sat')} ${esc(strongestSat.prn != null ? strongestSat.prn : '')} / ${strongestSnr} dB` : 'none';
+
+      // Sky conditions (Sun / twilight / Moon).
+      let condCard = '';
+      if (hasPos) {
+        const sun = sunPosition(date, lat, lon);
+        const tw = twilightPhase(sun.alt);
+        const ill = moonIllumination(date);
+        const darkPct = Math.round(tw.dark * 100);
+        const nextSet = nextSunCrossing(nowMs, lat, lon, -0.833, false);
+        const nextRise = nextSunCrossing(nowMs, lat, lon, -0.833, true);
+        const nextDark = nextSunCrossing(nowMs, lat, lon, -18, false);
+        const nextEvent = sun.alt > -0.833
+          ? `sunset ${inText(nextSet, nowMs)}`
+          : `sunrise ${inText(nextRise, nowMs)}`;
+        condCard = `<div class="sv-detail-card"><b>Sky conditions</b>
+          <span><i>Sun</i><em class="${tw.key === 'day' ? 'sv-em-warn' : 'sv-em-good'}">${tw.label} (${fmtDeg(sun.alt, 0)})</em></span>
+          <span><i>Darkness</i><em>${darkPct}%${tw.key !== 'night' && nextDark ? ' · astro dark ' + inText(nextDark, nowMs) : ''}</em></span>
+          <span><i>Next</i><em>${nextEvent}</em></span>
+          <span><i>Moon</i><em>${ill.phase} · ${Math.round(ill.illum * 100)}%</em></span></div>`;
+      }
+
+      // GNSS geometry + integrity + open-sky survey + SNR/elevation scatter.
+      const dop = computeDOP(lastData.sky || []);
+      const dv = dopVerdict(dop.ok ? dop.pdop : null);
+      const integ = integrityCheck(lastData.sky || [], integrityJumpM);
+      const st = surveyStats();
+      const integTone = integ.level === 'suspect' ? 'sv-em-warn' : (integ.level === 'caution' ? 'sv-em-warn' : 'sv-em-good');
+      const gnssCard = `<div class="sv-detail-card"><b>GNSS quality</b>
+        <span><i>Geometry (PDOP)</i><em class="sv-em-${dv.tone || 'plain'}">${dop.ok ? dop.pdop.toFixed(1) + ' · ' + dv.label : dv.label}</em></span>
+        <span><i>HDOP / VDOP</i><em>${dop.ok ? dop.hdop.toFixed(1) + ' / ' + dop.vdop.toFixed(1) : '—'}</em></span>
+        <span><i>Tracked / SNR avg</i><em>${trackedSats}/${(lastData.sky || []).length} · ${avgSnr}</em></span>
+        <span><i>Open-sky survey</i><em>${st.score != null ? st.score + '% (' + st.seenCells + ' cells)' : 'building…'}</em></span>
+        <span><i>Integrity</i><em class="${integTone}">${integ.level.toUpperCase()}</em></span>
+        <div class="sv-scatter">${snrElevScatter(lastData.sky || [])}</div>
+        <div class="sv-integ-note">${esc(integ.reasons[0])}</div></div>`;
+
+      // What's up now — brightest objects above the horizon.
+      const seenNames = new Set();
+      const up = whatsUp
+        .filter(o => { if (seenNames.has(o.name)) return false; seenNames.add(o.name); return o.alt > 8; })
+        .sort((a, b) => (a.mag ?? 9) - (b.mag ?? 9))
+        .slice(0, 7);
+      const upRows = up.map(o => `<span><i>${WU_ICON[o.kind] || '·'} ${esc(o.name)}</i><em>${fmtDeg(o.alt, 0)} ${cardinalName(o.az)}${o.mag != null ? ' · m' + o.mag.toFixed(1) : ''}</em></span>`).join('') || '<span><i>Nothing above 8°</i><em>—</em></span>';
+      const upCard = `<div class="sv-detail-card"><b>What's up now</b>${upRows}</div>`;
+
       detailEl.style.display = '';
-      detailEl.innerHTML = `<div class="sv-detail-card"><b>Sky model</b><span><i>Projection</i><em>alt/az panorama</em></span><span><i>Reference</i><em>ecliptic + Milky Way</em></span><span><i>Zoom</i><em>${skyZoom.toFixed(1)}x</em></span></div>
-        <div class="sv-detail-card"><b>Catalog</b><span><i>Visible stars</i><em>${visibleStars}</em></span><span><i>Named stars</i><em>${namedStars}</em></span><span><i>Constellation labels</i><em>${constellationLabels.size}</em></span></div>
-        <div class="sv-detail-card"><b>Live layer</b><span><i>Planets + Moon</i><em>${hasPos ? planetPositions(date, lat, lon).filter(p => p.alt > 0).length + (moonPosition(date, lat, lon).alt > 0 ? 1 : 0) : 0}</em></span><span><i>Tracked sats</i><em>${trackedSats}/${(lastData.sky || []).length}</em></span><span><i>Strongest</i><em>${strong}</em></span></div>`;
+      detailEl.innerHTML = condCard + gnssCard + upCard +
+        `<div class="sv-detail-card"><b>Catalog</b><span><i>Visible stars</i><em>${visibleStars}</em></span><span><i>Deep-sky shown</i><em>${showDeepSky ? projected.filter(p => p.kind === 'dso').length : 'off'}</em></span><span><i>Constellations</i><em>${showConstellations && constLines ? 'IAU figures' : 'labels'}</em></span></div>`;
     }
+  }
+
+  function fmtOffset(ms) {
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + 'm';
+    if (m < 1440) return Math.floor(m / 60) + 'h' + (m % 60 ? String(m % 60).padStart(2, '0') : '');
+    return Math.floor(m / 1440) + 'd' + (Math.floor(m / 60) % 24 || '') + (Math.floor(m / 60) % 24 ? 'h' : '');
+  }
+  const WU_ICON = { sun: '☀', moon: '☾', planet: '●', star: '✦', dso: '◇' };
+  // Compact SNR-vs-elevation scatter (antenna/multipath sanity check).
+  // Pure HTML/CSS dots — no inline-SVG aspect-ratio surprises.
+  function snrElevScatter(sats) {
+    let dots = '';
+    for (const s of sats) {
+      if (s.elev == null || !(typeof s.snr === 'number' && s.snr > 0)) continue;
+      const left = 14 + (Math.max(0, Math.min(90, s.elev)) / 90) * 82;
+      const top = 8 + (1 - Math.max(0, Math.min(55, s.snr)) / 55) * 78;
+      dots += `<span class="sv-sc-dot" style="left:${left.toFixed(1)}%;top:${top.toFixed(1)}%;background:${SAT_COLORS[s.constellation] || '#94a3b8'}"></span>`;
+    }
+    return `<span class="sv-sc-yl sv-sc-yl-t">55</span><span class="sv-sc-yl sv-sc-yl-b">0dB</span>` +
+      `<span class="sv-sc-xl sv-sc-xl-l">0°</span><span class="sv-sc-xl sv-sc-xl-r">90° el</span>${dots}`;
   }
 
   function updateCursorReadout(ev) {
@@ -720,13 +1129,32 @@
         <div class="sv-info-row">RA <b>${fmtRa(p.ra)}</b></div>
         <div class="sv-info-row">Dec <b>${fmtDeg(p.dec, 2)}</b></div>
         <div class="sv-info-section">Object profile</div>
-        <div class="sv-info-row">Type <b>${planetCategory(p.name)}</b></div>
+        <div class="sv-info-row">Type <b>${p.name === 'Sun' ? 'the Sun (G2V star)' : planetCategory(p.name)}</b></div>
         <div class="sv-info-row">Visual mag <b>${p.mag}</b></div>
         <div class="sv-info-row">Brightness <b>${brightnessVsVega(p.mag)}</b></div>
+        ${p.name === 'Moon' && p.phase ? `<div class="sv-info-row">Phase <b>${esc(p.phase)}</b></div>
+        <div class="sv-info-row">Illumination <b>${Math.round(p.illum * 100)}%</b></div>
+        <div class="sv-info-row">Moon age <b>${p.ageDays.toFixed(1)} days</b></div>` : ''}
         ${p.distanceAu != null ? `<div class="sv-info-row">Distance <b>${p.distanceAu.toFixed(2)} AU approx</b></div>` : ''}
         ${p.period ? `<div class="sv-info-row">Orbital period <b>${Math.round(p.period)} days</b></div>` : ''}
         ${p.r ? `<div class="sv-info-row">Mean solar dist. <b>${p.r.toFixed(2)} AU</b></div>` : ''}
-        <div class="sv-info-row">Model <b>${p.name === 'Moon' ? 'lunar approximation' : 'low-precision live'}</b></div>`;
+        <div class="sv-info-row">Model <b>${p.name === 'Moon' ? 'lunar approximation' : (p.name === 'Sun' ? 'low-precision solar' : 'low-precision live')}</b></div>`;
+    } else if (obj.kind === 'dso') {
+      html = `<div class="sv-info-title" style="color:#c4b5fd">◇ ${esc(obj.name || obj.id)}</div>
+        <div class="sv-info-section">Deep-sky identity</div>
+        <div class="sv-info-row">Catalog <b>${esc(obj.id)}</b></div>
+        ${obj.name && obj.name !== obj.id ? `<div class="sv-info-row">Name <b>${esc(obj.name)}</b></div>` : ''}
+        <div class="sv-info-row">Type <b>${esc(obj.dtype || 'deep-sky object')}</b></div>
+        <div class="sv-info-row">Magnitude <b>${obj.mag != null ? obj.mag : '—'}</b></div>
+        <div class="sv-info-row">Class <b>${obj.mag != null ? magnitudeClass(obj.mag) : 'telescopic'}</b></div>
+        <div class="sv-info-section">Equatorial coordinates</div>
+        <div class="sv-info-row">RA <b>${fmtRa(obj.ra)}</b></div>
+        <div class="sv-info-row">Dec <b>${fmtDeg(obj.dec, 2)}</b></div>
+        <div class="sv-info-section">Local sky</div>
+        <div class="sv-info-row">Elevation <b>${fmtDeg(obj.alt, 1)}</b></div>
+        <div class="sv-info-row">Azimuth <b>${fmtDeg(obj.az, 1)} ${cardinalName(obj.az)}</b></div>
+        <div class="sv-info-row">Altitude band <b>${altitudeBand(obj.alt)}</b></div>
+        <div class="sv-info-row">Airmass <b>${airmass(obj.alt)}</b></div>`;
     } else {
       const nm = obj.name || 'Unnamed star';
       const consFull = obj.cons ? (CONSTELLATIONS[obj.cons] || obj.cons) : null;
@@ -795,7 +1223,17 @@
       .then(d => {
         if (!d || !overlay) return;
         const p = positionFromStatus(d);
+        // Position-jump magnitude for the integrity check (live fixes only).
+        if (p.mode === 'live' && p.lat != null && p.lon != null) {
+          const cur = { lat: p.lat, lon: p.lon };
+          integrityJumpM = prevFix ? haversineM(prevFix, cur) : 0;
+          prevFix = cur;
+        } else {
+          integrityJumpM = 0;
+        }
         lastData = { sky: d.sky || [], lat: p.lat, lon: p.lon, mode: p.mode, t: p.t };
+        // Feed the obstruction/multipath survey once per live poll (not per redraw).
+        if (enhanced) surveyAccumulate(lastData.sky);
         render();
       })
       .catch(() => {});
@@ -1094,13 +1532,42 @@
         #ragnar-skyview .sv-zoom span{min-width:46px;text-align:center;color:#9fb0c3;font-size:11px;font-family:ui-monospace,monospace;}
         #ragnar-skyview .sv-detail{display:none;position:absolute;right:14px;bottom:14px;z-index:4;
           width:min(360px,calc(100vw - 28px));gap:8px;pointer-events:none;}
-        #ragnar-skyview .sv-detail-card{background:linear-gradient(180deg,rgba(8,20,38,.34),rgba(3,8,18,.28));
-          border:1px solid rgba(125,211,252,.12);border-radius:10px;padding:10px 12px;opacity:.6;
-          box-shadow:0 14px 36px rgba(0,0,0,.18), inset 0 1px 0 rgba(255,255,255,.025);backdrop-filter:blur(10px);}
-        #ragnar-skyview .sv-detail-card b{display:block;color:#dbeafe;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;opacity:.78;}
-        #ragnar-skyview .sv-detail-card span{display:flex;align-items:baseline;justify-content:space-between;gap:14px;color:#9fb0c3;font-size:11px;line-height:1.55;opacity:.82;}
+        #ragnar-skyview .sv-detail-card{background:linear-gradient(180deg,rgba(9,21,39,.97),rgba(3,8,18,.96));
+          border:1px solid rgba(125,211,252,.18);border-radius:10px;padding:10px 12px;opacity:1;
+          box-shadow:0 14px 36px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.03);backdrop-filter:blur(14px);}
+        #ragnar-skyview .sv-detail-card b{display:block;color:#dbeafe;font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px;opacity:.9;}
+        #ragnar-skyview .sv-detail-card span{display:flex;align-items:baseline;justify-content:space-between;gap:14px;color:#9fb0c3;font-size:11px;line-height:1.55;}
         #ragnar-skyview .sv-detail-card i{font-style:normal;color:#7f93ad;}
         #ragnar-skyview .sv-detail-card em{font-style:normal;color:#e2e8f0;text-align:right;max-width:58%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+        #ragnar-skyview .sv-detail-card em.sv-em-good{color:#86efac;}
+        #ragnar-skyview .sv-detail-card em.sv-em-warn{color:#fca5a5;}
+        #ragnar-skyview .sv-scatter{position:relative;margin-top:10px;height:60px;border-radius:6px;
+          background:rgba(1,4,10,.7);border:1px solid rgba(125,211,252,.16);}
+        #ragnar-skyview .sv-sc-dot{position:absolute;width:5px;height:5px;border-radius:50%;transform:translate(-50%,-50%);opacity:.92;}
+        #ragnar-skyview .sv-sc-yl,#ragnar-skyview .sv-sc-xl{position:absolute;color:#6688a8;font-size:8px;pointer-events:none;}
+        #ragnar-skyview .sv-sc-yl-t{left:3px;top:2px;}
+        #ragnar-skyview .sv-sc-yl-b{left:3px;bottom:2px;}
+        #ragnar-skyview .sv-sc-xl-l{left:20px;bottom:2px;}
+        #ragnar-skyview .sv-sc-xl-r{right:4px;bottom:2px;}
+        #ragnar-skyview .sv-integ-note{margin-top:6px;font-size:10px;color:#7f93ad;white-space:normal;line-height:1.4;}
+        #ragnar-skyview .sv-snap{cursor:pointer;background:#17233a;color:#e2e8f0;border:none;border-radius:8px;width:34px;height:34px;font-size:15px;line-height:1;flex:0 0 auto;}
+        #ragnar-skyview .sv-snap:hover{background:#243350;}
+        #ragnar-skyview .sv-controls{display:none;position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:5;gap:6px;flex-wrap:wrap;justify-content:center;
+          background:rgba(3,8,18,.5);border:1px solid rgba(125,211,252,.16);border-radius:12px;padding:6px;backdrop-filter:blur(10px);max-width:calc(100vw - 32px);}
+        #ragnar-skyview .sv-chip{cursor:pointer;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.66);color:#9fb0c3;border-radius:8px;
+          padding:5px 10px;font-size:11px;font-weight:600;letter-spacing:.02em;white-space:nowrap;}
+        #ragnar-skyview .sv-chip:hover{border-color:rgba(125,211,252,.46);color:#dbeafe;}
+        #ragnar-skyview .sv-chip.on{background:rgba(14,165,233,.22);border-color:rgba(125,211,252,.6);color:#e6f4ff;}
+        #ragnar-skyview .sv-time{display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:5;align-items:center;gap:10px;
+          background:rgba(3,8,18,.56);border:1px solid rgba(125,211,252,.2);border-radius:12px;padding:8px 12px;backdrop-filter:blur(10px);width:min(560px,calc(100vw - 40px));}
+        #ragnar-skyview .sv-time input[type=range]{flex:1;accent-color:#38bdf8;height:3px;}
+        #ragnar-skyview .sv-time .sv-time-lab{min-width:96px;text-align:center;color:#dbeafe;font-family:ui-monospace,monospace;font-size:11px;}
+        #ragnar-skyview .sv-time button{border:1px solid rgba(148,163,184,.24);background:rgba(15,23,42,.72);color:#dbeafe;border-radius:7px;padding:4px 9px;font-size:11px;cursor:pointer;}
+        #ragnar-skyview .sv-time button:hover{border-color:rgba(125,211,252,.5);}
+        #ragnar-skyview.sv-enhanced .sv-controls{display:flex;}
+        #ragnar-skyview.sv-enhanced .sv-time{display:flex;}
+        #ragnar-skyview.sv-enhanced .sv-snap{display:block;}
+        #ragnar-skyview .sv-snap{display:none;}
         #ragnar-skyview.sv-enhanced{background:radial-gradient(circle at 50% 35%,#113050 0,#06101f 42%,#02050d 76%);}
         #ragnar-skyview.sv-enhanced .sv-head{background:linear-gradient(90deg,rgba(14,165,233,.14),rgba(15,23,42,.32),rgba(125,211,252,.09));}
         #ragnar-skyview.sv-enhanced svg{cursor:grab;touch-action:none;}
@@ -1125,13 +1592,25 @@
           <span><i style="background:#f8f7ff"></i>stars</span>
         </div>
         <button class="sv-diag-btn" type="button" title="Open full wardriving GPS diagnostics">GPS Diagnostics</button>
+        <button class="sv-snap" type="button" title="Save PNG snapshot">📷</button>
         <button class="sv-close" title="Close (Esc)">✕</button>
       </div>
       <div class="sv-stage">
+        <div class="sv-controls">
+          <button class="sv-chip on" data-layer="constellations" type="button">✦ Constellations</button>
+          <button class="sv-chip" data-layer="deepsky" type="button">◇ Deep sky</button>
+          <button class="sv-chip" data-layer="obstruction" type="button">▦ Sky survey</button>
+          <button class="sv-chip" data-survey="reset" type="button" title="Clear the accumulated obstruction survey">⟲ Reset survey</button>
+        </div>
         <div class="sv-brand"><b>Ragnar observatory</b><span>live GNSS sky telemetry</span></div>
         <div class="sv-cursor">az --  alt --</div>
         <svg preserveAspectRatio="xMidYMid meet"></svg>
         <div class="sv-note"></div>
+        <div class="sv-time">
+          <button class="sv-time-now" type="button" title="Back to live">● Live</button>
+          <input class="sv-time-range" type="range" min="-720" max="720" step="5" value="0" aria-label="Time offset (minutes)">
+          <span class="sv-time-lab">now</span>
+        </div>
         <div class="sv-layer-key"><b>Layers</b><span class="mw"><i></i>Milky Way density</span><span class="ecl"><i></i>Ecliptic plane</span><span><i></i>Alt / az grid</span><span class="sat"><i></i>GNSS satellites</span></div>
         <div class="sv-zoom"><button class="sv-zoom-out" type="button" title="Zoom out">−</button><span class="sv-zoom-label">1.0x</span><button class="sv-zoom-in" type="button" title="Zoom in">+</button></div>
         <div class="sv-detail"></div>
@@ -1164,6 +1643,33 @@
     if (diagBtn) {
       diagBtn.addEventListener('click', openGpsDiagnosticsPopup);
     }
+    // Layer toggle chips + survey reset.
+    overlay.querySelectorAll('.sv-chip[data-layer]').forEach(chip => {
+      chip.addEventListener('click', () => {
+        const layer = chip.dataset.layer;
+        if (layer === 'constellations') showConstellations = !showConstellations;
+        else if (layer === 'deepsky') { showDeepSky = !showDeepSky; if (showDeepSky) loadDeepSky().then(render); }
+        else if (layer === 'obstruction') showObstruction = !showObstruction;
+        chip.classList.toggle('on');
+        render();
+      });
+    });
+    const surveyResetBtn = overlay.querySelector('.sv-chip[data-survey="reset"]');
+    if (surveyResetBtn) surveyResetBtn.addEventListener('click', () => { surveyReset(); render(); });
+    // Time scrubber.
+    const timeRange = overlay.querySelector('.sv-time-range');
+    const timeLab = overlay.querySelector('.sv-time-lab');
+    const timeNow = overlay.querySelector('.sv-time-now');
+    function applyTime() {
+      const mins = parseInt(timeRange.value, 10) || 0;
+      timeOffsetMs = mins * 60000;
+      if (timeLab) timeLab.textContent = mins === 0 ? 'now' : (mins > 0 ? '+' : '−') + fmtOffset(Math.abs(timeOffsetMs));
+      render();
+    }
+    if (timeRange) timeRange.addEventListener('input', applyTime);
+    if (timeNow) timeNow.addEventListener('click', () => { timeRange.value = 0; applyTime(); });
+    const snapBtn = overlay.querySelector('.sv-snap');
+    if (snapBtn) snapBtn.addEventListener('click', saveSnapshot);
     const diagClose = overlay.querySelector('.sv-diag-close');
     if (diagClose) diagClose.addEventListener('click', closeGpsDiagnosticsPopup);
     const diagModal = overlay.querySelector('.sv-diag-modal');
@@ -1221,13 +1727,46 @@
     document.addEventListener('keydown', onEsc);
 
     loadCatalog().then(() => { syncViewBox(); });
+    if (enhanced) {
+      loadConstLines().then(() => { if (overlay) render(); });
+      surveyInit();
+    }
     syncViewBox();
     refresh();
     timer = setInterval(refresh, REFRESH_MS);
   }
 
+  // Rasterise the current SVG sky to a PNG the operator can save.
+  function saveSnapshot() {
+    if (!svg) return;
+    const r = svg.getBoundingClientRect();
+    const w = Math.max(2, Math.round(r.width)), h = Math.max(2, Math.round(r.height));
+    const clone = svg.cloneNode(true);
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    clone.setAttribute('width', w); clone.setAttribute('height', h);
+    const xml = new XMLSerializer().serializeToString(clone);
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#02050d'; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      try {
+        const a = document.createElement('a');
+        a.href = canvas.toDataURL('image/png');
+        a.download = 'ragnar-starview-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.png';
+        document.body.appendChild(a); a.click(); a.remove();
+      } catch (_) {}
+    };
+    img.onerror = () => {};
+    img.src = url;
+  }
+
   function close() {
     if (!overlay) return;
+    if (surveyDirty) surveyPersist();
     clearInterval(timer); timer = null;
     document.removeEventListener('keydown', onEsc); onEsc = null;
     window.removeEventListener('resize', resizeH); resizeH = null;
@@ -1237,6 +1776,9 @@
     skyZoom = 1;
     skyPanX = skyPanY = 0;
     suppressNextClick = false;
+    timeOffsetMs = 0;
+    showConstellations = true; showDeepSky = false; showObstruction = false;
+    prevFix = null; integrityJumpM = 0;
     document.body.style.overflow = '';
   }
 
