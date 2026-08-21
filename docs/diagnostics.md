@@ -239,8 +239,24 @@ only; the polar view is unchanged.
 
 - **Time scrubber** (bottom) — drag ±12 h to see the sky at any moment
   (planning); **● Live** returns to now. The header shows a `⏱ ±Hh Mm` flag when
-  scrubbed. GNSS satellites stay at their live measured positions (no ephemeris
-  propagation).
+  scrubbed. The stars, Sun, Moon and planets move from their ephemerides, and the
+  **GNSS satellites move too** via an **approximate circular-orbit model**: each
+  satellite's geocentric position is reconstructed from its az/el plus a
+  per-constellation nominal orbit radius, its orbital plane is *learned from the
+  motion seen between live polls*, then advanced at the Keplerian mean rate.
+  Scrubbed (modeled) satellites draw **dashed**, and the header/card say
+  `sats modeled`. It is deliberately approximate — it ignores eccentricity, J2
+  drift and mixed-altitude constellations, and can only propagate satellites that
+  are *visible now* (it cannot show ones that rise later), so the sat sky thins as
+  you scrub hours out. At offset 0 it is an exact no-op (measured az/el verbatim).
+- **One consistent satellite set.** The **panorama**, the **GNSS radar** minimap,
+  and the **GNSS quality** card are all driven by the *same* satellite array, so
+  their counts agree: the card shows `In view / tracked` and how many sats the
+  PDOP solution used, and the radar caption echoes `N in view · M tracked`.
+  Satellites everywhere use one visual language — a constellation-coloured marker,
+  **filled/solid = SNR-locked**, **hollow/dim = visible-only**, **dashed =
+  modeled**. On the radar the old green dots are now the **🛰 glyph** inside a
+  constellation-coloured ring.
 - **Zoom / pan**, click-through info cards, the **GNSS radar** minimap, and a
   **📷 snapshot** button (header) that rasterises the current sky to a PNG.
 
