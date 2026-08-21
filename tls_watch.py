@@ -359,6 +359,63 @@ _WEAK_CIPHERS = frozenset({
     0xc011, 0xc012, 0xc015, 0xc016, 0xc017, 0xc018, 0xc019,
 })
 
+# SWEET32 (CVE-2016-2183): 64-bit block ciphers (DES/3DES) in CBC hit a birthday
+# bound after ~32 GiB under one write key, letting an attacker recover plaintext.
+# The negotiated suite IS the precondition and travels in cleartext in the
+# ServerHello, so this is an EXPOSURE observed directly on the wire — no version
+# fingerprinting, no probing. NVD/CISA-ADP score it 7.5 HIGH (IBM X-Force 3.7 LOW,
+# reflecting the traffic volume the attack needs). https://sweet32.info/
+_CVE_2016_2183 = {'cve': 'CVE-2016-2183', 'cvss': 7.5,
+                  'cvss_source': 'NVD (NIST), concurred by CISA-ADP'}
+SWEET32_CIPHERS = {
+    0x0008: ('TLS_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0009: ('TLS_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x000a: ('TLS_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x000b: ('TLS_DH_DSS_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x000c: ('TLS_DH_DSS_WITH_DES_CBC_SHA', 'DES'),
+    0x000d: ('TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x000e: ('TLS_DH_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x000f: ('TLS_DH_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x0010: ('TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0011: ('TLS_DHE_DSS_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0012: ('TLS_DHE_DSS_WITH_DES_CBC_SHA', 'DES'),
+    0x0013: ('TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0014: ('TLS_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x0015: ('TLS_DHE_RSA_WITH_DES_CBC_SHA', 'DES'),
+    0x0016: ('TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0019: ('TLS_DH_anon_EXPORT_WITH_DES40_CBC_SHA', 'DES'),
+    0x001a: ('TLS_DH_anon_WITH_DES_CBC_SHA', 'DES'),
+    0x001b: ('TLS_DH_anon_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x001e: ('TLS_KRB5_WITH_DES_CBC_SHA', 'DES'),
+    0x001f: ('TLS_KRB5_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0022: ('TLS_KRB5_WITH_DES_CBC_MD5', 'DES'),
+    0x0023: ('TLS_KRB5_WITH_3DES_EDE_CBC_MD5', '3DES'),
+    0x0026: ('TLS_KRB5_EXPORT_WITH_DES_CBC_40_SHA', 'DES'),
+    0x0029: ('TLS_KRB5_EXPORT_WITH_DES_CBC_40_MD5', 'DES'),
+    0x008b: ('TLS_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x008f: ('TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0x0093: ('TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc003: ('TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc008: ('TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc00d: ('TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc012: ('TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc017: ('TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01a: ('TLS_SRP_SHA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01b: ('TLS_SRP_SHA_RSA_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc01c: ('TLS_SRP_SHA_DSS_WITH_3DES_EDE_CBC_SHA', '3DES'),
+    0xc034: ('TLS_ECDHE_PSK_WITH_3DES_EDE_CBC_SHA', '3DES'),
+}
+# Same 64-bit-block birthday weakness (RC2/IDEA), outside CVE-2016-2183's named
+# DES/3DES scope. Kept as a distinct code so the CVE's coverage claim stays exact.
+BLOCK64_OTHER = {
+    0x0006: ('TLS_RSA_EXPORT_WITH_RC2_CBC_40_MD5', 'RC2'),
+    0x0007: ('TLS_RSA_WITH_IDEA_CBC_SHA', 'IDEA'),
+    0x0021: ('TLS_KRB5_WITH_IDEA_CBC_SHA', 'IDEA'),
+    0x0025: ('TLS_KRB5_WITH_IDEA_CBC_MD5', 'IDEA'),
+    0x0027: ('TLS_KRB5_EXPORT_WITH_RC2_CBC_40_SHA', 'RC2'),
+    0x002a: ('TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5', 'RC2'),
+}
+
 
 def _leaf_findings(der, chain_len, sni, now):
     """Return (findings, info) for the leaf certificate. Requires cryptography;
@@ -433,9 +490,41 @@ def analyze_session(client, server, cert_ders, now):
     if server:
         if server['neg_version'] <= 0x0302:
             add('warn', 'server_legacy_version', 'Server negotiated TLS 1.1 or lower')
-        if server['cipher'] in _WEAK_CIPHERS:
+        ch = server['cipher']
+        if ch in SWEET32_CIPHERS:
+            # CVE-2016-2183 (SWEET32) EXPOSURE: the negotiated 64-bit block cipher
+            # is the vulnerable condition, observed directly (not inferred).
+            name, algo = SWEET32_CIPHERS[ch]
+            f = {'severity': 'high', 'code': 'cve_2016_2183_negotiated',
+                 'message': ('Server negotiated {} (0x{:04x}) - {} uses a 64-bit block, '
+                             'so this session is exposed to SWEET32 (CVE-2016-2183) once '
+                             '~32 GiB passes under one write key'.format(name, ch, algo)),
+                 'cve': 'CVE-2016-2183', 'cvss': _CVE_2016_2183['cvss'],
+                 'cvss_source': _CVE_2016_2183['cvss_source'],
+                 'detect_class': 'exposure', 'cipher': '0x{:04x}'.format(ch)}
+            findings.append(f)
+        elif ch in BLOCK64_OTHER:
+            name, algo = BLOCK64_OTHER[ch]
+            findings.append({'severity': 'warn', 'code': 'weak_block_cipher_64bit',
+                             'message': ('Server negotiated {} (0x{:04x}) - {} is a 64-bit '
+                                         'block cipher with the same birthday-bound weakness '
+                                         'as SWEET32, though CVE-2016-2183 names only DES/3DES'
+                                         .format(name, ch, algo)),
+                             'related_cve': 'CVE-2016-2183', 'cipher': '0x{:04x}'.format(ch)})
+        elif ch in _WEAK_CIPHERS:
             add('high', 'weak_cipher',
-                'Server selected weak/legacy cipher 0x{:04x}'.format(server['cipher']))
+                'Server selected weak/legacy cipher 0x{:04x}'.format(ch))
+    if client and not any(f['code'] == 'cve_2016_2183_negotiated' for f in findings):
+        # CVE-2016-2183 POSTURE: offering 3DES was near-universal for years and
+        # says nothing about what got negotiated; informational unless a server
+        # actually selected one (handled above).
+        offered = [c for c in client['ciphers'] if c in SWEET32_CIPHERS]
+        if offered:
+            findings.append({'severity': 'info', 'code': 'cve_2016_2183_client_offer',
+                             'message': ('Client offers {} DES/3DES suite(s); it would accept '
+                                         'a SWEET32-exposed session (CVE-2016-2183) if a server '
+                                         'selected one'.format(len(offered))),
+                             'cve': 'CVE-2016-2183', 'detect_class': 'posture'})
     infos = []
     if cert_ders:
         try:
@@ -1068,6 +1157,37 @@ def selftest():
     shw = parse_server_hello(_mk_server_hello(0x0303, 0x0005)[4:])   # RC4
     fw, _ = analyze_session(None, shw, [], now)
     ck('weak_cipher', any(x['code'] == 'weak_cipher' for x in fw))
+
+    # ---- CVE-2016-2183 (SWEET32): negotiated 64-bit block cipher ----
+    sh3des = parse_server_hello(_mk_server_hello(0x0303, 0x000a)[4:])   # 3DES_EDE_CBC
+    f3, _ = analyze_session(None, sh3des, [], now)
+    fc3 = next((x for x in f3 if x['code'] == 'cve_2016_2183_negotiated'), None)
+    ck('sweet32_negotiated', fc3 is not None)
+    ck('sweet32_cve_field', (fc3 or {}).get('cve'), 'CVE-2016-2183')
+    ck('sweet32_exposure_class', (fc3 or {}).get('detect_class'), 'exposure')
+    ck('sweet32_high', (fc3 or {}).get('severity'), 'high')
+    ck('sweet32_not_generic_weak',           # named finding supersedes weak_cipher
+       not any(x['code'] == 'weak_cipher' for x in f3))
+    ck('sweet32_verdict_suspicious', _tls_analyze(
+        [{'proto': 'tls', 'src': 'a', 'sport': 1, 'dst': 'b', 'dport': 443,
+          'client': None, 'server': sh3des, 'certs': []}])['verdict'], 'suspicious')
+    # RC2/IDEA: same 64-bit weakness, outside the CVE's DES/3DES scope.
+    shidea = parse_server_hello(_mk_server_hello(0x0303, 0x0007)[4:])   # IDEA_CBC
+    fi, _ = analyze_session(None, shidea, [], now)
+    fci = next((x for x in fi if x['code'] == 'weak_block_cipher_64bit'), None)
+    ck('block64_other', fci is not None)
+    ck('block64_related_cve', (fci or {}).get('related_cve'), 'CVE-2016-2183')
+    # POSTURE: a client that merely offers 3DES (no SWEET32 negotiated).
+    cpos = parse_client_hello(_build_client_hello(
+        _KAT_CIPHERS + [0x000a], _KAT_EXTS, _KAT_SIGALGS, [0x0303],
+        alpn=['h2'], sni='x.test')[4:])
+    fp = {x['code'] for x in analyze_session(cpos, None, [], now)[0]}
+    ck('sweet32_client_offer', 'cve_2016_2183_client_offer' in fp)
+    # Clean client (no 3DES offered) stays silent.
+    cclean = parse_client_hello(_build_client_hello(
+        _KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0x0304], alpn=['h2'], sni='x.test')[4:])
+    ck('no_sweet32_false_positive', 'cve_2016_2183_client_offer'
+       not in {x['code'] for x in analyze_session(cclean, None, [], now)[0]})
 
     try:
         # self-signed leaf + SNI mismatch (the interception signal)
