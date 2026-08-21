@@ -6756,6 +6756,20 @@ async function watchtowerRefresh() {
     try { renderWatchtower(await fetchAPI(q)); } catch (e) { /* offline — leave as-is */ }
     refreshIncidents('watchtower-incidents');
 }
+async function watchtowerClear() {
+    if (!confirm('Clear the Watchtower alerts shown here?\n\nThe watchers keep their place in each log, so only genuinely new findings will re-appear.')) return;
+    try {
+        await postAPI('/api/net/watchtower/clear', {});
+        addConsoleMessage('Watchtower alerts cleared', 'info');
+    } catch (err) {
+        addConsoleMessage('Failed to clear Watchtower: ' + err.message, 'error');
+    }
+    // Refresh both views — the button lives on the Diagnostics pane and the
+    // Dashboard summary card. Each refresher re-pulls its own incident rows too,
+    // so the fused view empties alongside the raw alerts.
+    watchtowerRefresh();
+    if (typeof refreshDashWatchtower === 'function') refreshDashWatchtower();
+}
 async function syncWatchtowerFromServer() {
     const cb = document.getElementById('watchtower-enabled');
     try {

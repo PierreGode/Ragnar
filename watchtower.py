@@ -317,6 +317,11 @@ class Watchtower:
         items = list(reversed(items))
         return items[:limit] if limit else items
 
+    def clear(self):
+        """Drop every alert from the display ring. File offsets are untouched, so
+        the tailer keeps its place and only genuinely new lines re-appear."""
+        self._alerts.clear()
+
     def load(self, alerts):
         """Seed the display ring from persisted alerts (does not affect offsets)."""
         for a in alerts:
