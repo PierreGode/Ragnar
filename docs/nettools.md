@@ -1106,6 +1106,15 @@ wire. One short `tcpdump` window over the TLS ports (443/8443/993/995/465/990/
   of known-bad families.
 - **Identity / negotiation** — SNI, ALPN, offered vs. negotiated TLS version,
   chosen cipher, ECH presence.
+- **SWEET32 / `CVE-2016-2183` *(new in v3)*** — when the server negotiates a 64-bit
+  block cipher (DES/3DES), the ServerHello carries that suite in cleartext, so it is
+  named as **`cve_2016_2183_negotiated`** (high, *exposure* class — the vulnerable
+  condition is observed directly, not inferred from a version banner). A client that
+  merely *offers* 3DES is recorded as **`cve_2016_2183_client_offer`** (info,
+  *posture*) — near-universal for years and harmless unless a server takes the offer.
+  RC2/IDEA 64-bit suites share the birthday-bound weakness but fall outside the CVE's
+  named DES/3DES scope, so they get a distinct **`weak_block_cipher_64bit`** (warn)
+  that keeps the CVE's coverage claim exact. NVD/CISA-ADP score the CVE 7.5 HIGH.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,
