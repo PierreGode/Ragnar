@@ -356,6 +356,116 @@
     return { level, reasons, tracked: tracked.length };
   }
 
+  // ---- GNSS satellite orbit model (approximate, for the time scrubber) -
+  // Satellites arrive as a live az/el snapshot with no orbit attached. To let
+  // the time scrubber move them we reconstruct each satellite's geocentric
+  // position from its az/el plus a per-constellation nominal orbit radius, learn
+  // its orbital plane from the motion seen between live polls, then advance a
+  // CIRCULAR orbit at the Keplerian mean rate. Deliberately approximate (ignores
+  // eccentricity, J2 drift, and mixed-altitude constellations like BeiDou/QZSS)
+  // and only ever drives the scrubbed view — at offset 0 the measured az/el is
+  // used verbatim, so it is an exact no-op live.
+  const GM_EARTH = 398600.4418;   // km^3/s^2
+  const EARTH_R_KM = 6371.0;
+  // Nominal geocentric orbit radius (km, ~semi-major axis) per constellation.
+  const ORBIT_KM = {
+    GPS: 26560, GLONASS: 25510, Galileo: 29600, BeiDou: 27900,
+    QZSS: 42164, NavIC: 42164, combined: 27000
+  };
+  function vcross(a, b) { return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]; }
+  function vdot(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+  function vlen(a) { return Math.sqrt(vdot(a, a)); }
+  function vnorm(a) { const L = vlen(a) || 1; return [a[0] / L, a[1] / L, a[2] / L]; }
+  function vadd(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+  function vscale(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+  // Rotate v about unit axis k by angle a (Rodrigues).
+  function rodrigues(v, k, a) {
+    const c = Math.cos(a), s = Math.sin(a), kd = vdot(k, v), kv = vcross(k, v);
+    return [
+      v[0] * c + kv[0] * s + k[0] * kd * (1 - c),
+      v[1] * c + kv[1] * s + k[1] * kd * (1 - c),
+      v[2] * c + kv[2] * s + k[2] * kd * (1 - c)
+    ];
+  }
+  // Observer ECEF (spherical Earth) + local ENU basis for lat/lon (deg).
+  function observerFrame(lat, lon) {
+    const la = lat * D2R, lo = lon * D2R;
+    const cla = Math.cos(la), sla = Math.sin(la), clo = Math.cos(lo), slo = Math.sin(lo);
+    return {
+      ecef: [EARTH_R_KM * cla * clo, EARTH_R_KM * cla * slo, EARTH_R_KM * sla],
+      east: [-slo, clo, 0],
+      north: [-sla * clo, -sla * slo, cla],
+      up: [cla * clo, cla * slo, sla]
+    };
+  }
+  // az/el (deg) -> satellite ECEF on the sphere of radius Rs (km), or null.
+  function azElToEcef(az, el, fr, Rs) {
+    const a = az * D2R, e = el * D2R, ce = Math.cos(e);
+    const d = vadd(vadd(vscale(fr.east, Math.sin(a) * ce), vscale(fr.north, Math.cos(a) * ce)), vscale(fr.up, Math.sin(e)));
+    // |O + r d|^2 = Rs^2  ->  r^2 + 2(O·d) r + (|O|^2 - Rs^2) = 0 ; d is unit.
+    const b = 2 * vdot(fr.ecef, d), c = vdot(fr.ecef, fr.ecef) - Rs * Rs;
+    const disc = b * b - 4 * c;
+    if (disc < 0) return null;
+    const r = (-b + Math.sqrt(disc)) / 2;
+    if (r <= 0) return null;
+    return vadd(fr.ecef, vscale(d, r));
+  }
+  // satellite ECEF -> {az, elev} (deg) at observer frame.
+  function ecefToAzEl(sat, fr) {
+    const los = [sat[0] - fr.ecef[0], sat[1] - fr.ecef[1], sat[2] - fr.ecef[2]];
+    const e = vdot(los, fr.east), n = vdot(los, fr.north), u = vdot(los, fr.up);
+    return { az: normDeg(Math.atan2(e, n) * R2D), elev: Math.atan2(u, Math.sqrt(e * e + n * n)) * R2D };
+  }
+  function eciFromEcef(v, g) { const c = Math.cos(g), s = Math.sin(g); return [c * v[0] - s * v[1], s * v[0] + c * v[1], v[2]]; }
+  function ecefFromEci(v, g) { const c = Math.cos(g), s = Math.sin(g); return [c * v[0] + s * v[1], -s * v[0] + c * v[1], v[2]]; }
+  function satKey(s) { return (s.constellation || '?') + '/' + (s.prn != null ? s.prn : '?'); }
+  function orbitRadius(cons) { return ORBIT_KM[cons] || ORBIT_KM.combined; }
+  // Per-satellite orbit tracks learned from live polls: key -> {eciRef, eciNow, Rs}.
+  let satTrack = new Map();
+  function trackSatsLive(sky, lat, lon) {
+    if (lat == null || lon == null) return;
+    const fr = observerFrame(lat, lon);
+    const g = gmstDeg(new Date()) * D2R;
+    const alive = new Set();
+    for (const s of sky) {
+      if (s.az == null || s.elev == null || s.prn == null) continue;
+      const ecef = azElToEcef(s.az, Math.max(0.1, s.elev), fr, orbitRadius(s.constellation));
+      if (!ecef) continue;
+      const eci = eciFromEcef(ecef, g);
+      const key = satKey(s);
+      alive.add(key);
+      const t = satTrack.get(key);
+      if (!t) satTrack.set(key, { eciRef: eci, eciNow: eci, Rs: orbitRadius(s.constellation) });
+      else { t.eciNow = eci; t.Rs = orbitRadius(s.constellation); }
+    }
+    for (const k of [...satTrack.keys()]) if (!alive.has(k)) satTrack.delete(k);
+  }
+  // Predicted az/el for a live sat at the scrubbed time; null if not modelable
+  // yet (needs two separated live samples to fix the orbital plane).
+  function predictSat(s, offsetMs, fr) {
+    const t = satTrack.get(satKey(s));
+    if (!t) return null;
+    if (vlen(vcross(vnorm(t.eciRef), vnorm(t.eciNow))) < 1e-3) return null;   // no baseline motion yet
+    const n = vnorm(vcross(t.eciRef, t.eciNow));   // plane normal, motion sense ref -> now
+    const w = Math.sqrt(GM_EARTH / (t.Rs * t.Rs * t.Rs));
+    const eciT = rodrigues(t.eciNow, n, w * (offsetMs / 1000));
+    const g = gmstDeg(new Date(Date.now() + offsetMs)) * D2R;
+    return ecefToAzEl(ecefFromEci(eciT, g), fr);
+  }
+  // The satellite set as it should appear for the current view time. At offset 0
+  // (or without a position) this is the raw live sky; when scrubbed, modelable
+  // sats carry propagated az/elev and a `modeled` flag; the rest stay put.
+  function skyForView() {
+    const sky = lastData.sky || [];
+    if (timeOffsetMs === 0 || lastData.lat == null || lastData.lon == null) return sky;
+    const fr = observerFrame(lastData.lat, lastData.lon);
+    return sky.map(s => {
+      if (s.az == null || s.elev == null || s.prn == null) return s;
+      const p = predictSat(s, timeOffsetMs, fr);
+      return p ? { ...s, az: p.az, elev: p.elev, modeled: true } : s;
+    });
+  }
+
   // ---- GNSS obstruction / multipath sky survey ------------------------
   // Accumulates, per 5-deg az/el cell, how often a satellite is seen there vs
   // how often it is actually tracked (has SNR). Cells frequently transited but
@@ -547,8 +657,17 @@
     const parts = [];
     projected = [];
     const whatsUp = [];
-    let visibleStars = 0, namedStars = 0, trackedSats = 0, snrSum = 0;
-    let strongestSat = null, strongestSnr = -1;
+    let visibleStars = 0, namedStars = 0;
+    // One canonical satellite set drives the panorama, the radar, AND the GNSS
+    // quality card so all three agree. When scrubbed it carries modeled az/elev.
+    const viewSky = skyForView();
+    const inViewSats = viewSky.filter(s => s.az != null && s.elev != null && s.elev >= 0);
+    const trackedList = inViewSats.filter(s => typeof s.snr === 'number' && s.snr > 0);
+    const trackedSats = trackedList.length;
+    const snrSum = trackedList.reduce((a, s) => a + s.snr, 0);
+    const strongestSat = trackedList.reduce((b, s) => (!b || s.snr > b.snr ? s : b), null);
+    const strongestSnr = strongestSat ? strongestSat.snr : -1;
+    const modeledCount = inViewSats.filter(s => s.modeled).length;
     const { lat, lon, mode } = lastData;
     const hasPos = lat != null && lon != null;
     const radarR = Math.max(58, Math.min(122, W * 0.1, H * 0.17));
@@ -771,16 +890,17 @@
       }
     }
 
-    for (const s of (lastData.sky || [])) {
-      if (s.az == null || s.elev == null) continue;
-      const pt = fullSkyPoint(s.az, Math.max(0, s.elev), W, H);
+    // Satellites (panorama) — driven by the shared viewSky so the count/positions
+    // match the radar and the GNSS card. Modeled (scrubbed) sats draw dashed.
+    for (const s of inViewSats) {
+      const pt = fullSkyPoint(s.az, s.elev, W, H);
       const col = SAT_COLORS[s.constellation] || '#94a3b8';
       const hasSnr = typeof s.snr === 'number' && s.snr > 0;
-      if (hasSnr) { trackedSats++; snrSum += s.snr; if (s.snr > strongestSnr) { strongestSnr = s.snr; strongestSat = s; } }
       if (pt.x >= -50 && pt.x <= W + 50 && pt.y >= -50 && pt.y <= H + 50) {
         const satR = hasSnr ? 4.2 + Math.min(4, s.snr / 14) : 4;
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(satR * 4).toFixed(1)}" fill="${col}" opacity="${hasSnr ? .08 : .035}"/>`);
-        parts.push(`<path d="M${(pt.x - 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y - 7).toFixed(1)} L${(pt.x + 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y + 7).toFixed(1)} Z" fill="${hasSnr ? col : 'none'}" stroke="${col}" stroke-width="1.4" opacity="${hasSnr ? .9 : .42}"/>`);
+        const dash = s.modeled ? ' stroke-dasharray="3 2.5"' : '';
+        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(satR * 4).toFixed(1)}" fill="${col}" opacity="${hasSnr ? (s.modeled ? .05 : .08) : .035}"/>`);
+        parts.push(`<path d="M${(pt.x - 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y - 7).toFixed(1)} L${(pt.x + 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y + 7).toFixed(1)} Z" fill="${hasSnr && !s.modeled ? col : 'none'}" stroke="${col}" stroke-width="1.4" opacity="${hasSnr ? .9 : .42}"${dash}/>`);
         parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y - 12).toFixed(1)}" fill="${col}" font-size="10" text-anchor="middle" opacity=".82">${esc(s.prn != null ? s.prn : '')}</text>`);
         projected.push({ kind: 'sat', x: pt.x, y: pt.y, sat: s });
       }
@@ -793,19 +913,24 @@
       parts.push(`<line x1="${radarC.x}" y1="${radarC.y}" x2="${(radarC.x + radarR * Math.sin(a)).toFixed(1)}" y2="${(radarC.y - radarR * Math.cos(a)).toFixed(1)}" stroke="rgba(125,211,252,.17)"/>`);
     }
     parts.push(`<g opacity=".74"><path d="M${radarC.x} ${radarC.y} L${radarC.x} ${(radarC.y - radarR).toFixed(1)} A${radarR} ${radarR} 0 0 1 ${(radarC.x + radarR * .42).toFixed(1)} ${(radarC.y - radarR * .91).toFixed(1)} Z" fill="rgba(125,211,252,.12)"><animateTransform attributeName="transform" type="rotate" from="0 ${radarC.x} ${radarC.y}" to="360 ${radarC.x} ${radarC.y}" dur="4.8s" repeatCount="indefinite"/></path><line x1="${radarC.x}" y1="${radarC.y}" x2="${radarC.x}" y2="${(radarC.y - radarR).toFixed(1)}" stroke="rgba(125,211,252,.55)" stroke-width="1.3" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 ${radarC.x} ${radarC.y}" to="360 ${radarC.x} ${radarC.y}" dur="4.8s" repeatCount="indefinite"/></line></g>`);
-    for (const s of (lastData.sky || [])) {
-      if (s.az == null || s.elev == null) continue;
+    // Radar sats share viewSky with the panorama/card. Green dots are now the
+    // 🛰 glyph; a constellation-coloured ring behind it encodes system + lock
+    // (solid = tracked, dim = visible-only, dashed = modeled/scrubbed).
+    for (const s of inViewSats) {
       const rp = radarPoint(s.az, s.elev, radarC, radarR);
       const col = SAT_COLORS[s.constellation] || '#94a3b8';
-      parts.push(`<circle cx="${rp.x.toFixed(1)}" cy="${rp.y.toFixed(1)}" r="2.6" fill="${col}" opacity=".82"/>`);
+      const hasSnr = typeof s.snr === 'number' && s.snr > 0;
+      const dash = s.modeled ? ' stroke-dasharray="2 1.5"' : '';
+      parts.push(`<circle cx="${rp.x.toFixed(1)}" cy="${rp.y.toFixed(1)}" r="5" fill="rgba(2,6,15,.55)" stroke="${col}" stroke-width="${hasSnr ? 1.4 : 0.9}" opacity="${hasSnr ? .9 : .45}"${dash}/>`);
+      parts.push(`<text x="${rp.x.toFixed(1)}" y="${(rp.y + 3.6).toFixed(1)}" font-size="9" text-anchor="middle" opacity="${hasSnr ? .96 : .5}">🛰️</text>`);
     }
-    parts.push(`<text x="${radarC.x}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="middle">GNSS radar</text></g>`);
+    parts.push(`<text x="${radarC.x}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="middle">GNSS radar · ${inViewSats.length} in view · ${trackedSats} tracked</text></g>`);
 
     svg.innerHTML = parts.join('');
     const nowMs = date.getTime();
     if (subtitleEl) {
       const pos = hasPos ? `${lat.toFixed(4)}, ${lon.toFixed(4)}${mode === 'last' ? ' (last-known)' : ''}` : 'no position';
-      const sim = isNow ? '' : `  ·  ⏱ ${timeOffsetMs > 0 ? '+' : '−'}${fmtOffset(Math.abs(timeOffsetMs))}`;
+      const sim = isNow ? '' : `  ·  ⏱ ${timeOffsetMs > 0 ? '+' : '−'}${fmtOffset(Math.abs(timeOffsetMs))}${modeledCount ? '  ·  ' + modeledCount + ' sats modeled' : ''}`;
       subtitleEl.textContent = `${pos}  ·  zoom ${skyZoom.toFixed(1)}x  ·  ${date.toISOString().replace('T', ' ').slice(0, 19)} UTC${sim}`;
     }
     if (noteEl) noteEl.style.display = hasPos ? 'none' : '';
@@ -834,19 +959,21 @@
       }
 
       // GNSS geometry + integrity + open-sky survey + SNR/elevation scatter.
-      const dop = computeDOP(lastData.sky || []);
+      // Uses the same viewSky as the panorama and radar so every count agrees.
+      const dop = computeDOP(inViewSats);
       const dv = dopVerdict(dop.ok ? dop.pdop : null);
-      const integ = integrityCheck(lastData.sky || [], integrityJumpM);
+      const integ = integrityCheck(inViewSats, integrityJumpM);
       const st = surveyStats();
       const integTone = integ.level === 'suspect' ? 'sv-em-warn' : (integ.level === 'caution' ? 'sv-em-warn' : 'sv-em-good');
-      const gnssCard = `<div class="sv-detail-card"><b>GNSS quality</b>
-        <span><i>Geometry (PDOP)</i><em class="sv-em-${dv.tone || 'plain'}">${dop.ok ? dop.pdop.toFixed(1) + ' · ' + dv.label : dv.label}</em></span>
+      const gnssCard = `<div class="sv-detail-card"><b>GNSS quality${isNow ? '' : ' · modeled'}</b>
+        <span><i>In view / tracked</i><em>${inViewSats.length} / ${trackedSats}</em></span>
+        <span><i>Geometry (PDOP)</i><em class="sv-em-${dv.tone || 'plain'}">${dop.ok ? dop.pdop.toFixed(1) + ' · ' + dv.label + ' · ' + dop.n + ' sats' : dv.label}</em></span>
         <span><i>HDOP / VDOP</i><em>${dop.ok ? dop.hdop.toFixed(1) + ' / ' + dop.vdop.toFixed(1) : '—'}</em></span>
-        <span><i>Tracked / SNR avg</i><em>${trackedSats}/${(lastData.sky || []).length} · ${avgSnr}</em></span>
+        <span><i>Avg SNR</i><em>${avgSnr}</em></span>
         <span><i>Open-sky survey</i><em>${st.score != null ? st.score + '% (' + st.seenCells + ' cells)' : 'building…'}</em></span>
         <span><i>Integrity</i><em class="${integTone}">${integ.level.toUpperCase()}</em></span>
-        <div class="sv-scatter">${snrElevScatter(lastData.sky || [])}</div>
-        <div class="sv-integ-note">${esc(integ.reasons[0])}</div></div>`;
+        <div class="sv-scatter">${snrElevScatter(inViewSats)}</div>
+        <div class="sv-integ-note">${isNow ? esc(integ.reasons[0]) : 'Modeled orbits (approx) — only satellites visible now are propagated; risen sats not shown.'}</div></div>`;
 
       // What's up now — brightest objects above the horizon.
       const seenNames = new Set();
@@ -1233,7 +1360,12 @@
         }
         lastData = { sky: d.sky || [], lat: p.lat, lon: p.lon, mode: p.mode, t: p.t };
         // Feed the obstruction/multipath survey once per live poll (not per redraw).
-        if (enhanced) surveyAccumulate(lastData.sky);
+        if (enhanced) {
+          surveyAccumulate(lastData.sky);
+          // Learn each satellite's orbital plane from the live stream so the time
+          // scrubber can propagate it (approximate circular-orbit model).
+          trackSatsLive(lastData.sky, p.lat, p.lon);
+        }
         render();
       })
       .catch(() => {});
@@ -1779,6 +1911,7 @@
     timeOffsetMs = 0;
     showConstellations = true; showDeepSky = false; showObstruction = false;
     prevFix = null; integrityJumpM = 0;
+    satTrack = new Map();
     document.body.style.overflow = '';
   }
 
