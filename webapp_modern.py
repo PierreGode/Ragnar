@@ -2370,6 +2370,25 @@ def watchtower_status():
     })
 
 
+@app.route('/api/net/watchtower/clear', methods=['POST'])
+def watchtower_clear():
+    """Empty the Watchtower display ring and persist the cleared state. The
+    tailer keeps its file offsets, so cleared alerts don't re-appear; only
+    genuinely new watcher lines show up afterwards. The Pushover dedup memory
+    is left intact so clearing the pane never re-pages old findings."""
+    global _wt_summary
+    try:
+        with _watchtower_lock:
+            wt = _wt_get()
+            wt.clear()
+            _wt_summary = wt.summary()
+            _wt_save(wt)
+    except Exception as exc:
+        logger.debug(f"[watchtower] clear failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+    return jsonify({'success': True, 'summary': _wt_summary})
+
+
 @app.route('/api/net/incidents', methods=['GET'])
 def incidents_status():
     """Correlated attack-chain incidents fused from the Watchtower alert stream.

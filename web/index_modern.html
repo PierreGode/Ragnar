@@ -1612,6 +1612,7 @@
                     <div id="watchtower-summary" class="mt-3 flex flex-wrap items-center gap-2 text-sm"></div>
                     <div class="mt-3 flex flex-wrap items-center gap-3">
                         <button onclick="watchtowerRefresh()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Refresh</button>
+                        <button onclick="watchtowerClear()" title="Clear the alerts shown here. The watchers keep their place in each log, so only genuinely new findings re-appear." class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-1.5 rounded text-xs whitespace-nowrap">Clear</button>
                         <label class="flex items-center gap-1.5 text-xs text-gray-400" title="Only show alerts at or above this severity">
                             <span>show</span>
                             <select id="watchtower-minsev" onchange="watchtowerRefresh()" class="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-gray-300">
@@ -8143,7 +8144,7 @@
 
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260820-staregg-radarsweep"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260820-gps-enable"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260821-watchtower-clear"></script>
 
 
 
