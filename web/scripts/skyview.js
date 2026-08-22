@@ -952,10 +952,36 @@
         const sp = fullSkyPoint(sun.az, Math.max(0, sun.alt), W, H);
         if (sp.x > -80 && sp.x < W + 80) {
           const sunSize = 40;
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="84" fill="url(#sv-sun-corona)" opacity=".55"><animate attributeName="opacity" values="0.35;0.75;0.35" dur="5.5s" repeatCount="indefinite"/><animate attributeName="r" values="80;92;80" dur="5.5s" repeatCount="indefinite"/></circle>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="60" fill="url(#sv-sun-corona)" opacity=".65"><animate attributeName="opacity" values="0.5;0.85;0.5" dur="3.3s" repeatCount="indefinite"/><animate attributeName="r" values="56;66;56" dur="3.3s" repeatCount="indefinite"/></circle>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="44" fill="url(#sv-sun-corona)" opacity=".8"><animate attributeName="opacity" values="0.7;0.95;0.7" dur="2.1s" repeatCount="indefinite"/></circle>`);
+          // Noisy corona — 3 stacked layers with slightly non-integer periods
+          // + random per-render seeds so the pattern never repeats cleanly.
+          const seed = () => (Math.random() * 3 + 1).toFixed(2);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="84" fill="url(#sv-sun-corona)" opacity=".55"><animate attributeName="opacity" values="0.3;0.72;0.4;0.65;0.3" dur="${seed()}s" repeatCount="indefinite"/><animate attributeName="r" values="78;95;82;90;78" dur="${seed()}s" repeatCount="indefinite"/></circle>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="60" fill="url(#sv-sun-corona)" opacity=".65"><animate attributeName="opacity" values="0.45;0.9;0.55;0.8;0.45" dur="${seed()}s" repeatCount="indefinite"/><animate attributeName="r" values="55;68;58;65;55" dur="${seed()}s" repeatCount="indefinite"/></circle>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="44" fill="url(#sv-sun-corona)" opacity=".8"><animate attributeName="opacity" values="0.7;1;0.75;0.95;0.7" dur="${seed()}s" repeatCount="indefinite"/></circle>`);
+          // Sun disc.
           parts.push(`<image href="${PLANET_IMG.Sun}" x="${(sp.x - sunSize).toFixed(1)}" y="${(sp.y - sunSize).toFixed(1)}" width="${(sunSize * 2).toFixed(1)}" height="${(sunSize * 2).toFixed(1)}"/>`);
+          // Short-lived flare spikes — regenerated each render, animated to
+          // fade in and out once. Because render() runs ~1Hz, there's always
+          // a fresh set overlapping the previous one.
+          const nFlares = 5 + Math.floor(Math.random() * 5);
+          for (let i = 0; i < nFlares; i++) {
+            const ang = Math.random() * 360;
+            const len = 34 + Math.random() * 42;
+            const wid = (1 + Math.random() * 2).toFixed(1);
+            const dur = (0.6 + Math.random() * 1.6).toFixed(2);
+            const peak = (0.4 + Math.random() * 0.5).toFixed(2);
+            const r = 200 + Math.floor(Math.random() * 55);
+            const g = 180 + Math.floor(Math.random() * 65);
+            const b = 90 + Math.floor(Math.random() * 60);
+            parts.push(`<line x1="0" y1="0" x2="0" y2="${(-len).toFixed(1)}" stroke="rgba(${r},${g},${b},1)" stroke-width="${wid}" stroke-linecap="round" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;${peak};0" dur="${dur}s" repeatCount="1" fill="freeze"/></line>`);
+          }
+          // Occasional big glare — bright, longer, brighter color.
+          if (Math.random() < 0.35) {
+            const ang = Math.random() * 360;
+            const len = 100 + Math.random() * 90;
+            const dur = (1.8 + Math.random() * 1.6).toFixed(2);
+            parts.push(`<line x1="0" y1="0" x2="0" y2="${(-len).toFixed(1)}" stroke="rgba(255,240,180,1)" stroke-width="4" stroke-linecap="round" filter="url(#sv-full-glow)" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;0.95;0.55;0" dur="${dur}s" repeatCount="1" fill="freeze"/></line>`);
+          }
           parts.push(`<text x="${sp.x.toFixed(1)}" y="${(sp.y + sunSize + 14).toFixed(1)}" fill="#ffdf7e" font-size="12" text-anchor="middle" opacity=".95">Sun</text>`);
           projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
         }

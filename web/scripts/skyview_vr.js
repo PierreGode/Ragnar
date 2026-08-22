@@ -60,6 +60,7 @@
   let hoverPathLine = null;
   let hoverPathTarget = null;
   let sunAliveLayers = [];    // extra corona planes for the burning pulse
+  let sunFlares = [];         // { mesh, active, age, lifetime, peak, isGlare }
 
   function makeYLockedBillboard(map, sizeX, sizeY, color) {
     const mat = new THREE.MeshBasicMaterial({
@@ -553,20 +554,35 @@
       glow.position.copy(pos);
       zoomable.push(glow);
       group.add(glow);
-      // Two extra additive corona planes at different scales — the animation
-      // loop pulses their opacity at desynced frequencies for a "burning" feel.
+      // Two extra additive corona planes at different scales. The animation
+      // loop drives them with a multi-sine noise pattern for irregular
+      // "burning" motion instead of a clean sinusoid.
       const alive1 = buildSunGlow(sunSize * 0.8);
       alive1.position.copy(pos);
       alive1.material.opacity = 0.5;
       zoomable.push(alive1);
       group.add(alive1);
-      sunAliveLayers.push({ mesh: alive1, base: 0.55, amp: 0.35, freq: 0.55, phase: 0 });
+      sunAliveLayers.push({ mesh: alive1, base: 0.55, amp: 0.35, seed: 0.7 });
       const alive2 = buildSunGlow(sunSize * 1.15);
       alive2.position.copy(pos);
       alive2.material.opacity = 0.28;
       zoomable.push(alive2);
       group.add(alive2);
-      sunAliveLayers.push({ mesh: alive2, base: 0.28, amp: 0.22, freq: 1.35, phase: 1.9 });
+      sunAliveLayers.push({ mesh: alive2, base: 0.28, amp: 0.22, seed: 2.4 });
+      // Flare beams — 4 slots. Each spawns at a random angle with random
+      // duration + peak brightness; occasionally spawns as a "big glare".
+      for (let i = 0; i < 4; i++) {
+        const flareMat = new THREE.MeshBasicMaterial({
+          color: 0xffd67a, transparent: true, opacity: 0,
+          blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+        });
+        const flare = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 14), flareMat);
+        // Position/rotation set when this slot activates.
+        flare.position.set(0, 0, 0);
+        flare.visible = false;
+        sSpr.add(flare);   // child of the Sun sprite so it inherits the Y-locked billboard orientation
+        sunFlares.push({ mesh: flare, active: false, age: 0, lifetime: 0, peak: 0, isGlare: false });
+      }
       const label = makeLabelSprite('Sun', '#ffdf7e');
       label.position.copy(altAzToVec(sun.az, sun.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
@@ -1351,7 +1367,7 @@
     session = null; renderer = null; scene = null; camera = null;
     baseGroup = null; pointables = []; controllers = []; rayLines = [];
     zoomable = []; userZoom = 1; billboards = [];
-    celestialMovers = []; sunAliveLayers = [];
+    celestialMovers = []; sunAliveLayers = []; sunFlares = [];
     hidePath();
     raycaster = null; infoPanel = null; hoveredObject = null;
     skyDomeMesh = null; skyGroup = null;
@@ -1545,10 +1561,49 @@
         celestialTicker = 0;
         refreshCelestialPositions();
       }
-      // Sun burning pulse — modulate the extra corona layers each frame.
+      // Sun burning — noise-driven corona brightness (sum of incommensurate
+      // sines, so it never repeats visibly).
       const tSec = now * 0.001;
       for (const L of sunAliveLayers) {
-        L.mesh.material.opacity = L.base + L.amp * Math.sin(tSec * L.freq * 2 * Math.PI + L.phase);
+        const n = 0.42 * Math.sin(tSec * 0.71 + L.seed)
+                + 0.30 * Math.sin(tSec * 1.83 + L.seed * 1.7)
+                + 0.18 * Math.sin(tSec * 3.31 + L.seed * 0.9)
+                + 0.10 * Math.sin(tSec * 5.17 + L.seed * 2.3);
+        L.mesh.material.opacity = Math.max(0, L.base + L.amp * n);
+      }
+      // Sun flares — each slot independently spawns, fades in, holds, fades out.
+      for (const f of sunFlares) {
+        if (f.active) {
+          f.age += dtSec;
+          const p = f.age / f.lifetime;
+          if (p >= 1) {
+            f.active = false;
+            f.mesh.material.opacity = 0;
+            f.mesh.visible = false;
+          } else {
+            let a;
+            if (p < 0.18) a = p / 0.18;
+            else if (p < 0.45) a = 1;
+            else a = 1 - (p - 0.45) / 0.55;
+            f.mesh.material.opacity = a * f.peak;
+          }
+        } else if (Math.random() < 0.012) {
+          // ~1.2% chance per frame at 90fps ≈ 1 spawn/sec per slot.
+          f.active = true;
+          f.age = 0;
+          f.isGlare = Math.random() < 0.14;   // ~14% of spawns are big glares
+          f.lifetime = f.isGlare ? (1.8 + Math.random() * 1.4) : (0.4 + Math.random() * 0.8);
+          f.peak = f.isGlare ? (0.85 + Math.random() * 0.15) : (0.35 + Math.random() * 0.45);
+          const ang = Math.random() * Math.PI * 2;
+          const offset = f.isGlare ? 7 : 6;
+          f.mesh.position.set(Math.cos(ang) * offset, Math.sin(ang) * offset, 0);
+          f.mesh.rotation.z = ang - Math.PI / 2;
+          const w = f.isGlare ? (2.8 + Math.random() * 1.6) : (1.0 + Math.random() * 1.2);
+          const h = f.isGlare ? (18 + Math.random() * 10) : (10 + Math.random() * 6);
+          f.mesh.scale.set(w, h / 14, 1);
+          f.mesh.material.color.setHex(f.isGlare ? 0xfff4c8 : 0xffd67a);
+          f.mesh.visible = true;
+        }
       }
 
       // Right thumbstick: X = rotate sky (fine-tune), Y = zoom.
