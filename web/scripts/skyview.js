@@ -38,6 +38,17 @@
     { name: 'Uranus', period: 30688.5, l0: 314.05, r: 19.19, mag: 5.7, color: '#9ee8ff', size: 3.5 },
     { name: 'Neptune', period: 60182, l0: 304.35, r: 30.07, mag: 7.8, color: '#7aa7ff', size: 3.3 }
   ];
+  const PLANET_IMG = {
+    Sun:     '/web/vendor/sky/Inner-Planets/Sun.png',
+    Moon:    '/web/vendor/sky/Inner-Planets/Moon.png',
+    Mercury: '/web/vendor/sky/Inner-Planets/Mercury.png',
+    Venus:   '/web/vendor/sky/Inner-Planets/Venus.png',
+    Mars:    '/web/vendor/sky/Inner-Planets/Mars.png',
+    Jupiter: '/web/vendor/sky/Outer-Planets/Jupiter.png',
+    Saturn:  '/web/vendor/sky/Outer-Planets/Saturn.png',
+    Uranus:  '/web/vendor/sky/Outer-Planets/Uranus.png',
+    Neptune: '/web/vendor/sky/Outer-Planets/Neptune.png'
+  };
   // Full constellation names for the star info card.
   const CONSTELLATIONS = {
     And: 'Andromeda', Ant: 'Antlia', Aps: 'Apus', Aql: 'Aquila', Aqr: 'Aquarius',
@@ -940,33 +951,32 @@
       if (sun.alt > -1) {
         const sp = fullSkyPoint(sun.az, Math.max(0, sun.alt), W, H);
         if (sp.x > -80 && sp.x < W + 80) {
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="60" fill="url(#sv-sun-corona)" opacity=".9"/>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="34" fill="url(#sv-sun-corona)" opacity=".7"/>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="14" fill="url(#sv-sun-core)" filter="url(#sv-full-glow)"/>`);
-          parts.push(`<text x="${(sp.x + 22).toFixed(1)}" y="${(sp.y + 4).toFixed(1)}" fill="#ffdf7e" font-size="12" opacity=".95">Sun</text>`);
+          const sunSize = 40;
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="72" fill="url(#sv-sun-corona)" opacity=".85"/>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="46" fill="url(#sv-sun-corona)" opacity=".55"/>`);
+          parts.push(`<image href="${PLANET_IMG.Sun}" x="${(sp.x - sunSize).toFixed(1)}" y="${(sp.y - sunSize).toFixed(1)}" width="${(sunSize * 2).toFixed(1)}" height="${(sunSize * 2).toFixed(1)}"/>`);
+          parts.push(`<text x="${sp.x.toFixed(1)}" y="${(sp.y + sunSize + 14).toFixed(1)}" fill="#ffdf7e" font-size="12" text-anchor="middle" opacity=".95">Sun</text>`);
           projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
         }
       }
       if (sun.alt > 0) whatsUp.push({ kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az, mag: -26.7 });
 
-      // Moon with a lit-fraction terminator.
+      // Moon.
       const moon = moonPosition(date, lat, lon);
       const ill = moonIllumination(date);
       moon.illum = ill.illum; moon.phase = ill.phase; moon.waxing = ill.waxing; moon.ageDays = ill.ageDays;
       if (moon.alt > 0) {
         const mp = fullSkyPoint(moon.az, moon.alt, W, H);
         if (mp.x > -80 && mp.x < W + 80 && mp.y > -80 && mp.y < H + 80) {
-          const r = 9;
-          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="34" fill="url(#sv-planet-glow)" opacity=".22"/>`);
-          // dark disc, then lit fraction as a clipped bright cap on the correct limb
-          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="#2a3244"/>`);
+          const mSize = 22;
+          parts.push(`<image href="${PLANET_IMG.Moon}" x="${(mp.x - mSize).toFixed(1)}" y="${(mp.y - mSize).toFixed(1)}" width="${(mSize * 2).toFixed(1)}" height="${(mSize * 2).toFixed(1)}"/>`);
+          // Overlay a dark cap for the unlit fraction so phase is still visible.
           const k = Math.max(0.03, Math.min(0.97, ill.illum));
-          const off = (ill.waxing ? 1 : -1) * r * (1 - 2 * k);
-          const cid = 'sv-moonlit-' + (mp.x | 0) + '-' + (mp.y | 0);
-          parts.push(`<defs><clipPath id="${cid}"><circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}"/></clipPath></defs>`);
-          parts.push(`<circle cx="${(mp.x + off).toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="#e9eefc" clip-path="url(#${cid})"/>`);
-          parts.push(`<circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${r}" fill="none" stroke="rgba(219,234,254,.5)" stroke-width=".7"/>`);
-          parts.push(`<text x="${(mp.x + 17).toFixed(1)}" y="${(mp.y + 4).toFixed(1)}" fill="#dbeafe" font-size="12" opacity=".88">Moon</text>`);
+          const off = (ill.waxing ? -1 : 1) * mSize * (1 - 2 * k);
+          const cid = 'sv-moonshade-' + (mp.x | 0) + '-' + (mp.y | 0);
+          parts.push(`<defs><clipPath id="${cid}"><circle cx="${mp.x.toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${mSize}"/></clipPath></defs>`);
+          parts.push(`<circle cx="${(mp.x + off).toFixed(1)}" cy="${mp.y.toFixed(1)}" r="${mSize}" fill="rgba(3,8,18,.72)" clip-path="url(#${cid})"/>`);
+          parts.push(`<text x="${mp.x.toFixed(1)}" y="${(mp.y + mSize + 14).toFixed(1)}" fill="#dbeafe" font-size="12" text-anchor="middle" opacity=".88">Moon</text>`);
           projected.push({ kind: 'planet', x: mp.x, y: mp.y, planet: moon });
         }
         whatsUp.push({ kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, mag: -12 });
@@ -975,39 +985,14 @@
         if (planet.alt <= 0) continue;
         const pt = fullSkyPoint(planet.az, planet.alt, W, H);
         if (pt.x < -70 || pt.x > W + 70 || pt.y < -70 || pt.y > H + 70) continue;
-        const rDisc = planet.size * 1.6;
-        const rHalo = planet.size * 3.4;
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rHalo.toFixed(1)}" fill="url(#sv-planet-glow)" opacity=".22"/>`);
-        // Saturn ring behind the disc so the disc paints over the near side.
-        if (planet.name === 'Saturn') {
-          const rx = rDisc * 2.35, ry = rDisc * 0.55;
-          const cid = 'sv-sat-ring-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
-          parts.push(`<defs><clipPath id="${cid}"><rect x="${(pt.x - rx - 2).toFixed(1)}" y="${(pt.y - ry - 2).toFixed(1)}" width="${(rx * 2 + 4).toFixed(1)}" height="${(ry + 2).toFixed(1)}"/></clipPath></defs>`);
-          parts.push(`<g transform="rotate(-16 ${pt.x.toFixed(1)} ${pt.y.toFixed(1)})">
-            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="none" stroke="#e8cf94" stroke-width="1.6" opacity=".85" clip-path="url(#${cid})"/>
-            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${(rx * 0.78).toFixed(1)}" ry="${(ry * 0.78).toFixed(1)}" fill="none" stroke="#f5dfa8" stroke-width="0.9" opacity=".7" clip-path="url(#${cid})"/>
-          </g>`);
+        const size = planet.size * 3.2;
+        const href = PLANET_IMG[planet.name];
+        if (href) {
+          parts.push(`<image href="${href}" x="${(pt.x - size).toFixed(1)}" y="${(pt.y - size).toFixed(1)}" width="${(size * 2).toFixed(1)}" height="${(size * 2).toFixed(1)}"/>`);
+        } else {
+          parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(planet.size * 1.6).toFixed(1)}" fill="${planet.color}"/>`);
         }
-        const gid = 'sv-p-' + planet.name;
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rDisc.toFixed(1)}" fill="url(#${gid})" filter="url(#sv-full-glow)"/>`);
-        // Jupiter's banded surface.
-        if (planet.name === 'Jupiter') {
-          const jid = 'sv-jup-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
-          parts.push(`<defs><clipPath id="${jid}"><circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rDisc.toFixed(1)}"/></clipPath></defs>`);
-          parts.push(`<rect x="${(pt.x - rDisc).toFixed(1)}" y="${(pt.y - rDisc).toFixed(1)}" width="${(rDisc * 2).toFixed(1)}" height="${(rDisc * 2).toFixed(1)}" fill="url(#sv-p-Jupiter-bands)" clip-path="url(#${jid})" opacity=".85"/>`);
-          parts.push(`<ellipse cx="${(pt.x + rDisc * 0.25).toFixed(1)}" cy="${(pt.y + rDisc * 0.15).toFixed(1)}" rx="${(rDisc * 0.22).toFixed(1)}" ry="${(rDisc * 0.14).toFixed(1)}" fill="#c94a35" opacity=".8" clip-path="url(#${jid})"/>`);
-        }
-        // Front arc of Saturn's ring so it visually wraps.
-        if (planet.name === 'Saturn') {
-          const rx = rDisc * 2.35, ry = rDisc * 0.55;
-          const cid2 = 'sv-sat-front-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
-          parts.push(`<defs><clipPath id="${cid2}"><rect x="${(pt.x - rx - 2).toFixed(1)}" y="${pt.y.toFixed(1)}" width="${(rx * 2 + 4).toFixed(1)}" height="${(ry + 2).toFixed(1)}"/></clipPath></defs>`);
-          parts.push(`<g transform="rotate(-16 ${pt.x.toFixed(1)} ${pt.y.toFixed(1)})">
-            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="none" stroke="#e8cf94" stroke-width="1.6" opacity=".95" clip-path="url(#${cid2})"/>
-            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${(rx * 0.78).toFixed(1)}" ry="${(ry * 0.78).toFixed(1)}" fill="none" stroke="#f5dfa8" stroke-width="0.9" opacity=".8" clip-path="url(#${cid2})"/>
-          </g>`);
-        }
-        parts.push(`<text x="${(pt.x + rDisc + 7).toFixed(1)}" y="${(pt.y + 4).toFixed(1)}" fill="${planet.color}" font-size="12" opacity=".92">${planet.name}</text>`);
+        parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y + size + 14).toFixed(1)}" fill="${planet.color}" font-size="12" text-anchor="middle" opacity=".92">${planet.name}</text>`);
         projected.push({ kind: 'planet', x: pt.x, y: pt.y, planet });
         whatsUp.push({ kind: 'planet', name: planet.name, alt: planet.alt, az: planet.az, mag: planet.mag });
       }
@@ -1042,10 +1027,12 @@
       const col = SAT_COLORS[s.constellation] || '#94a3b8';
       const hasSnr = typeof s.snr === 'number' && s.snr > 0;
       if (pt.x >= -50 && pt.x <= W + 50 && pt.y >= -50 && pt.y <= H + 50) {
-        const satR = hasSnr ? 4.2 + Math.min(4, s.snr / 14) : 4;
-        const dash = s.modeled ? ' stroke-dasharray="3 2.5"' : '';
-        parts.push(`<path d="M${(pt.x - 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y - 7).toFixed(1)} L${(pt.x + 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y + 7).toFixed(1)} Z" fill="${hasSnr && !s.modeled ? col : 'none'}" stroke="${col}" stroke-width="1.4" opacity="${hasSnr ? .9 : .42}"${dash}/>`);
-        parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y + 20).toFixed(1)}" fill="${col}" font-size="10" text-anchor="middle" opacity=".82">${esc((s.constellation || '') + (s.prn != null ? ' ' + s.prn : ''))}</text>`);
+        const satSize = hasSnr ? 12 + Math.min(6, s.snr / 8) : 11;
+        const op = hasSnr ? (s.modeled ? .5 : .95) : .5;
+        parts.push(`<image href="/web/vendor/sky/sat/satellite.png" x="${(pt.x - satSize).toFixed(1)}" y="${(pt.y - satSize).toFixed(1)}" width="${(satSize * 2).toFixed(1)}" height="${(satSize * 2).toFixed(1)}" opacity="${op}"/>`);
+        // Constellation-colored dot at the base so identity is still readable.
+        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${(pt.y + satSize + 2).toFixed(1)}" r="2.4" fill="${col}" opacity=".9"/>`);
+        parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y + satSize + 16).toFixed(1)}" fill="${col}" font-size="10" text-anchor="middle" opacity=".82">${esc((s.constellation || '') + (s.prn != null ? ' ' + s.prn : ''))}</text>`);
         projected.push({ kind: 'sat', x: pt.x, y: pt.y, sat: s });
       }
     }

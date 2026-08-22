@@ -302,6 +302,30 @@
     ctx.putImageData(img, 0, 0);
   }
 
+  const PLANET_IMAGE_PATHS = {
+    Sun:     '/web/vendor/sky/Inner-Planets/Sun.png',
+    Moon:    '/web/vendor/sky/Inner-Planets/Moon.png',
+    Mercury: '/web/vendor/sky/Inner-Planets/Mercury.png',
+    Venus:   '/web/vendor/sky/Inner-Planets/Venus.png',
+    Mars:    '/web/vendor/sky/Inner-Planets/Mars.png',
+    Jupiter: '/web/vendor/sky/Outer-Planets/Jupiter.png',
+    Saturn:  '/web/vendor/sky/Outer-Planets/Saturn.png',
+    Uranus:  '/web/vendor/sky/Outer-Planets/Uranus.png',
+    Neptune: '/web/vendor/sky/Outer-Planets/Neptune.png'
+  };
+
+  function planetImageTexture(name) {
+    const key = '__img_' + name;
+    if (_textureCache[key]) return _textureCache[key];
+    const path = PLANET_IMAGE_PATHS[name];
+    if (!path) return null;
+    const loader = new THREE.TextureLoader();
+    const tex = loader.load(path);
+    tex.anisotropy = 8;
+    _textureCache[key] = tex;
+    return tex;
+  }
+
   function planetTexture(name) {
     if (_textureCache[name]) return _textureCache[name];
     const W = 512, H = 256;
@@ -456,64 +480,62 @@
     return ring;
   }
 
+  function makePlanetSprite(name, sizeWorld) {
+    const tex = planetImageTexture(name);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    const s = new THREE.Sprite(mat);
+    s.scale.set(sizeWorld, sizeWorld, 1);
+    return s;
+  }
+
   function buildPlanets(lat, lon, date) {
     const group = new THREE.Group();
     // Sun.
     const sun = sunSky(date, lat, lon);
     {
-      const sunR = 12;
-      const sMat = new THREE.MeshBasicMaterial({ map: planetTexture('Sun') });
-      const sMesh = new THREE.Mesh(new THREE.SphereGeometry(sunR, 32, 20), sMat);
+      const sunSize = 22;
+      const sSpr = makePlanetSprite('Sun', sunSize);
       const pos = altAzToVec(sun.az, sun.alt, R_PLANETS);
-      sMesh.position.copy(pos);
-      sMesh.userData = { kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az };
-      pointables.push(sMesh);
-      zoomable.push(sMesh);
-      group.add(sMesh);
-      const glow = buildSunGlow(sunR);
+      sSpr.position.copy(pos);
+      sSpr.userData = { kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az };
+      pointables.push(sSpr);
+      zoomable.push(sSpr);
+      group.add(sSpr);
+      const glow = buildSunGlow(sunSize * 0.55);
       glow.position.copy(pos);
       zoomable.push(glow);
       group.add(glow);
       const label = makeLabelSprite('Sun', '#ffdf7e');
-      label.position.copy(pos).multiplyScalar(1.09);
+      label.position.copy(altAzToVec(sun.az, sun.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
     }
     // Moon.
     const moon = moonSky(date, lat, lon);
     {
-      const mMat = new THREE.MeshBasicMaterial({ map: planetTexture('Moon') });
-      const mMesh = new THREE.Mesh(new THREE.SphereGeometry(9, 32, 20), mMat);
+      const mSpr = makePlanetSprite('Moon', 16);
       const pos = altAzToVec(moon.az, moon.alt, R_PLANETS);
-      mMesh.position.copy(pos);
-      mMesh.userData = { kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, illum: moon.illum };
-      pointables.push(mMesh);
-      zoomable.push(mMesh);
-      group.add(mMesh);
+      mSpr.position.copy(pos);
+      mSpr.userData = { kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, illum: moon.illum };
+      pointables.push(mSpr);
+      zoomable.push(mSpr);
+      group.add(mSpr);
       const label = makeLabelSprite('Moon', '#e2e8f0');
-      label.position.copy(pos).multiplyScalar(1.1);
+      label.position.copy(altAzToVec(moon.az, moon.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
     }
-    // Planets — draw everywhere on the sphere, above and below horizon.
+    // Planets.
     const planets = planetSkyPositions(date, lat, lon);
     for (const p of planets) {
-      const r = p.size * 1.1;
-      const mat = new THREE.MeshBasicMaterial({ map: planetTexture(p.name) });
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 20), mat);
+      const sz = p.size * 2.2;
+      const spr = makePlanetSprite(p.name, sz);
       const pos = altAzToVec(p.az, p.alt, R_PLANETS);
-      mesh.position.copy(pos);
-      mesh.userData = { kind: 'planet', name: p.name, alt: p.alt, az: p.az, ra: p.ra, dec: p.dec };
-      pointables.push(mesh);
-      zoomable.push(mesh);
-      group.add(mesh);
-      if (p.name === 'Saturn') {
-        const rings = buildSaturnRings(r);
-        rings.position.copy(pos);
-        rings.userData = { kind: 'planet-ring', name: 'Saturn ring' };
-        zoomable.push(rings);
-        group.add(rings);
-      }
+      spr.position.copy(pos);
+      spr.userData = { kind: 'planet', name: p.name, alt: p.alt, az: p.az, ra: p.ra, dec: p.dec };
+      pointables.push(spr);
+      zoomable.push(spr);
+      group.add(spr);
       const label = makeLabelSprite(p.name, '#f5d58a');
-      label.position.copy(pos).multiplyScalar(1.12);
+      label.position.copy(altAzToVec(p.az, p.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
     }
     return group;
@@ -625,34 +647,30 @@
     return g;
   }
 
+  const SAT_IMG = '/web/vendor/sky/sat/satellite.png';
+  let _satTexture = null;
+  function satTexture() {
+    if (_satTexture) return _satTexture;
+    _satTexture = new THREE.TextureLoader().load(SAT_IMG);
+    _satTexture.anisotropy = 4;
+    return _satTexture;
+  }
+
   function buildSatModel(color) {
     const g = new THREE.Group();
-    const body = new THREE.Mesh(
-      new THREE.BoxGeometry(1.4, 0.9, 0.9),
-      new THREE.MeshBasicMaterial({ color: 0xdedede })
-    );
-    g.add(body);
-    for (let side = -1; side <= 1; side += 2) {
-      const panel = new THREE.Mesh(
-        new THREE.PlaneGeometry(2.2, 1.2),
-        new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
-      );
-      panel.position.set(side * 1.85, 0, 0);
-      g.add(panel);
-      const strut = new THREE.Mesh(
-        new THREE.BoxGeometry(1.0, 0.06, 0.06),
-        new THREE.MeshBasicMaterial({ color: 0x9ca3af })
-      );
-      strut.position.set(side * 1.2, 0, 0);
-      g.add(strut);
-    }
-    const dish = new THREE.Mesh(
-      new THREE.ConeGeometry(0.32, 0.4, 12),
-      new THREE.MeshBasicMaterial({ color: 0xf1f5f9 })
-    );
-    dish.position.set(0, 0.55, 0.15);
-    dish.rotation.x = Math.PI;
-    g.add(dish);
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: satTexture(), transparent: true, depthWrite: false
+    }));
+    spr.scale.set(7, 7, 1);
+    g.add(spr);
+    // Tiny constellation-colored dot below the sprite so you can still tell
+    // GPS from GLONASS from Galileo etc. at a glance.
+    const tag = new THREE.Sprite(new THREE.SpriteMaterial({
+      color, transparent: true, depthWrite: false
+    }));
+    tag.scale.set(1.4, 1.4, 1);
+    tag.position.set(0, -3.6, 0);
+    g.add(tag);
     return g;
   }
 
@@ -669,7 +687,6 @@
       const model = buildSatModel(color);
       const pos = altAzToVec(s.az, s.elev, R_SATS);
       model.position.copy(pos);
-      model.lookAt(pos.clone().multiplyScalar(2));
       model.userData = { kind: 'sat', sat: s, alt: s.elev, az: s.az };
       pointables.push(model);
       zoomable.push(model);
@@ -897,6 +914,36 @@
     return best;
   }
 
+  function onSqueezeStart(ev) {
+    if (!camera || !skyGroup) return;
+    // Get the head's forward direction on the horizontal plane, then rotate
+    // skyGroup so its local -Z (astronomical north) points that way.
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    forward.y = 0;
+    if (forward.lengthSq() < 1e-6) return;
+    forward.normalize();
+    skyRotationY = Math.atan2(-forward.x, -forward.z);
+    skyGroup.rotation.y = skyRotationY;
+    try { localStorage.setItem('ragnar.skyview.xr.rotY', String(skyRotationY)); } catch (_) {}
+    // Haptic pulse + brief on-panel confirmation.
+    const ctl = ev.target;
+    try {
+      const src = ctl && ctl.userData && ctl.userData._inputSource;
+      const act = src && src.gamepad && src.gamepad.hapticActuators && src.gamepad.hapticActuators[0];
+      if (act && act.pulse) act.pulse(0.8, 120);
+    } catch (_) {}
+    if (infoPanel && ctl) {
+      drawInfoPanel(infoPanel, '🧭 Sky aligned', ['This direction is now north.', 'Fine-tune with right thumbstick.'], '#86efac');
+      const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion);
+      const headPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+      infoPanel.position.copy(ctl.position).addScaledVector(dir, 1.6);
+      infoPanel.lookAt(headPos);
+      infoPanel.visible = true;
+      if (infoPanel.userData._hideTimer) clearTimeout(infoPanel.userData._hideTimer);
+      infoPanel.userData._hideTimer = setTimeout(() => { if (infoPanel) infoPanel.visible = false; }, 2200);
+    }
+  }
+
   function onSelectStart(ev) {
     const ctl = ev.target;
     const origin = new THREE.Vector3().setFromMatrixPosition(ctl.matrixWorld);
@@ -1106,8 +1153,13 @@
           '<div style="font-size:24px;">🥽</div>' +
           '<h3 style="margin:0;color:#7dd3fc;font-size:16px;letter-spacing:.06em;text-transform:uppercase;">Enter Ragnar Observatory VR</h3>' +
         '</div>' +
-        '<p style="margin:6px 0 8px;font-size:12px;color:#9fb0c3;line-height:1.5;">Right thumbstick: rotate the sky to align north (WebXR has no compass — offset auto-saves). Left thumbstick up/down: zoom objects in/out.</p>' +
-        '<p style="margin:0 0 14px;font-size:12px;color:#9fb0c3;line-height:1.5;">Only satellites the receiver is actively tracking (SNR&nbsp;&gt;&nbsp;0) are shown — obstructed sats stay hidden. Trigger to inspect. Grip / menu to exit.</p>' +
+        '<p style="margin:6px 0 4px;font-size:12px;color:#9fb0c3;line-height:1.55;"><b style="color:#dbeafe;">Controls</b> (right hand):</p>' +
+        '<ul style="margin:0 0 10px 16px;padding:0;font-size:12px;color:#9fb0c3;line-height:1.6;">' +
+          '<li>Thumbstick X: rotate sky · Thumbstick Y: zoom (1–5×)</li>' +
+          '<li><b style="color:#86efac;">Grip / squeeze</b>: face real-world north and squeeze — the sky snaps to your head direction (saves).</li>' +
+          '<li>Trigger: inspect the object your ray points at.</li>' +
+        '</ul>' +
+        '<p style="margin:0 0 14px;font-size:11px;color:#7f93ad;line-height:1.55;">Only satellites the receiver is actively tracking (SNR&nbsp;&gt;&nbsp;0) are shown — obstructed sats stay hidden.</p>' +
         '<div style="font-size:11px;color:#7f93ad;background:rgba(2,6,15,.6);border:1px solid rgba(125,211,252,.14);border-radius:8px;padding:8px 10px;margin-bottom:14px;font-family:ui-monospace,monospace;">' + posLine + '</div>' +
         '<label class="sv-xr-toggle" style="display:flex;align-items:center;justify-content:space-between;gap:14px;background:rgba(3,10,22,.7);border:1px solid rgba(125,211,252,.2);border-radius:10px;padding:12px 14px;cursor:pointer;user-select:none;">' +
           '<span>' +
@@ -1295,6 +1347,7 @@
     for (let i = 0; i < 2; i++) {
       const ctl = renderer.xr.getController(i);
       ctl.addEventListener('selectstart', onSelectStart);
+      ctl.addEventListener('squeezestart', onSqueezeStart);
       ctl.addEventListener('connected', (ev) => { ctl.userData._inputSource = ev.data; });
       ctl.addEventListener('disconnected', () => { ctl.userData._inputSource = null; });
       const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -R_STARS)]);
@@ -1350,18 +1403,14 @@
         refreshISS(lat, lon);
       }
 
-      // Right thumbstick rotates the sky (WebXR gives no compass, so the user
-      // aligns north manually once). Left thumbstick vertical = zoom.
+      // Right thumbstick: X = rotate sky (fine-tune), Y = zoom.
       if (session && session.inputSources && skyGroup) {
-        let stickRX = 0, stickLY = 0;
+        let stickRX = 0, stickRY = 0;
         for (const src of session.inputSources) {
-          if (!src.gamepad) continue;
+          if (!src.gamepad || src.handedness !== 'right') continue;
           const axes = src.gamepad.axes || [];
-          if (src.handedness === 'right') {
-            stickRX = axes.length >= 3 ? (axes[2] || 0) : (axes[0] || 0);
-          } else if (src.handedness === 'left') {
-            stickLY = axes.length >= 4 ? (axes[3] || 0) : (axes[1] || 0);
-          }
+          stickRX = axes.length >= 3 ? (axes[2] || 0) : (axes[0] || 0);
+          stickRY = axes.length >= 4 ? (axes[3] || 0) : (axes[1] || 0);
         }
         if (Math.abs(stickRX) > 0.15) {
           skyRotationY -= stickRX * dtSec * 1.5;
@@ -1372,9 +1421,8 @@
             try { localStorage.setItem('ragnar.skyview.xr.rotY', String(skyRotationY)); } catch (_) {}
           }
         }
-        if (Math.abs(stickLY) > 0.15) {
-          // Push up (negative axis Y in xr-standard) = zoom in.
-          userZoom -= stickLY * dtSec * 2.2;
+        if (Math.abs(stickRY) > 0.15) {
+          userZoom -= stickRY * dtSec * 2.2;
           userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, userZoom));
           applyZoom();
         }
