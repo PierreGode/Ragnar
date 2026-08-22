@@ -237,7 +237,7 @@
     ctx.globalAlpha = opacity != null ? opacity : 0.7;
     const grad = ctx.createRadialGradient(x * W, y * H, 0, x * W, y * H, r * H);
     grad.addColorStop(0, color);
-    grad.addColorStop(1, color.replace(/rgb\(/, 'rgba(').replace(/\)/, ',0)').replace(/^#/, 'rgba(0,0,0,0)'));
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.ellipse(x * W, y * H, r * H * 1.4, r * H, 0, 0, Math.PI * 2);
@@ -1081,6 +1081,16 @@
 
   async function startSession(snapshot) {
     if (session) return;
+    try {
+      await _startSessionImpl(snapshot);
+    } catch (err) {
+      console.error('[RagnarSkyViewVR] startSession crashed', err);
+      onSessionEnd();
+      showXrUnavailableModal('VR startup failed: ' + ((err && err.message) || err));
+    }
+  }
+
+  async function _startSessionImpl(snapshot) {
     ensureStatusOverlay();
     // We used to gate on isSessionSupported() here but Meta Quest Browser
     // reports false negatives for immersive-ar on some builds. Just try the
