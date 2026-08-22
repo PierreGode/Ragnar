@@ -1086,7 +1086,7 @@
       parts.push(`<circle cx="${rp.x.toFixed(1)}" cy="${rp.y.toFixed(1)}" r="5" fill="rgba(2,6,15,.55)" stroke="${col}" stroke-width="${hasSnr ? 1.4 : 0.9}" opacity="${hasSnr ? .9 : .45}"${dash}/>`);
       parts.push(`<text x="${rp.x.toFixed(1)}" y="${(rp.y + 3.6).toFixed(1)}" font-size="9" text-anchor="middle" opacity="${hasSnr ? .96 : .5}">🛰️</text>`);
     }
-    parts.push(`<text x="${radarC.x}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="middle">GNSS radar · ${inViewSats.length} in view · ${trackedSats} tracked</text></g>`);
+    parts.push(`<text x="${(radarC.x - radarR).toFixed(1)}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="start">GNSS radar · ${inViewSats.length} in view · ${trackedSats} tracked</text></g>`);
 
     svg.innerHTML = parts.join('');
     const nowMs = date.getTime();
@@ -1907,7 +1907,35 @@
         #ragnar-skyview.sv-enhanced .sv-layer-key{display:block;}
         #ragnar-skyview.sv-enhanced .sv-zoom{display:flex;}
         #ragnar-skyview.sv-enhanced .sv-detail{display:grid;}
-        @media (max-width:760px){#ragnar-skyview .sv-legend{display:none;}#ragnar-skyview.sv-enhanced .sv-detail{display:none;}#ragnar-skyview .sv-layer-key{display:none;}#ragnar-skyview .sv-diag-grid{grid-template-columns:1fr;}#ragnar-skyview .sv-diag-modal{padding:12px;}}
+        @media (max-width:760px){
+          #ragnar-skyview .sv-legend{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-detail{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-layer-key{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-brand{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-cursor{display:none;}
+          #ragnar-skyview .sv-diag-grid{grid-template-columns:1fr;}
+          #ragnar-skyview .sv-diag-modal{padding:12px;}
+          /* Header: fit the notch, keep icon buttons on one row, drop the wide label. */
+          #ragnar-skyview .sv-head{gap:8px;padding:max(10px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));}
+          #ragnar-skyview .sv-title{font-size:14px;}
+          #ragnar-skyview .sv-sub{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-diag-btn .sv-dg-tx{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-diag-btn{padding:8px 10px;}
+          /* Floating controls: full-width time bar, keep clear of each other. */
+          #ragnar-skyview.sv-enhanced .sv-controls{top:max(8px,env(safe-area-inset-top));max-width:calc(100vw - 20px);}
+          #ragnar-skyview.sv-enhanced .sv-time{width:calc(100vw - 20px);bottom:max(14px,env(safe-area-inset-bottom));}
+          /* Keep the zoom pad clear of the full-width time bar (touch hides it via pinch). */
+          #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 54px);}
+        }
+        /* Touch devices: no hover cursor readout, bigger tap targets, pinch replaces the tiny zoom pad. */
+        @media (pointer:coarse){
+          #ragnar-skyview.sv-enhanced .sv-cursor{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-zoom{display:none;}
+          #ragnar-skyview .sv-chip{padding:9px 13px;font-size:12px;}
+          #ragnar-skyview .sv-close,#ragnar-skyview .sv-snap,#ragnar-skyview .sv-vr{width:40px;height:40px;}
+          #ragnar-skyview .sv-time button{padding:8px 12px;}
+          #ragnar-skyview .sv-time input[type=range]{height:22px;}
+        }
       </style>
       <div class="sv-head">
         <span class="sv-title">${enhanced ? 'Ragnar Starview' : 'GPS Sky View'}</span>
@@ -1920,7 +1948,7 @@
           <span><i style="background:#fbbf24"></i>BeiDou</span>
           <span><i style="background:#f8f7ff"></i>stars</span>
         </div>
-        <button class="sv-diag-btn" type="button" title="Open full wardriving GPS diagnostics">GPS Diagnostics</button>
+        <button class="sv-diag-btn" type="button" title="Open full wardriving GPS diagnostics"><span class="sv-dg-ic" aria-hidden="true">🛰</span><span class="sv-dg-tx">GPS Diagnostics</span></button>
         <button class="sv-snap" type="button" title="Save PNG snapshot">📷</button>
         <button class="sv-vr" type="button" title="Side-by-side 3D (Quest 3 / SBS)">🥽</button>
         <button class="sv-close" title="Close (Esc)">✕</button>
@@ -2018,29 +2046,83 @@
     if (diagModal) diagModal.addEventListener('click', (e) => { if (e.target === diagModal) closeGpsDiagnosticsPopup(); });
     overlay.querySelector('.sv-close').addEventListener('click', close);
     svg.addEventListener('click', onSvgClick);
+    // Pan (1 pointer) and pinch-zoom (2 pointers) for both mouse and touch.
     let dragState = null;
+    const activePointers = new Map();   // pointerId -> {x, y}
+    let pinchState = null;              // {dist, midX, midY} of the last frame
+    function pointersCenter() {
+      let sx = 0, sy = 0;
+      activePointers.forEach(p => { sx += p.x; sy += p.y; });
+      const n = activePointers.size || 1;
+      return { x: sx / n, y: sy / n };
+    }
+    function pointersDist() {
+      const pts = Array.from(activePointers.values());
+      if (pts.length < 2) return 0;
+      return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    }
     svg.addEventListener('pointerdown', (e) => {
-      if (!enhanced || e.button !== 0) return;
-      dragState = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: skyPanX, panY: skyPanY, moved: false };
-      svg.setPointerCapture(e.pointerId);
-      overlay.classList.add('sv-dragging');
+      if (!enhanced || (e.pointerType === 'mouse' && e.button !== 0)) return;
+      activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { svg.setPointerCapture(e.pointerId); } catch (_) {}
+      if (activePointers.size >= 2) {
+        // Second finger down: switch from pan to pinch.
+        dragState = null;
+        const c = pointersCenter();
+        pinchState = { dist: pointersDist(), midX: c.x, midY: c.y };
+        overlay.classList.add('sv-dragging');
+      } else {
+        dragState = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: skyPanX, panY: skyPanY, moved: false };
+        overlay.classList.add('sv-dragging');
+      }
     });
     svg.addEventListener('pointermove', (e) => {
       updateCursorReadout(e);
+      if (activePointers.has(e.pointerId)) activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinchState && activePointers.size >= 2) {
+        // Pinch: scale by finger-distance ratio, anchored at the moving midpoint,
+        // and pan by how far that midpoint slid so two-finger drag also moves the sky.
+        const dist = pointersDist();
+        const c = pointersCenter();
+        if (pinchState.dist > 0 && dist > 0) {
+          const ratio = dist / pinchState.dist;
+          setSkyPan(skyPanX + (c.x - pinchState.midX), skyPanY + (c.y - pinchState.midY));
+          setSkyZoom(skyZoom * ratio, { x: c.x, y: c.y });
+        }
+        pinchState = { dist, midX: c.x, midY: c.y };
+        suppressNextClick = true;
+        e.preventDefault();
+        return;
+      }
       if (!dragState || e.pointerId !== dragState.id) return;
       const dx = e.clientX - dragState.x, dy = e.clientY - dragState.y;
       if (Math.abs(dx) + Math.abs(dy) > 3) dragState.moved = true;
       setSkyPan(dragState.panX + dx, dragState.panY + dy);
     });
     function finishDrag(e) {
-      if (!dragState || e.pointerId !== dragState.id) return;
+      const wasTracked = activePointers.delete(e.pointerId);
+      try { svg.releasePointerCapture(e.pointerId); } catch (_) {}
+      if (pinchState) {
+        if (activePointers.size < 2) pinchState = null;
+        // A finger still down after a pinch resumes panning from its position.
+        if (activePointers.size === 1) {
+          const [id, p] = Array.from(activePointers.entries())[0];
+          dragState = { id, x: p.x, y: p.y, panX: skyPanX, panY: skyPanY, moved: true };
+        }
+        if (!activePointers.size) overlay.classList.remove('sv-dragging');
+        return;
+      }
+      if (!dragState || e.pointerId !== dragState.id) {
+        if (!activePointers.size) overlay.classList.remove('sv-dragging');
+        return;
+      }
       if (dragState.moved) {
         suppressNextClick = true;
-        e.preventDefault();
+        if (e.cancelable) e.preventDefault();
       }
-      try { svg.releasePointerCapture(e.pointerId); } catch (_) {}
       overlay.classList.remove('sv-dragging');
       window.setTimeout(() => { dragState = null; }, 0);
+      void wasTracked;
     }
     svg.addEventListener('pointerup', finishDrag);
     svg.addEventListener('pointercancel', finishDrag);

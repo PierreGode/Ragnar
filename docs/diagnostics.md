@@ -259,6 +259,13 @@ only; the polar view is unchanged.
   constellation-coloured ring.
 - **Zoom / pan**, click-through info cards, the **GNSS radar** minimap, and a
   **📷 snapshot** button (header) that rasterises the current sky to a PNG.
+- **Mobile / touch friendly.** On phones the observatory is a full-screen,
+  notch-aware layout: **pinch-to-zoom and two-finger drag** pan the sky (the tiny
+  +/− pad is hidden on touch since the gesture replaces it), the header collapses
+  to icon-only buttons (Diagnostics becomes a 🛰 icon), the legend / Layers key /
+  brand / pointer-readout hide to reclaim space, tap targets grow to ~40 px, and
+  the time scrubber spans the full width above the safe-area inset. A single mouse
+  pointer still pans exactly as before, and the mouse wheel still zooms.
 
 Still no external libraries or CDN — the astronomy math (Sun/Moon low-precision
 ephemerides, DOP inversion) is plain JS, and the two new catalogs are bundled
