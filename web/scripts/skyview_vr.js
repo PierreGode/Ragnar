@@ -54,6 +54,50 @@
   let userZoom = 1;
   const ZOOM_MIN = 1, ZOOM_MAX = 5;
   let zoomable = [];
+  let billboards = [];
+
+  function makeYLockedBillboard(map, sizeX, sizeY, color) {
+    const mat = new THREE.MeshBasicMaterial({
+      map: map || null,
+      color: color != null ? color : 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(sizeX, sizeY == null ? sizeX : sizeY), mat);
+    mesh.userData._billboard = true;
+    billboards.push(mesh);
+    return mesh;
+  }
+
+  function updateBillboards() {
+    if (!camera) return;
+    const cam = camera.getWorldPosition(new THREE.Vector3());
+    const tmp = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const m = new THREE.Matrix4();
+    const right = new THREE.Vector3();
+    const trueUp = new THREE.Vector3();
+    const fwd = new THREE.Vector3();
+    for (const bb of billboards) {
+      if (!bb.parent || bb.visible === false) continue;
+      bb.getWorldPosition(tmp);
+      fwd.copy(cam).sub(tmp);
+      if (fwd.lengthSq() < 1e-6) continue;
+      fwd.normalize();
+      right.crossVectors(up, fwd);
+      if (right.lengthSq() < 1e-6) right.set(1, 0, 0); else right.normalize();
+      trueUp.crossVectors(fwd, right);
+      m.makeBasis(right, trueUp, fwd);
+      const q = new THREE.Quaternion().setFromRotationMatrix(m);
+      if (bb.parent) {
+        const pq = bb.parent.getWorldQuaternion(new THREE.Quaternion()).invert();
+        bb.quaternion.copy(pq.multiply(q));
+      } else {
+        bb.quaternion.copy(q);
+      }
+    }
+  }
   let passthrough = true;
   try { passthrough = localStorage.getItem('ragnar.skyview.xr.passthrough') !== '0'; } catch (_) {}
 
@@ -246,10 +290,10 @@
     ctx.fillText(text, 256, 64);
     const tex = new THREE.CanvasTexture(canvas);
     tex.needsUpdate = true;
-    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: false });
-    const sprite = new THREE.Sprite(mat);
-    sprite.scale.set(30, 7.5, 1);
-    return sprite;
+    const bb = makeYLockedBillboard(tex, 30, 7.5);
+    bb.material.depthTest = false;
+    bb.renderOrder = 900;
+    return bb;
   }
 
   // ---- Procedural planet textures ------------------------------------
@@ -442,10 +486,9 @@
     grad.addColorStop(1, 'rgba(255,80,0,0)');
     ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
     const tex = new THREE.CanvasTexture(canvas);
-    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
-    const s = new THREE.Sprite(mat);
-    s.scale.set(radius * 6, radius * 6, 1);
-    return s;
+    const bb = makeYLockedBillboard(tex, radius * 6, radius * 6);
+    bb.material.blending = THREE.AdditiveBlending;
+    return bb;
   }
 
   function buildSaturnRings(radius) {
@@ -482,10 +525,7 @@
 
   function makePlanetSprite(name, sizeWorld) {
     const tex = planetImageTexture(name);
-    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
-    const s = new THREE.Sprite(mat);
-    s.scale.set(sizeWorld, sizeWorld, 1);
-    return s;
+    return makeYLockedBillboard(tex, sizeWorld, sizeWorld);
   }
 
   function buildPlanets(lat, lon, date) {
@@ -658,17 +698,11 @@
 
   function buildSatModel(color) {
     const g = new THREE.Group();
-    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: satTexture(), transparent: true, depthWrite: false
-    }));
-    spr.scale.set(7, 7, 1);
+    const spr = makeYLockedBillboard(satTexture(), 7, 7);
     g.add(spr);
     // Tiny constellation-colored dot below the sprite so you can still tell
     // GPS from GLONASS from Galileo etc. at a glance.
-    const tag = new THREE.Sprite(new THREE.SpriteMaterial({
-      color, transparent: true, depthWrite: false
-    }));
-    tag.scale.set(1.4, 1.4, 1);
+    const tag = makeYLockedBillboard(null, 1.4, 1.4, color);
     tag.position.set(0, -3.6, 0);
     g.add(tag);
     return g;
@@ -1215,7 +1249,7 @@
     }
     session = null; renderer = null; scene = null; camera = null;
     baseGroup = null; pointables = []; controllers = []; rayLines = [];
-    zoomable = []; userZoom = 1;
+    zoomable = []; userZoom = 1; billboards = [];
     raycaster = null; infoPanel = null; hoveredObject = null;
     skyDomeMesh = null; skyGroup = null;
     issMesh = null; issLabel = null; issState = null;
@@ -1429,6 +1463,7 @@
       }
 
       for (const ctl of controllers) if (ctl.visible !== false) highlightAlong(ctl);
+      updateBillboards();
       renderer.render(scene, camera);
     });
   }
