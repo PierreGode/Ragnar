@@ -51,6 +51,9 @@
     const v = parseFloat(localStorage.getItem('ragnar.skyview.xr.rotY'));
     if (isFinite(v)) skyRotationY = v;
   } catch (_) {}
+  let userZoom = 1;
+  const ZOOM_MIN = 1, ZOOM_MAX = 5;
+  let zoomable = [];
   let passthrough = true;
   try { passthrough = localStorage.getItem('ragnar.skyview.xr.passthrough') !== '0'; } catch (_) {}
 
@@ -194,6 +197,7 @@
       ring.lookAt(pos.clone().multiplyScalar(2));
       ring.userData = { kind: 'dso', id, name, dtype: typeNames[type] || type, mag, ra, dec, alt: p.alt, az: p.az, color: iconColor, dim };
       pointables.push(ring);
+      zoomable.push(ring);
       group.add(ring);
       // Show a label for the brighter Messier objects so the sky doesn't get
       // overrun with tiny text.
@@ -464,9 +468,11 @@
       sMesh.position.copy(pos);
       sMesh.userData = { kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az };
       pointables.push(sMesh);
+      zoomable.push(sMesh);
       group.add(sMesh);
       const glow = buildSunGlow(sunR);
       glow.position.copy(pos);
+      zoomable.push(glow);
       group.add(glow);
       const label = makeLabelSprite('Sun', '#ffdf7e');
       label.position.copy(pos).multiplyScalar(1.09);
@@ -481,6 +487,7 @@
       mMesh.position.copy(pos);
       mMesh.userData = { kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, illum: moon.illum };
       pointables.push(mMesh);
+      zoomable.push(mMesh);
       group.add(mMesh);
       const label = makeLabelSprite('Moon', '#e2e8f0');
       label.position.copy(pos).multiplyScalar(1.1);
@@ -496,11 +503,13 @@
       mesh.position.copy(pos);
       mesh.userData = { kind: 'planet', name: p.name, alt: p.alt, az: p.az, ra: p.ra, dec: p.dec };
       pointables.push(mesh);
+      zoomable.push(mesh);
       group.add(mesh);
       if (p.name === 'Saturn') {
         const rings = buildSaturnRings(r);
         rings.position.copy(pos);
         rings.userData = { kind: 'planet-ring', name: 'Saturn ring' };
+        zoomable.push(rings);
         group.add(rings);
       }
       const label = makeLabelSprite(p.name, '#f5d58a');
@@ -607,6 +616,7 @@
     issMesh.userData = { kind: 'iss', name: 'ISS' };
     issMesh.visible = false;
     pointables.push(issMesh);
+    zoomable.push(issMesh);
     g.add(issMesh);
     issLabel = makeLabelSprite('ISS', '#a7f3d0');
     issLabel.visible = false;
@@ -651,6 +661,10 @@
     if (!sky || !sky.length) return group;
     for (const s of sky) {
       if (s.az == null || s.elev == null) continue;
+      // Only render sats the receiver is actually locked onto — anything with
+      // SNR=0 is either obstructed by the environment (buildings, balcony
+      // wall, etc.) or below the tracking threshold, so it shouldn't appear.
+      if (!(typeof s.snr === 'number' && s.snr > 0)) continue;
       const color = SAT_COLORS[s.constellation] || 0x94a3b8;
       const model = buildSatModel(color);
       const pos = altAzToVec(s.az, s.elev, R_SATS);
@@ -658,6 +672,7 @@
       model.lookAt(pos.clone().multiplyScalar(2));
       model.userData = { kind: 'sat', sat: s, alt: s.elev, az: s.az };
       pointables.push(model);
+      zoomable.push(model);
       group.add(model);
       const label = makeLabelSprite(
         (s.constellation || 'sat') + (s.prn != null ? ' ' + s.prn : ''),
@@ -959,6 +974,13 @@
     return false;
   }
 
+  function applyZoom() {
+    for (const o of zoomable) {
+      if (o.userData._baseScale == null) o.userData._baseScale = o.scale.x;
+      o.scale.setScalar(o.userData._baseScale * userZoom);
+    }
+  }
+
   // ---- Session lifecycle --------------------------------------------
   function showXrUnavailableModal(reason) {
     const insecure = !window.isSecureContext;
@@ -1084,8 +1106,8 @@
           '<div style="font-size:24px;">🥽</div>' +
           '<h3 style="margin:0;color:#7dd3fc;font-size:16px;letter-spacing:.06em;text-transform:uppercase;">Enter Ragnar Observatory VR</h3>' +
         '</div>' +
-        '<p style="margin:6px 0 8px;font-size:12px;color:#9fb0c3;line-height:1.5;">Face north when you enter — WebXR has no compass, so "-Z is north" only holds if you start facing that way. Use the right thumbstick to spin the sky until it matches (auto-saves).</p>' +
-        '<p style="margin:0 0 14px;font-size:12px;color:#9fb0c3;line-height:1.5;">Trigger a satellite, planet, or bright star to inspect it. Grip / menu to exit.</p>' +
+        '<p style="margin:6px 0 8px;font-size:12px;color:#9fb0c3;line-height:1.5;">Right thumbstick: rotate the sky to align north (WebXR has no compass — offset auto-saves). Left thumbstick up/down: zoom objects in/out.</p>' +
+        '<p style="margin:0 0 14px;font-size:12px;color:#9fb0c3;line-height:1.5;">Only satellites the receiver is actively tracking (SNR&nbsp;&gt;&nbsp;0) are shown — obstructed sats stay hidden. Trigger to inspect. Grip / menu to exit.</p>' +
         '<div style="font-size:11px;color:#7f93ad;background:rgba(2,6,15,.6);border:1px solid rgba(125,211,252,.14);border-radius:8px;padding:8px 10px;margin-bottom:14px;font-family:ui-monospace,monospace;">' + posLine + '</div>' +
         '<label class="sv-xr-toggle" style="display:flex;align-items:center;justify-content:space-between;gap:14px;background:rgba(3,10,22,.7);border:1px solid rgba(125,211,252,.2);border-radius:10px;padding:12px 14px;cursor:pointer;user-select:none;">' +
           '<span>' +
@@ -1141,6 +1163,7 @@
     }
     session = null; renderer = null; scene = null; camera = null;
     baseGroup = null; pointables = []; controllers = []; rayLines = [];
+    zoomable = []; userZoom = 1;
     raycaster = null; infoPanel = null; hoveredObject = null;
     skyDomeMesh = null; skyGroup = null;
     issMesh = null; issLabel = null; issState = null;
@@ -1328,22 +1351,32 @@
       }
 
       // Right thumbstick rotates the sky (WebXR gives no compass, so the user
-      // aligns north manually once). Deadzone 0.15, ~1.5 rad/s at full push.
+      // aligns north manually once). Left thumbstick vertical = zoom.
       if (session && session.inputSources && skyGroup) {
-        let stickX = 0;
+        let stickRX = 0, stickLY = 0;
         for (const src of session.inputSources) {
-          if (!src.gamepad || src.handedness !== 'right') continue;
+          if (!src.gamepad) continue;
           const axes = src.gamepad.axes || [];
-          stickX = axes.length >= 3 ? (axes[2] || 0) : (axes[0] || 0);
+          if (src.handedness === 'right') {
+            stickRX = axes.length >= 3 ? (axes[2] || 0) : (axes[0] || 0);
+          } else if (src.handedness === 'left') {
+            stickLY = axes.length >= 4 ? (axes[3] || 0) : (axes[1] || 0);
+          }
         }
-        if (Math.abs(stickX) > 0.15) {
-          skyRotationY -= stickX * dtSec * 1.5;
+        if (Math.abs(stickRX) > 0.15) {
+          skyRotationY -= stickRX * dtSec * 1.5;
           skyGroup.rotation.y = skyRotationY;
           saveThrottle += dtSec;
           if (saveThrottle > 0.5) {
             saveThrottle = 0;
             try { localStorage.setItem('ragnar.skyview.xr.rotY', String(skyRotationY)); } catch (_) {}
           }
+        }
+        if (Math.abs(stickLY) > 0.15) {
+          // Push up (negative axis Y in xr-standard) = zoom in.
+          userZoom -= stickLY * dtSec * 2.2;
+          userZoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, userZoom));
+          applyZoom();
         }
       }
 
