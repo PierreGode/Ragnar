@@ -545,15 +545,17 @@
     if (insecure) {
       body =
         '<p style="margin:0 0 10px;font-size:13px;line-height:1.55;color:#cbd5e1;"><b style="color:#fca5a5;">Insecure origin.</b> Meta Quest Browser blocks WebXR on plain HTTP. Ragnar is served over HTTP on your LAN, so <code style="color:#fecaca;">navigator.xr</code> is disabled here.</p>' +
-        '<p style="margin:0 0 8px;font-size:12px;color:#9fb0c3;">Fix (choose one):</p>' +
-        '<ol style="margin:0 0 12px 20px;padding:0;font-size:12px;color:#cbd5e1;line-height:1.65;">' +
-          '<li>On the Quest, open <code style="color:#e0f2fe;">chrome://flags</code> → search <b>Insecure origins</b> → add <code style="color:#e0f2fe;">' + location.origin + '</code> → relaunch the browser.</li>' +
-          '<li>Or serve Ragnar over HTTPS (self-signed cert is fine, bypass the warning).</li>' +
+        '<p style="margin:0 0 6px;font-size:12px;color:#9fb0c3;">Easiest fix — let Ragnar generate a self-signed certificate and switch you over:</p>' +
+        '<div style="margin:0 0 14px;">' +
+          '<button type="button" class="sv-xr-ssl-btn" style="width:100%;background:linear-gradient(180deg,#10b981,#047857);color:#fff;border:none;border-radius:8px;padding:11px 16px;cursor:pointer;font-weight:600;letter-spacing:.03em;font-size:13px;">🔐 Generate SSL and switch to HTTPS</button>' +
+          '<div class="sv-xr-ssl-status" style="margin-top:8px;font-size:11px;color:#9fb0c3;min-height:14px;"></div>' +
+        '</div>' +
+        '<p style="margin:0 0 6px;font-size:11px;color:#7f93ad;">Or, manually:</p>' +
+        '<ol style="margin:0 0 12px 20px;padding:0;font-size:11px;color:#94a3b8;line-height:1.65;">' +
+          '<li>On the Quest, open <code style="color:#e0f2fe;">chrome://flags</code> → <b>Insecure origins</b> → add <code style="color:#e0f2fe;">' + location.origin + '</code>.</li>' +
         '</ol>' +
-        '<div style="background:#02050d;border:1px solid rgba(125,211,252,.2);color:#e0f2fe;padding:10px 12px;border-radius:8px;font-size:12px;font-family:ui-monospace,monospace;">' +
-          'isSecureContext: ' + window.isSecureContext + '<br>' +
-          'navigator.xr: ' + (hasXR ? 'present' : 'undefined') + '<br>' +
-          'reason: ' + (reason || 'unknown') +
+        '<div style="background:#02050d;border:1px solid rgba(125,211,252,.2);color:#94a3b8;padding:8px 10px;border-radius:8px;font-size:10px;font-family:ui-monospace,monospace;">' +
+          'isSecureContext: ' + window.isSecureContext + ' · navigator.xr: ' + (hasXR ? 'present' : 'undefined') +
         '</div>';
     } else {
       body =
@@ -579,9 +581,38 @@
           '<button type="button" style="background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;border:none;border-radius:8px;padding:9px 18px;cursor:pointer;font-weight:600;letter-spacing:.03em;">Got it</button>' +
         '</div>' +
       '</div>';
-    modal.querySelector('button').addEventListener('click', () => modal.remove());
+    const closeBtn = modal.querySelector('button:not(.sv-xr-ssl-btn)');
+    if (closeBtn) closeBtn.addEventListener('click', () => modal.remove());
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     document.body.appendChild(modal);
+    const sslBtn = modal.querySelector('.sv-xr-ssl-btn');
+    const sslStatus = modal.querySelector('.sv-xr-ssl-status');
+    if (sslBtn) {
+      sslBtn.addEventListener('click', async () => {
+        sslBtn.disabled = true;
+        sslBtn.style.opacity = '0.7';
+        sslBtn.textContent = 'Generating certificate…';
+        if (sslStatus) sslStatus.textContent = '';
+        try {
+          const r = await fetch('/api/ssl/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok || !d.ok) {
+            throw new Error(d.error || ('HTTP ' + r.status));
+          }
+          if (sslStatus) sslStatus.textContent = 'HTTPS listener on port ' + d.https_port + ' — redirecting…';
+          sslBtn.textContent = '✓ Redirecting to HTTPS';
+          const target = 'https://' + location.hostname + ':' + d.https_port + location.pathname + location.search + location.hash;
+          // Small delay so the user sees the confirmation.
+          setTimeout(() => { location.href = target; }, 900);
+        } catch (err) {
+          console.error('[RagnarSkyViewVR] SSL enable failed', err);
+          if (sslStatus) sslStatus.innerHTML = '<span style="color:#fca5a5;">Failed: ' + (err && err.message ? err.message : err) + '</span>';
+          sslBtn.disabled = false;
+          sslBtn.style.opacity = '1';
+          sslBtn.textContent = '🔐 Retry generating SSL';
+        }
+      });
+    }
     console.log('[RagnarSkyViewVR] not available:', {
       isSecureContext: window.isSecureContext,
       hasXR: hasXR,

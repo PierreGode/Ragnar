@@ -14535,6 +14535,154 @@ def _parse_toml_basic(filepath):
     return result
 
 
+_https_listener_state = {'started': False, 'port': None, 'server': None, 'thread': None}
+
+
+def _detect_lan_ips():
+    ips = set()
+    try:
+        import socket as _sock
+        hostname = _sock.gethostname()
+        try:
+            for res in _sock.getaddrinfo(hostname, None, _sock.AF_INET):
+                ips.add(res[4][0])
+        except Exception:
+            pass
+        try:
+            s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+            s.settimeout(0.5)
+            s.connect(('8.8.8.8', 53))
+            ips.add(s.getsockname()[0])
+            s.close()
+        except Exception:
+            pass
+        try:
+            import netifaces
+            for iface in netifaces.interfaces():
+                for addr in netifaces.ifaddresses(iface).get(netifaces.AF_INET, []) or []:
+                    ip = addr.get('addr')
+                    if ip and not ip.startswith('169.254.') and ip != '127.0.0.1':
+                        ips.add(ip)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    return sorted(ips)
+
+
+def _generate_ssl_on_demand(cert_path: str, key_path: str, hostnames, ips):
+    try:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.backends import default_backend
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        import datetime as _dt
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "SE"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Ragnar"),
+            x509.NameAttribute(NameOID.COMMON_NAME, hostnames[0] if hostnames else "ragnar.local"),
+        ])
+        san = []
+        for h in hostnames:
+            try: san.append(x509.DNSName(h))
+            except Exception: pass
+        for ip in ips:
+            try: san.append(x509.IPAddress(ipaddress.ip_address(ip)))
+            except Exception: pass
+        cert = (x509.CertificateBuilder()
+                .subject_name(subject).issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(_dt.datetime.utcnow() - _dt.timedelta(minutes=5))
+                .not_valid_after(_dt.datetime.utcnow() + _dt.timedelta(days=365))
+                .add_extension(x509.SubjectAlternativeName(san), critical=False)
+                .sign(key, hashes.SHA256(), default_backend()))
+        with open(key_path, 'wb') as f:
+            f.write(key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()))
+        with open(cert_path, 'wb') as f:
+            f.write(cert.public_bytes(serialization.Encoding.PEM))
+        return True
+    except ImportError:
+        logger.error("cryptography library not installed - cannot generate SSL cert on demand")
+        return False
+    except Exception as e:
+        logger.error(f"On-demand SSL cert generation failed: {e}")
+        return False
+
+
+@app.route('/api/ssl/enable', methods=['POST'])
+def api_ssl_enable():
+    global _https_listener_state
+    try:
+        req_host = (request.host or '').split(':')[0]
+        try:
+            http_port = int((request.host or '').split(':')[1]) if ':' in (request.host or '') else 80
+        except Exception:
+            http_port = 80
+        https_port = http_port + 1 if http_port < 65500 else 8443
+        if https_port == 443 or https_port == http_port:
+            https_port = 8443
+
+        if _https_listener_state['started']:
+            return jsonify({
+                'ok': True,
+                'https_port': _https_listener_state['port'],
+                'already_running': True,
+                'https_url': f"https://{req_host}:{_https_listener_state['port']}"
+            })
+
+        cert_dir = os.path.join(os.path.dirname(__file__), 'certs')
+        os.makedirs(cert_dir, exist_ok=True)
+        cert_path = os.path.join(cert_dir, 'ragnar.crt')
+        key_path = os.path.join(cert_dir, 'ragnar.key')
+
+        lan_ips = _detect_lan_ips()
+        hostnames = ['localhost', 'ragnar.local']
+        if req_host and req_host not in hostnames and not req_host.replace('.', '').isdigit():
+            hostnames.insert(0, req_host)
+        if req_host and req_host.replace('.', '').isdigit() and req_host not in lan_ips:
+            lan_ips.append(req_host)
+        if '127.0.0.1' not in lan_ips:
+            lan_ips.append('127.0.0.1')
+
+        need_regen = not (os.path.exists(cert_path) and os.path.exists(key_path))
+        if not need_regen:
+            try:
+                st = os.stat(cert_path)
+                if (time.time() - st.st_mtime) > 340 * 86400:
+                    need_regen = True
+            except Exception:
+                need_regen = True
+        if need_regen and not _generate_ssl_on_demand(cert_path, key_path, hostnames, lan_ips):
+            return jsonify({'ok': False, 'error': 'Failed to generate SSL certificate. Is python3-cryptography installed?'}), 500
+
+        try:
+            from werkzeug.serving import make_server
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'werkzeug not available: {e}'}), 500
+
+        server = make_server('0.0.0.0', https_port, app, ssl_context=(cert_path, key_path), threaded=True)
+        t = threading.Thread(target=server.serve_forever, name='ragnar-https', daemon=True)
+        t.start()
+        _https_listener_state.update({'started': True, 'port': https_port, 'server': server, 'thread': t})
+        logger.info(f"HTTPS listener started on port {https_port} (SAN hosts={hostnames}, ips={lan_ips})")
+        return jsonify({
+            'ok': True,
+            'https_port': https_port,
+            'https_url': f"https://{req_host}:{https_port}",
+            'san_ips': lan_ips,
+            'san_hostnames': hostnames
+        })
+    except Exception as e:
+        logger.error(f"api_ssl_enable failed: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/kill', methods=['POST'])
 def kill_switch():
     """
