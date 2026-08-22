@@ -1803,7 +1803,9 @@
         #ragnar-skyview svg{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;}
         #ragnar-skyview .sv-note{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
           background:rgba(180,121,30,.18);border:1px solid rgba(234,179,8,.4);color:#f4d9a6;
-          padding:6px 12px;border-radius:8px;font-size:12px;}
+          padding:6px 12px;border-radius:8px;font-size:12px;opacity:.15;}
+        /* Enhanced mode has the time scrubber along the bottom — lift the note clear of it. */
+        #ragnar-skyview.sv-enhanced .sv-note{bottom:74px;}
         #ragnar-skyview .sv-info{position:absolute;display:none;min-width:230px;max-width:310px;
           background:rgba(10,17,32,.96);border:1px solid #2a3a55;border-radius:10px;padding:10px 12px;
           box-shadow:0 8px 30px rgba(0,0,0,.55);pointer-events:none;z-index:5;}
@@ -1940,6 +1942,7 @@
           #ragnar-skyview.sv-enhanced .sv-chip-ic{font-size:16px;}
           #ragnar-skyview.sv-enhanced .sv-time{width:calc(100vw - 20px);bottom:max(14px,env(safe-area-inset-bottom));}
           #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 56px);}
+          #ragnar-skyview.sv-enhanced .sv-note{bottom:calc(max(14px,env(safe-area-inset-bottom)) + 62px);max-width:calc(100vw - 24px);}
         }
         /* Touch devices: no hover cursor readout, bigger tap targets, pinch replaces the tiny zoom pad. */
         @media (pointer:coarse){
