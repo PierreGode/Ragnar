@@ -928,10 +928,10 @@
   // ---- Info panel (canvas texture on a billboard) --------------------
   function buildInfoPanel() {
     const canvas = document.createElement('canvas');
-    canvas.width = 1024; canvas.height = 512;
+    canvas.width = 900; canvas.height = 1200;
     const tex = new THREE.CanvasTexture(canvas);
     const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.9), mat);
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.35, 1.8), mat);
     mesh.userData._canvas = canvas;
     mesh.userData._texture = tex;
     mesh.renderOrder = 999;
@@ -939,22 +939,23 @@
     return mesh;
   }
 
-  function drawInfoPanel(mesh, title, lines, accent) {
+  function drawInfoPanel(mesh, title, sections, accent) {
     const canvas = mesh.userData._canvas;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Backdrop.
+    const W = canvas.width, H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+    // Backdrop (rounded rectangle).
     ctx.fillStyle = 'rgba(3, 10, 22, 0.94)';
     ctx.strokeStyle = accent || '#38bdf8';
     ctx.lineWidth = 4;
     const r = 24;
     ctx.beginPath();
-    ctx.moveTo(r, 0); ctx.lineTo(canvas.width - r, 0);
-    ctx.quadraticCurveTo(canvas.width, 0, canvas.width, r);
-    ctx.lineTo(canvas.width, canvas.height - r);
-    ctx.quadraticCurveTo(canvas.width, canvas.height, canvas.width - r, canvas.height);
-    ctx.lineTo(r, canvas.height);
-    ctx.quadraticCurveTo(0, canvas.height, 0, canvas.height - r);
+    ctx.moveTo(r, 0); ctx.lineTo(W - r, 0);
+    ctx.quadraticCurveTo(W, 0, W, r);
+    ctx.lineTo(W, H - r);
+    ctx.quadraticCurveTo(W, H, W - r, H);
+    ctx.lineTo(r, H);
+    ctx.quadraticCurveTo(0, H, 0, H - r);
     ctx.lineTo(0, r);
     ctx.quadraticCurveTo(0, 0, r, 0);
     ctx.closePath();
@@ -965,21 +966,120 @@
     ctx.font = 'bold 56px system-ui, sans-serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(title, 40, 34);
-    // Lines.
-    ctx.font = '38px system-ui, sans-serif';
-    ctx.fillStyle = '#e2e8f0';
-    let y = 130;
-    for (const line of lines) {
-      ctx.fillText(line, 40, y);
-      y += 54;
+    ctx.fillText(_ellipsize(ctx, title, W - 80), 40, 32);
+    // Sections.
+    let y = 118;
+    const PAD_L = 40, PAD_R = 40;
+    for (const sec of sections) {
+      if (y > H - 60) break;
+      // Section header.
+      ctx.font = 'bold 24px system-ui, sans-serif';
+      ctx.fillStyle = accent || '#7dd3fc';
+      ctx.textAlign = 'left';
+      ctx.fillText((sec.header || '').toUpperCase(), PAD_L, y);
+      y += 8;
+      // Separator line.
+      ctx.strokeStyle = 'rgba(125,211,252,0.24)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(PAD_L, y + 22);
+      ctx.lineTo(W - PAD_R, y + 22);
+      ctx.stroke();
+      y += 34;
+      // Rows.
+      for (const [label, value] of (sec.rows || [])) {
+        if (y > H - 40) break;
+        ctx.font = '28px system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#9fb0c3';
+        ctx.fillText(_ellipsize(ctx, String(label), (W - PAD_L - PAD_R) * 0.55), PAD_L, y);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = 'bold 28px system-ui, sans-serif';
+        ctx.fillText(_ellipsize(ctx, String(value == null ? '—' : value), (W - PAD_L - PAD_R) * 0.55), W - PAD_R, y);
+        y += 42;
+      }
+      y += 16;
     }
     mesh.userData._texture.needsUpdate = true;
+  }
+
+  function _ellipsize(ctx, str, maxWidth) {
+    if (!str) return '';
+    if (ctx.measureText(str).width <= maxWidth) return str;
+    let lo = 0, hi = str.length;
+    while (lo + 1 < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ctx.measureText(str.slice(0, mid) + '…').width <= maxWidth) lo = mid;
+      else hi = mid;
+    }
+    return str.slice(0, lo) + '…';
   }
 
   function fmtDeg(v, dp) {
     return (v == null || !isFinite(v)) ? '—' : v.toFixed(dp == null ? 1 : dp) + '°';
   }
+  function fmtRa(ra) {
+    if (typeof ra !== 'number' || !isFinite(ra)) return '—';
+    const h = ra / 15;
+    const hh = Math.floor(h);
+    const mm = Math.floor((h - hh) * 60);
+    const ss = Math.round((((h - hh) * 60) - mm) * 60);
+    return hh + 'h ' + String(mm).padStart(2, '0') + 'm ' + String(ss).padStart(2, '0') + 's';
+  }
+  function altitudeBand(alt) {
+    if (alt >= 75) return 'near zenith';
+    if (alt >= 45) return 'high sky';
+    if (alt >= 20) return 'mid altitude';
+    if (alt >= 5) return 'low horizon';
+    if (alt >= 0) return 'at horizon';
+    return 'below horizon';
+  }
+  function airmass(alt) {
+    if (typeof alt !== 'number' || alt <= 0) return '—';
+    return (1 / Math.max(0.12, Math.sin(alt * D2R))).toFixed(2) + '×';
+  }
+  function magnitudeClass(mag) {
+    if (mag < 0) return 'brilliant';
+    if (mag < 1) return 'navigation star';
+    if (mag < 3) return 'bright naked-eye';
+    if (mag < 5.5) return 'naked-eye dark sky';
+    return 'faint';
+  }
+  function brightnessVsVega(mag) {
+    if (typeof mag !== 'number' || !isFinite(mag)) return '—';
+    const ratio = Math.pow(2.512, -mag);
+    if (ratio >= 10) return ratio.toFixed(0) + '× Vega';
+    if (ratio >= 1) return ratio.toFixed(1) + '× Vega';
+    return (ratio * 100).toFixed(0) + '% of Vega';
+  }
+  function signalQuality(snr) {
+    if (typeof snr !== 'number' || snr <= 0) return 'not tracked';
+    if (snr >= 40) return 'excellent';
+    if (snr >= 30) return 'strong';
+    if (snr >= 20) return 'usable';
+    return 'weak';
+  }
+  function planetCategory(name) {
+    if (name === 'Moon') return 'natural satellite';
+    if (name === 'Mercury' || name === 'Venus') return 'inner planet';
+    if (name === 'Mars') return 'terrestrial planet';
+    if (name === 'Jupiter' || name === 'Saturn') return 'gas giant';
+    return 'ice giant';
+  }
+  const CONSTELLATION_NAMES_VR = {
+    And: 'Andromeda', Aql: 'Aquila', Aqr: 'Aquarius', Ari: 'Aries', Aur: 'Auriga',
+    Boo: 'Boötes', Cnc: 'Cancer', CMa: 'Canis Major', CMi: 'Canis Minor',
+    Cap: 'Capricornus', Cas: 'Cassiopeia', Cen: 'Centaurus', Cep: 'Cepheus',
+    Cet: 'Cetus', Com: 'Coma Berenices', CrB: 'Corona Borealis', Crv: 'Corvus',
+    Crt: 'Crater', Cru: 'Crux', Cyg: 'Cygnus', Del: 'Delphinus', Dra: 'Draco',
+    Eri: 'Eridanus', Gem: 'Gemini', Her: 'Hercules', Hya: 'Hydra', Leo: 'Leo',
+    Lep: 'Lepus', Lib: 'Libra', Lup: 'Lupus', Lyr: 'Lyra', Oph: 'Ophiuchus',
+    Ori: 'Orion', Peg: 'Pegasus', Per: 'Perseus', Psc: 'Pisces', Pup: 'Puppis',
+    Sco: 'Scorpius', Sgr: 'Sagittarius', Ser: 'Serpens', Tau: 'Taurus',
+    Tri: 'Triangulum', UMa: 'Ursa Major', UMi: 'Ursa Minor', Vir: 'Virgo',
+    Vul: 'Vulpecula', Lyn: 'Lynx', Cam: 'Camelopardalis', CVn: 'Canes Venatici'
+  };
   function cardinal(az) {
     const dirs = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
     return dirs[Math.round(normDeg(az) / 22.5) % 16];
@@ -988,59 +1088,128 @@
   function showInfoFor(obj, ctl) {
     if (!infoPanel) return;
     const d = obj.userData;
-    let title = '', lines = [], accent = '#7dd3fc';
+    let title = '', sections = [], accent = '#7dd3fc';
     if (d.kind === 'sat') {
       const s = d.sat;
+      const hasSnr = typeof s.snr === 'number' && s.snr > 0;
       accent = '#34d399';
       title = '🛰 ' + (s.constellation || 'satellite') + (s.prn != null ? ' · PRN ' + s.prn : '');
-      lines = [
-        'Elevation ' + fmtDeg(s.elev, 0),
-        'Azimuth ' + fmtDeg(s.az, 0) + ' ' + cardinal(s.az),
-        'Signal ' + (typeof s.snr === 'number' && s.snr > 0 ? s.snr + ' dB' : 'untracked'),
-        'System ' + (s.constellation || 'unknown')
+      sections = [
+        { header: 'Sky position', rows: [
+          ['Elevation', fmtDeg(s.elev, 0)],
+          ['Azimuth', fmtDeg(s.az, 0) + ' ' + cardinal(s.az)],
+          ['Altitude band', altitudeBand(s.elev)]
+        ]},
+        { header: 'Receiver signal', rows: [
+          ['Signal', hasSnr ? s.snr + ' dB' : 'untracked'],
+          ['Quality', signalQuality(s.snr)],
+          ['Tracking', hasSnr ? 'locked' : 'visible only']
+        ]},
+        { header: 'GNSS identity', rows: [
+          ['System', s.constellation || 'unknown'],
+          ['PRN / SVID', s.prn != null ? s.prn : '—']
+        ]}
       ];
     } else if (d.kind === 'planet' || d.kind === 'sun' || d.kind === 'moon') {
       accent = d.kind === 'sun' ? '#ffdf7e' : (d.kind === 'moon' ? '#e2e8f0' : '#f5d58a');
       title = '● ' + d.name;
-      lines = [
-        'Elevation ' + fmtDeg(d.alt, 1),
-        'Azimuth ' + fmtDeg(d.az, 1) + ' ' + cardinal(d.az)
-      ];
-      if (d.kind === 'moon' && d.illum != null) lines.push('Illumination ' + Math.round(d.illum * 100) + '%');
+      const localSky = { header: 'Sky position', rows: [
+        ['Elevation', fmtDeg(d.alt, 1)],
+        ['Azimuth', fmtDeg(d.az, 1) + ' ' + cardinal(d.az)],
+        ['Altitude band', altitudeBand(d.alt)],
+        ['Airmass', airmass(d.alt)]
+      ]};
+      const equatorial = (d.ra != null && d.dec != null)
+        ? { header: 'Equatorial coordinates', rows: [
+            ['RA', fmtRa(d.ra)],
+            ['Dec', fmtDeg(d.dec, 2)]
+          ]}
+        : null;
+      const profileRows = [];
+      if (d.kind === 'sun') {
+        profileRows.push(['Type', 'G2V star (the Sun)']);
+        profileRows.push(['Visual mag', '−26.7']);
+      } else if (d.kind === 'moon') {
+        profileRows.push(['Type', planetCategory('Moon')]);
+        if (d.illum != null) profileRows.push(['Illumination', Math.round(d.illum * 100) + '%']);
+      } else {
+        profileRows.push(['Type', planetCategory(d.name)]);
+      }
+      const profile = { header: 'Object profile', rows: profileRows };
+      sections = [localSky];
+      if (equatorial) sections.push(equatorial);
+      sections.push(profile);
     } else if (d.kind === 'iss') {
       accent = '#a7f3d0';
       title = '🛰 International Space Station';
       const s = d.iss || issState || {};
-      lines = [
-        'Elevation ' + (s.el != null ? fmtDeg(s.el, 1) : '—'),
-        'Azimuth ' + (s.az != null ? fmtDeg(s.az, 1) + ' ' + cardinal(s.az) : '—'),
-        'Range ' + (s.range_km != null ? s.range_km.toFixed(0) + ' km' : '—'),
-        'Altitude ' + (s.alt_km != null ? s.alt_km.toFixed(0) + ' km' : '—'),
-        'Speed ' + (s.velocity != null ? s.velocity.toFixed(0) + ' km/h' : '—')
+      sections = [
+        { header: 'Sky position', rows: [
+          ['Elevation', s.el != null ? fmtDeg(s.el, 1) : '—'],
+          ['Azimuth', s.az != null ? fmtDeg(s.az, 1) + ' ' + cardinal(s.az) : '—'],
+          ['Range', s.range_km != null ? s.range_km.toFixed(0) + ' km' : '—']
+        ]},
+        { header: 'Orbit', rows: [
+          ['Altitude', s.alt_km != null ? s.alt_km.toFixed(0) + ' km' : '—'],
+          ['Speed', s.velocity != null ? s.velocity.toFixed(0) + ' km/h' : '—'],
+          ['Sub-point', (s.lat != null && s.lon != null) ? s.lat.toFixed(2) + ', ' + s.lon.toFixed(2) : '—']
+        ]},
+        { header: 'Source', rows: [
+          ['Data', 'wheretheiss.at (live)'],
+          ['Crew capacity', '7 astronauts']
+        ]}
       ];
     } else if (d.kind === 'dso') {
       accent = '#c4b5fd';
       title = '◇ ' + (d.name || d.id);
-      lines = [
-        'Catalog ' + (d.id || '—'),
-        'Type ' + (d.dtype || '—'),
-        'Magnitude ' + (d.mag != null ? d.mag.toFixed(1) : '—'),
-        'Elevation ' + fmtDeg(d.alt, 1),
-        'Azimuth ' + fmtDeg(d.az, 1) + ' ' + cardinal(d.az)
+      sections = [
+        { header: 'Deep-sky identity', rows: [
+          ['Catalog', d.id || '—'],
+          ['Type', d.dtype || 'deep-sky object'],
+          ['Magnitude', d.mag != null ? d.mag.toFixed(1) : '—'],
+          ['Class', d.mag != null ? magnitudeClass(d.mag) : 'telescopic'],
+          ['Dimensions', d.dim || '—']
+        ]},
+        { header: 'Equatorial coordinates', rows: [
+          ['RA', fmtRa(d.ra)],
+          ['Dec', fmtDeg(d.dec, 2)]
+        ]},
+        { header: 'Local sky', rows: [
+          ['Elevation', fmtDeg(d.alt, 1)],
+          ['Azimuth', fmtDeg(d.az, 1) + ' ' + cardinal(d.az)],
+          ['Altitude band', altitudeBand(d.alt)],
+          ['Airmass', airmass(d.alt)]
+        ]}
       ];
-      if (d.dim) lines.push('Dimensions ' + d.dim);
     } else if (d.kind === 'star') {
       accent = d.color || '#e2e8f0';
-      title = '✦ ' + (d.name || 'star') + (d.cons ? ' · ' + d.cons : '');
-      lines = [
-        'Magnitude ' + (d.mag != null ? d.mag.toFixed(2) : '—'),
-        'Elevation ' + fmtDeg(d.alt, 1),
-        'Azimuth ' + fmtDeg(d.az, 1) + ' ' + cardinal(d.az)
+      title = '✦ ' + (d.name || 'star');
+      const consFull = d.cons ? (CONSTELLATION_NAMES_VR[d.cons] || d.cons) : null;
+      sections = [
+        { header: 'Catalog identity', rows: [
+          consFull ? ['Constellation', consFull] : null,
+          ['Designation', d.name || 'unnamed'],
+          ['Magnitude', d.mag != null ? d.mag.toFixed(2) : '—'],
+          d.mag != null ? ['Class', magnitudeClass(d.mag)] : null,
+          d.mag != null ? ['Brightness', brightnessVsVega(d.mag)] : null
+        ].filter(Boolean) }
       ];
+      if (d.ra != null && d.dec != null) {
+        sections.push({ header: 'Equatorial coordinates', rows: [
+          ['RA', fmtRa(d.ra)],
+          ['Dec', fmtDeg(d.dec, 2)]
+        ]});
+      }
+      sections.push({ header: 'Local sky', rows: [
+        ['Elevation', fmtDeg(d.alt, 1)],
+        ['Azimuth', fmtDeg(d.az, 1) + ' ' + cardinal(d.az)],
+        ['Altitude band', altitudeBand(d.alt)],
+        ['Airmass', airmass(d.alt)]
+      ]});
     } else {
       return;
     }
-    drawInfoPanel(infoPanel, title, lines, accent);
+    drawInfoPanel(infoPanel, title, sections, accent);
     // Place the panel ~1.6m in front of the controller, facing the head.
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion);
     const headPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
@@ -1106,7 +1275,13 @@
       if (act && act.pulse) act.pulse(0.8, 120);
     } catch (_) {}
     if (infoPanel && ctl) {
-      drawInfoPanel(infoPanel, '🧭 Sky aligned', ['This direction is now north.', 'Fine-tune with right thumbstick.'], '#86efac');
+      drawInfoPanel(infoPanel, '🧭 Sky aligned', [
+        { header: 'Alignment', rows: [
+          ['Status', 'saved'],
+          ['This direction', 'is now north'],
+          ['Fine-tune', 'right thumbstick X']
+        ]}
+      ], '#86efac');
       const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion);
       const headPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
       infoPanel.position.copy(ctl.position).addScaledVector(dir, 1.6);
