@@ -1946,6 +1946,8 @@ def _net_integrity_check_once():
         ('cert', 'Cert', lambda: watch(nd.do_cert_watch, discover=False)),
         ('tls', 'TLS', lambda: watch(nd.do_tls_watch, interface=cap_iface)),
         ('ldap', 'LDAP', lambda: watch(nd.do_ldap_watch, interface=cap_iface)),
+        ('ssh', 'SSH', lambda: watch(nd.do_ssh_watch, interface=cap_iface)),
+        ('telnet', 'Telnet', lambda: watch(nd.do_telnet_watch, interface=cap_iface)),
     ]
 
     # LAN-only vendor switch/router guards: only auto-run when a genuine wired

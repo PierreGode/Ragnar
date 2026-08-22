@@ -37,6 +37,8 @@ import bgp_speaker
 import ldap_watch
 import path_asymmetry
 import tls_watch
+import ssh_watch
+import telnet_watch
 import wifi_analyzer
 import wifi_defense
 import report_common
@@ -45,6 +47,8 @@ import sdr_spectrum
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
+from ssh_watch import do_ssh_watch
+from telnet_watch import do_telnet_watch
 
 try:
     from flask import request, jsonify
@@ -15041,6 +15045,24 @@ def _ldap_selftest():
             'scapy': {'ran': True, 'pass': r['success']}}
 
 
+def _ssh_selftest():
+    """Adapt ssh_watch.selftest() to the aggregator's scenarios/scapy shape. The SSH
+    parse+detect path is pure-Python (scapy only for live capture)."""
+    r = ssh_watch.selftest()
+    scen = [{'name': c['name'], 'pass': c['pass']} for c in r['checks']]
+    return {'success': r['success'], 'scenarios': scen,
+            'scapy': {'ran': True, 'pass': r['success']}}
+
+
+def _telnet_selftest():
+    """Adapt telnet_watch.selftest() to the aggregator's scenarios/scapy shape. The
+    Telnet parse+detect path is pure-Python (scapy only for live capture)."""
+    r = telnet_watch.selftest()
+    scen = [{'name': c['name'], 'pass': c['pass']} for c in r['checks']]
+    return {'success': r['success'], 'scenarios': scen,
+            'scapy': {'ran': True, 'pass': r['success']}}
+
+
 # ==========================================================================
 # Vendor CVE Guards — passive Cisco / Juniper / Arista router+switch monitors
 # ==========================================================================
@@ -16737,6 +16759,7 @@ def do_routing_selftest():
               'eigrp': _eigrp_selftest(),
               'fhrp': _fhrp_selftest(), 'tls': _tls_selftest(),
               'ldap': _ldap_selftest(),
+              'ssh': _ssh_selftest(), 'telnet': _telnet_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
@@ -18038,6 +18061,28 @@ def register_network_diagnostics(app, logger=None):
         _log(f"net/ldap-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_ldap_watch(interface=iface, seconds=secs))
 
+    @app.route('/api/net/ssh-watch', methods=['GET'])
+    def net_ssh_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        iface = iface or _capture_iface()
+        secs = _clamp_int(request.args.get('seconds'), 12, 4, 60)
+        grace = _clamp_int(request.args.get('grace_seconds'), 120, 2, 900)
+        _log(f"net/ssh-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_ssh_watch(interface=iface, seconds=secs,
+                                    grace_seconds=grace))
+
+    @app.route('/api/net/telnet-watch', methods=['GET'])
+    def net_telnet_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        iface = iface or _capture_iface()
+        secs = _clamp_int(request.args.get('seconds'), 12, 4, 60)
+        _log(f"net/telnet-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_telnet_watch(interface=iface, seconds=secs))
+
     @app.route('/api/net/ipv6-watch', methods=['GET'])
     def net_ipv6_watch():
         iface = (request.args.get('interface') or '').strip() or None
@@ -19031,6 +19076,28 @@ def _cli(argv=None):
                          help='self-test the LDAP Watch detectors (no root)')
     lst.add_argument('--json', action='store_true', help='emit JSON')
 
+    sw_ = sub.add_parser('ssh-watch',
+                         help='passive SSH observer (regreSSHion / Terrapin / weak algos)')
+    sw_.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    sw_.add_argument('--seconds', '-s', type=int, default=12, help='capture window (4-60)')
+    sw_.add_argument('--grace-seconds', type=int, default=120,
+                     help="servers' LoginGraceTime, for the regreSSHion pattern")
+    sw_.add_argument('--json', action='store_true', help='emit JSON')
+
+    sst = sub.add_parser('ssh-selftest',
+                         help='self-test the SSH Watch detectors (no root)')
+    sst.add_argument('--json', action='store_true', help='emit JSON')
+
+    nw = sub.add_parser('telnet-watch',
+                        help='passive Telnet observer (CVE-2026-24061 / CVE-2026-32746)')
+    nw.add_argument('--iface', '-i', default=None, help='interface (default: route)')
+    nw.add_argument('--seconds', '-s', type=int, default=12, help='capture window (4-60)')
+    nw.add_argument('--json', action='store_true', help='emit JSON')
+
+    nst = sub.add_parser('telnet-selftest',
+                         help='self-test the Telnet Watch detectors (no root)')
+    nst.add_argument('--json', action='store_true', help='emit JSON')
+
     v6 = sub.add_parser('ipv6-watch', help='passive IPv6 first-hop (RA/DHCPv6) scan')
     v6.add_argument('--iface', '-i', default=None, help='interface (default: route)')
     v6.add_argument('--seconds', '-s', type=int, default=12, help='capture window (4-40)')
@@ -19268,6 +19335,67 @@ def _cli(argv=None):
             for sc in r['scenarios']:
                 print(f"  [{'PASS' if sc['pass'] else 'FAIL'}] {sc['name']}")
             print(f"LDAP Watch self-test: {'OK' if r['success'] else 'FAILED'}")
+        return 0 if r['success'] else 1
+
+    if args.cmd == 'ssh-watch':
+        iface = args.iface or _capture_iface()
+        r = do_ssh_watch(interface=iface, seconds=args.seconds,
+                         grace_seconds=args.grace_seconds)
+        if args.json:
+            print(json.dumps(r, indent=2, default=str))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"SSH Watch [{r.get('interface')}] {r.get('seconds')}s: "
+                  f"{r['verdict'].upper()}  ({r.get('count', 0)} flows, "
+                  f"{r.get('grace_bursts', 0)} grace bursts)")
+            for x in r.get('sessions', []):
+                if x.get('server_ident'):
+                    print(f"  {x.get('client')} -> {x.get('server')}  "
+                          f"{x.get('server_ident')}")
+                for f in x.get('findings', []):
+                    print(f"      - {f['severity']:6} {f['code']}: {f['message']}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'ssh-selftest':
+        r = _ssh_selftest()
+        if args.json:
+            print(json.dumps(r, indent=2, default=str))
+        else:
+            fails = [sc for sc in r['scenarios'] if not sc['pass']]
+            for sc in fails:
+                print(f"  [FAIL] {sc['name']}")
+            print(f"SSH Watch self-test: {len(r['scenarios'])} checks, "
+                  f"{len(fails)} failed -> {'OK' if r['success'] else 'FAILED'}")
+        return 0 if r['success'] else 1
+
+    if args.cmd == 'telnet-watch':
+        iface = args.iface or _capture_iface()
+        r = do_telnet_watch(interface=iface, seconds=args.seconds)
+        if args.json:
+            print(json.dumps(r, indent=2, default=str))
+        elif not r.get('success'):
+            print(f"error: {r.get('error')}")
+        else:
+            print(f"Telnet Watch [{r.get('interface')}] {r.get('seconds')}s: "
+                  f"{r['verdict'].upper()}  ({r.get('count', 0)} flows, "
+                  f"{r.get('findings_total', 0)} findings)")
+            for x in r.get('sessions', []):
+                print(f"  {x.get('client')} -> {x.get('server')}")
+                for f in x.get('findings', []):
+                    print(f"      - {f['severity']:8} {f['code']}: {f['desc']}")
+        return 0 if r.get('success') else 1
+
+    if args.cmd == 'telnet-selftest':
+        r = _telnet_selftest()
+        if args.json:
+            print(json.dumps(r, indent=2, default=str))
+        else:
+            fails = [sc for sc in r['scenarios'] if not sc['pass']]
+            for sc in fails:
+                print(f"  [FAIL] {sc['name']}")
+            print(f"Telnet Watch self-test: {len(r['scenarios'])} checks, "
+                  f"{len(fails)} failed -> {'OK' if r['success'] else 'FAILED'}")
         return 0 if r['success'] else 1
 
     if args.cmd == 'igmp-watch':
