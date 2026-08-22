@@ -350,7 +350,7 @@
     canvas.width = 1024; canvas.height = 512;
     const tex = new THREE.CanvasTexture(canvas);
     const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthTest: false });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(48, 24), mat);
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.9), mat);
     mesh.userData._canvas = canvas;
     mesh.userData._texture = tex;
     mesh.renderOrder = 999;
@@ -438,11 +438,16 @@
       return;
     }
     drawInfoPanel(infoPanel, title, lines, accent);
-    // Place the panel ~4m in front of the controller, facing the head.
+    // Place the panel ~1.6m in front of the controller, facing the head.
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion);
-    infoPanel.position.copy(ctl.position).addScaledVector(dir, 5);
-    infoPanel.lookAt(camera.position);
+    const headPos = new THREE.Vector3().setFromMatrixPosition(camera.matrixWorld);
+    infoPanel.position.copy(ctl.position).addScaledVector(dir, 1.6);
+    infoPanel.lookAt(headPos);
     infoPanel.visible = true;
+    if (infoPanel.userData._hideTimer) clearTimeout(infoPanel.userData._hideTimer);
+    infoPanel.userData._hideTimer = setTimeout(() => {
+      if (infoPanel) infoPanel.visible = false;
+    }, 6000);
     // Haptic pulse if the controller supports it.
     try {
       const src = ctl.userData._inputSource;
@@ -478,13 +483,14 @@
     const ctl = ev.target;
     const origin = new THREE.Vector3().setFromMatrixPosition(ctl.matrixWorld);
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion).normalize();
-    // Also allow picking bright stars from the points cloud.
-    const starHit = pickStar(origin, dir);
     const solidHit = pickAlongRay(origin, dir);
-    if (starHit && (!solidHit || starHit.dist < 6)) {
-      showInfoFor({ userData: starHit.meta }, ctl);
-    } else if (solidHit) {
+    const starHit = pickStar(origin, dir);
+    // Prefer the solid object (sat/planet) if the ray is close to it; otherwise
+    // fall back to the brightest on-axis star.
+    if (solidHit) {
       showInfoFor(solidHit, ctl);
+    } else if (starHit) {
+      showInfoFor({ userData: starHit.meta }, ctl);
     } else {
       if (infoPanel) infoPanel.visible = false;
     }
@@ -519,17 +525,32 @@
     const origin = new THREE.Vector3().setFromMatrixPosition(ctl.matrixWorld);
     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(ctl.quaternion).normalize();
     const hit = pickAlongRay(origin, dir);
-    if (hit === hoveredObject) return;
-    if (hoveredObject && hoveredObject.userData._origColor != null) {
-      hoveredObject.material.color.set(hoveredObject.userData._origColor);
-    }
-    hoveredObject = hit;
-    if (hoveredObject && hoveredObject.material && hoveredObject.material.color) {
-      if (hoveredObject.userData._origColor == null) {
-        hoveredObject.userData._origColor = hoveredObject.material.color.getHex();
+    const prevHover = ctl.userData._hover;
+    if (hit !== prevHover) {
+      if (prevHover && prevHover.userData._origColor != null && !isHoveredByOtherController(prevHover, ctl)) {
+        prevHover.material.color.setHex(prevHover.userData._origColor);
       }
-      hoveredObject.material.color.set(0xffffff);
+      if (hit && hit.material && hit.material.color) {
+        if (hit.userData._origColor == null) hit.userData._origColor = hit.material.color.getHex();
+        hit.material.color.setHex(0xffffff);
+      }
+      ctl.userData._hover = hit;
     }
+    const reticle = ctl.userData._reticle;
+    if (reticle) {
+      if (hit) {
+        reticle.position.copy(hit.getWorldPosition(new THREE.Vector3()));
+        reticle.lookAt(origin);
+        reticle.visible = true;
+      } else {
+        reticle.visible = false;
+      }
+    }
+  }
+
+  function isHoveredByOtherController(obj, notCtl) {
+    for (const c of controllers) if (c !== notCtl && c.userData._hover === obj) return true;
+    return false;
   }
 
   // ---- Session lifecycle --------------------------------------------
@@ -790,15 +811,24 @@
       ctl.addEventListener('selectstart', onSelectStart);
       ctl.addEventListener('connected', (ev) => { ctl.userData._inputSource = ev.data; });
       ctl.addEventListener('disconnected', () => { ctl.userData._inputSource = null; });
-      const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -40)]);
-      const m = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.65 });
+      const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -R_STARS)]);
+      const m = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.55 });
       const line = new THREE.Line(g, m);
       ctl.add(line);
       const puck = new THREE.Mesh(
-        new THREE.SphereGeometry(0.02, 12, 8),
+        new THREE.SphereGeometry(0.015, 12, 8),
         new THREE.MeshBasicMaterial({ color: 0x7dd3fc })
       );
       ctl.add(puck);
+      // Reticle floating at the point the ray is currently aimed at.
+      const reticle = new THREE.Mesh(
+        new THREE.RingGeometry(1.6, 2.4, 24),
+        new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthTest: false })
+      );
+      reticle.renderOrder = 998;
+      reticle.visible = false;
+      ctl.userData._reticle = reticle;
+      scene.add(reticle);
       scene.add(ctl);
       controllers.push(ctl);
       rayLines.push(line);
