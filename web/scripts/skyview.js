@@ -1044,9 +1044,8 @@
       if (pt.x >= -50 && pt.x <= W + 50 && pt.y >= -50 && pt.y <= H + 50) {
         const satR = hasSnr ? 4.2 + Math.min(4, s.snr / 14) : 4;
         const dash = s.modeled ? ' stroke-dasharray="3 2.5"' : '';
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(satR * 4).toFixed(1)}" fill="${col}" opacity="${hasSnr ? (s.modeled ? .05 : .08) : .035}"/>`);
         parts.push(`<path d="M${(pt.x - 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y - 7).toFixed(1)} L${(pt.x + 7).toFixed(1)} ${pt.y.toFixed(1)} L${pt.x.toFixed(1)} ${(pt.y + 7).toFixed(1)} Z" fill="${hasSnr && !s.modeled ? col : 'none'}" stroke="${col}" stroke-width="1.4" opacity="${hasSnr ? .9 : .42}"${dash}/>`);
-        parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y - 12).toFixed(1)}" fill="${col}" font-size="10" text-anchor="middle" opacity=".82">${esc(s.prn != null ? s.prn : '')}</text>`);
+        parts.push(`<text x="${pt.x.toFixed(1)}" y="${(pt.y + 20).toFixed(1)}" fill="${col}" font-size="10" text-anchor="middle" opacity=".82">${esc((s.constellation || '') + (s.prn != null ? ' ' + s.prn : ''))}</text>`);
         projected.push({ kind: 'sat', x: pt.x, y: pt.y, sat: s });
       }
     }

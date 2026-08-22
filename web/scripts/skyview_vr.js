@@ -615,7 +615,7 @@
     return g;
   }
 
-  function buildSatModel(color, tracked) {
+  function buildSatModel(color) {
     const g = new THREE.Group();
     const body = new THREE.Mesh(
       new THREE.BoxGeometry(1.4, 0.9, 0.9),
@@ -636,7 +636,6 @@
       strut.position.set(side * 1.2, 0, 0);
       g.add(strut);
     }
-    // Small antenna dish on top so it doesn't look symmetric front/back.
     const dish = new THREE.Mesh(
       new THREE.ConeGeometry(0.32, 0.4, 12),
       new THREE.MeshBasicMaterial({ color: 0xf1f5f9 })
@@ -644,14 +643,6 @@
     dish.position.set(0, 0.55, 0.15);
     dish.rotation.x = Math.PI;
     g.add(dish);
-    if (tracked) {
-      const glow = new THREE.Mesh(
-        new THREE.RingGeometry(2.2, 3.2, 24),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false })
-      );
-      g.add(glow);
-      g.userData._glowRing = glow;
-    }
     return g;
   }
 
@@ -661,8 +652,7 @@
     for (const s of sky) {
       if (s.az == null || s.elev == null) continue;
       const color = SAT_COLORS[s.constellation] || 0x94a3b8;
-      const tracked = typeof s.snr === 'number' && s.snr > 0;
-      const model = buildSatModel(color, tracked);
+      const model = buildSatModel(color);
       const pos = altAzToVec(s.az, s.elev, R_SATS);
       model.position.copy(pos);
       model.lookAt(pos.clone().multiplyScalar(2));
@@ -674,7 +664,8 @@
         '#' + color.toString(16).padStart(6, '0')
       );
       label.scale.set(20, 5, 1);
-      label.position.copy(pos).multiplyScalar(1.04);
+      // Place the label ~2.5° below the satellite along the sphere.
+      label.position.copy(altAzToVec(s.az, s.elev - 2.5, R_SATS * 1.01));
       group.add(label);
     }
     return group;
