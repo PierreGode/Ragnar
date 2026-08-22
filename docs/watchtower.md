@@ -26,6 +26,14 @@ pane and the same Pushover path as an ARP-poisoning or an evil-twin. Unlike the
 daemons, the guards need no systemd unit — they feed Watchtower automatically
 whenever **Extended Monitoring** is on.
 
+The in-app **L5–L7 observers** [`ssh_watch`](nettools.md#ssh-watch) and
+[`telnet_watch`](nettools.md#telnet-watch) feed the pane the same way, appending
+their **non-`info`** findings to `/var/log/ragnar/ssh_watch.jsonl` and
+`/var/log/ragnar/telnet_watch.jsonl` (deduplicated per code + server). Pure
+inventory/posture stays off the pane; a Terrapin exposure lands as **high** and a
+confirmed Telnet argument injection as **critical**. Both also run in the Network
+Integrity Monitor rotation, so their verdicts surface there as chips as well.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

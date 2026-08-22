@@ -103,6 +103,12 @@ DEFAULT_SOURCES = {
                       'paths': ['/var/log/ragnar/arista_guard.jsonl']},
     'comware_guard': {'label': 'Comware Guard (VRF-hop / MPLS)',
                       'paths': ['/var/log/ragnar/comware_guard.jsonl']},
+    # In-app L5-L7 passive observers (ssh_watch / telnet_watch do_*_watch) emit
+    # their non-info findings here so the unified pane tails them too.
+    'ssh_watch':     {'label': 'SSH Watch (regreSSHion / Terrapin)',
+                      'paths': ['/var/log/ragnar/ssh_watch.jsonl']},
+    'telnet_watch':  {'label': 'Telnet Watch (CVE-2026-24061 / 32746)',
+                      'paths': ['/var/log/ragnar/telnet_watch.jsonl']},
 }
 
 # Directories globbed for `*.jsonl`; the basename becomes the source name. This is

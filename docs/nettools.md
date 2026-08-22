@@ -1561,6 +1561,13 @@ it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / 
 Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. **API:**
 `GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.
 
+> **Watchtower feed.** Each non-`info` finding is appended as a JSON-lines record to
+> `/var/log/ragnar/ssh_watch.jsonl` (time-window deduplicated per code + server), so
+> [Watchtower](#watchtower) folds it into the unified alert pane and single Pushover path
+> alongside the standalone watcher daemons — automatically whenever Extended Monitoring is on.
+> Pure inventory/posture (`info`) stays off the alert pane. The observer also joins the
+> **Network Integrity Monitor** rotation, so its verdict shows as an `SSH` chip there.
+
 ### Telnet Watch
 A **passive** Telnet observer — **detection-only, it never transmits**. Telnet is unusually
 suited to deep passive detection because the protocol is **cleartext end to end**, including
@@ -1603,6 +1610,14 @@ dissected with Scapy; the parser/engine is pure Python and self-tests without ro
 engine). Hardening it drives: **disable Telnet** and use SSH; where it must remain, patch
 inetutils (**2.5 `3ubuntu4.1`** is the fixed build) and firewall tcp/23 off the management
 plane. **API:** `GET /api/net/telnet-watch`. **CLI:** `telnet-watch`, `telnet-selftest`.
+
+> **Watchtower feed.** Each non-`info` finding is appended as a JSON-lines record to
+> `/var/log/ragnar/telnet_watch.jsonl` (time-window deduplicated per code + server), so
+> [Watchtower](#watchtower) folds it into the unified alert pane and single Pushover path
+> alongside the standalone watcher daemons — automatically whenever Extended Monitoring is on.
+> A `compromised` finding (argument injection, confirmed overflow) lands as **critical** there.
+> The observer also joins the **Network Integrity Monitor** rotation, so its verdict shows as
+> a `Telnet` chip there.
 
 ### DTP Watch
 A **passive** VLAN-hopping / switch-spoofing scanner for Cisco's **Dynamic Trunking
