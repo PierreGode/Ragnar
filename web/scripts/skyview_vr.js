@@ -149,7 +149,6 @@
     for (const st of catalog.stars) {
       const [ra, dec, mag, cidx, name, cons] = st;
       const p = raDecToAltAz(ra, dec, lat, lon, date);
-      if (p.alt < -12) continue;
       const v = altAzToVec(p.az, p.alt, R_STARS);
       positions.push(v.x, v.y, v.z);
       const hex = colTable[cidx] || '#ffffff';
@@ -180,16 +179,15 @@
     const positions = [];
     for (const cid in constLines.lines) {
       for (const seg of constLines.lines[cid]) {
-        let prevAbove = null;
+        let prev = null;
         for (let i = 0; i < seg.length; i++) {
           const [ra, dec] = seg[i];
           const p = raDecToAltAz(ra, dec, lat, lon, date);
-          if (p.alt <= 0) { prevAbove = null; continue; }
           const v = altAzToVec(p.az, p.alt, R_STARS - 5);
-          if (prevAbove) {
-            positions.push(prevAbove.x, prevAbove.y, prevAbove.z, v.x, v.y, v.z);
+          if (prev) {
+            positions.push(prev.x, prev.y, prev.z, v.x, v.y, v.z);
           }
-          prevAbove = v;
+          prev = v;
         }
       }
     }
@@ -426,11 +424,11 @@
     const group = new THREE.Group();
     // Sun.
     const sun = sunSky(date, lat, lon);
-    if (sun.alt > -3) {
+    {
       const sunR = 12;
       const sMat = new THREE.MeshBasicMaterial({ map: planetTexture('Sun') });
       const sMesh = new THREE.Mesh(new THREE.SphereGeometry(sunR, 32, 20), sMat);
-      const pos = altAzToVec(sun.az, Math.max(0, sun.alt), R_PLANETS);
+      const pos = altAzToVec(sun.az, sun.alt, R_PLANETS);
       sMesh.position.copy(pos);
       sMesh.userData = { kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az };
       pointables.push(sMesh);
@@ -444,10 +442,10 @@
     }
     // Moon.
     const moon = moonSky(date, lat, lon);
-    if (moon.alt > -3) {
+    {
       const mMat = new THREE.MeshBasicMaterial({ map: planetTexture('Moon') });
       const mMesh = new THREE.Mesh(new THREE.SphereGeometry(9, 32, 20), mMat);
-      const pos = altAzToVec(moon.az, Math.max(0, moon.alt), R_PLANETS);
+      const pos = altAzToVec(moon.az, moon.alt, R_PLANETS);
       mMesh.position.copy(pos);
       mMesh.userData = { kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, illum: moon.illum };
       pointables.push(mMesh);
@@ -456,14 +454,13 @@
       label.position.copy(pos).multiplyScalar(1.1);
       group.add(label);
     }
-    // Planets.
+    // Planets — draw everywhere on the sphere, above and below horizon.
     const planets = planetSkyPositions(date, lat, lon);
     for (const p of planets) {
-      if (p.alt < -3) continue;
       const r = p.size * 1.1;
       const mat = new THREE.MeshBasicMaterial({ map: planetTexture(p.name) });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 20), mat);
-      const pos = altAzToVec(p.az, Math.max(0, p.alt), R_PLANETS);
+      const pos = altAzToVec(p.az, p.alt, R_PLANETS);
       mesh.position.copy(pos);
       mesh.userData = { kind: 'planet', name: p.name, alt: p.alt, az: p.az, ra: p.ra, dec: p.dec };
       pointables.push(mesh);
@@ -544,15 +541,12 @@
       const sky = issSkyFromLatLon(d.latitude, d.longitude, d.altitude, obsLat, obsLon);
       issState = { lat: d.latitude, lon: d.longitude, alt_km: d.altitude, velocity: d.velocity, ...sky };
       if (issMesh) {
-        const belowHorizon = sky.el < -5;
-        issMesh.visible = !belowHorizon;
-        if (issLabel) issLabel.visible = !belowHorizon;
-        if (!belowHorizon) {
-          const pos = altAzToVec(sky.az, Math.max(0, sky.el), R_SATS);
-          issMesh.position.copy(pos);
-          issMesh.lookAt(new THREE.Vector3(0, 0, 0));
-          if (issLabel) issLabel.position.copy(pos).multiplyScalar(1.06);
-        }
+        issMesh.visible = true;
+        if (issLabel) issLabel.visible = true;
+        const pos = altAzToVec(sky.az, sky.el, R_SATS);
+        issMesh.position.copy(pos);
+        issMesh.lookAt(new THREE.Vector3(0, 0, 0));
+        if (issLabel) issLabel.position.copy(pos).multiplyScalar(1.06);
         issMesh.userData.iss = issState;
       }
     } catch (_) {}
@@ -613,19 +607,11 @@
       sp.position.copy(altAzToVec(d.az, 3, R_COMPASS));
       group.add(sp);
     }
-    // Horizon ring.
+    // Horizon ring — semi-transparent so it doesn't block below-horizon view.
     const ringGeom = new THREE.RingGeometry(R_COMPASS - 1, R_COMPASS + 1, 128);
     ringGeom.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.18, side: THREE.DoubleSide });
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.28, side: THREE.DoubleSide });
     group.add(new THREE.Mesh(ringGeom, ringMat));
-    // Ground disc, subtle.
-    const ground = new THREE.Mesh(
-      new THREE.CircleGeometry(R_COMPASS - 5, 96),
-      new THREE.MeshBasicMaterial({ color: 0x081226, transparent: true, opacity: 0.35, side: THREE.DoubleSide })
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -1.2;
-    group.add(ground);
     return group;
   }
 
