@@ -264,8 +264,11 @@ only; the polar view is unchanged.
   +/− pad is hidden on touch since the gesture replaces it), the header collapses
   to icon-only buttons (Diagnostics becomes a 🛰 icon), the legend / Layers key /
   brand / pointer-readout hide to reclaim space, tap targets grow to ~40 px, and
-  the time scrubber spans the full width above the safe-area inset. A single mouse
-  pointer still pans exactly as before, and the mouse wheel still zooms.
+  the time scrubber spans the full width above the safe-area inset. The layer
+  controls (**Constellations / Deep sky / Sky survey / Reset survey**) shrink to
+  small icon-only buttons tucked in the top-right corner just under the header —
+  next to the Diagnostics button — instead of floating over the sky. A single
+  mouse pointer still pans exactly as before, and the mouse wheel still zooms.
 
 Still no external libraries or CDN — the astronomy math (Sun/Moon low-precision
 ephemerides, DOP inversion) is plain JS, and the two new catalogs are bundled
