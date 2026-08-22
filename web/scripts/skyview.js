@@ -1767,6 +1767,15 @@
       const p = positionFromStatus(null);
       lastData = { sky: [], lat: p.lat, lon: p.lon, mode: p.mode, t: p.t };
     }
+    // Narrow viewports fit 360° into <500 px — everything ends up squished.
+    // Kick zoom up so the sky lands at a comfortable ~4 px/deg on phones.
+    if (enhanced) {
+      const vw = window.innerWidth || 1024;
+      if (vw < 500) skyZoom = 3;
+      else if (vw < 760) skyZoom = 2.2;
+      else if (vw < 1100) skyZoom = 1.4;
+      else skyZoom = 1;
+    }
     requestBrowserGeo();
 
     overlay = document.createElement('div');
@@ -1921,11 +1930,12 @@
           #ragnar-skyview .sv-sub{display:none;}
           #ragnar-skyview.sv-enhanced .sv-diag-btn .sv-dg-tx{display:none;}
           #ragnar-skyview.sv-enhanced .sv-diag-btn{padding:8px 10px;}
-          /* Floating controls: full-width time bar, keep clear of each other. */
-          #ragnar-skyview.sv-enhanced .sv-controls{top:max(8px,env(safe-area-inset-top));max-width:calc(100vw - 20px);}
+          /* Floating controls: sky-clear layer chips off the center, on the
+             bottom above the time scrubber where the touch-hidden zoom pad
+             used to sit; time bar full width; keep them from overlapping. */
+          #ragnar-skyview.sv-enhanced .sv-controls{top:auto;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 56px);max-width:calc(100vw - 20px);}
           #ragnar-skyview.sv-enhanced .sv-time{width:calc(100vw - 20px);bottom:max(14px,env(safe-area-inset-bottom));}
-          /* Keep the zoom pad clear of the full-width time bar (touch hides it via pinch). */
-          #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 54px);}
+          #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 106px);}
         }
         /* Touch devices: no hover cursor readout, bigger tap targets, pinch replaces the tiny zoom pad. */
         @media (pointer:coarse){
