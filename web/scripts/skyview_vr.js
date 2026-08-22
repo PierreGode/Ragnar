@@ -44,6 +44,12 @@
   let statusOverlay = null;
   let currentSnapshot = null;
   let skyDomeMesh = null;
+  let skyGroup = null;
+  let skyRotationY = 0;
+  try {
+    const v = parseFloat(localStorage.getItem('ragnar.skyview.xr.rotY'));
+    if (isFinite(v)) skyRotationY = v;
+  } catch (_) {}
   let passthrough = true;
   try { passthrough = localStorage.getItem('ragnar.skyview.xr.passthrough') !== '0'; } catch (_) {}
 
@@ -212,27 +218,235 @@
     return sprite;
   }
 
+  // ---- Procedural planet textures ------------------------------------
+  const _textureCache = {};
+
+  function _paintBands(ctx, W, H, bands) {
+    for (const b of bands) {
+      const y0 = b.y * H, y1 = (b.y + b.h) * H;
+      const grad = ctx.createLinearGradient(0, y0, 0, y1);
+      grad.addColorStop(0, b.c1);
+      grad.addColorStop(1, b.c2);
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, y0, W, y1 - y0);
+    }
+  }
+
+  function _paintSpot(ctx, W, H, x, y, r, color, opacity) {
+    ctx.save();
+    ctx.globalAlpha = opacity != null ? opacity : 0.7;
+    const grad = ctx.createRadialGradient(x * W, y * H, 0, x * W, y * H, r * H);
+    grad.addColorStop(0, color);
+    grad.addColorStop(1, color.replace(/rgb\(/, 'rgba(').replace(/\)/, ',0)').replace(/^#/, 'rgba(0,0,0,0)'));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(x * W, y * H, r * H * 1.4, r * H, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function _paintPoles(ctx, W, H, color) {
+    const grad1 = ctx.createLinearGradient(0, 0, 0, H * 0.18);
+    grad1.addColorStop(0, color);
+    grad1.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad1; ctx.fillRect(0, 0, W, H * 0.18);
+    const grad2 = ctx.createLinearGradient(0, H * 0.82, 0, H);
+    grad2.addColorStop(0, 'rgba(255,255,255,0)');
+    grad2.addColorStop(1, color);
+    ctx.fillStyle = grad2; ctx.fillRect(0, H * 0.82, W, H * 0.18);
+  }
+
+  function _paintNoise(ctx, W, H, amount) {
+    const img = ctx.getImageData(0, 0, W, H);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const n = (Math.random() - 0.5) * amount;
+      d[i] = Math.max(0, Math.min(255, d[i] + n));
+      d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + n));
+      d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + n));
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  function planetTexture(name) {
+    if (_textureCache[name]) return _textureCache[name];
+    const W = 512, H = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = W; canvas.height = H;
+    const ctx = canvas.getContext('2d');
+
+    if (name === 'Sun') {
+      const grad = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, H * 0.7);
+      grad.addColorStop(0, '#fffbe6');
+      grad.addColorStop(0.35, '#ffd76a');
+      grad.addColorStop(0.7, '#f59e0b');
+      grad.addColorStop(1, '#c2410c');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < 32; i++) {
+        _paintSpot(ctx, W, H, Math.random(), Math.random(), 0.04 + Math.random() * 0.08, 'rgba(255,255,220,0.35)', 0.4);
+      }
+      _paintNoise(ctx, W, H, 14);
+    } else if (name === 'Mercury') {
+      ctx.fillStyle = '#8a7663'; ctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < 60; i++) {
+        const x = Math.random(), y = Math.random(), r = 0.02 + Math.random() * 0.09;
+        _paintSpot(ctx, W, H, x, y, r, i % 2 ? 'rgba(60,50,40,1)' : 'rgba(180,160,140,1)', 0.55);
+      }
+      _paintNoise(ctx, W, H, 26);
+    } else if (name === 'Venus') {
+      _paintBands(ctx, W, H, [
+        { y: 0, h: 0.3, c1: '#f8e6bb', c2: '#f0d494' },
+        { y: 0.3, h: 0.4, c1: '#f0d494', c2: '#e2b872' },
+        { y: 0.7, h: 0.3, c1: '#e2b872', c2: '#c99a52' }
+      ]);
+      for (let i = 0; i < 20; i++) {
+        _paintSpot(ctx, W, H, Math.random(), 0.2 + Math.random() * 0.6, 0.05 + Math.random() * 0.1, 'rgba(255,240,200,0.6)', 0.5);
+      }
+      _paintNoise(ctx, W, H, 8);
+    } else if (name === 'Mars') {
+      _paintBands(ctx, W, H, [
+        { y: 0, h: 0.5, c1: '#c96844', c2: '#b04d2c' },
+        { y: 0.5, h: 0.5, c1: '#b04d2c', c2: '#8f3818' }
+      ]);
+      _paintSpot(ctx, W, H, 0.35, 0.55, 0.15, 'rgba(70,30,20,1)', 0.65);
+      _paintSpot(ctx, W, H, 0.75, 0.45, 0.12, 'rgba(90,45,25,1)', 0.6);
+      _paintSpot(ctx, W, H, 0.15, 0.35, 0.08, 'rgba(60,25,15,1)', 0.55);
+      _paintPoles(ctx, W, H, 'rgba(240,220,200,0.9)');
+      _paintNoise(ctx, W, H, 18);
+    } else if (name === 'Jupiter') {
+      _paintBands(ctx, W, H, [
+        { y: 0.00, h: 0.10, c1: '#a67c52', c2: '#c9a37a' },
+        { y: 0.10, h: 0.08, c1: '#ecd6b0', c2: '#d3b085' },
+        { y: 0.18, h: 0.10, c1: '#b98858', c2: '#8f6740' },
+        { y: 0.28, h: 0.10, c1: '#e7cea3', c2: '#c9a37a' },
+        { y: 0.38, h: 0.14, c1: '#b98858', c2: '#a17547' },
+        { y: 0.52, h: 0.12, c1: '#e7cea3', c2: '#d3b085' },
+        { y: 0.64, h: 0.10, c1: '#a67c52', c2: '#c9a37a' },
+        { y: 0.74, h: 0.10, c1: '#ecd6b0', c2: '#d3b085' },
+        { y: 0.84, h: 0.16, c1: '#8f6740', c2: '#6c4d2c' }
+      ]);
+      _paintSpot(ctx, W, H, 0.65, 0.62, 0.06, 'rgba(190,70,50,1)', 0.85);
+      _paintNoise(ctx, W, H, 10);
+    } else if (name === 'Saturn') {
+      _paintBands(ctx, W, H, [
+        { y: 0.00, h: 0.20, c1: '#d9c188', c2: '#e6cf9a' },
+        { y: 0.20, h: 0.20, c1: '#e6cf9a', c2: '#f5dfa8' },
+        { y: 0.40, h: 0.20, c1: '#f5dfa8', c2: '#e6cf9a' },
+        { y: 0.60, h: 0.20, c1: '#e6cf9a', c2: '#d0b781' },
+        { y: 0.80, h: 0.20, c1: '#d0b781', c2: '#a89162' }
+      ]);
+      _paintNoise(ctx, W, H, 6);
+    } else if (name === 'Uranus') {
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, '#c6ecf5');
+      grad.addColorStop(0.5, '#a7ddec');
+      grad.addColorStop(1, '#7fbfd3');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+      _paintNoise(ctx, W, H, 4);
+    } else if (name === 'Neptune') {
+      const grad = ctx.createLinearGradient(0, 0, 0, H);
+      grad.addColorStop(0, '#4f7dc0');
+      grad.addColorStop(0.5, '#3762a8');
+      grad.addColorStop(1, '#254e94');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, W, H);
+      _paintSpot(ctx, W, H, 0.4, 0.55, 0.07, 'rgba(15,25,60,1)', 0.7);
+      _paintNoise(ctx, W, H, 5);
+    } else if (name === 'Moon') {
+      ctx.fillStyle = '#c9c6bd'; ctx.fillRect(0, 0, W, H);
+      const maria = [
+        { x: 0.45, y: 0.35, r: 0.14 }, { x: 0.55, y: 0.42, r: 0.10 },
+        { x: 0.35, y: 0.55, r: 0.09 }, { x: 0.62, y: 0.58, r: 0.11 },
+        { x: 0.28, y: 0.42, r: 0.07 }
+      ];
+      for (const m of maria) _paintSpot(ctx, W, H, m.x, m.y, m.r, 'rgba(80,80,90,1)', 0.75);
+      for (let i = 0; i < 120; i++) {
+        _paintSpot(ctx, W, H, Math.random(), Math.random(), 0.005 + Math.random() * 0.015,
+          Math.random() > 0.5 ? 'rgba(180,180,175,1)' : 'rgba(90,90,90,1)', 0.6);
+      }
+      _paintNoise(ctx, W, H, 14);
+    } else {
+      ctx.fillStyle = '#888'; ctx.fillRect(0, 0, W, H);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.anisotropy = 4;
+    _textureCache[name] = tex;
+    return tex;
+  }
+
+  function buildSunGlow(radius) {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(128, 128, 0, 128, 128, 128);
+    grad.addColorStop(0, 'rgba(255,240,170,0.85)');
+    grad.addColorStop(0.25, 'rgba(255,190,80,0.55)');
+    grad.addColorStop(0.6, 'rgba(255,120,20,0.18)');
+    grad.addColorStop(1, 'rgba(255,80,0,0)');
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, 256, 256);
+    const tex = new THREE.CanvasTexture(canvas);
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
+    const s = new THREE.Sprite(mat);
+    s.scale.set(radius * 6, radius * 6, 1);
+    return s;
+  }
+
+  function buildSaturnRings(radius) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 32;
+    const ctx = canvas.getContext('2d');
+    for (let x = 0; x < 512; x++) {
+      const t = x / 512;
+      let a = 0.4 + 0.5 * Math.sin(t * 20) * Math.sin(t * 8);
+      if (t < 0.15 || t > 0.95) a *= 0.2;
+      if (Math.abs(t - 0.55) < 0.03) a *= 0.15;
+      const shade = 210 + Math.round(Math.sin(t * 30) * 20);
+      ctx.fillStyle = 'rgba(' + shade + ',' + (shade - 20) + ',' + (shade - 60) + ',' + Math.max(0, Math.min(1, a)) + ')';
+      ctx.fillRect(x, 0, 1, 32);
+    }
+    const tex = new THREE.CanvasTexture(canvas);
+    const inner = radius * 1.35, outer = radius * 2.4;
+    const geom = new THREE.RingGeometry(inner, outer, 96, 1);
+    // Map the texture radially across the ring.
+    const pos = geom.attributes.position;
+    const uv = geom.attributes.uv;
+    const v3 = new THREE.Vector3();
+    for (let i = 0; i < pos.count; i++) {
+      v3.fromBufferAttribute(pos, i);
+      const r = v3.length();
+      uv.setXY(i, (r - inner) / (outer - inner), 0.5);
+    }
+    const mat = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide, transparent: true, depthWrite: false });
+    const ring = new THREE.Mesh(geom, mat);
+    ring.rotation.x = Math.PI / 2;
+    ring.rotation.z = 26.7 * D2R;
+    return ring;
+  }
+
   function buildPlanets(lat, lon, date) {
     const group = new THREE.Group();
     // Sun.
     const sun = sunSky(date, lat, lon);
     if (sun.alt > -3) {
-      const sMat = new THREE.MeshBasicMaterial({ color: 0xffdf7e });
-      const sMesh = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16), sMat);
+      const sunR = 12;
+      const sMat = new THREE.MeshBasicMaterial({ map: planetTexture('Sun') });
+      const sMesh = new THREE.Mesh(new THREE.SphereGeometry(sunR, 32, 20), sMat);
       const pos = altAzToVec(sun.az, Math.max(0, sun.alt), R_PLANETS);
       sMesh.position.copy(pos);
       sMesh.userData = { kind: 'sun', name: 'Sun', alt: sun.alt, az: sun.az };
       pointables.push(sMesh);
       group.add(sMesh);
+      const glow = buildSunGlow(sunR);
+      glow.position.copy(pos);
+      group.add(glow);
       const label = makeLabelSprite('Sun', '#ffdf7e');
-      label.position.copy(pos).multiplyScalar(1.08);
+      label.position.copy(pos).multiplyScalar(1.09);
       group.add(label);
     }
     // Moon.
     const moon = moonSky(date, lat, lon);
     if (moon.alt > -3) {
-      const mMat = new THREE.MeshBasicMaterial({ color: 0xd0d5de });
-      const mMesh = new THREE.Mesh(new THREE.SphereGeometry(8, 24, 16), mMat);
+      const mMat = new THREE.MeshBasicMaterial({ map: planetTexture('Moon') });
+      const mMesh = new THREE.Mesh(new THREE.SphereGeometry(9, 32, 20), mMat);
       const pos = altAzToVec(moon.az, Math.max(0, moon.alt), R_PLANETS);
       mMesh.position.copy(pos);
       mMesh.userData = { kind: 'moon', name: 'Moon', alt: moon.alt, az: moon.az, illum: moon.illum };
@@ -246,18 +460,116 @@
     const planets = planetSkyPositions(date, lat, lon);
     for (const p of planets) {
       if (p.alt < -3) continue;
-      const mat = new THREE.MeshBasicMaterial({ color: p.color });
-      const mesh = new THREE.Mesh(new THREE.SphereGeometry(p.size * 0.7, 20, 14), mat);
+      const r = p.size * 1.1;
+      const mat = new THREE.MeshBasicMaterial({ map: planetTexture(p.name) });
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(r, 32, 20), mat);
       const pos = altAzToVec(p.az, Math.max(0, p.alt), R_PLANETS);
       mesh.position.copy(pos);
       mesh.userData = { kind: 'planet', name: p.name, alt: p.alt, az: p.az, ra: p.ra, dec: p.dec };
       pointables.push(mesh);
       group.add(mesh);
+      if (p.name === 'Saturn') {
+        const rings = buildSaturnRings(r);
+        rings.position.copy(pos);
+        rings.userData = { kind: 'planet-ring', name: 'Saturn ring' };
+        group.add(rings);
+      }
       const label = makeLabelSprite(p.name, '#f5d58a');
       label.position.copy(pos).multiplyScalar(1.12);
       group.add(label);
     }
     return group;
+  }
+
+  // ---- ISS (International Space Station) -----------------------------
+  let issMesh = null, issLabel = null, issRefreshMs = 0, issState = null;
+  const ISS_URL = 'https://api.wheretheiss.at/v1/satellites/25544';
+
+  function buildISSModel() {
+    const g = new THREE.Group();
+    const truss = new THREE.Mesh(
+      new THREE.BoxGeometry(3.4, 0.7, 0.7),
+      new THREE.MeshBasicMaterial({ color: 0xdedede })
+    );
+    g.add(truss);
+    for (let side = -1; side <= 1; side += 2) {
+      for (let i = 0; i < 2; i++) {
+        const panel = new THREE.Mesh(
+          new THREE.PlaneGeometry(1.9, 5.6),
+          new THREE.MeshBasicMaterial({ color: 0x1e3a8a, side: THREE.DoubleSide })
+        );
+        panel.position.set(side * (0.9 + i * 1.9), 0, 0);
+        panel.rotation.y = Math.PI / 2;
+        g.add(panel);
+      }
+    }
+    const modules = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.5, 0.5, 1.6, 16),
+      new THREE.MeshBasicMaterial({ color: 0xe0e6ee })
+    );
+    modules.rotation.z = Math.PI / 2;
+    g.add(modules);
+    return g;
+  }
+
+  function issSkyFromLatLon(issLat, issLon, issAltKm, obsLat, obsLon) {
+    const R = 6371.0;
+    const lat1 = issLat * D2R, lon1 = issLon * D2R;
+    const lat2 = obsLat * D2R, lon2 = obsLon * D2R;
+    const r1 = R + issAltKm;
+    const iX = r1 * Math.cos(lat1) * Math.cos(lon1);
+    const iY = r1 * Math.cos(lat1) * Math.sin(lon1);
+    const iZ = r1 * Math.sin(lat1);
+    const oX = R * Math.cos(lat2) * Math.cos(lon2);
+    const oY = R * Math.cos(lat2) * Math.sin(lon2);
+    const oZ = R * Math.sin(lat2);
+    const dx = iX - oX, dy = iY - oY, dz = iZ - oZ;
+    const sLat = Math.sin(lat2), cLat = Math.cos(lat2);
+    const sLon = Math.sin(lon2), cLon = Math.cos(lon2);
+    const east  = -sLon * dx + cLon * dy;
+    const north = -sLat * cLon * dx - sLat * sLon * dy + cLat * dz;
+    const up    =  cLat * cLon * dx + cLat * sLon * dy + sLat * dz;
+    const rng = Math.sqrt(east * east + north * north + up * up);
+    const az = normDeg(Math.atan2(east, north) * R2D);
+    const el = Math.asin(up / rng) * R2D;
+    return { az, el, range_km: rng };
+  }
+
+  async function refreshISS(obsLat, obsLon) {
+    if (obsLat == null || obsLon == null) return;
+    try {
+      const r = await fetch(ISS_URL, { cache: 'no-store' });
+      if (!r.ok) return;
+      const d = await r.json();
+      const sky = issSkyFromLatLon(d.latitude, d.longitude, d.altitude, obsLat, obsLon);
+      issState = { lat: d.latitude, lon: d.longitude, alt_km: d.altitude, velocity: d.velocity, ...sky };
+      if (issMesh) {
+        const belowHorizon = sky.el < -5;
+        issMesh.visible = !belowHorizon;
+        if (issLabel) issLabel.visible = !belowHorizon;
+        if (!belowHorizon) {
+          const pos = altAzToVec(sky.az, Math.max(0, sky.el), R_SATS);
+          issMesh.position.copy(pos);
+          issMesh.lookAt(new THREE.Vector3(0, 0, 0));
+          if (issLabel) issLabel.position.copy(pos).multiplyScalar(1.06);
+        }
+        issMesh.userData.iss = issState;
+      }
+    } catch (_) {}
+  }
+
+  function buildISS(obsLat, obsLon) {
+    const g = new THREE.Group();
+    issMesh = buildISSModel();
+    issMesh.userData = { kind: 'iss', name: 'ISS' };
+    issMesh.visible = false;
+    pointables.push(issMesh);
+    g.add(issMesh);
+    issLabel = makeLabelSprite('ISS', '#a7f3d0');
+    issLabel.visible = false;
+    g.add(issLabel);
+    refreshISS(obsLat, obsLon);
+    return g;
   }
 
   function buildSatellites(sky) {
@@ -426,6 +738,17 @@
         'Azimuth ' + fmtDeg(d.az, 1) + ' ' + cardinal(d.az)
       ];
       if (d.kind === 'moon' && d.illum != null) lines.push('Illumination ' + Math.round(d.illum * 100) + '%');
+    } else if (d.kind === 'iss') {
+      accent = '#a7f3d0';
+      title = '🛰 International Space Station';
+      const s = d.iss || issState || {};
+      lines = [
+        'Elevation ' + (s.el != null ? fmtDeg(s.el, 1) : '—'),
+        'Azimuth ' + (s.az != null ? fmtDeg(s.az, 1) + ' ' + cardinal(s.az) : '—'),
+        'Range ' + (s.range_km != null ? s.range_km.toFixed(0) + ' km' : '—'),
+        'Altitude ' + (s.alt_km != null ? s.alt_km.toFixed(0) + ' km' : '—'),
+        'Speed ' + (s.velocity != null ? s.velocity.toFixed(0) + ' km/h' : '—')
+      ];
     } else if (d.kind === 'star') {
       accent = d.color || '#e2e8f0';
       title = '✦ ' + (d.name || 'star') + (d.cons ? ' · ' + d.cons : '');
@@ -463,6 +786,7 @@
     let best = null, bestScore = Infinity;
     const tmp = new THREE.Vector3();
     for (const o of pointables) {
+      if (o.visible === false) continue;
       tmp.copy(o.getWorldPosition(new THREE.Vector3())).sub(origin);
       const t = tmp.dot(dir);
       if (t <= 0) continue;
@@ -470,7 +794,8 @@
       const dx = tmp.x - projX, dy = tmp.y - projY, dz = tmp.z - projZ;
       const perp = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // The angular tolerance (rad) — scale by 8 deg for planets/sats, 5 deg for stars.
-      const tolDeg = o.userData.kind === 'star' ? 3.5 : 6;
+      const kind = o.userData && o.userData.kind;
+      const tolDeg = kind === 'star' ? 3.5 : (kind === 'iss' ? 4 : (kind === 'planet' || kind === 'sun' || kind === 'moon' ? 5 : 6));
       const tol = t * Math.tan(tolDeg * D2R);
       if (perp > tol) continue;
       const score = perp / (tol || 1);
@@ -501,17 +826,20 @@
     let starObj = null;
     scene.traverse(o => { if (o.isPoints && o.userData && o.userData.stars) starObj = o; });
     if (!starObj) return null;
+    // Transform world-space ray into star cloud's local frame (i.e. skyGroup).
+    starObj.updateWorldMatrix(true, false);
+    const inv = new THREE.Matrix4().copy(starObj.matrixWorld).invert();
+    const lo = origin.clone().applyMatrix4(inv);
+    const ld = dir.clone().transformDirection(inv).normalize();
     let bestScore = Infinity, best = null;
     const meta = starObj.userData.stars;
-    // Only inspect the brightest ~250 stars — rays land near them most often
-    // and we don't want to iterate 3k points per trigger press.
     const sorted = meta.slice().sort((a, b) => a.mag - b.mag).slice(0, 250);
     const tmp = new THREE.Vector3();
     for (const m of sorted) {
-      tmp.copy(altAzToVec(m.az, m.alt, R_STARS)).sub(origin);
-      const t = tmp.dot(dir);
+      tmp.copy(altAzToVec(m.az, m.alt, R_STARS)).sub(lo);
+      const t = tmp.dot(ld);
       if (t <= 0) continue;
-      const dx = tmp.x - t * dir.x, dy = tmp.y - t * dir.y, dz = tmp.z - t * dir.z;
+      const dx = tmp.x - t * ld.x, dy = tmp.y - t * ld.y, dz = tmp.z - t * ld.z;
       const perp = Math.sqrt(dx * dx + dy * dy + dz * dz);
       const tol = t * Math.tan(2.5 * D2R);
       if (perp > tol) continue;
@@ -678,7 +1006,8 @@
           '<div style="font-size:24px;">🥽</div>' +
           '<h3 style="margin:0;color:#7dd3fc;font-size:16px;letter-spacing:.06em;text-transform:uppercase;">Enter Ragnar Observatory VR</h3>' +
         '</div>' +
-        '<p style="margin:6px 0 14px;font-size:12px;color:#9fb0c3;line-height:1.5;">Put on your headset. Trigger a satellite, planet, or bright star to inspect it. Grip / menu to exit.</p>' +
+        '<p style="margin:6px 0 8px;font-size:12px;color:#9fb0c3;line-height:1.5;">Face north when you enter — WebXR has no compass, so "-Z is north" only holds if you start facing that way. Use the right thumbstick to spin the sky until it matches (auto-saves).</p>' +
+        '<p style="margin:0 0 14px;font-size:12px;color:#9fb0c3;line-height:1.5;">Trigger a satellite, planet, or bright star to inspect it. Grip / menu to exit.</p>' +
         '<div style="font-size:11px;color:#7f93ad;background:rgba(2,6,15,.6);border:1px solid rgba(125,211,252,.14);border-radius:8px;padding:8px 10px;margin-bottom:14px;font-family:ui-monospace,monospace;">' + posLine + '</div>' +
         '<label class="sv-xr-toggle" style="display:flex;align-items:center;justify-content:space-between;gap:14px;background:rgba(3,10,22,.7);border:1px solid rgba(125,211,252,.2);border-radius:10px;padding:12px 14px;cursor:pointer;user-select:none;">' +
           '<span>' +
@@ -689,9 +1018,12 @@
             '<span class="sv-xr-knob" style="position:absolute;top:3px;left:' + (passthrough ? '23px' : '3px') + ';width:20px;height:20px;border-radius:999px;background:#f8fafc;transition:left .2s;box-shadow:0 2px 6px rgba(0,0,0,.4);"></span>' +
           '</span>' +
         '</label>' +
-        '<div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;">' +
-          '<button type="button" class="sv-xr-cancel" style="background:transparent;color:#94a3b8;border:1px solid rgba(148,163,184,.3);border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600;">Cancel</button>' +
-          '<button type="button" class="sv-xr-go" style="background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;border:none;border-radius:8px;padding:9px 20px;cursor:pointer;font-weight:600;letter-spacing:.03em;">Enter VR</button>' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:18px;">' +
+          '<button type="button" class="sv-xr-reset-rot" style="background:transparent;color:#7f93ad;border:1px solid rgba(148,163,184,.2);border-radius:8px;padding:7px 12px;cursor:pointer;font-size:11px;">Reset alignment</button>' +
+          '<div style="display:flex;gap:10px;">' +
+            '<button type="button" class="sv-xr-cancel" style="background:transparent;color:#94a3b8;border:1px solid rgba(148,163,184,.3);border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600;">Cancel</button>' +
+            '<button type="button" class="sv-xr-go" style="background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;border:none;border-radius:8px;padding:9px 20px;cursor:pointer;font-weight:600;letter-spacing:.03em;">Enter VR</button>' +
+          '</div>' +
         '</div>' +
       '</div>';
     const toggle = modal.querySelector('.sv-xr-toggle');
@@ -710,10 +1042,19 @@
       modal.remove();
       onGo();
     });
+    const resetBtn = modal.querySelector('.sv-xr-reset-rot');
+    if (resetBtn) resetBtn.addEventListener('click', () => {
+      skyRotationY = 0;
+      try { localStorage.setItem('ragnar.skyview.xr.rotY', '0'); } catch (_) {}
+      resetBtn.textContent = '✓ Alignment reset';
+      resetBtn.style.color = '#86efac';
+      setTimeout(() => { resetBtn.textContent = 'Reset alignment'; resetBtn.style.color = '#7f93ad'; }, 1400);
+    });
     document.body.appendChild(modal);
   }
 
   function onSessionEnd() {
+    try { localStorage.setItem('ragnar.skyview.xr.rotY', String(skyRotationY)); } catch (_) {}
     if (renderer) {
       try { renderer.setAnimationLoop(null); } catch (_) {}
       try { renderer.dispose(); } catch (_) {}
@@ -723,7 +1064,8 @@
     session = null; renderer = null; scene = null; camera = null;
     baseGroup = null; pointables = []; controllers = []; rayLines = [];
     raycaster = null; infoPanel = null; hoveredObject = null;
-    skyDomeMesh = null;
+    skyDomeMesh = null; skyGroup = null;
+    issMesh = null; issLabel = null; issState = null;
     removeStatusOverlay();
   }
 
@@ -788,19 +1130,23 @@
     camera = new THREE.PerspectiveCamera(80, window.innerWidth / window.innerHeight, 0.1, 2000);
     camera.position.set(0, 1.6, 0);
 
+    skyGroup = new THREE.Group();
+    skyGroup.rotation.y = skyRotationY;
+    scene.add(skyGroup);
     if (!passthrough) {
       skyDomeMesh = buildSkyDome();
-      scene.add(skyDomeMesh);
+      skyGroup.add(skyDomeMesh);
     }
-    if (catalog) scene.add(buildStars(catalog, lat, lon, date));
+    if (catalog) skyGroup.add(buildStars(catalog, lat, lon, date));
     if (constLines) {
       const cl = buildConstellationLines(constLines, lat, lon, date);
-      if (cl) scene.add(cl);
+      if (cl) skyGroup.add(cl);
     }
-    scene.add(buildPlanets(lat, lon, date));
-    scene.add(buildSatellites(snapshot && snapshot.sky));
-    if (!passthrough) scene.add(buildCompass());
-    else scene.add(buildCompassAR());
+    skyGroup.add(buildPlanets(lat, lon, date));
+    skyGroup.add(buildSatellites(snapshot && snapshot.sky));
+    skyGroup.add(buildISS(lat, lon));
+    if (!passthrough) skyGroup.add(buildCompass());
+    else skyGroup.add(buildCompassAR());
 
     infoPanel = buildInfoPanel();
     scene.add(infoPanel);
@@ -851,7 +1197,39 @@
     await renderer.xr.setSession(session);
     removeStatusOverlay();
 
-    renderer.setAnimationLoop(() => {
+    let lastFrameTime = null;
+    let saveThrottle = 0;
+    let issTicker = 30000;
+    renderer.setAnimationLoop((now) => {
+      if (lastFrameTime == null) lastFrameTime = now;
+      const dtSec = Math.min(0.1, (now - lastFrameTime) / 1000);
+      lastFrameTime = now;
+      issTicker += dtSec * 1000;
+      if (issTicker >= 30000) {
+        issTicker = 0;
+        refreshISS(lat, lon);
+      }
+
+      // Right thumbstick rotates the sky (WebXR gives no compass, so the user
+      // aligns north manually once). Deadzone 0.15, ~1.5 rad/s at full push.
+      if (session && session.inputSources && skyGroup) {
+        let stickX = 0;
+        for (const src of session.inputSources) {
+          if (!src.gamepad || src.handedness !== 'right') continue;
+          const axes = src.gamepad.axes || [];
+          stickX = axes.length >= 3 ? (axes[2] || 0) : (axes[0] || 0);
+        }
+        if (Math.abs(stickX) > 0.15) {
+          skyRotationY -= stickX * dtSec * 1.5;
+          skyGroup.rotation.y = skyRotationY;
+          saveThrottle += dtSec;
+          if (saveThrottle > 0.5) {
+            saveThrottle = 0;
+            try { localStorage.setItem('ragnar.skyview.xr.rotY', String(skyRotationY)); } catch (_) {}
+          }
+        }
+      }
+
       for (const ctl of controllers) if (ctl.visible !== false) highlightAlong(ctl);
       renderer.render(scene, camera);
     });
