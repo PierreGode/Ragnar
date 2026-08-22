@@ -7049,19 +7049,22 @@
 
                 <!-- Wardriving Section -->
                 <div id="wardriving-config-section" class="mb-8">
-                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400" role="button" tabindex="0" onclick="openWardrivingStarEgg()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openWardrivingStarEgg();}">Wardriving</h3>
+                    <h3 class="text-xl font-semibold mb-4 text-Ragnar-400">Wardriving</h3>
 
                     <!-- Always-visible Enable toggle: gates the rest of the section -->
                     <div class="glass rounded-lg p-4 mb-4">
-                        <div class="flex items-center justify-between">
-                            <div>
+                        <div class="flex items-center justify-between gap-3 flex-wrap">
+                            <div class="min-w-0">
                                 <h4 class="font-medium">Enable Wardriving</h4>
                                 <p class="text-xs text-gray-500 mt-1">Toggle on to reveal wardriving cards and settings.</p>
                             </div>
-                            <label class="toggle-switch relative inline-flex items-center cursor-pointer">
-                                <input type="checkbox" id="wardriving-enable-toggle" class="sr-only peer" onchange="toggleWardrivingEnabled(this)">
-                                <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
-                            </label>
+                            <div class="flex items-center gap-3">
+                                <button type="button" onclick="openWardrivingStarEgg()" class="bg-slate-700 hover:bg-slate-600 text-white text-xs font-semibold px-3 py-2 rounded-lg transition-colors">Advanced sat view</button>
+                                <label class="toggle-switch relative inline-flex items-center cursor-pointer">
+                                    <input type="checkbox" id="wardriving-enable-toggle" class="sr-only peer" onchange="toggleWardrivingEnabled(this)">
+                                    <div class="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
+                                </label>
+                            </div>
                         </div>
                     </div>
 
@@ -8146,7 +8149,8 @@
     </div>
 
     <!-- JavaScript -->
-    <script src="/web/scripts/skyview.js?v=20260822-gnss-orbit-model"></script>
+    <script src="/web/scripts/skyview.js?v=20260822-flare-feather"></script>
+    <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
     <script src="/web/scripts/ragnar_modern.js?v=20260821-watchtower-clear-incidents"></script>
 
 
