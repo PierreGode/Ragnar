@@ -320,6 +320,27 @@ else
     echo -e "  ${YELLOW}⚠${NC} tcpdump missing — Traffic Analysis tab stays hidden (apt install tcpdump)"
 fi
 
+echo -e "${BLUE}Step 5.4c: Ensuring CardputerZero display dependencies...${NC}"
+# The M5Stack CardputerZero (epd_type "st7789v2") drives its built-in 1.9" LCD
+# over SPI (spidev) and its 46-key TCA8418 keyboard + M5IOE1 backlight/reset over
+# I2C (smbus2). The installer pins these when option 6 is chosen; mirror them here
+# so a box that only ever updates still gets a working screen + keyboard. Gated on
+# the persisted display profile and idempotent (an importable module is left alone).
+_disp_cfg="$(dirname "$0")/config/shared_config.json"
+if grep -q '"epd_type"[[:space:]]*:[[:space:]]*"st7789v2"' "$_disp_cfg" 2>/dev/null; then
+    for _mod in spidev smbus2; do
+        python3 -c "import $_mod" 2>/dev/null && continue
+        pip3 install --break-system-packages "$_mod" >/dev/null 2>&1 || true
+    done
+    if python3 -c "import spidev, smbus2" 2>/dev/null; then
+        echo -e "  ${GREEN}✓${NC} CardputerZero display deps present (spidev, smbus2)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} CardputerZero needs spidev + smbus2 — install failed; LCD/keyboard may not work"
+    fi
+else
+    echo -e "  ${GREEN}✓${NC} Not a CardputerZero display profile — nothing to do"
+fi
+
 echo -e "${BLUE}Step 5.4b: Tailscale subnet-router IP forwarding...${NC}"
 # A Ragnar that advertises subnet routes (e.g. an on-site unit that lets an
 # off-site scanner reach the LAN over the tunnel) must have IP forwarding on, or

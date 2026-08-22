@@ -1,6 +1,7 @@
 # st7789v2.py
-# Driver for the M5Stack CardputerZero's built-in 1.9" ST7789V2 LCD (170x320,
-# used in landscape as 320x170). Exposes the same interface as the Waveshare
+# Driver for the M5Stack CardputerZero's built-in 1.9" ST7789V3 LCD (170x320,
+# used in landscape as 320x170; the module name keeps the historical "v2" —
+# V2/V3 share the register set this driver uses). Exposes the same interface as the Waveshare
 # e-Paper drivers so it integrates transparently with EPDHelper and the rest of
 # Ragnar:
 #   width, height, init(), Clear(), getbuffer(image), display(buf),
@@ -29,18 +30,17 @@
 #          hardware CE0, so we must NOT let spidev drive chip-select — we run
 #          with no_cs and assert CS manually on GPIO25.
 #        * RST and the backlight are behind M5Stack's M5IOE1 I2C I/O expander,
-#          not on direct GPIO, and its register map is not public. So we cannot
-#          toggle a hardware reset or the backlight from here: we issue a
-#          software reset (SWRESET) over SPI and rely on the backlight being on
-#          by power-on default. If your board boots with the backlight off, the
-#          framebuffer path (which M5Stack's image sets up, expander and all) is
-#          the one to use.
+#          not on direct GPIO. We drive them through m5ioe1.py (LCD reset on
+#          expander IO12, backlight on IO10/PWM4 — see the schematic): a real
+#          hardware reset before the init sequence, and backlight explicitly on.
+#          If the expander does not answer (e.g. framebuffer-only image), we fall
+#          back to a software reset (SWRESET) and rely on the power-on backlight.
 #
-# Wiring (CardputerZero, BCM numbering — from M5Stack's schematic):
+# Wiring (CardputerZero, BCM numbering — from M5Stack's schematic C154 V0.6.1):
 #   MOSI → GPIO10 (SPI0)      SCLK → GPIO11 (SPI0)
 #   CS   → GPIO25             DC   → GPIO8
-#   TE   → GPIO5              RST  → M5IOE1 expander (not wired to a GPIO)
-#   BL   → M5IOE1 expander (PWM, not wired to a GPIO)
+#   TE   → GPIO5              RST  → M5IOE1 IO12 (PYG12_LCD_RST, active-low)
+#   BL   → M5IOE1 IO10 / PWM4 (PYG10_BL_PWM)
 #
 # NOTE: unvalidated on real CardputerZero hardware. Offsets/MADCTL below follow
 # the standard ST7789 170-wide panel geometry and may need on-device tuning.
@@ -103,6 +103,7 @@ class EPD:
         # spi state
         self._spi  = None
         self._gpio = {}
+        self._ioe  = None   # M5IOE1 expander (LCD reset + backlight), lazy
         self._initialized = False
 
     # ------------------------------------------------------------------
@@ -250,12 +251,38 @@ class EPD:
         if not self._setup_spi_hardware():
             return False
         try:
-            self._software_reset()
+            self._reset_panel()
             self._send_init_sequence()
+            self._backlight_on()
             return True
         except Exception as e:
             logger.error("CardputerZero SPI init sequence failed: %s", e)
             return False
+
+    def _ensure_ioe(self):
+        """Lazily open the M5IOE1 expander (LCD reset + backlight). Returns the
+        handle or None; failures are non-fatal (we fall back to SWRESET)."""
+        if self._ioe is None:
+            try:
+                from m5ioe1 import M5IOE1
+                self._ioe = M5IOE1()
+            except Exception as e:
+                logger.info("CardputerZero: M5IOE1 expander unavailable (%s); "
+                            "using software reset + power-on backlight", e)
+                self._ioe = False   # sentinel: tried and failed, don't retry
+        return self._ioe or None
+
+    def _reset_panel(self):
+        """Hardware reset via the M5IOE1 expander if present, else SWRESET."""
+        ioe = self._ensure_ioe()
+        if ioe is not None and ioe.reset_lcd():
+            return
+        self._software_reset()
+
+    def _backlight_on(self):
+        ioe = self._ensure_ioe()
+        if ioe is not None:
+            ioe.backlight_on()
 
     def _setup_spi_hardware(self):
         if self._spi is not None:

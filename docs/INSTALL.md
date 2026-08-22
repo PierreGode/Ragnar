@@ -173,10 +173,14 @@ board's built-in display (`st7789v2`, 320×170 landscape) and wires up its keybo
    your LCD framebuffer reports an unexpected size, force it with
    `RAGNAR_CARDPUTER_FB=/dev/fbN`.
 2. **Native SPI (fallback).** If no matching framebuffer exists, Ragnar drives the
-   ST7789V2 directly over SPI (CS on GPIO25, DC on GPIO8). Note the board's reset
-   and backlight sit behind M5Stack's I2C I/O expander, so this path relies on the
-   backlight being on by power-on default; if the panel stays dark, use the
-   framebuffer path.
+   ST7789 (V3) directly over SPI (CS on GPIO25, DC on GPIO8). The board's reset
+   and backlight sit behind M5Stack's M5IOE1 I2C I/O expander (`0x4F`); Ragnar
+   drives them through it — a hardware reset on expander IO12 and the backlight on
+   IO10/PWM4. If the expander does not answer, this path falls back to a software
+   reset and relies on the power-on backlight; if the panel then stays dark, use
+   the framebuffer path. The expander pins/address are overridable via the
+   `RAGNAR_M5IOE1_ADDR`, `RAGNAR_M5IOE1_BL_PWM`, `RAGNAR_M5IOE1_RST_IO`, and
+   `RAGNAR_M5IOE1_BL_DUTY` environment variables.
 
 **Keyboard.** The 46-key keyboard is a TCA8418 matrix controller on I2C (`0x34`).
 Arrow keys page the display / navigate the on-device menus, Enter selects, and

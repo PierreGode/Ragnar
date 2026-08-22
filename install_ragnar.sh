@@ -2106,7 +2106,7 @@ main() {
             if [ "$CARDPUTER_MODE" = true ]; then
                 EPD_VERSION="st7789v2"
                 pip3 install smbus2 --break-system-packages >/dev/null 2>&1
-                echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789V2 LCD (320x170)${NC}"
+                echo -e "${GREEN}✓ M5Stack CardputerZero: built-in 1.9\" ST7789 V3 LCD (320x170)${NC}"
                 echo -e "${CYAN}  Keyboard: 46-key TCA8418 @ I2C 0x34 — arrows navigate, Enter selects.${NC}"
                 echo -e "${YELLOW}  If keys don't respond, press each nav key and check the log for its${NC}"
                 echo -e "${YELLOW}  code, then map it in config/cardputer_keymap.json (see docs).${NC}"

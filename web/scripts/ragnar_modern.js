@@ -638,7 +638,7 @@ const displaySelectOptions = {
         { value: '3in5_tft', label: '3.5" SPI TFT — ILI9486/ILI9488 (320x480)' },
         { value: '1in28_tft', label: '1.28" GC9A01 Round TFT (240x240)' },
         { value: '1in44_lcd', label: '1.44" ST7735S LCD HAT + joystick (128x128)' },
-        { value: '1in9_cardputer', label: '1.9" M5Stack CardputerZero ST7789V2 (320x170)' },
+        { value: '1in9_cardputer', label: '1.9" M5Stack CardputerZero ST7789 V3 (320x170)' },
         { value: '1in69_tft', label: '1.69" Whisplay ST7789 TFT (240x280)' },
         { value: '0in96_oled', label: '0.96" SSD1306 OLED (128x64)' },
         { value: 'lcd1602', label: '16×2 LCD1602 Character LCD (I2C)' },
