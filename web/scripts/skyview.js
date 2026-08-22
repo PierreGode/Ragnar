@@ -542,7 +542,7 @@
   }
 
   // ---- State -----------------------------------------------------------
-  let overlay = null, svg = null, svgRight = null, infoCard = null, subtitleEl = null, noteEl = null, detailEl = null, cursorEl = null;
+  let overlay = null, svg = null, infoCard = null, subtitleEl = null, noteEl = null, detailEl = null, cursorEl = null;
   let catalog = null, catalogLoading = null;
   let constLines = null, constLinesLoading = null;
   let deepSky = null, deepSkyLoading = null;
@@ -560,8 +560,6 @@
   // mode: 'live' | 'last' | 'browser' | 'default' | 'none'
   let lastData = { sky: [], lat: null, lon: null, mode: 'none', t: null };
   let browserGeo = null;
-  let stereoMode = false;
-  try { stereoMode = localStorage.getItem('ragnar.skyview.stereo') === '1'; } catch (_) {}
   // Screen-space projected objects for click hit-testing.
   let projected = [];
   function viewDate() { return new Date(Date.now() + timeOffsetMs); }
@@ -967,9 +965,7 @@
     }
     parts.push(`<text x="${radarC.x}" y="${(radarC.y + radarR + 16).toFixed(1)}" fill="#7fa7c8" font-size="10" text-anchor="middle">GNSS radar · ${inViewSats.length} in view · ${trackedSats} tracked</text></g>`);
 
-    const rendered = parts.join('');
-    svg.innerHTML = rendered;
-    if (stereoMode && svgRight) svgRight.innerHTML = rendered;
+    svg.innerHTML = parts.join('');
     const nowMs = date.getTime();
     if (subtitleEl) {
       const pos = hasPos ? `${lat.toFixed(4)}, ${lon.toFixed(4)}${modeSuffix(mode)}` : 'no position';
@@ -1236,9 +1232,7 @@
       projected.push({ kind: 'sat', x, y, sat: s });
     }
 
-    const rendered = parts.join('');
-    svg.innerHTML = rendered;
-    if (stereoMode && svgRight) svgRight.innerHTML = rendered;
+    svg.innerHTML = parts.join('');
 
     // Subtitle + note.
     if (subtitleEl) {
@@ -1747,15 +1741,8 @@
         #ragnar-skyview .sv-integ-note{margin-top:6px;font-size:10px;color:#7f93ad;white-space:normal;line-height:1.4;}
         #ragnar-skyview .sv-snap{cursor:pointer;background:#17233a;color:#e2e8f0;border:none;border-radius:8px;width:34px;height:34px;font-size:15px;line-height:1;flex:0 0 auto;}
         #ragnar-skyview .sv-snap:hover{background:#243350;}
-        #ragnar-skyview .sv-vr{cursor:pointer;background:#17233a;color:#e2e8f0;border:none;border-radius:8px;width:34px;height:34px;font-size:15px;line-height:1;flex:0 0 auto;}
-        #ragnar-skyview .sv-vr:hover{background:#243350;}
-        #ragnar-skyview .sv-vr.on{background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;box-shadow:0 0 0 1px rgba(125,211,252,.55),0 0 14px rgba(56,189,248,.35);}
-        #ragnar-skyview .sv-svg-right{display:none;position:absolute;top:0;bottom:0;left:50%;right:auto;width:50%;height:100%;pointer-events:none;cursor:default;}
-        #ragnar-skyview.sv-stereo svg.sv-svg-main{left:0;right:auto;width:50%;}
-        #ragnar-skyview.sv-stereo .sv-svg-right{display:block;}
-        #ragnar-skyview.sv-stereo .sv-stage::after{content:"";position:absolute;top:6%;bottom:6%;left:calc(50% - 1px);width:2px;background:rgba(3,8,18,.9);pointer-events:none;z-index:2;}
-        #ragnar-skyview.sv-stereo .sv-brand,#ragnar-skyview.sv-stereo .sv-cursor,#ragnar-skyview.sv-stereo .sv-controls,#ragnar-skyview.sv-stereo .sv-time,#ragnar-skyview.sv-stereo .sv-detail,#ragnar-skyview.sv-stereo .sv-layer-key,#ragnar-skyview.sv-stereo .sv-zoom,#ragnar-skyview.sv-stereo .sv-note,#ragnar-skyview.sv-stereo .sv-info,#ragnar-skyview.sv-stereo .sv-legend{display:none !important;}
-        #ragnar-skyview.sv-stereo .sv-head{background:rgba(3,8,18,.72);}
+        #ragnar-skyview .sv-vr{cursor:pointer;background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;border:none;border-radius:8px;width:34px;height:34px;font-size:15px;line-height:1;flex:0 0 auto;box-shadow:0 0 0 1px rgba(125,211,252,.35);}
+        #ragnar-skyview .sv-vr:hover{filter:brightness(1.15);}
         #ragnar-skyview .sv-controls{display:none;position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:5;gap:6px;flex-wrap:wrap;justify-content:center;
           background:rgba(3,8,18,.5);border:1px solid rgba(125,211,252,.16);border-radius:12px;padding:6px;backdrop-filter:blur(10px);max-width:calc(100vw - 32px);}
         #ragnar-skyview .sv-chip{cursor:pointer;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.66);color:#9fb0c3;border-radius:8px;
@@ -1809,8 +1796,7 @@
         </div>
         <div class="sv-brand"><b>Ragnar observatory</b><span>live GNSS sky telemetry</span></div>
         <div class="sv-cursor">az --  alt --</div>
-        <svg class="sv-svg-main" preserveAspectRatio="xMidYMid meet"></svg>
-        <svg class="sv-svg-right" preserveAspectRatio="xMidYMid meet" aria-hidden="true"></svg>
+        <svg preserveAspectRatio="xMidYMid meet"></svg>
         <div class="sv-note"></div>
         <div class="sv-time">
           <button class="sv-time-now" type="button" title="Back to live">● Live</button>
@@ -1833,8 +1819,7 @@
     overlay.style.setProperty('overflow', 'hidden');
     document.body.style.overflow = 'hidden';
 
-    svg = overlay.querySelector('svg.sv-svg-main');
-    svgRight = overlay.querySelector('svg.sv-svg-right');
+    svg = overlay.querySelector('svg');
     subtitleEl = overlay.querySelector('#sv-sub');
     noteEl = overlay.querySelector('.sv-note');
     detailEl = overlay.querySelector('.sv-detail');
@@ -1879,14 +1864,14 @@
     if (snapBtn) snapBtn.addEventListener('click', saveSnapshot);
     const vrBtn = overlay.querySelector('.sv-vr');
     if (vrBtn) {
-      if (stereoMode) { overlay.classList.add('sv-stereo'); vrBtn.classList.add('on'); }
       vrBtn.addEventListener('click', () => {
-        stereoMode = !stereoMode;
-        try { localStorage.setItem('ragnar.skyview.stereo', stereoMode ? '1' : '0'); } catch (_) {}
-        overlay.classList.toggle('sv-stereo', stereoMode);
-        vrBtn.classList.toggle('on', stereoMode);
-        if (resizeH) resizeH();
-        else render();
+        if (window.RagnarSkyViewVR && typeof window.RagnarSkyViewVR.enter === 'function') {
+          window.RagnarSkyViewVR.enter({
+            lat: lastData.lat, lon: lastData.lon,
+            sky: lastData.sky, mode: lastData.mode,
+            date: viewDate()
+          });
+        }
       });
     }
     const diagClose = overlay.querySelector('.sv-diag-close');
@@ -1932,7 +1917,6 @@
     function syncViewBox() {
       const r = svg.getBoundingClientRect();
       svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
-      if (svgRight) svgRight.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
       render();
     }
     resizeH = syncViewBox;
@@ -1991,7 +1975,7 @@
     document.removeEventListener('keydown', onEsc); onEsc = null;
     window.removeEventListener('resize', resizeH); resizeH = null;
     overlay.remove(); overlay = null;
-    svg = svgRight = infoCard = subtitleEl = noteEl = detailEl = cursorEl = null;
+    svg = infoCard = subtitleEl = noteEl = detailEl = cursorEl = null;
     enhanced = false;
     skyZoom = 1;
     skyPanX = skyPanY = 0;
