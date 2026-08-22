@@ -51,6 +51,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -1277,6 +1278,61 @@ def _ssh_summarize(events, interface, seconds):
             "interface": interface, "seconds": seconds}
 
 
+# --- Watchtower feed: append findings as JSON-lines so the unified alert pane tails them ---
+_WT_LOG_DIR = os.environ.get("RAGNAR_WATCH_LOG_DIR", "/var/log/ragnar")
+_WT_DEDUP_S = 300.0                    # don't re-log the same standing finding within 5 min
+_WT_SKIP_SEV = frozenset(("info",))   # pure posture/inventory stays off the alert pane
+_wt_lock = threading.Lock()
+_wt_seen = {}                         # (code, server) -> last-emitted epoch
+
+
+def _emit_watchtower(result):
+    """Append each non-info SSH finding to <log-dir>/ssh_watch.jsonl in the shape
+    Watchtower.normalize() reads, so the unified alert pane and its single Pushover
+    path fold in the in-app SSH observer alongside the standalone watchers. Time-window
+    deduplicated per (code, server) so the background rotation can't spam a standing
+    condition. Best-effort: the scan never fails because logging did."""
+    if not result.get("success"):
+        return
+    verdict = result.get("verdict", "clean")
+    iface = result.get("interface")
+    now = time.time()
+    iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = []
+    with _wt_lock:
+        for row in result.get("sessions", []):
+            server, client = row.get("server"), row.get("client")
+            for f in row.get("findings", []):
+                sev = f.get("severity")
+                if sev in _WT_SKIP_SEV:
+                    continue
+                code = f.get("code")
+                key = (code, server)
+                last = _wt_seen.get(key)
+                if last is not None and now - last < _WT_DEDUP_S:
+                    continue
+                _wt_seen[key] = now
+                cve = f.get("cve")
+                lines.append(json.dumps({
+                    "module": "ssh_watch", "ts": now, "iso": iso, "iface": iface,
+                    "severity": sev, "code": code, "codes": [code],
+                    "src": server, "target": client,
+                    "cves": [cve] if cve else [],
+                    "summary": f.get("message"), "verdict": verdict}))
+        if len(_wt_seen) > 4096:
+            cutoff = now - _WT_DEDUP_S
+            for k in [k for k, t in _wt_seen.items() if t < cutoff]:
+                _wt_seen.pop(k, None)
+    if not lines:
+        return
+    try:
+        os.makedirs(_WT_LOG_DIR, exist_ok=True)
+        with open(os.path.join(_WT_LOG_DIR, "ssh_watch.jsonl"), "a") as fh:
+            fh.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
 def do_ssh_watch(interface=None, seconds=12, grace_seconds=120, grace_min=20,
                  no_grace_track=False):
     """Passive SSH observation on `interface` for `seconds`. Reads the cleartext SSH
@@ -1314,7 +1370,9 @@ def do_ssh_watch(interface=None, seconds=12, grace_seconds=120, grace_min=20,
         except OSError:
             pass
     watcher._gc(force=True)      # flush held flows so grace holds within the window score
-    return _ssh_summarize(em.events, interface, seconds)
+    result = _ssh_summarize(em.events, interface, seconds)
+    _emit_watchtower(result)
+    return result
 
 
 # ===========================================================================

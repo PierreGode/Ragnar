@@ -6458,7 +6458,7 @@ function renderNetIntegrity(d) {
     // Prefer the full per-check map (extended monitor); fall back to dns/arp/dhcp.
     let entries;
     if (d.checks && Object.keys(d.checks).length) {
-        const order = ['dns', 'arp', 'dhcp', 'raguard', 'stp', 'dtp', 'cdp', 'vtp', 'igmp', 'ipv6', 'ndp', 'fhrp', 'ospf', 'eigrp', 'isis', 'bgp', 'smb', 'relay', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ldap'];
+        const order = ['dns', 'arp', 'dhcp', 'raguard', 'stp', 'dtp', 'cdp', 'vtp', 'igmp', 'ipv6', 'ndp', 'fhrp', 'ospf', 'eigrp', 'isis', 'bgp', 'smb', 'relay', 'ntp', 'icmp', 'snmp', 'cert', 'tls', 'ldap', 'ssh', 'telnet'];
         entries = Object.keys(d.checks).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99))
             .map(k => [d.checks[k].label || k.toUpperCase(), d.checks[k].verdict, d.checks[k].reasons || []]);
     } else {
