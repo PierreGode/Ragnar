@@ -1892,8 +1892,9 @@
         #ragnar-skyview .sv-vr:hover{filter:brightness(1.15);}
         #ragnar-skyview .sv-controls{display:none;position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:5;gap:6px;flex-wrap:wrap;justify-content:center;
           background:rgba(3,8,18,.5);border:1px solid rgba(125,211,252,.16);border-radius:12px;padding:6px;backdrop-filter:blur(10px);max-width:calc(100vw - 32px);}
-        #ragnar-skyview .sv-chip{cursor:pointer;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.66);color:#9fb0c3;border-radius:8px;
+        #ragnar-skyview .sv-chip{cursor:pointer;display:inline-flex;align-items:center;gap:5px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.66);color:#9fb0c3;border-radius:8px;
           padding:5px 10px;font-size:11px;font-weight:600;letter-spacing:.02em;white-space:nowrap;}
+        #ragnar-skyview .sv-chip-ic{font-size:12px;line-height:1;}
         #ragnar-skyview .sv-chip:hover{border-color:rgba(125,211,252,.46);color:#dbeafe;}
         #ragnar-skyview .sv-chip.on{background:rgba(14,165,233,.22);border-color:rgba(125,211,252,.6);color:#e6f4ff;}
         #ragnar-skyview .sv-time{display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:5;align-items:center;gap:10px;
@@ -1930,12 +1931,15 @@
           #ragnar-skyview .sv-sub{display:none;}
           #ragnar-skyview.sv-enhanced .sv-diag-btn .sv-dg-tx{display:none;}
           #ragnar-skyview.sv-enhanced .sv-diag-btn{padding:8px 10px;}
-          /* Floating controls: sky-clear layer chips off the center, on the
-             bottom above the time scrubber where the touch-hidden zoom pad
-             used to sit; time bar full width; keep them from overlapping. */
-          #ragnar-skyview.sv-enhanced .sv-controls{top:auto;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 56px);max-width:calc(100vw - 20px);}
+          /* Layer chips: small icon-only buttons tucked in the top-right just
+             under the header, next to the Diagnostics button — off the sky
+             center and off the bottom scrubber where they used to crowd in. */
+          #ragnar-skyview.sv-enhanced .sv-controls{top:6px;bottom:auto;left:auto;right:max(8px,env(safe-area-inset-right));transform:none;justify-content:flex-end;gap:5px;padding:4px;max-width:none;}
+          #ragnar-skyview.sv-enhanced .sv-chip-tx{display:none;}
+          #ragnar-skyview.sv-enhanced .sv-chip{padding:0;width:38px;height:38px;justify-content:center;gap:0;}
+          #ragnar-skyview.sv-enhanced .sv-chip-ic{font-size:16px;}
           #ragnar-skyview.sv-enhanced .sv-time{width:calc(100vw - 20px);bottom:max(14px,env(safe-area-inset-bottom));}
-          #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 106px);}
+          #ragnar-skyview.sv-enhanced .sv-zoom{left:auto;right:12px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 56px);}
         }
         /* Touch devices: no hover cursor readout, bigger tap targets, pinch replaces the tiny zoom pad. */
         @media (pointer:coarse){
@@ -1965,10 +1969,10 @@
       </div>
       <div class="sv-stage">
         <div class="sv-controls">
-          <button class="sv-chip on" data-layer="constellations" type="button">✦ Constellations</button>
-          <button class="sv-chip" data-layer="deepsky" type="button">◇ Deep sky</button>
-          <button class="sv-chip" data-layer="obstruction" type="button">▦ Sky survey</button>
-          <button class="sv-chip" data-survey="reset" type="button" title="Clear the accumulated obstruction survey">⟲ Reset survey</button>
+          <button class="sv-chip on" data-layer="constellations" type="button" title="Constellations" aria-label="Constellations"><span class="sv-chip-ic" aria-hidden="true">✦</span><span class="sv-chip-tx">Constellations</span></button>
+          <button class="sv-chip" data-layer="deepsky" type="button" title="Deep sky" aria-label="Deep sky"><span class="sv-chip-ic" aria-hidden="true">◇</span><span class="sv-chip-tx">Deep sky</span></button>
+          <button class="sv-chip" data-layer="obstruction" type="button" title="Sky survey" aria-label="Sky survey"><span class="sv-chip-ic" aria-hidden="true">▦</span><span class="sv-chip-tx">Sky survey</span></button>
+          <button class="sv-chip" data-survey="reset" type="button" title="Clear the accumulated obstruction survey" aria-label="Reset survey"><span class="sv-chip-ic" aria-hidden="true">⟲</span><span class="sv-chip-tx">Reset survey</span></button>
         </div>
         <div class="sv-brand"><b>Ragnar observatory</b><span>live GNSS sky telemetry</span></div>
         <div class="sv-cursor">az --  alt --</div>
