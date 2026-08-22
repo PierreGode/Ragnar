@@ -7,9 +7,10 @@
 (function () {
   'use strict';
 
-  const THREE_URL = 'https://unpkg.com/three@0.160.0/build/three.min.js';
+  const THREE_URL = '/web/vendor/three/three.module.js';
   const CATALOG_URL = '/web/vendor/star_catalog.json';
   const CONST_URL = '/web/vendor/constellation_lines.json';
+  let THREE = null;
   const D2R = Math.PI / 180, R2D = 180 / Math.PI;
   const R_STARS = 400;
   const R_PLANETS = 260;
@@ -117,17 +118,11 @@
   }
 
   // ---- Loader helpers ------------------------------------------------
-  function loadScript(src) {
-    return new Promise((resolve, reject) => {
-      const s = document.createElement('script');
-      s.src = src; s.onload = resolve; s.onerror = () => reject(new Error('failed: ' + src));
-      document.head.appendChild(s);
-    });
-  }
   function loadThree() {
-    if (window.THREE) return Promise.resolve();
+    if (THREE) return Promise.resolve();
     if (threeLoading) return threeLoading;
-    threeLoading = loadScript(THREE_URL);
+    threeLoading = import(THREE_URL).then(mod => { THREE = mod; })
+      .catch(err => { threeLoading = null; throw err; });
     return threeLoading;
   }
   function loadJSON(url, cacheRef) {
@@ -743,9 +738,10 @@
       setStatus('Passthrough unavailable — falling back to opaque VR.');
     }
     setStatus('Loading 3D engine…');
-    try { await loadThree(); } catch (_) {
+    try { await loadThree(); } catch (err) {
+      console.error('[RagnarSkyViewVR] loadThree failed', err);
       removeStatusOverlay();
-      showXrUnavailableModal('Failed to load three.js from CDN — the headset needs internet access on first launch.');
+      showXrUnavailableModal('Failed to load three.js from ' + THREE_URL + ' — ' + ((err && err.message) || err));
       return;
     }
     setStatus('Building sky…');
