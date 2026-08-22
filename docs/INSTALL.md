@@ -156,6 +156,10 @@ until it is installed.
 
 #### M5Stack CardputerZero
 
+> Full guide: [docs/M5StackCardputerZero.md](M5StackCardputerZero.md) — hardware,
+> the on-device screen/keyboard, M5IOE1 backlight/reset, keymap calibration, and
+> troubleshooting. The essentials are below.
+
 The [M5Stack CardputerZero](https://shop.m5stack.com/pages/m5-cardputerzero) is a
 Raspberry Pi Compute Module Zero (CM0 / BCM2837) in a pocket case with a built-in
 1.9" LCD and a 46-key keyboard — so from Ragnar's point of view it is just a
