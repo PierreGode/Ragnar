@@ -484,6 +484,35 @@
     return tex;
   }
 
+  let _flareTexture = null;
+  function buildFlareTexture() {
+    if (_flareTexture) return _flareTexture;
+    const W = 128, H = 512;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    // Horizontal band: opaque at center, transparent at sides.
+    const hg = ctx.createLinearGradient(0, 0, W, 0);
+    hg.addColorStop(0.00, 'rgba(255,255,255,0)');
+    hg.addColorStop(0.35, 'rgba(255,255,255,0.7)');
+    hg.addColorStop(0.50, 'rgba(255,255,255,1)');
+    hg.addColorStop(0.65, 'rgba(255,255,255,0.7)');
+    hg.addColorStop(1.00, 'rgba(255,255,255,0)');
+    ctx.fillStyle = hg; ctx.fillRect(0, 0, W, H);
+    // Mask by vertical alpha so both ends taper to nothing.
+    ctx.globalCompositeOperation = 'destination-in';
+    const vg = ctx.createLinearGradient(0, 0, 0, H);
+    vg.addColorStop(0.00, 'rgba(0,0,0,0)');
+    vg.addColorStop(0.15, 'rgba(0,0,0,0.35)');
+    vg.addColorStop(0.50, 'rgba(0,0,0,1)');
+    vg.addColorStop(0.85, 'rgba(0,0,0,0.35)');
+    vg.addColorStop(1.00, 'rgba(0,0,0,0)');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+    _flareTexture = new THREE.CanvasTexture(c);
+    _flareTexture.anisotropy = 4;
+    return _flareTexture;
+  }
+
   function buildSunGlow(radius) {
     const canvas = document.createElement('canvas');
     canvas.width = canvas.height = 256;
@@ -569,18 +598,18 @@
       zoomable.push(alive2);
       group.add(alive2);
       sunAliveLayers.push({ mesh: alive2, base: 0.28, amp: 0.22, seed: 2.4 });
-      // Flare beams — 4 slots. Each spawns at a random angle with random
-      // duration + peak brightness; occasionally spawns as a "big glare".
+      // Flare beams — 4 slots with a soft-alpha texture so edges feather
+      // instead of showing rectangle corners.
+      const flareTex = buildFlareTexture();
       for (let i = 0; i < 4; i++) {
         const flareMat = new THREE.MeshBasicMaterial({
-          color: 0xffd67a, transparent: true, opacity: 0,
+          map: flareTex, color: 0xffd67a, transparent: true, opacity: 0,
           blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
         });
         const flare = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 14), flareMat);
-        // Position/rotation set when this slot activates.
         flare.position.set(0, 0, 0);
         flare.visible = false;
-        sSpr.add(flare);   // child of the Sun sprite so it inherits the Y-locked billboard orientation
+        sSpr.add(flare);   // child of Sun sprite → inherits Y-locked billboard
         sunFlares.push({ mesh: flare, active: false, age: 0, lifetime: 0, peak: 0, isGlare: false });
       }
       const label = makeLabelSprite('Sun', '#ffdf7e');

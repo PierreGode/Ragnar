@@ -783,7 +783,10 @@
       <radialGradient id="sv-p-Neptune" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#7fa4d4"/><stop offset="55%" stop-color="#3762a8"/><stop offset="100%" stop-color="#0e2a5c"/></radialGradient>
       <linearGradient id="sv-p-Jupiter-bands" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(120,80,40,.55)"/><stop offset="18%" stop-color="rgba(240,220,180,0)"/><stop offset="30%" stop-color="rgba(120,80,40,.5)"/><stop offset="45%" stop-color="rgba(240,220,180,0)"/><stop offset="58%" stop-color="rgba(140,90,50,.55)"/><stop offset="72%" stop-color="rgba(240,220,180,0)"/><stop offset="88%" stop-color="rgba(90,60,30,.6)"/></linearGradient>
       <linearGradient id="sv-iss-panel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1e3a8a"/></linearGradient>
-      <filter id="sv-full-glow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`);
+      <linearGradient id="sv-flare-warm" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#ffe58c" stop-opacity="0"/><stop offset="0.2" stop-color="#ffd67a" stop-opacity="0.85"/><stop offset="1" stop-color="#ffe58c" stop-opacity="0"/></linearGradient>
+      <linearGradient id="sv-flare-glare" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#fff5cd" stop-opacity="0"/><stop offset="0.25" stop-color="#fff5cd" stop-opacity="0.98"/><stop offset="0.7" stop-color="#ffd67a" stop-opacity="0.4"/><stop offset="1" stop-color="#ffd67a" stop-opacity="0"/></linearGradient>
+      <filter id="sv-full-glow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="sv-flare-blur" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.8"/></filter></defs>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-full-bg)"/>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-zenith)"/>`);
     parts.push(`<rect x="0" y="${(H * .72).toFixed(1)}" width="${W}" height="${(H * .28).toFixed(1)}" fill="url(#sv-horizon)" opacity=".7"/>`);
@@ -967,20 +970,21 @@
           for (let i = 0; i < nFlares; i++) {
             const ang = Math.random() * 360;
             const len = 34 + Math.random() * 42;
-            const wid = (1 + Math.random() * 2).toFixed(1);
+            const rx = 2 + Math.random() * 2;
             const dur = (0.6 + Math.random() * 1.6).toFixed(2);
-            const peak = (0.4 + Math.random() * 0.5).toFixed(2);
-            const r = 200 + Math.floor(Math.random() * 55);
-            const g = 180 + Math.floor(Math.random() * 65);
-            const b = 90 + Math.floor(Math.random() * 60);
-            parts.push(`<line x1="0" y1="0" x2="0" y2="${(-len).toFixed(1)}" stroke="rgba(${r},${g},${b},1)" stroke-width="${wid}" stroke-linecap="round" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;${peak};0" dur="${dur}s" repeatCount="1" fill="freeze"/></line>`);
+            const peak = (0.55 + Math.random() * 0.4).toFixed(2);
+            // Ellipse anchored at (0,-len/2) so its base touches the Sun center.
+            const cy = -(len / 2);
+            parts.push(`<ellipse cx="0" cy="${cy.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${(len / 2).toFixed(1)}" fill="url(#sv-flare-warm)" filter="url(#sv-flare-blur)" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;${peak};0" dur="${dur}s" repeatCount="1" fill="freeze"/></ellipse>`);
           }
-          // Occasional big glare — bright, longer, brighter color.
+          // Occasional big glare — brighter, longer, wider.
           if (Math.random() < 0.35) {
             const ang = Math.random() * 360;
             const len = 100 + Math.random() * 90;
+            const rx = 5 + Math.random() * 3;
             const dur = (1.8 + Math.random() * 1.6).toFixed(2);
-            parts.push(`<line x1="0" y1="0" x2="0" y2="${(-len).toFixed(1)}" stroke="rgba(255,240,180,1)" stroke-width="4" stroke-linecap="round" filter="url(#sv-full-glow)" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;0.95;0.55;0" dur="${dur}s" repeatCount="1" fill="freeze"/></line>`);
+            const cy = -(len / 2);
+            parts.push(`<ellipse cx="0" cy="${cy.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${(len / 2).toFixed(1)}" fill="url(#sv-flare-glare)" filter="url(#sv-flare-blur)" transform="translate(${sp.x.toFixed(1)} ${sp.y.toFixed(1)}) rotate(${ang.toFixed(1)})" opacity="0"><animate attributeName="opacity" values="0;1;0.55;0" dur="${dur}s" repeatCount="1" fill="freeze"/></ellipse>`);
           }
           parts.push(`<text x="${sp.x.toFixed(1)}" y="${(sp.y + sunSize + 14).toFixed(1)}" fill="#ffdf7e" font-size="12" text-anchor="middle" opacity=".95">Sun</text>`);
           projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
