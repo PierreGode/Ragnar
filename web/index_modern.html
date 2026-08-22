@@ -2059,6 +2059,35 @@
                     </div>
                     <div id="tls-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
+                <!-- SSH Watch (passive regreSSHion / Terrapin observer) -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">SSH Watch <span class="text-xs font-normal text-gray-500">(passive · regreSSHion / Terrapin)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive SSH observer — <strong>detection-only</strong>, <strong>never connects</strong> (almost every published regreSSHion "detector" is a banner <em>grab</em>, i.e. active scanning; this reads only what already flows). Sniffs the cleartext SSH prologue — the identification strings and both KEXINIT messages — and reports software versions, the negotiated algorithm set, and <strong>HASSH</strong> fingerprints. Names <strong><code>CVE-2024-6387</code> (regreSSHion)</strong>: an OpenSSH <span class="font-mono">8.5p1–9.7p1</span> banner is capped at <em>notice / low-confidence posture</em> — a version in range is <em>worth checking</em>, never <em>vulnerable</em>, because distros backport the fix without changing the string. The confidence lives in the <strong>login-grace access pattern</strong> (many connections that complete the handshake and are then held to ~LoginGraceTime carrying no session) — the behaviour exploitation produces. Also flags <strong><code>CVE-2023-48795</code> (Terrapin)</strong> prefix-truncation exposure (ChaCha20-Poly1305 / CBC-EtM negotiated without strict-KEX — <em>read</em> from the KEXINITs, high confidence), SSH-1.x, and weak KEX / host-key / cipher / MAC.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture on tcp/22 (needs a SPAN/mirror to see other hosts). <strong>Set "grace secs" to your servers' <span class="font-mono">LoginGraceTime</span></strong> — a passive observer cannot read it, and the regreSSHion behavioural finding needs a window long enough to observe a hold, so it is the version/Terrapin/algorithm findings that surface on a short snapshot.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="ssh-iface" title="Interface for the SSH capture — pick the LAN/WiFi NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="ssh-secs" type="number" min="4" max="60" value="12" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <input id="ssh-grace" type="number" min="2" max="900" value="120" title="servers' LoginGraceTime (seconds) — the expected regreSSHion hold time" class="w-24 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" placeholder="grace">
+                        <button onclick="runSshWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Observe SSH</button>
+                    </div>
+                    <div id="ssh-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
+                <!-- Telnet Watch (passive CVE-2026-24061 / CVE-2026-32746 observer) -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">Telnet Watch <span class="text-xs font-normal text-gray-500">(passive · CVE-2026-24061 / 32746)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive Telnet observer — <strong>detection-only</strong>, never transmits. Telnet is <strong>cleartext end to end</strong>, including all option negotiation, so — unlike SSH/TLS, which see only a prologue before encryption — the exploit payload itself crosses the wire in the open and attack findings carry <strong>high confidence</strong>. Names two critical GNU inetutils <span class="font-mono">telnetd</span> bugs. <strong><code>CVE-2026-24061</code></strong> (CVSS 9.8, <strong>CISA KEV</strong>): a <span class="font-mono">USER=-f root</span> value in a <span class="font-mono">NEW-ENVIRON IS</span> subnegotiation makes telnetd run <span class="font-mono">login -f root</span> — an <strong>unauthenticated root shell</strong>; the injected <span class="font-mono">-</span>value is read verbatim off the wire (only the flag prefix is logged, never the full value). <strong><code>CVE-2026-32746</code></strong> (CVSS 9.8): a <span class="font-mono">LINEMODE SLC</span> table with more reply triplets than the 108-byte <span class="font-mono">slcbuf</span> holds — a BSS overflow (attempt is <em>counted</em> on the wire; a server whose SLC reply echoes past the buffer is <em>confirmed vulnerable</em>; a LINEMODE-advertising server is <em>posture only</em>, since a patched telnetd negotiates identically). Also flags <strong>cleartext credential</strong> exposure (a server password prompt with no <span class="font-mono">ENCRYPT START</span>) and environment-variable leakage.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture on tcp/23 + 2323 (needs a SPAN/mirror to see other hosts). Telnet-over-TLS (992) is observed but not dissected. The client's keystrokes are never inspected or logged — only the server-side prompt is used as the cleartext-auth signal.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="telnet-iface" title="Interface for the Telnet capture — pick the LAN/access NIC or a SPAN/mirror port" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="telnet-secs" type="number" min="4" max="60" value="12" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runTelnetWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Observe Telnet</button>
+                    </div>
+                    <div id="telnet-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
                 <!-- STP/BPDU Watch (spanning tree) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">STP/BPDU Watch <span class="text-xs font-normal text-gray-500">(spanning tree · root hijack)</span></h3>
@@ -8151,7 +8180,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-flare-feather"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260821-watchtower-clear-incidents"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260822-ssh-telnet-watch"></script>
 
 
 

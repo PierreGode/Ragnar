@@ -64,6 +64,8 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [SMB Watch](#smb-watch) | Switch & L2/L3 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
 | [Relay/Coercion Watch](#relaycoercion-watch) | Switch & L2/L3 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
+| [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
+| [Telnet Watch](#telnet-watch) | Switch & L2/L3 | `GET /api/net/telnet-watch` |
 | [FHRP Watch](#fhrp-watch) | Switch & L2/L3 | `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline` |
 | [EIGRP Watch](#eigrp-watch) | Switch & L2/L3 | `GET /api/net/eigrp-watch`, `POST /api/net/eigrp-baseline` |
 | [IS-IS Watch](#is-is-watch) | Switch & L2/L3 | `GET /api/net/isis-watch`, `POST /api/net/isis-baseline` |
@@ -1512,6 +1514,95 @@ Hardening it drives: require **LDAPS/StartTLS** and reject simple binds on clear
 **disable anonymous binds**, enforce **LDAP signing + channel binding (EPA)** on DCs,
 and restrict **UDP/389** at the edge. **API:** `GET /api/net/ldap-watch`. **CLI:**
 `ldap-watch`, `ldap-selftest`.
+
+### SSH Watch
+A **passive** SSH observer — **detection-only, it never connects**. This matters:
+almost every published "detector" for regreSSHion is a banner *grab*, which means
+opening a connection to the target — active scanning wearing a passive label. SSH Watch
+reads only the cleartext SSH prologue that already flows on **tcp/22** — the
+identification strings and both **KEXINIT** messages — and reports software versions,
+the negotiated algorithm set, and **HASSH** / HASSH-server fingerprints (the SSH analogue
+of JA3/JA3S, free once KEXINIT is parsed). `ssh_watch.py` is a standalone module imported
+by the toolbox; Scapy is imported lazily, so `--selftest` and offline parsing need zero
+third-party deps.
+
+What it flags:
+
+- **cve_2024_6387_version_in_range** — an OpenSSH banner in the **regreSSHion** affected
+  range (**8.5p1–9.7p1**, or anything before 4.4p1 without the CVE-2006-5051 fix). Capped
+  at **notice / low confidence** posture on purpose: distributions **backport** the fix
+  without changing the version string, so a version in range means *worth checking*, never
+  *vulnerable*. The message says so. *(clean verdict on its own — it is posture, not proof)*
+- **cve_2024_6387_grace_timeout_pattern** — where the real confidence lives. Exploitation
+  needs many connections that each complete the cleartext handshake and are then **held
+  until LoginGraceTime expires** without authenticating. Authentication is encrypted but
+  **connection timing is not**: this counts handshake-completed connections from one source
+  that were held ~`grace_seconds` and carried <16 KiB, so port scans, TCP probes and real
+  sessions don't count. 20 in the window is `warn`, 100 is `high` — labelled
+  `heuristic`. **`grace_seconds` must be set to your servers' `LoginGraceTime`** (a passive
+  observer can't read it), and the window must be long enough to observe a hold. *(suspicious)*
+- **cve_2023_48795_terrapin_exposed** — ChaCha20-Poly1305, or CBC with Encrypt-then-MAC,
+  negotiated **without strict key exchange** — the **Terrapin** prefix-truncation condition.
+  This is the one high-confidence finding: both KEXINITs are cleartext, so the vulnerable
+  state is *read*, not inferred. *(suspicious)*
+- **ssh_protocol_1x** — SSH-1.x offered. *(suspicious)* · **ssh_weak_kex / ssh_weak_hostkey
+  / ssh_weak_cipher / ssh_weak_mac** — 1024-bit MODP + SHA-1 KEX, `ssh-dss` / SHA-1 RSA host
+  keys, `none` / single-DES / RC4 / 64-bit-block ciphers, `none` / MD5 MACs. Tiered per
+  algorithm so a feed doesn't warn on OpenSSH's default `umac-64-etm` first preference.
+  *(notice → suspicious by severity)* · **ssh_strict_kex_absent** — strict KEX not offered by
+  both sides, but the negotiated mode isn't vulnerable. *(info)*
+
+Verdict is **clean → suspicious**: every SSH finding is posture, exposure or heuristic —
+none is a confirmed live compromise (regreSSHion can't be confirmed passively), so the scale
+does not reach "compromised". Capture is a short passive tcpdump snapshot dissected with
+Scapy. The parse+detect path is pure Python and self-tests without root (`ssh_watch.py
+--selftest`, 182 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
+it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / ChaCha where
+Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. **API:**
+`GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.
+
+### Telnet Watch
+A **passive** Telnet observer — **detection-only, it never transmits**. Telnet is unusually
+suited to deep passive detection because the protocol is **cleartext end to end**, including
+all option negotiation — so unlike [SSH Watch](#ssh-watch) and [TLS Watch](#tls-watch), which
+see only a prologue before the session encrypts, Telnet Watch sees the **whole session** and
+the exploit payload itself crosses the wire in the open. It monitors **tcp/23** and **2323**
+(Telnet-over-TLS **992** is observed but not dissected). `telnet_watch.py` is a standalone
+module imported by the toolbox; Scapy is imported lazily.
+
+It names two critical GNU inetutils `telnetd` CVEs:
+
+- **TELNET-24061-ARGINJECT** — **CVE-2026-24061** (CVSS **9.8**, **CISA KEV** 2026-01-26).
+  telnetd expands the `USER` environment variable from the client's `NEW-ENVIRON IS`
+  subnegotiation straight into the login command line, so `USER=-f root` runs `login -f
+  root` — `-f` skips authentication and the result is an **unauthenticated root shell**, no
+  memory corruption involved. High confidence: the injected value is on the wire verbatim
+  (`IAC SB NEW-ENVIRON IS VAR USER VALUE -f root IAC SE`). Only the flag **prefix** and the
+  value length are logged — never the full value. *(compromised)*
+- **TELNET-32746-SLC-OVERFLOW** / **-NOSUPPORT-FLOOD** / **-OVERSIZED** / **-VULN-CONFIRMED**
+  / **-LINEMODE-POSTURE** — **CVE-2026-32746** (CVSS **9.8**). telnetd's `add_slc()` appends
+  3 bytes per SLC triplet to a fixed 108-byte BSS buffer without bounds checking; with 4 bytes
+  pre-consumed it holds 34 reply triplets and the 35th overflows. A `LINEMODE SLC` table with
+  more than 34 reply triplets is the **overflow attempt** (counted directly from wire bytes,
+  high confidence — the watchTowr overflow-padding signature corroborates); a server whose SLC
+  reply echoes past the buffer boundary is **confirmed vulnerable** and was hit. A server
+  merely advertising LINEMODE is **posture only**, capped at `notice`/low confidence — the
+  patch is wire-invisible, a patched telnetd negotiates LINEMODE identically. *(overflow /
+  confirmed → compromised; flood / oversized → suspicious; posture → clean)*
+
+Plus general cleartext exposure: **TELNET-CLEARTEXT-AUTH** — a server `Password:` prompt on a
+session that never reached RFC 2946 `ENCRYPT START` (a lone `WILL ENCRYPT`, which inetutils
+telnetd sends on **every** connection, is *not* protection and must not suppress this) —
+**TELNET-ENV-LEAK**, **TELNET-ENCRYPT-NEGOTIATED**, and **TELNET-SESSION**. The client's
+keystrokes are **never** inspected or logged; only the server-side prompt is used as the
+signal, and the credential content never appears in any finding.
+
+Verdict is **clean → suspicious → compromised**. Capture is a short passive tcpdump snapshot
+dissected with Scapy; the parser/engine is pure Python and self-tests without root
+(`telnet_watch.py --selftest`, 92 checks; wire bytes are fabricated through the production
+engine). Hardening it drives: **disable Telnet** and use SSH; where it must remain, patch
+inetutils (**2.5 `3ubuntu4.1`** is the fixed build) and firewall tcp/23 off the management
+plane. **API:** `GET /api/net/telnet-watch`. **CLI:** `telnet-watch`, `telnet-selftest`.
 
 ### DTP Watch
 A **passive** VLAN-hopping / switch-spoofing scanner for Cisco's **Dynamic Trunking
