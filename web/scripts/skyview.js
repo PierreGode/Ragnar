@@ -85,6 +85,46 @@
 
   function normDeg(v) { return ((v % 360) + 360) % 360; }
 
+  function issSkyFromLatLon(issLat, issLon, issAltKm, obsLat, obsLon) {
+    const R = 6371.0;
+    const lat1 = issLat * D2R, lon1 = issLon * D2R;
+    const lat2 = obsLat * D2R, lon2 = obsLon * D2R;
+    const r1 = R + issAltKm;
+    const iX = r1 * Math.cos(lat1) * Math.cos(lon1);
+    const iY = r1 * Math.cos(lat1) * Math.sin(lon1);
+    const iZ = r1 * Math.sin(lat1);
+    const oX = R * Math.cos(lat2) * Math.cos(lon2);
+    const oY = R * Math.cos(lat2) * Math.sin(lon2);
+    const oZ = R * Math.sin(lat2);
+    const dx = iX - oX, dy = iY - oY, dz = iZ - oZ;
+    const sLat = Math.sin(lat2), cLat = Math.cos(lat2);
+    const sLon = Math.sin(lon2), cLon = Math.cos(lon2);
+    const east  = -sLon * dx + cLon * dy;
+    const north = -sLat * cLon * dx - sLat * sLon * dy + cLat * dz;
+    const up    =  cLat * cLon * dx + cLat * sLon * dy + sLat * dz;
+    const rng = Math.sqrt(east * east + north * north + up * up);
+    const az = normDeg(Math.atan2(east, north) * R2D);
+    const el = Math.asin(up / rng) * R2D;
+    return { az, el, range_km: rng };
+  }
+
+  function refreshISS() {
+    const now = Date.now();
+    if (now - issLastFetch < 25000) return;
+    issLastFetch = now;
+    fetch('https://api.wheretheiss.at/v1/satellites/25544', { cache: 'no-store' })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!d) return;
+        issState = {
+          lat: d.latitude, lon: d.longitude,
+          alt_km: d.altitude, velocity: d.velocity,
+          t: Math.round(d.timestamp || (now / 1000))
+        };
+      })
+      .catch(() => {});
+  }
+
   function eclipticToRaDec(x, y, z) {
     const eps = 23.439291 * D2R;
     const xe = x;
@@ -560,6 +600,8 @@
   // mode: 'live' | 'last' | 'browser' | 'default' | 'none'
   let lastData = { sky: [], lat: null, lon: null, mode: 'none', t: null };
   let browserGeo = null;
+  let issState = null;
+  let issLastFetch = 0;
   // Screen-space projected objects for click hit-testing.
   let projected = [];
   function viewDate() { return new Date(Date.now() + timeOffsetMs); }
@@ -719,6 +761,17 @@
       <radialGradient id="sv-zenith" cx="50%" cy="12%" r="65%"><stop offset="0" stop-color="rgba(56,189,248,.22)"/><stop offset="65%" stop-color="rgba(56,189,248,0)"/></radialGradient>
       <linearGradient id="sv-horizon" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="rgba(251,191,36,0)"/><stop offset="100%" stop-color="rgba(251,191,36,.16)"/></linearGradient>
       <radialGradient id="sv-planet-glow" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="rgba(255,255,255,.58)"/><stop offset="100%" stop-color="rgba(255,255,255,0)"/></radialGradient>
+      <radialGradient id="sv-sun-core" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#fffbe6"/><stop offset="40%" stop-color="#ffd76a"/><stop offset="80%" stop-color="#f59e0b"/><stop offset="100%" stop-color="#c2410c"/></radialGradient>
+      <radialGradient id="sv-sun-corona" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="rgba(255,240,180,.55)"/><stop offset="35%" stop-color="rgba(255,180,60,.28)"/><stop offset="100%" stop-color="rgba(255,120,20,0)"/></radialGradient>
+      <radialGradient id="sv-p-Mercury" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#c9b099"/><stop offset="55%" stop-color="#8a7663"/><stop offset="100%" stop-color="#4b3d30"/></radialGradient>
+      <radialGradient id="sv-p-Venus" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#fff3c8"/><stop offset="55%" stop-color="#f0d494"/><stop offset="100%" stop-color="#8f6a2a"/></radialGradient>
+      <radialGradient id="sv-p-Mars" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#f0a375"/><stop offset="45%" stop-color="#c96844"/><stop offset="100%" stop-color="#5a2110"/></radialGradient>
+      <radialGradient id="sv-p-Jupiter" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#f5dfb5"/><stop offset="60%" stop-color="#b98858"/><stop offset="100%" stop-color="#5f3d1f"/></radialGradient>
+      <radialGradient id="sv-p-Saturn" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#f8e7b6"/><stop offset="60%" stop-color="#e6cf9a"/><stop offset="100%" stop-color="#8a6f3f"/></radialGradient>
+      <radialGradient id="sv-p-Uranus" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#dff5fa"/><stop offset="60%" stop-color="#a7ddec"/><stop offset="100%" stop-color="#3d7f95"/></radialGradient>
+      <radialGradient id="sv-p-Neptune" cx="35%" cy="35%" r="70%"><stop offset="0" stop-color="#7fa4d4"/><stop offset="55%" stop-color="#3762a8"/><stop offset="100%" stop-color="#0e2a5c"/></radialGradient>
+      <linearGradient id="sv-p-Jupiter-bands" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="rgba(120,80,40,.55)"/><stop offset="18%" stop-color="rgba(240,220,180,0)"/><stop offset="30%" stop-color="rgba(120,80,40,.5)"/><stop offset="45%" stop-color="rgba(240,220,180,0)"/><stop offset="58%" stop-color="rgba(140,90,50,.55)"/><stop offset="72%" stop-color="rgba(240,220,180,0)"/><stop offset="88%" stop-color="rgba(90,60,30,.6)"/></linearGradient>
+      <linearGradient id="sv-iss-panel" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3b82f6"/><stop offset="100%" stop-color="#1e3a8a"/></linearGradient>
       <filter id="sv-full-glow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="2.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-full-bg)"/>`);
     parts.push(`<rect x="0" y="0" width="${W}" height="${H}" fill="url(#sv-zenith)"/>`);
@@ -887,9 +940,10 @@
       if (sun.alt > -1) {
         const sp = fullSkyPoint(sun.az, Math.max(0, sun.alt), W, H);
         if (sp.x > -80 && sp.x < W + 80) {
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="30" fill="url(#sv-planet-glow)" opacity=".5"/>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="11" fill="#ffdf7e" filter="url(#sv-full-glow)"/>`);
-          parts.push(`<text x="${(sp.x + 18).toFixed(1)}" y="${(sp.y + 4).toFixed(1)}" fill="#ffdf7e" font-size="12" opacity=".9">Sun</text>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="60" fill="url(#sv-sun-corona)" opacity=".9"/>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="34" fill="url(#sv-sun-corona)" opacity=".7"/>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="14" fill="url(#sv-sun-core)" filter="url(#sv-full-glow)"/>`);
+          parts.push(`<text x="${(sp.x + 22).toFixed(1)}" y="${(sp.y + 4).toFixed(1)}" fill="#ffdf7e" font-size="12" opacity=".95">Sun</text>`);
           projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
         }
       }
@@ -921,11 +975,63 @@
         if (planet.alt <= 0) continue;
         const pt = fullSkyPoint(planet.az, planet.alt, W, H);
         if (pt.x < -70 || pt.x > W + 70 || pt.y < -70 || pt.y > H + 70) continue;
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(planet.size * 3.2).toFixed(1)}" fill="url(#sv-planet-glow)" opacity=".34"/>`);
-        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${(planet.size * 0.95).toFixed(1)}" fill="${planet.color}" filter="url(#sv-full-glow)"><animate attributeName="r" values="${(planet.size * .85).toFixed(1)};${(planet.size * 1.05).toFixed(1)};${(planet.size * .85).toFixed(1)}" dur="5.5s" repeatCount="indefinite"/></circle>`);
-        parts.push(`<text x="${(pt.x + planet.size + 7).toFixed(1)}" y="${(pt.y + 4).toFixed(1)}" fill="${planet.color}" font-size="12" opacity=".86">${planet.name}</text>`);
+        const rDisc = planet.size * 1.6;
+        const rHalo = planet.size * 3.4;
+        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rHalo.toFixed(1)}" fill="url(#sv-planet-glow)" opacity=".22"/>`);
+        // Saturn ring behind the disc so the disc paints over the near side.
+        if (planet.name === 'Saturn') {
+          const rx = rDisc * 2.35, ry = rDisc * 0.55;
+          const cid = 'sv-sat-ring-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
+          parts.push(`<defs><clipPath id="${cid}"><rect x="${(pt.x - rx - 2).toFixed(1)}" y="${(pt.y - ry - 2).toFixed(1)}" width="${(rx * 2 + 4).toFixed(1)}" height="${(ry + 2).toFixed(1)}"/></clipPath></defs>`);
+          parts.push(`<g transform="rotate(-16 ${pt.x.toFixed(1)} ${pt.y.toFixed(1)})">
+            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="none" stroke="#e8cf94" stroke-width="1.6" opacity=".85" clip-path="url(#${cid})"/>
+            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${(rx * 0.78).toFixed(1)}" ry="${(ry * 0.78).toFixed(1)}" fill="none" stroke="#f5dfa8" stroke-width="0.9" opacity=".7" clip-path="url(#${cid})"/>
+          </g>`);
+        }
+        const gid = 'sv-p-' + planet.name;
+        parts.push(`<circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rDisc.toFixed(1)}" fill="url(#${gid})" filter="url(#sv-full-glow)"/>`);
+        // Jupiter's banded surface.
+        if (planet.name === 'Jupiter') {
+          const jid = 'sv-jup-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
+          parts.push(`<defs><clipPath id="${jid}"><circle cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" r="${rDisc.toFixed(1)}"/></clipPath></defs>`);
+          parts.push(`<rect x="${(pt.x - rDisc).toFixed(1)}" y="${(pt.y - rDisc).toFixed(1)}" width="${(rDisc * 2).toFixed(1)}" height="${(rDisc * 2).toFixed(1)}" fill="url(#sv-p-Jupiter-bands)" clip-path="url(#${jid})" opacity=".85"/>`);
+          parts.push(`<ellipse cx="${(pt.x + rDisc * 0.25).toFixed(1)}" cy="${(pt.y + rDisc * 0.15).toFixed(1)}" rx="${(rDisc * 0.22).toFixed(1)}" ry="${(rDisc * 0.14).toFixed(1)}" fill="#c94a35" opacity=".8" clip-path="url(#${jid})"/>`);
+        }
+        // Front arc of Saturn's ring so it visually wraps.
+        if (planet.name === 'Saturn') {
+          const rx = rDisc * 2.35, ry = rDisc * 0.55;
+          const cid2 = 'sv-sat-front-clip-' + (pt.x | 0) + '-' + (pt.y | 0);
+          parts.push(`<defs><clipPath id="${cid2}"><rect x="${(pt.x - rx - 2).toFixed(1)}" y="${pt.y.toFixed(1)}" width="${(rx * 2 + 4).toFixed(1)}" height="${(ry + 2).toFixed(1)}"/></clipPath></defs>`);
+          parts.push(`<g transform="rotate(-16 ${pt.x.toFixed(1)} ${pt.y.toFixed(1)})">
+            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${rx.toFixed(1)}" ry="${ry.toFixed(1)}" fill="none" stroke="#e8cf94" stroke-width="1.6" opacity=".95" clip-path="url(#${cid2})"/>
+            <ellipse cx="${pt.x.toFixed(1)}" cy="${pt.y.toFixed(1)}" rx="${(rx * 0.78).toFixed(1)}" ry="${(ry * 0.78).toFixed(1)}" fill="none" stroke="#f5dfa8" stroke-width="0.9" opacity=".8" clip-path="url(#${cid2})"/>
+          </g>`);
+        }
+        parts.push(`<text x="${(pt.x + rDisc + 7).toFixed(1)}" y="${(pt.y + 4).toFixed(1)}" fill="${planet.color}" font-size="12" opacity=".92">${planet.name}</text>`);
         projected.push({ kind: 'planet', x: pt.x, y: pt.y, planet });
         whatsUp.push({ kind: 'planet', name: planet.name, alt: planet.alt, az: planet.az, mag: planet.mag });
+      }
+      // ISS — live position from api.wheretheiss.at (silently absent if offline).
+      if (issState) {
+        const iss = issSkyFromLatLon(issState.lat, issState.lon, issState.alt_km, lat, lon);
+        if (iss.el > 0) {
+          const ip = fullSkyPoint(iss.az, iss.el, W, H);
+          if (ip.x > -80 && ip.x < W + 80 && ip.y > -80 && ip.y < H + 80) {
+            const iw = 14, ih = 8;
+            const panelW = 6, panelH = 12;
+            parts.push(`<g transform="translate(${ip.x.toFixed(1)} ${ip.y.toFixed(1)}) rotate(-12)">
+              <circle cx="0" cy="0" r="22" fill="url(#sv-planet-glow)" opacity=".24"/>
+              <rect x="${(-panelW - iw/2 - 1).toFixed(1)}" y="${(-panelH/2).toFixed(1)}" width="${panelW}" height="${panelH}" fill="url(#sv-iss-panel)" stroke="#0f172a" stroke-width=".4"/>
+              <rect x="${(iw/2 + 1).toFixed(1)}" y="${(-panelH/2).toFixed(1)}" width="${panelW}" height="${panelH}" fill="url(#sv-iss-panel)" stroke="#0f172a" stroke-width=".4"/>
+              <rect x="${(-iw/2).toFixed(1)}" y="${(-ih/2).toFixed(1)}" width="${iw}" height="${ih}" fill="#dedede" stroke="#0f172a" stroke-width=".5" rx="1"/>
+              <rect x="-2" y="${(-ih/2 - 3).toFixed(1)}" width="4" height="3" fill="#e5e7eb"/>
+              <circle cx="0" cy="0" r="1.4" fill="#facc15"/>
+            </g>`);
+            parts.push(`<text x="${(ip.x + 20).toFixed(1)}" y="${(ip.y + 4).toFixed(1)}" fill="#a7f3d0" font-size="12" opacity=".95">ISS</text>`);
+            projected.push({ kind: 'iss', x: ip.x, y: ip.y, iss: Object.assign({}, issState, iss) });
+            whatsUp.push({ kind: 'iss', name: 'ISS', alt: iss.el, az: iss.az, mag: -3 });
+          }
+        }
       }
     }
 
@@ -1319,6 +1425,20 @@
         ${p.period ? `<div class="sv-info-row">Orbital period <b>${Math.round(p.period)} days</b></div>` : ''}
         ${p.r ? `<div class="sv-info-row">Mean solar dist. <b>${p.r.toFixed(2)} AU</b></div>` : ''}
         <div class="sv-info-row">Model <b>${p.name === 'Moon' ? 'lunar approximation' : (p.name === 'Sun' ? 'low-precision solar' : 'low-precision live')}</b></div>`;
+    } else if (obj.kind === 'iss') {
+      const i = obj.iss || {};
+      html = `<div class="sv-info-title" style="color:#a7f3d0">🛰️ International Space Station</div>
+        <div class="sv-info-section">Sky position</div>
+        <div class="sv-info-row">Elevation <b>${fmtDeg(i.el, 1)}</b></div>
+        <div class="sv-info-row">Azimuth <b>${fmtDeg(i.az, 1)} ${cardinalName(i.az)}</b></div>
+        <div class="sv-info-row">Range <b>${i.range_km != null ? i.range_km.toFixed(0) + ' km' : '—'}</b></div>
+        <div class="sv-info-section">Orbit</div>
+        <div class="sv-info-row">Altitude <b>${i.alt_km != null ? i.alt_km.toFixed(0) + ' km' : '—'}</b></div>
+        <div class="sv-info-row">Speed <b>${i.velocity != null ? i.velocity.toFixed(0) + ' km/h' : '—'}</b></div>
+        <div class="sv-info-row">Sub-point <b>${i.lat != null ? i.lat.toFixed(3) + ', ' + i.lon.toFixed(3) : '—'}</b></div>
+        <div class="sv-info-section">Source</div>
+        <div class="sv-info-row">Data <b>api.wheretheiss.at (live)</b></div>
+        <div class="sv-info-row">Crew capacity <b>7 astronauts</b></div>`;
     } else if (obj.kind === 'dso') {
       html = `<div class="sv-info-title" style="color:#c4b5fd">◇ ${esc(obj.name || obj.id)}</div>
         <div class="sv-info-section">Deep-sky identity</div>
@@ -1394,6 +1514,7 @@
   }
 
   function refresh() {
+    refreshISS();
     // The lightweight, uncached GPS endpoint (status + sky) — polled at 1 Hz so
     // the view is actually live, unlike the heavy 5 s-cached /diagnostics one.
     // Its body IS the status object (has_fix/lat/lon/last_known at top level),
