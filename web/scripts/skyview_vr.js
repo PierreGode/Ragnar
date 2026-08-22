@@ -539,17 +539,42 @@
 
   // ---- Session lifecycle --------------------------------------------
   function showXrUnavailableModal(reason) {
+    const insecure = !window.isSecureContext;
+    const hasXR = !!navigator.xr;
+    let body = '';
+    if (insecure) {
+      body =
+        '<p style="margin:0 0 10px;font-size:13px;line-height:1.55;color:#cbd5e1;"><b style="color:#fca5a5;">Insecure origin.</b> Meta Quest Browser blocks WebXR on plain HTTP. Ragnar is served over HTTP on your LAN, so <code style="color:#fecaca;">navigator.xr</code> is disabled here.</p>' +
+        '<p style="margin:0 0 8px;font-size:12px;color:#9fb0c3;">Fix (choose one):</p>' +
+        '<ol style="margin:0 0 12px 20px;padding:0;font-size:12px;color:#cbd5e1;line-height:1.65;">' +
+          '<li>On the Quest, open <code style="color:#e0f2fe;">chrome://flags</code> → search <b>Insecure origins</b> → add <code style="color:#e0f2fe;">' + location.origin + '</code> → relaunch the browser.</li>' +
+          '<li>Or serve Ragnar over HTTPS (self-signed cert is fine, bypass the warning).</li>' +
+        '</ol>' +
+        '<div style="background:#02050d;border:1px solid rgba(125,211,252,.2);color:#e0f2fe;padding:10px 12px;border-radius:8px;font-size:12px;font-family:ui-monospace,monospace;">' +
+          'isSecureContext: ' + window.isSecureContext + '<br>' +
+          'navigator.xr: ' + (hasXR ? 'present' : 'undefined') + '<br>' +
+          'reason: ' + (reason || 'unknown') +
+        '</div>';
+    } else {
+      body =
+        '<p style="margin:0 0 12px;font-size:13px;line-height:1.55;color:#cbd5e1;">' + (reason || 'WebXR is not available in this browser.') + '</p>' +
+        '<div style="background:#02050d;border:1px solid rgba(125,211,252,.2);color:#e0f2fe;padding:10px 12px;border-radius:8px;font-size:12px;font-family:ui-monospace,monospace;margin-bottom:12px;">' +
+          'isSecureContext: ' + window.isSecureContext + '<br>' +
+          'navigator.xr: ' + (hasXR ? 'present' : 'undefined') + '<br>' +
+          'user-agent: ' + (navigator.userAgent || '').slice(0, 90) +
+        '</div>' +
+        '<p style="margin:0 0 8px;font-size:12px;color:#9fb0c3;">If you\'re not in a headset, open this URL on your Quest 3:</p>' +
+        '<code style="display:block;background:#02050d;border:1px solid rgba(125,211,252,.2);color:#e0f2fe;padding:10px 12px;border-radius:8px;font-size:13px;word-break:break-all;">' + location.href + '</code>';
+    }
     const modal = document.createElement('div');
     modal.style.cssText = 'position:fixed;inset:0;z-index:100010;background:rgba(1,4,10,.82);display:flex;align-items:center;justify-content:center;padding:20px;font-family:system-ui,-apple-system,sans-serif;backdrop-filter:blur(6px);';
     modal.innerHTML =
-      '<div style="max-width:460px;background:linear-gradient(180deg,#081426,#02050d);color:#e2e8f0;border:1px solid rgba(125,211,252,.35);border-radius:14px;padding:22px 24px;box-shadow:0 22px 60px rgba(0,0,0,.6);">' +
+      '<div style="max-width:520px;width:100%;background:linear-gradient(180deg,#081426,#02050d);color:#e2e8f0;border:1px solid rgba(125,211,252,.35);border-radius:14px;padding:22px 24px;box-shadow:0 22px 60px rgba(0,0,0,.6);">' +
         '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">' +
           '<div style="font-size:24px;">🥽</div>' +
-          '<h3 style="margin:0;color:#7dd3fc;font-size:16px;letter-spacing:.06em;text-transform:uppercase;">Open in Quest 3</h3>' +
+          '<h3 style="margin:0;color:#7dd3fc;font-size:16px;letter-spacing:.06em;text-transform:uppercase;">' + (insecure ? 'HTTPS required' : 'VR not available') + '</h3>' +
         '</div>' +
-        '<p style="margin:0 0 12px;font-size:13px;line-height:1.55;color:#cbd5e1;">Immersive VR needs a WebXR-capable browser. On this device: ' + (reason || 'WebXR is not available.') + '</p>' +
-        '<p style="margin:0 0 8px;font-size:12px;color:#9fb0c3;">Open this URL in the Meta Quest Browser to enter VR:</p>' +
-        '<code style="display:block;background:#02050d;border:1px solid rgba(125,211,252,.2);color:#e0f2fe;padding:10px 12px;border-radius:8px;font-size:13px;word-break:break-all;">' + location.href + '</code>' +
+        body +
         '<div style="display:flex;justify-content:flex-end;margin-top:16px;">' +
           '<button type="button" style="background:linear-gradient(180deg,#0ea5e9,#0369a1);color:#fff;border:none;border-radius:8px;padding:9px 18px;cursor:pointer;font-weight:600;letter-spacing:.03em;">Got it</button>' +
         '</div>' +
@@ -557,6 +582,12 @@
     modal.querySelector('button').addEventListener('click', () => modal.remove());
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     document.body.appendChild(modal);
+    console.log('[RagnarSkyViewVR] not available:', {
+      isSecureContext: window.isSecureContext,
+      hasXR: hasXR,
+      reason: reason,
+      userAgent: navigator.userAgent
+    });
   }
 
   function ensureStatusOverlay() {
@@ -662,25 +693,23 @@
   async function startSession(snapshot) {
     if (session) return;
     ensureStatusOverlay();
-    const sessionMode = passthrough ? 'immersive-ar' : 'immersive-vr';
-    let supported = false;
-    try { supported = await navigator.xr.isSessionSupported(sessionMode); } catch (_) {}
-    if (!supported) {
-      if (passthrough) {
-        // Fall back gracefully to opaque VR if AR is unavailable.
-        let vrOk = false;
-        try { vrOk = await navigator.xr.isSessionSupported('immersive-vr'); } catch (_) {}
-        if (!vrOk) {
-          removeStatusOverlay();
-          showXrUnavailableModal('Neither immersive-ar (passthrough) nor immersive-vr is supported.');
-          return;
-        }
-        passthrough = false;
-      } else {
-        removeStatusOverlay();
-        showXrUnavailableModal('immersive-vr is not supported.');
-        return;
-      }
+    // We used to gate on isSessionSupported() here but Meta Quest Browser
+    // reports false negatives for immersive-ar on some builds. Just try the
+    // session — the requestSession() error tells us what actually failed.
+    let sessionMode = passthrough ? 'immersive-ar' : 'immersive-vr';
+    let vrSupported = false, arSupported = false;
+    try { vrSupported = await navigator.xr.isSessionSupported('immersive-vr'); } catch (_) {}
+    try { arSupported = await navigator.xr.isSessionSupported('immersive-ar'); } catch (_) {}
+    console.log('[RagnarSkyViewVR] support probe', { vrSupported, arSupported, requested: sessionMode });
+    if (!vrSupported && !arSupported) {
+      removeStatusOverlay();
+      showXrUnavailableModal('Neither immersive-ar nor immersive-vr is reported as supported.');
+      return;
+    }
+    if (passthrough && !arSupported && vrSupported) {
+      passthrough = false;
+      sessionMode = 'immersive-vr';
+      setStatus('Passthrough unavailable — falling back to opaque VR.');
     }
     setStatus('Loading 3D engine…');
     try { await loadThree(); } catch (_) {
