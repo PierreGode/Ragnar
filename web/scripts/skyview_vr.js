@@ -290,7 +290,10 @@
     ctx.fillText(text, 256, 64);
     const tex = new THREE.CanvasTexture(canvas);
     tex.needsUpdate = true;
-    const bb = makeYLockedBillboard(tex, 30, 7.5);
+    // Base geometry is a unit plane so callers can `.scale.set(w, h, 1)` and
+    // get world-space sizes matching the old THREE.Sprite behavior.
+    const bb = makeYLockedBillboard(tex, 1, 1);
+    bb.scale.set(30, 7.5, 1);
     bb.material.depthTest = false;
     bb.renderOrder = 900;
     return bb;
