@@ -1803,7 +1803,7 @@
         #ragnar-skyview svg{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;}
         #ragnar-skyview .sv-note{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
           background:rgba(180,121,30,.18);border:1px solid rgba(234,179,8,.4);color:#f4d9a6;
-          padding:6px 12px;border-radius:8px;font-size:12px;opacity:.15;}
+          padding:6px 12px;border-radius:8px;font-size:12px;opacity:.2;}
         /* Enhanced mode has the time scrubber along the bottom — lift the note clear of it. */
         #ragnar-skyview.sv-enhanced .sv-note{bottom:74px;}
         #ragnar-skyview .sv-info{position:absolute;display:none;min-width:230px;max-width:310px;
@@ -1900,7 +1900,8 @@
         #ragnar-skyview .sv-chip:hover{border-color:rgba(125,211,252,.46);color:#dbeafe;}
         #ragnar-skyview .sv-chip.on{background:rgba(14,165,233,.22);border-color:rgba(125,211,252,.6);color:#e6f4ff;}
         #ragnar-skyview .sv-time{display:none;position:absolute;left:50%;bottom:18px;transform:translateX(-50%);z-index:5;align-items:center;gap:10px;
-          background:rgba(3,8,18,.56);border:1px solid rgba(125,211,252,.2);border-radius:12px;padding:8px 12px;backdrop-filter:blur(10px);width:min(560px,calc(100vw - 40px));}
+          background:rgba(3,8,18,.56);border:1px solid rgba(125,211,252,.2);border-radius:12px;padding:8px 12px;backdrop-filter:blur(10px);width:min(560px,calc(100vw - 40px));opacity:.4;}
+        #ragnar-skyview .sv-time:hover,#ragnar-skyview .sv-time:focus-within{opacity:1;}
         #ragnar-skyview .sv-time input[type=range]{flex:1;accent-color:#38bdf8;height:3px;}
         #ragnar-skyview .sv-time .sv-time-lab{min-width:96px;text-align:center;color:#dbeafe;font-family:ui-monospace,monospace;font-size:11px;}
         #ragnar-skyview .sv-time button{border:1px solid rgba(148,163,184,.24);background:rgba(15,23,42,.72);color:#dbeafe;border-radius:7px;padding:4px 9px;font-size:11px;cursor:pointer;}
@@ -1936,7 +1937,8 @@
           /* Layer chips: small icon-only buttons tucked in the top-right just
              under the header, next to the Diagnostics button — off the sky
              center and off the bottom scrubber where they used to crowd in. */
-          #ragnar-skyview.sv-enhanced .sv-controls{top:6px;bottom:auto;left:auto;right:max(8px,env(safe-area-inset-right));transform:none;justify-content:flex-end;gap:5px;padding:4px;max-width:none;}
+          #ragnar-skyview.sv-enhanced .sv-controls{top:6px;bottom:auto;left:auto;right:max(8px,env(safe-area-inset-right));transform:none;justify-content:flex-end;gap:5px;padding:4px;max-width:none;opacity:.3;}
+          #ragnar-skyview.sv-enhanced .sv-controls:hover,#ragnar-skyview.sv-enhanced .sv-controls:focus-within{opacity:1;}
           #ragnar-skyview.sv-enhanced .sv-chip-tx{display:none;}
           #ragnar-skyview.sv-enhanced .sv-chip{padding:0;width:38px;height:38px;justify-content:center;gap:0;}
           #ragnar-skyview.sv-enhanced .sv-chip-ic{font-size:16px;}
