@@ -1072,11 +1072,38 @@
   function enter(snapshot) {
     if (session) return;
     currentSnapshot = snapshot || {};
+    // On insecure origin (plain HTTP), transparently promote to HTTPS. The
+    // /api/ssl/enable endpoint is idempotent — reuses an existing cert and
+    // listener, so re-invocation costs nothing.
+    if (!window.isSecureContext) {
+      _promoteToHttps();
+      return;
+    }
     if (!navigator.xr) {
       showXrUnavailableModal('navigator.xr is missing.');
       return;
     }
     showLaunchPanel(snapshot, () => startSession(snapshot));
+  }
+
+  async function _promoteToHttps() {
+    const toast = document.createElement('div');
+    toast.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100010;background:linear-gradient(180deg,#081426,#02050d);border:1px solid rgba(125,211,252,.35);border-radius:12px;padding:16px 22px;color:#dbeafe;font-family:system-ui,-apple-system,sans-serif;font-size:13px;letter-spacing:.03em;box-shadow:0 22px 60px rgba(0,0,0,.6);text-align:center;';
+    toast.innerHTML = '<div style="font-size:22px;margin-bottom:8px;">🔐</div><div class="sv-xr-toast-msg">Switching to HTTPS…</div>';
+    document.body.appendChild(toast);
+    const setMsg = (m) => { const el = toast.querySelector('.sv-xr-toast-msg'); if (el) el.textContent = m; };
+    try {
+      const r = await fetch('/api/ssl/enable', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      setMsg(d.already_running ? 'Redirecting to HTTPS…' : 'SSL ready — redirecting…');
+      const target = 'https://' + location.hostname + ':' + d.https_port + location.pathname + location.search + location.hash;
+      setTimeout(() => { location.href = target; }, d.already_running ? 250 : 700);
+    } catch (err) {
+      console.error('[RagnarSkyViewVR] auto-promote to HTTPS failed', err);
+      toast.remove();
+      showXrUnavailableModal('Automatic HTTPS bootstrap failed: ' + (err && err.message || err));
+    }
   }
 
   async function startSession(snapshot) {
