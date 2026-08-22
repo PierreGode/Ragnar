@@ -55,6 +55,11 @@
   const ZOOM_MIN = 1, ZOOM_MAX = 5;
   let zoomable = [];
   let billboards = [];
+  // { mesh, label, kind, updateFn(date, lat, lon) -> {az, alt} }
+  let celestialMovers = [];
+  let hoverPathLine = null;
+  let hoverPathTarget = null;
+  let sunAliveLayers = [];    // extra corona planes for the burning pulse
 
   function makeYLockedBillboard(map, sizeX, sizeY, color) {
     const mat = new THREE.MeshBasicMaterial({
@@ -548,9 +553,27 @@
       glow.position.copy(pos);
       zoomable.push(glow);
       group.add(glow);
+      // Two extra additive corona planes at different scales — the animation
+      // loop pulses their opacity at desynced frequencies for a "burning" feel.
+      const alive1 = buildSunGlow(sunSize * 0.8);
+      alive1.position.copy(pos);
+      alive1.material.opacity = 0.5;
+      zoomable.push(alive1);
+      group.add(alive1);
+      sunAliveLayers.push({ mesh: alive1, base: 0.55, amp: 0.35, freq: 0.55, phase: 0 });
+      const alive2 = buildSunGlow(sunSize * 1.15);
+      alive2.position.copy(pos);
+      alive2.material.opacity = 0.28;
+      zoomable.push(alive2);
+      group.add(alive2);
+      sunAliveLayers.push({ mesh: alive2, base: 0.28, amp: 0.22, freq: 1.35, phase: 1.9 });
       const label = makeLabelSprite('Sun', '#ffdf7e');
       label.position.copy(altAzToVec(sun.az, sun.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
+      celestialMovers.push({
+        mesh: sSpr, label, glow: [glow, alive1, alive2], kind: 'sun',
+        updateFn: (d) => sunSky(d, lat, lon)
+      });
     }
     // Moon.
     const moon = moonSky(date, lat, lon);
@@ -565,6 +588,10 @@
       const label = makeLabelSprite('Moon', '#e2e8f0');
       label.position.copy(altAzToVec(moon.az, moon.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
+      celestialMovers.push({
+        mesh: mSpr, label, kind: 'moon',
+        updateFn: (d) => moonSky(d, lat, lon)
+      });
     }
     // Planets.
     const planets = planetSkyPositions(date, lat, lon);
@@ -580,8 +607,72 @@
       const label = makeLabelSprite(p.name, '#f5d58a');
       label.position.copy(altAzToVec(p.az, p.alt - 2.5, R_PLANETS * 1.01));
       group.add(label);
+      const planetName = p.name;
+      celestialMovers.push({
+        mesh: spr, label, kind: 'planet',
+        updateFn: (d) => planetSkyPositions(d, lat, lon).find(x => x.name === planetName)
+      });
     }
     return group;
+  }
+
+  // Recompute Sun/Moon/planet positions from the current wall-clock. Called
+  // periodically from the animation loop so the sky actually drifts.
+  function refreshCelestialPositions() {
+    const now = new Date();
+    for (const m of celestialMovers) {
+      const p = m.updateFn(now);
+      if (!p || p.alt == null || p.az == null) continue;
+      const pos = altAzToVec(p.az, p.alt, R_PLANETS);
+      m.mesh.position.copy(pos);
+      m.mesh.userData.alt = p.alt;
+      m.mesh.userData.az = p.az;
+      if (m.mesh.userData.kind === 'moon' && p.illum != null) m.mesh.userData.illum = p.illum;
+      if (m.label) m.label.position.copy(altAzToVec(p.az, p.alt - 2.5, R_PLANETS * 1.01));
+      if (m.glow) for (const g of m.glow) g.position.copy(pos);
+    }
+    // If a path is currently displayed for a mover that just moved, rebuild it.
+    if (hoverPathTarget) showPathFor(hoverPathTarget);
+  }
+
+  function showPathFor(obj) {
+    if (!skyGroup || !obj || !obj.userData) return;
+    const kind = obj.userData.kind;
+    if (kind !== 'sun' && kind !== 'moon' && kind !== 'planet') { hidePath(); return; }
+    const name = obj.userData.name;
+    const mover = celestialMovers.find(m =>
+      m.mesh === obj || m.mesh.userData.name === name
+    );
+    if (!mover) return;
+    hidePath();
+    hoverPathTarget = obj;
+    const now = Date.now();
+    const points = [];
+    // ±12 hours = 24-hour arc, sampled every 15 minutes.
+    for (let mins = -12 * 60; mins <= 12 * 60; mins += 15) {
+      const d = new Date(now + mins * 60000);
+      const p = mover.updateFn(d);
+      if (!p || p.alt == null || p.az == null) continue;
+      points.push(altAzToVec(p.az, p.alt, R_PLANETS * 0.99));
+    }
+    if (points.length < 2) return;
+    const color = kind === 'sun' ? 0xfacc15 : (kind === 'moon' ? 0xdbeafe : 0xf5d58a);
+    const geom = new THREE.BufferGeometry().setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({
+      color, transparent: true, opacity: 0.55, depthWrite: false
+    });
+    hoverPathLine = new THREE.Line(geom, mat);
+    skyGroup.add(hoverPathLine);
+  }
+
+  function hidePath() {
+    if (hoverPathLine) {
+      if (hoverPathLine.parent) hoverPathLine.parent.remove(hoverPathLine);
+      hoverPathLine.geometry.dispose();
+      hoverPathLine.material.dispose();
+      hoverPathLine = null;
+    }
+    hoverPathTarget = null;
   }
 
   // ---- ISS (International Space Station) -----------------------------
@@ -1040,6 +1131,13 @@
         hit.material.color.setHex(0xffffff);
       }
       ctl.userData._hover = hit;
+      // Show the sky-arc path when hovering a Sun/Moon/planet; hide otherwise
+      // (unless the other controller is still on a valid target).
+      const otherCtl = controllers.find(c => c !== ctl);
+      const otherHover = otherCtl && otherCtl.userData._hover;
+      const activeHover = hit || otherHover;
+      if (activeHover) showPathFor(activeHover);
+      else hidePath();
     }
     const reticle = ctl.userData._reticle;
     if (reticle) {
@@ -1253,6 +1351,8 @@
     session = null; renderer = null; scene = null; camera = null;
     baseGroup = null; pointables = []; controllers = []; rayLines = [];
     zoomable = []; userZoom = 1; billboards = [];
+    celestialMovers = []; sunAliveLayers = [];
+    hidePath();
     raycaster = null; infoPanel = null; hoveredObject = null;
     skyDomeMesh = null; skyGroup = null;
     issMesh = null; issLabel = null; issState = null;
@@ -1430,14 +1530,25 @@
     let lastFrameTime = null;
     let saveThrottle = 0;
     let issTicker = 30000;
+    let celestialTicker = 3000;
     renderer.setAnimationLoop((now) => {
       if (lastFrameTime == null) lastFrameTime = now;
       const dtSec = Math.min(0.1, (now - lastFrameTime) / 1000);
       lastFrameTime = now;
       issTicker += dtSec * 1000;
+      celestialTicker += dtSec * 1000;
       if (issTicker >= 30000) {
         issTicker = 0;
         refreshISS(lat, lon);
+      }
+      if (celestialTicker >= 3000) {
+        celestialTicker = 0;
+        refreshCelestialPositions();
+      }
+      // Sun burning pulse — modulate the extra corona layers each frame.
+      const tSec = now * 0.001;
+      for (const L of sunAliveLayers) {
+        L.mesh.material.opacity = L.base + L.amp * Math.sin(tSec * L.freq * 2 * Math.PI + L.phase);
       }
 
       // Right thumbstick: X = rotate sky (fine-tune), Y = zoom.

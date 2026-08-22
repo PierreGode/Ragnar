@@ -952,8 +952,9 @@
         const sp = fullSkyPoint(sun.az, Math.max(0, sun.alt), W, H);
         if (sp.x > -80 && sp.x < W + 80) {
           const sunSize = 40;
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="72" fill="url(#sv-sun-corona)" opacity=".85"/>`);
-          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="46" fill="url(#sv-sun-corona)" opacity=".55"/>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="84" fill="url(#sv-sun-corona)" opacity=".55"><animate attributeName="opacity" values="0.35;0.75;0.35" dur="5.5s" repeatCount="indefinite"/><animate attributeName="r" values="80;92;80" dur="5.5s" repeatCount="indefinite"/></circle>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="60" fill="url(#sv-sun-corona)" opacity=".65"><animate attributeName="opacity" values="0.5;0.85;0.5" dur="3.3s" repeatCount="indefinite"/><animate attributeName="r" values="56;66;56" dur="3.3s" repeatCount="indefinite"/></circle>`);
+          parts.push(`<circle cx="${sp.x.toFixed(1)}" cy="${sp.y.toFixed(1)}" r="44" fill="url(#sv-sun-corona)" opacity=".8"><animate attributeName="opacity" values="0.7;0.95;0.7" dur="2.1s" repeatCount="indefinite"/></circle>`);
           parts.push(`<image href="${PLANET_IMG.Sun}" x="${(sp.x - sunSize).toFixed(1)}" y="${(sp.y - sunSize).toFixed(1)}" width="${(sunSize * 2).toFixed(1)}" height="${(sunSize * 2).toFixed(1)}"/>`);
           parts.push(`<text x="${sp.x.toFixed(1)}" y="${(sp.y + sunSize + 14).toFixed(1)}" fill="#ffdf7e" font-size="12" text-anchor="middle" opacity=".95">Sun</text>`);
           projected.push({ kind: 'planet', x: sp.x, y: sp.y, planet: sun });
