@@ -10,6 +10,7 @@
   const THREE_URL = '/web/vendor/three/three.module.js';
   const CATALOG_URL = '/web/vendor/star_catalog.json';
   const CONST_URL = '/web/vendor/constellation_lines.json';
+  const DEEP_SKY_URL = '/web/vendor/deep_sky.json';
   let THREE = null;
   const D2R = Math.PI / 180, R2D = 180 / Math.PI;
   const R_STARS = 400;
@@ -32,7 +33,7 @@
   ];
 
   let threeLoading = null;
-  let catalogCache = null, constLinesCache = null;
+  let catalogCache = null, constLinesCache = null, deepSkyCache = null;
   let session = null, renderer = null, scene = null, camera = null;
   let baseGroup = null;   // holds sky content, follows camera position
   let pointables = [];
@@ -140,6 +141,7 @@
   }
   const catalogRef = { get value() { return catalogCache; }, set value(v) { catalogCache = v; } };
   const constLinesRef = { get value() { return constLinesCache; }, set value(v) { constLinesCache = v; } };
+  const deepSkyRef = { get value() { return deepSkyCache; }, set value(v) { deepSkyCache = v; } };
 
   // ---- Scene builders ------------------------------------------------
   function buildStars(catalog, lat, lon, date) {
@@ -173,6 +175,36 @@
     const points = new THREE.Points(geom, mat);
     points.userData.stars = meta;
     return points;
+  }
+
+  function buildDeepSky(deepSky, lat, lon, date) {
+    const group = new THREE.Group();
+    if (!deepSky || !Array.isArray(deepSky.objects)) return group;
+    const typeNames = deepSky.type_names || {};
+    for (const o of deepSky.objects) {
+      const [ra, dec, mag, id, name, type, dim] = o;
+      const p = raDecToAltAz(ra, dec, lat, lon, date);
+      const pos = altAzToVec(p.az, p.alt, R_STARS - 15);
+      const iconColor = type && type.startsWith('g') ? 0xf9a8d4 : (type === 'oc' ? 0xbef264 : (type === 'gc' ? 0xfcd34d : 0xc4b5fd));
+      // Small dashed ring so DSOs read differently from stars.
+      const geom = new THREE.RingGeometry(3.0, 3.6, 24);
+      const mat = new THREE.MeshBasicMaterial({ color: iconColor, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });
+      const ring = new THREE.Mesh(geom, mat);
+      ring.position.copy(pos);
+      ring.lookAt(pos.clone().multiplyScalar(2));
+      ring.userData = { kind: 'dso', id, name, dtype: typeNames[type] || type, mag, ra, dec, alt: p.alt, az: p.az, color: iconColor, dim };
+      pointables.push(ring);
+      group.add(ring);
+      // Show a label for the brighter Messier objects so the sky doesn't get
+      // overrun with tiny text.
+      if (mag != null && mag < 7) {
+        const label = makeLabelSprite(name || id, '#c4b5fd');
+        label.scale.set(18, 4.5, 1);
+        label.position.copy(pos).multiplyScalar(1.02);
+        group.add(label);
+      }
+    }
+    return group;
   }
 
   function buildConstellationLines(constLines, lat, lon, date) {
@@ -480,32 +512,42 @@
 
   // ---- ISS (International Space Station) -----------------------------
   let issMesh = null, issLabel = null, issRefreshMs = 0, issState = null;
-  const ISS_URL = 'https://api.wheretheiss.at/v1/satellites/25544';
+  const ISS_URL = '/api/iss/position';
 
   function buildISSModel() {
     const g = new THREE.Group();
     const truss = new THREE.Mesh(
-      new THREE.BoxGeometry(3.4, 0.7, 0.7),
+      new THREE.BoxGeometry(4.6, 0.5, 0.5),
       new THREE.MeshBasicMaterial({ color: 0xdedede })
     );
     g.add(truss);
     for (let side = -1; side <= 1; side += 2) {
       for (let i = 0; i < 2; i++) {
         const panel = new THREE.Mesh(
-          new THREE.PlaneGeometry(1.9, 5.6),
+          new THREE.PlaneGeometry(1.9, 4.0),
           new THREE.MeshBasicMaterial({ color: 0x1e3a8a, side: THREE.DoubleSide })
         );
-        panel.position.set(side * (0.9 + i * 1.9), 0, 0);
-        panel.rotation.y = Math.PI / 2;
+        panel.position.set(side * (1.0 + i * 2.0), 0, 0);
         g.add(panel);
       }
     }
     const modules = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.5, 0.5, 1.6, 16),
+      new THREE.CylinderGeometry(0.55, 0.55, 1.9, 16),
       new THREE.MeshBasicMaterial({ color: 0xe0e6ee })
     );
     modules.rotation.z = Math.PI / 2;
     g.add(modules);
+    // Radiator arrays on top/bottom
+    for (let s = -1; s <= 1; s += 2) {
+      const rad = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.4, 0.9),
+        new THREE.MeshBasicMaterial({ color: 0xfdf6e3, side: THREE.DoubleSide })
+      );
+      rad.position.set(0, s * 0.9, 0);
+      g.add(rad);
+    }
+    // Scale up so ISS reads clearly at R_SATS distance.
+    g.scale.setScalar(1.4);
     return g;
   }
 
@@ -536,8 +578,15 @@
     if (obsLat == null || obsLon == null) return;
     try {
       const r = await fetch(ISS_URL, { cache: 'no-store' });
-      if (!r.ok) return;
+      if (!r.ok) {
+        console.warn('[RagnarSkyViewVR] ISS fetch HTTP', r.status);
+        return;
+      }
       const d = await r.json();
+      if (d && d.error) {
+        console.warn('[RagnarSkyViewVR] ISS upstream error', d.error);
+        return;
+      }
       const sky = issSkyFromLatLon(d.latitude, d.longitude, d.altitude, obsLat, obsLon);
       issState = { lat: d.latitude, lon: d.longitude, alt_km: d.altitude, velocity: d.velocity, ...sky };
       if (issMesh) {
@@ -545,8 +594,8 @@
         if (issLabel) issLabel.visible = true;
         const pos = altAzToVec(sky.az, sky.el, R_SATS);
         issMesh.position.copy(pos);
-        issMesh.lookAt(new THREE.Vector3(0, 0, 0));
-        if (issLabel) issLabel.position.copy(pos).multiplyScalar(1.06);
+        issMesh.lookAt(pos.clone().multiplyScalar(2));
+        if (issLabel) issLabel.position.copy(pos).multiplyScalar(1.08);
         issMesh.userData.iss = issState;
       }
     } catch (_) {}
@@ -566,29 +615,67 @@
     return g;
   }
 
+  function buildSatModel(color, tracked) {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(1.4, 0.9, 0.9),
+      new THREE.MeshBasicMaterial({ color: 0xdedede })
+    );
+    g.add(body);
+    for (let side = -1; side <= 1; side += 2) {
+      const panel = new THREE.Mesh(
+        new THREE.PlaneGeometry(2.2, 1.2),
+        new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide })
+      );
+      panel.position.set(side * 1.85, 0, 0);
+      g.add(panel);
+      const strut = new THREE.Mesh(
+        new THREE.BoxGeometry(1.0, 0.06, 0.06),
+        new THREE.MeshBasicMaterial({ color: 0x9ca3af })
+      );
+      strut.position.set(side * 1.2, 0, 0);
+      g.add(strut);
+    }
+    // Small antenna dish on top so it doesn't look symmetric front/back.
+    const dish = new THREE.Mesh(
+      new THREE.ConeGeometry(0.32, 0.4, 12),
+      new THREE.MeshBasicMaterial({ color: 0xf1f5f9 })
+    );
+    dish.position.set(0, 0.55, 0.15);
+    dish.rotation.x = Math.PI;
+    g.add(dish);
+    if (tracked) {
+      const glow = new THREE.Mesh(
+        new THREE.RingGeometry(2.2, 3.2, 24),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.55, side: THREE.DoubleSide, depthWrite: false })
+      );
+      g.add(glow);
+      g.userData._glowRing = glow;
+    }
+    return g;
+  }
+
   function buildSatellites(sky) {
     const group = new THREE.Group();
     if (!sky || !sky.length) return group;
     for (const s of sky) {
-      if (s.az == null || s.elev == null || s.elev < 0) continue;
+      if (s.az == null || s.elev == null) continue;
       const color = SAT_COLORS[s.constellation] || 0x94a3b8;
-      const geom = new THREE.SphereGeometry(2.6, 16, 10);
-      const mat = new THREE.MeshBasicMaterial({ color });
-      const mesh = new THREE.Mesh(geom, mat);
-      mesh.position.copy(altAzToVec(s.az, s.elev, R_SATS));
-      mesh.userData = { kind: 'sat', sat: s, alt: s.elev, az: s.az };
-      pointables.push(mesh);
-      group.add(mesh);
-      // Faint ring for tracked (SNR > 0) sats.
-      if (typeof s.snr === 'number' && s.snr > 0) {
-        const ring = new THREE.Mesh(
-          new THREE.RingGeometry(3.2, 4.6, 24),
-          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.45, side: THREE.DoubleSide })
-        );
-        ring.position.copy(mesh.position);
-        ring.lookAt(new THREE.Vector3(0, 0, 0));
-        group.add(ring);
-      }
+      const tracked = typeof s.snr === 'number' && s.snr > 0;
+      const model = buildSatModel(color, tracked);
+      const pos = altAzToVec(s.az, s.elev, R_SATS);
+      model.position.copy(pos);
+      model.lookAt(pos.clone().multiplyScalar(2));
+      model.userData = { kind: 'sat', sat: s, alt: s.elev, az: s.az };
+      pointables.push(model);
+      group.add(model);
+      const label = makeLabelSprite(
+        (s.constellation || 'sat') + (s.prn != null ? ' ' + s.prn : ''),
+        '#' + color.toString(16).padStart(6, '0')
+      );
+      label.scale.set(20, 5, 1);
+      label.position.copy(pos).multiplyScalar(1.04);
+      group.add(label);
     }
     return group;
   }
@@ -735,6 +822,17 @@
         'Altitude ' + (s.alt_km != null ? s.alt_km.toFixed(0) + ' km' : '—'),
         'Speed ' + (s.velocity != null ? s.velocity.toFixed(0) + ' km/h' : '—')
       ];
+    } else if (d.kind === 'dso') {
+      accent = '#c4b5fd';
+      title = '◇ ' + (d.name || d.id);
+      lines = [
+        'Catalog ' + (d.id || '—'),
+        'Type ' + (d.dtype || '—'),
+        'Magnitude ' + (d.mag != null ? d.mag.toFixed(1) : '—'),
+        'Elevation ' + fmtDeg(d.alt, 1),
+        'Azimuth ' + fmtDeg(d.az, 1) + ' ' + cardinal(d.az)
+      ];
+      if (d.dim) lines.push('Dimensions ' + d.dim);
     } else if (d.kind === 'star') {
       accent = d.color || '#e2e8f0';
       title = '✦ ' + (d.name || 'star') + (d.cons ? ' · ' + d.cons : '');
@@ -781,7 +879,10 @@
       const perp = Math.sqrt(dx * dx + dy * dy + dz * dz);
       // The angular tolerance (rad) — scale by 8 deg for planets/sats, 5 deg for stars.
       const kind = o.userData && o.userData.kind;
-      const tolDeg = kind === 'star' ? 3.5 : (kind === 'iss' ? 4 : (kind === 'planet' || kind === 'sun' || kind === 'moon' ? 5 : 6));
+      const tolDeg = kind === 'star' ? 3.5
+        : (kind === 'iss' ? 4
+        : (kind === 'planet' || kind === 'sun' || kind === 'moon' ? 5
+        : (kind === 'dso' ? 3 : 6)));
       const tol = t * Math.tan(tolDeg * D2R);
       if (perp > tol) continue;
       const score = perp / (tol || 1);
@@ -1131,9 +1232,10 @@
       return;
     }
     setStatus('Building sky…');
-    const [catalog, constLines] = await Promise.all([
+    const [catalog, constLines, deepSky] = await Promise.all([
       loadJSON(CATALOG_URL, catalogRef),
-      loadJSON(CONST_URL, constLinesRef)
+      loadJSON(CONST_URL, constLinesRef),
+      loadJSON(DEEP_SKY_URL, deepSkyRef)
     ]);
 
     const lat = (snapshot && typeof snapshot.lat === 'number') ? snapshot.lat : 45;
@@ -1165,6 +1267,7 @@
       const cl = buildConstellationLines(constLines, lat, lon, date);
       if (cl) skyGroup.add(cl);
     }
+    if (deepSky) skyGroup.add(buildDeepSky(deepSky, lat, lon, date));
     skyGroup.add(buildPlanets(lat, lon, date));
     skyGroup.add(buildSatellites(snapshot && snapshot.sky));
     skyGroup.add(buildISS(lat, lon));

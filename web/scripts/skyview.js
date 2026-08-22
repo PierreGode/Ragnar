@@ -112,10 +112,10 @@
     const now = Date.now();
     if (now - issLastFetch < 25000) return;
     issLastFetch = now;
-    fetch('https://api.wheretheiss.at/v1/satellites/25544', { cache: 'no-store' })
+    fetch('/api/iss/position', { cache: 'no-store' })
       .then(r => r.ok ? r.json() : null)
       .then(d => {
-        if (!d) return;
+        if (!d || d.error) return;
         issState = {
           lat: d.latitude, lon: d.longitude,
           alt_km: d.altitude, velocity: d.velocity,

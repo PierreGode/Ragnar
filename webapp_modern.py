@@ -14683,6 +14683,34 @@ def api_ssl_enable():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+_iss_cache = {'t': 0.0, 'data': None}
+
+
+@app.route('/api/iss/position', methods=['GET'])
+def api_iss_position():
+    now = time.time()
+    if _iss_cache['data'] and (now - _iss_cache['t']) < 4.0:
+        return jsonify(_iss_cache['data'])
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            'https://api.wheretheiss.at/v1/satellites/25544',
+            headers={'User-Agent': 'Ragnar/1.0'}
+        )
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            body = resp.read().decode('utf-8', errors='replace')
+        import json as _json
+        data = _json.loads(body)
+        _iss_cache['data'] = data
+        _iss_cache['t'] = now
+        return jsonify(data)
+    except Exception as e:
+        logger.warning(f"api_iss_position upstream fetch failed: {e}")
+        if _iss_cache['data']:
+            return jsonify(_iss_cache['data'])
+        return jsonify({'error': str(e)}), 502
+
+
 @app.route('/api/kill', methods=['POST'])
 def kill_switch():
     """
