@@ -18737,12 +18737,21 @@ def register_network_diagnostics(app, logger=None):
     def net_sdr_start():
         data = request.get_json(silent=True) or {}
         band = (data.get('band') or '2.4').strip()
-        if band not in sdr_spectrum.BANDS:
+        # Optional zoom span (Hz) — converted to MHz for hackrf_sweep. When a
+        # valid span is given the named band is ignored, so skip band validation.
+        lo_mhz = hi_mhz = None
+        try:
+            if data.get('lo_hz') is not None and data.get('hi_hz') is not None:
+                lo_mhz = float(data['lo_hz']) / 1e6
+                hi_mhz = float(data['hi_hz']) / 1e6
+        except (TypeError, ValueError):
+            return _bad('Invalid zoom span')
+        if lo_mhz is None and band not in sdr_spectrum.BANDS:
             return _bad('Invalid band')
-        lna = data.get('lna')
-        vga = data.get('vga')
-        _log(f"net/sdr/start band={band}")
-        return jsonify(sdr_spectrum.start(band=band, lna=lna, vga=vga))
+        _log(f"net/sdr/start band={band} zoom={lo_mhz}:{hi_mhz}")
+        return jsonify(sdr_spectrum.start(band=band, lna=data.get('lna'),
+                                          vga=data.get('vga'),
+                                          lo_mhz=lo_mhz, hi_mhz=hi_mhz))
 
     @app.route('/api/net/sdr/stop', methods=['POST'])
     def net_sdr_stop():
@@ -18778,8 +18787,28 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_power_start():
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
-        _log(f"net/rtl/power/start band={band}")
-        return jsonify(rtl_sdr.power_start(band=band))
+        _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')}")
+        return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
+                                           hi_hz=data.get('hi_hz')))
+
+    # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
+    # stations, doorbells, …). One dongle, so the scanner and the power sweep are
+    # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
+    @app.route('/api/net/rtl/ism/start', methods=['POST'])
+    def net_rtl_ism_start():
+        data = request.get_json(silent=True) or {}
+        band = str(data.get('band') or '433').strip()
+        _log(f"net/rtl/ism/start band={band}")
+        return jsonify(rtl_sdr.ism_start(band=band))
+
+    @app.route('/api/net/rtl/ism/stop', methods=['POST'])
+    def net_rtl_ism_stop():
+        _log("net/rtl/ism/stop")
+        return jsonify(rtl_sdr.ism_stop())
+
+    @app.route('/api/net/rtl/ism/devices', methods=['GET'])
+    def net_rtl_ism_devices():
+        return jsonify(rtl_sdr.ism_devices())
 
     @app.route('/api/net/rtl/power/stop', methods=['POST'])
     def net_rtl_power_stop():

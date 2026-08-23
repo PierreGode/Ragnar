@@ -277,27 +277,47 @@ class SweepCapture:
         self._vga = _DEFAULT_VGA
         self._stderr_tail = None   # last stderr line, kept for exit diagnostics
         self._detect_cache = None  # last good detect(), reused while streaming
+        self._sig = None           # (label, lo, hi) — restart only on a real change
+        self._lo_mhz = None        # active sweep range (band OR custom zoom span)
+        self._hi_mhz = None
 
     # -- lifecycle ---------------------------------------------------------
-    def start(self, band="2.4", lna=None, vga=None):
-        band = band if band in BANDS else "2.4"
+    def start(self, band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None):
+        # A custom [lo_mhz, hi_mhz] span (the page's zoom) overrides the named
+        # band when both edges are sane (>=1 MHz wide, inside 1-7250 MHz).
+        custom = None
+        try:
+            if lo_mhz is not None and hi_mhz is not None:
+                lo_mhz, hi_mhz = float(lo_mhz), float(hi_mhz)
+                if hi_mhz - lo_mhz >= 1 and lo_mhz >= 1 and hi_mhz <= 7250:
+                    custom = (lo_mhz, hi_mhz)
+        except (TypeError, ValueError):
+            custom = None
+        if custom:
+            label, lo, hi = "zoom", custom[0], custom[1]
+        else:
+            band = band if band in BANDS else "2.4"
+            label, (lo, hi) = band, BANDS[band]
+        sig = (label, round(lo, 3), round(hi, 3))
         with self._lock:
             if self._thread and self._thread.is_alive():
-                if band == self._band:
-                    return {"ok": True, "already": True, "band": band}
-                self._stop_locked()   # band change: restart cleanly
+                if sig == self._sig:
+                    return {"ok": True, "already": True, "band": label}
+                self._stop_locked()   # band / zoom change: restart cleanly
             self._stop.clear()
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _GRID_BINS
-            self._band = band
+            self._band = label
+            self._sig = sig
+            self._lo_mhz, self._hi_mhz = lo, hi
             self._error = None
             self._lna = _clamp(lna, 0, 40, _DEFAULT_LNA)
             self._vga = _clamp(vga, 0, 62, _DEFAULT_VGA)
-            self._thread = threading.Thread(target=self._run_loop, args=(band,),
+            self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
                                             daemon=True, name="hackrf-sweep")
             self._thread.start()
-        return {"ok": True, "band": band}
+        return {"ok": True, "band": label, "range_mhz": [lo, hi]}
 
     def stop(self):
         with self._lock:
@@ -319,11 +339,15 @@ class SweepCapture:
         self._band = None
 
     # -- capture thread ----------------------------------------------------
-    def _run_loop(self, band):
-        lo, hi = BANDS[band]
+    def _run_loop(self, lo, hi):
+        # Keep the FFT bin finer than a display column so a narrow zoom span
+        # doesn't leave floor-streak gaps; clamp to hackrf_sweep's sane range.
+        span_hz = (hi - lo) * 1_000_000
+        bin_hz = int(span_hz / (_GRID_BINS * 2)) or _BIN_WIDTH_HZ
+        bin_hz = max(2500, min(_BIN_WIDTH_HZ, bin_hz))
         builder = _FrameBuilder(lo, hi)
-        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (lo, hi),
-               "-w", str(_BIN_WIDTH_HZ), "-l", str(self._lna),
+        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(lo), int(hi)),
+               "-w", str(bin_hz), "-l", str(self._lna),
                "-g", str(self._vga)]
         self._stderr_tail = None
         try:
@@ -403,7 +427,7 @@ class SweepCapture:
                     "frames_buffered": len(self._frames), "seq": self._seq,
                     "bins": _GRID_BINS, "lna": self._lna, "vga": self._vga,
                     "error": self._error,
-                    "band_mhz": BANDS.get(self._band) if self._band else None,
+                    "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
                     "floor_dbm": _FLOOR_DBM}
 
     def get_frames(self, since=0):
@@ -414,7 +438,7 @@ class SweepCapture:
         with self._lock:
             new = [f for f in self._frames if f["seq"] > since]
             return {"frames": new, "seq": self._seq, "band": self._band,
-                    "band_mhz": BANDS.get(self._band) if self._band else None,
+                    "band_mhz": [self._lo_mhz, self._hi_mhz] if self._lo_mhz else None,
                     "bins": _GRID_BINS, "floor_dbm": _FLOOR_DBM,
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
@@ -432,12 +456,12 @@ def _clamp(v, lo, hi, default):
 _capture = SweepCapture()
 
 
-def start(band="2.4", lna=None, vga=None):
+def start(band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None):
     d = detect()
     if not d.get("available"):
         return {"ok": False, "error": d.get("error", "no SDR")}
     _capture._detect_cache = d
-    return _capture.start(band, lna=lna, vga=vga)
+    return _capture.start(band, lna=lna, vga=vga, lo_mhz=lo_mhz, hi_mhz=hi_mhz)
 
 
 def stop():

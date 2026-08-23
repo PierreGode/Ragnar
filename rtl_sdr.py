@@ -399,24 +399,44 @@ class PowerSweep:
         self._band = None
         self._error = None
         self._stderr_tail = None
+        self._sig = None           # (label, lo, hi) — restart only on a real change
+        self._lo = None            # active sweep range in Hz (band OR zoom span)
+        self._hi = None
 
-    def start(self, band="433"):
-        band = band if band in RTL_BANDS else "433"
+    def start(self, band="433", lo_hz=None, hi_hz=None):
+        # A custom [lo_hz, hi_hz] span (the page's zoom) overrides the named band
+        # when both edges are sane (>=100 kHz wide, inside the RTL-SDR's reach).
+        custom = None
+        try:
+            if lo_hz is not None and hi_hz is not None:
+                lo_hz, hi_hz = int(float(lo_hz)), int(float(hi_hz))
+                if hi_hz - lo_hz >= 100_000 and lo_hz >= 24_000_000 and hi_hz <= 1_766_000_000:
+                    custom = (lo_hz, hi_hz)
+        except (TypeError, ValueError):
+            custom = None
+        if custom:
+            label, lo, hi = "zoom", custom[0], custom[1]
+        else:
+            band = band if band in RTL_BANDS else "433"
+            label, (lo, hi) = band, RTL_BANDS[band]
+        sig = (label, lo, hi)
         with self._lock:
             if self._thread and self._thread.is_alive():
-                if band == self._band:
-                    return {"ok": True, "already": True, "band": band}
+                if sig == self._sig:
+                    return {"ok": True, "already": True, "band": label}
                 self._stop_locked()
             self._stop.clear()
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _POWER_BINS
-            self._band = band
+            self._band = label
+            self._sig = sig
+            self._lo, self._hi = lo, hi
             self._error = None
-            self._thread = threading.Thread(target=self._run_loop, args=(band,),
+            self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
                                             daemon=True, name="rtlpower-sweep")
             self._thread.start()
-        return {"ok": True, "band": band}
+        return {"ok": True, "band": label, "range_hz": [lo, hi]}
 
     def stop(self):
         with self._lock:
@@ -429,8 +449,7 @@ class PowerSweep:
         self._proc = None
         self._band = None
 
-    def _run_loop(self, band):
-        lo, hi = RTL_BANDS[band]
+    def _run_loop(self, lo, hi):
         step = max(1000, (hi - lo) // _POWER_BINS)   # Hz per rtl_power bin
         builder = _PowerFrameBuilder(lo, hi)
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
@@ -479,7 +498,7 @@ class PowerSweep:
         with self._lock:
             return {"running": bool(self._thread and self._thread.is_alive()),
                     "band": self._band, "bins": _POWER_BINS,
-                    "band_hz": RTL_BANDS.get(self._band) if self._band else None,
+                    "band_hz": [self._lo, self._hi] if self._lo else None,
                     "frames_buffered": len(self._frames), "seq": self._seq,
                     "floor_dbm": _FLOOR_DBM, "error": self._error}
 
@@ -491,7 +510,7 @@ class PowerSweep:
         with self._lock:
             new = [f for f in self._frames if f["seq"] > since]
             return {"frames": new, "seq": self._seq, "band": self._band,
-                    "band_hz": RTL_BANDS.get(self._band) if self._band else None,
+                    "band_hz": [self._lo, self._hi] if self._lo else None,
                     "bins": _POWER_BINS, "floor_dbm": _FLOOR_DBM,
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
@@ -565,7 +584,7 @@ def ism_devices():
     return _ism.get_devices()
 
 
-def power_start(band="433"):
+def power_start(band="433", lo_hz=None, hi_hz=None):
     global _detect_cache
     if _ism.status()["running"]:
         _ism.stop()            # one dongle: hand it to the sweep
@@ -574,7 +593,7 @@ def power_start(band="433"):
         if not d.get("available"):
             return {"ok": False, "error": d.get("error", "no RTL-SDR")}
         _detect_cache = d
-    return _power.start(band)
+    return _power.start(band, lo_hz=lo_hz, hi_hz=hi_hz)
 
 
 def power_stop():
