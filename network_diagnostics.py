@@ -18800,6 +18800,13 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_zwave():
         return jsonify({"regions": rtl_sdr.zwave_plan()})
 
+    # LoRa mesh / LPWAN plan (Meshtastic, MeshCore, LoRaWAN) for the mesh overlay.
+    # Energy view only — LoRa (CSS) can't be demodulated with rtl_power/rtl_433,
+    # and payloads are encrypted; the UI sweeps the span and overlays channels.
+    @app.route('/api/net/rtl/lora', methods=['GET'])
+    def net_rtl_lora():
+        return jsonify({"plans": rtl_sdr.lora_plan()})
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
