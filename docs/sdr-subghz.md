@@ -83,6 +83,30 @@ sudo make install && sudo ldconfig
 The V3, Nooelec and generic (R820T2) dongles need none of this — they work with
 the stock driver as soon as the DVB blacklist is in place.
 
+### Troubleshooting "not detected"
+
+The fastest path is the **🩺 SDR check** button in the Wi-Fi Spectrum Analyzer
+(always available, even with no dongle). It calls `/api/net/rtl/diagnose`, which
+walks every layer detection depends on and prints a one-line verdict plus the
+exact fix — "no dongle on the USB bus (power/cable)", "tools not installed", or
+"DVB-T driver holding it". The manual equivalents are below.
+
+Detection runs a ladder (`rtl_sdr.py` → `detect`): `rtl_test -t` to open the
+radio, then an `lsusb` VID:PID fallback (`0bda:2838`/`2832` and common rebadges)
+so a plugged-in dongle is still reported when the tools are missing or the DVB
+driver is holding it. That lets `/status` tell three cases apart:
+
+- **`usb_id: null`, `device_present: false`** — the dongle is **not on the USB
+  bus at all**. This is below Ragnar: check power and the cable/port. RTL-SDR
+  dongles (NESDR SMArt especially, with its TCXO + LNA) draw ~300 mA; on a Pi
+  that's browning out (`vcgencmd get_throttled` != `0x0`) the port may fail to
+  enumerate it. Use a solid PSU + a **powered USB hub**, a *data* cable (not
+  charge-only), and confirm with `lsusb` that a `Realtek ... RTL283x` line shows.
+- **`device_present: true` but `available: false`** — the dongle *is* on the bus
+  but `rtl_test` can't open it: either the rtl-sdr tools aren't installed, or the
+  DVB-T driver still holds it (blacklist `dvb_usb_rtl28xxu`, replug).
+- **`available: true`** — good; the SDR tab and RF Waterfall button light up.
+
 ## API
 
 | Route | Purpose |
