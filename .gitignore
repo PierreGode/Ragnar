@@ -252,6 +252,7 @@ data/pcaps/
 # ── RuSense (WiFi-CSI) user data — captured/trained per install, never commit ──
 # raw CSI recordings (can be tens of MB+)
 data/recordings/
+data/rf_recordings/
 # locally-trained adaptive sensing model
 data/adaptive_model.json
 # locally-trained / downloaded sensing models

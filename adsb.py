@@ -139,6 +139,197 @@ def parse_sbs(line):
     return rec
 
 
+# Airline designators: ICAO 3-letter callsign prefix -> (IATA 2-letter, name).
+# A curated set of the busiest carriers worldwide — covers the large majority of
+# flights seen; unknown prefixes just fall back to the raw callsign. ADS-B
+# callsigns carry the ICAO code (e.g. "RYR123"); we derive IATA ("FR123") + name.
+AIRLINES = {
+    "AAL": ("AA", "American Airlines"), "UAL": ("UA", "United Airlines"),
+    "DAL": ("DL", "Delta Air Lines"), "SWA": ("WN", "Southwest"),
+    "JBU": ("B6", "JetBlue"), "ASA": ("AS", "Alaska Airlines"),
+    "FFT": ("F9", "Frontier"), "NKS": ("NK", "Spirit"), "SKW": ("OO", "SkyWest"),
+    "AAY": ("G4", "Allegiant"), "HAL": ("HA", "Hawaiian"),
+    "ACA": ("AC", "Air Canada"), "WJA": ("WS", "WestJet"), "JZA": ("QK", "Jazz"),
+    "BAW": ("BA", "British Airways"), "SHT": ("BA", "British Airways (Shuttle)"),
+    "VIR": ("VS", "Virgin Atlantic"), "EZY": ("U2", "easyJet"),
+    "EXS": ("LS", "Jet2"), "TOM": ("BY", "TUI Airways"),
+    "RYR": ("FR", "Ryanair"), "RUK": ("FR", "Ryanair UK"),
+    "DLH": ("LH", "Lufthansa"), "CLH": ("CL", "Lufthansa CityLine"),
+    "AFR": ("AF", "Air France"), "KLM": ("KL", "KLM"), "BEL": ("SN", "Brussels Airlines"),
+    "SWR": ("LX", "SWISS"), "AUA": ("OS", "Austrian"), "EWG": ("EW", "Eurowings"),
+    "IBE": ("IB", "Iberia"), "IBS": ("I2", "Iberia Express"), "VLG": ("VY", "Vueling"),
+    "AEA": ("UX", "Air Europa"), "TAP": ("TP", "TAP Air Portugal"),
+    "ITY": ("AZ", "ITA Airways"), "SAS": ("SK", "SAS"), "NAX": ("DY", "Norwegian"),
+    "NSZ": ("DY", "Norwegian"), "FIN": ("AY", "Finnair"), "ICE": ("FI", "Icelandair"),
+    "AFL": ("SU", "Aeroflot"), "THY": ("TK", "Turkish Airlines"),
+    "PGT": ("PC", "Pegasus"), "AEE": ("A3", "Aegean"), "LOT": ("LO", "LOT Polish"),
+    "CSA": ("OK", "Czech Airlines"), "WZZ": ("W6", "Wizz Air"), "TVF": ("TO", "Transavia France"),
+    "TRA": ("HV", "Transavia"), "EIN": ("EI", "Aer Lingus"),
+    "UAE": ("EK", "Emirates"), "ETD": ("EY", "Etihad"), "QTR": ("QR", "Qatar Airways"),
+    "SVA": ("SV", "Saudia"), "MSR": ("MS", "EgyptAir"), "ELY": ("LY", "El Al"),
+    "RJA": ("RJ", "Royal Jordanian"), "ABY": ("G9", "Air Arabia"), "FDB": ("FZ", "flydubai"),
+    "GFA": ("GF", "Gulf Air"), "KAC": ("KU", "Kuwait Airways"), "OMA": ("WY", "Oman Air"),
+    "SIA": ("SQ", "Singapore Airlines"), "CPA": ("CX", "Cathay Pacific"),
+    "CCA": ("CA", "Air China"), "CES": ("MU", "China Eastern"), "CSN": ("CZ", "China Southern"),
+    "HDA": ("UO", "HK Express"), "ANA": ("NH", "All Nippon"), "JAL": ("JL", "Japan Airlines"),
+    "KAL": ("KE", "Korean Air"), "AAR": ("OZ", "Asiana"), "CAL": ("CI", "China Airlines"),
+    "EVA": ("BR", "EVA Air"), "THA": ("TG", "Thai Airways"), "AXM": ("AK", "AirAsia"),
+    "MAS": ("MH", "Malaysia Airlines"), "GIA": ("GA", "Garuda"), "PAL": ("PR", "Philippine"),
+    "VJC": ("VJ", "VietJet"), "HVN": ("VN", "Vietnam Airlines"), "IGO": ("6E", "IndiGo"),
+    "AIC": ("AI", "Air India"), "VTI": ("UK", "Vistara"), "QFA": ("QF", "Qantas"),
+    "JST": ("JQ", "Jetstar"), "VOZ": ("VA", "Virgin Australia"), "ANZ": ("NZ", "Air New Zealand"),
+    "AMX": ("AM", "Aeromexico"), "VOI": ("Y4", "Volaris"),
+    "TAM": ("JJ", "LATAM Brasil"), "LAN": ("LA", "LATAM"), "GLO": ("G3", "Gol"),
+    "AZU": ("AD", "Azul"), "ARG": ("AR", "Aerolineas Argentinas"), "AVA": ("AV", "Avianca"),
+    "CMP": ("CM", "Copa"), "ETH": ("ET", "Ethiopian"), "KQA": ("KQ", "Kenya Airways"),
+    "SAA": ("SA", "South African"), "MAU": ("MK", "Air Mauritius"), "RAM": ("AT", "Royal Air Maroc"),
+    "DLA": ("D0", "DHL"), "GEC": ("LH", "Lufthansa Cargo"), "FDX": ("FX", "FedEx"),
+    "UPS": ("5X", "UPS"), "CLX": ("CV", "Cargolux"), "GTI": ("5Y", "Atlas Air"),
+    "BOX": ("BX", "AeroLogic"), "ABW": ("RU", "AirBridgeCargo"),
+}
+
+
+def airline_from_callsign(cs):
+    """Derive airline (ICAO+IATA+name) and the IATA flight number from a callsign.
+
+    ADS-B callsigns are the ICAO airline designator + flight number ("RYR123").
+    Returns {icao, iata, name, flight_icao, flight_iata} or None (e.g. for tail
+    numbers like N12345, or unknown prefixes).
+    """
+    if not cs:
+        return None
+    s = cs.strip().upper()
+    if len(s) < 3 or not s[:3].isalpha():
+        return None
+    pfx, rest = s[:3], s[3:].strip()
+    info = AIRLINES.get(pfx)
+    if not info:
+        return None
+    iata, name = info
+    return {"icao": pfx, "iata": iata, "name": name, "flight_icao": s,
+            "flight_iata": (iata + rest) if rest else iata}
+
+
+# ICAO 24-bit address country blocks (start, end inclusive, hex) -> country.
+# A trimmed set of the busiest allocations; the block also lets us pick the right
+# tail-registration scheme. Ranges are the official ICAO assignments.
+_ICAO_BLOCKS = [
+    (0xA00000, 0xAFFFFF, "United States", "US"),
+    (0xC00000, 0xC3FFFF, "Canada", "CA"),
+    (0x400000, 0x43FFFF, "United Kingdom", "GB"),
+    (0x3C0000, 0x3FFFFF, "Germany", "DE"),
+    (0x380000, 0x3BFFFF, "France", "FR"),
+    (0x300000, 0x33FFFF, "Italy", "IT"),
+    (0x340000, 0x37FFFF, "Spain", "ES"),
+    (0x480000, 0x4BFFFF, "Netherlands", "NL"),
+    (0x4A0000, 0x4AFFFF, "Sweden", "SE"),
+    (0x460000, 0x467FFF, "Finland", "FI"),
+    (0x458000, 0x45FFFF, "Denmark", "DK"),
+    (0x478000, 0x47FFFF, "Norway", "NO"),
+    (0x440000, 0x447FFF, "Austria", "AT"),
+    (0x4B0000, 0x4B7FFF, "Switzerland", "CH"),
+    (0x448000, 0x44FFFF, "Belgium", "BE"),
+    (0x490000, 0x497FFF, "Portugal", "PT"),
+    (0x468000, 0x46FFFF, "Greece", "GR"),
+    (0x500000, 0x5FFFFF, "Europe (other)", None),
+    (0x140000, 0x1FFFFF, "Russia", "RU"),
+    (0x4B8000, 0x4BFFFF, "Turkey", "TR"),
+    (0x896000, 0x896FFF, "United Arab Emirates", "AE"),
+    (0x760000, 0x767FFF, "India", "IN"),
+    (0x780000, 0x7BFFFF, "China", "CN"),
+    (0x840000, 0x87FFFF, "Japan", "JP"),
+    (0x718000, 0x71FFFF, "South Korea", "KR"),
+    (0x750000, 0x757FFF, "Singapore", "SG"),
+    (0x8A0000, 0x8A7FFF, "Indonesia", "ID"),
+    (0x7C0000, 0x7FFFFF, "Australia", "AU"),
+    (0xC80000, 0xC87FFF, "New Zealand", "NZ"),
+    (0x0A0000, 0x0A7FFF, "South Africa", "ZA"),
+    (0xE00000, 0xE3FFFF, "Argentina/Brazil region", None),
+    (0xE40000, 0xE7FFFF, "Brazil", "BR"),
+    (0x0D0000, 0x0D7FFF, "Mexico", "MX"),
+]
+
+# US N-number decoder alphabet (no I or O — they look like 1/0).
+_NCHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ"       # 24 letters used in registrations
+_NALL = _NCHARS + "0123456789"             # last-position char set (34)
+# Bucket sizes for the FAA N-number <-> ICAO base encoding (exact, canonical).
+_NSUFFIX = len(_NCHARS) * len(_NCHARS) + len(_NCHARS) + 1     # 601  ("" + 24 + 576)
+_NB4 = len(_NCHARS) + 10 + 1                                   # 35
+_NB3 = _NB4 * 10 + _NSUFFIX                                    # 951
+_NB2 = _NB3 * 10 + _NSUFFIX                                    # 10111
+_NB1 = _NB2 * 10 + _NSUFFIX                                    # 101711
+
+
+def _n_suffix(off):
+    """One/two-letter (or blank) N-number suffix for a bucket offset 0.._NSUFFIX-1."""
+    if off == 0:
+        return ""
+    off -= 1
+    if off < len(_NCHARS):
+        return _NCHARS[off]
+    off -= len(_NCHARS)
+    return _NCHARS[off // len(_NCHARS)] + _NCHARS[off % len(_NCHARS)]
+
+
+def _icao_country(hexaddr):
+    for lo, hi, name, cc in _ICAO_BLOCKS:
+        if lo <= hexaddr <= hi:
+            return name, cc
+    return None, None
+
+
+def _us_nnumber(addr):
+    """US tail 'N-number' from an ICAO 24-bit address (algorithmic, exact).
+
+    The FAA maps hex addresses to N-numbers by a fixed base encoding starting at
+    0xA00001 = N1. Returns e.g. 'N172SP' / 'N1' / 'N100', or None outside the US
+    block. Canonical bucket algorithm (matches the FAA registry).
+    """
+    if not (0xA00001 <= addr <= 0xADF7C7):
+        return None
+    off = addr - 0xA00001
+    out = "N"
+    d1 = off // _NB1
+    r1 = off % _NB1
+    out += str(d1 + 1)                 # digit1: 1..9
+    if r1 < _NSUFFIX:
+        return out + _n_suffix(r1)
+    r1 -= _NSUFFIX
+    out += str(r1 // _NB2)             # digit2: 0..9
+    r2 = r1 % _NB2
+    if r2 < _NSUFFIX:
+        return out + _n_suffix(r2)
+    r2 -= _NSUFFIX
+    out += str(r2 // _NB3)             # digit3
+    r3 = r2 % _NB3
+    if r3 < _NSUFFIX:
+        return out + _n_suffix(r3)
+    r3 -= _NSUFFIX
+    out += str(r3 // _NB4)             # digit4
+    r4 = r3 % _NB4
+    if r4 == 0:                        # digit5 position: nothing, a letter, or a digit
+        return out
+    return out + _NALL[r4 - 1]
+
+
+def registration_from_icao(hexaddr):
+    """Best-effort tail registration + country from an ICAO 24-bit hex address.
+
+    Returns {country, country_code, tail} — tail is exact for US (N-numbers),
+    None elsewhere (most countries aren't a simple algorithm), country covers the
+    major allocations.
+    """
+    try:
+        addr = int(str(hexaddr), 16)
+    except (TypeError, ValueError):
+        return None
+    country, cc = _icao_country(addr)
+    tail = _us_nnumber(addr) if cc == "US" else None
+    if not country and tail is None:
+        return None
+    return {"country": country, "country_code": cc, "tail": tail}
+
+
 def haversine_km(lat1, lon1, lat2, lon2):
     """Great-circle distance in km (pure)."""
     r = 6371.0
@@ -194,6 +385,19 @@ class AdsbTracker:
             for r in self._planes.values():
                 a = {k: v for k, v in r.items() if not k.startswith("_")}
                 a["seen"] = round(now - r["_seen"], 1)
+                al = airline_from_callsign(a.get("callsign"))
+                if al:
+                    a["airline"] = al["name"]
+                    a["iata"] = al["iata"]
+                    a["op_icao"] = al["icao"]
+                    a["flight_iata"] = al["flight_iata"]
+                reg = registration_from_icao(a.get("icao"))
+                if reg:
+                    if reg.get("tail"):
+                        a["tail"] = reg["tail"]
+                    if reg.get("country"):
+                        a["country"] = reg["country"]
+                        a["country_code"] = reg["country_code"]
                 out.append(a)
             out.sort(key=lambda a: a.get("callsign") or a["icao"])
             return {"aircraft": out, "count": len(out), "messages": self._msgs,
@@ -317,6 +521,48 @@ def aircraft():
     return _tracker.aircraft()
 
 
+def install():
+    """One-click install of dump1090 for the radar's 'not installed' state.
+
+    Tries the common package names (dump1090-fa / dump1090-mutability / dump1090)
+    as the service user (root on Ragnar). Fixed package set only. Returns the
+    fresh detect() so the UI can flip to ready.
+    """
+    if _dump_bin():
+        return {"ok": True, "already": True, "detect": detect()}
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+    steps = []
+    out = ""
+    ok = False
+    for pkg in _DUMP_CANDIDATES:
+        try:
+            p = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", pkg],
+                               capture_output=True, text=True, timeout=420, check=False, env=env)
+            out = (p.stdout or "") + (p.stderr or "")
+        except FileNotFoundError:
+            return {"ok": False, "error": "apt-get not found", "detect": detect()}
+        except subprocess.TimeoutExpired:
+            steps.append("%s: timed out" % pkg)
+            continue
+        if p.returncode == 0 and _dump_bin():
+            steps.append("installed " + pkg)
+            ok = True
+            break
+        if "Unable to locate package" in out and not any("update" in s for s in steps):
+            try:
+                subprocess.run(["apt-get", "update"], capture_output=True, text=True,
+                               timeout=180, check=False, env=env)
+                steps.append("apt update")
+            except Exception:
+                pass
+        steps.append("%s: not available" % pkg)
+    ok = ok or (_dump_bin() is not None)
+    tail = "\n".join((out or "").strip().splitlines()[-12:])
+    return {"ok": ok, "steps": steps, "output": tail, "detect": detect(),
+            "error": None if ok else ("no dump1090 package available in this apt suite — "
+                                      "install dump1090-fa (FlightAware repo) or dump1090-mutability")}
+
+
 # --------------------------------------------------------------------------
 # Selftest (pure parsers + geo, no hardware)
 # --------------------------------------------------------------------------
@@ -356,6 +602,39 @@ def selftest():
           ac["count"] == 1 and ac["aircraft"][0]["callsign"] == "RYR123"
           and ac["aircraft"][0]["alt"] == 38000 and ac["aircraft"][0]["gs"] == 450, str(ac))
     check("track: message counter", ac["messages"] == 3)
+
+    # Airline code derivation: ICAO callsign prefix -> IATA + name + flight nums.
+    al = airline_from_callsign("RYR123")
+    check("airline: RYR123 -> Ryanair FR / FR123",
+          al and al["iata"] == "FR" and al["name"] == "Ryanair"
+          and al["flight_iata"] == "FR123" and al["flight_icao"] == "RYR123", str(al))
+    check("airline: unknown prefix + tail numbers -> None",
+          airline_from_callsign("ZZZ99") is None and airline_from_callsign("N12345") is None
+          and airline_from_callsign("") is None)
+    ac2 = AdsbTracker()
+    ac2._ingest(parse_sbs(ident))   # RYR123
+    a0 = ac2.aircraft()["aircraft"][0]
+    check("airline: aircraft record carries iata + airline + flight_iata",
+          a0.get("iata") == "FR" and a0.get("airline") == "Ryanair" and a0.get("flight_iata") == "FR123", str(a0))
+
+    # Tail registration + country from ICAO 24-bit address.
+    check("reg: 0xA00001 -> N1 (US block start)",
+          (registration_from_icao("A00001") or {}).get("tail") == "N1",
+          str(registration_from_icao("A00001")))
+    r_us = registration_from_icao("A12345")
+    check("reg: US hex -> N-number + United States",
+          r_us and r_us["country"] == "United States" and r_us["tail"]
+          and r_us["tail"].startswith("N"), str(r_us))
+    r_gb = registration_from_icao("400123")
+    check("reg: UK hex -> United Kingdom, no algorithmic tail",
+          r_gb and r_gb["country"] == "United Kingdom" and r_gb["tail"] is None, str(r_gb))
+    check("reg: unknown/garbage hex -> None",
+          registration_from_icao("ZZZZZZ") is None and registration_from_icao(None) is None)
+    ac3 = AdsbTracker()
+    ac3._ingest(parse_sbs("MSG,3,1,1,A12345,1,,,,,,38000,,,40.0,-74.0,,,,,,0"))
+    a3 = ac3.aircraft()["aircraft"][0]
+    check("reg: aircraft record carries tail + country",
+          a3.get("tail", "").startswith("N") and a3.get("country") == "United States", str(a3))
 
     # Geo helpers: Dublin -> London ~ 464 km, bearing ~ 118 deg.
     d = haversine_km(53.3498, -6.2603, 51.5074, -0.1278)

@@ -160,12 +160,26 @@ heading vectors + a contacts table.
 - **Set your lat/lon** (or use the browser location) so range/bearing are
   correct — aircraft carry their own GPS position; the page computes distance and
   bearing relative to you client-side.
+- **Each contact is identified three ways:** the **ICAO** callsign (e.g.
+  `DLH427`), the derived **IATA** flight + airline (`LH427 · Lufthansa`), and the
+  **tail registration** + country decoded from the ICAO 24-bit address (exact
+  N-number algorithm for the US; country from the ICAO address block elsewhere).
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
-  The installer/updater install it best-effort; if it's missing the page shows a
-  hint. Everything here is receive-only, and ADS-B is unauthenticated/unencrypted
-  by design — the same data every flight-tracking site shows.
+  The installer/updater install it best-effort; if it's missing the page shows an
+  **⬇ Install dump1090** button (POSTs `/api/net/adsb/install`). Everything here
+  is receive-only, and ADS-B is unauthenticated/unencrypted by design — the same
+  data every flight-tracking site shows.
+
+## Session record & replay
+
+The sub-GHz waterfall toolbar has a **● Rec** button that captures the running
+power sweep to a JSONL file under `data/rf_recordings/` (gitignored), and a
+**Replay** dropdown to load any past recording back into the waterfall with a
+transport bar (play/pause, seek, restart, delete). Frames are small, so a
+recording is cheap; capped at a few thousand frames. Routes:
+`/api/net/rtl/record/{start,stop,status,list,get,delete}`.
 
 ## API
 
@@ -183,8 +197,10 @@ heading vectors + a contacts table.
 | `GET  /api/net/rtl/zwave` | Z-Wave regional plan (spans + channel centres) |
 | `GET  /api/net/rtl/lora` | LoRa mesh plan — Meshtastic/MeshCore/LoRaWAN (spans + channels) |
 | `GET  /api/net/rtl/tuning` · POST `{ppm,gain}` | Read / set PPM freq-correction + tuner gain (reapplied live) |
-| `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft table |
+| `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft (icao/iata/tail/country) |
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
+| `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
+| `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI

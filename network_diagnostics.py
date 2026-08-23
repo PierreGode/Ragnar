@@ -18819,6 +18819,37 @@ def register_network_diagnostics(app, logger=None):
             return jsonify(rtl_sdr.set_tuning(ppm=data.get('ppm'), gain=data.get('gain')))
         return jsonify(rtl_sdr.get_tuning())
 
+    # Session recording — capture the running power sweep to a JSONL file and
+    # replay it later. Frames are small, so this is cheap; files live under data/.
+    @app.route('/api/net/rtl/record/start', methods=['POST'])
+    def net_rtl_record_start():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/record/start")
+        return jsonify(rtl_sdr.record_start(name=data.get('name')))
+
+    @app.route('/api/net/rtl/record/stop', methods=['POST'])
+    def net_rtl_record_stop():
+        _log("net/rtl/record/stop")
+        return jsonify(rtl_sdr.record_stop())
+
+    @app.route('/api/net/rtl/record/status', methods=['GET'])
+    def net_rtl_record_status():
+        return jsonify(rtl_sdr.record_status())
+
+    @app.route('/api/net/rtl/record/list', methods=['GET'])
+    def net_rtl_record_list():
+        return jsonify(rtl_sdr.record_list())
+
+    @app.route('/api/net/rtl/record/get', methods=['GET'])
+    def net_rtl_record_get():
+        return jsonify(rtl_sdr.record_get(request.args.get('name', '')))
+
+    @app.route('/api/net/rtl/record/delete', methods=['POST'])
+    def net_rtl_record_delete():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/record/delete")
+        return jsonify(rtl_sdr.record_delete(data.get('name', '')))
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.
@@ -18845,6 +18876,11 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/adsb/selftest', methods=['GET'])
     def net_adsb_selftest():
         return jsonify(adsb.selftest())
+
+    @app.route('/api/net/adsb/install', methods=['POST'])
+    def net_adsb_install():
+        _log("net/adsb/install")
+        return jsonify(adsb.install())
 
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are

@@ -1009,14 +1009,18 @@ class PowerSweep:
         ints = [int(round(v)) for v in grid]
         with self._lock:
             self._seq += 1
-            self._frames.append({"seq": self._seq, "ts": time.time(),
-                                 "power": ints})
+            ts = time.time()
+            self._frames.append({"seq": self._seq, "ts": ts, "power": ints})
             if len(self._frames) > _RING_FRAMES:
                 self._frames = self._frames[-_RING_FRAMES:]
             if self._maxhold is None:
                 self._maxhold = list(ints)
             else:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
+            meta = {"band": self._band, "lo_hz": self._lo, "hi_hz": self._hi,
+                    "bins": _POWER_BINS, "floor": _FLOOR_DBM}
+        # Feed the session recorder outside our lock (it has its own).
+        _recorder.write(self._seq, ts, ints, meta)
 
     def status(self):
         with self._lock:
@@ -1126,6 +1130,169 @@ def power_stop():
 
 def power_frames(since=0):
     return _power.get_frames(since=since)
+
+
+# --------------------------------------------------------------------------
+# Session recording — capture the power-sweep frame stream to a JSONL file so a
+# session can be replayed (or shared) later. Frames are small (one power grid
+# each), so this is cheap; recordings live under data/ (gitignored).
+# --------------------------------------------------------------------------
+
+_REC_MAX_FRAMES = 3000     # cap a recording (~a few minutes) so files stay bounded
+
+
+def _rec_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rf_recordings")
+
+
+def _rec_safe(name):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or ""))[:60]
+
+
+class _Recorder:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._fh = None
+        self._name = None
+        self._count = 0
+        self._started = None
+        self._meta = None
+
+    def start(self, meta, name=None):
+        with self._lock:
+            self._close()
+            d = _rec_dir()
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": "cannot create recordings dir: %s" % exc}
+            base = _rec_safe(name) or ("rf-" + time.strftime("%Y%m%d-%H%M%S"))
+            self._name = base
+            self._count = 0
+            self._started = time.time()
+            self._meta = dict(meta or {})
+            try:
+                self._fh = open(os.path.join(d, base + ".jsonl"), "w")
+                hdr = dict(self._meta)
+                hdr.update({"_hdr": True, "name": base, "ts": self._started})
+                self._fh.write(json.dumps(hdr) + "\n")
+                self._fh.flush()
+            except OSError as exc:
+                self._fh = None
+                return {"ok": False, "error": "cannot open recording file: %s" % exc}
+        return self.status()
+
+    def write(self, seq, ts, power, meta=None):
+        with self._lock:
+            if not self._fh:
+                return
+            if self._count >= _REC_MAX_FRAMES:
+                self._close()
+                return
+            try:
+                self._fh.write(json.dumps({"seq": seq, "ts": round(ts, 3), "power": power}) + "\n")
+                self._count += 1
+                if self._count % 20 == 0:
+                    self._fh.flush()
+            except OSError:
+                self._close()
+
+    def stop(self):
+        with self._lock:
+            self._close()
+        return {"ok": True}
+
+    def _close(self):
+        if self._fh:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def status(self):
+        with self._lock:
+            rec = self._fh is not None
+            return {"recording": rec, "name": self._name if rec else None,
+                    "frames": self._count,
+                    "seconds": round(time.time() - self._started, 1) if (rec and self._started) else 0,
+                    "max_frames": _REC_MAX_FRAMES}
+
+
+_recorder = _Recorder()
+
+
+def record_start(name=None):
+    """Begin recording the running power sweep. Needs a sweep in progress."""
+    st = _power.status()
+    if not st.get("running"):
+        return {"ok": False, "error": "start a sub-GHz sweep first, then record"}
+    meta = {"band": st.get("band"), "lo_hz": (st.get("band_hz") or [None, None])[0],
+            "hi_hz": (st.get("band_hz") or [None, None])[1],
+            "bins": st.get("bins"), "floor": st.get("floor_dbm")}
+    return _recorder.start(meta, name=name)
+
+
+def record_stop():
+    return _recorder.stop()
+
+
+def record_status():
+    return _recorder.status()
+
+
+def record_list():
+    import glob
+    d = _rec_dir()
+    out = []
+    for path in sorted(glob.glob(os.path.join(d, "*.jsonl")), reverse=True):
+        try:
+            with open(path) as fh:
+                first = fh.readline()
+            hdr = json.loads(first) if first.strip() else {}
+            n = 0
+            with open(path) as fh:
+                for _ in fh:
+                    n += 1
+            stat = os.stat(path)
+            out.append({"name": os.path.basename(path)[:-6], "band": hdr.get("band"),
+                        "lo_hz": hdr.get("lo_hz"), "hi_hz": hdr.get("hi_hz"),
+                        "bins": hdr.get("bins"), "floor": hdr.get("floor"),
+                        "frames": max(0, n - 1), "size": stat.st_size,
+                        "mtime": stat.st_mtime})
+        except (OSError, ValueError):
+            continue
+    return {"recordings": out}
+
+
+def record_get(name):
+    path = os.path.join(_rec_dir(), _rec_safe(name) + ".jsonl")
+    if not os.path.exists(path):
+        return {"ok": False, "error": "recording not found"}
+    try:
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not lines:
+        return {"ok": False, "error": "empty recording"}
+    hdr = json.loads(lines[0])
+    frames = []
+    for ln in lines[1:]:
+        try:
+            frames.append(json.loads(ln))
+        except ValueError:
+            continue
+    return {"ok": True, "header": hdr, "frames": frames, "count": len(frames)}
+
+
+def record_delete(name):
+    path = os.path.join(_rec_dir(), _rec_safe(name) + ".jsonl")
+    try:
+        os.remove(path)
+        return {"ok": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def status():
@@ -1371,6 +1538,31 @@ def selftest():
         check("tuning: ppm clamped to +/-1000", get_tuning()["ppm"] == 1000)
     finally:
         set_tuning(ppm=_saved_ppm, gain=("auto" if _saved_gain is None else _saved_gain))
+
+    # --- session recorder round-trip (hermetic: uses a temp recordings dir) ---
+    import tempfile as _tf
+    _saved_rec_dir = _rec_dir
+    _tmpdir = _tf.mkdtemp(prefix="ragnar-rec-")
+    globals()["_rec_dir"] = lambda: _tmpdir
+    try:
+        _rn = "selftest-tmp-rec"
+        rec = _Recorder()
+        rec.start({"band": "433", "lo_hz": 433050000, "hi_hz": 434790000, "bins": 4, "floor": -120}, name=_rn)
+        rec.write(1, 1000.0, [-40, -90, -90, -40])
+        rec.write(2, 1001.0, [-45, -88, -88, -45])
+        rec.stop()
+        g = record_get(_rn)
+        check("record: round-trip get (2 frames + header meta)",
+              g.get("ok") and g["count"] == 2 and g["header"].get("band") == "433"
+              and g["frames"][0]["power"] == [-40, -90, -90, -40], str(g.get("count")))
+        check("record: shows up in the recordings list",
+              any(r["name"] == _rn and r["frames"] == 2 for r in record_list()["recordings"]))
+        check("record: delete removes it",
+              record_delete(_rn).get("ok") and not record_get(_rn).get("ok"))
+    finally:
+        globals()["_rec_dir"] = _saved_rec_dir
+        import shutil as _sh
+        _sh.rmtree(_tmpdir, ignore_errors=True)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

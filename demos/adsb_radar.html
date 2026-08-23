@@ -102,14 +102,16 @@
     <div class="card">
       <div class="scopewrap">
         <canvas id="radar"></canvas>
-        <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div></div>
+        <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div>
+          <button class="ctl" id="veil-install" style="display:none;margin-top:8px;border-color:rgba(46,160,150,.5);color:var(--radar)">⬇ Install dump1090</button>
+        </div>
       </div>
     </div>
     <div class="card tablecard">
       <div class="tcap"><span class="t">Contacts</span><span class="c" id="tblcount"></span></div>
       <div class="tbl">
         <table>
-          <thead><tr><th>Flight</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Trk</th><th>Dist</th><th>Age</th></tr></thead>
+          <thead><tr><th>Flight</th><th>Airline</th><th>Reg</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Dist</th></tr></thead>
           <tbody id="tbody"><tr><td colspan="7" class="empty">No contacts yet…</td></tr></tbody>
         </table>
       </div>
@@ -242,22 +244,38 @@
     document.getElementById('s-count').textContent=list.length;
     document.getElementById('s-msgs').textContent=msgs;
     if(!list.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Listening…':'Not started')+'</td></tr>'; return; }
-    tb.innerHTML=list.map(function(p){ return '<tr>'
-      +'<td class="cs">'+esc(p.callsign||'—')+'</td>'
-      +'<td>'+esc(p.icao)+'</td>'
+    tb.innerHTML=list.map(function(p){
+      var flight = p.callsign||'—';
+      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign) ? '<span style="color:var(--muted)"> · '+esc(p.flight_iata)+'</span>' : '';
+      var air = p.airline ? ('<span style="color:var(--cyan)">'+esc(p.iata||'')+'</span> '+esc(p.airline)) : '<span style="color:#546074">—</span>';
+      var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
+      var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
+      return '<tr>'
+      +'<td class="cs">'+esc(flight)+fl2+'</td>'
+      +'<td>'+air+'</td>'
+      +'<td class="cs">'+reg+'</td>'
+      +'<td>'+esc(p.icao)+cc+'</td>'
       +'<td>'+(p.alt!=null?('FL'+Math.round(p.alt/100)):'—')+'</td>'
       +'<td>'+(p.gs!=null?Math.round(p.gs):'—')+'</td>'
-      +'<td>'+(p.track!=null?Math.round(p.track)+'°':'—')+'</td>'
       +'<td>'+fmtDist(p._dist)+'</td>'
-      +'<td>'+(p.seen!=null?p.seen+'s':'—')+'</td>'
       +'</tr>'; }).join('');
   }
 
   function setMode(m){ mode=m; var el=document.getElementById('s-mode');
     el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle'));
     el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'idle')); }
-  function showVeil(t,s){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');}
+  var veilInstall=document.getElementById('veil-install');
+  function showVeil(t,s,canInstall){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');
+    veilInstall.style.display=canInstall?'inline-block':'none';}
   function hideVeil(){veil.classList.remove('show');}
+  veilInstall.addEventListener('click',function(){
+    veilInstall.textContent='Installing… (up to a minute)'; veilInstall.disabled=true;
+    fetch('/api/net/adsb/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      veilInstall.textContent='⬇ Install dump1090'; veilInstall.disabled=false;
+      if(res&&res.ok){ hideVeil(); checkStatus(); }
+      else { showVeil('Install did not complete', (res&&res.error)||'apt failed — you can also: sudo apt install dump1090-fa', true); }
+    }).catch(function(){ veilInstall.textContent='⬇ Install dump1090'; veilInstall.disabled=false; });
+  });
 
   // ---- live ----
   var poll=null;
@@ -292,12 +310,22 @@
     synthTimer=setInterval(function(){ stepSynth(); enrich(); renderTable(); }, 1000);
     enrich(); renderTable();
   }
-  var callsigns=['RYR','EZY','BAW','DLH','AFR','KLM','UAL','AAL','THY','SAS','TAP','SWR'];
+  // [ICAO prefix, IATA, name] for a believable synthetic sky (with both codes).
+  var synthAir=[['RYR','FR','Ryanair'],['EZY','U2','easyJet'],['BAW','BA','British Airways'],
+    ['DLH','LH','Lufthansa'],['AFR','AF','Air France'],['KLM','KL','KLM'],['UAL','UA','United Airlines'],
+    ['AAL','AA','American Airlines'],['THY','TK','Turkish Airlines'],['SAS','SK','SAS'],
+    ['TAP','TP','TAP Air Portugal'],['UAE','EK','Emirates'],['DAL','DL','Delta Air Lines']];
+  // [country, code, tail-prefix] samples for a believable synthetic registry.
+  var synthReg=[['United States','US','N'],['United Kingdom','GB','G-'],['Germany','DE','D-'],
+    ['France','FR','F-'],['Netherlands','NL','PH-'],['Ireland','IE','EI-'],['Spain','ES','EC-']];
+  function synthTail(pfx){ var s=''; for(var i=0;i<(pfx==='N'?4:4);i++){ s+='ABCDEFGHJKLMNPQRSTUVWXYZ0123456789'[(Math.random()*34)|0]; } return pfx+s; }
   function makeSynth(){ var n=9,out=[];
     for(var i=0;i<n;i++){ var brg=Math.random()*360, dist=8+Math.random()*maxKm*1.1;
-      var d=destPoint(rx.lat,rx.lon,brg,dist);
+      var d=destPoint(rx.lat,rx.lon,brg,dist), a=synthAir[(Math.random()*synthAir.length)|0], num=(100+((Math.random()*899)|0));
+      var reg=synthReg[(Math.random()*synthReg.length)|0];
       out.push({icao:(0x400000+((Math.random()*0xBFFFFF)|0)).toString(16).toUpperCase(),
-        callsign:callsigns[(Math.random()*callsigns.length)|0]+(100+((Math.random()*899)|0)),
+        callsign:a[0]+num, iata:a[1], airline:a[2], flight_iata:a[1]+num,
+        tail:synthTail(reg[2]), country:reg[0], country_code:reg[1],
         lat:d.lat,lon:d.lon,alt:2000+((Math.random()*38000)|0),gs:180+((Math.random()*320)|0),
         track:Math.random()*360,vert:((Math.random()*2000)|0)-1000,seen:0}); }
     return out;
@@ -324,7 +352,11 @@
       if(st&&st.running){ running=true; startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop'; if(!poll){poll=setInterval(pollLive,1000);pollLive();} return; }
       if(det.available){ hideVeil(); if(mode==='idle'&&!DEMO_ON){ setMode('idle'); } if(DEMO_ON&&mode==='idle'){ synthMode(); } }
       else if(DEMO_ON){ synthMode(); }
-      else { setMode('idle'); showVeil('ADS-B unavailable', det.error||'Connect an RTL-SDR and install dump1090, or enable the RF Waterfall demo for a synthetic sky.'); }
+      else { setMode('idle');
+        var needsInstall=det.tools_installed===false;   // dump1090 missing
+        showVeil('ADS-B unavailable',
+          det.error||'Connect an RTL-SDR and install dump1090, or enable the RF Waterfall demo for a synthetic sky.',
+          needsInstall); }
     }).catch(function(){ if(DEMO_ON) synthMode(); });
   }
 
