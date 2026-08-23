@@ -42,10 +42,12 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
   .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:6px 11px;cursor:pointer}
   .seg button[aria-pressed="true"]{background:rgba(46,160,150,.16);color:var(--radar)}
-  .layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
+  /* Radar column hugs the (now ~20% smaller) radar square so Contacts takes all
+     the remaining width. min(66vh,46vw) keeps the radar from ever dominating. */
+  .layout{display:grid;grid-template-columns:min(66vh,46vw) minmax(340px,1fr);gap:16px;align-items:start}
   @media (max-width:880px){.layout{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
-  .scopewrap{position:relative;background:#05080d;aspect-ratio:1/1;width:100%;max-height:82vh}
+  .scopewrap{position:relative;background:#05080d;aspect-ratio:1/1;width:100%;max-height:66vh}
   canvas#radar{display:block;width:100%;height:100%}
   .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(5,8,13,.78);text-align:center;padding:20px}
   .veil.show{display:flex}
