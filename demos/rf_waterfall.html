@@ -108,6 +108,13 @@
   .logempty{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:6px 0 10px}
   /* decode view: hide the sweep surfaces, let the device list breathe */
   .scope.decoding .fall-wrap,.scope.decoding .ruler,.scope.decoding canvas.trace,.scope.decoding .toolbar{display:none}
+  .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
+  .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
+  .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
+  .scope:fullscreen .scope-body,.scope:-webkit-full-screen .scope-body{flex:1 1 auto;min-height:0}
+  .scope:fullscreen .fall-wrap,.scope:-webkit-full-screen .fall-wrap{flex:1 1 auto;min-height:0}
+  .scope:fullscreen canvas.fall,.scope:-webkit-full-screen canvas.fall{height:100%}
+  .scope:fullscreen .fsbtn,.scope:-webkit-full-screen .fsbtn{border-color:rgba(56,189,201,.5);color:var(--cyan)}
   .scope.decoding .loglist{max-height:300px}
   footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.7}
   footer b{color:var(--ink-dim);font-weight:600}
@@ -223,7 +230,9 @@
         +'<div class="stat"><span class="k">Busy</span><span class="v busy busyv">&mdash;</span></div>'
         +'<div class="stat"><span class="k">Span</span><span class="v cy span">&mdash;</span></div>'
         +'<div class="stat"><span class="k">Rows/s</span><span class="v rate">&mdash;</span></div>'
-      +'</div></div>'
+      +'</div>'
+      +'<button class="fsbtn" title="Expand this waterfall to full screen">&#9974;&nbsp;Full screen</button>'
+      +'</div>'
       +'<div class="scope-body">'
         +'<div class="fall-wrap">'
           +'<canvas class="fall"></canvas><span class="now">t=0.0s</span>'
@@ -243,13 +252,14 @@
       +'</div>';
     this.el=el;
     this.fall=el.querySelector('.fall'); this.trace=el.querySelector('.trace'); this.ruler=el.querySelector('.ruler');
-    this.nowEl=el.querySelector('.now'); this.tagEl=el.querySelector('.scope-tag');
+    this.nowEl=el.querySelector('.now'); this.tagEl=el.querySelector('.scope-tag'); this.devEl=el.querySelector('.dev');
     this.veil=el.querySelector('.veil'); this.veilT=el.querySelector('.vt'); this.veilS=el.querySelector('.vs');
     this.markEl=el.querySelector('.marker'); this.markLbl=el.querySelector('.marker .ml');
     this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d'); this.busyEl=el.querySelector('.busyv');
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
     this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel');
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
+    this.fsBtn=el.querySelector('.fsbtn');
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
     this.rigEl=document.getElementById(cfg.rig);
@@ -277,6 +287,10 @@
     this.trace.addEventListener('click',function(e){ self.onPick(e,self.trace); });
     this.zoomBtn.addEventListener('click',function(){ self.doZoom(); });
     this.resetBtn.addEventListener('click',function(){ self.resetZoom(); });
+    this.fsBtn.addEventListener('click',function(){ self.toggleFullscreen(); });
+    ['fullscreenchange','webkitfullscreenchange'].forEach(function(ev){
+      document.addEventListener(ev,function(){ self.onFsChange(); });
+    });
 
     this.resize(); this.resetCanvas();
     this._ro=new ResizeObserver(function(){ if(self.resize()){ self.drawRuler(); self.placeMarker(); } });
@@ -284,9 +298,25 @@
   }
 
   Scope.prototype.dpr=function(){return Math.min(window.devicePixelRatio||1,2);};
+  Scope.prototype.isFull=function(){
+    var fe=document.fullscreenElement||document.webkitFullscreenElement;
+    return fe===this.el;
+  };
+  Scope.prototype.toggleFullscreen=function(){
+    var el=this.el;
+    if(this.isFull()){ (document.exitFullscreen||document.webkitExitFullscreen||function(){}).call(document); }
+    else { (el.requestFullscreen||el.webkitRequestFullscreen||function(){}).call(el); }
+  };
+  Scope.prototype.onFsChange=function(){
+    var full=this.isFull();
+    this.fsBtn.innerHTML=full?'&#10005;&nbsp;Exit full screen':'&#9974;&nbsp;Full screen';
+    var self=this;
+    // let the layout settle, then regrow the canvas to the new size
+    requestAnimationFrame(function(){ if(self.resize()){ self.resetCanvas(); self.drawRuler(); self.placeMarker(); } });
+  };
   Scope.prototype.resize=function(){
     var d=this.dpr(), wcss=this.fall.clientWidth||600;
-    var newW=Math.max(1,Math.round(wcss*d)), newH=Math.round(210*d);
+    var hcss=this.fall.clientHeight||210, newW=Math.max(1,Math.round(wcss*d)), newH=Math.max(1,Math.round(hcss*d));
     if(newW===this.W && newH===this.H && this.fall.width===newW && this.d===d) return false;
     this.W=newW; this.fall.width=this.W; this.fall.height=newH;
     this.trace.width=this.W; this.trace.height=Math.round(56*d);
@@ -365,7 +395,11 @@
     var self=this;
     fetch(this.cfg.api.status).then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{};
-      self.available=!!det.available; self.board=det.board||''; self.detErr=det.error||'';
+      self.available=!!det.available;
+      self.board=det.model_name||det.board||(det.tuner?det.tuner+' tuner':'')||'';
+      self.detErr=det.error||'';
+      if(self.devEl && self.available && self.board) self.devEl.textContent=self.board
+        +(det.needs_blog_driver?' · needs RTL-SDR Blog driver':'');
       // radio vanished mid-decode -> drop back
       if(self.decoding && !self.available){ self.setView('wf'); }
       self.applyDesired(); self.updateTag();

@@ -241,6 +241,27 @@ if [ ${#_missing_optional[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
 fi
 
+# RTL-SDR dongles (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, generic
+# RTL2832U) need the kernel's DVB-T driver kept off them, or rtl_power / rtl_433
+# / rtl_test can never open the device. Mirror install_ragnar.sh so update-only
+# boxes get the same fix. Idempotent — only writes/unloads when needed.
+if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
+    _rtl_bl=/etc/modprobe.d/blacklist-rtl-sdr.conf
+    if ! grep -q "dvb_usb_rtl28xxu" "$_rtl_bl" 2>/dev/null; then
+        cat > "$_rtl_bl" << 'EOF'
+# Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /
+# rtl_433 / rtl_test can claim them (RTL-SDR Blog V3/V4, Nooelec NESDR, generic).
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist rtl2838
+EOF
+        chmod 644 "$_rtl_bl"
+        echo -e "  ${GREEN}✓${NC} Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
+    fi
+    rmmod dvb_usb_rtl28xxu 2>/dev/null || true
+fi
+
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up
 # firefox/firefox-esr at runtime). Ship it to update-only boxes too. Debian and
 # Pi OS provide it as firefox-esr; try that first, then plain firefox for other

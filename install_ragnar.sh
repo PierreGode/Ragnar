@@ -756,6 +756,31 @@ EOF
         log "WARNING" "rfkill not available - WiFi blocking status unknown"
     fi
 
+    # RTL-SDR dongles (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, and any
+    # generic RTL2832U stick) drive the sub-GHz half of the RF Waterfall and the
+    # ISM decoder in rtl_sdr.py. Two things stop a freshly-plugged dongle from
+    # ever opening:
+    #   1) The kernel's DVB-T driver (dvb_usb_rtl28xxu) claims the device first,
+    #      so rtl_power / rtl_433 / rtl_test can't. Blacklist it + unload now.
+    #   2) The RTL-SDR Blog V4 uses an R828D tuner the stock distro librtlsdr
+    #      mis-tunes; it needs the RTL-SDR Blog librtlsdr fork. V3/Nooelec/
+    #      generic (R820T2) dongles work with the stock driver as-is.
+    if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
+        cat > /etc/modprobe.d/blacklist-rtl-sdr.conf << 'EOF'
+# Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /
+# rtl_433 / rtl_test can claim them (RTL-SDR Blog V3/V4, Nooelec NESDR, generic).
+blacklist dvb_usb_rtl28xxu
+blacklist rtl2832
+blacklist rtl2830
+blacklist rtl2838
+EOF
+        chmod 644 /etc/modprobe.d/blacklist-rtl-sdr.conf
+        # Unload it now if bound, so a plugged-in dongle works without a reboot.
+        rmmod dvb_usb_rtl28xxu 2>/dev/null || true
+        log "SUCCESS" "Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
+        log "INFO" "RTL-SDR ready (Blog V3 / Nooelec / RTL-SDR.com / generic). The RTL-SDR Blog V4 (R828D tuner) additionally needs the RTL-SDR Blog librtlsdr fork - see docs/sdr-subghz.md"
+    fi
+
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).
     # Enable decoding of CDP (Cisco), EDP (Extreme), FDP (Foundry) and SONMP
     # (Nortel) in addition to LLDP so non-LLDP switches are discovered too.
