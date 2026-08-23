@@ -71,6 +71,51 @@ ISM_FREQS = {
     "915": "915M",
 }
 
+# Z-Wave regional radio plan. Z-Wave is a sub-GHz mesh (GFSK/FSK) that lives on a
+# small set of FIXED narrow channels per regulatory region — not a wide ISM
+# scatter — so each region gets a tight sweep span plus the exact channel centres
+# to overlay on the spectrum. rtl_433 does NOT decode Z-Wave, so this is an
+# ENERGY / occupancy view: you watch the mesh's bursts land on the channels
+# (device chatter, retries, a jammer parked on a channel), band nobody usually
+# looks at. Frequencies are the published Z-Wave regional assignments (Hz).
+ZWAVE_REGIONS = {
+    "eu":    {"label": "EU (868)",        "span": (867_600_000, 870_200_000),
+              "channels": [(868_420_000, "R1/R2 9.6/40k"), (869_850_000, "R3 100k")]},
+    "us":    {"label": "US (908/916)",    "span": (907_000_000, 917_200_000),
+              "channels": [(908_420_000, "R1/R2 9.6/40k"), (916_000_000, "R3 100k")]},
+    "us-lr": {"label": "US Long Range",   "span": (910_500_000, 921_500_000),
+              "channels": [(912_000_000, "LR ch A"), (920_000_000, "LR ch B")]},
+    "anz":   {"label": "ANZ (919/921)",   "span": (919_000_000, 922_200_000),
+              "channels": [(919_820_000, "R1/R2"), (921_420_000, "R3")]},
+    "jp":    {"label": "Japan (922-926)", "span": (921_500_000, 927_200_000),
+              "channels": [(922_500_000, "ch1"), (923_900_000, "ch2"), (926_300_000, "ch3")]},
+    "kr":    {"label": "Korea (920-923)", "span": (920_000_000, 924_000_000),
+              "channels": [(920_900_000, "ch1"), (921_700_000, "ch2"), (923_100_000, "ch3")]},
+    "in":    {"label": "India (865)",     "span": (864_400_000, 866_000_000),
+              "channels": [(865_200_000, "R1/R2/R3")]},
+    "il":    {"label": "Israel (916)",    "span": (915_000_000, 917_000_000),
+              "channels": [(916_000_000, "R1/R2/R3")]},
+    "hk":    {"label": "Hong Kong (919)", "span": (919_000_000, 920_600_000),
+              "channels": [(919_820_000, "R1/R2/R3")]},
+    "ru":    {"label": "Russia (869)",    "span": (868_000_000, 870_000_000),
+              "channels": [(869_000_000, "R1/R2/R3")]},
+    "cn":    {"label": "China (868)",     "span": (867_600_000, 869_200_000),
+              "channels": [(868_400_000, "R1/R2/R3")]},
+}
+
+
+def zwave_plan():
+    """Region → sweep span + Z-Wave channel centres, for the UI's Z-Wave view."""
+    out = {}
+    for rid, r in ZWAVE_REGIONS.items():
+        out[rid] = {
+            "label": r["label"],
+            "lo_hz": r["span"][0], "hi_hz": r["span"][1],
+            "channels": [{"freq_hz": f, "freq_mhz": round(f / 1e6, 3), "label": lbl}
+                         for f, lbl in r["channels"]],
+        }
+    return out
+
 _POWER_BINS = 480          # display columns per waterfall frame
 _RING_FRAMES = 300         # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
@@ -723,9 +768,10 @@ class PowerSweep:
         self._lo = None            # active sweep range in Hz (band OR zoom span)
         self._hi = None
 
-    def start(self, band="433", lo_hz=None, hi_hz=None):
-        # A custom [lo_hz, hi_hz] span (the page's zoom) overrides the named band
-        # when both edges are sane (>=100 kHz wide, inside the RTL-SDR's reach).
+    def start(self, band="433", lo_hz=None, hi_hz=None, label=None):
+        # A custom [lo_hz, hi_hz] span (the page's zoom, or a Z-Wave region)
+        # overrides the named band when both edges are sane (>=100 kHz wide,
+        # inside the RTL-SDR's reach). ``label`` names it (e.g. "zwave-eu").
         custom = None
         try:
             if lo_hz is not None and hi_hz is not None:
@@ -735,7 +781,7 @@ class PowerSweep:
         except (TypeError, ValueError):
             custom = None
         if custom:
-            label, lo, hi = "zoom", custom[0], custom[1]
+            label, lo, hi = (label or "zoom"), custom[0], custom[1]
         else:
             band = band if band in RTL_BANDS else "433"
             label, (lo, hi) = band, RTL_BANDS[band]
@@ -904,7 +950,7 @@ def ism_devices():
     return _ism.get_devices()
 
 
-def power_start(band="433", lo_hz=None, hi_hz=None):
+def power_start(band="433", lo_hz=None, hi_hz=None, label=None):
     global _detect_cache
     if _ism.status()["running"]:
         _ism.stop()            # one dongle: hand it to the sweep
@@ -913,7 +959,7 @@ def power_start(band="433", lo_hz=None, hi_hz=None):
         if not d.get("available"):
             return {"ok": False, "error": d.get("error", "no RTL-SDR")}
         _detect_cache = d
-    return _power.start(band, lo_hz=lo_hz, hi_hz=hi_hz)
+    return _power.start(band, lo_hz=lo_hz, hi_hz=hi_hz, label=label)
 
 
 def power_stop():
@@ -1112,6 +1158,23 @@ def selftest():
           all(b in RTL_BANDS for b in ("433", "868", "915", "subghz")))
     check("bands: ism 433/868/915 present",
           all(b in ISM_FREQS for b in ("433", "868", "915")))
+
+    # --- Z-Wave regional plan: channels sit inside their span, all in RTL reach ---
+    plan = zwave_plan()
+    check("zwave: eu + us regions present",
+          "eu" in plan and "us" in plan and "us-lr" in plan)
+    _zw_ok = True
+    for rid, r in plan.items():
+        if not (24_000_000 <= r["lo_hz"] < r["hi_hz"] <= 1_766_000_000):
+            _zw_ok = False
+        for ch in r["channels"]:
+            if not (r["lo_hz"] <= ch["freq_hz"] <= r["hi_hz"]):
+                _zw_ok = False
+    check("zwave: every channel lands inside its region span (and RTL range)", _zw_ok)
+    check("zwave: EU classic channel is 868.42 MHz",
+          any(abs(c["freq_hz"] - 868_420_000) < 1000 for c in plan["eu"]["channels"]))
+    check("zwave: span >= 100 kHz so power_start accepts it",
+          all(r["hi_hz"] - r["lo_hz"] >= 100_000 for r in plan.values()))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
