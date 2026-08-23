@@ -221,14 +221,14 @@ for _btpkg in python3-dbus python3-gi bluez; do
 done
 # Optional tooling. Each backs one feature that resolves the binary at runtime
 # and disables itself when it is missing (hackrf → the HackRF 2.4/5/6 GHz half of
-# the RF Waterfall in sdr_spectrum.py; rtl-sdr/rtl-433 → the RTL-SDR sub-GHz half
-# in rtl_sdr.py; the rest → the recon/vuln scanners, which server_capabilities
-# already marks 'critical': False). Not every suite ships all of them — ffuf only
-# entered Debian in trixie — so a miss is reported and skipped, never fatal.
+# the RF Waterfall in sdr_spectrum.py; the rest → the recon/vuln scanners, which
+# server_capabilities already marks 'critical': False). Not every suite ships all
+# of them — ffuf only entered Debian in trixie — so a miss is reported and
+# skipped, never fatal. (rtl-sdr/rtl-433 for the RTL-SDR sub-GHz half get their
+# own self-healing block below, together with the DVB-T blacklist they need.)
 _missing_optional=()
-for _opt in hackrf:"RF Waterfall (Wi-Fi bands)" rtl-sdr:"RF Waterfall (sub-GHz)" \
-            rtl-433:"ISM decoder" nikto:"vuln scanner" sqlmap:"vuln scanner" \
-            whatweb:"vuln scanner" ffuf:"content discovery"; do
+for _opt in hackrf:"RF Waterfall (Wi-Fi bands)" nikto:"vuln scanner" \
+            sqlmap:"vuln scanner" whatweb:"vuln scanner" ffuf:"content discovery"; do
     _pkg="${_opt%%:*}"; _why="${_opt#*:}"
     dpkg -s "$_pkg" >/dev/null 2>&1 && continue
     if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_pkg" >/dev/null 2>&1; then
@@ -241,10 +241,20 @@ if [ ${#_missing_optional[@]} -gt 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} Not available in this suite: ${_missing_optional[*]} — the features using them stay disabled"
 fi
 
-# RTL-SDR dongles (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, generic
-# RTL2832U) need the kernel's DVB-T driver kept off them, or rtl_power / rtl_433
-# / rtl_test can never open the device. Mirror install_ragnar.sh so update-only
-# boxes get the same fix. Idempotent — only writes/unloads when needed.
+# RTL-SDR support (RTL-SDR Blog V3/V4, Nooelec NESDR, RTL-SDR.com, generic
+# RTL2832U) for the sub-GHz RF Waterfall + ISM decoder. Two things must be true
+# for a plugged-in dongle to work, so we guarantee BOTH here (self-healing —
+# mirrors install_ragnar.sh so update-only boxes get the full setup in one run):
+#   1) the rtl-sdr + rtl-433 tools are installed;
+#   2) the DVB-T kernel driver is blacklisted + unloaded so it can't grab the
+#      device before rtl_power / rtl_433 / rtl_test can.
+if ! command -v rtl_test >/dev/null 2>&1; then
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rtl-sdr rtl-433 >/dev/null 2>&1; then
+        echo -e "  ${GREEN}✓${NC} Installed rtl-sdr + rtl-433 (RTL-SDR sub-GHz / ISM)"
+    else
+        echo -e "  ${YELLOW}⚠${NC} Could not install rtl-sdr/rtl-433 — RTL-SDR features stay disabled until they're present"
+    fi
+fi
 if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
     _rtl_bl=/etc/modprobe.d/blacklist-rtl-sdr.conf
     if ! grep -q "dvb_usb_rtl28xxu" "$_rtl_bl" 2>/dev/null; then
@@ -260,6 +270,8 @@ EOF
         echo -e "  ${GREEN}✓${NC} Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
     fi
     rmmod dvb_usb_rtl28xxu 2>/dev/null || true
+    command -v rtl_test >/dev/null 2>&1 \
+        && echo -e "  ${GREEN}✓${NC} RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
 fi
 
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up
