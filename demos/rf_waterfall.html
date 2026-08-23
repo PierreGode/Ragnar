@@ -58,6 +58,9 @@
   button.ctl:hover{border-color:var(--cyan);color:#fff}
   button.ctl:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
   button.ctl[aria-pressed="true"]{background:rgba(245,185,66,.12);border-color:rgba(245,185,66,.5);color:var(--accent)}
+  a.ctl{display:inline-flex;align-items:center;text-decoration:none}
+  a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  a.back:hover{border-color:var(--cyan);background:rgba(56,189,201,.10);color:#fff}
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
   .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;
     padding:7px 12px;cursor:pointer;transition:background .15s,color .15s}
@@ -126,6 +129,7 @@
   </header>
 
   <div class="bar">
+    <div class="grp"><a href="/" class="ctl back" id="back" title="Return to the Ragnar dashboard">&#8592;&nbsp;Ragnar</a></div>
     <div class="grp"><button class="ctl" id="play" aria-pressed="true">&#10074;&#10074;&nbsp;Pause</button></div>
     <div class="grp">
       <span class="lbl">Scroll</span>
@@ -265,18 +269,25 @@
     });
 
     this.resize(); this.resetCanvas();
-    this._ro=new ResizeObserver(function(){ self.resize(); self.drawRuler(); });
+    this._ro=new ResizeObserver(function(){ if(self.resize()) self.drawRuler(); });
     this._ro.observe(this.fall);
   }
 
   Scope.prototype.dpr=function(){ return Math.min(window.devicePixelRatio||1,2); };
   Scope.prototype.resize=function(){
     var d=this.dpr(), wcss=this.fall.clientWidth||600;
-    this.W=Math.max(1,Math.round(wcss*d));
-    this.fall.width=this.W; this.fall.height=Math.round(210*d);
+    var newW=Math.max(1,Math.round(wcss*d)), newH=Math.round(210*d);
+    // Only rebuild the canvas when the pixel size actually changes. A
+    // ResizeObserver also fires on spurious layout ticks — notably a phone's
+    // URL bar showing/hiding as you scroll the page — and re-assigning
+    // canvas.width (even to the same value) wipes the bitmap, which read as the
+    // waterfall "resetting" on every scroll. Bail when nothing really changed.
+    if(newW===this.W && newH===this.H && this.fall.width===newW && this.d===d) return false;
+    this.W=newW; this.fall.width=this.W; this.fall.height=newH;
     this.trace.width=this.W; this.trace.height=Math.round(56*d);
     this.H=this.fall.height; this.STEP=Math.max(1,Math.round(2*d)); this.d=d;
     this.fctx.fillStyle="#05080d"; this.fctx.fillRect(0,0,this.W,this.H);
+    return true;
   };
   Scope.prototype.resetCanvas=function(){
     this.t0=performance.now();
@@ -513,7 +524,7 @@
   });
   scopes.forEach(function(s){ s.setRate(HZ); });
   if(reduce){ setRunning(false); } else { setRunning(true); }
-  window.addEventListener('resize',function(){ scopes.forEach(function(s){ s.resize(); s.drawRuler(); }); });
+  window.addEventListener('resize',function(){ scopes.forEach(function(s){ if(s.resize()) s.drawRuler(); }); });
   window.addEventListener('beforeunload', function(){ scopes.forEach(function(s){ if(s.mode==='live') s.stopLive(); }); });
 })();
 </script>
