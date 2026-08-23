@@ -2035,6 +2035,14 @@ function _wifiRfwfShow() {
     btn.title = bits.length
         ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
         : 'Open the RF Waterfall page (synthetic demo — connect a HackRF or RTL-SDR for true RF)';
+    // ADS-B radar needs an RTL-SDR (1090 MHz via dump1090); show alongside when
+    // an RTL is present or the demo is on (synthetic sky).
+    const adsb = document.getElementById('wifi-adsb-btn');
+    if (adsb) {
+        const showA = rtl || demo;
+        adsb.classList.toggle('hidden', !showA);
+        adsb.classList.toggle('inline-flex', showA);
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.

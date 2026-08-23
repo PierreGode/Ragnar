@@ -785,6 +785,17 @@ EOF
         command -v rtl_test >/dev/null 2>&1 \
             && log "SUCCESS" "RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
         log "INFO" "RTL-SDR ready (Blog V3 / Nooelec / RTL-SDR.com / generic). The RTL-SDR Blog V4 (R828D tuner) additionally needs the RTL-SDR Blog librtlsdr fork - see docs/sdr-subghz.md"
+        # dump1090 powers the ADS-B radar (1090 MHz aircraft). Try the common
+        # package names; a miss just leaves the radar disabled until it's present.
+        if ! command -v dump1090-fa >/dev/null 2>&1 && ! command -v dump1090-mutability >/dev/null 2>&1 && ! command -v dump1090 >/dev/null 2>&1; then
+            for _d in dump1090-fa dump1090-mutability dump1090; do
+                if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_d" >/dev/null 2>&1; then
+                    log "SUCCESS" "Installed $_d (ADS-B radar, 1090 MHz)"; break
+                fi
+            done
+            command -v dump1090-fa >/dev/null 2>&1 || command -v dump1090-mutability >/dev/null 2>&1 || command -v dump1090 >/dev/null 2>&1 \
+                || log "INFO" "dump1090 not in this suite - ADS-B radar stays disabled (install dump1090-fa/-mutability to enable)"
+        fi
     fi
 
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).

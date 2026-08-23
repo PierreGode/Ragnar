@@ -146,6 +146,27 @@ Frequencies: LoRaWAN entries follow the published regional band plans; Meshtasti
 default channels are preset/hash-derived and MeshCore's are user-configurable, so
 those are marked "~" / "default" — scan the band for the actual chirps.
 
+## ADS-B radar (1090 MHz aircraft)
+
+The RTL-SDR's other classic trick: at **1090 MHz** it hears the ADS-B position
+broadcasts every airliner (and most GA) sends in the clear — ICAO address,
+callsign, lat/lon, altitude, speed, heading. The **ADS-B Radar** page
+(`/adsb-radar`, `adsb.py` driving **dump1090**) renders them on a PPI radar:
+range rings, compass, your receiver at centre, and altitude-coloured blips with
+heading vectors + a contacts table.
+
+- **Reachable** from the RF Waterfall page ("✈ ADS-B Radar") and the Wi-Fi
+  Spectrum Analyzer button (shown when an RTL-SDR is present or the demo is on).
+- **Set your lat/lon** (or use the browser location) so range/bearing are
+  correct — aircraft carry their own GPS position; the page computes distance and
+  bearing relative to you client-side.
+- **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
+  sub-GHz sweep/decoder and vice-versa.
+- **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
+  The installer/updater install it best-effort; if it's missing the page shows a
+  hint. Everything here is receive-only, and ADS-B is unauthenticated/unencrypted
+  by design — the same data every flight-tracking site shows.
+
 ## API
 
 | Route | Purpose |
@@ -161,6 +182,9 @@ those are marked "~" / "default" — scan the band for the actual chirps.
 | `GET  /api/net/rtl/power/frames?since=` | New waterfall frames + max-hold since a seq |
 | `GET  /api/net/rtl/zwave` | Z-Wave regional plan (spans + channel centres) |
 | `GET  /api/net/rtl/lora` | LoRa mesh plan — Meshtastic/MeshCore/LoRaWAN (spans + channels) |
+| `GET  /api/net/rtl/tuning` · POST `{ppm,gain}` | Read / set PPM freq-correction + tuner gain (reapplied live) |
+| `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft table |
+| `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI

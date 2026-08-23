@@ -45,6 +45,7 @@ import report_common
 import bt_scanner
 import sdr_spectrum
 import rtl_sdr
+import adsb
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18790,6 +18791,8 @@ def register_network_diagnostics(app, logger=None):
         label = data.get('label')
         label = str(label).strip()[:24] if label else None
         _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
+        try: adsb.stop()          # one dongle: ADS-B can't run alongside the sweep
+        except Exception: pass
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
                                            hi_hz=data.get('hi_hz'), label=label))
 
@@ -18816,6 +18819,33 @@ def register_network_diagnostics(app, logger=None):
             return jsonify(rtl_sdr.set_tuning(ppm=data.get('ppm'), gain=data.get('gain')))
         return jsonify(rtl_sdr.get_tuning())
 
+    # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
+    # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
+    # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.
+    @app.route('/api/net/adsb/status', methods=['GET'])
+    def net_adsb_status():
+        return jsonify(adsb.status())
+
+    @app.route('/api/net/adsb/start', methods=['POST'])
+    def net_adsb_start():
+        _log("net/adsb/start")
+        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop()   # hand the dongle to dump1090
+        except Exception: pass
+        return jsonify(adsb.start())
+
+    @app.route('/api/net/adsb/stop', methods=['POST'])
+    def net_adsb_stop():
+        _log("net/adsb/stop")
+        return jsonify(adsb.stop())
+
+    @app.route('/api/net/adsb/aircraft', methods=['GET'])
+    def net_adsb_aircraft():
+        return jsonify(adsb.aircraft())
+
+    @app.route('/api/net/adsb/selftest', methods=['GET'])
+    def net_adsb_selftest():
+        return jsonify(adsb.selftest())
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
@@ -18824,6 +18854,8 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
         _log(f"net/rtl/ism/start band={band}")
+        try: adsb.stop()          # one dongle: ADS-B can't run alongside the decoder
+        except Exception: pass
         return jsonify(rtl_sdr.ism_start(band=band))
 
     @app.route('/api/net/rtl/ism/stop', methods=['POST'])
