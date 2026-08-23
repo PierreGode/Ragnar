@@ -8413,6 +8413,28 @@ def mesh_nodes_page():
     return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
 
 
+@app.route('/pager-decode')
+def pager_decode_page():
+    """Serve the POCSAG/FLEX pager decode page.
+
+    Served when any SDR is present (so the page can offer its Install-multimon-ng
+    button even before multimon-ng exists), when pager decode is ready, or in
+    demo mode. 404s otherwise. Login required.
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    present = _any_sdr_present()
+    if not present:
+        try:
+            import pager
+            present = bool(pager.detect().get('available'))
+        except Exception:
+            present = False
+    if not (demo or present):
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'pager_decode.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')

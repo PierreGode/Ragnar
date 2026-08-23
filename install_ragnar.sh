@@ -809,6 +809,13 @@ EOF
         fi
     fi
 
+    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — in the apt repos.
+    if ! command -v multimon-ng >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed multimon-ng (Pager Decode)" \
+            || log "INFO" "multimon-ng not installed - Pager Decode stays disabled (apt install multimon-ng to enable)"
+    fi
+
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).
     # Enable decoding of CDP (Cisco), EDP (Extreme), FDP (Foundry) and SONMP
     # (Nortel) in addition to LLDP so non-LLDP switches are discovered too.

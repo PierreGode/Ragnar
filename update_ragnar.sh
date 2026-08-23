@@ -288,6 +288,11 @@ EOF
             echo -e "  ${GREEN}✓${NC} Installed meshtastic (Mesh Nodes companion)"
         fi
     fi
+    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — it IS in the repos.
+    if ! command -v multimon-ng >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed multimon-ng (Pager Decode)"
+    fi
 fi
 
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up

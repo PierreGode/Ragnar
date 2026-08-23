@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pager Decode</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --pager:#f0a35e;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace; --head:'Chakra Petch',system-ui,sans-serif; --radius:12px;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:20px;min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(240,163,94,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
+  .wrap{max-width:1180px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--pager);box-shadow:0 0 10px var(--pager)}
+  h1{font-family:var(--head);font-weight:700;font-size:34px;margin:2px 0 0}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:520px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .stat{display:flex;flex-direction:column;gap:1px} .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)} .stat .v{font-family:var(--mono);font-size:14px;color:var(--pager)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px} .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s}
+  button.ctl:hover,a.ctl:hover{border-color:var(--pager);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  select.tin,input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input.tin{width:120px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;position:relative}
+  .cap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .tbl{overflow:auto;max-height:64vh}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:8px 12px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
+  td{padding:7px 12px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);vertical-align:top}
+  tr:hover td{background:rgba(240,163,94,.06)}
+  td.txt{color:var(--ink);white-space:pre-wrap;word-break:break-word;max-width:640px} td.cap-c{color:var(--cyan)}
+  .proto{font-size:9.5px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+  .empty{padding:30px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.82);text-align:center;padding:22px}
+  .veil.show{display:flex} .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>Pager Decode</h1>
+      <div class="sub">POCSAG / FLEX pager messages, in the clear, via rtl_fm | multimon-ng. Tune a pager channel and read the traffic — capcode, function, and text. Receive-only.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Messages</span><span class="v" id="s-count">—</span></div>
+      <div class="stat"><span class="k">Channel</span><span class="v" id="s-freq">—</span></div>
+      <div class="stat"><span class="k">Mode</span><span class="v"><span class="tag idle" id="s-mode">idle</span></span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/rf-waterfall" class="ctl">〜&nbsp;RF Waterfall</a></div>
+    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Start / stop decoding (uses the RTL-SDR)">&#9654;&nbsp;Start</button></div>
+    <div class="grp"><span class="lbl">Channel</span><select class="tin" id="preset"></select></div>
+    <div class="grp"><span class="lbl">or MHz</span><input class="tin" id="freq" type="number" step="0.0005" placeholder="153.350"></div>
+    <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
+  </div>
+
+  <div class="card">
+    <div class="cap"><span class="t">Decoded messages</span><span class="c" id="tblcount"></span></div>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>Time</th><th>Protocol</th><th>Capcode</th><th>Fn</th><th>Message</th></tr></thead>
+        <tbody id="tbody"><tr><td colspan="5" class="empty">Not started…</td></tr></tbody>
+      </table>
+    </div>
+    <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div>
+      <button class="ctl" id="veil-install" style="display:none;margin-top:6px;border-color:rgba(240,163,94,.5);color:var(--pager)">⬇ Install multimon-ng</button>
+    </div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> rtl_fm FM-demodulates the pager channel; multimon-ng decodes POCSAG512/1200/2400 + FLEX. Pager traffic is unencrypted, so messages come through as plain text.</div>
+    <div style="margin-top:6px"><b>One dongle:</b> this takes the RTL-SDR from the sub-GHz sweep / ADS-B while running. <b>Legality:</b> pager messages are often sensitive (medical, security) — decode third-party traffic only where lawful.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var running=false, DEMO_ON=false, mode='idle', seq=0, msgs=[], freqHz=null;
+  var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs'), veilInstall=document.getElementById('veil-install');
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function fmtF(hz){ return hz?(hz/1e6).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')+' MHz':'—'; }
+  function hhmm(ts){ var d=new Date((ts||Date.now()/1000)*1000); return d.toLocaleTimeString(); }
+
+  var PRESETS={};
+  var presetSel=document.getElementById('preset'), freqIn=document.getElementById('freq');
+  function fillPresets(p){ PRESETS=p||{}; var keys=Object.keys(PRESETS);
+    presetSel.innerHTML=keys.map(function(k){return '<option value="'+PRESETS[k]+'">'+esc(k)+'</option>';}).join('')||'<option value="">—</option>';
+    if(keys.length && !freqIn.value){ freqIn.value=(PRESETS[keys[0]]/1e6); } }
+  presetSel.addEventListener('change',function(){ if(presetSel.value){ freqIn.value=(parseInt(presetSel.value,10)/1e6); if(running) startRun(); } });
+
+  function chosenFreqHz(){ var v=parseFloat(freqIn.value); if(isFinite(v)) return Math.round(v*1e6); if(presetSel.value) return parseInt(presetSel.value,10); return null; }
+
+  function setMode(m){ mode=m; var el=document.getElementById('s-mode'); el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'decoding':(m==='synth'?'synthetic':'idle')); }
+  function showVeil(t,s,inst){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');veilInstall.style.display=inst?'inline-block':'none';}
+  function hideVeil(){veil.classList.remove('show');}
+  veilInstall.addEventListener('click',function(){ veilInstall.textContent='Installing…'; veilInstall.disabled=true;
+    fetch('/api/net/pager/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      veilInstall.textContent='⬇ Install multimon-ng'; veilInstall.disabled=false;
+      if(res&&res.ok){ hideVeil(); checkStatus(); } else { showVeil('Install did not complete',(res&&res.error)||'apt failed — try: sudo apt install multimon-ng',true); }
+    }).catch(function(){ veilInstall.textContent='⬇ Install multimon-ng'; veilInstall.disabled=false; });
+  });
+
+  function renderTable(){
+    var tb=document.getElementById('tbody');
+    document.getElementById('s-count').textContent=msgs.length;
+    document.getElementById('s-freq').textContent=fmtF(freqHz||chosenFreqHz());
+    document.getElementById('tblcount').textContent=msgs.length+' messages';
+    if(!msgs.length){ tb.innerHTML='<tr><td colspan="5" class="empty">'+(running||mode==='synth'?'Listening on '+fmtF(freqHz||chosenFreqHz())+'…':'Not started')+'</td></tr>'; return; }
+    tb.innerHTML=msgs.slice().reverse().slice(0,300).map(function(m){
+      return '<tr>'
+        +'<td>'+hhmm(m.ts)+'</td>'
+        +'<td><span class="proto">'+esc(m.protocol||'')+'</span></td>'
+        +'<td class="cap-c">'+esc(m.capcode||'—')+'</td>'
+        +'<td>'+(m.function!=null?m.function:'—')+'</td>'
+        +'<td class="txt">'+(m.text?esc(m.text):'<span style="color:var(--muted)">('+(m.kind||'tone')+')</span>')+'</td>'
+        +'</tr>'; }).join('');
+  }
+
+  var poll=null;
+  function startRun(){
+    var hz=chosenFreqHz(); if(!hz){ return; }
+    running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Stop';
+    seq=0; msgs=[]; freqHz=hz; renderTable();
+    fetch('/api/net/pager/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq_hz:hz})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON)synthMode(); else showVeil('Could not start',res.error); } }).catch(function(){});
+    if(poll)clearInterval(poll); poll=setInterval(pollLive,1500); pollLive();
+  }
+  function stopRun(){
+    running=false; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Start';
+    if(poll){clearInterval(poll);poll=null;}
+    fetch('/api/net/pager/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) synthMode(); else { setMode('idle'); }
+  }
+  document.getElementById('startbtn').addEventListener('click',function(){ running?stopRun():startRun(); });
+
+  function pollLive(){
+    fetch('/api/net/pager/messages?since='+seq).then(function(r){return r.json();}).then(function(d){
+      if(!d) return;
+      if(d.running){ hideVeil(); setMode('live'); if(d.freq_hz)freqHz=d.freq_hz;
+        if(d.messages&&d.messages.length){ d.messages.forEach(function(m){msgs.push(m);}); seq=d.seq; if(msgs.length>500)msgs=msgs.slice(-500); renderTable(); } }
+      else if(d.error){ if(DEMO_ON)synthMode(); else showVeil('Decoder stopped',d.error); }
+    }).catch(function(){});
+  }
+
+  // ---- synthetic feed (demo / no hardware) ----
+  var synthTimer=null;
+  var SAMPLES=[['POCSAG1200','1234567',3,'Alpha','ICU bed 4 requesting on-call cardiology'],
+    ['POCSAG512','0980809',0,'Numeric','5551234'],['POCSAG1200','0421337',1,'Alpha','SITE 12 door forced - dispatch'],
+    ['FLEX','0891234',null,'ALN','Weather alert: high wind warning issued'],['POCSAG2400','7654321',2,'Alpha','Pump station 3 low pressure'],
+    ['POCSAG1200','0100200',0,null,''],['POCSAG1200','3345566',3,'Alpha','Test page - please acknowledge']];
+  function synthMode(){ setMode('synth'); hideVeil(); if(!freqHz)freqHz=chosenFreqHz()||153350000;
+    if(!msgs._synth){ msgs=[]; msgs._synth=true; }
+    if(synthTimer) return; synthTimer=setInterval(function(){ if(Math.random()<0.8){ var s=SAMPLES[(Math.random()*SAMPLES.length)|0];
+      msgs.push({protocol:s[0],capcode:s[1],function:s[2],kind:s[3],text:s[4]||null,ts:Date.now()/1000}); if(msgs.length>500)msgs=msgs.slice(-500); renderTable(); } },2500); renderTable(); }
+
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function checkStatus(){
+    fetch('/api/net/pager/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{}, dt=document.getElementById('devtag');
+      if(det.presets) fillPresets(det.presets);
+      if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Stop'; if(!poll){poll=setInterval(pollLive,1500);pollLive();} return; }
+      if(det.available){ dt.className='tag live'; dt.textContent='RTL-SDR + multimon-ng ready'; hideVeil(); }
+      else { dt.className='tag idle'; dt.textContent=det.error?'unavailable':'detecting…';
+        if(DEMO_ON){ if(!Object.keys(PRESETS).length) fillPresets({'153.350 (UK POCSAG)':153350000,'148.4375 (US)':148437500,'929.6625 (US FLEX)':929662500}); synthMode(); }
+        else if(!running){ setMode('idle'); showVeil('Pager decode unavailable', det.error||'Connect an RTL-SDR and install multimon-ng, or enable the RF Waterfall demo for a synthetic feed.', det.tools_installed===false); } }
+    }).catch(function(){ if(DEMO_ON) synthMode(); });
+  }
+
+  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+})();
+</script>
+</body>
+</html>

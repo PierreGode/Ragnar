@@ -2056,6 +2056,14 @@ function _wifiRfwfShow() {
         mesh.classList.toggle('hidden', !showM);
         mesh.classList.toggle('inline-flex', showM);
     }
+    // Pager decode needs an RTL-SDR (rtl_fm|multimon-ng); show when RTL present
+    // or demo on (synthetic feed).
+    const pager = document.getElementById('wifi-pager-btn');
+    if (pager) {
+        const showP = rtl || demo;
+        pager.classList.toggle('hidden', !showP);
+        pager.classList.toggle('inline-flex', showP);
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.

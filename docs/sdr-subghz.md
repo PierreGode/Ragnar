@@ -205,6 +205,25 @@ transport bar (play/pause, seek, restart, delete). Frames are small, so a
 recording is cheap; capped at a few thousand frames. Routes:
 `/api/net/rtl/record/{start,stop,status,list,get,delete}`.
 
+## Pager Decode (POCSAG / FLEX)
+
+Pagers are still everywhere — hospitals, industrial SCADA/telemetry, alarms,
+on-call teams — and **POCSAG/FLEX are transmitted in the clear**. The **Pager
+Decode** page (`/pager-decode`, `pager.py`) tunes a pager channel with `rtl_fm`
+and decodes it with `multimon-ng`, showing each message's capcode (address),
+function bits, and alphanumeric/numeric text, live.
+
+- **Channels** — a preset list of common POCSAG/FLEX frequencies plus a
+  free-form MHz box. Uses the current PPM/gain tuning.
+- **`multimon-ng`** is in the Debian/Pi OS apt repos, so the installer/updater
+  install it cleanly; if missing, the page shows an **⬇ Install multimon-ng**
+  button (`POST /api/net/pager/install`).
+- **One dongle** — pager decode uses `rtl_fm` (the whole RTL-SDR), so starting
+  it stops the sub-GHz sweep/decoder and ADS-B (and vice-versa).
+- **Legality** — pager traffic is unencrypted but frequently *sensitive*
+  (patient data, security callouts). Decode third-party traffic only where
+  lawful; this is receive-only.
+
 ## API
 
 | Route | Purpose |
@@ -227,6 +246,8 @@ recording is cheap; capped at a few thousand frames. Routes:
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
 | `GET  /api/net/mesh/status` · `/nodes` · `/messages` | Mesh Nodes: link state + enumerated nodes + decoded messages |
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
+| `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state + decoded POCSAG/FLEX messages |
+| `POST /api/net/pager/start` `{freq_hz}` · `/stop` · `/install` | Start/stop pager decode on a channel; install multimon-ng |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI
