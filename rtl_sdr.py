@@ -160,6 +160,50 @@ def identify_model(device, tuner):
     return out("RTL-SDR", fam, False, "")
 
 
+# Known RTL-SDR USB IDs (VID:PID). An lsusb fallback probe against these lets us
+# report "dongle present" even when the rtl_* tools aren't installed yet, or when
+# rtl_test can't open the device because the DVB-T driver still has it. 0bda is
+# Realtek (RTL2832U/RTL2838 — NESDR SMArt, Blog V3/V4, most generics); the rest
+# are common rebadges.
+_RTL_USB_IDS = {
+    "0bda:2838": "Realtek RTL2838 (RTL-SDR)",   # NESDR SMArt, Blog V3, most generics
+    "0bda:2832": "Realtek RTL2832U (RTL-SDR)",  # DVB-T mode / older dongles
+    "0bda:2831": "Realtek RTL2831U (RTL-SDR)",
+    "1d19:1101": "Dexatek RTL2832U (RTL-SDR)",
+    "1d19:1102": "Dexatek RTL2832U (RTL-SDR)",
+    "1d19:1103": "Dexatek RTL2832U (RTL-SDR)",
+    "1b80:d3a4": "Astrometa RTL2832U (RTL-SDR)",
+    "0458:707f": "Genius RTL2832U (RTL-SDR)",
+}
+
+
+def parse_lsusb_for_rtl(text):
+    """Find the first known RTL-SDR (usb_id, description) in lsusb output (pure).
+
+    Returns (usb_id, description) for the first VID:PID match — description is
+    the text after the ID on that lsusb line when present, else a friendly
+    default — or (None, None) when nothing matches.
+    """
+    if not text:
+        return None, None
+    low = text.lower()
+    for usb_id, desc in _RTL_USB_IDS.items():
+        if usb_id in low:
+            line = next((ln for ln in text.splitlines() if usb_id in ln.lower()), "")
+            m = re.search(r"ID\s+" + re.escape(usb_id) + r"\s*(.*)", line, re.I)
+            dtext = m.group(1).strip() if m else ""
+            return usb_id, (dtext or desc)
+    return None, None
+
+
+def probe_usb():
+    """Best-effort lsusb probe for a plugged-in RTL-SDR. Never raises."""
+    rc, out, _err = _run(["lsusb"], timeout=4)
+    if rc != 0 or not out:
+        return None, None
+    return parse_lsusb_for_rtl(out)
+
+
 def detect():
     """Report RTL-SDR availability so the UI can gate the tools.
 
@@ -169,9 +213,23 @@ def detect():
     """
     tools = {"rtl_433": _have(_RTL_433), "rtl_power": _have(_RTL_POWER),
              "rtl_test": _have(_RTL_TEST)}
+    # Cheap USB-bus probe first, so we can tell "no dongle plugged in" apart from
+    # "dongle present but tools missing / DVB driver holding it" (RaspyJack does
+    # the same). It never opens the radio, so it's safe alongside rtl_test.
+    usb_id, usb_desc = probe_usb()
     if not any(tools.values()):
+        if usb_id:
+            model = identify_model(usb_desc, None)
+            return {"available": False, "tools_installed": False,
+                    "device_present": True, "tools": tools, "usb_id": usb_id,
+                    "device": usb_desc, "model_name": model["model_name"],
+                    "tuner_family": model["tuner_family"],
+                    "needs_blog_driver": model["needs_blog_driver"],
+                    "model_note": model["note"],
+                    "error": "RTL-SDR dongle detected on USB (%s) but the rtl-sdr "
+                             "tools aren't installed — apt install rtl-sdr rtl-433" % usb_id}
         return {"available": False, "tools_installed": False,
-                "device_present": False, "tools": tools,
+                "device_present": False, "tools": tools, "usb_id": None,
                 "error": "rtl-sdr tools not installed (apt install rtl-sdr rtl-433)"}
     # rtl_test -t opens the dongle, prints tuner info, and exits — a clean probe.
     rc, out, err = _run([_RTL_TEST, "-t"], timeout=10)
@@ -180,22 +238,31 @@ def detect():
         # rtl_test missing but a decoder is present — can't hard-probe; report
         # tools state and let a start attempt surface any device error.
         return {"available": False, "tools_installed": True,
-                "device_present": False, "tools": tools,
+                "device_present": bool(usb_id), "tools": tools, "usb_id": usb_id,
                 "error": "rtl_test not found — install rtl-sdr to probe the dongle"}
     if rc == 124:
         return {"available": False, "tools_installed": True,
-                "device_present": False, "tools": tools,
+                "device_present": bool(usb_id), "tools": tools, "usb_id": usb_id,
                 "error": "RTL-SDR probe timed out — retry, or use a powered USB hub"}
     if "No supported devices found" in blob or "usb_open error" in blob or (
             rc != 0 and "PLL not locked" not in blob):
+        if usb_id:
+            # Dongle is on the bus but rtl_test couldn't claim it — almost always
+            # the DVB-T kernel driver still holds it.
+            return {"available": False, "tools_installed": True,
+                    "device_present": True, "tools": tools, "usb_id": usb_id,
+                    "device": usb_desc,
+                    "error": "RTL-SDR seen on USB (%s) but rtl_test can't open it — the "
+                             "DVB-T driver may still hold it. Blacklist dvb_usb_rtl28xxu "
+                             "(the installer does this), replug, and retry." % usb_id}
         return {"available": False, "tools_installed": True,
-                "device_present": False, "tools": tools,
+                "device_present": False, "tools": tools, "usb_id": None,
                 "error": "no RTL-SDR detected — plug a dongle in (a powered USB "
                          "hub is recommended on the Pi)"}
     info = parse_rtl_test(blob)
     model = identify_model(info["device"], info["tuner"])
     return {"available": True, "tools_installed": True, "device_present": True,
-            "tools": tools, "device": info["device"], "tuner": info["tuner"],
+            "tools": tools, "usb_id": usb_id, "device": info["device"], "tuner": info["tuner"],
             "model_name": model["model_name"], "tuner_family": model["tuner_family"],
             "needs_blog_driver": model["needs_blog_driver"], "model_note": model["note"],
             "bands": sorted(RTL_BANDS.keys()), "ism_bands": sorted(ISM_FREQS.keys())}
@@ -710,6 +777,17 @@ def selftest():
           gen["model_name"] == "RTL-SDR (R820T)" and gen["needs_blog_driver"] is False, str(gen))
     check("id: empty strings never crash",
           identify_model(None, None)["model_name"] == "RTL-SDR")
+
+    # --- lsusb VID:PID fallback probe (RaspyJack-style) ---
+    lsusb = ("Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub\n"
+             "Bus 001 Device 004: ID 0bda:2838 Realtek Semiconductor Corp. RTL2838 DVB-T\n")
+    uid, udesc = parse_lsusb_for_rtl(lsusb)
+    check("usb: NESDR/generic 0bda:2838 found in lsusb",
+          uid == "0bda:2838" and "RTL2838" in udesc, "%s / %s" % (uid, udesc))
+    check("usb: no RTL device -> (None, None)",
+          parse_lsusb_for_rtl("Bus 001 Device 001: ID 1d6b:0002 Linux Foundation root hub")
+          == (None, None))
+    check("usb: empty lsusb output safe", parse_lsusb_for_rtl("") == (None, None))
 
     # --- rtl_power row parser ---
     row = "2024-01-01, 12:00:00, 433050000, 434790000, 3625.00, 100, -40.1, -55.2, -33.0"
