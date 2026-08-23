@@ -8315,6 +8315,30 @@ def wifi_config_alt():
     return send_from_directory('web', 'wifi_config.html')
 
 
+# Hidden synthetic RF Waterfall demo (no SDR hardware required).
+@app.route('/demo/rf-waterfall')
+def sdr_waterfall_demo():
+    """Serve the synthetic RF Waterfall demo — only while it's switched on.
+
+    The page is a self-contained synthetic spectrum (sub-GHz ISM stacked over
+    the Wi-Fi bands) so the waterfall display can be shown on a unit with no
+    SDR attached. It stays hidden by default: unless the demo is enabled this
+    route 404s, and nothing in the UI links to it. Enable/disable in the
+    background with either of:
+
+        curl -X POST http://localhost:8000/api/config \\
+             -H 'Content-Type: application/json' -d '{"sdr_demo": true}'   # persisted
+        RAGNAR_SDR_DEMO=1   (env, transient — set before the service starts)
+
+    Login is still required: the route is not in the auth whitelist.
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    enabled = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    if not enabled:
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'rf_waterfall.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')

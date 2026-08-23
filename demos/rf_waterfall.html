@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RF Waterfall — Ragnar (synthetic demo)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --ground:#0a0e14;
+    --panel:#111722;
+    --panel-2:#0d1420;
+    --ink:#cdd6e4;
+    --ink-dim:#8b98ab;
+    --muted:#6b7a8f;
+    --line:#1e2836;
+    --line-soft:#161f2c;
+    --accent:#f5b942;   /* signal amber — matches colormap hot band */
+    --cyan:#38bdc9;     /* cool secondary — matches colormap low band */
+    --good:#3fb56b;
+    --idle:#546074;
+    --radius:10px;
+    --disp:"IBM Plex Sans",system-ui,sans-serif;
+    --head:"Chakra Petch","IBM Plex Sans",system-ui,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--ground);
+    color:var(--ink);
+    font-family:var(--disp);
+    line-height:1.5;
+    -webkit-font-smoothing:antialiased;
+    padding:clamp(14px,3vw,34px);
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgba(56,189,201,.06), transparent 60%),
+      linear-gradient(var(--ground),var(--ground));
+    min-height:100vh;
+  }
+  .wrap{max-width:1080px;margin:0 auto}
+  header{
+    display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
+    gap:16px 24px;margin-bottom:22px;border-bottom:1px solid var(--line);padding-bottom:18px;
+  }
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;
+    color:var(--cyan);margin:0 0 8px;display:flex;align-items:center;gap:9px;
+  }
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);
+    box-shadow:0 0 0 3px rgba(56,189,201,.15);animation:pulse 2.4s ease-in-out infinite}
+  h1{
+    font-family:var(--head);font-weight:700;font-size:clamp(28px,5vw,44px);
+    letter-spacing:.01em;margin:0;line-height:1.02;text-wrap:balance;
+  }
+  .sub{color:var(--ink-dim);font-size:14px;margin:8px 0 0;max-width:46ch}
+  .rigs{display:flex;flex-direction:column;gap:8px;align-items:flex-end}
+  .rig{
+    display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;
+    color:var(--ink-dim);white-space:nowrap;
+  }
+  .rig b{color:var(--ink);font-weight:600}
+  .tag{
+    font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
+    padding:2px 7px;border-radius:5px;border:1px solid;
+  }
+  .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .bar{
+    display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;margin:0 0 20px;
+    padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);
+  }
+  .bar .grp{display:flex;align-items:center;gap:8px}
+  .bar .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  button.ctl{
+    font-family:var(--head);font-weight:600;font-size:13px;letter-spacing:.02em;
+    color:var(--ink);background:var(--panel);border:1px solid var(--line);
+    padding:7px 14px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s;
+  }
+  button.ctl:hover{border-color:var(--cyan);color:#fff}
+  button.ctl:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+  button.ctl[aria-pressed="true"]{background:rgba(245,185,66,.12);border-color:rgba(245,185,66,.5);color:var(--accent)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{
+    font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;
+    padding:7px 12px;cursor:pointer;transition:background .15s,color .15s}
+  .seg button:hover{color:var(--ink)}
+  .seg button[aria-pressed="true"]{background:rgba(56,189,201,.14);color:var(--cyan)}
+  .seg button:focus-visible{outline:2px solid var(--cyan);outline-offset:-2px}
+  .spacer{flex:1 1 auto}
+  .clock{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em}
+  .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted)}
+  .legend .grad{width:120px;height:9px;border-radius:3px;
+    background:linear-gradient(90deg,#071a2c,#0e5f78,#22a06a,#f5b942,#fff3d6)}
+  .stack{display:flex;flex-direction:column;gap:20px}
+  .scope{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;
+    box-shadow:0 18px 40px -28px rgba(0,0,0,.9);
+  }
+  .scope-head{
+    display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;
+    padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2);
+  }
+  .scope-title{display:flex;flex-direction:column;gap:2px;min-width:180px}
+  .scope-title .name{font-family:var(--head);font-weight:600;font-size:15px;letter-spacing:.02em}
+  .scope-title .dev{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .scope-head .spacer{flex:1 1 40px}
+  .readout{display:flex;gap:18px;flex-wrap:wrap}
+  .stat{display:flex;flex-direction:column;gap:1px;min-width:66px}
+  .stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  .stat .v.peak{color:var(--accent)}
+  .stat .v.cy{color:var(--cyan)}
+  .scope-body{display:grid;grid-template-columns:1fr;}
+  .fall-wrap{position:relative;background:#05080d}
+  canvas.fall{display:block;width:100%;height:210px}
+  canvas.trace{display:block;width:100%;height:56px;background:var(--panel-2);border-top:1px solid var(--line-soft)}
+  .watermark{
+    position:absolute;top:8px;right:10px;font-family:var(--mono);font-size:9.5px;letter-spacing:.18em;
+    text-transform:uppercase;color:rgba(245,185,66,.55);pointer-events:none;text-shadow:0 1px 3px rgba(0,0,0,.8);
+  }
+  .now{
+    position:absolute;top:0;left:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
+    color:rgba(205,214,228,.55);pointer-events:none;text-shadow:0 1px 3px #000;
+  }
+  .paused-veil{
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(5,8,13,.55);
+    font-family:var(--head);font-size:14px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-dim);
+  }
+  .scope.paused .paused-veil{display:flex}
+  .ruler{position:relative;height:30px;background:var(--panel-2);border-top:1px solid var(--line-soft);font-family:var(--mono)}
+  .ruler .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
+  .ruler .tlab{position:absolute;top:7px;transform:translateX(-50%);font-size:10px;color:var(--muted);white-space:nowrap}
+  .ruler .ism{position:absolute;top:0;bottom:0;background:rgba(56,189,201,.09);border-left:1px solid rgba(56,189,201,.35);
+    border-right:1px solid rgba(56,189,201,.35)}
+  .ruler .ism .il{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:9px;
+    letter-spacing:.1em;color:var(--cyan);text-transform:uppercase;white-space:nowrap}
+  footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);
+    font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.7}
+  footer b{color:var(--ink-dim);font-weight:600}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (max-width:640px){.rigs{align-items:flex-start}header{align-items:flex-start}.readout{gap:12px}}
+  @media (prefers-reduced-motion:reduce){.eyebrow .dot{animation:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <p class="eyebrow"><span class="dot"></span>Ragnar · Signal Intelligence</p>
+      <h1>RF Waterfall</h1>
+      <p class="sub">Two radios stacked — sub-GHz ISM and the Wi-Fi bands — scrolling as a live power-over-frequency heatmap.</p>
+    </div>
+    <div class="rigs">
+      <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag synth">synthetic</span></div>
+      <div class="rig"><b>HackRF&nbsp;One</b> · 1&nbsp;MHz–6&nbsp;GHz <span class="tag synth">synthetic</span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><button class="ctl" id="play" aria-pressed="true">&#10074;&#10074;&nbsp;Pause</button></div>
+    <div class="grp">
+      <span class="lbl">Scroll</span>
+      <div class="seg" id="speed" role="group" aria-label="Scroll rate">
+        <button data-hz="5" aria-pressed="false">Slow</button>
+        <button data-hz="12" aria-pressed="true">Normal</button>
+        <button data-hz="24" aria-pressed="false">Fast</button>
+      </div>
+    </div>
+    <div class="spacer"></div>
+    <div class="legend"><span>&minus;110&nbsp;dBm</span><span class="grad" aria-hidden="true"></span><span>&minus;20&nbsp;dBm</span></div>
+    <span class="clock" id="clock">--:--:--</span>
+  </div>
+
+  <div class="stack" id="stack"></div>
+
+  <footer>
+    <div><b>Synthetic feed.</b> No SDR is attached to this unit, so the panels model each band's real occupants — 433.92&nbsp;MHz TPMS/remote bursts, 868&nbsp;MHz metering, 915&nbsp;MHz frequency hoppers, and Wi-Fi OFDM blocks on channels 1/6/11 — to show how the display reads. Plug in an RTL-SDR or HackRF and the same view runs on true RF.</div>
+    <div style="margin-top:6px"><b>Backends:</b> rtl_sdr.py (rtl_power sub-GHz sweeps) · sdr_spectrum.py (hackrf_sweep) — each time-integrates raw sweeps into fixed-cadence rows so the scroll stays steady.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var STOPS=[[0.00,[7,26,44]],[0.28,[14,95,120]],[0.52,[34,160,106]],[0.78,[245,185,66]],[1.00,[255,243,214]]];
+  var FLOOR=-110, CEIL=-20, LUT=new Array(256);
+  (function(){
+    for(var i=0;i<256;i++){
+      var t=i/255, a=STOPS[0], b=STOPS[STOPS.length-1];
+      for(var s=0;s<STOPS.length-1;s++){ if(t>=STOPS[s][0] && t<=STOPS[s+1][0]){a=STOPS[s];b=STOPS[s+1];break;} }
+      var f=(t-a[0])/((b[0]-a[0])||1);
+      LUT[i]="rgb("+Math.round(a[1][0]+(b[1][0]-a[1][0])*f)+","+Math.round(a[1][1]+(b[1][1]-a[1][1])*f)+","+Math.round(a[1][2]+(b[1][2]-a[1][2])*f)+")";
+    }
+  })();
+  function color(db){ var t=(db-FLOOR)/(CEIL-FLOOR); if(t<0)t=0; if(t>1)t=1; return LUT[(t*255)|0]; }
+
+  var N=512;
+  function gauss(){ return (Math.random()+Math.random()+Math.random()-1.5)*0.9; }
+  function bump(arr, lo, hi, centerMHz, widthMHz, level){
+    for(var i=0;i<N;i++){
+      var f=lo+(i/N)*(hi-lo), d=(f-centerMHz)/widthMHz;
+      var target=(-108)+(level+108)*Math.exp(-d*d*2.0);
+      if(target>arr[i]) arr[i]=target;
+    }
+  }
+  function subGhzModel(){
+    var lo=430, hi=930, hoppers=[905,912,919,924];
+    return { lo:lo, hi:hi,
+      ticks:[430,450,500,550,600,650,700,750,800,850,868,900,915,928],
+      isms:[[433.05,434.79,"433"],[863,870,"868"],[902,928,"915"]],
+      emit:function(row){
+        if(Math.random()<0.30) bump(row,lo,hi,433.92,0.35,-42-Math.random()*10);
+        if(Math.random()<0.12) bump(row,lo,hi,434.42,0.25,-52);
+        bump(row,lo,hi,868.30,0.30,-60+gauss()*3);
+        if(Math.random()<0.18) bump(row,lo,hi,869.52,0.30,-50);
+        var hop=hoppers[(Math.random()*hoppers.length)|0]+(Math.random()-0.5)*3;
+        bump(row,lo,hi,hop,0.4,-46-Math.random()*8);
+      }
+    };
+  }
+  function wifiModel(band){
+    if(band==="2.4"){
+      var lo=2400,hi=2500;
+      return { lo:lo,hi:hi,
+        ticks:[2400,2412,2437,2462,2484,2500],
+        chLabels:[[2412,"ch1"],[2437,"ch6"],[2462,"ch11"]], isms:[],
+        emit:function(row){
+          bump(row,lo,hi,2412,9,-58+gauss()*4);
+          bump(row,lo,hi,2437,9,-52+gauss()*5);
+          bump(row,lo,hi,2462,9,-60+gauss()*4);
+          if(Math.random()<0.4) bump(row,lo,hi,2402,0.6,-64);
+          if(Math.random()<0.4) bump(row,lo,hi,2426,0.6,-62);
+          if(Math.random()<0.4) bump(row,lo,hi,2480,0.6,-66);
+        }
+      };
+    }
+    if(band==="5"){
+      var lo=5150,hi=5895;
+      return { lo:lo,hi:hi,
+        ticks:[5150,5250,5350,5470,5600,5745,5895],
+        chLabels:[[5220,"UNII-1"],[5300,"UNII-2"],[5580,"DFS"],[5785,"UNII-3"]], isms:[],
+        emit:function(row){
+          bump(row,lo,hi,5210,18,-60+gauss()*4);
+          if(Math.random()<0.7) bump(row,lo,hi,5290,38,-58+gauss()*5);
+          if(Math.random()<0.35) bump(row,lo,hi,5765,38,-62+gauss()*4);
+          if(Math.random()<0.15) bump(row,lo,hi,5580,18,-70);
+        }
+      };
+    }
+    var lo=5925,hi=6425;
+    return { lo:lo,hi:hi,
+      ticks:[5925,6025,6125,6225,6325,6425],
+      chLabels:[[6035,"U-NII-5"],[6255,"160 MHz"]], isms:[],
+      emit:function(row){
+        if(Math.random()<0.5) bump(row,lo,hi,6035,78,-64+gauss()*4);
+        if(Math.random()<0.25) bump(row,lo,hi,6255,78,-66+gauss()*4);
+      }
+    };
+  }
+
+  function Scope(cfg){
+    var self=this; this.cfg=cfg; this.model=cfg.model; this.row=null; this.peak={db:-999,idx:0}; this.frames=0;
+    var el=document.createElement('div'); el.className='scope';
+    el.innerHTML=
+      '<div class="scope-head">'
+      +'<div class="scope-title"><span class="name">'+cfg.name+'</span><span class="dev">'+cfg.dev+'</span></div>'
+      +(cfg.bands?'<div class="seg bandsel" role="group" aria-label="Band"></div>':'')
+      +'<div class="spacer"></div>'
+      +'<div class="readout">'
+        +'<div class="stat"><span class="k">Peak f</span><span class="v peak pk-f">&mdash;</span></div>'
+        +'<div class="stat"><span class="k">Peak lvl</span><span class="v peak pk-d">&mdash;</span></div>'
+        +'<div class="stat"><span class="k">Span</span><span class="v cy span">&mdash;</span></div>'
+        +'<div class="stat"><span class="k">Rows/s</span><span class="v rate">&mdash;</span></div>'
+      +'</div></div>'
+      +'<div class="scope-body">'
+        +'<div class="fall-wrap">'
+          +'<canvas class="fall"></canvas>'
+          +'<span class="now">t=0.0s</span>'
+          +'<span class="watermark">&#9673; synthetic</span>'
+          +'<div class="paused-veil">Paused</div>'
+        +'</div>'
+        +'<div class="ruler"></div>'
+        +'<canvas class="trace"></canvas>'
+      +'</div>';
+    this.el=el;
+    this.fall=el.querySelector('.fall'); this.trace=el.querySelector('.trace'); this.ruler=el.querySelector('.ruler');
+    this.nowEl=el.querySelector('.now');
+    this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d');
+    this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
+    this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
+    if(cfg.bands){
+      var bs=el.querySelector('.bandsel');
+      cfg.bands.forEach(function(b){
+        var btn=document.createElement('button');
+        btn.textContent=b.label; btn.setAttribute('aria-pressed', b.id===cfg.band?'true':'false');
+        btn.addEventListener('click',function(){
+          if(self.cfg.band===b.id) return;
+          self.cfg.band=b.id;
+          bs.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed','false');});
+          btn.setAttribute('aria-pressed','true');
+          self.model=cfg.makeModel(b.id); self.reset();
+        });
+        bs.appendChild(btn);
+      });
+    }
+    this.resize(); this.reset();
+    var self2=this;
+    this._ro=new ResizeObserver(function(){ self2.resize(); self2.drawRuler(); });
+    this._ro.observe(this.fall);
+  }
+  Scope.prototype.dpr=function(){ return Math.min(window.devicePixelRatio||1,2); };
+  Scope.prototype.resize=function(){
+    var d=this.dpr(), wcss=this.fall.clientWidth||600;
+    this.W=Math.max(1,Math.round(wcss*d));
+    this.fall.width=this.W; this.fall.height=Math.round(210*d);
+    this.trace.width=this.W; this.trace.height=Math.round(56*d);
+    this.H=this.fall.height; this.STEP=Math.max(1,Math.round(2*d)); this.d=d;
+    this.fctx.fillStyle="#05080d"; this.fctx.fillRect(0,0,this.W,this.H);
+  };
+  Scope.prototype.reset=function(){
+    this.frames=0; this.t0=performance.now();
+    this.fctx.fillStyle="#05080d"; this.fctx.fillRect(0,0,this.W,this.H);
+    this.tctx.clearRect(0,0,this.trace.width,this.trace.height);
+    this.spanEl.textContent=Math.round(this.model.lo)+"–"+Math.round(this.model.hi)+" MHz";
+    this.drawRuler();
+  };
+  Scope.prototype.drawRuler=function(){
+    var m=this.model, lo=m.lo, hi=m.hi, span=hi-lo, r=this.ruler; r.innerHTML="";
+    (m.isms||[]).forEach(function(b){
+      var x0=(b[0]-lo)/span*100, x1=(b[1]-lo)/span*100;
+      var d=document.createElement('div'); d.className='ism'; d.style.left=x0+"%"; d.style.width=(x1-x0)+"%";
+      d.innerHTML='<span class="il">'+b[2]+'</span>'; r.appendChild(d);
+    });
+    (m.ticks||[]).forEach(function(f){
+      var x=(f-lo)/span*100; if(x<0||x>100)return;
+      var t=document.createElement('div'); t.className='tick'; t.style.left=x+"%"; r.appendChild(t);
+      var l=document.createElement('div'); l.className='tlab'; l.style.left=x+"%";
+      l.textContent=(f>=1000)?(f/1000).toFixed(f%1000?2:0)+"G":f; r.appendChild(l);
+    });
+    (m.chLabels||[]).forEach(function(c){
+      var x=(c[0]-lo)/span*100; if(x<0||x>100)return;
+      var l=document.createElement('div'); l.className='tlab'; l.style.left=x+"%"; l.style.top="18px";
+      l.style.color="var(--cyan)"; l.textContent=c[1]; r.appendChild(l);
+    });
+  };
+  Scope.prototype.step=function(){
+    var row=new Float32Array(N);
+    for(var i=0;i<N;i++) row[i]=-108+gauss()*2.2;
+    this.model.emit(row);
+    var f=this.fctx;
+    f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
+    var peakDb=-999, peakIdx=0;
+    for(var c=0;c<N;c++){
+      var x0=(c*this.W/N)|0, x1=((c+1)*this.W/N)|0;
+      f.fillStyle=color(row[c]); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
+      if(row[c]>peakDb){peakDb=row[c];peakIdx=c;}
+    }
+    this.row=row; this.peak={db:peakDb,idx:peakIdx}; this.frames++;
+    this.drawTrace(row); this.updateReadout();
+  };
+  Scope.prototype.drawTrace=function(row){
+    var t=this.tctx, W=this.trace.width, H=this.trace.height;
+    t.clearRect(0,0,W,H);
+    t.fillStyle="rgba(56,189,201,0.12)"; t.strokeStyle="#38bdc9"; t.lineWidth=Math.max(1,this.d);
+    t.beginPath();
+    for(var c=0;c<N;c++){
+      var x=c*W/N, norm=(row[c]-FLOOR)/(CEIL-FLOOR); if(norm<0)norm=0; if(norm>1)norm=1;
+      var y=H-norm*(H-4)-2; if(c===0)t.moveTo(x,y); else t.lineTo(x,y);
+    }
+    t.stroke(); t.lineTo(W,H); t.lineTo(0,H); t.closePath(); t.fill();
+    var px=this.peak.idx*W/N;
+    t.strokeStyle="rgba(245,185,66,0.8)"; t.lineWidth=Math.max(1,this.d);
+    t.beginPath(); t.moveTo(px,0); t.lineTo(px,H); t.stroke();
+  };
+  Scope.prototype.freqAt=function(idx){ var m=this.model; return m.lo+(idx/N)*(m.hi-m.lo); };
+  Scope.prototype.updateReadout=function(){
+    var fMHz=this.freqAt(this.peak.idx);
+    this.pkF.textContent=(fMHz>=1000)?(fMHz/1000).toFixed(3)+" GHz":fMHz.toFixed(2)+" MHz";
+    this.pkD.textContent=this.peak.db.toFixed(0)+" dBm";
+    this.nowEl.textContent="t="+((performance.now()-this.t0)/1000).toFixed(1)+"s";
+  };
+  Scope.prototype.setRate=function(hz){ this.rateEl.textContent=hz.toFixed(0); };
+
+  var stack=document.getElementById('stack'), scopes=[];
+  var s1=new Scope({ name:"Sub-GHz ISM", dev:"RTL-SDR · rtl_power", model:subGhzModel() });
+  scopes.push(s1); stack.appendChild(s1.el);
+  var s2=new Scope({ name:"Wi-Fi Bands", dev:"HackRF One · hackrf_sweep",
+    bands:[{id:"2.4",label:"2.4"},{id:"5",label:"5"},{id:"6",label:"6"}], band:"2.4",
+    makeModel:function(b){return wifiModel(b);}, model:wifiModel("2.4") });
+  scopes.push(s2); stack.appendChild(s2.el);
+
+  var clockEl=document.getElementById('clock');
+  function fmtClock(){ var d=new Date();
+    clockEl.textContent=String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0')+":"+String(d.getSeconds()).padStart(2,'0'); }
+  setInterval(fmtClock,1000); fmtClock();
+
+  var HZ=12, running=true, acc=0, last=performance.now();
+  var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var playBtn=document.getElementById('play');
+  function setRunning(on){
+    running=on; playBtn.setAttribute('aria-pressed',on?'true':'false');
+    playBtn.innerHTML=on?'&#10074;&#10074;&nbsp;Pause':'&#9654;&nbsp;Play';
+    scopes.forEach(function(s){ s.el.classList.toggle('paused',!on); s.setRate(on?HZ:0); });
+    if(on){ last=performance.now(); requestAnimationFrame(loop); }
+  }
+  playBtn.addEventListener('click',function(){ setRunning(!running); });
+  var speedSeg=document.getElementById('speed');
+  speedSeg.addEventListener('click',function(e){
+    var b=e.target.closest('button'); if(!b)return;
+    HZ=parseFloat(b.getAttribute('data-hz'));
+    speedSeg.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed','false');});
+    b.setAttribute('aria-pressed','true'); scopes.forEach(function(s){ s.setRate(running?HZ:0); });
+  });
+  function loop(now){
+    if(!running) return;
+    var dt=(now-last)/1000; last=now; acc+=dt; var interval=1/HZ, did=0;
+    while(acc>=interval && did<4){ scopes.forEach(function(s){s.step();}); acc-=interval; did++; }
+    scopes.forEach(function(s){ s.setRate(HZ); }); requestAnimationFrame(loop);
+  }
+  scopes.forEach(function(s){ s.setRate(HZ); });
+  if(reduce){ setRunning(false); } else { setRunning(true); }
+  window.addEventListener('resize',function(){ scopes.forEach(function(s){ s.resize(); s.drawRuler(); }); });
+})();
+</script>
+</body>
+</html>
