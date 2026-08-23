@@ -798,6 +798,17 @@ EOF
         fi
     fi
 
+    # meshtastic Python package powers the Mesh Nodes page (real enumeration of a
+    # LoRa mesh via a USB Meshtastic companion node). Optional/best-effort.
+    if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
+        if pip3 install --break-system-packages meshtastic >/dev/null 2>&1 \
+           || pip3 install meshtastic >/dev/null 2>&1; then
+            log "SUCCESS" "Installed meshtastic (Mesh Nodes companion)"
+        else
+            log "INFO" "meshtastic not installed - Mesh Nodes stays disabled (pip install meshtastic to enable)"
+        fi
+    fi
+
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).
     # Enable decoding of CDP (Cisco), EDP (Extreme), FDP (Foundry) and SONMP
     # (Nortel) in addition to LLDP so non-LLDP switches are discovered too.

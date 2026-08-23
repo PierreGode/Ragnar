@@ -137,14 +137,38 @@ chatter, retries, or a **jammer** parked on a channel.
   gives you addresses/metadata at best, not message contents.
 - **What you get RF-only:** presence, activity/occupancy per channel, and which
   band a mesh is on. Not node IDs or messages.
-- **To actually identify/enumerate a mesh** (node list, names, and to decrypt the
-  Meshtastic public channel), the practical path is a **companion LoRa node**
-  (a Meshtastic/MeshCore device over USB, the way Huginn/Zigbee attach) — a
-  possible future integration, not part of this receive-only spectrum view.
+- **To actually identify/enumerate a mesh** (node list, names, and to read the
+  Meshtastic public channel), use the **Mesh Nodes** page below — a companion
+  Meshtastic node over USB does the LoRa demod the RTL-SDR can't.
 
 Frequencies: LoRaWAN entries follow the published regional band plans; Meshtastic
 default channels are preset/hash-derived and MeshCore's are user-configurable, so
 those are marked "~" / "default" — scan the band for the actual chirps.
+
+## Mesh Nodes (Meshtastic companion node)
+
+The spectrum overlay shows *where* a LoRa mesh is; the **Mesh Nodes** page
+(`/mesh-nodes`, `meshtastic_node.py`) shows *who's on it*. A cheap Meshtastic
+device (Heltec / RAK / LILYGO T-Beam …) plugged into **USB** does the LoRa
+demodulation in hardware, and the `meshtastic` Python API hands Ragnar the
+decoded mesh:
+
+- **Node DB** — id, long/short name, hardware model, role, SNR, hops away,
+  battery/voltage, GPS position, last-heard. Plotted on a node map (self at
+  centre, links coloured by SNR) plus a full table.
+- **Public-channel messages** — the default Meshtastic channel key is
+  well-known, so its text traffic is decoded and shown live. Private channels
+  stay encrypted.
+- **Own USB radio** — this does *not* contend for the RTL-SDR, so it can run
+  alongside the sub-GHz sweep / ADS-B.
+- **Needs the `meshtastic` pip package** — installed best-effort by the
+  installer/updater; if missing, the page shows an **⬇ Install meshtastic**
+  button (`POST /api/net/mesh/install`).
+- **MeshCore:** its companion tooling is still immature, so only the spectrum
+  overlay covers it for now; node enumeration here is Meshtastic.
+
+Ragnar never *sends* mesh messages — it reads the node DB and listens. (The
+device itself still beacons as a normal mesh node.)
 
 ## ADS-B radar (1090 MHz aircraft)
 
@@ -201,6 +225,8 @@ recording is cheap; capped at a few thousand frames. Routes:
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
+| `GET  /api/net/mesh/status` · `/nodes` · `/messages` | Mesh Nodes: link state + enumerated nodes + decoded messages |
+| `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI

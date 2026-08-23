@@ -280,6 +280,12 @@ EOF
             fi
         done
     fi
+    # meshtastic Python package for the Mesh Nodes page (USB companion node).
+    if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
+        if pip3 install --break-system-packages meshtastic >/dev/null 2>&1 || pip3 install meshtastic >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed meshtastic (Mesh Nodes companion)"
+        fi
+    fi
 fi
 
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up

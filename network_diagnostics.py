@@ -46,6 +46,7 @@ import bt_scanner
 import sdr_spectrum
 import rtl_sdr
 import adsb
+import meshtastic_node
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18881,6 +18882,42 @@ def register_network_diagnostics(app, logger=None):
     def net_adsb_install():
         _log("net/adsb/install")
         return jsonify(adsb.install())
+
+    # Meshtastic companion node (USB) — real mesh enumeration + decoded public
+    # channel. This is the identify-the-mesh counterpart to the LoRa spectrum
+    # overlay (which is energy-only). Its own USB radio, so it does NOT contend
+    # for the RTL-SDR.
+    @app.route('/api/net/mesh/status', methods=['GET'])
+    def net_mesh_status():
+        return jsonify(meshtastic_node.status())
+
+    @app.route('/api/net/mesh/nodes', methods=['GET'])
+    def net_mesh_nodes():
+        return jsonify(meshtastic_node.nodes())
+
+    @app.route('/api/net/mesh/messages', methods=['GET'])
+    def net_mesh_messages():
+        return jsonify(meshtastic_node.messages())
+
+    @app.route('/api/net/mesh/start', methods=['POST'])
+    def net_mesh_start():
+        data = request.get_json(silent=True) or {}
+        _log("net/mesh/start")
+        return jsonify(meshtastic_node.start(port=data.get('port')))
+
+    @app.route('/api/net/mesh/stop', methods=['POST'])
+    def net_mesh_stop():
+        _log("net/mesh/stop")
+        return jsonify(meshtastic_node.stop())
+
+    @app.route('/api/net/mesh/install', methods=['POST'])
+    def net_mesh_install():
+        _log("net/mesh/install")
+        return jsonify(meshtastic_node.install())
+
+    @app.route('/api/net/mesh/selftest', methods=['GET'])
+    def net_mesh_selftest():
+        return jsonify(meshtastic_node.selftest())
 
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are

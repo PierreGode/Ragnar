@@ -8382,6 +8382,27 @@ def adsb_radar_page():
     return _no_store(make_response(send_from_directory('demos', 'adsb_radar.html')))
 
 
+@app.route('/mesh-nodes')
+def mesh_nodes_page():
+    """Serve the Meshtastic mesh map/node list (real enumeration via a USB node).
+
+    Served when a Meshtastic device is usable, or when the RF Waterfall demo
+    toggle is on (synthetic mesh so it's explorable). 404s otherwise. Login
+    required (not in the auth whitelist).
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    present = False
+    try:
+        import meshtastic_node
+        present = bool(meshtastic_node.detect().get('available'))
+    except Exception:
+        present = False
+    if not (demo or present):
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')
