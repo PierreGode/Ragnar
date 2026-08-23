@@ -2048,11 +2048,12 @@ function _wifiRfwfShow() {
         adsb.classList.toggle('hidden', !showA);
         adsb.classList.toggle('inline-flex', showA);
     }
-    // Mesh Nodes uses a separate USB Meshtastic node; show when one is detected
-    // or the demo is on (synthetic mesh).
+    // Mesh Nodes uses a separate USB Meshtastic node. Show it alongside the other
+    // SDR tools whenever an SDR is present, a Meshtastic node is detected, or the
+    // demo is on — the page itself guides plugging in a node / installing the pkg.
     const mesh = document.getElementById('wifi-mesh-btn');
     if (mesh) {
-        const showM = !!_wifiState.meshAvailable || demo;
+        const showM = rtl || hackrf || !!_wifiState.meshAvailable || demo;
         mesh.classList.toggle('hidden', !showM);
         mesh.classList.toggle('inline-flex', showM);
     }

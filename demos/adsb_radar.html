@@ -62,6 +62,16 @@
   tr:hover td{background:rgba(46,160,150,.06)}
   td.cs{color:var(--ink);font-weight:500}
   .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .acarscard{margin-top:16px}
+  .acars-list{max-height:none;padding:4px 0}
+  .acars-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 78px 1fr auto;gap:12px;align-items:start}
+  @media (max-width:720px){.acars-msg{grid-template-columns:1fr;gap:2px}}
+  .acars-msg .who{font-family:var(--mono);font-size:12px}
+  .acars-msg .who .tail{color:var(--cyan);font-weight:600} .acars-msg .who .flt{color:var(--ink-dim)}
+  .acars-msg .lbl{font-family:var(--mono);font-size:10px} .acars-msg .lbl .code{color:var(--accent)} .acars-msg .lbl .mean{color:var(--muted);display:block;font-size:9px}
+  .acars-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+  .acars-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
+  .acars-msg.match{background:rgba(46,160,150,.05)} .acars-msg .who .onradar{color:var(--live);font-size:9px}
   .stat{display:flex;flex-direction:column;gap:1px}
   .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .stat .v{font-family:var(--mono);font-size:14px;color:var(--radar)}
@@ -118,8 +128,20 @@
     </div>
   </div>
 
+  <div class="card acarscard">
+    <div class="tcap">
+      <span class="t">✉ ACARS datalink <span class="c" id="acars-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="tag idle" id="acars-mode">off</span>
+        <button class="ctl" id="acars-btn" style="padding:5px 11px" title="ACARS uses the RTL-SDR at ~131 MHz — starting it stops the 1090 MHz radar (one dongle)">&#9654;&nbsp;Start ACARS</button>
+      </span>
+    </div>
+    <div class="acars-list" id="acars-list"><div class="empty" id="acars-empty">ACARS off — start it to read aircraft datalink messages (VHF ~131 MHz). One dongle, so this pauses the radar.</div></div>
+  </div>
+
   <footer>
     <div><b>How it works:</b> dump1090 decodes 1090 MHz ADS-B; each aircraft is placed by its own broadcast lat/lon relative to your receiver location. Set <b>My lat/lon</b> (or use the browser location) so the range rings and bearings are correct. Blip colour = altitude. Range rings label in the selected unit.</div>
+    <div style="margin-top:6px"><b>✉ ACARS:</b> aircraft VHF datalink (~131 MHz) — position reports, OOOI times, weather, load sheets and free-text crew↔ops messages, in the clear via acarsdec. Matched to the contacts above by tail/flight. One dongle means ACARS and the 1090 MHz radar can't run at once.</div>
     <div style="margin-top:6px"><b>One dongle:</b> starting the radar takes the RTL-SDR from the sub-GHz sweep/decoder (and vice-versa). Receive-only — Ragnar never transmits.</div>
   </footer>
 </div>
@@ -243,10 +265,12 @@
     document.getElementById('tblcount').textContent=list.length+' contacts';
     document.getElementById('s-count').textContent=list.length;
     document.getElementById('s-msgs').textContent=msgs;
-    if(!list.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Listening…':'Not started')+'</td></tr>'; return; }
+    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="7" class="empty">'+esc(em)+'</td></tr>'; return; }
     tb.innerHTML=list.map(function(p){
       var flight = p.callsign||'—';
-      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign) ? '<span style="color:var(--muted)"> · '+esc(p.flight_iata)+'</span>' : '';
+      // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
+      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign)
+        ? ' <span style="color:var(--cyan);font-weight:600">'+esc(p.flight_iata)+'</span>' : '';
       var air = p.airline ? ('<span style="color:var(--cyan)">'+esc(p.iata||'')+'</span> '+esc(p.airline)) : '<span style="color:#546074">—</span>';
       var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
       var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
@@ -292,10 +316,12 @@
     fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
     if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
   }
+  var lastHint='', lastSbs=0;
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
-      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); }
+      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0;
+        lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); }
       else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
@@ -344,6 +370,98 @@
   }
   function stopSynth(){ if(synthTimer){clearInterval(synthTimer);synthTimer=null;} }
 
+  // ---- ACARS datalink ----
+  var acarsRunning=false, acarsMode='off', acarsMsgs=[], acarsSeq=0, acarsPoll=null, acarsSynthTimer=null;
+  var acarsBtn=document.getElementById('acars-btn');
+  function setAcarsMode(m){ acarsMode=m; var el=document.getElementById('acars-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'off')); }
+  function tailsOnRadar(){ var set={}; planes.forEach(function(p){ if(p.tail)set[p.tail.toUpperCase()]=1; if(p.callsign)set[p.callsign.toUpperCase()]=1; if(p.flight_iata)set[p.flight_iata.toUpperCase()]=1; }); return set; }
+  function renderAcars(){
+    var el=document.getElementById('acars-list'); document.getElementById('acars-count').textContent=acarsMsgs.length?('· '+acarsMsgs.length):'';
+    if(!acarsMsgs.length){ el.innerHTML='<div class="empty" id="acars-empty">'+(acarsRunning||acarsMode==='synth'?'Listening for ACARS… (VHF ~131 MHz)':'ACARS off — start it to read aircraft datalink messages. One dongle, so this pauses the radar.')+'</div>'; return; }
+    var onradar=tailsOnRadar();
+    el.innerHTML=acarsMsgs.slice().reverse().slice(0,80).map(function(m){
+      var match=(m.tail&&onradar[m.tail.toUpperCase()])||(m.flight&&onradar[m.flight.toUpperCase()]);
+      var who='<span class="tail">'+esc(m.tail||'—')+'</span>'+(m.flight?' <span class="flt">'+esc(m.flight)+'</span>':'')
+        +(match?' <span class="onradar">● on radar</span>':'');
+      var lbl='<span class="code">'+esc(m.label||'—')+'</span>'+(m.label_meaning?'<span class="mean">'+esc(m.label_meaning)+'</span>':'');
+      var body=m.text?esc(m.text):'<span style="color:var(--muted)">(no text — '+(m.label_meaning||'link')+')</span>';
+      var meta=(m.freq_mhz?esc(m.freq_mhz)+' MHz':'')+(m.level!=null?' · '+m.level+'dB':'')+(m.msgno?' · '+esc(m.msgno):'');
+      return '<div class="acars-msg'+(match?' match':'')+'"><div class="who">'+who+'</div><div class="lbl">'+lbl+'</div>'
+        +'<div class="body">'+body+'</div><div class="meta">'+meta+'</div></div>';
+    }).join('');
+  }
+  acarsBtn.addEventListener('click',function(){ acarsRunning?stopAcars():startAcars(); });
+  function startAcars(){
+    // one dongle: ACARS at 131 MHz can't coexist with the 1090 MHz radar
+    if(running){ stopRun(); }
+    acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS';
+    acarsSeq=0; acarsMsgs=[]; renderAcars();
+    fetch('/api/net/acars/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ if(DEMO_ON) acarsSynth(); else { document.getElementById('acars-list').innerHTML='<div class="empty">Could not start ACARS: '+esc(res.error)+(res.error&&res.error.indexOf('not installed')>=0?' — <button class="ctl" id="acars-install" style="margin-left:6px;padding:3px 8px">⬇ Install acarsdec</button>':'')+'</div>'; wireAcarsInstall(); } }
+    }).catch(function(){});
+    if(acarsPoll)clearInterval(acarsPoll); acarsPoll=setInterval(pollAcars,2000); pollAcars();
+  }
+  function stopAcars(){
+    acarsRunning=false; acarsBtn.setAttribute('aria-pressed','false'); acarsBtn.innerHTML='&#9654;&nbsp;Start ACARS';
+    if(acarsPoll){clearInterval(acarsPoll);acarsPoll=null;}
+    fetch('/api/net/acars/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) acarsSynth(); else { setAcarsMode('off'); renderAcars(); }
+  }
+  function wireAcarsInstall(){ var b=document.getElementById('acars-install'); if(!b)return;
+    b.addEventListener('click',function(){ b.textContent='Building… (~2-4 min)'; b.disabled=true;
+      fetch('/api/net/acars/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+        if(res&&res.ok){ startAcars(); } else { b.textContent='⬇ Install acarsdec'; b.disabled=false; }
+      }).catch(function(){ b.textContent='⬇ Install acarsdec'; b.disabled=false; }); }); }
+  function pollAcars(){
+    fetch('/api/net/acars/messages?since='+acarsSeq).then(function(r){return r.json();}).then(function(d){
+      if(!d)return;
+      if(d.running){ setAcarsMode('live'); if(d.messages&&d.messages.length){ d.messages.forEach(function(m){acarsMsgs.push(m);}); acarsSeq=d.seq; if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500); renderAcars(); } }
+      else if(d.error && DEMO_ON){ acarsSynth(); }
+    }).catch(function(){});
+  }
+  // synthetic ACARS — rich, all fields, tied to synthetic aircraft
+  var ACSAMPLES=[
+    {label:'15',mean:'Position report',text:'POS N51.482 W000.451 FL360 M0.79 OAT-54 WIND 270/48'},
+    {label:'22',mean:'Departure/arrival (OOOI)',text:'OUT 1412 OFF 1428 GATE A22 RWY 27R'},
+    {label:'5U',mean:'Weather request',text:'REQ METAR EGLL EHAM LFPG'},
+    {label:'12',mean:'Weather / ATIS',text:'ATIS EGLL INFO K 1420Z 25008KT 9999 SCT035 18/09 Q1018'},
+    {label:'83',mean:'Load sheet',text:'ZFW 61.2 TOW 74.8 FUEL 13.6 PAX 174 CG 24.3%'},
+    {label:'H1',mean:'Free text',text:'OPS: SLOT CTOT 1455 EXPECT HOLDING BIG'},
+    {label:'B9',mean:'Request oceanic clearance',text:'RCL NAT A 56N020W 340 M082'},
+    {label:'44',mean:'Flight plan',text:'FPL EGLL-KJFK STEP 340/360/380 ETA 1735'},
+    {label:'10',mean:'Airline-defined',text:'ENG2 N1 92.4 EGT 610 OIL 45 VIB 0.8 - NORMAL'},
+    {label:'2Z',mean:'OOOI times',text:'ON 1731 IN 1738 GATE T4-411'}
+  ];
+  function acarsSynth(){
+    setAcarsMode('synth');
+    if(!acarsMsgs._synth){ acarsMsgs=[]; acarsMsgs._synth=true; }
+    if(acarsSynthTimer) { renderAcars(); return; }
+    // seed a few immediately so the panel isn't empty
+    for(var i=0;i<6;i++) pushSynthAcars();
+    renderAcars();
+    acarsSynthTimer=setInterval(function(){ if(Math.random()<0.8){ pushSynthAcars(); renderAcars(); } },2600);
+  }
+  function pushSynthAcars(){
+    var p=(planes&&planes.length)?planes[(Math.random()*planes.length)|0]:null;
+    var s=ACSAMPLES[(Math.random()*ACSAMPLES.length)|0];
+    var ch=[131.550,131.725,130.025,131.475][(Math.random()*4)|0];
+    acarsMsgs.push({tail:p?p.tail:'G-'+('ABCDEFGHJKLMNPQRSTUVWXYZ'[(Math.random()*24)|0]+'ZZZ'),
+      flight:p?p.callsign:'BAW'+(100+((Math.random()*899)|0)), label:s.label, label_meaning:s.mean,
+      text:s.text, freq_mhz:ch, level:-(10+((Math.random()*20)|0)), mode:'2',
+      msgno:'M'+(10+((Math.random()*89)|0))+'A', block_id:''+((Math.random()*9)|0), ts:Date.now()/1000});
+    if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500);
+  }
+  function acarsCheckStatus(){
+    fetch('/api/net/acars/status').then(function(r){return r.json();}).then(function(st){
+      if(st&&st.running){ acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS'; if(!acarsPoll){acarsPoll=setInterval(pollAcars,2000);pollAcars();} return; }
+      var det=(st&&st.detect)||{};
+      // enable button label with install hint if acarsdec missing
+      if(det.tools_installed===false && !acarsRunning && acarsMode!=='synth' && !DEMO_ON){ acarsBtn.title='acarsdec not installed — click to install & start'; }
+      if(DEMO_ON && acarsMode==='off'){ acarsSynth(); }
+    }).catch(function(){});
+  }
+
   // ---- boot ----
   function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
   function checkStatus(){
@@ -364,7 +482,8 @@
   resize();
   window.addEventListener('resize',function(){resize();});
   requestAnimationFrame(anim);
-  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus();
+    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); }); },5000); });
 })();
 </script>
 </body>

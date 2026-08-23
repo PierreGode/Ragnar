@@ -796,6 +796,16 @@ EOF
                 log "INFO" "dump1090 not installed - ADS-B radar stays disabled (needs internet to build; use the in-app Install button later)"
             fi
         fi
+        # acarsdec powers the ADS-B ACARS panel (VHF ~131 MHz datalink). Not in
+        # apt either, so build from source best-effort.
+        if ! command -v acarsdec >/dev/null 2>&1; then
+            if [ -x "$ragnar_PATH/scripts/install_acarsdec.sh" ] \
+               && bash "$ragnar_PATH/scripts/install_acarsdec.sh" >/dev/null 2>&1; then
+                log "SUCCESS" "Installed acarsdec (ADS-B ACARS datalink)"
+            else
+                log "INFO" "acarsdec not installed - ACARS panel stays disabled (use the in-app Install button later)"
+            fi
+        fi
     fi
 
     # meshtastic Python package powers the Mesh Nodes page (real enumeration of a
