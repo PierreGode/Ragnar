@@ -91,11 +91,13 @@
           <input id="prov-ip" type="text" placeholder="Server IP — e.g. 192.168.1.20" autocomplete="off" />
           <input id="prov-port" type="number" value="5005" min="1" max="65535" placeholder="Port" />
           <input id="prov-node" type="number" value="1" min="0" max="255" placeholder="Node ID (0-255, unique per node)" title="Give each node in the mesh a different ID, e.g. 1, 2, 3. Nodes with the same ID collide and only one shows up." />
+          <input id="prov-channel" type="number" min="1" max="14" placeholder="Channel (1-14, blank = auto)" title="Fix every node to the SAME 2.4 GHz channel as your AP. Leave blank to auto-detect from the AP the node associates with. Overrides auto-detect when set." />
           <label class="prov-ext-ant" title="Seeed XIAO ESP32-C6 only: drives the on-board RF switch to the external u.FL/IPEX socket at boot. Ignored on other boards. Only helps with an antenna actually attached.">
             <input id="prov-ext-ant" type="checkbox" />
             <span class="prov-ext-ant-text">Use external u.FL antenna <span class="panel-sub">(Seeed XIAO ESP32-C6 only)</span></span>
           </label>
           <p class="prov-hint">⚠️ Give <strong>each node a unique Node ID</strong> (1, 2, 3…). Two nodes sharing an ID collide, so only one shows up in RuSense.</p>
+          <p class="prov-hint">📶 <strong>Channel:</strong> set the <strong>same fixed 2.4 GHz channel</strong> on every node — match your AP's channel (1, 6 and 11 are the non-overlapping ones). Leave it <strong>blank</strong> to auto-detect from the AP, but a fixed channel keeps the fleet's clocks in sync and stops fusion dropping offline.</p>
           <p class="prov-hint">📡 Point <strong>every node at the same WiFi access point on one fixed 2.4 GHz channel</strong>. If several routers or a mesh/extenders share one SSID, nodes latch onto different APs, their clocks can't sync, and sensing drops offline. Use a single AP (a dedicated 2.4 GHz SSID served by one router is ideal) and disable auto-channel.</p>
         </div>
         <div class="flash-buttons">
@@ -413,7 +415,7 @@
       </div>
     </div>
 
-    <script src="js/nvs_gen.js?v=20260804-ext-antenna"></script>
-    <script type="module" src="js/flasher.js?v=20260804-ext-antenna"></script>
+    <script src="js/nvs_gen.js?v=20260823-channel"></script>
+    <script type="module" src="js/flasher.js?v=20260823-channel"></script>
   </body>
 </html>
