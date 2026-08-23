@@ -18807,6 +18807,15 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_lora():
         return jsonify({"plans": rtl_sdr.lora_plan()})
 
+    # Tuner corrections: PPM frequency-correction + tuner gain. GET reads current,
+    # POST {ppm, gain} sets them and reapplies to any running capture.
+    @app.route('/api/net/rtl/tuning', methods=['GET', 'POST'])
+    def net_rtl_tuning():
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            return jsonify(rtl_sdr.set_tuning(ppm=data.get('ppm'), gain=data.get('gain')))
+        return jsonify(rtl_sdr.get_tuning())
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).

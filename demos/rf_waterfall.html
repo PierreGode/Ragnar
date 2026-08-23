@@ -111,6 +111,10 @@
   .zwavesel{display:flex;align-items:center;gap:6px}
   .zwavesel select{font-family:var(--mono);font-size:11.5px;color:var(--cyan);background:var(--panel);border:1px solid rgba(56,189,201,.4);border-radius:6px;padding:5px 8px;cursor:pointer}
   .zwavesel .zwtag{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-family:var(--mono)}
+  .tunergrp{display:inline-flex;align-items:center;gap:5px}
+  .tunergrp .tlbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--mono)}
+  .tunergrp .tin{width:52px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px}
+  .tunergrp .tin.gain{width:44px}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
@@ -267,7 +271,9 @@
         +'<canvas class="trace"></canvas>'
         +'<div class="toolbar">'
           +'<span class="marktxt">Click the waterfall to mark a signal.</span>'
+          +'<span class="tunergrp"></span>'
           +'<span class="spacer"></span>'
+          +'<button class="mini snapbtn" title="Save the waterfall as a PNG">⇩ PNG</button>'
           +'<button class="mini zoombtn" disabled>Zoom here</button>'
           +'<button class="mini resetbtn" disabled>Reset zoom</button>'
         +'</div>'
@@ -283,6 +289,7 @@
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
     this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel'); this.zwaveSel=el.querySelector('.zwavesel');
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
+    this.snapBtn=el.querySelector('.snapbtn'); this.tunerGrp=el.querySelector('.tunergrp');
     this.fsBtn=el.querySelector('.fsbtn');
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
@@ -315,6 +322,8 @@
     ['fullscreenchange','webkitfullscreenchange'].forEach(function(ev){
       document.addEventListener(ev,function(){ self.onFsChange(); });
     });
+    this.snapBtn.addEventListener('click',function(){ self.snapshot(); });
+    if(cfg.tuner) this.buildTuner();
 
     this.resize(); this.resetCanvas();
     this._ro=new ResizeObserver(function(){ if(self.resize()){ self.drawRuler(); self.placeMarker(); } });
@@ -337,6 +346,49 @@
     var self=this;
     // let the layout settle, then regrow the canvas to the new size
     requestAnimationFrame(function(){ if(self.resize()){ self.resetCanvas(); self.drawRuler(); self.placeMarker(); } });
+  };
+  // Save the waterfall (with its ruler labels baked on) as a PNG the browser
+  // downloads. Same-origin page, so a normal <a download> works.
+  Scope.prototype.snapshot=function(){
+    var w=this.fall.width, h=this.fall.height;
+    var out=document.createElement('canvas'); out.width=w; out.height=h+34*this.d;
+    var o=out.getContext('2d');
+    o.fillStyle='#05080d'; o.fillRect(0,0,out.width,out.height);
+    o.drawImage(this.fall,0,0);
+    // caption band: label + span + timestamp
+    o.fillStyle='#0d1420'; o.fillRect(0,h,out.width,34*this.d);
+    o.fillStyle='#9fb0c8'; o.font=(12*this.d)+'px monospace'; o.textBaseline='middle';
+    var cap=this.cfg.short+'  '+fmtF(this.lo)+'–'+fmtF(this.hi)
+      +(this.zwave?('  ['+(this.zwave.name||'')+']'):'')+'   '+new Date().toLocaleString();
+    o.fillText(cap, 8*this.d, h+17*this.d);
+    var name='ragnar-rf-'+this.cfg.short.toLowerCase().replace(/[^a-z0-9]+/g,'')+'-'+Date.now()+'.png';
+    var a=document.createElement('a'); a.download=name; a.href=out.toDataURL('image/png');
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  // Tuner corrections (RTL only): PPM freq-correction + gain. Applies globally to
+  // the dongle via /api/net/rtl/tuning and reapplies to a running capture.
+  Scope.prototype.buildTuner=function(){
+    var self=this, g=this.tunerGrp; if(!g) return;
+    g.innerHTML='<span class="tlbl">PPM</span>'
+      +'<input class="tin ppm" type="number" step="1" min="-1000" max="1000" value="0" title="Frequency correction (ppm) — trims the dongle crystal offset">'
+      +'<span class="tlbl">Gain</span>'
+      +'<input class="tin gain" type="text" value="auto" title="Tuner gain in dB, or auto" size="4">'
+      +'<button class="mini tapply">Apply</button>';
+    this.ppmIn=g.querySelector('.ppm'); this.gainIn=g.querySelector('.gain');
+    g.querySelector('.tapply').addEventListener('click',function(){ self.applyTuner(); });
+    // load current
+    fetch('/api/net/rtl/tuning').then(function(r){return r.json();}).then(function(t){
+      if(!t) return; self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain;
+    }).catch(function(){});
+  };
+  Scope.prototype.applyTuner=function(){
+    var self=this, body={ppm:this.ppmIn.value, gain:this.gainIn.value};
+    var b=this.tunerGrp.querySelector('.tapply'); if(b){b.textContent='…';}
+    fetch('/api/net/rtl/tuning',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(t){
+        if(t){ self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain; }
+        if(b){b.textContent='Apply';}
+      }).catch(function(){ if(b){b.textContent='Apply';} });
   };
   Scope.prototype.resize=function(){
     var d=this.dpr(), wcss=this.fall.clientWidth||600;
@@ -649,8 +701,8 @@
   var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
-    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, minSpan:0.2,
-    liveBands:[{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
+    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, minSpan:0.2,
+    liveBands:[{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},

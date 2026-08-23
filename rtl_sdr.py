@@ -58,6 +58,9 @@ _RTL_POWER = _which("rtl_power")
 
 # Power-sweep ranges (Hz). Kept inside the RTL-SDR's reach (~24 MHz–1.7 GHz).
 RTL_BANDS = {
+    "27":     (26900000, 27500000),     # CB / 27 MHz RC (near the tuner's low edge)
+    "40":     (40000000, 41000000),     # 40 MHz RC / toys
+    "315":    (313500000, 316500000),   # US keyfobs / TPMS / garage & gate remotes
     "433":    (433050000, 434790000),   # EU 433 ISM
     "868":    (863000000, 870000000),   # EU 868 SRD
     "915":    (902000000, 928000000),   # US 915 ISM
@@ -66,6 +69,7 @@ RTL_BANDS = {
 
 # rtl_433 tuning presets (its own hop frequencies).
 ISM_FREQS = {
+    "315": "315M",     # US keyfobs, TPMS, garage/gate remotes, many alarm sensors
     "433": "433.92M",
     "868": "868.3M",
     "915": "915M",
@@ -198,6 +202,55 @@ _RING_FRAMES = 300         # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
 _SWEEP_INTERVAL_S = 1      # rtl_power -i (seconds per full sweep)
 _ISM_MAX_DEVICES = 500     # cap the live device table
+
+# Tuner corrections shared by both captures (one dongle). PPM trims the RTL-SDR's
+# crystal offset (matters on the narrow Z-Wave/LoRa channels); gain is tuner gain
+# in dB, or None for the driver's automatic gain. Applied to every rtl_power /
+# rtl_433 command; changing them reapplies to a running capture.
+_ppm = 0
+_gain = None               # None = automatic gain control
+
+
+def get_tuning():
+    """Current tuner corrections for the UI."""
+    return {"ppm": _ppm, "gain": ("auto" if _gain is None else _gain),
+            "gain_is_auto": _gain is None}
+
+
+def set_tuning(ppm=None, gain=None):
+    """Set PPM freq-correction and/or tuner gain, then reapply to any running
+    capture. gain may be a number (dB), or 'auto'/'' /None for AGC."""
+    global _ppm, _gain
+    if ppm is not None:
+        try:
+            _ppm = max(-1000, min(1000, int(float(ppm))))
+        except (TypeError, ValueError):
+            pass
+    if gain is not None:
+        if gain in ("auto", "", "AUTO"):
+            _gain = None
+        else:
+            try:
+                _gain = max(0.0, min(50.0, round(float(gain), 1)))
+            except (TypeError, ValueError):
+                pass
+    # Reapply live so the change takes effect without the user restarting.
+    try:
+        _power.reapply()
+        _ism.reapply()
+    except Exception:
+        pass
+    return get_tuning()
+
+
+def _tuner_args():
+    """Common rtl_power / rtl_433 flags for the current PPM + gain."""
+    args = []
+    if _ppm:
+        args += ["-p", str(_ppm)]
+    if _gain is not None:
+        args += ["-g", str(_gain)]
+    return args
 
 
 # --------------------------------------------------------------------------
@@ -750,6 +803,15 @@ class IsmScanner:
             self._stop_locked()
         return {"ok": True}
 
+    def reapply(self):
+        """Restart the scanner on the same band so a PPM/gain change takes hold."""
+        with self._lock:
+            running = bool(self._thread and self._thread.is_alive())
+            band = self._band
+        if running and band:
+            self.stop()
+            self.start(band)
+
     def _stop_locked(self):
         self._stop.set()
         _terminate(self._proc)
@@ -758,7 +820,7 @@ class IsmScanner:
 
     def _run_loop(self, band):
         freq = ISM_FREQS[band]
-        cmd = [_RTL_433, "-F", "json", "-M", "level", "-f", freq]
+        cmd = [_RTL_433, "-F", "json", "-M", "level", "-f", freq] + _tuner_args()
         self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -886,6 +948,25 @@ class PowerSweep:
             self._stop_locked()
         return {"ok": True}
 
+    def reapply(self):
+        """Restart the sweep on the same span so a PPM/gain change takes hold."""
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()):
+                return
+            lo, hi, label, sig = self._lo, self._hi, self._band, self._sig
+            self._stop_locked()
+            self._stop.clear()
+            self._frames = []
+            self._seq = 0
+            self._maxhold = [_FLOOR_DBM] * _POWER_BINS
+            self._band = label
+            self._sig = sig
+            self._lo, self._hi = lo, hi
+            self._error = None
+            self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
+                                            daemon=True, name="rtlpower-sweep")
+            self._thread.start()
+
     def _stop_locked(self):
         self._stop.set()
         _terminate(self._proc)
@@ -896,7 +977,7 @@ class PowerSweep:
         step = max(1000, (hi - lo) // _POWER_BINS)   # Hz per rtl_power bin
         builder = _PowerFrameBuilder(lo, hi)
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
-               "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"]
+               "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"] + _tuner_args()
         self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -1271,6 +1352,25 @@ def selftest():
     check("lora: LoRaWAN EU868 lists the three mandatory uplinks",
           all(any(abs(c["freq_hz"] - f) < 1000 for c in lp["lorawan-eu868"]["channels"])
               for f in (868_100_000, 868_300_000, 868_500_000)))
+
+    # --- new bands: 315 (US keyfobs/TPMS/garage) + 40/27 present ---
+    check("bands: 315/40/27 MHz added",
+          all(b in RTL_BANDS for b in ("315", "40", "27")) and "315" in ISM_FREQS)
+
+    # --- tuner corrections (PPM + gain) build the right rtl_* flags ---
+    _saved_ppm, _saved_gain = _ppm, _gain
+    try:
+        set_tuning(ppm=42, gain=28.0)
+        check("tuning: ppm+gain stored", get_tuning()["ppm"] == 42 and get_tuning()["gain"] == 28.0)
+        check("tuning: flags built", _tuner_args() == ["-p", "42", "-g", "28.0"], str(_tuner_args()))
+        set_tuning(gain="auto")
+        check("tuning: auto gain drops -g", _tuner_args() == ["-p", "42"] and get_tuning()["gain_is_auto"])
+        set_tuning(ppm=0, gain="auto")
+        check("tuning: zero ppm + auto = no flags", _tuner_args() == [])
+        set_tuning(ppm=99999)  # clamped
+        check("tuning: ppm clamped to +/-1000", get_tuning()["ppm"] == 1000)
+    finally:
+        set_tuning(ppm=_saved_ppm, gain=("auto" if _saved_gain is None else _saved_gain))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
