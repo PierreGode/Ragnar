@@ -12,10 +12,7 @@
     --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420;
     --ink:#cdd6e4; --ink-dim:#8b98ab; --muted:#6b7a8f;
     --line:#1e2836; --line-soft:#161f2c;
-    --accent:#f5b942;   /* signal amber — colormap hot band, and SYNTHETIC state */
-    --cyan:#38bdc9;     /* cool secondary — colormap low band */
-    --live:#3fb56b;     /* LIVE state */
-    --idle:#546074;
+    --accent:#f5b942; --cyan:#38bdc9; --live:#3fb56b; --idle:#546074;
     --radius:10px;
     --disp:"IBM Plex Sans",system-ui,sans-serif;
     --head:"Chakra Petch","IBM Plex Sans",system-ui,sans-serif;
@@ -23,12 +20,9 @@
   }
   *{box-sizing:border-box}
   html,body{margin:0}
-  body{
-    background:var(--ground); color:var(--ink); font-family:var(--disp);
-    line-height:1.5; -webkit-font-smoothing:antialiased;
-    padding:clamp(14px,3vw,34px); min-height:100vh;
-    background-image:radial-gradient(120% 80% at 50% -10%, rgba(56,189,201,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));
-  }
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;
+    -webkit-font-smoothing:antialiased;padding:clamp(14px,3vw,34px);min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(56,189,201,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
   .wrap{max-width:1080px;margin:0 auto}
   header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
     gap:16px 24px;margin-bottom:22px;border-bottom:1px solid var(--line);padding-bottom:18px}
@@ -36,15 +30,12 @@
     color:var(--cyan);margin:0 0 8px;display:flex;align-items:center;gap:9px}
   .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);
     box-shadow:0 0 0 3px rgba(56,189,201,.15);animation:pulse 2.4s ease-in-out infinite}
-  h1{font-family:var(--head);font-weight:700;font-size:clamp(28px,5vw,44px);
-    letter-spacing:.01em;margin:0;line-height:1.02;text-wrap:balance}
-  .sub{color:var(--ink-dim);font-size:14px;margin:8px 0 0;max-width:46ch}
+  h1{font-family:var(--head);font-weight:700;font-size:clamp(28px,5vw,44px);letter-spacing:.01em;margin:0;line-height:1.02;text-wrap:balance}
+  .sub{color:var(--ink-dim);font-size:14px;margin:8px 0 0;max-width:48ch}
   .rigs{display:flex;flex-direction:column;gap:8px;align-items:flex-end}
-  .rig{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;
-    color:var(--ink-dim);white-space:nowrap}
+  .rig{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:12px;color:var(--ink-dim);white-space:nowrap}
   .rig b{color:var(--ink);font-weight:600}
-  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;
-    padding:2px 7px;border-radius:5px;border:1px solid;transition:color .2s,border-color .2s,background .2s}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid;transition:color .2s,border-color .2s,background .2s}
   .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
   .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
   .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
@@ -52,9 +43,8 @@
     padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius)}
   .bar .grp{display:flex;align-items:center;gap:8px}
   .bar .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
-  button.ctl{font-family:var(--head);font-weight:600;font-size:13px;letter-spacing:.02em;
-    color:var(--ink);background:var(--panel);border:1px solid var(--line);
-    padding:7px 14px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+  button.ctl{font-family:var(--head);font-weight:600;font-size:13px;letter-spacing:.02em;color:var(--ink);
+    background:var(--panel);border:1px solid var(--line);padding:7px 14px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
   button.ctl:hover{border-color:var(--cyan);color:#fff}
   button.ctl:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
   button.ctl[aria-pressed="true"]{background:rgba(245,185,66,.12);border-color:rgba(245,185,66,.5);color:var(--accent)}
@@ -62,52 +52,64 @@
   a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
   a.back:hover{border-color:var(--cyan);background:rgba(56,189,201,.10);color:#fff}
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
-  .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;
-    padding:7px 12px;cursor:pointer;transition:background .15s,color .15s}
+  .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:7px 12px;cursor:pointer;transition:background .15s,color .15s}
   .seg button:hover{color:var(--ink)}
   .seg button[aria-pressed="true"]{background:rgba(56,189,201,.14);color:var(--cyan)}
+  .seg button:disabled{opacity:.35;cursor:not-allowed}
   .seg button:focus-visible{outline:2px solid var(--cyan);outline-offset:-2px}
   .seg.hidden{display:none}
   .spacer{flex:1 1 auto}
   .clock{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em}
   .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted)}
-  .legend .grad{width:120px;height:9px;border-radius:3px;
-    background:linear-gradient(90deg,#071a2c,#0e5f78,#22a06a,#f5b942,#fff3d6)}
+  .legend .grad{width:120px;height:9px;border-radius:3px;background:linear-gradient(90deg,#071a2c,#0e5f78,#22a06a,#f5b942,#fff3d6)}
   .stack{display:flex;flex-direction:column;gap:20px}
-  .scope{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;
-    box-shadow:0 18px 40px -28px rgba(0,0,0,.9)}
-  .scope-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;
-    padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .scope{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:0 18px 40px -28px rgba(0,0,0,.9)}
+  .scope-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
   .scope-title{display:flex;flex-direction:column;gap:2px;min-width:170px}
   .scope-title .name{font-family:var(--head);font-weight:600;font-size:15px;letter-spacing:.02em;display:flex;align-items:center;gap:8px}
   .scope-title .dev{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .scope-head .spacer{flex:1 1 40px}
-  .readout{display:flex;gap:18px;flex-wrap:wrap}
-  .stat{display:flex;flex-direction:column;gap:1px;min-width:66px}
+  .readout{display:flex;gap:16px;flex-wrap:wrap}
+  .stat{display:flex;flex-direction:column;gap:1px;min-width:60px}
   .stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
   .stat .v{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
-  .stat .v.peak{color:var(--accent)}
-  .stat .v.cy{color:var(--cyan)}
-  .scope-body{display:grid;grid-template-columns:1fr}
+  .stat .v.peak{color:var(--accent)} .stat .v.cy{color:var(--cyan)} .stat .v.busy{color:var(--live)}
+  .scope-body{display:flex;flex-direction:column}
   .fall-wrap{position:relative;background:#05080d}
-  canvas.fall{display:block;width:100%;height:210px}
-  canvas.trace{display:block;width:100%;height:56px;background:var(--panel-2);border-top:1px solid var(--line-soft)}
-  .now{position:absolute;top:0;left:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;
-    color:rgba(205,214,228,.55);pointer-events:none;text-shadow:0 1px 3px #000}
-  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;
-    background:rgba(5,8,13,.72);text-align:center;padding:16px}
+  canvas.fall{display:block;width:100%;height:210px;cursor:crosshair}
+  canvas.trace{display:block;width:100%;height:56px;background:var(--panel-2);border-top:1px solid var(--line-soft);cursor:crosshair}
+  .now{position:absolute;top:0;left:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:rgba(205,214,228,.55);pointer-events:none;text-shadow:0 1px 3px #000}
+  .marker{position:absolute;top:0;bottom:0;width:1px;background:var(--accent);box-shadow:0 0 6px rgba(245,185,66,.7);display:none;pointer-events:none}
+  .marker .ml{position:absolute;top:2px;left:3px;font-family:var(--mono);font-size:10px;color:var(--accent);white-space:nowrap;text-shadow:0 1px 3px #000}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(5,8,13,.72);text-align:center;padding:16px}
   .veil.show{display:flex}
   .veil .vt{font-family:var(--head);font-size:15px;letter-spacing:.04em;color:var(--ink-dim)}
-  .veil .vs{font-family:var(--mono);font-size:11px;color:var(--muted);max-width:40ch}
+  .veil .vs{font-family:var(--mono);font-size:11px;color:var(--muted);max-width:42ch}
   .ruler{position:relative;height:30px;background:var(--panel-2);border-top:1px solid var(--line-soft);font-family:var(--mono)}
   .ruler .tick{position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
   .ruler .tlab{position:absolute;top:7px;transform:translateX(-50%);font-size:10px;color:var(--muted);white-space:nowrap}
-  .ruler .ism{position:absolute;top:0;bottom:0;background:rgba(56,189,201,.09);border-left:1px solid rgba(56,189,201,.35);
-    border-right:1px solid rgba(56,189,201,.35)}
-  .ruler .ism .il{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:9px;
-    letter-spacing:.1em;color:var(--cyan);text-transform:uppercase;white-space:nowrap}
-  footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);
-    font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.7}
+  .ruler .ism{position:absolute;top:0;bottom:0;background:rgba(56,189,201,.09);border-left:1px solid rgba(56,189,201,.35);border-right:1px solid rgba(56,189,201,.35)}
+  .ruler .ism .il{position:absolute;bottom:3px;left:50%;transform:translateX(-50%);font-size:9px;letter-spacing:.1em;color:var(--cyan);text-transform:uppercase;white-space:nowrap}
+  /* toolbar + log */
+  .toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:9px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2);font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
+  .toolbar .mk{color:var(--accent)} .toolbar .zi{color:var(--cyan)}
+  button.mini{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:4px 10px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s}
+  button.mini:hover{border-color:var(--cyan)}
+  button.mini:disabled{opacity:.35;cursor:not-allowed}
+  button.mini:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+  .logwrap{border-top:1px solid var(--line-soft);background:var(--panel)}
+  .logcap{display:flex;align-items:center;justify-content:space-between;padding:8px 14px 4px;font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  .loglist{max-height:132px;overflow-y:auto;padding:0 14px 10px}
+  .logrow{display:grid;grid-template-columns:64px 1fr auto;gap:10px;padding:4px 0;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:12px;align-items:baseline}
+  .logrow:last-child{border-bottom:0}
+  .logrow .t{color:var(--muted);font-size:11px}
+  .logrow .f{color:var(--ink)} .logrow .d{color:var(--accent);text-align:right;font-variant-numeric:tabular-nums}
+  .logrow.dev .f{color:var(--cyan)} .logrow .meta{color:var(--ink-dim);font-size:11px}
+  .logempty{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:6px 0 10px}
+  /* decode view: hide the sweep surfaces, let the device list breathe */
+  .scope.decoding .fall-wrap,.scope.decoding .ruler,.scope.decoding canvas.trace,.scope.decoding .toolbar{display:none}
+  .scope.decoding .loglist{max-height:300px}
+  footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.7}
   footer b{color:var(--ink-dim);font-weight:600}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   @media (max-width:640px){.rigs{align-items:flex-start}header{align-items:flex-start}.readout{gap:12px}}
@@ -120,7 +122,7 @@
     <div>
       <p class="eyebrow"><span class="dot"></span>Ragnar · Signal Intelligence</p>
       <h1>RF Waterfall</h1>
-      <p class="sub">Two radios stacked — sub-GHz ISM and the Wi-Fi bands — scrolling as a live power-over-frequency heatmap. Each panel streams true RF when its radio is connected.</p>
+      <p class="sub">Two radios stacked — sub-GHz ISM and the Wi-Fi bands. Streams true RF when a radio is connected; click a signal to mark &amp; zoom.</p>
     </div>
     <div class="rigs">
       <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag idle" id="rig-rtl">detecting…</span></div>
@@ -146,142 +148,145 @@
 
   <div class="stack" id="stack"></div>
 
-  <footer id="footer">
-    <div id="foot-msg"></div>
-    <div style="margin-top:6px"><b>Backends:</b> rtl_sdr.py (rtl_power sub-GHz sweeps) · sdr_spectrum.py (hackrf_sweep) — each time-integrates raw sweeps into fixed-cadence rows so the scroll stays steady.</div>
+  <footer id="footer"><div id="foot-msg"></div>
+    <div style="margin-top:6px"><b>Backends:</b> rtl_sdr.py (rtl_power sweep · rtl_433 decode) · sdr_spectrum.py (hackrf_sweep). Click a signal to pin a marker and retune a narrow zoom sweep there; the sub-GHz panel can switch to rtl_433 to name devices (one dongle, so Waterfall and Decode are mutually exclusive).</div>
   </footer>
 </div>
 
 <script>
 (function(){
   "use strict";
-
-  // ---- colormap: floor..-20 dBm -> navy->teal->green->amber->hot ----
   var STOPS=[[0.00,[7,26,44]],[0.28,[14,95,120]],[0.52,[34,160,106]],[0.78,[245,185,66]],[1.00,[255,243,214]]];
   var CEIL=-20, LUT=new Array(256);
-  (function(){
-    for(var i=0;i<256;i++){
-      var t=i/255, a=STOPS[0], b=STOPS[STOPS.length-1];
-      for(var s=0;s<STOPS.length-1;s++){ if(t>=STOPS[s][0] && t<=STOPS[s+1][0]){a=STOPS[s];b=STOPS[s+1];break;} }
-      var f=(t-a[0])/((b[0]-a[0])||1);
-      LUT[i]="rgb("+Math.round(a[1][0]+(b[1][0]-a[1][0])*f)+","+Math.round(a[1][1]+(b[1][1]-a[1][1])*f)+","+Math.round(a[1][2]+(b[1][2]-a[1][2])*f)+")";
-    }
-  })();
-  function color(db, floor){ var t=(db-floor)/(CEIL-floor); if(t<0)t=0; if(t>1)t=1; return LUT[(t*255)|0]; }
+  (function(){for(var i=0;i<256;i++){var t=i/255,a=STOPS[0],b=STOPS[STOPS.length-1];
+    for(var s=0;s<STOPS.length-1;s++){if(t>=STOPS[s][0]&&t<=STOPS[s+1][0]){a=STOPS[s];b=STOPS[s+1];break;}}
+    var f=(t-a[0])/((b[0]-a[0])||1);
+    LUT[i]="rgb("+Math.round(a[1][0]+(b[1][0]-a[1][0])*f)+","+Math.round(a[1][1]+(b[1][1]-a[1][1])*f)+","+Math.round(a[1][2]+(b[1][2]-a[1][2])*f)+")";}})();
+  function color(db,floor){var t=(db-floor)/(CEIL-floor);if(t<0)t=0;if(t>1)t=1;return LUT[(t*255)|0];}
 
-  // ---- synthetic band models (fallback when a radio is absent + demo on) ----
   var NSYN=512;
-  function gauss(){ return (Math.random()+Math.random()+Math.random()-1.5)*0.9; }
-  function bump(arr,lo,hi,centerMHz,widthMHz,level){
-    var N=arr.length;
-    for(var i=0;i<N;i++){ var fr=lo+(i/N)*(hi-lo), d=(fr-centerMHz)/widthMHz;
-      var target=(-108)+(level+108)*Math.exp(-d*d*2.0); if(target>arr[i]) arr[i]=target; }
-  }
-  function subGhzModel(){
-    var lo=430,hi=930,hoppers=[905,912,919,924];
-    return { lo:lo,hi:hi,floor:-110,
-      ticks:[430,450,500,550,600,650,700,750,800,850,868,900,915,928],
+  function gauss(){return (Math.random()+Math.random()+Math.random()-1.5)*0.9;}
+  function bump(arr,lo,hi,c,w,level){var N=arr.length;for(var i=0;i<N;i++){var fr=lo+(i/N)*(hi-lo),d=(fr-c)/w;
+    var target=(-108)+(level+108)*Math.exp(-d*d*2.0);if(target>arr[i])arr[i]=target;}}
+  // synth models accept an optional [lo,hi] override (used by zoom). Emitters
+  // sit at absolute frequencies, so a narrowed range just reveals a slice.
+  function subGhzModel(lo,hi){lo=lo||430;hi=hi||930;var hoppers=[905,912,919,924];
+    return {lo:lo,hi:hi,floor:-110,ticks:[430,450,500,550,600,650,700,750,800,850,868,900,915,928],
       isms:[[433.05,434.79,"433"],[863,870,"868"],[902,928,"915"]],
-      emit:function(row){
-        if(Math.random()<0.30) bump(row,lo,hi,433.92,0.35,-42-Math.random()*10);
-        if(Math.random()<0.12) bump(row,lo,hi,434.42,0.25,-52);
+      emit:function(row){if(Math.random()<0.30)bump(row,lo,hi,433.92,0.35,-42-Math.random()*10);
+        if(Math.random()<0.12)bump(row,lo,hi,434.42,0.25,-52);
         bump(row,lo,hi,868.30,0.30,-60+gauss()*3);
-        if(Math.random()<0.18) bump(row,lo,hi,869.52,0.30,-50);
+        if(Math.random()<0.18)bump(row,lo,hi,869.52,0.30,-50);
         var hop=hoppers[(Math.random()*hoppers.length)|0]+(Math.random()-0.5)*3;
-        bump(row,lo,hi,hop,0.4,-46-Math.random()*8);
-      } };
-  }
-  function wifiModel(band){
-    if(band==="5"){ var lo=5150,hi=5895; return { lo:lo,hi:hi,floor:-110,
-      ticks:[5150,5250,5350,5470,5600,5745,5895], chLabels:[[5220,"UNII-1"],[5300,"UNII-2"],[5580,"DFS"],[5785,"UNII-3"]],
-      emit:function(row){ bump(row,lo,hi,5210,18,-60+gauss()*4);
-        if(Math.random()<0.7) bump(row,lo,hi,5290,38,-58+gauss()*5);
-        if(Math.random()<0.35) bump(row,lo,hi,5765,38,-62+gauss()*4);
-        if(Math.random()<0.15) bump(row,lo,hi,5580,18,-70); } }; }
-    if(band==="6"){ var lo=5925,hi=6425; return { lo:lo,hi:hi,floor:-110,
-      ticks:[5925,6025,6125,6225,6325,6425], chLabels:[[6035,"U-NII-5"],[6255,"160 MHz"]],
-      emit:function(row){ if(Math.random()<0.5) bump(row,lo,hi,6035,78,-64+gauss()*4);
-        if(Math.random()<0.25) bump(row,lo,hi,6255,78,-66+gauss()*4); } }; }
-    var lo=2400,hi=2500; return { lo:lo,hi:hi,floor:-110,
-      ticks:[2400,2412,2437,2462,2484,2500], chLabels:[[2412,"ch1"],[2437,"ch6"],[2462,"ch11"]],
-      emit:function(row){ bump(row,lo,hi,2412,9,-58+gauss()*4); bump(row,lo,hi,2437,9,-52+gauss()*5);
-        bump(row,lo,hi,2462,9,-60+gauss()*4);
-        if(Math.random()<0.4) bump(row,lo,hi,2402,0.6,-64);
-        if(Math.random()<0.4) bump(row,lo,hi,2426,0.6,-62);
-        if(Math.random()<0.4) bump(row,lo,hi,2480,0.6,-66); } };
-  }
+        bump(row,lo,hi,hop,0.4,-46-Math.random()*8);}};}
+  function wifiModel(band,lo,hi){
+    var base={"2.4":[2400,2500],"5":[5150,5895],"6":[5925,6425]}[band]||[2400,2500];
+    lo=lo||base[0];hi=hi||base[1];
+    var m={lo:lo,hi:hi,floor:-110,ticks:null,chLabels:null,emit:null};
+    if(band==="5"){m.ticks=[5150,5250,5350,5470,5600,5745,5895];m.chLabels=[[5220,"UNII-1"],[5300,"UNII-2"],[5580,"DFS"],[5785,"UNII-3"]];
+      m.emit=function(row){bump(row,lo,hi,5210,18,-60+gauss()*4);if(Math.random()<0.7)bump(row,lo,hi,5290,38,-58+gauss()*5);
+        if(Math.random()<0.35)bump(row,lo,hi,5765,38,-62+gauss()*4);if(Math.random()<0.15)bump(row,lo,hi,5580,18,-70);};}
+    else if(band==="6"){m.ticks=[5925,6025,6125,6225,6325,6425];m.chLabels=[[6035,"U-NII-5"],[6255,"160 MHz"]];
+      m.emit=function(row){if(Math.random()<0.5)bump(row,lo,hi,6035,78,-64+gauss()*4);if(Math.random()<0.25)bump(row,lo,hi,6255,78,-66+gauss()*4);};}
+    else{m.ticks=[2400,2412,2437,2462,2484,2500];m.chLabels=[[2412,"ch1"],[2437,"ch6"],[2462,"ch11"]];
+      m.emit=function(row){bump(row,lo,hi,2412,9,-58+gauss()*4);bump(row,lo,hi,2437,9,-52+gauss()*5);bump(row,lo,hi,2462,9,-60+gauss()*4);
+        if(Math.random()<0.4)bump(row,lo,hi,2402,0.6,-64);if(Math.random()<0.4)bump(row,lo,hi,2426,0.6,-62);if(Math.random()<0.4)bump(row,lo,hi,2480,0.6,-66);};}
+    return m;}
 
-  // ---- shared globals ----
   var running=true, HZ=12, DEMO_ON=false;
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function fmtF(mhz){return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(1):mhz.toFixed(2));}
+  function genTicks(lo,hi){var n=6,out=[];for(var i=0;i<=n;i++)out.push(lo+(hi-lo)*i/n);return out;}
+  function nowHM(){var d=new Date();return String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0')+":"+String(d.getSeconds()).padStart(2,'0');}
 
-  // ---- one scope panel (a radio) --------------------------------------
   function Scope(cfg){
     var self=this;
-    // cfg: {name, dev, api:{status,start,stop,frames}, rig(el id),
-    //       synth:function(band)->model, synthDefault, liveBands:[{id,label,synthId}], defaultBand}
-    this.cfg=cfg;
-    this.mode='idle';            // 'live' | 'synth' | 'idle'
-    this.available=false; this.board=''; this.detErr='';
-    this.liveBand=cfg.defaultBand;   // band id sent to the backend when live
+    this.cfg=cfg; this.mode='idle'; this.available=false; this.board=''; this.detErr='';
+    this.liveBand=cfg.defaultBand; this.synthBand=cfg.synthDefault;
+    this.zoom=null; this.marker=null; this.decoding=false;
+    this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
     this.model=cfg.synth(cfg.synthDefault);
     this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor;
+    this.homeLo=this.lo; this.homeHi=this.hi;
     this.seq=0; this.liveErr=null; this._poll=null; this._rangeKnown=false;
 
     var el=document.createElement('div'); el.className='scope';
     el.innerHTML=
       '<div class="scope-head">'
       +'<div class="scope-title"><span class="name">'+cfg.name+' <span class="tag idle scope-tag">idle</span></span><span class="dev">'+cfg.dev+'</span></div>'
+      +'<div class="seg viewsel" role="group" aria-label="View"></div>'
       +'<div class="seg bandsel" role="group" aria-label="Band"></div>'
       +'<div class="spacer"></div>'
       +'<div class="readout">'
         +'<div class="stat"><span class="k">Peak f</span><span class="v peak pk-f">&mdash;</span></div>'
         +'<div class="stat"><span class="k">Peak lvl</span><span class="v peak pk-d">&mdash;</span></div>'
+        +'<div class="stat"><span class="k">Busy</span><span class="v busy busyv">&mdash;</span></div>'
         +'<div class="stat"><span class="k">Span</span><span class="v cy span">&mdash;</span></div>'
         +'<div class="stat"><span class="k">Rows/s</span><span class="v rate">&mdash;</span></div>'
       +'</div></div>'
       +'<div class="scope-body">'
         +'<div class="fall-wrap">'
-          +'<canvas class="fall"></canvas>'
-          +'<span class="now">t=0.0s</span>'
+          +'<canvas class="fall"></canvas><span class="now">t=0.0s</span>'
+          +'<div class="marker"><span class="ml"></span></div>'
           +'<div class="veil"><div class="vt"></div><div class="vs"></div></div>'
         +'</div>'
         +'<div class="ruler"></div>'
         +'<canvas class="trace"></canvas>'
+        +'<div class="toolbar">'
+          +'<span class="marktxt">Click the waterfall to mark a signal.</span>'
+          +'<span class="spacer"></span>'
+          +'<button class="mini zoombtn" disabled>Zoom here</button>'
+          +'<button class="mini resetbtn" disabled>Reset zoom</button>'
+        +'</div>'
+        +'<div class="logwrap"><div class="logcap"><span class="logtitle">Detections</span><span class="logcount"></span></div>'
+          +'<div class="loglist"><div class="logempty">Listening…</div></div></div>'
       +'</div>';
     this.el=el;
     this.fall=el.querySelector('.fall'); this.trace=el.querySelector('.trace'); this.ruler=el.querySelector('.ruler');
     this.nowEl=el.querySelector('.now'); this.tagEl=el.querySelector('.scope-tag');
     this.veil=el.querySelector('.veil'); this.veilT=el.querySelector('.vt'); this.veilS=el.querySelector('.vs');
-    this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d');
+    this.markEl=el.querySelector('.marker'); this.markLbl=el.querySelector('.marker .ml');
+    this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d'); this.busyEl=el.querySelector('.busyv');
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
-    this.bandSel=el.querySelector('.bandsel');
+    this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel');
+    this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
+    this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
     this.rigEl=document.getElementById(cfg.rig);
 
-    // band selector buttons (band ids are backend live-band ids)
+    // view toggle (RTL only): Waterfall | Decode
+    if(cfg.decode){
+      [['wf','Waterfall'],['decode','Decode']].forEach(function(v){
+        var b=document.createElement('button'); b.textContent=v[1]; b.setAttribute('data-view',v[0]);
+        b.setAttribute('aria-pressed', v[0]==='wf'?'true':'false');
+        b.addEventListener('click',function(){ self.setView(v[0]); });
+        self.viewSel.appendChild(b);
+      });
+    } else { this.viewSel.classList.add('hidden'); }
+
+    // band selector (live-band ids)
     cfg.liveBands.forEach(function(b){
       var btn=document.createElement('button'); btn.textContent=b.label;
-      btn.setAttribute('data-band', b.id); btn.setAttribute('data-synth', b.synthId||'');
+      btn.setAttribute('data-band',b.id); btn.setAttribute('data-synth',b.synthId||'');
       btn.setAttribute('aria-pressed', b.id===cfg.defaultBand?'true':'false');
-      btn.addEventListener('click', function(){ self.selectBand(b.id, b.synthId); });
+      btn.addEventListener('click',function(){ self.selectBand(b.id,b.synthId); });
       self.bandSel.appendChild(btn);
     });
 
+    this.fall.addEventListener('click',function(e){ self.onPick(e,self.fall); });
+    this.trace.addEventListener('click',function(e){ self.onPick(e,self.trace); });
+    this.zoomBtn.addEventListener('click',function(){ self.doZoom(); });
+    this.resetBtn.addEventListener('click',function(){ self.resetZoom(); });
+
     this.resize(); this.resetCanvas();
-    this._ro=new ResizeObserver(function(){ if(self.resize()) self.drawRuler(); });
+    this._ro=new ResizeObserver(function(){ if(self.resize()){ self.drawRuler(); self.placeMarker(); } });
     this._ro.observe(this.fall);
   }
 
-  Scope.prototype.dpr=function(){ return Math.min(window.devicePixelRatio||1,2); };
+  Scope.prototype.dpr=function(){return Math.min(window.devicePixelRatio||1,2);};
   Scope.prototype.resize=function(){
     var d=this.dpr(), wcss=this.fall.clientWidth||600;
     var newW=Math.max(1,Math.round(wcss*d)), newH=Math.round(210*d);
-    // Only rebuild the canvas when the pixel size actually changes. A
-    // ResizeObserver also fires on spurious layout ticks — notably a phone's
-    // URL bar showing/hiding as you scroll the page — and re-assigning
-    // canvas.width (even to the same value) wipes the bitmap, which read as the
-    // waterfall "resetting" on every scroll. Bail when nothing really changed.
     if(newW===this.W && newH===this.H && this.fall.width===newW && this.d===d) return false;
     this.W=newW; this.fall.width=this.W; this.fall.height=newH;
     this.trace.width=this.W; this.trace.height=Math.round(56*d);
@@ -293,239 +298,295 @@
     this.t0=performance.now();
     this.fctx.fillStyle="#05080d"; this.fctx.fillRect(0,0,this.W,this.H);
     this.tctx.clearRect(0,0,this.trace.width,this.trace.height);
-    this.drawRuler();
+    this.drawRuler(); this.placeMarker();
   };
 
-  // -- band selection: live restarts the sweep; synth swaps the model --
-  Scope.prototype.selectBand=function(bandId, synthId){
-    Array.prototype.forEach.call(this.bandSel.querySelectorAll('button'), function(x){
-      x.setAttribute('aria-pressed', x.getAttribute('data-band')===bandId?'true':'false'); });
-    this.liveBand=bandId; this.synthBand=synthId;
+  // ---- click -> frequency marker ----
+  Scope.prototype.onPick=function(e,canvas){
+    var r=canvas.getBoundingClientRect(); var frac=(e.clientX-r.left)/r.width;
+    frac=Math.max(0,Math.min(1,frac)); var f=this.lo+frac*(this.hi-this.lo);
+    this.marker=f; this.placeMarker();
+    this.markTxt.innerHTML='Marked <span class="mk">'+fmtMHz(f)+'</span>';
+    var canZoom=(this.mode==='live')||(this.mode==='synth'); this.zoomBtn.disabled=!canZoom;
+    this.resetBtn.disabled=!this.zoom;
+    this.zoomBtn.title=(this.mode==='live')?'Retune a narrow sweep around the marker':'Zoom the synthetic view (a real radio retunes the hardware)';
+  };
+  Scope.prototype.placeMarker=function(){
+    if(this.marker==null || !(this.hi>this.lo)){ this.markEl.style.display='none'; return; }
+    var pct=(this.marker-this.lo)/(this.hi-this.lo);
+    if(pct<0||pct>1){ this.markEl.style.display='none'; return; }
+    this.markEl.style.display='block'; this.markEl.style.left=(pct*100)+'%';
+    this.markLbl.textContent=fmtMHz(this.marker);
+  };
+  Scope.prototype.doZoom=function(){
+    if(this.marker==null) return;
+    var cur=this.hi-this.lo, span=Math.max(this.cfg.minSpan, cur/6);
+    var lo=this.marker-span/2, hi=this.marker+span/2;
+    if(lo<this.homeLo){lo=this.homeLo;hi=lo+span;} if(hi>this.homeHi){hi=this.homeHi;lo=hi-span;}
+    lo=Math.max(this.homeLo,lo); hi=Math.min(this.homeHi,hi);
+    this.applyZoom([lo,hi]);
+  };
+  Scope.prototype.resetZoom=function(){ this.applyZoom(null); };
+  Scope.prototype.applyZoom=function(z){
+    this.zoom=z; this.resetBtn.disabled=!z;
     if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
-    else if(this.mode==='synth'){ this.model=this.cfg.synth(synthId||bandId);
-      this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor; this.resetCanvas(); }
+    else if(this.mode==='synth'){
+      this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault, z&&z[0], z&&z[1]);
+      this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor; this.resetCanvas();
+    }
   };
 
-  // -- detection status -> desired mode --------------------------------
+  // ---- band / view selection ----
+  Scope.prototype.selectBand=function(bandId,synthId){
+    Array.prototype.forEach.call(this.bandSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-band')===bandId?'true':'false');});
+    this.liveBand=bandId; this.synthBand=synthId||bandId; this.zoom=null; this.resetBtn.disabled=true;
+    if(this.decoding){ this.stopIsm(); this.startIsm(); return; }
+    if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
+    else if(this.mode==='synth'){ this.model=this.cfg.synth(this.synthBand); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.resetCanvas(); }
+  };
+  Scope.prototype.setView=function(v){
+    var want=(v==='decode');
+    if(want && !this.available){ this.flashDecodeHint(); return; }
+    if(want===this.decoding) return;
+    this.decoding=want;
+    Array.prototype.forEach.call(this.viewSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-view')===(want?'decode':'wf')?'true':'false');});
+    if(want){ this.el.classList.add('decoding'); this.stopLive(); this.logTitle.textContent='ISM devices (rtl_433)'; this.log=[]; this.renderLog(); this.startIsm(); }
+    else{ this.el.classList.remove('decoding'); this.stopIsm(); this.logTitle.textContent='Detections'; this.log=[]; this.renderLog(); this.startLive(); }
+  };
+  Scope.prototype.flashDecodeHint=function(){
+    var self=this; Array.prototype.forEach.call(this.viewSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-view')==='wf'?'true':'false');});
+    this.logTitle.textContent='Detections';
+    this.logList.innerHTML='<div class="logempty">Decode (rtl_433) needs a connected RTL-SDR.</div>';
+    setTimeout(function(){ if(!self.decoding) self.renderLog(); },2500);
+  };
+
+  // ---- detection status -> mode ----
   Scope.prototype.checkStatus=function(){
     var self=this;
     fetch(this.cfg.api.status).then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{};
       self.available=!!det.available; self.board=det.board||''; self.detErr=det.error||'';
-      self.applyDesired();
-    }).catch(function(){ /* keep prior state on a transient error */ });
+      // radio vanished mid-decode -> drop back
+      if(self.decoding && !self.available){ self.setView('wf'); }
+      self.applyDesired(); self.updateTag();
+    }).catch(function(){});
   };
   Scope.prototype.applyDesired=function(){
-    var desired = this.available ? 'live' : (DEMO_ON ? 'synth' : 'idle');
-    this.setMode(desired);
-    this.updateTag();
+    if(this.decoding) return;   // decode owns the dongle; leave it be
+    this.setMode(this.available?'live':(DEMO_ON?'synth':'idle'));
   };
   Scope.prototype.setMode=function(mode){
     if(mode===this.mode) return;
     if(this.mode==='live') this.stopLive();
-    this.mode=mode; this._rangeKnown=false; this.resetCanvas();
+    this.mode=mode; this._rangeKnown=false; this.zoom=null; this.resetBtn.disabled=true; this.resetCanvas();
     if(mode==='live'){ this.hideVeil(); this.bandSel.classList.remove('hidden'); this.startLive(); }
-    else if(mode==='synth'){ this.hideVeil(); this.bandSel.classList.toggle('hidden', !this.cfg.synthBands);
-      this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault);
-      this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor; this.drawRuler(); }
-    else { this.bandSel.classList.add('hidden'); this.showVeil(
-      'No '+this.cfg.short+' detected',
-      this.detErr || ('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.')); }
+    else if(mode==='synth'){ this.hideVeil(); this.bandSel.classList.toggle('hidden',!this.cfg.synthBands);
+      this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.drawRuler(); }
+    else{ this.bandSel.classList.add('hidden'); this.zoomBtn.disabled=true;
+      this.showVeil('No '+this.cfg.short+' detected', this.detErr||('Connect a '+this.cfg.short+' to stream true RF, or enable the RF Waterfall demo for a synthetic feed.')); }
   };
   Scope.prototype.updateTag=function(){
-    var m=this.mode, txt=(m==='live'?'live':(m==='synth'?'synthetic':'idle'));
-    this.tagEl.className='tag scope-tag '+(m==='live'?'live':(m==='synth'?'synth':'idle'));
-    this.tagEl.textContent=txt;
-    if(this.rigEl){ this.rigEl.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle'));
-      this.rigEl.textContent = m==='live' ? ('live'+(this.board?' · '+this.board:'')) : (m==='synth'?'synthetic':'not connected'); }
+    var m=this.decoding?'decode':this.mode;
+    var cls=(this.mode==='live')?'live':(this.mode==='synth'?'synth':'idle');
+    this.tagEl.className='tag scope-tag '+cls; this.tagEl.textContent=this.decoding?'decode':(this.mode==='live'?'live':(this.mode==='synth'?'synthetic':'idle'));
+    if(this.rigEl){ this.rigEl.className='tag '+cls;
+      this.rigEl.textContent=(this.mode==='live')?('live'+(this.board?' · '+this.board:'')):(this.mode==='synth'?'synthetic':'not connected'); }
   };
 
-  // -- live streaming --------------------------------------------------
+  // ---- live sweep ----
   Scope.prototype.startLive=function(){
     var self=this; this.seq=0; this.liveErr=null;
-    fetch(this.cfg.api.start,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({band:this.liveBand})})
+    var body={band:this.liveBand};
+    if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
+    fetch(this.cfg.api.start,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json();}).then(function(res){
-        if(res&&res.error){ self.liveErr=res.error; self.showVeil('Could not start '+self.cfg.short, res.error); }
+        if(res&&res.error){ self.liveErr=res.error; self.showVeil('Could not start '+self.cfg.short,res.error); }
         if(self._poll) clearInterval(self._poll);
-        self._poll=setInterval(function(){ self.livePoll(); }, 200);
-      }).catch(function(){ self.liveErr='Failed to start '+self.cfg.short; self.showVeil('Could not start '+self.cfg.short, self.liveErr); });
+        self._poll=setInterval(function(){ self.livePoll(); },200);
+      }).catch(function(){ self.liveErr='Failed to start '+self.cfg.short; self.showVeil('Could not start '+self.cfg.short,self.liveErr); });
   };
-  Scope.prototype.stopLive=function(){
-    if(this._poll){ clearInterval(this._poll); this._poll=null; }
-    fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){});
-  };
+  Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
   Scope.prototype.livePoll=function(){
-    if(!running || this.mode!=='live') return;
+    if(!running || this.mode!=='live' || this.decoding) return;
     var self=this;
     fetch(this.cfg.api.frames+'?since='+this.seq).then(function(r){return r.json();}).then(function(d){
-      self.liveErr = d.error || null;
-      var lo,hi;
-      if(d.band_mhz){ lo=d.band_mhz[0]; hi=d.band_mhz[1]; }
-      else if(d.band_hz){ lo=d.band_hz[0]/1e6; hi=d.band_hz[1]/1e6; }
-      else { lo=self.lo; hi=self.hi; }
+      self.liveErr=d.error||null; var lo,hi;
+      if(d.band_mhz){lo=d.band_mhz[0];hi=d.band_mhz[1];}
+      else if(d.band_hz){lo=d.band_hz[0]/1e6;hi=d.band_hz[1]/1e6;}
+      else{lo=self.lo;hi=self.hi;}
       var floor=(typeof d.floor_dbm==='number')?d.floor_dbm:-110;
       var frames=d.frames||[];
       if(frames.length){
-        if(!self._rangeKnown || lo!==self.lo || hi!==self.hi){
-          self.lo=lo; self.hi=hi; self.floor=floor; self._rangeKnown=true; self.drawRuler(); }
+        if(!self._rangeKnown||lo!==self.lo||hi!==self.hi){ self.lo=lo;self.hi=hi;self.floor=floor;self._rangeKnown=true;self.drawRuler();self.placeMarker(); }
         self.hideVeil();
-        frames.forEach(function(f){ self.seq=f.seq; self.pushRow(f.power, self.lo, self.hi, self.floor); });
-      } else if(self.liveErr){
-        self.showVeil('⚠ '+self.cfg.short, self.liveErr);
-      } else if(!self._rangeKnown){
-        self.showVeil('Starting '+self.cfg.short+' sweep…', 'Waiting for the first frame.');
-      }
+        frames.forEach(function(f){ self.seq=f.seq; self.pushRow(f.power,self.lo,self.hi,floor); });
+      } else if(self.liveErr){ self.showVeil('⚠ '+self.cfg.short,self.liveErr); }
+      else if(!self._rangeKnown){ self.showVeil('Starting '+self.cfg.short+' sweep…','Waiting for the first frame.'); }
     }).catch(function(){});
   };
 
-  // -- synthetic step (driven by the shared RAF loop) ------------------
-  Scope.prototype.synthStep=function(){
-    var m=this.model, N=NSYN, row=new Float32Array(N);
-    for(var i=0;i<N;i++) row[i]=-108+gauss()*2.2;
-    m.emit(row);
-    this.pushRow(row, m.lo, m.hi, m.floor);
+  // ---- ISM decode (rtl_433) ----
+  Scope.prototype.startIsm=function(){
+    var self=this; if(this._ismPoll){clearInterval(this._ismPoll);this._ismPoll=null;}
+    fetch(this.cfg.api.ismStart,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({band:this.liveBand})})
+      .then(function(r){return r.json();}).catch(function(){});
+    this._ismPoll=setInterval(function(){ self.ismPoll(); },1500); this.ismPoll();
+  };
+  Scope.prototype.stopIsm=function(){ if(this._ismPoll){clearInterval(this._ismPoll);this._ismPoll=null;} fetch(this.cfg.api.ismStop,{method:'POST'}).catch(function(){}); };
+  Scope.prototype.ismPoll=function(){
+    if(!running || !this.decoding) return; var self=this;
+    fetch(this.cfg.api.ismDevices).then(function(r){return r.json();}).then(function(d){ self.renderDevices(d); }).catch(function(){});
+  };
+  Scope.prototype.renderDevices=function(d){
+    var devs=(d&&d.devices)||[]; this.logCount.textContent=devs.length+' seen · '+((d&&d.events)||0)+' events';
+    if(d&&d.error){ this.logList.innerHTML='<div class="logempty">⚠ '+esc(d.error)+'</div>'; return; }
+    if(!devs.length){ this.logList.innerHTML='<div class="logempty">Listening on '+this.liveBand+' MHz for ISM transmitters…</div>'; return; }
+    var html='';
+    devs.slice(0,60).forEach(function(v){
+      var meta=[]; var f=v.fields||{};
+      ['temperature_C','humidity','battery_ok','pressure_kPa','wind_avg_km_h','depth_cm','moisture'].forEach(function(k){ if(f[k]!=null) meta.push(k.replace(/_/g,' ')+' '+f[k]); });
+      var freq=(v.freq_mhz!=null)?v.freq_mhz.toFixed(3)+' MHz':'';
+      var rssi=(v.rssi!=null)?Math.round(v.rssi)+' dB':'';
+      html+='<div class="logrow dev"><span class="t">×'+(v.count||1)+'</span>'
+        +'<span class="f">'+esc(v.model)+(v.id!=null?' <span class="meta">#'+esc(String(v.id))+'</span>':'')
+        +(meta.length?' <span class="meta">· '+esc(meta.join(' · '))+'</span>':'')+'</span>'
+        +'<span class="d">'+esc(freq)+(rssi?' '+esc(rssi):'')+'</span></div>';
+    });
+    this.logList.innerHTML=html;
   };
 
-  // -- paint one row + trace + readout --------------------------------
-  Scope.prototype.pushRow=function(power, lo, hi, floor){
-    this.lo=lo; this.hi=hi; this.floor=(typeof floor==='number')?floor:-110;
-    var N=power.length, f=this.fctx;
+  // ---- synth step ----
+  Scope.prototype.synthStep=function(){
+    if(this.decoding) return; var m=this.model,N=NSYN,row=new Float32Array(N);
+    for(var i=0;i<N;i++) row[i]=-108+gauss()*2.2; m.emit(row);
+    this.pushRow(row,m.lo,m.hi,m.floor);
+  };
+
+  // ---- paint one row ----
+  Scope.prototype.pushRow=function(power,lo,hi,floor){
+    this.lo=lo;this.hi=hi;this.floor=(typeof floor==='number')?floor:-110;
+    if(!this.zoom){ this.homeLo=lo; this.homeHi=hi; }
+    var N=power.length,f=this.fctx;
     f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
-    var peakDb=-999,peakIdx=0;
-    for(var c=0;c<N;c++){
-      var x0=(c*this.W/N)|0, x1=((c+1)*this.W/N)|0;
-      f.fillStyle=color(power[c], this.floor); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
-      if(power[c]>peakDb){peakDb=power[c];peakIdx=c;}
-    }
+    var peakDb=-999,peakIdx=0,busyC=0,thr=this.floor+12;
+    for(var c=0;c<N;c++){var x0=(c*this.W/N)|0,x1=((c+1)*this.W/N)|0;
+      f.fillStyle=color(power[c],this.floor); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
+      if(power[c]>peakDb){peakDb=power[c];peakIdx=c;} if(power[c]>thr)busyC++;}
     this.row=power; this.peak={db:peakDb,idx:peakIdx};
+    this.busy=this.busy*0.8 + (busyC/N*100)*0.2;
+    this.maybeLog(peakDb,this.lo+(peakIdx/N)*(this.hi-this.lo));
     this.drawTrace(power); this.updateReadout();
   };
+  Scope.prototype.maybeLog=function(db,freq){
+    var t=performance.now();
+    if(db < this.floor+25) return;              // only notable signals
+    if(t-this._lastLog < 1400) return;          // throttle the feed
+    this._lastLog=t;
+    this.log.unshift({tm:nowHM(),f:freq,d:db}); if(this.log.length>40) this.log.length=40;
+    if(!this.decoding) this.renderLog();
+  };
+  Scope.prototype.renderLog=function(){
+    if(this.decoding) return;
+    this.logCount.textContent=this.log.length?this.log.length+' hits':'';
+    if(!this.log.length){ this.logList.innerHTML='<div class="logempty">Listening…</div>'; return; }
+    var html='';
+    this.log.forEach(function(e){ html+='<div class="logrow"><span class="t">'+e.tm+'</span><span class="f">'+fmtMHz(e.f)+'</span><span class="d">'+e.d.toFixed(0)+' dBm</span></div>'; });
+    this.logList.innerHTML=html;
+  };
   Scope.prototype.drawTrace=function(power){
-    var t=this.tctx, W=this.trace.width, H=this.trace.height, N=power.length, floor=this.floor;
-    t.clearRect(0,0,W,H);
-    t.fillStyle="rgba(56,189,201,0.12)"; t.strokeStyle="#38bdc9"; t.lineWidth=Math.max(1,this.d);
+    var t=this.tctx,W=this.trace.width,H=this.trace.height,N=power.length,floor=this.floor;
+    t.clearRect(0,0,W,H); t.fillStyle="rgba(56,189,201,0.12)"; t.strokeStyle="#38bdc9"; t.lineWidth=Math.max(1,this.d);
     t.beginPath();
-    for(var c=0;c<N;c++){ var x=c*W/N, norm=(power[c]-floor)/(CEIL-floor); if(norm<0)norm=0; if(norm>1)norm=1;
-      var y=H-norm*(H-4)-2; if(c===0)t.moveTo(x,y); else t.lineTo(x,y); }
+    for(var c=0;c<N;c++){var x=c*W/N,norm=(power[c]-floor)/(CEIL-floor);if(norm<0)norm=0;if(norm>1)norm=1;
+      var y=H-norm*(H-4)-2; if(c===0)t.moveTo(x,y);else t.lineTo(x,y);}
     t.stroke(); t.lineTo(W,H); t.lineTo(0,H); t.closePath(); t.fill();
-    var px=this.peak.idx*W/N;
-    t.strokeStyle="rgba(245,185,66,0.8)"; t.lineWidth=Math.max(1,this.d);
+    var px=this.peak.idx*W/N; t.strokeStyle="rgba(245,185,66,0.8)"; t.lineWidth=Math.max(1,this.d);
     t.beginPath(); t.moveTo(px,0); t.lineTo(px,H); t.stroke();
   };
   Scope.prototype.updateReadout=function(){
     var N=this.row?this.row.length:1, fMHz=this.lo+(this.peak.idx/N)*(this.hi-this.lo);
-    this.pkF.textContent=(fMHz>=1000)?(fMHz/1000).toFixed(3)+" GHz":fMHz.toFixed(2)+" MHz";
-    this.pkD.textContent=this.peak.db.toFixed(0)+" dBm";
-    this.spanEl.textContent=fmtF(this.lo)+"–"+fmtF(this.hi);
+    this.pkF.textContent=fmtMHz(fMHz); this.pkD.textContent=this.peak.db.toFixed(0)+" dBm";
+    this.busyEl.textContent=this.busy.toFixed(0)+"%";
+    this.spanEl.textContent=fmtF(this.lo)+"–"+fmtF(this.hi)+(this.zoom?" ⤢":"");
     this.nowEl.textContent="t="+((performance.now()-this.t0)/1000).toFixed(1)+"s";
   };
-  Scope.prototype.setRate=function(hz){ this.rateEl.textContent = (this.mode==='idle')?'—':hz.toFixed(0); };
+  Scope.prototype.setRate=function(hz){ this.rateEl.textContent=(this.mode==='idle'||this.decoding)?'—':hz.toFixed(0); };
 
   Scope.prototype.drawRuler=function(){
-    var lo=this.lo, hi=this.hi, span=hi-lo, r=this.ruler; r.innerHTML="";
-    if(!(span>0)) return;
-    var m=this.model;
-    // ISM band boxes + channel labels only for the synthetic wide/known models
-    if(this.mode==='synth' && m){
-      (m.isms||[]).forEach(function(b){ var x0=(b[0]-lo)/span*100, x1=(b[1]-lo)/span*100;
-        var d=document.createElement('div'); d.className='ism'; d.style.left=x0+"%"; d.style.width=(x1-x0)+"%";
-        d.innerHTML='<span class="il">'+b[2]+'</span>'; r.appendChild(d); });
-      (m.chLabels||[]).forEach(function(c){ var x=(c[0]-lo)/span*100; if(x<0||x>100)return;
-        var l=document.createElement('div'); l.className='tlab'; l.style.left=x+"%"; l.style.top="18px";
-        l.style.color="var(--cyan)"; l.textContent=c[1]; r.appendChild(l); });
+    var lo=this.lo,hi=this.hi,span=hi-lo,r=this.ruler; r.innerHTML=""; if(!(span>0))return;
+    var m=this.model, showBands=(this.mode==='synth'&&!this.zoom&&m);
+    if(showBands){
+      (m.isms||[]).forEach(function(b){var x0=(b[0]-lo)/span*100,x1=(b[1]-lo)/span*100;
+        var d=document.createElement('div');d.className='ism';d.style.left=x0+"%";d.style.width=(x1-x0)+"%";
+        d.innerHTML='<span class="il">'+b[2]+'</span>';r.appendChild(d);});
+      (m.chLabels||[]).forEach(function(c){var x=(c[0]-lo)/span*100;if(x<0||x>100)return;
+        var l=document.createElement('div');l.className='tlab';l.style.left=x+"%";l.style.top="18px";l.style.color="var(--cyan)";l.textContent=c[1];r.appendChild(l);});
     }
-    var ticks = (this.mode==='synth' && m && m.ticks) ? m.ticks : genTicks(lo,hi);
-    ticks.forEach(function(fq){ var x=(fq-lo)/span*100; if(x<0||x>100)return;
-      var t=document.createElement('div'); t.className='tick'; t.style.left=x+"%"; r.appendChild(t);
-      var l=document.createElement('div'); l.className='tlab'; l.style.left=x+"%"; l.textContent=fmtF(fq); r.appendChild(l); });
+    var ticks=(showBands&&m.ticks)?m.ticks:genTicks(lo,hi);
+    ticks.forEach(function(fq){var x=(fq-lo)/span*100;if(x<0||x>100)return;
+      var t=document.createElement('div');t.className='tick';t.style.left=x+"%";r.appendChild(t);
+      var l=document.createElement('div');l.className='tlab';l.style.left=x+"%";l.textContent=fmtF(fq);r.appendChild(l);});
   };
+  Scope.prototype.showVeil=function(t,s){this.veilT.textContent=t;this.veilS.textContent=s||'';this.veil.classList.add('show');};
+  Scope.prototype.hideVeil=function(){this.veil.classList.remove('show');};
 
-  Scope.prototype.showVeil=function(t,s){ this.veilT.textContent=t; this.veilS.textContent=s||''; this.veil.classList.add('show'); };
-  Scope.prototype.hideVeil=function(){ this.veil.classList.remove('show'); };
+  function fmtMHz(mhz){return (mhz>=1000)?(mhz/1000).toFixed(4)+" GHz":mhz.toFixed(2)+" MHz";}
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
-  function genTicks(lo,hi){ var n=6,out=[]; for(var i=0;i<=n;i++) out.push(lo+(hi-lo)*i/n); return out; }
-  function fmtF(mhz){ return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(0):mhz.toFixed(2)); }
-
-  // ---- build the two scopes ------------------------------------------
+  // ---- build scopes ----
   var stack=document.getElementById('stack'), scopes=[];
-  var rtl=new Scope({
-    name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power", rig:"rig-rtl",
-    api:{status:'/api/net/rtl/status', start:'/api/net/rtl/power/start', stop:'/api/net/rtl/power/stop', frames:'/api/net/rtl/power/frames'},
-    synth:function(){ return subGhzModel(); }, synthDefault:'433', synthBands:false,
-    liveBands:[{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433'
-  });
+  var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
+    api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
+         ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
+    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, minSpan:0.2,
+    liveBands:[{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
-  var hackrf=new Scope({
-    name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
-    api:{status:'/api/net/sdr/status', start:'/api/net/sdr/start', stop:'/api/net/sdr/stop', frames:'/api/net/sdr/frames'},
-    synth:function(b){ return wifiModel(b); }, synthDefault:'2.4', synthBands:true,
-    liveBands:[{id:'2.4',label:'2.4',synthId:'2.4'},{id:'5',label:'5',synthId:'5'},{id:'6',label:'6',synthId:'6'}], defaultBand:'2.4'
-  });
+  var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
+    api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
+    synth:function(b,lo,hi){return wifiModel(b,lo,hi);}, synthDefault:'2.4', synthBands:true, decode:false, minSpan:1,
+    liveBands:[{id:'2.4',label:'2.4',synthId:'2.4'},{id:'5',label:'5',synthId:'5'},{id:'6',label:'6',synthId:'6'}], defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
 
-  // ---- clock ----
   var clockEl=document.getElementById('clock');
-  function fmtClock(){ var d=new Date();
-    clockEl.textContent=String(d.getHours()).padStart(2,'0')+":"+String(d.getMinutes()).padStart(2,'0')+":"+String(d.getSeconds()).padStart(2,'0'); }
-  setInterval(fmtClock,1000); fmtClock();
+  function tickClock(){clockEl.textContent=nowHM();} setInterval(tickClock,1000); tickClock();
 
-  // ---- play / pause + speed ----
   var playBtn=document.getElementById('play');
-  function setRunning(on){
-    running=on; playBtn.setAttribute('aria-pressed',on?'true':'false');
+  function setRunning(on){ running=on; playBtn.setAttribute('aria-pressed',on?'true':'false');
     playBtn.innerHTML=on?'&#10074;&#10074;&nbsp;Pause':'&#9654;&nbsp;Play';
-    scopes.forEach(function(s){ s.setRate(on?HZ:0); });
-    if(on){ last=performance.now(); requestAnimationFrame(loop); }
-  }
+    scopes.forEach(function(s){s.setRate(on?HZ:0);}); if(on){last=performance.now();requestAnimationFrame(loop);} }
   playBtn.addEventListener('click',function(){ setRunning(!running); });
   var speedSeg=document.getElementById('speed');
-  speedSeg.addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+  speedSeg.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
     HZ=parseFloat(b.getAttribute('data-hz'));
     speedSeg.querySelectorAll('button').forEach(function(x){x.setAttribute('aria-pressed','false');});
-    b.setAttribute('aria-pressed','true'); scopes.forEach(function(s){ s.setRate(running?HZ:0); }); });
+    b.setAttribute('aria-pressed','true'); scopes.forEach(function(s){s.setRate(running?HZ:0);}); });
 
-  // ---- shared RAF loop (drives synthetic scopes; live scopes self-poll) ----
-  var acc=0, last=performance.now();
-  function loop(now){
-    if(!running) return;
-    var dt=(now-last)/1000; last=now; acc+=dt; var interval=1/HZ, did=0;
-    while(acc>=interval && did<4){ scopes.forEach(function(s){ if(s.mode==='synth') s.synthStep(); }); acc-=interval; did++; }
-    scopes.forEach(function(s){ s.setRate(HZ); });
-    requestAnimationFrame(loop);
-  }
+  var acc=0,last=performance.now();
+  function loop(now){ if(!running)return; var dt=(now-last)/1000;last=now;acc+=dt;var interval=1/HZ,did=0;
+    while(acc>=interval&&did<4){ scopes.forEach(function(s){ if(s.mode==='synth'&&!s.decoding) s.synthStep(); }); acc-=interval;did++; }
+    scopes.forEach(function(s){s.setRate(HZ);}); requestAnimationFrame(loop); }
 
-  // ---- footer message reflects overall state ----
   function updateFoot(){
     var live=scopes.filter(function(s){return s.mode==='live';}).map(function(s){return s.cfg.short;});
-    var synth=scopes.some(function(s){return s.mode==='synth';});
+    var synth=scopes.some(function(s){return s.mode==='synth';}), decode=scopes.some(function(s){return s.decoding;});
     var msg;
-    if(live.length===2) msg='<b>Live.</b> Both radios connected — streaming true RF.';
-    else if(live.length===1) msg='<b>Live ('+live[0]+').</b> The other panel '+(synth?'is a synthetic feed (RF Waterfall demo on).':'shows no device — connect it or enable the RF Waterfall demo.');
-    else if(synth) msg='<b>Synthetic feed.</b> No SDR detected; panels model each band\'s real occupants (433.92 MHz TPMS bursts, 868 MHz metering, 915 MHz hoppers, Wi-Fi ch 1/6/11). Connect an RTL-SDR or HackRF and that panel flips to live automatically.';
-    else msg='<b>No SDR detected.</b> Connect an RTL-SDR or HackRF to stream true RF, or enable the RF Waterfall demo in the WiFi Spectrum Analyzer for a synthetic feed.';
+    if(decode) msg='<b>Decoding.</b> rtl_433 is naming sub-GHz transmitters on the RTL-SDR.';
+    else if(live.length===2) msg='<b>Live.</b> Both radios connected — streaming true RF. Click a signal to mark &amp; zoom.';
+    else if(live.length===1) msg='<b>Live ('+live[0]+').</b> The other panel '+(synth?'is synthetic (demo on).':'shows no device.')+' Click a signal to mark &amp; zoom.';
+    else if(synth) msg='<b>Synthetic feed.</b> No SDR detected; panels model each band\'s occupants. Zoom works on the synthetic view; connect a radio and it retunes real hardware.';
+    else msg='<b>No SDR detected.</b> Connect an RTL-SDR or HackRF, or enable the RF Waterfall demo in the WiFi Spectrum Analyzer.';
     document.getElementById('foot-msg').innerHTML=msg;
   }
 
-  // ---- config (demo flag) + detection polling ----
-  function refreshConfig(){
-    return fetch('/api/config').then(function(r){return r.json();}).then(function(c){
-      DEMO_ON = !!(c && (c.sdr_demo===true || c.sdr_demo==='true'));
-    }).catch(function(){});
-  }
-  function pollAll(){ scopes.forEach(function(s){ s.checkStatus(); }); setTimeout(updateFoot, 400); }
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function pollAll(){ scopes.forEach(function(s){s.checkStatus();}); setTimeout(updateFoot,400); }
 
-  // boot
-  refreshConfig().then(function(){
-    scopes.forEach(function(s){ s.applyDesired(); s.updateTag(); });
-    updateFoot();
-    pollAll();
-    setInterval(function(){ refreshConfig().then(pollAll); }, 5000);
-  });
-  scopes.forEach(function(s){ s.setRate(HZ); });
+  refreshConfig().then(function(){ scopes.forEach(function(s){s.applyDesired();s.updateTag();}); updateFoot(); pollAll();
+    setInterval(function(){ refreshConfig().then(pollAll); },5000); });
+  scopes.forEach(function(s){s.setRate(HZ);});
   if(reduce){ setRunning(false); } else { setRunning(true); }
-  window.addEventListener('resize',function(){ scopes.forEach(function(s){ if(s.resize()) s.drawRuler(); }); });
-  window.addEventListener('beforeunload', function(){ scopes.forEach(function(s){ if(s.mode==='live') s.stopLive(); }); });
+  window.addEventListener('resize',function(){ scopes.forEach(function(s){ if(s.resize()){s.drawRuler();s.placeMarker();} }); });
+  window.addEventListener('beforeunload',function(){ scopes.forEach(function(s){ if(s.mode==='live')s.stopLive(); if(s.decoding)s.stopIsm(); }); });
 })();
 </script>
 </body>
