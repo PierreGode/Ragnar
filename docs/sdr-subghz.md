@@ -114,17 +114,53 @@ driver is holding it. That lets `/status` tell three cases apart:
   DVB-T driver still holds it (blacklist `dvb_usb_rtl28xxu`, replug).
 - **`available: true`** — good; the SDR tab and RF Waterfall button light up.
 
+## Mesh overlays (Z-Wave / Meshtastic / MeshCore / LoRaWAN)
+
+The RF Waterfall page's sub-GHz panel has a **📡 Mesh / LoRa** dropdown that
+sweeps a chosen mesh's band and overlays its exact channel centres on the
+spectrum, so you can watch the mesh's bursts/chirps land on its channels — device
+chatter, retries, or a **jammer** parked on a channel.
+
+- **Z-Wave** (FSK) — per-region channels (EU 868.42/869.85, US 908.42/916.0,
+  US-LR 912/920, ANZ/JP/KR/IN/IL/HK/RU/CN). `GET /api/net/rtl/zwave`.
+- **Meshtastic / MeshCore / LoRaWAN** (LoRa/CSS) — per protocol+region band +
+  channels: Meshtastic US/EU868/EU433/ANZ, MeshCore EU/US, LoRaWAN
+  EU868/US915/IN865/AS923. `GET /api/net/rtl/lora`.
+
+**This is an energy / occupancy view, not a decoder — and deliberately so:**
+
+- **LoRa cannot be demodulated with `rtl_power`/`rtl_433`.** LoRa is chirp
+  spread-spectrum; demodulating it needs `gr-lora_sdr` (GNU Radio — heavy) or a
+  real LoRa radio (SX127x/SX126x). This view never claims to read LoRa frames.
+- **The payloads are encrypted anyway** — Meshtastic AES-256 (channel PSK;
+  the *public* channel key is well-known), LoRaWAN AES-128. So even a demodulator
+  gives you addresses/metadata at best, not message contents.
+- **What you get RF-only:** presence, activity/occupancy per channel, and which
+  band a mesh is on. Not node IDs or messages.
+- **To actually identify/enumerate a mesh** (node list, names, and to decrypt the
+  Meshtastic public channel), the practical path is a **companion LoRa node**
+  (a Meshtastic/MeshCore device over USB, the way Huginn/Zigbee attach) — a
+  possible future integration, not part of this receive-only spectrum view.
+
+Frequencies: LoRaWAN entries follow the published regional band plans; Meshtastic
+default channels are preset/hash-derived and MeshCore's are user-configurable, so
+those are marked "~" / "default" — scan the band for the actual chirps.
+
 ## API
 
 | Route | Purpose |
 |---|---|
 | `GET  /api/net/rtl/status` | Dongle detection (gates the tab) + capture state for both modes |
+| `GET  /api/net/rtl/diagnose` | SDR health check (USB/tools/DVB/power) — the "SDR check" button |
+| `POST /api/net/rtl/install` | One-click install of rtl-sdr/rtl-433 + DVB unblock |
 | `POST /api/net/rtl/ism/start` `{band}` | Start the ISM scanner (433/868/915) |
 | `POST /api/net/rtl/ism/stop` | Stop the ISM scanner |
 | `GET  /api/net/rtl/ism/devices` | The live decoded-device table |
-| `POST /api/net/rtl/power/start` `{band}` | Start the sub-GHz sweep (433/868/915/subghz) |
+| `POST /api/net/rtl/power/start` `{band, lo_hz?, hi_hz?, label?}` | Start the sub-GHz sweep (band or custom/zoom/mesh span) |
 | `POST /api/net/rtl/power/stop` | Stop the sweep |
 | `GET  /api/net/rtl/power/frames?since=` | New waterfall frames + max-hold since a seq |
+| `GET  /api/net/rtl/zwave` | Z-Wave regional plan (spans + channel centres) |
+| `GET  /api/net/rtl/lora` | LoRa mesh plan — Meshtastic/MeshCore/LoRaWAN (spans + channels) |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI

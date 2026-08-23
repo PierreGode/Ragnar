@@ -116,6 +116,83 @@ def zwave_plan():
         }
     return out
 
+
+# LoRa mesh / LPWAN radio plans (Meshtastic, MeshCore, LoRaWAN). These are all
+# LoRa (chirp spread-spectrum), NOT the FSK that rtl_433 decodes — so this is an
+# ENERGY / occupancy view only: sweep the band and watch the mesh's chirps land
+# on its channels. We CANNOT demodulate LoRa with rtl_power/rtl_433 (that needs
+# gr-lora_sdr or a real LoRa radio), and the payloads are encrypted regardless;
+# so no node IDs / message contents — just presence, activity and which channels.
+# Each entry: proto, sweep span (Hz), reference channel centres, and a note.
+# LoRaWAN band plans are standards (accurate); Meshtastic/MeshCore defaults are
+# preset/config-derived, so their channels are marked "~" / "default".
+LORA_PLANS = {
+    # --- Meshtastic (LoRa; default LongFast preset, BW 250 kHz) ---
+    "meshtastic-us":    {"proto": "Meshtastic", "label": "Meshtastic · US (902-928)",
+                         "span": (902_000_000, 928_000_000),
+                         "channels": [(906_875_000, "LongFast ~")],
+                         "note": "US: 902-928 MHz, LongFast BW250/SF11 (default channel is hash-derived; scan the band for 250 kHz chirps)"},
+    "meshtastic-eu868": {"proto": "Meshtastic", "label": "Meshtastic · EU868",
+                         "span": (869_300_000, 869_750_000),
+                         "channels": [(869_525_000, "LongFast")],
+                         "note": "EU868: single 250 kHz channel in the 10% duty sub-band"},
+    "meshtastic-eu433": {"proto": "Meshtastic", "label": "Meshtastic · EU433",
+                         "span": (433_050_000, 434_790_000),
+                         "channels": [(433_175_000, "LongFast ~")],
+                         "note": "EU433: BW250 (default channel hash-derived)"},
+    "meshtastic-anz":   {"proto": "Meshtastic", "label": "Meshtastic · ANZ (915-928)",
+                         "span": (915_000_000, 928_000_000),
+                         "channels": [(915_900_000, "LongFast ~")],
+                         "note": "ANZ: 915-928 MHz, BW250 (default channel hash-derived)"},
+    # --- MeshCore (LoRa; frequency is user-configurable — common defaults) ---
+    "meshcore-eu":      {"proto": "MeshCore", "label": "MeshCore · EU (default)",
+                         "span": (868_000_000, 870_500_000),
+                         "channels": [(869_525_000, "default ~")],
+                         "note": "MeshCore EU default ~869.525 MHz (configurable), BW250"},
+    "meshcore-us":      {"proto": "MeshCore", "label": "MeshCore · US (default)",
+                         "span": (902_000_000, 928_000_000),
+                         "channels": [(910_525_000, "default ~")],
+                         "note": "MeshCore US default ~910.525 MHz (configurable), BW250"},
+    # --- LoRaWAN (band plans are standards; payload AES-encrypted, DevAddr/MAC
+    #     in clear only if demodulated — which we cannot do here) ---
+    "lorawan-eu868":    {"proto": "LoRaWAN", "label": "LoRaWAN · EU868",
+                         "span": (867_000_000, 869_700_000),
+                         "channels": [(868_100_000, "ch0"), (868_300_000, "ch1"),
+                                      (868_500_000, "ch2"), (867_100_000, "ch3"),
+                                      (867_300_000, "ch4"), (867_500_000, "ch5"),
+                                      (867_700_000, "ch6"), (867_900_000, "ch7"),
+                                      (869_525_000, "RX2/dl")],
+                         "note": "EU868: 125 kHz uplinks 867.1-868.5 + 869.525 RX2 downlink (SF12)"},
+    "lorawan-us915":    {"proto": "LoRaWAN", "label": "LoRaWAN · US915",
+                         "span": (902_000_000, 928_000_000),
+                         "channels": [(902_300_000, "up0 125k"), (903_000_000, "up 500k"),
+                                      (914_900_000, "up63 125k"), (923_300_000, "dl0 500k"),
+                                      (927_500_000, "dl7 500k")],
+                         "note": "US915: 64×125k + 8×500k uplinks (902.3-914.9); 8×500k downlinks (923.3-927.5)"},
+    "lorawan-in865":    {"proto": "LoRaWAN", "label": "LoRaWAN · IN865",
+                         "span": (865_000_000, 867_000_000),
+                         "channels": [(865_062_500, "ch0"), (865_402_500, "ch1"),
+                                      (865_985_000, "ch2")],
+                         "note": "IN865: 3 mandatory 125 kHz channels"},
+    "lorawan-as923":    {"proto": "LoRaWAN", "label": "LoRaWAN · AS923-1",
+                         "span": (921_000_000, 928_000_000),
+                         "channels": [(923_200_000, "ch0"), (923_400_000, "ch1")],
+                         "note": "AS923-1: 923.2/923.4 default (+ up to 8 channels)"},
+}
+
+
+def lora_plan():
+    """Protocol/region → sweep span + LoRa channel centres, for the mesh view."""
+    out = {}
+    for pid, p in LORA_PLANS.items():
+        out[pid] = {
+            "proto": p["proto"], "label": p["label"], "note": p.get("note", ""),
+            "lo_hz": p["span"][0], "hi_hz": p["span"][1],
+            "channels": [{"freq_hz": f, "freq_mhz": round(f / 1e6, 3), "label": lbl}
+                         for f, lbl in p["channels"]],
+        }
+    return out
+
 _POWER_BINS = 480          # display columns per waterfall frame
 _RING_FRAMES = 300         # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
@@ -1175,6 +1252,25 @@ def selftest():
           any(abs(c["freq_hz"] - 868_420_000) < 1000 for c in plan["eu"]["channels"]))
     check("zwave: span >= 100 kHz so power_start accepts it",
           all(r["hi_hz"] - r["lo_hz"] >= 100_000 for r in plan.values()))
+
+    # --- LoRa mesh plan (Meshtastic / MeshCore / LoRaWAN): channels inside span,
+    #     spans in RTL reach + acceptable width, all three protocols present ---
+    lp = lora_plan()
+    check("lora: meshtastic + meshcore + lorawan present",
+          {p["proto"] for p in lp.values()} >= {"Meshtastic", "MeshCore", "LoRaWAN"})
+    _lp_ok = True
+    for pid, p in lp.items():
+        if not (24_000_000 <= p["lo_hz"] < p["hi_hz"] <= 1_766_000_000):
+            _lp_ok = False
+        if p["hi_hz"] - p["lo_hz"] < 100_000:
+            _lp_ok = False
+        for ch in p["channels"]:
+            if not (p["lo_hz"] <= ch["freq_hz"] <= p["hi_hz"]):
+                _lp_ok = False
+    check("lora: every channel inside its span, span in RTL range + >=100 kHz", _lp_ok)
+    check("lora: LoRaWAN EU868 lists the three mandatory uplinks",
+          all(any(abs(c["freq_hz"] - f) < 1000 for c in lp["lorawan-eu868"]["channels"])
+              for f in (868_100_000, 868_300_000, 868_500_000)))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
