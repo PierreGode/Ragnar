@@ -280,3 +280,9 @@ ups_config.json
 
 # Environment or system logs
 *.log
+
+# Self-signed TLS material (generated at runtime — never commit private keys)
+certs/
+*.key
+*.crt
+*.pem
