@@ -592,13 +592,10 @@ install_dependencies() {
     optional_packages=(
         "libatlas-base-dev"
         "hackrf"
-        # SDR sweep tools for the RF Waterfall (network_diagnostics.py):
-        # hackrf (above) → hackrf_sweep for the 2.4/5/6 GHz Wi-Fi bands;
-        # rtl-sdr → rtl_power for the 433/868/915 MHz sub-GHz ISM sweep;
-        # rtl-433 → ISM device decoder. All optional — a missing one just
-        # leaves that radio's panel synthetic/idle until it's plugged in.
-        "rtl-sdr"
-        "rtl-433"
+        # hackrf → hackrf_sweep for the 2.4/5/6 GHz Wi-Fi bands of the RF
+        # Waterfall (network_diagnostics.py). The RTL-SDR sub-GHz tools
+        # (rtl-sdr + rtl-433) get their own self-healing install + DVB-T
+        # blacklist block later in this script, so they're not listed here.
         "nikto"
         "sqlmap"
         "whatweb"
@@ -765,6 +762,13 @@ EOF
     #   2) The RTL-SDR Blog V4 uses an R828D tuner the stock distro librtlsdr
     #      mis-tunes; it needs the RTL-SDR Blog librtlsdr fork. V3/Nooelec/
     #      generic (R820T2) dongles work with the stock driver as-is.
+    # Self-healing: ensure the rtl-sdr + rtl-433 tools are installed here too, so
+    # this one block fully enables SDR even if the optional-package pass missed.
+    if ! command -v rtl_test >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends rtl-sdr rtl-433 >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed rtl-sdr + rtl-433 (RTL-SDR sub-GHz / ISM)" \
+            || log "WARNING" "Could not install rtl-sdr/rtl-433 - RTL-SDR features stay disabled until they're present"
+    fi
     if command -v rtl_test >/dev/null 2>&1 || dpkg -s rtl-sdr >/dev/null 2>&1; then
         cat > /etc/modprobe.d/blacklist-rtl-sdr.conf << 'EOF'
 # Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /
@@ -778,6 +782,8 @@ EOF
         # Unload it now if bound, so a plugged-in dongle works without a reboot.
         rmmod dvb_usb_rtl28xxu 2>/dev/null || true
         log "SUCCESS" "Blacklisted DVB-T kernel driver so RTL-SDR dongles are usable"
+        command -v rtl_test >/dev/null 2>&1 \
+            && log "SUCCESS" "RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
         log "INFO" "RTL-SDR ready (Blog V3 / Nooelec / RTL-SDR.com / generic). The RTL-SDR Blog V4 (R828D tuner) additionally needs the RTL-SDR Blog librtlsdr fork - see docs/sdr-subghz.md"
     fi
 
