@@ -224,6 +224,22 @@ function bits, and alphanumeric/numeric text, live.
   (patient data, security callouts). Decode third-party traffic only where
   lawful; this is receive-only.
 
+## ACARS datalink (on the ADS-B radar)
+
+The ADS-B radar page has an **✉ ACARS datalink** panel. ACARS is the VHF text
+system airliners use for ops — position reports, OOOI (out/off/on/in) times,
+weather, load sheets, and free-text crew↔ops messages — transmitted in the clear
+around **131 MHz**. `acars.py` drives `acarsdec` and shows each message's tail,
+flight, label (+ its meaning), text, and frequency/level. Messages are matched to
+the radar contacts by tail/flight and flagged **● on radar**.
+
+- **One dongle** — ACARS (131 MHz) and the 1090 MHz radar can't run at once, so
+  starting ACARS pauses the radar (and vice-versa). The panel has its own
+  Start/Stop.
+- **`acarsdec`** isn't in apt, so the installer/updater build it from source
+  (`scripts/install_acarsdec.sh`); if missing, the panel shows an **⬇ Install
+  acarsdec** button. Receive-only.
+
 ## API
 
 | Route | Purpose |
@@ -248,6 +264,8 @@ function bits, and alphanumeric/numeric text, live.
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
 | `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state + decoded POCSAG/FLEX messages |
 | `POST /api/net/pager/start` `{freq_hz}` · `/stop` · `/install` | Start/stop pager decode on a channel; install multimon-ng |
+| `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
+| `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI
