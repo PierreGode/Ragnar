@@ -5231,7 +5231,7 @@ def _collect_pwnagotchi_discovery_summary() -> dict:
     """Parse Pwnagotchi handshake/discovery files into grouped network data."""
     global _pwn_discovery_cache
 
-    handshake_dirs = ['/root/handshakes', '/home/pi/handshakes']
+    handshake_dirs = ['/etc/pwnagotchi/handshakes', '/root/handshakes', '/home/pi/handshakes']
 
     current_mtimes: Dict[str, float] = {}
     for d in handshake_dirs:
@@ -14229,7 +14229,7 @@ def download_pwnagotchi_file():
         if not filename or '/' in filename or '\\' in filename or '..' in filename:
             return jsonify({'error': 'Invalid filename'}), 400
 
-        allowed_dirs = ['/root/handshakes', '/home/pi/handshakes']
+        allowed_dirs = ['/etc/pwnagotchi/handshakes', '/root/handshakes', '/home/pi/handshakes']
         for d in allowed_dirs:
             candidate = os.path.join(d, filename)
             if os.path.isfile(candidate):
