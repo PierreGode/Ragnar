@@ -28,10 +28,25 @@ probe instead of touching the bus.
 
 ## Hardware
 
-Any **RTL2832U**-based dongle (RTL-SDR Blog V3/V4, generic R820T2/R860). The
-dongle draws real USB current — a **powered USB hub** is recommended on the Pi
-(see the undervoltage note in the HackRF section). Leaving the tab, or switching
-modes, stops the capture and frees the dongle.
+Any **RTL2832U**-based dongle works — Ragnar shells out to the standard
+`rtl_power` / `rtl_433` / `rtl_test`, so it's brand-agnostic. Tested/supported
+families, with what Ragnar shows for each:
+
+| Dongle | Tuner | Ragnar shows | Notes |
+|---|---|---|---|
+| **RTL-SDR Blog V3** (RTL-SDR.com) | R820T2 | `RTL-SDR Blog V3` | TCXO, HF direct-sampling, software bias-tee. Works with the stock driver. |
+| **RTL-SDR Blog V4** (RTL-SDR.com) | **R828D** | `RTL-SDR Blog V4` ⚠ | **Needs the RTL-SDR Blog librtlsdr fork** — the stock distro driver mis-tunes the R828D (see below). |
+| **Nooelec NESDR** (SMArt / Nano / Mini 2+) | R820T2 | `Nooelec NESDR …` | TCXO models recommended. Works with the stock driver. |
+| **Generic RTL2832U** (R820T / R820T2 / R860) | R820T/T2 | `RTL-SDR (R820T2)` | Any no-name stick. Works with the stock driver. |
+
+Ragnar identifies the dongle from its USB product string and tuner chip
+(`rtl_sdr.py` → `identify_model`). When a vendor flashed an EEPROM string
+("Blog V4", "NESDR SMArt", …) that name is used verbatim; otherwise the tuner
+chip decides (an **R828D** tuner is reported as a Blog V4).
+
+The dongle draws real USB current — a **powered USB hub** is recommended on the
+Pi (see the undervoltage note in the HackRF section). Leaving the tab, or
+switching modes, stops the capture and frees the dongle.
 
 **The tab's buttons stay greyed until Ragnar detects a dongle.** It polls
 `/api/net/rtl/status` and un-greys once `rtl_test -t` answers.
@@ -42,8 +57,31 @@ Install the tools (done by `install_ragnar.sh`, ensured by `update_ragnar.sh`):
 sudo apt install rtl-sdr rtl-433
 ```
 
-If the dongle isn't found, blacklist the DVB-T kernel driver that otherwise
-grabs it (`dvb_usb_rtl28xxu`), replug, and confirm with `rtl_test -t`.
+The installer/updater also **blacklists the DVB-T kernel driver**
+(`dvb_usb_rtl28xxu`, via `/etc/modprobe.d/blacklist-rtl-sdr.conf`) that would
+otherwise grab the dongle before `rtl_*` can, and unloads it on the spot so a
+plugged-in stick works without a reboot. If you set one up by hand: blacklist
+that module, replug, and confirm with `rtl_test -t`.
+
+### RTL-SDR Blog V4 (R828D) driver
+
+The V4 swapped the R820T2 tuner for an **R828D**, which the *stock* Debian /
+Raspberry Pi OS `librtlsdr` does not tune correctly — the sweep appears but lands
+on the wrong frequencies. The V4 needs the **RTL-SDR Blog fork** of `librtlsdr`.
+Ragnar detects the R828D tuner and flags it in the SDR tab ("⚠ needs Blog
+driver"). To install the fork:
+
+```bash
+sudo apt purge -y ^librtlsdr        # remove the stock lib
+sudo apt install -y libusb-1.0-0-dev git cmake pkg-config
+git clone https://github.com/rtlsdrblog/rtl-sdr-blog
+cd rtl-sdr-blog && mkdir build && cd build
+cmake ../ -DINSTALL_UDEV_RULES=ON && make -j"$(nproc)"
+sudo make install && sudo ldconfig
+```
+
+The V3, Nooelec and generic (R820T2) dongles need none of this — they work with
+the stock driver as soon as the DVB blacklist is in place.
 
 ## API
 

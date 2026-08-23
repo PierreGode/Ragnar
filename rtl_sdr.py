@@ -109,6 +109,57 @@ def parse_rtl_test(text):
     return info
 
 
+# Known RTL-SDR families we explicitly recognise (RTL-SDR Blog V3/V4,
+# Nooelec NESDR, RTL-SDR.com, and any generic RTL2832U). rtl_test only exposes
+# the USB product string and the tuner chip, so identity is best-effort: the
+# EEPROM product string ("Blog V4", "NESDR SMArt", …) is authoritative when a
+# vendor flashed one, otherwise we fall back to the tuner chip.
+_TUNER_FAMILIES = ("R828D", "R820T2", "R820T", "E4000", "FC0013", "FC0012",
+                   "FC2580", "R828")
+
+
+def identify_model(device, tuner):
+    """Best-effort friendly name for an RTL-SDR dongle (pure).
+
+    Returns ``{"model_name", "tuner_family", "needs_blog_driver", "note"}``.
+    ``needs_blog_driver`` flags the RTL-SDR Blog V4 (R828D tuner), which only
+    tunes correctly with the RTL-SDR Blog fork of librtlsdr — the stock distro
+    driver silently mis-tunes it.
+    """
+    dev = (device or "").strip()
+    devl = dev.lower()
+    tun = (tuner or "").upper()
+    fam = next((f for f in _TUNER_FAMILIES if f in tun), (tuner or "").strip())
+
+    def out(name, family, blog=False, note=""):
+        return {"model_name": name, "tuner_family": family,
+                "needs_blog_driver": blog, "note": note}
+
+    # 1) EEPROM product strings a vendor deliberately flashed win outright.
+    if "blog v4" in devl or ("rtlsdrblog" in devl and "v4" in devl):
+        return out("RTL-SDR Blog V4", "R828D", True,
+                   "R828D tuner — needs the RTL-SDR Blog librtlsdr fork")
+    if "blog v3" in devl:
+        return out("RTL-SDR Blog V3", "R820T2", False,
+                   "R820T2 with TCXO + HF direct sampling + bias-tee")
+    if "nesdr" in devl or "nooelec" in devl:
+        return out(dev or "Nooelec NESDR", fam, False, "Nooelec NESDR series")
+    # 2) Tuner chip fallback (generic / RTL-SDR.com without flashed EEPROM).
+    if "R828D" in tun:
+        # R828D almost always means a Blog V4 in the RTL-SDR world.
+        return out("RTL-SDR Blog V4 (R828D)", "R828D", True,
+                   "R828D tuner — needs the RTL-SDR Blog librtlsdr fork")
+    if "R820T2" in tun:
+        return out("RTL-SDR (R820T2)", "R820T2", False, "")
+    if "R820T" in tun:
+        return out("RTL-SDR (R820T)", "R820T", False, "")
+    if fam in _TUNER_FAMILIES:
+        return out("RTL-SDR (%s)" % fam, fam, False, "")
+    if dev:
+        return out(dev, fam, False, "")
+    return out("RTL-SDR", fam, False, "")
+
+
 def detect():
     """Report RTL-SDR availability so the UI can gate the tools.
 
@@ -142,8 +193,11 @@ def detect():
                 "error": "no RTL-SDR detected — plug a dongle in (a powered USB "
                          "hub is recommended on the Pi)"}
     info = parse_rtl_test(blob)
+    model = identify_model(info["device"], info["tuner"])
     return {"available": True, "tools_installed": True, "device_present": True,
             "tools": tools, "device": info["device"], "tuner": info["tuner"],
+            "model_name": model["model_name"], "tuner_family": model["tuner_family"],
+            "needs_blog_driver": model["needs_blog_driver"], "model_note": model["note"],
             "bands": sorted(RTL_BANDS.keys()), "ism_bands": sorted(ISM_FREQS.keys())}
 
 
@@ -631,6 +685,31 @@ def selftest():
 
     def check(name, ok, detail=""):
         results.append({"name": name, "pass": bool(ok), "detail": detail})
+
+    # --- rtl_test parse + dongle identification (Blog V3/V4, Nooelec, generic) ---
+    ti = parse_rtl_test("Found 1 device(s):\n  0:  Realtek, RTL2838UHIDIR, SN: 00000001\n\n"
+                        "Using device 0: Generic RTL2832U OEM\nFound Rafael Micro R820T tuner\n")
+    check("detect: rtl_test device+tuner parsed",
+          ti["device"] == "Realtek, RTL2838UHIDIR, SN: 00000001" and ti["tuner"] == "Rafael Micro R820T",
+          str(ti))
+    v4 = identify_model("Realtek, RTL2832U, SN: 00000001", "Rafael Micro R828D")
+    check("id: R828D tuner -> Blog V4 + needs blog driver",
+          v4["model_name"].startswith("RTL-SDR Blog V4") and v4["needs_blog_driver"] is True
+          and v4["tuner_family"] == "R828D", str(v4))
+    v4e = identify_model("RTLSDRBlog, Blog V4, SN: 00000001", "Rafael Micro R828D")
+    check("id: 'Blog V4' EEPROM string honored",
+          v4e["model_name"] == "RTL-SDR Blog V4", str(v4e))
+    v3 = identify_model("RTLSDRBlog, Blog V3, SN: 00000001", "Rafael Micro R820T2")
+    check("id: 'Blog V3' EEPROM string honored, no blog driver needed",
+          v3["model_name"] == "RTL-SDR Blog V3" and v3["needs_blog_driver"] is False, str(v3))
+    noo = identify_model("Nooelec, NESDR SMArt, SN: 00000001", "Rafael Micro R820T2")
+    check("id: Nooelec NESDR recognized",
+          "NESDR" in noo["model_name"] and noo["needs_blog_driver"] is False, str(noo))
+    gen = identify_model("Generic RTL2832U OEM", "Rafael Micro R820T")
+    check("id: generic R820T falls back to tuner name",
+          gen["model_name"] == "RTL-SDR (R820T)" and gen["needs_blog_driver"] is False, str(gen))
+    check("id: empty strings never crash",
+          identify_model(None, None)["model_name"] == "RTL-SDR")
 
     # --- rtl_power row parser ---
     row = "2024-01-01, 12:00:00, 433050000, 434790000, 3625.00, 100, -40.1, -55.2, -33.0"

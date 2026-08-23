@@ -38,8 +38,11 @@ function rtlRefreshStatus() {
         const el = document.getElementById('rtl-detect');
         if (el) {
             if (det.available) {
-                const who = det.tuner ? (det.tuner + ' tuner') : (det.device || 'RTL-SDR');
-                el.innerHTML = '<span class="text-emerald-400">●</span> ' + rtlEsc(who) + ' ready';
+                const who = det.model_name || (det.tuner ? (det.tuner + ' tuner') : (det.device || 'RTL-SDR'));
+                const warn = det.needs_blog_driver
+                    ? ' <span class="text-amber-400" title="The RTL-SDR Blog V4 (R828D tuner) only tunes correctly with the RTL-SDR Blog fork of librtlsdr — install it or the sweep will mis-tune.">⚠ needs Blog driver</span>'
+                    : '';
+                el.innerHTML = '<span class="text-emerald-400">●</span> ' + rtlEsc(who) + ' ready' + warn;
             } else {
                 el.innerHTML = '<span class="text-slate-500">○</span> ' + rtlEsc(det.error || 'No RTL-SDR detected');
             }
