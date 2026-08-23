@@ -272,16 +272,18 @@ EOF
     rmmod dvb_usb_rtl28xxu 2>/dev/null || true
     command -v rtl_test >/dev/null 2>&1 \
         && echo -e "  ${GREEN}✓${NC} RTL-SDR tools ready (rtl_test / rtl_power / rtl_433)"
-    # dump1090 powers the ADS-B radar (1090 MHz aircraft). Best-effort.
+    # dump1090 powers the ADS-B radar (1090 MHz aircraft). Not in standard apt
+    # repos, so the helper tries apt then builds from source (only runs when it's
+    # actually missing, so it's a one-time cost). Best-effort.
     if ! command -v dump1090-fa >/dev/null 2>&1 && ! command -v dump1090-mutability >/dev/null 2>&1 && ! command -v dump1090 >/dev/null 2>&1; then
-        for _d in dump1090-fa dump1090-mutability dump1090; do
-            if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$_d" >/dev/null 2>&1; then
-                echo -e "  ${GREEN}✓${NC} Installed $_d (ADS-B radar, 1090 MHz)"; break
-            fi
-        done
+        if [ -x "$ragnar_PATH/scripts/install_dump1090.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_dump1090.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed dump1090 (ADS-B radar, 1090 MHz)"
+        fi
     fi
     # meshtastic Python package for the Mesh Nodes page (USB companion node).
     if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
+        command -v pip3 >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-pip >/dev/null 2>&1
         if pip3 install --break-system-packages meshtastic >/dev/null 2>&1 || pip3 install meshtastic >/dev/null 2>&1; then
             echo -e "  ${GREEN}✓${NC} Installed meshtastic (Mesh Nodes companion)"
         fi

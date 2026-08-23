@@ -333,9 +333,17 @@ def install():
     if _have_meshtastic():
         return {"ok": True, "already": True, "detect": detect()}
     out = ""
+    # Ensure pip3 exists (fresh Pi OS images sometimes ship without it).
+    if _run(["pip3", "--version"], timeout=10)[0] == 127:
+        env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        try:
+            subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", "python3-pip"],
+                           capture_output=True, text=True, timeout=300, check=False, env=env)
+        except Exception:
+            pass
     for args in (["pip3", "install", "--break-system-packages", "meshtastic"],
                  ["pip3", "install", "meshtastic"]):
-        rc, o, e = _run(args, timeout=420)
+        rc, o, e = _run(args, timeout=600)
         out = (o or "") + (e or "")
         if rc == 0 and _have_meshtastic():
             return {"ok": True, "detect": detect(),
@@ -343,7 +351,7 @@ def install():
     return {"ok": _have_meshtastic(), "detect": detect(),
             "output": "\n".join((out or "").strip().splitlines()[-10:]),
             "error": None if _have_meshtastic()
-            else "pip could not install meshtastic — check network/pip, or install on the host"}
+            else "pip could not install meshtastic — check network/pip3, or run: pip3 install meshtastic"}
 
 
 # --------------------------------------------------------------------------

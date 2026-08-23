@@ -524,43 +524,35 @@ def aircraft():
 def install():
     """One-click install of dump1090 for the radar's 'not installed' state.
 
-    Tries the common package names (dump1090-fa / dump1090-mutability / dump1090)
-    as the service user (root on Ragnar). Fixed package set only. Returns the
-    fresh detect() so the UI can flip to ready.
+    dump1090-fa lives only in FlightAware's apt repo and dump1090-mutability was
+    dropped after Debian buster, so a plain ``apt install`` usually reports "can't
+    find the package". We delegate to scripts/install_dump1090.sh, which tries apt
+    first and then BUILDS FlightAware's dump1090 from source (self-contained, no
+    third-party repo). Runs as the service user (root on Ragnar). This can take a
+    couple of minutes on first build.
     """
     if _dump_bin():
         return {"ok": True, "already": True, "detect": detect()}
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "scripts", "install_dump1090.sh")
+    if not os.path.exists(script):
+        return {"ok": False, "error": "install_dump1090.sh missing (update Ragnar)",
+                "detect": detect()}
     env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-    steps = []
-    out = ""
-    ok = False
-    for pkg in _DUMP_CANDIDATES:
-        try:
-            p = subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", pkg],
-                               capture_output=True, text=True, timeout=420, check=False, env=env)
-            out = (p.stdout or "") + (p.stderr or "")
-        except FileNotFoundError:
-            return {"ok": False, "error": "apt-get not found", "detect": detect()}
-        except subprocess.TimeoutExpired:
-            steps.append("%s: timed out" % pkg)
-            continue
-        if p.returncode == 0 and _dump_bin():
-            steps.append("installed " + pkg)
-            ok = True
-            break
-        if "Unable to locate package" in out and not any("update" in s for s in steps):
-            try:
-                subprocess.run(["apt-get", "update"], capture_output=True, text=True,
-                               timeout=180, check=False, env=env)
-                steps.append("apt update")
-            except Exception:
-                pass
-        steps.append("%s: not available" % pkg)
-    ok = ok or (_dump_bin() is not None)
-    tail = "\n".join((out or "").strip().splitlines()[-12:])
-    return {"ok": ok, "steps": steps, "output": tail, "detect": detect(),
-            "error": None if ok else ("no dump1090 package available in this apt suite — "
-                                      "install dump1090-fa (FlightAware repo) or dump1090-mutability")}
+    try:
+        p = subprocess.run(["bash", script], capture_output=True, text=True,
+                           timeout=900, check=False, env=env)
+        out = (p.stdout or "") + (p.stderr or "")
+    except FileNotFoundError:
+        return {"ok": False, "error": "bash not found", "detect": detect()}
+    except subprocess.TimeoutExpired:
+        return {"ok": _dump_bin() is not None, "error": "install timed out (source build is slow — retry)",
+                "detect": detect()}
+    ok = _dump_bin() is not None
+    tail = "\n".join((out or "").strip().splitlines()[-14:])
+    return {"ok": ok, "output": tail, "detect": detect(),
+            "error": None if ok else ("could not install dump1090 — apt has no package and the "
+                                      "source build failed (needs internet + build tools). See output.")}
 
 
 # --------------------------------------------------------------------------

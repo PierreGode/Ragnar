@@ -269,7 +269,7 @@
     veilInstall.style.display=canInstall?'inline-block':'none';}
   function hideVeil(){veil.classList.remove('show');}
   veilInstall.addEventListener('click',function(){
-    veilInstall.textContent='Installing… (up to a minute)'; veilInstall.disabled=true;
+    veilInstall.textContent='Installing… (builds from source, ~1-3 min — don\'t close)'; veilInstall.disabled=true;
     fetch('/api/net/adsb/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
       veilInstall.textContent='⬇ Install dump1090'; veilInstall.disabled=false;
       if(res&&res.ok){ hideVeil(); checkStatus(); }
