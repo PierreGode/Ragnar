@@ -2083,17 +2083,47 @@ function wifiSdrCheck() {
         const hkline = hk && hk.detect
             ? `<div class="mt-2 text-xs" style="color:#9ca3af">HackRF (Wi-Fi bands): ${hk.detect.available ? '<span style="color:#34d399">detected</span>' : escapeHtml(String(hk.detect.error || 'not detected'))}</div>`
             : '';
+        // One-click fix button when the SDR check says the tools are missing or
+        // the DVB-T driver is holding the dongle (both fixable from the server).
+        const actLabel = (d.tools_installed === false)
+            ? '⬇ Install RTL-SDR tools' : '🔓 Free the dongle (unload DVB driver)';
+        const actBtn = d.can_install
+            ? `<button type="button" onclick="wifiSdrInstall()" style="margin-top:.6rem;background:#4f46e5;color:#fff;border:0;border-radius:6px;padding:.45rem .8rem;font-weight:600;cursor:pointer">${actLabel}</button>`
+            : '';
         box.innerHTML =
             `<div style="display:flex;align-items:flex-start;gap:.5rem">
                <span style="font-size:1.15rem;line-height:1">${icon}</span>
                <div style="flex:1;min-width:0">
                  <div class="font-semibold" style="color:${col}">${escapeHtml(String(d.summary || 'SDR check'))}</div>
                  ${fixes ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${fixes}</ul>` : ''}
+                 ${actBtn}
                  <div class="mt-2 text-xs" style="color:#9ca3af">${facts}</div>
                  ${hkline}
                </div>
                <button type="button" onclick="document.getElementById('wifi-sdr-diag').classList.add('hidden')" class="text-xs" style="color:#6b7280" title="Dismiss">✕</button>
              </div>`;
+    });
+}
+
+// One-click install/fix from the SDR check panel: apt-installs rtl-sdr+rtl-433
+// and unloads/blacklists the DVB-T driver on the server, then re-runs the check.
+function wifiSdrInstall() {
+    const box = document.getElementById('wifi-sdr-diag');
+    if (!box) return;
+    box.classList.remove('hidden');
+    box.innerHTML = '<span style="color:#fbbf24">⏳ Installing RTL-SDR tools and freeing the device… this can take a minute — don\'t close the page.</span>';
+    fetch('/api/net/rtl/install', { method: 'POST' }).then(r => r.json()).then(res => {
+        if (res && res.ok) { wifiSdrCheck(); return; }   // success → show the fresh (green) state
+        const steps = ((res && res.steps) || []).map(s =>
+            `<li style="display:flex;gap:.4rem"><span style="color:#f87171">›</span><span style="color:#e5e7eb">${escapeHtml(String(s))}</span></li>`).join('');
+        box.innerHTML =
+            `<div class="font-semibold" style="color:#f87171">Install didn't complete — ${escapeHtml(String((res && res.error) || 'unknown error'))}</div>`
+            + (steps ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${steps}</ul>` : '')
+            + (res && res.output ? `<pre class="font-mono text-xs" style="color:#9ca3af;white-space:pre-wrap;overflow-x:auto;margin-top:.5rem">${escapeHtml(String(res.output))}</pre>` : '')
+            + `<div class="mt-2 text-xs" style="color:#9ca3af">You can also run it on the host: <code class="font-mono" style="color:#e5e7eb">sudo apt install -y rtl-sdr rtl-433</code></div>`
+            + `<button type="button" onclick="wifiSdrCheck()" style="margin-top:.5rem;background:#334155;color:#e5e7eb;border:0;border-radius:6px;padding:.35rem .7rem;cursor:pointer" class="text-xs">↻ Re-run check</button>`;
+    }).catch(() => {
+        box.innerHTML = '<span style="color:#f87171">Install request failed — the endpoint did not respond. Try again, or install on the host: <code class="font-mono">sudo apt install -y rtl-sdr rtl-433</code></span>';
     });
 }
 

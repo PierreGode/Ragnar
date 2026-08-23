@@ -378,7 +378,93 @@ def diagnose():
     facts["state"] = state
     facts["summary"] = summary
     facts["fix"] = fix
+    # Whether the one-click "Install" button can help from here.
+    facts["can_install"] = state in ("tools_missing", "dvb_held")
     return facts
+
+
+_BLACKLIST_PATH = "/etc/modprobe.d/blacklist-rtl-sdr.conf"
+_BLACKLIST_BODY = (
+    "# Ragnar: keep the DVB-T kernel drivers off RTL-SDR dongles so rtl_power /\n"
+    "# rtl_433 / rtl_test can claim them (RTL-SDR Blog V3/V4, Nooelec NESDR, generic).\n"
+    "blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\nblacklist rtl2838\n"
+)
+
+
+def _write_blacklist():
+    try:
+        with open(_BLACKLIST_PATH, "w") as fh:
+            fh.write(_BLACKLIST_BODY)
+        os.chmod(_BLACKLIST_PATH, 0o644)
+        return True
+    except OSError:
+        return False
+
+
+def _unload_dvb():
+    """Unload the DVB-T driver so a plugged-in dongle frees up now. Best-effort."""
+    for cmd in (["modprobe", "-r", "dvb_usb_rtl28xxu"],
+                ["/sbin/modprobe", "-r", "dvb_usb_rtl28xxu"],
+                ["rmmod", "dvb_usb_rtl28xxu"], ["/sbin/rmmod", "dvb_usb_rtl28xxu"]):
+        rc = _run(cmd, timeout=10)[0]
+        if rc != 127:
+            return rc == 0
+    return False
+
+
+def install_tools():
+    """One-click 'Install' for the UI: install rtl-sdr + rtl-433 and free the
+    dongle from the DVB-T driver. Runs apt as the web service's user (root on
+    Ragnar) and installs a FIXED package set only — no caller-supplied names.
+
+    Returns {ok, already, steps[], error, output, diagnose}. Safe to re-run.
+    """
+    global _detect_cache
+    steps = []
+    already = _have(_RTL_TEST) and _have(_RTL_433)
+    env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+
+    def _apt(args, timeout=420):
+        try:
+            p = subprocess.run(["apt-get"] + args, capture_output=True, text=True,
+                               timeout=timeout, check=False, env=env)
+            return p.returncode, (p.stdout or "") + (p.stderr or "")
+        except FileNotFoundError:
+            return 127, "apt-get not found"
+        except subprocess.TimeoutExpired:
+            return 124, "apt timed out"
+        except Exception as exc:  # pragma: no cover - defensive
+            return 1, str(exc)
+
+    out = ""
+    if not already:
+        rc, out = _apt(["install", "-y", "--no-install-recommends", "rtl-sdr", "rtl-433"])
+        if rc != 0 and ("Unable to locate package" in out
+                        or "no installation candidate" in out):
+            steps.append("Package index stale — running apt-get update…")
+            _apt(["update"], timeout=240)
+            rc, out = _apt(["install", "-y", "--no-install-recommends", "rtl-sdr", "rtl-433"])
+        steps.append("Installed rtl-sdr + rtl-433" if rc == 0
+                     else "apt install failed (rc=%s)" % rc)
+    else:
+        steps.append("rtl-sdr + rtl-433 already installed")
+
+    if _write_blacklist():
+        steps.append("Blacklisted the DVB-T kernel driver (persists across reboots)")
+    steps.append("Freed the dongle from the DVB-T driver"
+                 if _unload_dvb() else "DVB-T driver was not loaded")
+
+    _detect_cache = None                      # force a fresh probe next status()
+    tools_ok = _have(_RTL_TEST) and _have(_RTL_433)
+    diag = diagnose()
+    ok = tools_ok and diag.get("state") in ("ok", "no_usb")
+    tail = "\n".join((out or "").strip().splitlines()[-14:])
+    return {
+        "ok": ok, "already": already, "steps": steps,
+        "error": None if tools_ok else ("apt could not install the tools — "
+                                        "check network/apt, or install on the host"),
+        "output": tail, "diagnose": diag,
+    }
 
 
 # --------------------------------------------------------------------------
