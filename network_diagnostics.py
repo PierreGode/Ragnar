@@ -47,6 +47,7 @@ import sdr_spectrum
 import rtl_sdr
 import adsb
 import meshtastic_node
+import pager
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18792,7 +18793,7 @@ def register_network_diagnostics(app, logger=None):
         label = data.get('label')
         label = str(label).strip()[:24] if label else None
         _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
-        try: adsb.stop()          # one dongle: ADS-B can't run alongside the sweep
+        try: adsb.stop(); pager.stop()   # one dongle: free it for the sweep
         except Exception: pass
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
                                            hi_hz=data.get('hi_hz'), label=label))
@@ -18861,7 +18862,7 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/adsb/start', methods=['POST'])
     def net_adsb_start():
         _log("net/adsb/start")
-        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop()   # hand the dongle to dump1090
+        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop(); pager.stop()   # hand the dongle to dump1090
         except Exception: pass
         return jsonify(adsb.start())
 
@@ -18919,6 +18920,40 @@ def register_network_diagnostics(app, logger=None):
     def net_mesh_selftest():
         return jsonify(meshtastic_node.selftest())
 
+    # POCSAG/FLEX pager decode (rtl_fm | multimon-ng). Uses the whole RTL-SDR, so
+    # starting it stops the sub-GHz sweep/decoder + ADS-B (and vice-versa).
+    @app.route('/api/net/pager/status', methods=['GET'])
+    def net_pager_status():
+        return jsonify(pager.status())
+
+    @app.route('/api/net/pager/messages', methods=['GET'])
+    def net_pager_messages():
+        return jsonify(pager.messages(since=request.args.get('since', 0)))
+
+    @app.route('/api/net/pager/start', methods=['POST'])
+    def net_pager_start():
+        data = request.get_json(silent=True) or {}
+        _log(f"net/pager/start freq={data.get('freq_hz')}")
+        try:
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop()
+        except Exception:
+            pass
+        return jsonify(pager.start(freq_hz=data.get('freq_hz')))
+
+    @app.route('/api/net/pager/stop', methods=['POST'])
+    def net_pager_stop():
+        _log("net/pager/stop")
+        return jsonify(pager.stop())
+
+    @app.route('/api/net/pager/install', methods=['POST'])
+    def net_pager_install():
+        _log("net/pager/install")
+        return jsonify(pager.install())
+
+    @app.route('/api/net/pager/selftest', methods=['GET'])
+    def net_pager_selftest():
+        return jsonify(pager.selftest())
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
@@ -18927,7 +18962,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
         _log(f"net/rtl/ism/start band={band}")
-        try: adsb.stop()          # one dongle: ADS-B can't run alongside the decoder
+        try: adsb.stop(); pager.stop()   # one dongle: free it for the decoder
         except Exception: pass
         return jsonify(rtl_sdr.ism_start(band=band))
 
