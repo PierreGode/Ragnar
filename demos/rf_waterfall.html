@@ -61,7 +61,7 @@
   .spacer{flex:1 1 auto}
   .clock{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em}
   .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted)}
-  .legend .grad{width:120px;height:9px;border-radius:3px;background:linear-gradient(90deg,#071a2c,#0e5f78,#22a06a,#f5b942,#fff3d6)}
+  .legend .grad{width:120px;height:9px;border-radius:3px;background:linear-gradient(90deg,#071a2c,#165a82,#2ea096,#7b8cd2,#cec4e6)}
   .stack{display:flex;flex-direction:column;gap:20px}
   .scope{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:0 18px 40px -28px rgba(0,0,0,.9)}
   .scope-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
@@ -167,7 +167,10 @@
 <script>
 (function(){
   "use strict";
-  var STOPS=[[0.00,[7,26,44]],[0.28,[14,95,120]],[0.52,[34,160,106]],[0.78,[245,185,66]],[1.00,[255,243,214]]];
+  // Aurora colormap — cool, no warm tones: navy→blue→teal→periwinkle→lavender.
+  // Kinder on the eyes than the old amber/white hot end; strong bursts glow soft
+  // violet instead of glaring yellow.
+  var STOPS=[[0.00,[7,26,44]],[0.28,[22,90,130]],[0.52,[46,160,150]],[0.78,[123,140,210]],[1.00,[206,196,230]]];
   var CEIL=-20, LUT=new Array(256);
   (function(){for(var i=0;i<256;i++){var t=i/255,a=STOPS[0],b=STOPS[STOPS.length-1];
     for(var s=0;s<STOPS.length-1;s++){if(t>=STOPS[s][0]&&t<=STOPS[s+1][0]){a=STOPS[s];b=STOPS[s+1];break;}}
