@@ -8315,25 +8315,46 @@ def wifi_config_alt():
     return send_from_directory('web', 'wifi_config.html')
 
 
-# Hidden synthetic RF Waterfall demo (no SDR hardware required).
-@app.route('/demo/rf-waterfall')
-def sdr_waterfall_demo():
-    """Serve the synthetic RF Waterfall demo — only while it's switched on.
+def _any_sdr_present():
+    """True if a HackRF or RTL-SDR is currently detected. Uses each backend's
+    status() (which reports from cache while a capture streams, so this never
+    knocks a running sweep off the USB bus). Best-effort — any probe error
+    reads as 'not present'."""
+    try:
+        import sdr_spectrum
+        if bool((sdr_spectrum.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
+    try:
+        import rtl_sdr
+        if bool((rtl_sdr.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
+    return False
 
-    The page is a self-contained synthetic spectrum (sub-GHz ISM stacked over
-    the Wi-Fi bands) so the waterfall display can be shown on a unit with no
-    SDR attached. It stays hidden by default: unless the demo is enabled this
-    route 404s, and nothing in the UI links to it. Enable/disable in the
-    background with either of:
 
-        curl -X POST http://localhost:8000/api/config \\
-             -H 'Content-Type: application/json' -d '{"sdr_demo": true}'   # persisted
-        RAGNAR_SDR_DEMO=1   (env, transient — set before the service starts)
+# RF Waterfall page — real HackRF + RTL-SDR waterfall, with a synthetic demo
+# fallback. Reached from the "RF Waterfall page" button in the WiFi Spectrum
+# Analyzer (which appears once a radio is detected), or directly.
+@app.route('/rf-waterfall')
+@app.route('/demo/rf-waterfall')  # back-compat alias
+def rf_waterfall_page():
+    """Serve the RF Waterfall page.
 
-    Login is still required: the route is not in the auth whitelist.
+    Each scope streams true RF when its radio is connected (HackRF via
+    /api/net/sdr/*, RTL-SDR via /api/net/rtl/*) and falls back to a synthetic
+    feed while the "Enable RF Waterfall demo" config toggle (``sdr_demo``) is
+    on. The page is served when the demo toggle is on, or when a radio is
+    present (so the analyzer's button always lands somewhere), otherwise it
+    404s so it stays out of sight. Env ``RAGNAR_SDR_DEMO=1`` forces it on.
+    Login is required (the route is not in the auth whitelist).
     """
     env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
-    enabled = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    enabled = (bool(shared_data.config.get('sdr_demo'))
+               or env in ('1', 'true', 'yes', 'on')
+               or _any_sdr_present())
     if not enabled:
         return ('Not Found', 404)
     return _no_store(make_response(send_from_directory('demos', 'rf_waterfall.html')))

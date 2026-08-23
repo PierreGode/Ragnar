@@ -44,6 +44,7 @@ import wifi_defense
 import report_common
 import bt_scanner
 import sdr_spectrum
+import rtl_sdr
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18760,6 +18761,43 @@ def register_network_diagnostics(app, logger=None):
     def net_sdr_selftest():
         _log("net/sdr/selftest")
         return jsonify(sdr_spectrum.selftest())
+
+    # ------------------------------------------------------------------
+    # Sub-GHz true-RF power sweep / waterfall via an RTL-SDR (rtl_sdr.py).
+    # The HackRF block above covers the 2.4/5/6 GHz Wi-Fi bands; this covers
+    # the 433/868/915 MHz ISM bands the HackRF view doesn't target. Same
+    # receive-only, frame-ring shape as the HackRF sweep, so the RF Waterfall
+    # page streams both radios through the identical consumer.
+    # ------------------------------------------------------------------
+    @app.route('/api/net/rtl/status', methods=['GET'])
+    def net_rtl_status():
+        _log("net/rtl/status")
+        return jsonify(rtl_sdr.status())
+
+    @app.route('/api/net/rtl/power/start', methods=['POST'])
+    def net_rtl_power_start():
+        data = request.get_json(silent=True) or {}
+        band = str(data.get('band') or '433').strip()
+        _log(f"net/rtl/power/start band={band}")
+        return jsonify(rtl_sdr.power_start(band=band))
+
+    @app.route('/api/net/rtl/power/stop', methods=['POST'])
+    def net_rtl_power_stop():
+        _log("net/rtl/power/stop")
+        return jsonify(rtl_sdr.power_stop())
+
+    @app.route('/api/net/rtl/power/frames', methods=['GET'])
+    def net_rtl_power_frames():
+        try:
+            since = int(request.args.get('since', 0))
+        except (TypeError, ValueError):
+            return _bad('Invalid since')
+        return jsonify(rtl_sdr.power_frames(since=since))
+
+    @app.route('/api/net/rtl/selftest', methods=['GET'])
+    def net_rtl_selftest():
+        _log("net/rtl/selftest")
+        return jsonify(rtl_sdr.selftest())
 
     # ------------------------------------------------------------------
     # Zigbee / 802.15.4 overlay via an on-demand HuginnESP sniff

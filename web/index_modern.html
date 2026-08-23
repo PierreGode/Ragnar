@@ -2504,11 +2504,16 @@
                             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4"/></svg>
                             Full screen
                         </button>
+                        <a href="/rf-waterfall" target="_blank" rel="noopener" id="wifi-rfwf-btn" title="Open the full-screen RF Waterfall page — true-RF sub-GHz (RTL-SDR) + Wi-Fi bands (HackRF), stacked" class="hidden items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-semibold">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+                            RF Waterfall page
+                        </a>
                         <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifi-auto" class="accent-Ragnar-600"> Auto-refresh (8s)</label>
                         <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Overlay Bluetooth / BLE device activity on the 2.4 GHz band (device-discovery estimate, not measured RF)"><input type="checkbox" id="wifi-bt" class="accent-sky-500"> <span class="text-sky-400">📶 Bluetooth</span></label>
                         <span id="wifi-bt-status" class="text-xs text-sky-500/70"></span>
                         <label id="wifi-zb-label" class="flex items-center gap-2 text-xs opacity-40 cursor-not-allowed select-none" title="Connect a HuginnESP (ESP32-C5) companion to sniff Zigbee / 802.15.4"><input type="checkbox" id="wifi-zb" disabled class="accent-amber-500"> <span class="text-amber-400">🐝 Zigbee</span></label>
                         <span id="wifi-zb-status" class="text-xs text-amber-500/70"></span>
+                        <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Keep the RF Waterfall page reachable even with no SDR connected — it shows a synthetic feed, and each panel flips to true RF automatically when its radio (HackRF / RTL-SDR) is plugged in"><input type="checkbox" id="wifi-rfwf-demo" class="accent-indigo-500"> <span class="text-indigo-300">🌊 RF Waterfall demo</span></label>
                         <span id="wifi-status" class="text-xs text-gray-500 ml-auto"></span>
                     </div>
                 </div>
@@ -8180,7 +8185,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260822-ssh-telnet-watchtower"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260823-rf-waterfall-page"></script>
 
 
 
