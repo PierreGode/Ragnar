@@ -220,12 +220,14 @@ for _btpkg in python3-dbus python3-gi bluez; do
     fi
 done
 # Optional tooling. Each backs one feature that resolves the binary at runtime
-# and disables itself when it is missing (hackrf → the true-RF Waterfall view in
-# sdr_spectrum.py; the rest → the recon/vuln scanners, which server_capabilities
+# and disables itself when it is missing (hackrf → the HackRF 2.4/5/6 GHz half of
+# the RF Waterfall in sdr_spectrum.py; rtl-sdr/rtl-433 → the RTL-SDR sub-GHz half
+# in rtl_sdr.py; the rest → the recon/vuln scanners, which server_capabilities
 # already marks 'critical': False). Not every suite ships all of them — ffuf only
 # entered Debian in trixie — so a miss is reported and skipped, never fatal.
 _missing_optional=()
-for _opt in hackrf:"true-RF Waterfall" nikto:"vuln scanner" sqlmap:"vuln scanner" \
+for _opt in hackrf:"RF Waterfall (Wi-Fi bands)" rtl-sdr:"RF Waterfall (sub-GHz)" \
+            rtl-433:"ISM decoder" nikto:"vuln scanner" sqlmap:"vuln scanner" \
             whatweb:"vuln scanner" ffuf:"content discovery"; do
     _pkg="${_opt%%:*}"; _why="${_opt#*:}"
     dpkg -s "$_pkg" >/dev/null 2>&1 && continue

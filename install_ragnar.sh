@@ -592,6 +592,13 @@ install_dependencies() {
     optional_packages=(
         "libatlas-base-dev"
         "hackrf"
+        # SDR sweep tools for the RF Waterfall (network_diagnostics.py):
+        # hackrf (above) → hackrf_sweep for the 2.4/5/6 GHz Wi-Fi bands;
+        # rtl-sdr → rtl_power for the 433/868/915 MHz sub-GHz ISM sweep;
+        # rtl-433 → ISM device decoder. All optional — a missing one just
+        # leaves that radio's panel synthetic/idle until it's plugged in.
+        "rtl-sdr"
+        "rtl-433"
         "nikto"
         "sqlmap"
         "whatweb"
