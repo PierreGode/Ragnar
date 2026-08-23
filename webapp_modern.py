@@ -8364,19 +8364,23 @@ def rf_waterfall_page():
 def adsb_radar_page():
     """Serve the ADS-B radar screen (live aircraft at 1090 MHz via dump1090).
 
-    Served when dump1090 + an RTL-SDR are present, or when the RF Waterfall demo
-    toggle (``sdr_demo`` / ``RAGNAR_SDR_DEMO``) is on (the page then shows a
-    synthetic sky so it's explorable with no hardware). 404s otherwise so it
-    stays out of sight. Login required (not in the auth whitelist).
+    Served when any SDR is present (so the page can offer its Install-dump1090
+    button even before dump1090 exists), when dump1090 itself is ready, or when
+    the RF Waterfall demo toggle (``sdr_demo`` / ``RAGNAR_SDR_DEMO``) is on (the
+    page then shows a synthetic sky). 404s otherwise. Login required.
     """
     env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
     demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
-    present = False
-    try:
-        import adsb
-        present = bool(adsb.detect().get('available'))
-    except Exception:
-        present = False
+    # Serve whenever an SDR is present (even without dump1090) so the page can
+    # show its "Install dump1090" button — gating on dump1090 alone made the page
+    # 404 before the user could reach that button. Demo always serves too.
+    present = _any_sdr_present()
+    if not present:
+        try:
+            import adsb
+            present = bool(adsb.detect().get('available'))
+        except Exception:
+            present = False
     if not (demo or present):
         return ('Not Found', 404)
     return _no_store(make_response(send_from_directory('demos', 'adsb_radar.html')))
@@ -8386,19 +8390,25 @@ def adsb_radar_page():
 def mesh_nodes_page():
     """Serve the Meshtastic mesh map/node list (real enumeration via a USB node).
 
-    Served when a Meshtastic device is usable, or when the RF Waterfall demo
-    toggle is on (synthetic mesh so it's explorable). 404s otherwise. Login
-    required (not in the auth whitelist).
+    Served when a Meshtastic node/serial device is present (so the page can offer
+    its Install-meshtastic button even before the pip pkg exists), when any SDR is
+    present (it sits with the other SDR tools), or when the RF Waterfall demo
+    toggle is on (synthetic mesh). 404s otherwise. Login required.
     """
     env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
     demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    # Serve when a Meshtastic node OR its serial device is present (so the page
+    # can show its "Install meshtastic" button when only the pip pkg is missing),
+    # or when any SDR is present (this page sits with the other SDR tools), or in
+    # demo mode. Gating on the pip pkg alone 404'd before the install button.
     present = False
     try:
         import meshtastic_node
-        present = bool(meshtastic_node.detect().get('available'))
+        det = meshtastic_node.detect()
+        present = bool(det.get('available') or det.get('device_present'))
     except Exception:
         present = False
-    if not (demo or present):
+    if not (demo or present or _any_sdr_present()):
         return ('Not Found', 404)
     return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
 
