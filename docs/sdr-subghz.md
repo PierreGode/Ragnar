@@ -89,7 +89,14 @@ The fastest path is the **🩺 SDR check** button in the Wi-Fi Spectrum Analyzer
 (always available, even with no dongle). It calls `/api/net/rtl/diagnose`, which
 walks every layer detection depends on and prints a one-line verdict plus the
 exact fix — "no dongle on the USB bus (power/cable)", "tools not installed", or
-"DVB-T driver holding it". The manual equivalents are below.
+"DVB-T driver holding it".
+
+When the fix is server-side (tools missing, or the DVB-T driver holding the
+device), the check shows a one-click button — **⬇ Install RTL-SDR tools** /
+**🔓 Free the dongle** — that POSTs to `/api/net/rtl/install`, which apt-installs
+`rtl-sdr` + `rtl-433`, writes the DVB blacklist and unloads the DVB-T driver
+(runs as the service user), then re-runs the check. The manual equivalents are
+below.
 
 Detection runs a ladder (`rtl_sdr.py` → `detect`): `rtl_test -t` to open the
 radio, then an `lsusb` VID:PID fallback (`0bda:2838`/`2832` and common rebadges)

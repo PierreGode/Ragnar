@@ -18837,6 +18837,14 @@ def register_network_diagnostics(app, logger=None):
         _log("net/rtl/diagnose")
         return jsonify(rtl_sdr.diagnose())
 
+    # One-click fix for the SDR-check "tools missing" / "DVB driver holding it"
+    # states: apt-installs rtl-sdr + rtl-433 (fixed set) and unloads/blacklists
+    # the DVB-T driver. Runs as the service user (root); can take a minute.
+    @app.route('/api/net/rtl/install', methods=['POST'])
+    def net_rtl_install():
+        _log("net/rtl/install")
+        return jsonify(rtl_sdr.install_tools())
+
     # ------------------------------------------------------------------
     # Zigbee / 802.15.4 overlay via an on-demand HuginnESP sniff
     # (zigbee_scan.py + zigbee_overlay.py). Receive-only. The UI gates the
