@@ -542,8 +542,12 @@ class _PowerFrameBuilder:
     """Accumulate ascending rtl_power rows into fixed-width power frames.
 
     Like the HackRF frame builder but in Hz across an arbitrary range: each dB
-    bin drops into one of ``bins`` display columns (max-per-column), and a row
-    whose start frequency falls below the previous one marks a completed sweep.
+    bin drops into one of ``bins`` display columns (max-per-column). A new sweep
+    is marked when a row's start frequency is not higher than the previous one:
+    a *drop* (wide bands like 868/915 that rtl_power splits into several ascending
+    crops, wrapping back to the bottom) or a *repeat* (a narrow band like the
+    1.74 MHz 433 ISM that fits in a single crop, so every row is the same low —
+    without the repeat case that band would never finalize a frame).
     """
 
     def __init__(self, lo_hz, hi_hz, bins=_POWER_BINS):
@@ -568,7 +572,7 @@ class _PowerFrameBuilder:
     def add(self, hz_low, hz_high, hz_step, dbs):
         """Feed one parsed row; return a finished frame grid or None."""
         frame = None
-        if self._last_low is not None and hz_low < self._last_low and self._filled:
+        if self._last_low is not None and hz_low <= self._last_low and self._filled:
             frame = self.grid
             self._reset()
         self._last_low = hz_low
@@ -1044,6 +1048,16 @@ def selftest():
         check("power: frame width = display bins", len(g) == _POWER_BINS)
         check("power: quiet columns at/near floor",
               sum(1 for v in g if v <= -90) > _POWER_BINS * 0.5)
+
+    # Narrow band (433 ISM, 1.74 MHz) → rtl_power emits ONE row per sweep with a
+    # repeating hz_low. Each repeat must finalize a frame (the bug: 915/868 loaded
+    # but 433 never did because the strict < wrap check never fired).
+    fbn = _PowerFrameBuilder(lo, hi)
+    one_row = "d, t, %d, %d, %d, 100, %s" % (
+        lo, hi, (hi - lo) // 8, ", ".join(["-30.0"] * 8))
+    nframes = sum(1 for _ in range(4)
+                  if fbn.add(*parse_power_row(one_row)) is not None)
+    check("power: single-row (433) sweeps finalize frames", nframes == 3, str(nframes))
 
     # --- rtl_433 JSON parser + device keying ---
     ev = parse_rtl433_event('{"time":"2024-01-01 12:00:00","model":"Toyota-TPMS",'
