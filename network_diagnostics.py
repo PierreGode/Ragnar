@@ -18787,9 +18787,18 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_power_start():
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
-        _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')}")
+        label = data.get('label')
+        label = str(label).strip()[:24] if label else None
+        _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
-                                           hi_hz=data.get('hi_hz')))
+                                           hi_hz=data.get('hi_hz'), label=label))
+
+    # Z-Wave regional plan (span + exact channel centres per region) for the
+    # "Z-Wave Spectrum" view. rtl_433 can't decode Z-Wave, so the UI sweeps the
+    # region span (via power/start with lo_hz/hi_hz) and overlays these channels.
+    @app.route('/api/net/rtl/zwave', methods=['GET'])
+    def net_rtl_zwave():
+        return jsonify({"regions": rtl_sdr.zwave_plan()})
 
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are

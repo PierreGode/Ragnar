@@ -61,7 +61,7 @@
   .spacer{flex:1 1 auto}
   .clock{font-family:var(--mono);font-size:12px;color:var(--muted);letter-spacing:.04em}
   .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted)}
-  .legend .grad{width:120px;height:9px;border-radius:3px;background:linear-gradient(90deg,#071a2c,#0e5f78,#22a06a,#f5b942,#fff3d6)}
+  .legend .grad{width:120px;height:9px;border-radius:3px;background:linear-gradient(90deg,#071a2c,#165a82,#2ea096,#7b8cd2,#cec4e6)}
   .stack{display:flex;flex-direction:column;gap:20px}
   .scope{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;box-shadow:0 18px 40px -28px rgba(0,0,0,.9)}
   .scope-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
@@ -108,6 +108,9 @@
   .logempty{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:6px 0 10px}
   /* decode view: hide the sweep surfaces, let the device list breathe */
   .scope.decoding .fall-wrap,.scope.decoding .ruler,.scope.decoding canvas.trace,.scope.decoding .toolbar{display:none}
+  .zwavesel{display:flex;align-items:center;gap:6px}
+  .zwavesel select{font-family:var(--mono);font-size:11.5px;color:var(--cyan);background:var(--panel);border:1px solid rgba(56,189,201,.4);border-radius:6px;padding:5px 8px;cursor:pointer}
+  .zwavesel .zwtag{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-family:var(--mono)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
@@ -157,13 +160,17 @@
 
   <footer id="footer"><div id="foot-msg"></div>
     <div style="margin-top:6px"><b>Backends:</b> rtl_sdr.py (rtl_power sweep · rtl_433 decode) · sdr_spectrum.py (hackrf_sweep). Click a signal to pin a marker and retune a narrow zoom sweep there; the sub-GHz panel can switch to rtl_433 to name devices (one dongle, so Waterfall and Decode are mutually exclusive).</div>
+    <div style="margin-top:6px"><b>📡 Z-Wave Spectrum:</b> pick a region to sweep its exact Z-Wave channels and watch the mesh's bursts land on them — device chatter, retries, or a jammer parked on a channel. Z-Wave is a sub-GHz mesh that rtl_433 can't decode, so this is an energy/occupancy view of a band almost nobody scans. Receive-only.</div>
   </footer>
 </div>
 
 <script>
 (function(){
   "use strict";
-  var STOPS=[[0.00,[7,26,44]],[0.28,[14,95,120]],[0.52,[34,160,106]],[0.78,[245,185,66]],[1.00,[255,243,214]]];
+  // Aurora colormap — cool, no warm tones: navy→blue→teal→periwinkle→lavender.
+  // Kinder on the eyes than the old amber/white hot end; strong bursts glow soft
+  // violet instead of glaring yellow.
+  var STOPS=[[0.00,[7,26,44]],[0.28,[22,90,130]],[0.52,[46,160,150]],[0.78,[123,140,210]],[1.00,[206,196,230]]];
   var CEIL=-20, LUT=new Array(256);
   (function(){for(var i=0;i<256;i++){var t=i/255,a=STOPS[0],b=STOPS[STOPS.length-1];
     for(var s=0;s<STOPS.length-1;s++){if(t>=STOPS[s][0]&&t<=STOPS[s+1][0]){a=STOPS[s];b=STOPS[s+1];break;}}
@@ -199,8 +206,19 @@
       m.emit=function(row){bump(row,lo,hi,2412,9,-58+gauss()*4);bump(row,lo,hi,2437,9,-52+gauss()*5);bump(row,lo,hi,2462,9,-60+gauss()*4);
         if(Math.random()<0.4)bump(row,lo,hi,2402,0.6,-64);if(Math.random()<0.4)bump(row,lo,hi,2426,0.6,-62);if(Math.random()<0.4)bump(row,lo,hi,2480,0.6,-66);};}
     return m;}
+  // Z-Wave: narrow GFSK bursts that land on the region's fixed channels — a mesh
+  // chattering (device reports, hops, retries). Used for the no-hardware demo;
+  // with a dongle the real rtl_power sweep replaces this.
+  function zwaveModel(lo,hi,channels){
+    var chans=(channels||[]).map(function(c){return c.freq_mhz;});
+    return {lo:lo,hi:hi,floor:-112,ticks:null,zwaveChans:chans,
+      emit:function(row){
+        chans.forEach(function(f,idx){
+          if(Math.random()<(idx===0?0.55:0.32)) bump(row,lo,hi,f,0.12,-44-Math.random()*16);});
+        if(chans.length && Math.random()<0.15)
+          bump(row,lo,hi,chans[(Math.random()*chans.length)|0]+0.2,0.10,-60);}};}
 
-  var running=true, HZ=12, DEMO_ON=false;
+  var running=true, HZ=12, DEMO_ON=false, ZWAVE=null;
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function fmtF(mhz){return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(1):mhz.toFixed(2));}
   function genTicks(lo,hi){var n=6,out=[];for(var i=0;i<=n;i++)out.push(lo+(hi-lo)*i/n);return out;}
@@ -210,7 +228,7 @@
     var self=this;
     this.cfg=cfg; this.mode='idle'; this.available=false; this.board=''; this.detErr='';
     this.liveBand=cfg.defaultBand; this.synthBand=cfg.synthDefault;
-    this.zoom=null; this.marker=null; this.decoding=false;
+    this.zoom=null; this.marker=null; this.decoding=false; this.zwave=null; this.zwaveRegion=null;
     this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
     this.model=cfg.synth(cfg.synthDefault);
     this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor;
@@ -223,6 +241,7 @@
       +'<div class="scope-title"><span class="name">'+cfg.name+' <span class="tag idle scope-tag">idle</span></span><span class="dev">'+cfg.dev+'</span></div>'
       +'<div class="seg viewsel" role="group" aria-label="View"></div>'
       +'<div class="seg bandsel" role="group" aria-label="Band"></div>'
+      +'<div class="seg zwavesel hidden" role="group" aria-label="Z-Wave region"></div>'
       +'<div class="spacer"></div>'
       +'<div class="readout">'
         +'<div class="stat"><span class="k">Peak f</span><span class="v peak pk-f">&mdash;</span></div>'
@@ -257,7 +276,7 @@
     this.markEl=el.querySelector('.marker'); this.markLbl=el.querySelector('.marker .ml');
     this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d'); this.busyEl=el.querySelector('.busyv');
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
-    this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel');
+    this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel'); this.zwaveSel=el.querySelector('.zwavesel');
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
     this.fsBtn=el.querySelector('.fsbtn');
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
@@ -369,10 +388,44 @@
   // ---- band / view selection ----
   Scope.prototype.selectBand=function(bandId,synthId){
     Array.prototype.forEach.call(this.bandSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-band')===bandId?'true':'false');});
-    this.liveBand=bandId; this.synthBand=synthId||bandId; this.zoom=null; this.resetBtn.disabled=true;
+    if(this.zwaveSel) Array.prototype.forEach.call(this.zwaveSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed','false');});
+    this.liveBand=bandId; this.synthBand=synthId||bandId; this.zoom=null; this.zwave=null; this.zwaveRegion=null; this.resetBtn.disabled=true;
     if(this.decoding){ this.stopIsm(); this.startIsm(); return; }
     if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
-    else if(this.mode==='synth'){ this.model=this.cfg.synth(this.synthBand); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.resetCanvas(); }
+    else if(this.mode==='synth'){ this.model=this.cfg.synth(this.synthBand); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.resetCanvas(); this.drawRuler(); }
+  };
+  // Z-Wave region selector: a dropdown (built once the plan loads) that sweeps
+  // the region's tight span and overlays its exact channel centres. Z-Wave is a
+  // sub-GHz mesh rtl_433 can't decode, so this is an energy/occupancy view of a
+  // band nobody usually looks at.
+  Scope.prototype.populateZwave=function(plan){
+    if(!this.cfg.zwave || !plan || this._zwaveBuilt) return;
+    var self=this; this._zwaveBuilt=true;
+    var tag=document.createElement('span'); tag.className='zwtag'; tag.textContent='📡 Z-Wave';
+    var sel=document.createElement('select'); sel.title='Sweep a Z-Wave region and overlay its channels';
+    var opt0=document.createElement('option'); opt0.value=''; opt0.textContent='Region…'; sel.appendChild(opt0);
+    Object.keys(plan).forEach(function(rid){
+      var o=document.createElement('option'); o.value=rid; o.textContent=plan[rid].label; sel.appendChild(o);
+    });
+    sel.addEventListener('change',function(){ if(sel.value) self.selectZwave(sel.value); else self.clearZwave(); });
+    this.zwaveDropdown=sel;
+    this.zwaveSel.appendChild(tag); this.zwaveSel.appendChild(sel);
+    this.zwaveSel.classList.remove('hidden');
+  };
+  Scope.prototype.clearZwave=function(){ // back to the normal band view
+    if(this.zwaveDropdown) this.zwaveDropdown.value='';
+    this.selectBand(this.liveBand,this.synthBand);
+  };
+  Scope.prototype.selectZwave=function(regionId){
+    var reg=ZWAVE&&ZWAVE[regionId]; if(!reg) return;
+    this.zwaveRegion=regionId; this.zwave=reg; this.zoom=null; this.marker=null; this.markEl.style.display='none'; this.resetBtn.disabled=true;
+    if(this.zwaveDropdown) this.zwaveDropdown.value=regionId;
+    if(this.decoding) this.setView('wf');   // decode can't do Z-Wave; back to sweep
+    Array.prototype.forEach.call(this.bandSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed','false');});
+    if(this.mode==='live'){ this.stopLive(); this._rangeKnown=false; this.resetCanvas(); this.startLive(); }
+    else if(this.mode==='synth'){ this.model=zwaveModel(reg.lo_hz/1e6,reg.hi_hz/1e6,reg.channels);
+      this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor; this.resetCanvas(); this.drawRuler(); }
+    else { this.setMode(DEMO_ON?'synth':'idle'); if(this.mode==='synth'){ this.model=zwaveModel(reg.lo_hz/1e6,reg.hi_hz/1e6,reg.channels); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.drawRuler(); } }
   };
   Scope.prototype.setView=function(v){
     var want=(v==='decode');
@@ -431,7 +484,8 @@
   Scope.prototype.startLive=function(){
     var self=this; this.seq=0; this.liveErr=null;
     var body={band:this.liveBand};
-    if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
+    if(this.zwave){ body.lo_hz=this.zwave.lo_hz; body.hi_hz=this.zwave.hi_hz; body.label='zwave-'+this.zwaveRegion; }
+    else if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
     fetch(this.cfg.api.start,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){return r.json();}).then(function(res){
         if(res&&res.error){ self.liveErr=res.error; self.showVeil('Could not start '+self.cfg.short,res.error); }
@@ -548,6 +602,18 @@
 
   Scope.prototype.drawRuler=function(){
     var lo=this.lo,hi=this.hi,span=hi-lo,r=this.ruler; r.innerHTML=""; if(!(span>0))return;
+    // Z-Wave channel overlay: exact channel centres for the selected region,
+    // drawn as cyan bands so you can see which channel each burst lands on.
+    if(this.zwave){
+      (this.zwave.channels||[]).forEach(function(c){var x=(c.freq_mhz-lo)/span*100; if(x<0||x>100)return;
+        var d=document.createElement('div');d.className='ism';d.style.left=(x-1.1)+"%";d.style.width="2.2%";
+        d.innerHTML='<span class="il">'+esc(c.label)+'</span>';r.appendChild(d);
+        var t=document.createElement('div');t.className='tick';t.style.left=x+"%";t.style.background="var(--cyan)";r.appendChild(t);
+        var l=document.createElement('div');l.className='tlab';l.style.left=x+"%";l.textContent=c.freq_mhz.toFixed(2);r.appendChild(l);});
+      genTicks(lo,hi).forEach(function(fq){var x=(fq-lo)/span*100;if(x<0||x>100)return;
+        var t=document.createElement('div');t.className='tick';t.style.left=x+"%";r.appendChild(t);});
+      return;
+    }
     var m=this.model, showBands=(this.mode==='synth'&&!this.zoom&&m);
     if(showBands){
       (m.isms||[]).forEach(function(b){var x0=(b[0]-lo)/span*100,x1=(b[1]-lo)/span*100;
@@ -572,7 +638,7 @@
   var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
-    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, minSpan:0.2,
+    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, minSpan:0.2,
     liveBands:[{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
@@ -614,6 +680,12 @@
 
   function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
   function pollAll(){ scopes.forEach(function(s){s.checkStatus();}); setTimeout(updateFoot,400); }
+
+  // Load the Z-Wave regional plan once and build the region selector on scopes
+  // that support it (the RTL-SDR panel). No dongle needed — the plan is static.
+  fetch('/api/net/rtl/zwave').then(function(r){return r.json();}).then(function(d){
+    if(d&&d.regions){ ZWAVE=d.regions; scopes.forEach(function(s){ s.populateZwave(ZWAVE); }); }
+  }).catch(function(){});
 
   refreshConfig().then(function(){ scopes.forEach(function(s){s.applyDesired();s.updateTag();}); updateFoot(); pollAll();
     setInterval(function(){ refreshConfig().then(pollAll); },5000); });
