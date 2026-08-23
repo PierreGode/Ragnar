@@ -273,6 +273,115 @@ def _have(path):
 
 
 # --------------------------------------------------------------------------
+# SDR health check (the UI's "SDR check" button) — walks every layer detection
+# depends on and turns it into a one-line verdict + concrete fix steps.
+# --------------------------------------------------------------------------
+
+def _dvb_module_loaded():
+    """True if the DVB-T kernel driver that steals RTL-SDR dongles is loaded."""
+    try:
+        with open("/proc/modules", "r") as fh:
+            return "dvb_usb_rtl28xxu" in fh.read()
+    except OSError:
+        return False
+
+
+def _dvb_blacklisted():
+    """True if any modprobe.d file blacklists the DVB-T RTL driver."""
+    import glob
+    for path in glob.glob("/etc/modprobe.d/*.conf"):
+        try:
+            with open(path, "r") as fh:
+                if re.search(r"^\s*blacklist\s+dvb_usb_rtl28xxu", fh.read(), re.M):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _pi_throttled():
+    """Best-effort Pi power state: (throttled_hex|None, undervoltage_bool)."""
+    rc, out, _ = _run(["vcgencmd", "get_throttled"], timeout=3)
+    if rc != 0 or not out:
+        return None, False
+    m = re.search(r"throttled=(0x[0-9a-fA-F]+)", out)
+    if not m:
+        return None, False
+    val = int(m.group(1), 16)
+    # bit 0 = under-voltage now; bit 16 = under-voltage has occurred.
+    return m.group(1), bool(val & 0x1 or val & 0x10000)
+
+
+def summarize_diagnosis(f):
+    """Turn gathered facts into (state, summary, [fix steps]) — pure.
+
+    States: ok / no_usb / tools_missing / dvb_held / probe_timeout / unknown.
+    """
+    if f.get("available"):
+        return ("ok", "RTL-SDR ready: %s." % (f.get("model_name") or "detected"), [])
+    if not f.get("usb_present"):
+        fix = ["Use a solid PSU and a powered USB hub — RTL-SDR dongles draw ~300 mA.",
+               "Use a data USB cable (not charge-only) and another port; reseat firmly.",
+               "Confirm on the host with: lsusb  (expect 'ID 0bda:2838 Realtek ...')."]
+        if f.get("undervoltage"):
+            fix.insert(0, "This Pi reports under-voltage (throttled=%s) — fix power first."
+                       % (f.get("throttled") or "set"))
+        return ("no_usb",
+                "No RTL-SDR on the USB bus — the dongle isn't reaching the OS.", fix)
+    if not f.get("tools_installed"):
+        return ("tools_missing",
+                "Dongle on USB (%s) but the rtl-sdr tools aren't installed." % f.get("usb_id"),
+                ["sudo apt install -y rtl-sdr rtl-433"])
+    if f.get("dvb_loaded") or (f.get("rtl_test_ran") and not f.get("rtl_test_opened")):
+        fix = ["sudo rmmod dvb_usb_rtl28xxu    # free the device now"]
+        if not f.get("blacklisted"):
+            fix.append("Run update_ragnar.sh to blacklist the DVB-T driver permanently.")
+        fix.append("Replug the dongle, then run the check again.")
+        return ("dvb_held",
+                "Dongle on USB (%s) but rtl_test can't open it — the DVB-T driver is holding it."
+                % f.get("usb_id"), fix)
+    if f.get("probe_timeout"):
+        return ("probe_timeout", "RTL-SDR probe timed out.",
+                ["Retry; use a powered USB hub if it persists."])
+    return ("unknown", f.get("error") or "RTL-SDR present but not usable.",
+            ["Check on the host with: rtl_test -t"])
+
+
+def diagnose():
+    """Full SDR health check: walk the detection ladder + every layer it needs.
+
+    Returns structured facts plus a one-line verdict (``summary``) and concrete
+    ``fix`` steps. Safe with no hardware — nothing here raises.
+    """
+    det = detect()
+    tools = det.get("tools", {})
+    throttled, undervolt = _pi_throttled()
+    facts = {
+        "available": det.get("available", False),
+        "usb_present": bool(det.get("usb_id")),
+        "usb_id": det.get("usb_id"),
+        "device": det.get("device"),
+        "model_name": det.get("model_name"),
+        "needs_blog_driver": det.get("needs_blog_driver", False),
+        "tools": tools,
+        "tools_installed": any(tools.values()),
+        "dvb_loaded": _dvb_module_loaded(),
+        "blacklisted": _dvb_blacklisted(),
+        "throttled": throttled,
+        "undervoltage": undervolt,
+        "rtl_test_ran": bool(tools.get("rtl_test")),
+        "rtl_test_opened": det.get("available", False),
+        "probe_timeout": "timed out" in (det.get("error") or ""),
+        "error": det.get("error"),
+    }
+    state, summary, fix = summarize_diagnosis(facts)
+    facts["state"] = state
+    facts["summary"] = summary
+    facts["fix"] = fix
+    return facts
+
+
+# --------------------------------------------------------------------------
 # Parsers (pure — the selftest drives these with captured lines)
 # --------------------------------------------------------------------------
 
@@ -788,6 +897,29 @@ def selftest():
           parse_lsusb_for_rtl("Bus 001 Device 001: ID 1d6b:0002 Linux Foundation root hub")
           == (None, None))
     check("usb: empty lsusb output safe", parse_lsusb_for_rtl("") == (None, None))
+
+    # --- SDR health-check verdict (summarize_diagnosis, pure) ---
+    st, _, _ = summarize_diagnosis({"available": True, "model_name": "RTL-SDR Blog V4"})
+    check("diag: available -> ok", st == "ok")
+    st, _, fix = summarize_diagnosis({"available": False, "usb_present": False,
+                                      "undervoltage": True, "throttled": "0x50000"})
+    check("diag: no dongle on bus -> no_usb, power hint first",
+          st == "no_usb" and any("under-voltage" in s for s in fix), st)
+    st, _, fix = summarize_diagnosis({"available": False, "usb_present": True,
+                                      "usb_id": "0bda:2838", "tools_installed": False})
+    check("diag: on bus but no tools -> tools_missing",
+          st == "tools_missing" and any("apt install" in s for s in fix), st)
+    st, _, fix = summarize_diagnosis({"available": False, "usb_present": True,
+                                      "usb_id": "0bda:2838", "tools_installed": True,
+                                      "dvb_loaded": True, "blacklisted": False})
+    check("diag: DVB driver holding it -> dvb_held, rmmod + blacklist",
+          st == "dvb_held" and any("rmmod" in s for s in fix)
+          and any("update_ragnar" in s for s in fix), st)
+    st, _, _ = summarize_diagnosis({"available": False, "usb_present": True,
+                                    "usb_id": "0bda:2838", "tools_installed": True,
+                                    "rtl_test_ran": True, "rtl_test_opened": False,
+                                    "blacklisted": True})
+    check("diag: can't open despite blacklist -> still dvb_held", st == "dvb_held", st)
 
     # --- rtl_power row parser ---
     row = "2024-01-01, 12:00:00, 433050000, 434790000, 3625.00, 100, -40.1, -55.2, -33.0"

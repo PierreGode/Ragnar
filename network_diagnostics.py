@@ -18828,6 +18828,15 @@ def register_network_diagnostics(app, logger=None):
         _log("net/rtl/selftest")
         return jsonify(rtl_sdr.selftest())
 
+    # SDR health check for the UI's "SDR check" button: walks every layer
+    # detection depends on (USB bus, tools, DVB driver, power, rtl_test) and
+    # returns a one-line verdict + concrete fix steps. Reachable even when no
+    # dongle is detected, so a user can find out *why*.
+    @app.route('/api/net/rtl/diagnose', methods=['GET'])
+    def net_rtl_diagnose():
+        _log("net/rtl/diagnose")
+        return jsonify(rtl_sdr.diagnose())
+
     # ------------------------------------------------------------------
     # Zigbee / 802.15.4 overlay via an on-demand HuginnESP sniff
     # (zigbee_scan.py + zigbee_overlay.py). Receive-only. The UI gates the

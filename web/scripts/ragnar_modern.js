@@ -2054,6 +2054,49 @@ function _wifiRfwfDemoInit() {
     });
 }
 
+// "SDR check" button: diagnose why an SDR isn't detected and show the fix
+// inline. Reachable with no device connected, so a user can find out *why*.
+// Colours are inline hex (not Tailwind classes) so they survive the CSS purge.
+function wifiSdrCheck() {
+    const box = document.getElementById('wifi-sdr-diag');
+    if (!box) return;
+    box.classList.remove('hidden');
+    box.innerHTML = '<span style="color:#9ca3af">🩺 Checking SDR — USB bus, drivers, tools, power…</span>';
+    Promise.all([
+        fetch('/api/net/rtl/diagnose').then(r => r.json()).catch(() => null),
+        fetch('/api/net/sdr/status').then(r => r.json()).catch(() => null)
+    ]).then(([d, hk]) => {
+        if (!d) { box.innerHTML = '<span style="color:#f87171">SDR check failed — the endpoint did not respond.</span>'; return; }
+        const tone = { ok: ['#34d399', '✅'], no_usb: ['#fb7185', '⛔'], tools_missing: ['#fbbf24', '⚙️'],
+                       dvb_held: ['#fbbf24', '🔒'], probe_timeout: ['#fbbf24', '⏱️'] }[d.state] || ['#94a3b8', 'ℹ️'];
+        const col = tone[0], icon = tone[1];
+        const fixes = (d.fix || []).map(s =>
+            `<li style="display:flex;gap:.4rem"><span style="color:${col}">›</span><code class="font-mono text-xs" style="color:#e5e7eb;word-break:break-all">${escapeHtml(String(s))}</code></li>`).join('');
+        const yn = (v, t, f) => v ? `<span style="color:#34d399">${escapeHtml(String(t))}</span>` : `<span style="color:#6b7280">${escapeHtml(String(f))}</span>`;
+        const facts = [
+            `RTL-SDR on USB: ${yn(d.usb_present, d.usb_id || 'yes', 'no')}`,
+            `tools: ${yn(d.tools_installed, 'installed', 'missing')}`,
+            `DVB driver: ${d.dvb_loaded ? '<span style="color:#fbbf24">loaded (blocking)</span>' : '<span style="color:#34d399">clear</span>'}`,
+            `blacklist: ${yn(d.blacklisted, 'set', 'absent')}`,
+            d.throttled ? `power: ${d.undervoltage ? '<span style="color:#fb7185">under-voltage (' + escapeHtml(String(d.throttled)) + ')</span>' : '<span style="color:#34d399">ok</span>'}` : ''
+        ].filter(Boolean).join(' · ');
+        const hkline = hk && hk.detect
+            ? `<div class="mt-2 text-xs" style="color:#9ca3af">HackRF (Wi-Fi bands): ${hk.detect.available ? '<span style="color:#34d399">detected</span>' : escapeHtml(String(hk.detect.error || 'not detected'))}</div>`
+            : '';
+        box.innerHTML =
+            `<div style="display:flex;align-items:flex-start;gap:.5rem">
+               <span style="font-size:1.15rem;line-height:1">${icon}</span>
+               <div style="flex:1;min-width:0">
+                 <div class="font-semibold" style="color:${col}">${escapeHtml(String(d.summary || 'SDR check'))}</div>
+                 ${fixes ? `<ul style="margin-top:.5rem;display:flex;flex-direction:column;gap:.25rem">${fixes}</ul>` : ''}
+                 <div class="mt-2 text-xs" style="color:#9ca3af">${facts}</div>
+                 ${hkline}
+               </div>
+               <button type="button" onclick="document.getElementById('wifi-sdr-diag').classList.add('hidden')" class="text-xs" style="color:#6b7280" title="Dismiss">✕</button>
+             </div>`;
+    });
+}
+
 function _wifiSdrStart() {
     const s = _wifiState.sdr;
     if (!s.available) { _wifiDrawWaterfall(); return; }
