@@ -956,7 +956,16 @@ class SharedData:
             # dashboard up for the square 720x720 panel. Env RAGNAR_KIOSK_EXIT /
             # RAGNAR_KIOSK_SCALE still override these at launch.
             "kiosk_handheld": False,
-            "kiosk_scale": 1.0
+            "kiosk_scale": 1.0,
+
+            "__title_sdr__": "SDR / RF Waterfall",
+            # Synthetic RF Waterfall demo. Hidden by default: the route
+            # /demo/rf-waterfall serves a self-contained synthetic spectrum
+            # (sub-GHz ISM + Wi-Fi bands) ONLY while this is on, so the waterfall
+            # display can be shown with no SDR attached. 404s when off, so it
+            # stays out of sight until deliberately switched on. Env
+            # RAGNAR_SDR_DEMO=1 also enables it without persisting to config.
+            "sdr_demo": False
         }
 
     def apply_display_profile(self, epd_type=None, set_orientation_if_missing=False, persist=False):

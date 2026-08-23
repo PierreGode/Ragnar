@@ -1,0 +1,781 @@
+#!/usr/bin/env python3
+"""
+rtl_sdr.py — sub-GHz RF via a cheap RTL-SDR dongle (RTL2832U).
+
+The HackRF Waterfall ([[sdr_spectrum]]) covers the 2.4/5/6 GHz Wi-Fi bands. A
+common RTL-SDR **cannot** reach those (it tops out ~1.7 GHz), but that lower
+range is exactly where the *interesting non-Wi-Fi* world lives — the 433/868/915
+MHz ISM bands packed with TPMS tyre sensors, weather stations, door/PIR
+contacts, remotes and keyfobs, utility meters and doorbells. This module turns a
+plug-in RTL-SDR into two receive-only tools:
+
+  1. **ISM device scanner** — shells out to ``rtl_433 -F json`` and keeps a live
+     table of every device it decodes (model, id, RSSI, and the decoded fields).
+  2. **Sub-GHz waterfall** — shells out to ``rtl_power`` sweeps and assembles a
+     scrolling power-per-frequency heatmap, the same shape the HackRF Waterfall
+     uses, but for the bands the HackRF view doesn't target.
+
+Both are **receive-only** — nothing here ever transmits.
+
+One dongle, one claim
+---------------------
+An RTL-SDR is a single USB device that only one program can open at a time.
+``rtl_433`` and ``rtl_power`` therefore cannot run together, and — the lesson
+from the HackRF view — a device probe (``rtl_test``) must never run while either
+is streaming, or it knocks the capture offline. So the two modes are mutually
+exclusive (starting one stops the other) and :func:`status` reports availability
+from a cached probe while anything is running.
+
+CLI
+---
+    python3 rtl_sdr.py detect
+    python3 rtl_sdr.py ism   [--band 433|868|915] [--seconds N]
+    python3 rtl_sdr.py power [--band 433|868|915|subghz] [--seconds N]
+    python3 rtl_sdr.py selftest
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+
+
+# --------------------------------------------------------------------------
+# Tools / tunables
+# --------------------------------------------------------------------------
+
+def _which(name):
+    p = "/usr/bin/%s" % name
+    return p if os.path.exists(p) else name
+
+
+_RTL_TEST = _which("rtl_test")
+_RTL_433 = _which("rtl_433")
+_RTL_POWER = _which("rtl_power")
+
+# Power-sweep ranges (Hz). Kept inside the RTL-SDR's reach (~24 MHz–1.7 GHz).
+RTL_BANDS = {
+    "433":    (433050000, 434790000),   # EU 433 ISM
+    "868":    (863000000, 870000000),   # EU 868 SRD
+    "915":    (902000000, 928000000),   # US 915 ISM
+    "subghz": (300000000, 960000000),   # wide "what's out there" sweep
+}
+
+# rtl_433 tuning presets (its own hop frequencies).
+ISM_FREQS = {
+    "433": "433.92M",
+    "868": "868.3M",
+    "915": "915M",
+}
+
+_POWER_BINS = 480          # display columns per waterfall frame
+_RING_FRAMES = 300         # rolling history of sweep frames kept in memory
+_FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
+_SWEEP_INTERVAL_S = 1      # rtl_power -i (seconds per full sweep)
+_ISM_MAX_DEVICES = 500     # cap the live device table
+
+
+# --------------------------------------------------------------------------
+# Detection
+# --------------------------------------------------------------------------
+
+def _run(args, timeout=6):
+    """Run a command, returning (rc, stdout, stderr). Never raises."""
+    try:
+        p = subprocess.run(args, capture_output=True, text=True,
+                           timeout=timeout, check=False)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return 127, "", "not found"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out"
+    except Exception as exc:  # pragma: no cover - defensive
+        return 1, "", str(exc)
+
+
+def parse_rtl_test(text):
+    """Pull device index / tuner name from ``rtl_test`` output (pure)."""
+    info = {"device": None, "tuner": None}
+    # e.g. "  0:  Realtek, RTL2838UHIDIR, SN: 00000001"
+    m = re.search(r"^\s*(\d+):\s*(.+)$", text, re.MULTILINE)
+    if m:
+        info["device"] = m.group(2).strip()
+    m = re.search(r"Found\s+(.+?)\s+tuner", text)
+    if m:
+        info["tuner"] = m.group(1).strip()
+    return info
+
+
+def detect():
+    """Report RTL-SDR availability so the UI can gate the tools.
+
+    ``available`` is True only when at least one of the rtl tools is installed
+    *and* a dongle actually answers ``rtl_test -t`` (which opens the device once
+    and exits). Mirrors the HackRF gate.
+    """
+    tools = {"rtl_433": _have(_RTL_433), "rtl_power": _have(_RTL_POWER),
+             "rtl_test": _have(_RTL_TEST)}
+    if not any(tools.values()):
+        return {"available": False, "tools_installed": False,
+                "device_present": False, "tools": tools,
+                "error": "rtl-sdr tools not installed (apt install rtl-sdr rtl-433)"}
+    # rtl_test -t opens the dongle, prints tuner info, and exits — a clean probe.
+    rc, out, err = _run([_RTL_TEST, "-t"], timeout=10)
+    blob = (out or "") + (err or "")
+    if rc == 127:
+        # rtl_test missing but a decoder is present — can't hard-probe; report
+        # tools state and let a start attempt surface any device error.
+        return {"available": False, "tools_installed": True,
+                "device_present": False, "tools": tools,
+                "error": "rtl_test not found — install rtl-sdr to probe the dongle"}
+    if rc == 124:
+        return {"available": False, "tools_installed": True,
+                "device_present": False, "tools": tools,
+                "error": "RTL-SDR probe timed out — retry, or use a powered USB hub"}
+    if "No supported devices found" in blob or "usb_open error" in blob or (
+            rc != 0 and "PLL not locked" not in blob):
+        return {"available": False, "tools_installed": True,
+                "device_present": False, "tools": tools,
+                "error": "no RTL-SDR detected — plug a dongle in (a powered USB "
+                         "hub is recommended on the Pi)"}
+    info = parse_rtl_test(blob)
+    return {"available": True, "tools_installed": True, "device_present": True,
+            "tools": tools, "device": info["device"], "tuner": info["tuner"],
+            "bands": sorted(RTL_BANDS.keys()), "ism_bands": sorted(ISM_FREQS.keys())}
+
+
+def _have(path):
+    return _run([path, "-h"])[0] != 127 or os.path.exists(path)
+
+
+# --------------------------------------------------------------------------
+# Parsers (pure — the selftest drives these with captured lines)
+# --------------------------------------------------------------------------
+
+def parse_power_row(line):
+    """Parse one ``rtl_power`` CSV row into (hz_low, hz_high, hz_step, [dB…]).
+
+    rtl_power streams rows shaped:
+        date, time, Hz_low, Hz_high, Hz_step, samples, dB, dB, …
+    Each row covers one chunk of the swept range; rows climb in frequency and
+    wrap back to the bottom when a full sweep completes. Returns None for
+    blank/garbage lines.
+    """
+    parts = [p.strip() for p in line.split(",")]
+    if len(parts) < 7:
+        return None
+    try:
+        hz_low = int(parts[2])
+        hz_high = int(parts[3])
+        hz_step = float(parts[4])
+        dbs = [float(x) for x in parts[6:] if x not in ("", "-inf", "nan")]
+    except (ValueError, IndexError):
+        return None
+    if hz_step <= 0 or hz_high <= hz_low or not dbs:
+        return None
+    return hz_low, hz_high, hz_step, dbs
+
+
+def parse_rtl433_event(line):
+    """Parse one ``rtl_433 -F json`` line into a normalized device event.
+
+    Returns a dict with model/id/channel/freq_mhz/rssi/snr and a ``fields`` map
+    of the remaining decoded values, or None for non-JSON / undecodable lines.
+    """
+    line = line.strip()
+    if not line or line[0] != "{":
+        return None
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(obj, dict) or "model" not in obj:
+        return None
+    meta = ("time", "model", "id", "channel", "rssi", "snr", "noise",
+            "freq", "freq1", "freq2", "mod", "protocol")
+    fields = {k: v for k, v in obj.items() if k not in meta}
+    freq_mhz = None
+    for fk in ("freq", "freq1"):
+        if isinstance(obj.get(fk), (int, float)):
+            freq_mhz = round(float(obj[fk]), 3)
+            break
+    return {
+        "model": str(obj.get("model")),
+        "id": obj.get("id"),
+        "channel": obj.get("channel"),
+        "freq_mhz": freq_mhz,
+        "rssi": obj.get("rssi"),
+        "snr": obj.get("snr"),
+        "time": obj.get("time"),
+        "fields": fields,
+    }
+
+
+def device_key(ev):
+    """Stable identity for a decoded device: model + id/channel."""
+    ident = ev.get("id")
+    if ident is None:
+        ident = ev.get("channel")
+    return "%s/%s" % (ev.get("model"), "" if ident is None else ident)
+
+
+class _PowerFrameBuilder:
+    """Accumulate ascending rtl_power rows into fixed-width power frames.
+
+    Like the HackRF frame builder but in Hz across an arbitrary range: each dB
+    bin drops into one of ``bins`` display columns (max-per-column), and a row
+    whose start frequency falls below the previous one marks a completed sweep.
+    """
+
+    def __init__(self, lo_hz, hi_hz, bins=_POWER_BINS):
+        self.lo = lo_hz
+        self.hi = hi_hz
+        self.bins = bins
+        self._last_low = None
+        self._reset()
+
+    def _reset(self):
+        self.grid = [_FLOOR_DBM] * self.bins
+        self._filled = False
+
+    def _bucket(self, hz):
+        if self.hi <= self.lo:
+            return None
+        frac = (hz - self.lo) / (self.hi - self.lo)
+        if frac < 0 or frac >= 1:
+            return None
+        return min(self.bins - 1, int(frac * self.bins))
+
+    def add(self, hz_low, hz_high, hz_step, dbs):
+        """Feed one parsed row; return a finished frame grid or None."""
+        frame = None
+        if self._last_low is not None and hz_low < self._last_low and self._filled:
+            frame = self.grid
+            self._reset()
+        self._last_low = hz_low
+        for i, db in enumerate(dbs):
+            center = hz_low + (i + 0.5) * hz_step
+            b = self._bucket(center)
+            if b is not None:
+                if db > self.grid[b]:
+                    self.grid[b] = db
+                self._filled = True
+        return frame
+
+
+# --------------------------------------------------------------------------
+# ISM device scanner (rtl_433)
+# --------------------------------------------------------------------------
+
+class IsmScanner:
+    """Own a running ``rtl_433 -F json`` and a live device table."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._devices = {}     # key -> device record
+        self._events = 0
+        self._seq = 0
+        self._band = None
+        self._error = None
+        self._stderr_tail = None
+
+    def start(self, band="433"):
+        band = band if band in ISM_FREQS else "433"
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                if band == self._band:
+                    return {"ok": True, "already": True, "band": band}
+                self._stop_locked()
+            self._stop.clear()
+            self._devices = {}
+            self._events = 0
+            self._seq = 0
+            self._band = band
+            self._error = None
+            self._thread = threading.Thread(target=self._run_loop, args=(band,),
+                                            daemon=True, name="rtl433-ism")
+            self._thread.start()
+        return {"ok": True, "band": band}
+
+    def stop(self):
+        with self._lock:
+            self._stop_locked()
+        return {"ok": True}
+
+    def _stop_locked(self):
+        self._stop.set()
+        _terminate(self._proc)
+        self._proc = None
+        self._band = None
+
+    def _run_loop(self, band):
+        freq = ISM_FREQS[band]
+        cmd = [_RTL_433, "-F", "json", "-M", "level", "-f", freq]
+        self._stderr_tail = None
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True,
+                                          bufsize=1)
+        except Exception as exc:
+            self._error = "failed to launch rtl_433: %s" % exc
+            return
+        serr = _drain(self._proc.stderr, self)
+        try:
+            for line in self._proc.stdout:
+                if self._stop.is_set():
+                    break
+                ev = parse_rtl433_event(line)
+                if ev:
+                    self._ingest(ev)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._error = str(exc)
+        finally:
+            serr.join(timeout=1)
+            if (self._proc and self._proc.poll() not in (None, 0)
+                    and not self._error and self._stderr_tail):
+                self._error = self._stderr_tail
+
+    def _ingest(self, ev):
+        key = device_key(ev)
+        now = time.time()
+        with self._lock:
+            self._events += 1
+            self._seq += 1
+            rec = self._devices.get(key)
+            if rec is None:
+                if len(self._devices) >= _ISM_MAX_DEVICES:
+                    # Evict the stalest device so a noisy band can't grow forever.
+                    oldest = min(self._devices, key=lambda k: self._devices[k]["last_ts"])
+                    self._devices.pop(oldest, None)
+                rec = {"key": key, "model": ev["model"], "id": ev["id"],
+                       "channel": ev["channel"], "first_ts": now, "count": 0}
+                self._devices[key] = rec
+            rec["last_ts"] = now
+            rec["count"] += 1
+            rec["seq"] = self._seq
+            rec["freq_mhz"] = ev.get("freq_mhz")
+            rec["rssi"] = ev.get("rssi")
+            rec["snr"] = ev.get("snr")
+            rec["fields"] = ev.get("fields") or {}
+
+    def status(self):
+        with self._lock:
+            return {"running": bool(self._thread and self._thread.is_alive()),
+                    "band": self._band, "freq": ISM_FREQS.get(self._band),
+                    "devices": len(self._devices), "events": self._events,
+                    "seq": self._seq, "error": self._error}
+
+    def get_devices(self):
+        with self._lock:
+            devs = sorted(self._devices.values(),
+                          key=lambda d: d["last_ts"], reverse=True)
+            return {"devices": devs, "count": len(devs), "events": self._events,
+                    "seq": self._seq, "band": self._band,
+                    "running": bool(self._thread and self._thread.is_alive()),
+                    "error": self._error}
+
+
+# --------------------------------------------------------------------------
+# Sub-GHz power sweep (rtl_power)
+# --------------------------------------------------------------------------
+
+class PowerSweep:
+    """Own a running ``rtl_power`` sweep and a ring buffer of frames."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._frames = []
+        self._seq = 0
+        self._maxhold = None
+        self._band = None
+        self._error = None
+        self._stderr_tail = None
+
+    def start(self, band="433"):
+        band = band if band in RTL_BANDS else "433"
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                if band == self._band:
+                    return {"ok": True, "already": True, "band": band}
+                self._stop_locked()
+            self._stop.clear()
+            self._frames = []
+            self._seq = 0
+            self._maxhold = [_FLOOR_DBM] * _POWER_BINS
+            self._band = band
+            self._error = None
+            self._thread = threading.Thread(target=self._run_loop, args=(band,),
+                                            daemon=True, name="rtlpower-sweep")
+            self._thread.start()
+        return {"ok": True, "band": band}
+
+    def stop(self):
+        with self._lock:
+            self._stop_locked()
+        return {"ok": True}
+
+    def _stop_locked(self):
+        self._stop.set()
+        _terminate(self._proc)
+        self._proc = None
+        self._band = None
+
+    def _run_loop(self, band):
+        lo, hi = RTL_BANDS[band]
+        step = max(1000, (hi - lo) // _POWER_BINS)   # Hz per rtl_power bin
+        builder = _PowerFrameBuilder(lo, hi)
+        cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
+               "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"]
+        self._stderr_tail = None
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True,
+                                          bufsize=1)
+        except Exception as exc:
+            self._error = "failed to launch rtl_power: %s" % exc
+            return
+        serr = _drain(self._proc.stderr, self)
+        try:
+            for line in self._proc.stdout:
+                if self._stop.is_set():
+                    break
+                parsed = parse_power_row(line)
+                if not parsed:
+                    continue
+                frame = builder.add(*parsed)
+                if frame is not None:
+                    self._push_frame(frame)
+        except Exception as exc:  # pragma: no cover - defensive
+            self._error = str(exc)
+        finally:
+            serr.join(timeout=1)
+            if (self._proc and self._proc.poll() not in (None, 0)
+                    and not self._error and self._stderr_tail):
+                self._error = self._stderr_tail
+
+    def _push_frame(self, grid):
+        ints = [int(round(v)) for v in grid]
+        with self._lock:
+            self._seq += 1
+            self._frames.append({"seq": self._seq, "ts": time.time(),
+                                 "power": ints})
+            if len(self._frames) > _RING_FRAMES:
+                self._frames = self._frames[-_RING_FRAMES:]
+            if self._maxhold is None:
+                self._maxhold = list(ints)
+            else:
+                self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
+
+    def status(self):
+        with self._lock:
+            return {"running": bool(self._thread and self._thread.is_alive()),
+                    "band": self._band, "bins": _POWER_BINS,
+                    "band_hz": RTL_BANDS.get(self._band) if self._band else None,
+                    "frames_buffered": len(self._frames), "seq": self._seq,
+                    "floor_dbm": _FLOOR_DBM, "error": self._error}
+
+    def get_frames(self, since=0):
+        try:
+            since = int(since)
+        except (TypeError, ValueError):
+            since = 0
+        with self._lock:
+            new = [f for f in self._frames if f["seq"] > since]
+            return {"frames": new, "seq": self._seq, "band": self._band,
+                    "band_hz": RTL_BANDS.get(self._band) if self._band else None,
+                    "bins": _POWER_BINS, "floor_dbm": _FLOOR_DBM,
+                    "max_hold": list(self._maxhold) if self._maxhold else None,
+                    "running": bool(self._thread and self._thread.is_alive()),
+                    "error": self._error}
+
+
+# --------------------------------------------------------------------------
+# Shared helpers
+# --------------------------------------------------------------------------
+
+def _terminate(proc):
+    if not proc:
+        return
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def _drain(pipe, owner):
+    """Spawn a daemon thread draining ``pipe`` into ``owner._stderr_tail``.
+
+    rtl_433/rtl_power both chatter to stderr; if it's never read the 64 KB pipe
+    fills and blocks the process mid-run. Keep the last line for diagnostics.
+    """
+    def run():
+        try:
+            for line in pipe:
+                line = line.strip()
+                if line:
+                    owner._stderr_tail = line[:200]
+        except Exception:  # pragma: no cover - pipe closed on teardown
+            pass
+    t = threading.Thread(target=run, daemon=True, name="rtl-stderr")
+    t.start()
+    return t
+
+
+# Module-level singletons the web routes drive. One dongle, so the two capture
+# modes are mutually exclusive.
+_ism = IsmScanner()
+_power = PowerSweep()
+_detect_cache = None
+
+
+def _running():
+    return _ism.status()["running"] or _power.status()["running"]
+
+
+def ism_start(band="433"):
+    global _detect_cache
+    if _power.status()["running"]:
+        _power.stop()          # one dongle: hand it to the scanner
+    if not _ism.status()["running"]:
+        d = detect()
+        if not d.get("available"):
+            return {"ok": False, "error": d.get("error", "no RTL-SDR")}
+        _detect_cache = d
+    return _ism.start(band)
+
+
+def ism_stop():
+    return _ism.stop()
+
+
+def ism_devices():
+    return _ism.get_devices()
+
+
+def power_start(band="433"):
+    global _detect_cache
+    if _ism.status()["running"]:
+        _ism.stop()            # one dongle: hand it to the sweep
+    if not _power.status()["running"]:
+        d = detect()
+        if not d.get("available"):
+            return {"ok": False, "error": d.get("error", "no RTL-SDR")}
+        _detect_cache = d
+    return _power.start(band)
+
+
+def power_stop():
+    return _power.stop()
+
+
+def power_frames(since=0):
+    return _power.get_frames(since=since)
+
+
+def status():
+    ism, pwr = _ism.status(), _power.status()
+    st = {"ism": ism, "power": pwr, "bands": sorted(RTL_BANDS.keys()),
+          "ism_bands": sorted(ISM_FREQS.keys())}
+    if ism["running"] or pwr["running"]:
+        # Something already holds the dongle over USB. Re-probing with rtl_test
+        # here would open the same device and kill the capture — the HackRF
+        # lesson. Report availability from the cached probe instead.
+        d = dict(_detect_cache or {})
+        d.update({"available": True, "tools_installed": True,
+                  "device_present": True, "streaming": True})
+        d.setdefault("bands", sorted(RTL_BANDS.keys()))
+        st["detect"] = d
+    else:
+        st["detect"] = detect()
+    return st
+
+
+# --------------------------------------------------------------------------
+# Self-test (pure parsing / assembly checks — no hardware needed)
+# --------------------------------------------------------------------------
+
+def selftest():
+    results = []
+
+    def check(name, ok, detail=""):
+        results.append({"name": name, "pass": bool(ok), "detail": detail})
+
+    # --- rtl_power row parser ---
+    row = "2024-01-01, 12:00:00, 433050000, 434790000, 3625.00, 100, -40.1, -55.2, -33.0"
+    p = parse_power_row(row)
+    check("power: valid row -> (lo,hi,step,dbs)",
+          p is not None and p[0] == 433050000 and p[1] == 434790000
+          and abs(p[2] - 3625.0) < 1e-6 and len(p[3]) == 3, str(p))
+    check("power: header/garbage -> None",
+          parse_power_row("date, time, low, high") is None
+          and parse_power_row("") is None)
+    check("power: -inf/nan dB cells dropped",
+          (parse_power_row("d,t,1,2,1,9,-inf,-10,nan,-20") or (0, 0, 0, []))[3] == [-10.0, -20.0])
+
+    # --- power frame builder: bucketing + wrap ---
+    lo, hi = 433050000, 434790000
+    step = 20000
+    def rows_for(peak_hz):
+        out, f = [], lo
+        while f < hi:
+            dbs = [(-15.0 if abs((f + step / 2) - peak_hz) < step else -95.0)]
+            out.append("d, t, %d, %d, %d, 100, %.1f" % (f, f + step, step, dbs[0]))
+            f += step
+        return out
+    peak = (lo + hi) // 2
+    fb = _PowerFrameBuilder(lo, hi)
+    frames = []
+    for r in rows_for(peak) + rows_for(peak):
+        fr = fb.add(*parse_power_row(r))
+        if fr is not None:
+            frames.append(fr)
+    check("power: one frame after the second sweep starts", len(frames) == 1, str(len(frames)))
+    if frames:
+        g = frames[0]
+        pk = max(range(len(g)), key=lambda i: g[i])
+        check("power: peak lands mid-band", abs(pk - _POWER_BINS // 2) <= 2, str(pk))
+        check("power: frame width = display bins", len(g) == _POWER_BINS)
+        check("power: quiet columns at/near floor",
+              sum(1 for v in g if v <= -90) > _POWER_BINS * 0.5)
+
+    # --- rtl_433 JSON parser + device keying ---
+    ev = parse_rtl433_event('{"time":"2024-01-01 12:00:00","model":"Toyota-TPMS",'
+                            '"id":60123,"pressure_kPa":230,"temperature_C":22,"rssi":-8.2}')
+    check("ism: valid event parsed",
+          ev is not None and ev["model"] == "Toyota-TPMS" and ev["id"] == 60123
+          and ev["rssi"] == -8.2 and ev["fields"].get("pressure_kPa") == 230, str(ev))
+    check("ism: non-JSON / status line -> None",
+          parse_rtl433_event("Tuned to 433.920MHz") is None
+          and parse_rtl433_event("") is None
+          and parse_rtl433_event('{"no":"model"}') is None)
+    check("ism: device key is model/id",
+          device_key(ev) == "Toyota-TPMS/60123", device_key(ev))
+    ch = parse_rtl433_event('{"model":"Acurite-5n1","channel":"A","wind_avg_km_h":12}')
+    check("ism: id-less device keys on channel", device_key(ch) == "Acurite-5n1/A")
+
+    # --- device table ingest: dedupe + count + latest fields ---
+    sc = IsmScanner()
+    sc._ingest(parse_rtl433_event('{"model":"Toyota-TPMS","id":1,"pressure_kPa":200}'))
+    sc._ingest(parse_rtl433_event('{"model":"Toyota-TPMS","id":1,"pressure_kPa":205}'))
+    sc._ingest(parse_rtl433_event('{"model":"Honeywell-Door","id":9,"state":"open"}'))
+    dv = sc.get_devices()
+    tpms = next(d for d in dv["devices"] if d["key"] == "Toyota-TPMS/1")
+    check("ism: repeat device deduped, count rises",
+          dv["count"] == 2 and tpms["count"] == 2, str(dv["count"]))
+    check("ism: latest fields retained",
+          tpms["fields"].get("pressure_kPa") == 205)
+    check("ism: total events counted", dv["events"] == 3, str(dv["events"]))
+
+    # --- status() must not re-probe the dongle while a capture streams ---
+    import sys as _sys
+    _mod = _sys.modules[__name__]
+    global _detect_cache
+    _saved_detect, _saved_ism_status = _mod.detect, _ism.status
+    _saved_pwr_status = _power.status
+    _probe = []
+    _detect_cache = {"tuner": "R820T"}
+    _ism.status = lambda: {"running": True, "band": "433"}
+    _power.status = lambda: {"running": False, "band": None}
+    _mod.detect = lambda *a, **k: (_probe.append(1) or {"available": False})
+    try:
+        st = status()
+        check("status: no dongle re-probe while streaming",
+              not _probe and st["detect"].get("streaming") is True
+              and st["detect"].get("available") is True, str(st["detect"]))
+    finally:
+        _mod.detect, _ism.status, _power.status = _saved_detect, _saved_ism_status, _saved_pwr_status
+        _detect_cache = None
+
+    # --- band tables ---
+    check("bands: power 433/868/915/subghz present",
+          all(b in RTL_BANDS for b in ("433", "868", "915", "subghz")))
+    check("bands: ism 433/868/915 present",
+          all(b in ISM_FREQS for b in ("433", "868", "915")))
+
+    passed = sum(1 for r in results if r["pass"])
+    return {"pass": passed == len(results), "passed": passed,
+            "total": len(results), "results": results}
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+def _main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(description="RTL-SDR sub-GHz ISM scanner + waterfall")
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("detect")
+    pi = sub.add_parser("ism")
+    pi.add_argument("--band", default="433", choices=sorted(ISM_FREQS.keys()))
+    pi.add_argument("--seconds", type=int, default=15)
+    pp = sub.add_parser("power")
+    pp.add_argument("--band", default="433", choices=sorted(RTL_BANDS.keys()))
+    pp.add_argument("--seconds", type=int, default=15)
+    sub.add_parser("selftest")
+
+    args = ap.parse_args(argv)
+    if args.cmd == "detect":
+        print(json.dumps(detect(), indent=2))
+    elif args.cmd == "ism":
+        d = detect()
+        if not d.get("available"):
+            print(json.dumps({"error": d.get("error")}, indent=2)); return 1
+        ism_start(args.band)
+        try:
+            end = time.time() + args.seconds
+            while time.time() < end:
+                time.sleep(2)
+                dv = ism_devices()
+                print("[%ds] %d devices, %d events" %
+                      (int(args.seconds - (end - time.time())), dv["count"], dv["events"]))
+                for row in dv["devices"][:8]:
+                    print("   %-22s rssi=%s  %s" % (row["key"], row.get("rssi"),
+                          json.dumps(row.get("fields", {}))[:70]))
+        finally:
+            ism_stop()
+    elif args.cmd == "power":
+        d = detect()
+        if not d.get("available"):
+            print(json.dumps({"error": d.get("error")}, indent=2)); return 1
+        power_start(args.band)
+        last = 0
+        try:
+            end = time.time() + args.seconds
+            while time.time() < end:
+                time.sleep(1)
+                fr = power_frames(since=last)
+                for f in fr["frames"]:
+                    last = f["seq"]
+                    strong = max(range(len(f["power"])), key=lambda i: f["power"][i])
+                    print("frame %d: peak col %d @ %d dBm" % (f["seq"], strong, f["power"][strong]))
+        finally:
+            power_stop()
+    elif args.cmd == "selftest":
+        r = selftest()
+        for item in r["results"]:
+            print("  [%s] %s%s" % ("PASS" if item["pass"] else "FAIL", item["name"],
+                                   "" if item["pass"] else "  (%s)" % item["detail"]))
+        print("\n%d/%d checks pass — %s" %
+              (r["passed"], r["total"], "OK" if r["pass"] else "FAILURES"))
+        return 0 if r["pass"] else 1
+    else:
+        ap.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv[1:]))

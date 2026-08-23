@@ -8315,6 +8315,51 @@ def wifi_config_alt():
     return send_from_directory('web', 'wifi_config.html')
 
 
+def _any_sdr_present():
+    """True if a HackRF or RTL-SDR is currently detected. Uses each backend's
+    status() (which reports from cache while a capture streams, so this never
+    knocks a running sweep off the USB bus). Best-effort — any probe error
+    reads as 'not present'."""
+    try:
+        import sdr_spectrum
+        if bool((sdr_spectrum.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
+    try:
+        import rtl_sdr
+        if bool((rtl_sdr.status().get('detect') or {}).get('available')):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# RF Waterfall page — real HackRF + RTL-SDR waterfall, with a synthetic demo
+# fallback. Reached from the "RF Waterfall page" button in the WiFi Spectrum
+# Analyzer (which appears once a radio is detected), or directly.
+@app.route('/rf-waterfall')
+@app.route('/demo/rf-waterfall')  # back-compat alias
+def rf_waterfall_page():
+    """Serve the RF Waterfall page.
+
+    Each scope streams true RF when its radio is connected (HackRF via
+    /api/net/sdr/*, RTL-SDR via /api/net/rtl/*) and falls back to a synthetic
+    feed while the "Enable RF Waterfall demo" config toggle (``sdr_demo``) is
+    on. The page is served when the demo toggle is on, or when a radio is
+    present (so the analyzer's button always lands somewhere), otherwise it
+    404s so it stays out of sight. Env ``RAGNAR_SDR_DEMO=1`` forces it on.
+    Login is required (the route is not in the auth whitelist).
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    enabled = (bool(shared_data.config.get('sdr_demo'))
+               or env in ('1', 'true', 'yes', 'on')
+               or _any_sdr_present())
+    if not enabled:
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'rf_waterfall.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')

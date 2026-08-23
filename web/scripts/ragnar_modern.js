@@ -1563,8 +1563,10 @@ function wifiInit() {
     _wifiFillIfaces();
     _wifiSdrCheck();
     _wifiZbCheck();
+    _wifiRtlCheck();
+    _wifiRfwfDemoInit();
     if (!_wifiState.sdr.statusPoll)
-        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); }, 15000);
+        _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiRtlCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
 }
 
@@ -2002,7 +2004,54 @@ function _wifiSdrCheck() {
             ? `HackRF ready${det.board ? ' (' + det.board + ')' : ''} — true-RF waterfall`
             : (det.error || 'Connect a HackRF SDR to enable true-RF waterfall');
         _wifiFsSyncGates();
+        _wifiRfwfShow();
     }).catch(() => {});
+}
+
+// ---- RF Waterfall page (full-screen HackRF + RTL-SDR waterfall) -------------
+// A dedicated page (/rf-waterfall) that stacks the sub-GHz RTL-SDR sweep over
+// the Wi-Fi-band HackRF sweep. The button here appears once either radio is
+// detected, or while the "RF Waterfall demo" toggle is on (synthetic feed).
+function _wifiRtlCheck() {
+    fetch('/api/net/rtl/status').then(r => r.json()).then(st => {
+        const det = (st && st.detect) || {};
+        _wifiState.rtlAvailable = !!det.available;
+        _wifiRfwfShow();
+    }).catch(() => {});
+}
+
+function _wifiRfwfShow() {
+    const btn = document.getElementById('wifi-rfwf-btn');
+    if (!btn) return;
+    const hackrf = !!(_wifiState.sdr && _wifiState.sdr.available);
+    const rtl = !!_wifiState.rtlAvailable;
+    const demo = !!_wifiState.rfwfDemo;
+    const show = hackrf || rtl || demo;
+    btn.classList.toggle('hidden', !show);
+    btn.classList.toggle('inline-flex', show);
+    const bits = [];
+    if (hackrf) bits.push('HackRF');
+    if (rtl) bits.push('RTL-SDR');
+    btn.title = bits.length
+        ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
+        : 'Open the RF Waterfall page (synthetic demo — connect a HackRF or RTL-SDR for true RF)';
+}
+
+// Load the demo toggle's state from config and persist changes.
+function _wifiRfwfDemoInit() {
+    const cb = document.getElementById('wifi-rfwf-demo');
+    if (!cb || cb._wired) return;
+    cb._wired = true;
+    fetch('/api/config').then(r => r.json()).then(c => {
+        _wifiState.rfwfDemo = !!(c && (c.sdr_demo === true || c.sdr_demo === 'true'));
+        cb.checked = _wifiState.rfwfDemo;
+        _wifiRfwfShow();
+    }).catch(() => {});
+    cb.addEventListener('change', () => {
+        _wifiState.rfwfDemo = cb.checked;
+        postAPI('/api/config', { sdr_demo: cb.checked }).catch(() => {});
+        _wifiRfwfShow();
+    });
 }
 
 function _wifiSdrStart() {
