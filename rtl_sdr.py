@@ -58,6 +58,9 @@ _RTL_POWER = _which("rtl_power")
 
 # Power-sweep ranges (Hz). Kept inside the RTL-SDR's reach (~24 MHz–1.7 GHz).
 RTL_BANDS = {
+    "27":     (26900000, 27500000),     # CB / 27 MHz RC (near the tuner's low edge)
+    "40":     (40000000, 41000000),     # 40 MHz RC / toys
+    "315":    (313500000, 316500000),   # US keyfobs / TPMS / garage & gate remotes
     "433":    (433050000, 434790000),   # EU 433 ISM
     "868":    (863000000, 870000000),   # EU 868 SRD
     "915":    (902000000, 928000000),   # US 915 ISM
@@ -66,6 +69,7 @@ RTL_BANDS = {
 
 # rtl_433 tuning presets (its own hop frequencies).
 ISM_FREQS = {
+    "315": "315M",     # US keyfobs, TPMS, garage/gate remotes, many alarm sensors
     "433": "433.92M",
     "868": "868.3M",
     "915": "915M",
@@ -198,6 +202,55 @@ _RING_FRAMES = 300         # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
 _SWEEP_INTERVAL_S = 1      # rtl_power -i (seconds per full sweep)
 _ISM_MAX_DEVICES = 500     # cap the live device table
+
+# Tuner corrections shared by both captures (one dongle). PPM trims the RTL-SDR's
+# crystal offset (matters on the narrow Z-Wave/LoRa channels); gain is tuner gain
+# in dB, or None for the driver's automatic gain. Applied to every rtl_power /
+# rtl_433 command; changing them reapplies to a running capture.
+_ppm = 0
+_gain = None               # None = automatic gain control
+
+
+def get_tuning():
+    """Current tuner corrections for the UI."""
+    return {"ppm": _ppm, "gain": ("auto" if _gain is None else _gain),
+            "gain_is_auto": _gain is None}
+
+
+def set_tuning(ppm=None, gain=None):
+    """Set PPM freq-correction and/or tuner gain, then reapply to any running
+    capture. gain may be a number (dB), or 'auto'/'' /None for AGC."""
+    global _ppm, _gain
+    if ppm is not None:
+        try:
+            _ppm = max(-1000, min(1000, int(float(ppm))))
+        except (TypeError, ValueError):
+            pass
+    if gain is not None:
+        if gain in ("auto", "", "AUTO"):
+            _gain = None
+        else:
+            try:
+                _gain = max(0.0, min(50.0, round(float(gain), 1)))
+            except (TypeError, ValueError):
+                pass
+    # Reapply live so the change takes effect without the user restarting.
+    try:
+        _power.reapply()
+        _ism.reapply()
+    except Exception:
+        pass
+    return get_tuning()
+
+
+def _tuner_args():
+    """Common rtl_power / rtl_433 flags for the current PPM + gain."""
+    args = []
+    if _ppm:
+        args += ["-p", str(_ppm)]
+    if _gain is not None:
+        args += ["-g", str(_gain)]
+    return args
 
 
 # --------------------------------------------------------------------------
@@ -750,6 +803,15 @@ class IsmScanner:
             self._stop_locked()
         return {"ok": True}
 
+    def reapply(self):
+        """Restart the scanner on the same band so a PPM/gain change takes hold."""
+        with self._lock:
+            running = bool(self._thread and self._thread.is_alive())
+            band = self._band
+        if running and band:
+            self.stop()
+            self.start(band)
+
     def _stop_locked(self):
         self._stop.set()
         _terminate(self._proc)
@@ -758,7 +820,7 @@ class IsmScanner:
 
     def _run_loop(self, band):
         freq = ISM_FREQS[band]
-        cmd = [_RTL_433, "-F", "json", "-M", "level", "-f", freq]
+        cmd = [_RTL_433, "-F", "json", "-M", "level", "-f", freq] + _tuner_args()
         self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -886,6 +948,25 @@ class PowerSweep:
             self._stop_locked()
         return {"ok": True}
 
+    def reapply(self):
+        """Restart the sweep on the same span so a PPM/gain change takes hold."""
+        with self._lock:
+            if not (self._thread and self._thread.is_alive()):
+                return
+            lo, hi, label, sig = self._lo, self._hi, self._band, self._sig
+            self._stop_locked()
+            self._stop.clear()
+            self._frames = []
+            self._seq = 0
+            self._maxhold = [_FLOOR_DBM] * _POWER_BINS
+            self._band = label
+            self._sig = sig
+            self._lo, self._hi = lo, hi
+            self._error = None
+            self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
+                                            daemon=True, name="rtlpower-sweep")
+            self._thread.start()
+
     def _stop_locked(self):
         self._stop.set()
         _terminate(self._proc)
@@ -896,7 +977,7 @@ class PowerSweep:
         step = max(1000, (hi - lo) // _POWER_BINS)   # Hz per rtl_power bin
         builder = _PowerFrameBuilder(lo, hi)
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
-               "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"]
+               "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"] + _tuner_args()
         self._stderr_tail = None
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
@@ -928,14 +1009,18 @@ class PowerSweep:
         ints = [int(round(v)) for v in grid]
         with self._lock:
             self._seq += 1
-            self._frames.append({"seq": self._seq, "ts": time.time(),
-                                 "power": ints})
+            ts = time.time()
+            self._frames.append({"seq": self._seq, "ts": ts, "power": ints})
             if len(self._frames) > _RING_FRAMES:
                 self._frames = self._frames[-_RING_FRAMES:]
             if self._maxhold is None:
                 self._maxhold = list(ints)
             else:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
+            meta = {"band": self._band, "lo_hz": self._lo, "hi_hz": self._hi,
+                    "bins": _POWER_BINS, "floor": _FLOOR_DBM}
+        # Feed the session recorder outside our lock (it has its own).
+        _recorder.write(self._seq, ts, ints, meta)
 
     def status(self):
         with self._lock:
@@ -1045,6 +1130,169 @@ def power_stop():
 
 def power_frames(since=0):
     return _power.get_frames(since=since)
+
+
+# --------------------------------------------------------------------------
+# Session recording — capture the power-sweep frame stream to a JSONL file so a
+# session can be replayed (or shared) later. Frames are small (one power grid
+# each), so this is cheap; recordings live under data/ (gitignored).
+# --------------------------------------------------------------------------
+
+_REC_MAX_FRAMES = 3000     # cap a recording (~a few minutes) so files stay bounded
+
+
+def _rec_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "rf_recordings")
+
+
+def _rec_safe(name):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(name or ""))[:60]
+
+
+class _Recorder:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._fh = None
+        self._name = None
+        self._count = 0
+        self._started = None
+        self._meta = None
+
+    def start(self, meta, name=None):
+        with self._lock:
+            self._close()
+            d = _rec_dir()
+            try:
+                os.makedirs(d, exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": "cannot create recordings dir: %s" % exc}
+            base = _rec_safe(name) or ("rf-" + time.strftime("%Y%m%d-%H%M%S"))
+            self._name = base
+            self._count = 0
+            self._started = time.time()
+            self._meta = dict(meta or {})
+            try:
+                self._fh = open(os.path.join(d, base + ".jsonl"), "w")
+                hdr = dict(self._meta)
+                hdr.update({"_hdr": True, "name": base, "ts": self._started})
+                self._fh.write(json.dumps(hdr) + "\n")
+                self._fh.flush()
+            except OSError as exc:
+                self._fh = None
+                return {"ok": False, "error": "cannot open recording file: %s" % exc}
+        return self.status()
+
+    def write(self, seq, ts, power, meta=None):
+        with self._lock:
+            if not self._fh:
+                return
+            if self._count >= _REC_MAX_FRAMES:
+                self._close()
+                return
+            try:
+                self._fh.write(json.dumps({"seq": seq, "ts": round(ts, 3), "power": power}) + "\n")
+                self._count += 1
+                if self._count % 20 == 0:
+                    self._fh.flush()
+            except OSError:
+                self._close()
+
+    def stop(self):
+        with self._lock:
+            self._close()
+        return {"ok": True}
+
+    def _close(self):
+        if self._fh:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def status(self):
+        with self._lock:
+            rec = self._fh is not None
+            return {"recording": rec, "name": self._name if rec else None,
+                    "frames": self._count,
+                    "seconds": round(time.time() - self._started, 1) if (rec and self._started) else 0,
+                    "max_frames": _REC_MAX_FRAMES}
+
+
+_recorder = _Recorder()
+
+
+def record_start(name=None):
+    """Begin recording the running power sweep. Needs a sweep in progress."""
+    st = _power.status()
+    if not st.get("running"):
+        return {"ok": False, "error": "start a sub-GHz sweep first, then record"}
+    meta = {"band": st.get("band"), "lo_hz": (st.get("band_hz") or [None, None])[0],
+            "hi_hz": (st.get("band_hz") or [None, None])[1],
+            "bins": st.get("bins"), "floor": st.get("floor_dbm")}
+    return _recorder.start(meta, name=name)
+
+
+def record_stop():
+    return _recorder.stop()
+
+
+def record_status():
+    return _recorder.status()
+
+
+def record_list():
+    import glob
+    d = _rec_dir()
+    out = []
+    for path in sorted(glob.glob(os.path.join(d, "*.jsonl")), reverse=True):
+        try:
+            with open(path) as fh:
+                first = fh.readline()
+            hdr = json.loads(first) if first.strip() else {}
+            n = 0
+            with open(path) as fh:
+                for _ in fh:
+                    n += 1
+            stat = os.stat(path)
+            out.append({"name": os.path.basename(path)[:-6], "band": hdr.get("band"),
+                        "lo_hz": hdr.get("lo_hz"), "hi_hz": hdr.get("hi_hz"),
+                        "bins": hdr.get("bins"), "floor": hdr.get("floor"),
+                        "frames": max(0, n - 1), "size": stat.st_size,
+                        "mtime": stat.st_mtime})
+        except (OSError, ValueError):
+            continue
+    return {"recordings": out}
+
+
+def record_get(name):
+    path = os.path.join(_rec_dir(), _rec_safe(name) + ".jsonl")
+    if not os.path.exists(path):
+        return {"ok": False, "error": "recording not found"}
+    try:
+        with open(path) as fh:
+            lines = fh.read().splitlines()
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    if not lines:
+        return {"ok": False, "error": "empty recording"}
+    hdr = json.loads(lines[0])
+    frames = []
+    for ln in lines[1:]:
+        try:
+            frames.append(json.loads(ln))
+        except ValueError:
+            continue
+    return {"ok": True, "header": hdr, "frames": frames, "count": len(frames)}
+
+
+def record_delete(name):
+    path = os.path.join(_rec_dir(), _rec_safe(name) + ".jsonl")
+    try:
+        os.remove(path)
+        return {"ok": True}
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def status():
@@ -1271,6 +1519,50 @@ def selftest():
     check("lora: LoRaWAN EU868 lists the three mandatory uplinks",
           all(any(abs(c["freq_hz"] - f) < 1000 for c in lp["lorawan-eu868"]["channels"])
               for f in (868_100_000, 868_300_000, 868_500_000)))
+
+    # --- new bands: 315 (US keyfobs/TPMS/garage) + 40/27 present ---
+    check("bands: 315/40/27 MHz added",
+          all(b in RTL_BANDS for b in ("315", "40", "27")) and "315" in ISM_FREQS)
+
+    # --- tuner corrections (PPM + gain) build the right rtl_* flags ---
+    _saved_ppm, _saved_gain = _ppm, _gain
+    try:
+        set_tuning(ppm=42, gain=28.0)
+        check("tuning: ppm+gain stored", get_tuning()["ppm"] == 42 and get_tuning()["gain"] == 28.0)
+        check("tuning: flags built", _tuner_args() == ["-p", "42", "-g", "28.0"], str(_tuner_args()))
+        set_tuning(gain="auto")
+        check("tuning: auto gain drops -g", _tuner_args() == ["-p", "42"] and get_tuning()["gain_is_auto"])
+        set_tuning(ppm=0, gain="auto")
+        check("tuning: zero ppm + auto = no flags", _tuner_args() == [])
+        set_tuning(ppm=99999)  # clamped
+        check("tuning: ppm clamped to +/-1000", get_tuning()["ppm"] == 1000)
+    finally:
+        set_tuning(ppm=_saved_ppm, gain=("auto" if _saved_gain is None else _saved_gain))
+
+    # --- session recorder round-trip (hermetic: uses a temp recordings dir) ---
+    import tempfile as _tf
+    _saved_rec_dir = _rec_dir
+    _tmpdir = _tf.mkdtemp(prefix="ragnar-rec-")
+    globals()["_rec_dir"] = lambda: _tmpdir
+    try:
+        _rn = "selftest-tmp-rec"
+        rec = _Recorder()
+        rec.start({"band": "433", "lo_hz": 433050000, "hi_hz": 434790000, "bins": 4, "floor": -120}, name=_rn)
+        rec.write(1, 1000.0, [-40, -90, -90, -40])
+        rec.write(2, 1001.0, [-45, -88, -88, -45])
+        rec.stop()
+        g = record_get(_rn)
+        check("record: round-trip get (2 frames + header meta)",
+              g.get("ok") and g["count"] == 2 and g["header"].get("band") == "433"
+              and g["frames"][0]["power"] == [-40, -90, -90, -40], str(g.get("count")))
+        check("record: shows up in the recordings list",
+              any(r["name"] == _rn and r["frames"] == 2 for r in record_list()["recordings"]))
+        check("record: delete removes it",
+              record_delete(_rn).get("ok") and not record_get(_rn).get("ok"))
+    finally:
+        globals()["_rec_dir"] = _saved_rec_dir
+        import shutil as _sh
+        _sh.rmtree(_tmpdir, ignore_errors=True)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

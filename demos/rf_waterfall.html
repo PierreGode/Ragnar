@@ -111,6 +111,17 @@
   .zwavesel{display:flex;align-items:center;gap:6px}
   .zwavesel select{font-family:var(--mono);font-size:11.5px;color:var(--cyan);background:var(--panel);border:1px solid rgba(56,189,201,.4);border-radius:6px;padding:5px 8px;cursor:pointer}
   .zwavesel .zwtag{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--cyan);font-family:var(--mono)}
+  .tunergrp{display:inline-flex;align-items:center;gap:5px}
+  .tunergrp .tlbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--mono)}
+  .tunergrp .tin{width:52px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px}
+  .tunergrp .tin.gain{width:44px}
+  .recbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2);font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
+  .recbar button{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:4px 10px;border-radius:6px;cursor:pointer}
+  .recbar button.rec[aria-pressed="true"]{color:#fb7185;border-color:rgba(251,113,133,.6);background:rgba(251,113,133,.12)}
+  .recbar .recdot{color:#fb7185}
+  .recbar select{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+  .recbar input[type="range"]{flex:1 1 120px;min-width:100px;accent-color:var(--cyan)}
+  .recbar .rsp{color:var(--muted)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
   .scope:fullscreen,.scope:-webkit-full-screen{width:100vw;height:100vh;border-radius:0;border:0;background:var(--ground);display:flex;flex-direction:column}
@@ -142,6 +153,8 @@
 
   <div class="bar">
     <div class="grp"><a href="/" class="ctl back" id="back" title="Return to the Ragnar dashboard">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/adsb-radar" class="ctl" id="radarlink" title="ADS-B radar — live aircraft at 1090 MHz (dump1090)">&#9992;&nbsp;ADS-B Radar</a></div>
+    <div class="grp"><a href="/mesh-nodes" class="ctl" id="meshlink" title="Mesh Nodes — real Meshtastic enumeration via a USB companion node">&#9741;&nbsp;Mesh Nodes</a></div>
     <div class="grp"><button class="ctl" id="play" aria-pressed="true">&#10074;&#10074;&nbsp;Pause</button></div>
     <div class="grp">
       <span class="lbl">Scroll</span>
@@ -234,6 +247,7 @@
     this.cfg=cfg; this.mode='idle'; this.available=false; this.board=''; this.detErr='';
     this.liveBand=cfg.defaultBand; this.synthBand=cfg.synthDefault;
     this.zoom=null; this.marker=null; this.decoding=false; this.zwave=null; this.zwaveRegion=null;
+    this.replaying=false; this.replay=null; this._recPoll=null;
     this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
     this.model=cfg.synth(cfg.synthDefault);
     this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor;
@@ -267,10 +281,13 @@
         +'<canvas class="trace"></canvas>'
         +'<div class="toolbar">'
           +'<span class="marktxt">Click the waterfall to mark a signal.</span>'
+          +'<span class="tunergrp"></span>'
           +'<span class="spacer"></span>'
+          +'<button class="mini snapbtn" title="Save the waterfall as a PNG">⇩ PNG</button>'
           +'<button class="mini zoombtn" disabled>Zoom here</button>'
           +'<button class="mini resetbtn" disabled>Reset zoom</button>'
         +'</div>'
+        +'<div class="recbar hidden"></div>'
         +'<div class="logwrap"><div class="logcap"><span class="logtitle">Detections</span><span class="logcount"></span></div>'
           +'<div class="loglist"><div class="logempty">Listening…</div></div></div>'
       +'</div>';
@@ -283,6 +300,7 @@
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
     this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel'); this.zwaveSel=el.querySelector('.zwavesel');
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
+    this.snapBtn=el.querySelector('.snapbtn'); this.tunerGrp=el.querySelector('.tunergrp'); this.recBar=el.querySelector('.recbar');
     this.fsBtn=el.querySelector('.fsbtn');
     this.logTitle=el.querySelector('.logtitle'); this.logCount=el.querySelector('.logcount'); this.logList=el.querySelector('.loglist');
     this.fctx=this.fall.getContext('2d'); this.tctx=this.trace.getContext('2d');
@@ -315,6 +333,9 @@
     ['fullscreenchange','webkitfullscreenchange'].forEach(function(ev){
       document.addEventListener(ev,function(){ self.onFsChange(); });
     });
+    this.snapBtn.addEventListener('click',function(){ self.snapshot(); });
+    if(cfg.tuner) this.buildTuner();
+    if(cfg.record){ this.buildRecorder(); this.recBar.classList.remove('hidden'); }
 
     this.resize(); this.resetCanvas();
     this._ro=new ResizeObserver(function(){ if(self.resize()){ self.drawRuler(); self.placeMarker(); } });
@@ -337,6 +358,146 @@
     var self=this;
     // let the layout settle, then regrow the canvas to the new size
     requestAnimationFrame(function(){ if(self.resize()){ self.resetCanvas(); self.drawRuler(); self.placeMarker(); } });
+  };
+  // Save the waterfall (with its ruler labels baked on) as a PNG the browser
+  // downloads. Same-origin page, so a normal <a download> works.
+  Scope.prototype.snapshot=function(){
+    var w=this.fall.width, h=this.fall.height;
+    var out=document.createElement('canvas'); out.width=w; out.height=h+34*this.d;
+    var o=out.getContext('2d');
+    o.fillStyle='#05080d'; o.fillRect(0,0,out.width,out.height);
+    o.drawImage(this.fall,0,0);
+    // caption band: label + span + timestamp
+    o.fillStyle='#0d1420'; o.fillRect(0,h,out.width,34*this.d);
+    o.fillStyle='#9fb0c8'; o.font=(12*this.d)+'px monospace'; o.textBaseline='middle';
+    var cap=this.cfg.short+'  '+fmtF(this.lo)+'–'+fmtF(this.hi)
+      +(this.zwave?('  ['+(this.zwave.name||'')+']'):'')+'   '+new Date().toLocaleString();
+    o.fillText(cap, 8*this.d, h+17*this.d);
+    var name='ragnar-rf-'+this.cfg.short.toLowerCase().replace(/[^a-z0-9]+/g,'')+'-'+Date.now()+'.png';
+    var a=document.createElement('a'); a.download=name; a.href=out.toDataURL('image/png');
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+  // Tuner corrections (RTL only): PPM freq-correction + gain. Applies globally to
+  // the dongle via /api/net/rtl/tuning and reapplies to a running capture.
+  Scope.prototype.buildTuner=function(){
+    var self=this, g=this.tunerGrp; if(!g) return;
+    g.innerHTML='<span class="tlbl">PPM</span>'
+      +'<input class="tin ppm" type="number" step="1" min="-1000" max="1000" value="0" title="Frequency correction (ppm) — trims the dongle crystal offset">'
+      +'<span class="tlbl">Gain</span>'
+      +'<input class="tin gain" type="text" value="auto" title="Tuner gain in dB, or auto" size="4">'
+      +'<button class="mini tapply">Apply</button>';
+    this.ppmIn=g.querySelector('.ppm'); this.gainIn=g.querySelector('.gain');
+    g.querySelector('.tapply').addEventListener('click',function(){ self.applyTuner(); });
+    // load current
+    fetch('/api/net/rtl/tuning').then(function(r){return r.json();}).then(function(t){
+      if(!t) return; self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain;
+    }).catch(function(){});
+  };
+  Scope.prototype.applyTuner=function(){
+    var self=this, body={ppm:this.ppmIn.value, gain:this.gainIn.value};
+    var b=this.tunerGrp.querySelector('.tapply'); if(b){b.textContent='…';}
+    fetch('/api/net/rtl/tuning',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(t){
+        if(t){ self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain; }
+        if(b){b.textContent='Apply';}
+      }).catch(function(){ if(b){b.textContent='Apply';} });
+  };
+  // ---- session record + replay (RTL only) ----
+  Scope.prototype.buildRecorder=function(){
+    var self=this, g=this.recBar;
+    g.innerHTML='<button class="rec" title="Record the running sweep to a file"><span class="recdot">&#9679;</span>&nbsp;Rec</button>'
+      +'<span class="recstat rsp"></span><span class="rsp">·</span>'
+      +'<span class="rsp">Recordings</span><select class="reclist"><option value="">—</option></select>'
+      +'<button class="reload" title="Refresh list">&#8635;</button>'
+      +'<span class="transport hidden" style="display:none;align-items:center;gap:8px">'
+        +'<button class="rew" title="Restart">&#9198;</button><button class="pp" title="Play/Pause">&#10074;&#10074;</button>'
+        +'<input type="range" class="seek" min="0" max="0" value="0">'
+        +'<span class="rpos rsp"></span><button class="rdel" title="Delete this recording">&#128465;</button>'
+        +'<button class="rexit">&#10005;&nbsp;Exit</button></span>';
+    this.recBtn=g.querySelector('.rec'); this.recStat=g.querySelector('.recstat');
+    this.recList=g.querySelector('.reclist'); this.transport=g.querySelector('.transport');
+    this.seekEl=g.querySelector('.seek'); this.ppEl=g.querySelector('.pp'); this.rposEl=g.querySelector('.rpos');
+    this.recBtn.addEventListener('click',function(){ self.toggleRecord(); });
+    g.querySelector('.reload').addEventListener('click',function(){ self.refreshRecordings(); });
+    this.recList.addEventListener('change',function(){ if(self.recList.value) self.enterReplay(self.recList.value); });
+    g.querySelector('.rew').addEventListener('click',function(){ self.replaySeek(0); });
+    this.ppEl.addEventListener('click',function(){ self.replayToggle(); });
+    this.seekEl.addEventListener('input',function(){ self.replaySeek(parseInt(self.seekEl.value,10)||0,true); });
+    g.querySelector('.rdel').addEventListener('click',function(){ self.deleteRecording(); });
+    g.querySelector('.rexit').addEventListener('click',function(){ self.exitReplay(); });
+    this.refreshRecordings();
+  };
+  Scope.prototype.toggleRecord=function(){
+    var self=this;
+    if(this._recPoll){ // stop
+      fetch('/api/net/rtl/record/stop',{method:'POST'}).then(function(){ self.refreshRecordings(); });
+      clearInterval(this._recPoll); this._recPoll=null; this.recBtn.setAttribute('aria-pressed','false'); this.recStat.textContent=''; return;
+    }
+    fetch('/api/net/rtl/record/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(function(r){return r.json();}).then(function(st){
+        if(st&&st.error){ self.recStat.innerHTML='<span style="color:#fb7185">'+esc(st.error)+'</span>'; return; }
+        self.recBtn.setAttribute('aria-pressed','true');
+        self._recPoll=setInterval(function(){ self.pollRec(); },1000); self.pollRec();
+      }).catch(function(){});
+  };
+  Scope.prototype.pollRec=function(){ var self=this;
+    fetch('/api/net/rtl/record/status').then(function(r){return r.json();}).then(function(st){
+      if(!st||!st.recording){ if(self._recPoll){clearInterval(self._recPoll);self._recPoll=null;} self.recBtn.setAttribute('aria-pressed','false'); self.recStat.textContent=''; self.refreshRecordings(); return; }
+      self.recStat.innerHTML='<span class="recdot">&#9679;</span> REC '+st.seconds+'s · '+st.frames+'f';
+    }).catch(function(){});
+  };
+  Scope.prototype.refreshRecordings=function(){ var self=this;
+    fetch('/api/net/rtl/record/list').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.recordings)||[], cur=self.recList.value;
+      self.recList.innerHTML='<option value="">'+(recs.length?'Replay…':'— none —')+'</option>'
+        +recs.map(function(r){var mhz=r.lo_hz?(( (r.lo_hz/1e6)|0)+'-'+((r.hi_hz/1e6)|0)+'M'):'';
+          return '<option value="'+esc(r.name)+'">'+esc(r.name)+' ('+r.frames+'f '+mhz+')</option>';}).join('');
+      if(cur) self.recList.value=cur;
+    }).catch(function(){});
+  };
+  Scope.prototype.deleteRecording=function(){ var self=this, n=this.replay&&this.replay.name; if(!n)return;
+    fetch('/api/net/rtl/record/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})})
+      .then(function(){ self.exitReplay(); self.refreshRecordings(); });
+  };
+  Scope.prototype.enterReplay=function(name){ var self=this;
+    fetch('/api/net/rtl/record/get?name='+encodeURIComponent(name)).then(function(r){return r.json();}).then(function(d){
+      if(!d||!d.ok||!d.frames.length){ self.recStat.innerHTML='<span style="color:#fb7185">recording empty</span>'; return; }
+      var h=d.header||{}, lo=(h.lo_hz||430e6)/1e6, hi=(h.hi_hz||930e6)/1e6, floor=(typeof h.floor==='number')?h.floor:-120;
+      var wasLive=(self.mode==='live'); if(wasLive) self.stopLive();
+      self.replaying=true; self.replay={name:name,frames:d.frames,idx:0,playing:true,lo:lo,hi:hi,floor:floor,wasLive:wasLive};
+      self.lo=lo; self.hi=hi; self.floor=floor; self.zoom=null; self.resetBtn.disabled=true; self.resetCanvas(); self.drawRuler();
+      self.transport.style.display='inline-flex'; self.seekEl.max=d.frames.length-1; self.seekEl.value=0;
+      self.ppEl.innerHTML='&#10074;&#10074;'; self.recStat.innerHTML='<span style="color:var(--cyan)">▷ replay</span>';
+      self.replayTick();
+    }).catch(function(){});
+  };
+  Scope.prototype.replayTick=function(){ var self=this, rp=this.replay; if(!rp||!rp.playing) return;
+    if(rp.idx>=rp.frames.length){ rp.playing=false; this.ppEl.innerHTML='&#9654;'; return; }
+    var f=rp.frames[rp.idx]; this.pushRow(f.power,rp.lo,rp.hi,rp.floor);
+    this.seekEl.value=rp.idx; this.rposEl.textContent=(rp.idx+1)+'/'+rp.frames.length;
+    var dt=1000/12; if(rp.idx+1<rp.frames.length){ dt=Math.max(50,Math.min(1000,(rp.frames[rp.idx+1].ts-f.ts)*1000)); }
+    rp.idx++; this._replayTimer=setTimeout(function(){ self.replayTick(); },dt);
+  };
+  Scope.prototype.replayToggle=function(){ var rp=this.replay; if(!rp)return;
+    rp.playing=!rp.playing; this.ppEl.innerHTML=rp.playing?'&#10074;&#10074;':'&#9654;';
+    if(rp.playing){ if(rp.idx>=rp.frames.length) rp.idx=0; this.replayTick(); }
+    else if(this._replayTimer){ clearTimeout(this._replayTimer); this._replayTimer=null; } };
+  Scope.prototype.replaySeek=function(i,fromSlider){ var rp=this.replay; if(!rp)return;
+    if(this._replayTimer){ clearTimeout(this._replayTimer); this._replayTimer=null; }
+    i=Math.max(0,Math.min(rp.frames.length-1,i)); rp.idx=i;
+    // repaint the visible window ending at i
+    this.resetCanvas(); var rows=Math.ceil(this.H/this.STEP), start=Math.max(0,i-rows);
+    for(var k=start;k<=i;k++){ this.pushRow(rp.frames[k].power,rp.lo,rp.hi,rp.floor); }
+    this.seekEl.value=i; this.rposEl.textContent=(i+1)+'/'+rp.frames.length;
+    if(rp.playing && !fromSlider){ rp.idx=i+1; this.replayTick(); }
+    if(fromSlider){ rp.playing=false; this.ppEl.innerHTML='&#9654;'; } };
+  Scope.prototype.exitReplay=function(){ var rp=this.replay;
+    if(this._replayTimer){ clearTimeout(this._replayTimer); this._replayTimer=null; }
+    this.replaying=false; this.replay=null; this.transport.style.display='none';
+    if(this.recList) this.recList.value=''; if(this.recStat) this.recStat.textContent='';
+    this.resetCanvas();
+    if(rp&&rp.wasLive){ this._rangeKnown=false; this.startLive(); }
+    else { this.drawRuler(); }
   };
   Scope.prototype.resize=function(){
     var d=this.dpr(), wcss=this.fall.clientWidth||600;
@@ -506,7 +667,7 @@
   };
   Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
   Scope.prototype.livePoll=function(){
-    if(!running || this.mode!=='live' || this.decoding) return;
+    if(!running || this.mode!=='live' || this.decoding || this.replaying) return;
     var self=this;
     fetch(this.cfg.api.frames+'?since='+this.seq).then(function(r){return r.json();}).then(function(d){
       self.liveErr=d.error||null; var lo,hi;
@@ -649,8 +810,8 @@
   var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
-    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, minSpan:0.2,
-    liveBands:[{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
+    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
+    liveBands:[{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
@@ -674,7 +835,7 @@
 
   var acc=0,last=performance.now();
   function loop(now){ if(!running)return; var dt=(now-last)/1000;last=now;acc+=dt;var interval=1/HZ,did=0;
-    while(acc>=interval&&did<4){ scopes.forEach(function(s){ if(s.mode==='synth'&&!s.decoding) s.synthStep(); }); acc-=interval;did++; }
+    while(acc>=interval&&did<4){ scopes.forEach(function(s){ if(s.mode==='synth'&&!s.decoding&&!s.replaying) s.synthStep(); }); acc-=interval;did++; }
     scopes.forEach(function(s){s.setRate(HZ);}); requestAnimationFrame(loop); }
 
   function updateFoot(){

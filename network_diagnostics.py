@@ -45,6 +45,8 @@ import report_common
 import bt_scanner
 import sdr_spectrum
 import rtl_sdr
+import adsb
+import meshtastic_node
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18790,6 +18792,8 @@ def register_network_diagnostics(app, logger=None):
         label = data.get('label')
         label = str(label).strip()[:24] if label else None
         _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
+        try: adsb.stop()          # one dongle: ADS-B can't run alongside the sweep
+        except Exception: pass
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
                                            hi_hz=data.get('hi_hz'), label=label))
 
@@ -18807,6 +18811,114 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_lora():
         return jsonify({"plans": rtl_sdr.lora_plan()})
 
+    # Tuner corrections: PPM frequency-correction + tuner gain. GET reads current,
+    # POST {ppm, gain} sets them and reapplies to any running capture.
+    @app.route('/api/net/rtl/tuning', methods=['GET', 'POST'])
+    def net_rtl_tuning():
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            return jsonify(rtl_sdr.set_tuning(ppm=data.get('ppm'), gain=data.get('gain')))
+        return jsonify(rtl_sdr.get_tuning())
+
+    # Session recording — capture the running power sweep to a JSONL file and
+    # replay it later. Frames are small, so this is cheap; files live under data/.
+    @app.route('/api/net/rtl/record/start', methods=['POST'])
+    def net_rtl_record_start():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/record/start")
+        return jsonify(rtl_sdr.record_start(name=data.get('name')))
+
+    @app.route('/api/net/rtl/record/stop', methods=['POST'])
+    def net_rtl_record_stop():
+        _log("net/rtl/record/stop")
+        return jsonify(rtl_sdr.record_stop())
+
+    @app.route('/api/net/rtl/record/status', methods=['GET'])
+    def net_rtl_record_status():
+        return jsonify(rtl_sdr.record_status())
+
+    @app.route('/api/net/rtl/record/list', methods=['GET'])
+    def net_rtl_record_list():
+        return jsonify(rtl_sdr.record_list())
+
+    @app.route('/api/net/rtl/record/get', methods=['GET'])
+    def net_rtl_record_get():
+        return jsonify(rtl_sdr.record_get(request.args.get('name', '')))
+
+    @app.route('/api/net/rtl/record/delete', methods=['POST'])
+    def net_rtl_record_delete():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/record/delete")
+        return jsonify(rtl_sdr.record_delete(data.get('name', '')))
+
+    # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
+    # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
+    # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.
+    @app.route('/api/net/adsb/status', methods=['GET'])
+    def net_adsb_status():
+        return jsonify(adsb.status())
+
+    @app.route('/api/net/adsb/start', methods=['POST'])
+    def net_adsb_start():
+        _log("net/adsb/start")
+        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop()   # hand the dongle to dump1090
+        except Exception: pass
+        return jsonify(adsb.start())
+
+    @app.route('/api/net/adsb/stop', methods=['POST'])
+    def net_adsb_stop():
+        _log("net/adsb/stop")
+        return jsonify(adsb.stop())
+
+    @app.route('/api/net/adsb/aircraft', methods=['GET'])
+    def net_adsb_aircraft():
+        return jsonify(adsb.aircraft())
+
+    @app.route('/api/net/adsb/selftest', methods=['GET'])
+    def net_adsb_selftest():
+        return jsonify(adsb.selftest())
+
+    @app.route('/api/net/adsb/install', methods=['POST'])
+    def net_adsb_install():
+        _log("net/adsb/install")
+        return jsonify(adsb.install())
+
+    # Meshtastic companion node (USB) — real mesh enumeration + decoded public
+    # channel. This is the identify-the-mesh counterpart to the LoRa spectrum
+    # overlay (which is energy-only). Its own USB radio, so it does NOT contend
+    # for the RTL-SDR.
+    @app.route('/api/net/mesh/status', methods=['GET'])
+    def net_mesh_status():
+        return jsonify(meshtastic_node.status())
+
+    @app.route('/api/net/mesh/nodes', methods=['GET'])
+    def net_mesh_nodes():
+        return jsonify(meshtastic_node.nodes())
+
+    @app.route('/api/net/mesh/messages', methods=['GET'])
+    def net_mesh_messages():
+        return jsonify(meshtastic_node.messages())
+
+    @app.route('/api/net/mesh/start', methods=['POST'])
+    def net_mesh_start():
+        data = request.get_json(silent=True) or {}
+        _log("net/mesh/start")
+        return jsonify(meshtastic_node.start(port=data.get('port')))
+
+    @app.route('/api/net/mesh/stop', methods=['POST'])
+    def net_mesh_stop():
+        _log("net/mesh/stop")
+        return jsonify(meshtastic_node.stop())
+
+    @app.route('/api/net/mesh/install', methods=['POST'])
+    def net_mesh_install():
+        _log("net/mesh/install")
+        return jsonify(meshtastic_node.install())
+
+    @app.route('/api/net/mesh/selftest', methods=['GET'])
+    def net_mesh_selftest():
+        return jsonify(meshtastic_node.selftest())
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
@@ -18815,6 +18927,8 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
         _log(f"net/rtl/ism/start band={band}")
+        try: adsb.stop()          # one dongle: ADS-B can't run alongside the decoder
+        except Exception: pass
         return jsonify(rtl_sdr.ism_start(band=band))
 
     @app.route('/api/net/rtl/ism/stop', methods=['POST'])

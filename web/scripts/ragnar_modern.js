@@ -2018,6 +2018,11 @@ function _wifiRtlCheck() {
         _wifiState.rtlAvailable = !!det.available;
         _wifiRfwfShow();
     }).catch(() => {});
+    // Meshtastic companion node (separate USB device) gates the Mesh Nodes button.
+    fetch('/api/net/mesh/status').then(r => r.json()).then(st => {
+        _wifiState.meshAvailable = !!(st && st.detect && st.detect.available);
+        _wifiRfwfShow();
+    }).catch(() => {});
 }
 
 function _wifiRfwfShow() {
@@ -2035,6 +2040,22 @@ function _wifiRfwfShow() {
     btn.title = bits.length
         ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
         : 'Open the RF Waterfall page (synthetic demo — connect a HackRF or RTL-SDR for true RF)';
+    // ADS-B radar needs an RTL-SDR (1090 MHz via dump1090); show alongside when
+    // an RTL is present or the demo is on (synthetic sky).
+    const adsb = document.getElementById('wifi-adsb-btn');
+    if (adsb) {
+        const showA = rtl || demo;
+        adsb.classList.toggle('hidden', !showA);
+        adsb.classList.toggle('inline-flex', showA);
+    }
+    // Mesh Nodes uses a separate USB Meshtastic node; show when one is detected
+    // or the demo is on (synthetic mesh).
+    const mesh = document.getElementById('wifi-mesh-btn');
+    if (mesh) {
+        const showM = !!_wifiState.meshAvailable || demo;
+        mesh.classList.toggle('hidden', !showM);
+        mesh.classList.toggle('inline-flex', showM);
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.

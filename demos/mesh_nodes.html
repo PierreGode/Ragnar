@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh Nodes</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --mesh:#7b8cd2;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
+    --head:'Chakra Petch',system-ui,sans-serif; --radius:12px;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:20px;min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(123,140,210,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
+  .wrap{max-width:1280px;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--mesh);box-shadow:0 0 10px var(--mesh)}
+  h1{font-family:var(--head);font-weight:700;font-size:34px;margin:2px 0 0;letter-spacing:.01em}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:520px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s,background .15s}
+  button.ctl:hover,a.ctl:hover{border-color:var(--mesh);color:#fff}
+  a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  .stat{display:flex;flex-direction:column;gap:1px}
+  .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:14px;color:var(--mesh)}
+  .layout{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px}
+  @media (max-width:900px){.layout{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .cap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .scopewrap{position:relative;background:#05080d;aspect-ratio:4/3;width:100%}
+  canvas#map{display:block;width:100%;height:100%}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.80);text-align:center;padding:20px}
+  .veil.show{display:flex}
+  .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
+  .tbl{overflow:auto;max-height:360px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+  th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
+  td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
+  tr:hover td{background:rgba(123,140,210,.06)}
+  td.nm{color:var(--ink);font-weight:500} .self td{background:rgba(63,181,107,.07)}
+  .empty{padding:24px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .pill{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted)}
+  .msgs{max-height:220px;overflow:auto;padding:6px 0}
+  .msg{padding:6px 14px;border-bottom:1px solid var(--line-soft);font-size:12px}
+  .msg .mf{color:var(--cyan);font-family:var(--mono);font-size:11px} .msg .mt{color:var(--ink)} .msg .mm{color:var(--muted);font-family:var(--mono);font-size:10px}
+  .snrbadge{font-family:var(--mono);font-size:10px}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>Mesh Nodes</h1>
+      <div class="sub">Real Meshtastic enumeration via a USB companion node — the node DB (names, hardware, role, SNR, hops, battery, GPS) and decoded public-channel messages. This is the <i>who's on it</i> to the spectrum overlay's <i>where it is</i>.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Nodes</span><span class="v" id="s-count">—</span></div>
+      <div class="stat"><span class="k">Messages</span><span class="v" id="s-msgs">—</span></div>
+      <div class="stat"><span class="k">Link</span><span class="v"><span class="tag idle" id="s-mode">idle</span></span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/rf-waterfall" class="ctl" title="LoRa spectrum overlay (energy view)">〜&nbsp;RF Waterfall</a></div>
+    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Connect to the USB Meshtastic node">&#9654;&nbsp;Connect</button></div>
+    <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
+  </div>
+
+  <div class="layout">
+    <div style="display:flex;flex-direction:column;gap:16px;min-width:0">
+      <div class="card">
+        <div class="cap"><span class="t">Node map</span><span class="c" id="mapcap">GPS-positioned nodes</span></div>
+        <div class="scopewrap">
+          <canvas id="map"></canvas>
+          <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div>
+            <button class="ctl" id="veil-install" style="display:none;margin-top:6px;border-color:rgba(123,140,210,.5);color:var(--mesh)">⬇ Install meshtastic</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="cap"><span class="t">Public channel</span><span class="c" id="msgcap"></span></div>
+        <div class="msgs" id="msgs"><div class="empty">No messages yet…</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="cap"><span class="t">Nodes</span><span class="c" id="tblcount"></span></div>
+      <div class="tbl">
+        <table>
+          <thead><tr><th>Name</th><th>ID</th><th>HW</th><th>SNR</th><th>Hops</th><th>Batt</th><th>Heard</th></tr></thead>
+          <tbody id="tbody"><tr><td colspan="7" class="empty">Not connected…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> a Meshtastic device (Heltec / RAK / T-Beam …) on USB does the LoRa demodulation in hardware; the meshtastic Python API hands Ragnar the decoded node DB and messages. The <b>public</b> channel key is well-known so its traffic is readable; private channels stay encrypted. The device's own USB radio is used, so this does not contend for the RTL-SDR.</div>
+    <div style="margin-top:6px"><b>Map:</b> nodes with a GPS position are plotted relative to your node (self = green centre). SNR colours the link. Nodes without GPS appear in the table only.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var running=false, DEMO_ON=false, mode='idle', nodes=[], msgs=[];
+  var cv=document.getElementById('map'), ctx=cv.getContext('2d');
+  var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs'), veilInstall=document.getElementById('veil-install');
+
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function toRad(d){return d*Math.PI/180;}
+  function haversineKm(a,b,c,d){var R=6371,p1=toRad(a),p2=toRad(c),dp=toRad(c-a),dl=toRad(d-b);
+    var x=Math.sin(dp/2)*Math.sin(dp/2)+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)*Math.sin(dl/2);
+    return 2*R*Math.asin(Math.min(1,Math.sqrt(x)));}
+  function bearing(a,b,c,d){var p1=toRad(a),p2=toRad(c),dl=toRad(d-b);
+    var y=Math.sin(dl)*Math.cos(p2),x=Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl);
+    return (Math.atan2(y,x)*180/Math.PI+360)%360;}
+  function snrColor(s){ if(s==null)return '#7c8aa0'; if(s>=5)return '#3fb56b'; if(s>=0)return '#38bdc9'; if(s>=-8)return '#f0a35e'; return '#fb7185';}
+  function ago(ts){ if(!ts)return '—'; var d=Date.now()/1000-ts; if(d<60)return Math.round(d)+'s'; if(d<3600)return Math.round(d/60)+'m'; if(d<86400)return Math.round(d/3600)+'h'; return Math.round(d/86400)+'d';}
+
+  function ensureSize(){ var d=Math.min(window.devicePixelRatio||1,2), w=cv.clientWidth, h=cv.clientHeight; if(!w||!h)return false;
+    if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){cv.width=Math.round(w*d);cv.height=Math.round(h*d);ctx.setTransform(d,0,0,d,0,0);} return true; }
+
+  function selfNode(){ return nodes.filter(function(n){return n.is_self;})[0]||null; }
+  function draw(){
+    var W=cv.clientWidth||600,H=cv.clientHeight||450,cx=W/2,cy=H/2,R=Math.min(W,H)/2-24;
+    ctx.clearRect(0,0,W,H);
+    var me=selfNode(), origin=(me&&me.lat!=null)?me:null;
+    // gather positioned nodes + max distance
+    var pos=nodes.filter(function(n){return n.lat!=null&&n.lon!=null;});
+    var maxKm=1;
+    if(origin){ pos.forEach(function(n){ n._d=haversineKm(origin.lat,origin.lon,n.lat,n.lon); n._b=bearing(origin.lat,origin.lon,n.lat,n.lon); if(n._d>maxKm)maxKm=n._d; }); }
+    maxKm=Math.max(0.5,maxKm*1.15);
+    // rings
+    ctx.strokeStyle='rgba(123,140,210,.25)'; ctx.fillStyle='rgba(123,140,210,.5)'; ctx.font='10px "IBM Plex Mono",monospace'; ctx.textAlign='left';
+    for(var i=1;i<=3;i++){ var rr=R*i/3; ctx.beginPath(); ctx.arc(cx,cy,rr,0,2*Math.PI); ctx.stroke();
+      ctx.fillText((maxKm*i/3).toFixed(maxKm<3?1:0)+(i===3?' km':''),cx+4,cy-rr+12); }
+    ctx.strokeStyle='rgba(123,140,210,.15)'; ctx.beginPath(); ctx.moveTo(cx-R,cy);ctx.lineTo(cx+R,cy);ctx.moveTo(cx,cy-R);ctx.lineTo(cx,cy+R);ctx.stroke();
+    // links from self to each positioned node + node dots
+    pos.forEach(function(n){ if(n.is_self) return; if(n._d==null) return;
+      var r=(n._d/maxKm)*R, ang=toRad(n._b), x=cx+r*Math.sin(ang), y=cy-r*Math.cos(ang), col=snrColor(n.snr);
+      ctx.strokeStyle='rgba(123,140,210,.25)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke();
+      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(x,y,4,0,2*Math.PI); ctx.fill();
+      ctx.fillStyle='rgba(232,238,246,.92)'; ctx.textAlign='center'; ctx.font='10px "IBM Plex Mono",monospace';
+      ctx.fillText(n.short_name||n.long_name||n.id, x, y-8);
+      if(n.snr!=null){ ctx.fillStyle='rgba(124,138,160,.9)'; ctx.fillText(n.snr+'dB', x, y+15); }
+    });
+    // self at centre
+    ctx.fillStyle=origin?'#3fb56b':'#546074'; ctx.beginPath(); ctx.arc(cx,cy,5,0,2*Math.PI); ctx.fill();
+    ctx.fillStyle='rgba(63,181,107,.95)'; ctx.textAlign='center'; ctx.font='10px "IBM Plex Mono",monospace';
+    if(me) ctx.fillText((me.short_name||'YOU'),cx,cy-10);
+    if(!origin){ ctx.fillStyle='rgba(245,185,66,.9)'; ctx.fillText('No GPS on your node — see the table',cx,cy+R-4); }
+    var noPos=nodes.length-pos.length;
+    document.getElementById('mapcap').textContent=pos.length+' positioned'+(noPos>0?(' · '+noPos+' no GPS'):'');
+  }
+  function anim(){ if(ensureSize()) draw(); requestAnimationFrame(anim); }
+
+  function setMode(m){ mode=m; var el=document.getElementById('s-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle'));
+    el.textContent=(m==='live'?'connected':(m==='synth'?'synthetic':'idle')); }
+  function showVeil(t,s,inst){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');veilInstall.style.display=inst?'inline-block':'none';}
+  function hideVeil(){veil.classList.remove('show');}
+  veilInstall.addEventListener('click',function(){ veilInstall.textContent='Installing…'; veilInstall.disabled=true;
+    fetch('/api/net/mesh/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      veilInstall.textContent='⬇ Install meshtastic'; veilInstall.disabled=false;
+      if(res&&res.ok){ hideVeil(); checkStatus(); } else { showVeil('Install did not complete',(res&&res.error)||'pip failed — try: pip install meshtastic',true); }
+    }).catch(function(){ veilInstall.textContent='⬇ Install meshtastic'; veilInstall.disabled=false; });
+  });
+
+  function renderTable(){
+    var tb=document.getElementById('tbody');
+    document.getElementById('s-count').textContent=nodes.length;
+    document.getElementById('tblcount').textContent=nodes.length+' nodes';
+    if(!nodes.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Waiting for nodes…':'Not connected')+'</td></tr>'; return; }
+    tb.innerHTML=nodes.map(function(n){
+      var nm=(n.long_name||n.short_name||n.id||'—')+(n.is_self?' <span class="pill" style="color:var(--live);border-color:rgba(63,181,107,.4)">self</span>':'')
+        +(n.role&&n.role!=='CLIENT'?' <span class="pill">'+esc(n.role)+'</span>':'');
+      return '<tr class="'+(n.is_self?'self':'')+'">'
+        +'<td class="nm">'+nm+'</td>'
+        +'<td>'+esc(n.id||'—')+'</td>'
+        +'<td>'+esc(n.hw_model||'—')+'</td>'
+        +'<td class="snrbadge" style="color:'+snrColor(n.snr)+'">'+(n.snr!=null?n.snr:'—')+'</td>'
+        +'<td>'+(n.hops!=null?n.hops:'—')+'</td>'
+        +'<td>'+(n.battery!=null?n.battery+'%':'—')+'</td>'
+        +'<td>'+ago(n.last_heard)+'</td>'
+        +'</tr>'; }).join('');
+  }
+  function renderMsgs(){
+    var el=document.getElementById('msgs'); document.getElementById('s-msgs').textContent=msgs.length;
+    document.getElementById('msgcap').textContent=msgs.length?(msgs.length+' messages'):'';
+    if(!msgs.length){ el.innerHTML='<div class="empty">No messages yet…</div>'; return; }
+    var byId={}; nodes.forEach(function(n){byId[n.id]=n.long_name||n.short_name||n.id;});
+    el.innerHTML=msgs.slice().reverse().slice(0,60).map(function(m){
+      var who=byId[m.from]||m.from||'?';
+      return '<div class="msg"><span class="mf">'+esc(who)+'</span> <span class="mt">'+esc(m.text||'')+'</span>'
+        +' <span class="mm">'+(m.snr!=null?('SNR '+m.snr+' · '):'')+ago(m.ts)+'</span></div>';
+    }).join('');
+  }
+
+  var poll=null;
+  function startRun(){
+    running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Disconnect';
+    fetch('/api/net/mesh/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON)synthMode(); else showVeil('Could not connect',res.error); } }).catch(function(){});
+    if(poll)clearInterval(poll); poll=setInterval(pollLive,2000); pollLive();
+  }
+  function stopRun(){
+    running=false; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Connect';
+    if(poll){clearInterval(poll);poll=null;}
+    fetch('/api/net/mesh/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) synthMode(); else { setMode('idle'); nodes=[]; msgs=[]; renderTable(); renderMsgs(); }
+  }
+  document.getElementById('startbtn').addEventListener('click',function(){ running?stopRun():startRun(); });
+
+  function pollLive(){
+    Promise.all([fetch('/api/net/mesh/nodes').then(function(r){return r.json();}).catch(function(){return null;}),
+                 fetch('/api/net/mesh/messages').then(function(r){return r.json();}).catch(function(){return null;})])
+      .then(function(res){ var nd=res[0],mg=res[1];
+        if(nd&&nd.connected){ hideVeil(); setMode('live'); nodes=nd.nodes||[]; msgs=(mg&&mg.messages)||[]; renderTable(); renderMsgs(); }
+        else if(nd&&nd.error){ if(DEMO_ON)synthMode(); else showVeil('Mesh link error',nd.error); }
+      });
+  }
+
+  // ---- synthetic mesh (demo / no hardware) ----
+  var synthTimer=null;
+  function synthMode(){ setMode('synth'); hideVeil();
+    if(!nodes.length||!nodes._synth){ nodes=makeSynth(); nodes._synth=true; msgs=[]; }
+    renderTable(); renderMsgs();
+    if(synthTimer) return;
+    synthTimer=setInterval(function(){ stepSynth(); renderTable(); renderMsgs(); },3000);
+  }
+  var SN=[['Base Camp','BASE','HELTEC_V3','ROUTER',0,59.3293,18.0686],['Trail Node','TRL','RAK4631','CLIENT',2,59.34,18.09],
+    ['Ridge Relay','RDG','TBEAM','ROUTER',1,59.31,18.02],['Harbor','HARB','TLORA_V2','CLIENT',3,59.32,18.12],
+    ['Rooftop','ROOF','HELTEC_V3','CLIENT',1,59.345,18.05],['Mobile','MOB','TECHO','CLIENT',2,null,null]];
+  function makeSynth(){ return SN.map(function(s,i){ return {id:'!'+(0x7c000000+i*0x1111).toString(16), num:0x7c000000+i*0x1111,
+    long_name:s[0],short_name:s[1],hw_model:s[2],role:s[3],hops:s[4],snr:[9.5,-3,4,-9,2,-6][i],battery:[92,64,78,41,88,55][i],
+    lat:s[5],lon:s[6],last_heard:Math.floor(Date.now()/1000)-((Math.random()*120)|0),is_self:i===0}; }); }
+  var chat=['net?','loud and clear','moving to ridge','battery low here','wx: clear','anyone on high site?','copy that','QSL 73'];
+  function stepSynth(){ nodes.forEach(function(n){ if(!n.is_self){ n.snr=Math.round((n.snr+(Math.random()-0.5)*2)*10)/10; n.last_heard=Math.floor(Date.now()/1000)-((Math.random()*90)|0);} });
+    if(Math.random()<0.6){ var from=nodes[1+((Math.random()*(nodes.length-1))|0)];
+      msgs.push({from:from.id,to:'^all',channel:0,snr:from.snr,text:chat[(Math.random()*chat.length)|0],ts:Date.now()/1000});
+      if(msgs.length>200)msgs=msgs.slice(-200); } }
+
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function checkStatus(){
+    fetch('/api/net/mesh/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{}; var dt=document.getElementById('devtag');
+      if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Disconnect'; if(!poll){poll=setInterval(pollLive,2000);pollLive();} }
+      if(det.available){ dt.className='tag live'; dt.textContent=(det.usb_desc||'Meshtastic')+' ready'; hideVeil(); if(!running&&mode==='idle'){} }
+      else { dt.className='tag idle'; dt.textContent=det.error?'no node':'detecting…';
+        if(DEMO_ON){ synthMode(); }
+        else if(!running){ setMode('idle'); showVeil('No Meshtastic node', det.error||'Plug a Meshtastic device in via USB, or enable the RF Waterfall demo for a synthetic mesh.', det.tools_installed===false); } }
+    }).catch(function(){ if(DEMO_ON) synthMode(); });
+  }
+
+  ensureSize(); window.addEventListener('resize',ensureSize); requestAnimationFrame(anim);
+  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+})();
+</script>
+</body>
+</html>

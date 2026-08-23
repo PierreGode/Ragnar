@@ -8360,6 +8360,49 @@ def rf_waterfall_page():
     return _no_store(make_response(send_from_directory('demos', 'rf_waterfall.html')))
 
 
+@app.route('/adsb-radar')
+def adsb_radar_page():
+    """Serve the ADS-B radar screen (live aircraft at 1090 MHz via dump1090).
+
+    Served when dump1090 + an RTL-SDR are present, or when the RF Waterfall demo
+    toggle (``sdr_demo`` / ``RAGNAR_SDR_DEMO``) is on (the page then shows a
+    synthetic sky so it's explorable with no hardware). 404s otherwise so it
+    stays out of sight. Login required (not in the auth whitelist).
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    present = False
+    try:
+        import adsb
+        present = bool(adsb.detect().get('available'))
+    except Exception:
+        present = False
+    if not (demo or present):
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'adsb_radar.html')))
+
+
+@app.route('/mesh-nodes')
+def mesh_nodes_page():
+    """Serve the Meshtastic mesh map/node list (real enumeration via a USB node).
+
+    Served when a Meshtastic device is usable, or when the RF Waterfall demo
+    toggle is on (synthetic mesh so it's explorable). 404s otherwise. Login
+    required (not in the auth whitelist).
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    present = False
+    try:
+        import meshtastic_node
+        present = bool(meshtastic_node.detect().get('available'))
+    except Exception:
+        present = False
+    if not (demo or present):
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')
