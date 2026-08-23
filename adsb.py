@@ -401,13 +401,34 @@ class AdsbTracker:
         self._error = None
         self._msgs = 0
         self._started = None
+        self._connected = False    # SBS socket connected to dump1090
+        self._sbs_lines = 0        # raw lines received on 30003 (reception proof)
+        self._stderr_tail = ""     # last bit of dump1090 stderr (device errors)
+
+    def _diag(self):
+        """A human hint distinguishing 'no reception' from a real fault."""
+        if not (self._reader and self._reader.is_alive()):
+            return None
+        if not self._connected:
+            return "starting dump1090 / connecting to SBS 30003…"
+        elapsed = time.time() - (self._started or time.time())
+        if self._sbs_lines == 0:
+            if elapsed > 15:
+                return ("dump1090 running but no 1090 MHz messages — check the "
+                        "antenna (needs a 1090 MHz / ADS-B antenna), placement, and "
+                        "that aircraft are overhead")
+            return "listening for aircraft…"
+        return None
 
     def status(self):
         with self._lock:
             running = bool(self._reader and self._reader.is_alive())
             self._prune()
             return {"running": running, "aircraft": len(self._planes),
-                    "messages": self._msgs, "error": self._error,
+                    "messages": self._msgs, "sbs_lines": self._sbs_lines,
+                    "connected": self._connected, "error": self._error,
+                    "hint": self._diag(),
+                    "stderr": (self._stderr_tail or "").strip()[-300:],
                     "since": self._started}
 
     def _prune(self):
@@ -439,6 +460,8 @@ class AdsbTracker:
                 out.append(a)
             out.sort(key=lambda a: a.get("callsign") or a["icao"])
             return {"aircraft": out, "count": len(out), "messages": self._msgs,
+                    "sbs_lines": self._sbs_lines, "connected": self._connected,
+                    "hint": self._diag(),
                     "running": bool(self._reader and self._reader.is_alive()),
                     "error": self._error}
 
@@ -468,19 +491,41 @@ class AdsbTracker:
             self._planes = {}
             self._msgs = 0
             self._error = None
+            self._connected = False
+            self._sbs_lines = 0
+            self._stderr_tail = ""
             self._started = time.time()
+            # --net enables the SBS BaseStation server; force its port to 30003
+            # explicitly so it doesn't matter what a given fork defaults to.
+            # (No --quiet: not all forks accept it, and stdout is discarded anyway.)
+            cmd = [dump, "--net", "--net-sbs-port", str(_SBS_PORT)]
             try:
-                # --net turns on the SBS (30003) server; --quiet keeps stdout clean.
                 self._proc = subprocess.Popen(
-                    [dump, "--net", "--quiet"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             except Exception as exc:
                 self._error = "failed to launch dump1090: %s" % exc
                 return {"ok": False, "error": self._error}
+            # Drain stderr so dump1090 can't block on a full pipe, and keep a tail
+            # for diagnostics (device-open errors, gain warnings).
+            threading.Thread(target=self._drain_stderr, daemon=True,
+                             name="adsb-stderr").start()
             self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                             name="adsb-sbs")
             self._reader.start()
         return {"ok": True}
+
+    def _drain_stderr(self):  # pragma: no cover - hardware path
+        proc = self._proc
+        if not (proc and proc.stderr):
+            return
+        try:
+            for line in proc.stderr:
+                if self._stop.is_set():
+                    break
+                with self._lock:
+                    self._stderr_tail = (self._stderr_tail + line)[-1000:]
+        except Exception:
+            pass
 
     def _read_loop(self):
         # dump1090 needs a moment to open the device and bind :30003.
@@ -492,12 +537,19 @@ class AdsbTracker:
                 break
             except OSError:
                 if self._proc and self._proc.poll() is not None:
-                    self._error = "dump1090 exited (device busy? no RTL-SDR?)"
+                    tail = (self._stderr_tail or "").strip().splitlines()
+                    self._error = ("dump1090 exited (device busy / held by another "
+                                   "capture, or no RTL-SDR)"
+                                   + (" — " + tail[-1] if tail else ""))
                     return
                 time.sleep(0.5)
         if sock is None:
-            self._error = "could not connect to dump1090 SBS port 30003"
+            self._error = ("could not connect to dump1090 SBS port 30003"
+                           + (" — " + self._stderr_tail.strip().splitlines()[-1]
+                              if self._stderr_tail.strip() else ""))
             return
+        with self._lock:
+            self._connected = True
         sock.settimeout(1.0)
         buf = ""
         try:
@@ -513,6 +565,9 @@ class AdsbTracker:
                 buf += data.decode("ascii", "replace")
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
+                    if line.strip():
+                        with self._lock:
+                            self._sbs_lines += 1   # reception proof (any SBS line)
                     rec = parse_sbs(line)
                     if rec:
                         self._ingest(rec)

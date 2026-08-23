@@ -265,7 +265,7 @@
     document.getElementById('tblcount').textContent=list.length+' contacts';
     document.getElementById('s-count').textContent=list.length;
     document.getElementById('s-msgs').textContent=msgs;
-    if(!list.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Listening…':'Not started')+'</td></tr>'; return; }
+    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="7" class="empty">'+esc(em)+'</td></tr>'; return; }
     tb.innerHTML=list.map(function(p){
       var flight = p.callsign||'—';
       // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
@@ -316,10 +316,12 @@
     fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
     if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
   }
+  var lastHint='', lastSbs=0;
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
-      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); }
+      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0;
+        lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); }
       else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
