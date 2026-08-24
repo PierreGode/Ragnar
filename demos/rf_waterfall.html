@@ -869,7 +869,7 @@
     else if(live.length===2) msg='<b>Live.</b> Both radios connected — streaming true RF. Click a signal to mark &amp; zoom.';
     else if(live.length===1) msg='<b>Live ('+live[0]+').</b> The other panel '+(synth?'is synthetic (demo on).':'shows no device.')+' Click a signal to mark &amp; zoom.';
     else if(synth) msg='<b>Synthetic feed.</b> No SDR detected; panels model each band\'s occupants. Zoom works on the synthetic view; connect a radio and it retunes real hardware.';
-    else msg='<b>No SDR detected.</b> Connect an RTL-SDR or HackRF, or enable the RF Waterfall demo in the WiFi Spectrum Analyzer.';
+    else msg='<b>No SDR detected.</b> Connect an RTL-SDR or HackRF, or enable the RF Waterfall demo in Signal Intelligence.';
     document.getElementById('foot-msg').innerHTML=msg;
   }
 
