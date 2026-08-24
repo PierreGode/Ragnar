@@ -124,6 +124,12 @@
   .tunergrp .tlbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--mono)}
   .tunergrp .tin{width:52px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px}
   .tunergrp .tin.gain{width:44px}
+  .tunesel{display:inline-flex;align-items:center;gap:4px}
+  .tunesel .tlbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--mono)}
+  .tunesel .u{font-size:9px;color:var(--muted);font-family:var(--mono)}
+  .tunesel .tin{width:62px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px}
+  .tunesel .tin.sp{width:40px}
+  .tunesel .gobtn{font-family:var(--mono);font-size:11px;color:var(--ground);background:var(--cyan);border:1px solid var(--cyan);padding:3px 9px;border-radius:5px;cursor:pointer;font-weight:600}
   .recbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:8px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2);font-family:var(--mono);font-size:11.5px;color:var(--ink-dim)}
   .recbar button{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:4px 10px;border-radius:6px;cursor:pointer}
   .recbar button.rec[aria-pressed="true"]{color:#fb7185;border-color:rgba(251,113,133,.6);background:rgba(251,113,133,.12)}
@@ -152,7 +158,7 @@
     <div>
       <p class="eyebrow"><span class="dot"></span>Ragnar · Signal Intelligence</p>
       <h1>RF Waterfall</h1>
-      <p class="sub">Two radios stacked — sub-GHz ISM and the Wi-Fi bands. Streams true RF when a radio is connected; click a signal to mark &amp; zoom.</p>
+      <p class="sub">Two radios stacked — broadcast, ISM &amp; the Wi-Fi bands. Pick a preset or punch in any frequency the dongle can reach; streams true RF when a radio is connected; click a signal to mark &amp; zoom.</p>
     </div>
     <div class="rigs">
       <div class="rig"><b>RTL-SDR</b> · 24&nbsp;MHz–1.7&nbsp;GHz <span class="tag idle" id="rig-rtl">detecting…</span></div>
@@ -284,6 +290,7 @@
       +'<div class="scope-title"><span class="name">'+cfg.name+' <span class="tag idle scope-tag">idle</span></span><span class="dev">'+cfg.dev+'</span></div>'
       +'<div class="seg viewsel" role="group" aria-label="View"></div>'
       +'<div class="seg bandsel" role="group" aria-label="Band"></div>'
+      +'<div class="tunesel hidden" role="group" aria-label="Manual tune"></div>'
       +'<div class="seg zwavesel hidden" role="group" aria-label="Z-Wave region"></div>'
       +'<div class="spacer"></div>'
       +'<div class="readout">'
@@ -322,7 +329,7 @@
     this.markEl=el.querySelector('.marker'); this.markLbl=el.querySelector('.marker .ml');
     this.pkF=el.querySelector('.pk-f'); this.pkD=el.querySelector('.pk-d'); this.busyEl=el.querySelector('.busyv');
     this.spanEl=el.querySelector('.span'); this.rateEl=el.querySelector('.rate');
-    this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel'); this.zwaveSel=el.querySelector('.zwavesel');
+    this.bandSel=el.querySelector('.bandsel'); this.viewSel=el.querySelector('.viewsel'); this.zwaveSel=el.querySelector('.zwavesel'); this.tuneSel=el.querySelector('.tunesel');
     this.markTxt=el.querySelector('.marktxt'); this.zoomBtn=el.querySelector('.zoombtn'); this.resetBtn=el.querySelector('.resetbtn');
     this.snapBtn=el.querySelector('.snapbtn'); this.tunerGrp=el.querySelector('.tunergrp'); this.recBar=el.querySelector('.recbar');
     this.fsBtn=el.querySelector('.fsbtn');
@@ -348,6 +355,7 @@
       btn.addEventListener('click',function(){ self.selectBand(b.id,b.synthId); });
       self.bandSel.appendChild(btn);
     });
+    this.buildTune();   // free-frequency "Manual tune" box next to the presets
 
     this.fall.addEventListener('click',function(e){ self.onPick(e,self.fall); });
     this.trace.addEventListener('click',function(e){ self.onPick(e,self.trace); });
@@ -403,6 +411,45 @@
   };
   // Tuner corrections (RTL only): PPM freq-correction + gain. Applies globally to
   // the dongle via /api/net/rtl/tuning and reapplies to a running capture.
+  // ---- manual tune: sweep an arbitrary centre freq the radio can reach ----
+  Scope.prototype.buildTune=function(){
+    var self=this, g=this.tuneSel; if(!g) return;
+    var lo=this.cfg.hwLo, hi=this.cfg.hwHi;
+    g.innerHTML='<span class="tlbl">Tune</span>'
+      +'<input class="tin freq" type="number" step="any" inputmode="decimal" placeholder="'+lo+'–'+hi+'" '
+        +'title="Centre frequency in MHz — anywhere the '+this.cfg.short+' can sweep ('+lo+'–'+hi+' MHz)">'
+      +'<span class="u">MHz&nbsp;±</span>'
+      +'<input class="tin sp span2" type="number" step="any" inputmode="decimal" value="'+this.cfg.tuneSpan+'" '
+        +'title="Sweep width in MHz around the centre">'
+      +'<button class="gobtn" title="Sweep a window centred on this frequency">Go</button>';
+    this.freqTune=g.querySelector('.freq'); this.spanTune=g.querySelector('.span2');
+    g.querySelector('.gobtn').addEventListener('click',function(){ self.tuneTo(); });
+    function onEnter(e){ if(e.key==='Enter'){ e.preventDefault(); self.tuneTo(); } }
+    this.freqTune.addEventListener('keydown',onEnter); this.spanTune.addEventListener('keydown',onEnter);
+  };
+  Scope.prototype.tuneTo=function(){
+    var c=parseFloat(this.freqTune.value);
+    if(!isFinite(c)){ this.freqTune.focus(); return; }
+    var sp=parseFloat(this.spanTune.value);
+    if(!isFinite(sp)||sp<=0) sp=this.cfg.tuneSpan;
+    sp=Math.max(this.cfg.minSpan, sp);
+    var hwLo=this.cfg.hwLo, hwHi=this.cfg.hwHi;
+    c=Math.max(hwLo,Math.min(hwHi,c));            // centre into hardware reach
+    var lo=c-sp/2, hi=c+sp/2;                       // window, clamped to the edges
+    if(lo<hwLo){ lo=hwLo; hi=Math.min(hwHi,lo+sp); }
+    if(hi>hwHi){ hi=hwHi; lo=Math.max(hwLo,hi-sp); }
+    if(hi-lo<this.cfg.minSpan){ hi=Math.min(hwHi,lo+this.cfg.minSpan); lo=Math.max(hwLo,hi-this.cfg.minSpan); }
+    this.freqTune.value=Math.round(((lo+hi)/2)*1000)/1000;
+    // a manual tune is not one of the presets: clear their pressed state + overlay
+    Array.prototype.forEach.call(this.bandSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed','false');});
+    if(this.ovDropdown) this.ovDropdown.value=''; this.zwave=null; this.zwaveRegion=null;
+    this.synthBand='__tune__';                      // synth: render a generic scene for this span
+    if(this.decoding) this.setView('wf');           // decode can't free-tune; back to the sweep
+    if(this.mode==='idle') this.setMode(DEMO_ON?'synth':'live');
+    this.marker=null; if(this.markEl) this.markEl.style.display='none';
+    this.applyZoom([lo,hi]);                         // reuses the zoom path -> lo_hz/hi_hz sweep
+    this.markTxt.innerHTML='Tuned <span class="mk">'+fmtMHz((lo+hi)/2)+'</span> · '+fmtF(lo)+'–'+fmtF(hi);
+  };
   Scope.prototype.buildTuner=function(){
     var self=this, g=this.tunerGrp; if(!g) return;
     g.innerHTML='<span class="tlbl">PPM</span>'
@@ -639,6 +686,7 @@
     if(want===this.decoding) return;
     this.decoding=want;
     Array.prototype.forEach.call(this.viewSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-view')===(want?'decode':'wf')?'true':'false');});
+    if(this.tuneSel) this.tuneSel.classList.toggle('hidden', want || !(this.mode==='live'||this.mode==='synth'));
     if(want){ this.el.classList.add('decoding'); this.stopLive(); this.logTitle.textContent='ISM devices (rtl_433)'; this.log=[]; this.renderLog(); this.startIsm(); }
     else{ this.el.classList.remove('decoding'); this.stopIsm(); this.logTitle.textContent='Detections'; this.log=[]; this.renderLog(); this.startLive(); }
   };
@@ -672,6 +720,9 @@
     if(mode===this.mode) return;
     if(this.mode==='live') this.stopLive();
     this.mode=mode; this._rangeKnown=false; this.zoom=null; this.resetBtn.disabled=true; this.resetCanvas();
+    // Manual tune works in both live and synth (any scope), so it rides along
+    // wherever a sweep is running — unlike the presets, which the RTL synth hides.
+    if(this.tuneSel) this.tuneSel.classList.toggle('hidden', !(mode==='live'||mode==='synth'));
     if(mode==='live'){ this.hideVeil(); this.bandSel.classList.remove('hidden'); this.startLive(); }
     else if(mode==='synth'){ this.hideVeil(); this.bandSel.classList.toggle('hidden',!this.cfg.synthBands);
       this.model=this.cfg.synth(this.synthBand||this.cfg.synthDefault); this.lo=this.model.lo;this.hi=this.model.hi;this.floor=this.model.floor; this.drawRuler(); }
@@ -840,17 +891,31 @@
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 
   // ---- build scopes ----
+  // Sub-GHz band ranges (MHz) for the synthetic/demo scenes — mirrors the
+  // backend band tables (rtl_sdr.RTL_BANDS / sdr_spectrum.BANDS).
+  var BAND_MHZ={am:[0.53,1.71],sw:[3,24],fm:[88,108],air:[108,137],'27':[26.9,27.5],'40':[40,41],'315':[313.5,316.5],'433':[433.05,434.79],'868':[863,870],'915':[902,928]};
+  var WIFI_BANDS={'2.4':1,'5':1,'6':1};
+  // HackRF reaches 1 MHz-6 GHz, so its demo scene picks a wifi model for the
+  // wifi bands and a generic sub-GHz model (with ISM peaks) for everything else.
+  function hackrfSynth(b,lo,hi){
+    if(lo!=null&&hi!=null) return WIFI_BANDS[b]?wifiModel(b,lo,hi):subGhzModel(lo,hi);
+    if(WIFI_BANDS[b]) return wifiModel(b);
+    var r=BAND_MHZ[b]; return r?subGhzModel(r[0],r[1]):wifiModel('2.4');
+  }
+  var SUBGHZ_BANDS=[{id:'am',label:'AM'},{id:'sw',label:'SW'},{id:'fm',label:'FM'},{id:'air',label:'Air'},{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}];
   var stack=document.getElementById('stack'), scopes=[];
   var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
     synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
-    liveBands:[{id:'am',label:'AM'},{id:'sw',label:'SW'},{id:'fm',label:'FM'},{id:'air',label:'Air'},{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
+    hwLo:24, hwHi:1766, tuneSpan:2,   // rtl_power sweep reach (MHz); HF listen is on the radio bar
+    liveBands:SUBGHZ_BANDS, defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
-  var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
+  var hackrf=new Scope({ name:"RF Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
-    synth:function(b,lo,hi){return wifiModel(b,lo,hi);}, synthDefault:'2.4', synthBands:true, decode:false, minSpan:1,
-    liveBands:[{id:'2.4',label:'2.4',synthId:'2.4'},{id:'5',label:'5',synthId:'5'},{id:'6',label:'6',synthId:'6'}], defaultBand:'2.4' });
+    synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, minSpan:1,
+    hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz
+    liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
 
   var clockEl=document.getElementById('clock');

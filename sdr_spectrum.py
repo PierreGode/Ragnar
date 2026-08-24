@@ -64,10 +64,29 @@ _HACKRF_SWEEP = _which("hackrf_sweep")
 # Named bands (MHz). Wi-Fi 6 GHz is within HackRF's range but its edges vary by
 # region; 2.4 and 5 cover the common troubleshooting cases.
 BANDS = {
+    # HF / sub-GHz band scopes. The HackRF reaches 1 MHz-6 GHz, so it can sweep
+    # everything the RTL-SDR can (mirrors rtl_sdr.RTL_BANDS) -- except the bottom
+    # of the AM band, which sits below HackRF's 1 MHz floor (clamped here).
+    "am":  (1.0, 1.71),        # AM / medium-wave (only the top is above 1 MHz)
+    "sw":  (3.0, 24.0),        # shortwave HF broadcast
+    "fm":  (88.0, 108.0),      # FM broadcast
+    "air": (108.0, 137.0),     # VHF airband (AM voice)
+    "27":  (26.9, 27.5),       # CB / 27 MHz RC
+    "40":  (40.0, 41.0),       # 40 MHz RC / toys
+    "315": (313.5, 316.5),     # US keyfobs / TPMS / garage & gate remotes
+    "433": (433.05, 434.79),   # EU 433 ISM
+    "868": (863.0, 870.0),     # EU 868 SRD
+    "915": (902.0, 928.0),     # US 915 ISM
     "2.4": (2400, 2500),
     "5":   (5150, 5895),
     "6":   (5925, 6425),
 }
+
+# hackrf_sweep needs a window at least a couple of int-MHz wide (it captures
+# ~20 MHz per tune and wants max>min after MHz truncation). Narrow band scopes
+# (AM/27/40) and 1-2 MHz zoom spans get symmetrically widened to this for the
+# sweep command; the display still bins to the requested [lo, hi].
+_MIN_SWEEP_MHZ = 2.0
 
 _GRID_BINS = 512          # display columns per frame (band binned into this many)
 _RING_FRAMES = 600        # rolling history of sweep frames kept in memory
@@ -345,8 +364,17 @@ class SweepCapture:
         span_hz = (hi - lo) * 1_000_000
         bin_hz = int(span_hz / (_GRID_BINS * 2)) or _BIN_WIDTH_HZ
         bin_hz = max(2500, min(_BIN_WIDTH_HZ, bin_hz))
-        builder = _FrameBuilder(lo, hi)
-        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(lo), int(hi)),
+        builder = _FrameBuilder(lo, hi)           # display still bins to [lo, hi]
+        # Widen the actual sweep window so hackrf_sweep is happy on narrow bands
+        # (AM/27/40) -- it needs max>min after MHz truncation. The display range
+        # above is unchanged; we just give the radio a wider window to tune.
+        s_lo, s_hi = lo, hi
+        if s_hi - s_lo < _MIN_SWEEP_MHZ:
+            c = (s_lo + s_hi) / 2.0
+            s_lo, s_hi = c - _MIN_SWEEP_MHZ / 2.0, c + _MIN_SWEEP_MHZ / 2.0
+        s_lo = max(1.0, s_lo)
+        s_hi = min(7250.0, s_hi)
+        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(s_lo), int(s_hi) + 1),
                "-w", str(bin_hz), "-l", str(self._lna),
                "-g", str(self._vga)]
         self._stderr_tail = None
@@ -611,6 +639,10 @@ def selftest():
 
     # --- band table ---
     check("bands: 2.4 and 5 present", "2.4" in BANDS and "5" in BANDS)
+    check("bands: sub-GHz scopes mirrored from RTL (fm/air/433/915)",
+          all(b in BANDS for b in ("am", "sw", "fm", "air", "27", "40",
+                                   "315", "433", "868", "915")))
+    check("bands: AM clamped to HackRF's 1 MHz floor", BANDS["am"][0] >= 1.0)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
