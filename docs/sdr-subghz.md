@@ -185,9 +185,11 @@ heading vectors + a contacts table.
   correct — aircraft carry their own GPS position; the page computes distance and
   bearing relative to you client-side.
 - **Each contact is identified three ways:** the **ICAO** callsign (e.g.
-  `DLH427`), the derived **IATA** flight + airline (`LH427 · Lufthansa`), and the
-  **tail registration** + country decoded from the ICAO 24-bit address (exact
-  N-number algorithm for the US; country from the ICAO address block elsewhere).
+  `DLH427`); the airline's **IATA** flight + name looked up from a cross-reference
+  table (`LH427 · Lufthansa` — ICAO and IATA are separate code systems, so this
+  is a lookup, not a conversion); and the **tail registration** + country decoded
+  from the ICAO 24-bit address (exact N-number algorithm for the US; country from
+  the ICAO address block elsewhere).
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).

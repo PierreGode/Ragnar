@@ -139,10 +139,12 @@ def parse_sbs(line):
     return rec
 
 
-# Airline designators: ICAO 3-letter callsign prefix -> (IATA 2-letter, name).
-# A curated set of the busiest carriers worldwide — covers the large majority of
-# flights seen; unknown prefixes just fall back to the raw callsign. ADS-B
-# callsigns carry the ICAO code (e.g. "RYR123"); we derive IATA ("FR123") + name.
+# Airline cross-reference: ICAO 3-letter designator -> (IATA 2-letter, name).
+# ICAO and IATA are DIFFERENT organisations with independent, unrelated code
+# systems — there's no formula between them, so this is a lookup table, not a
+# derivation. ADS-B callsigns carry the ICAO airline designator (e.g. "RYR123");
+# we look up the matching IATA code + name here. A curated set of the busiest
+# carriers worldwide; unknown prefixes just fall back to the raw callsign.
 AIRLINES = {
     "AAL": ("AA", "American Airlines"), "UAL": ("UA", "United Airlines"),
     "DAL": ("DL", "Delta Air Lines"), "SWA": ("WN", "Southwest"),
@@ -228,11 +230,13 @@ AIRLINES = {
 
 
 def airline_from_callsign(cs):
-    """Derive airline (ICAO+IATA+name) and the IATA flight number from a callsign.
+    """Look up the airline (ICAO designator, IATA code, name) + IATA flight no.
 
     ADS-B callsigns are the ICAO airline designator + flight number ("RYR123").
-    Returns {icao, iata, name, flight_icao, flight_iata} or None (e.g. for tail
-    numbers like N12345, or unknown prefixes).
+    The IATA code is a separate code system, so it comes from the AIRLINES
+    cross-reference table (not computed from ICAO). Returns
+    {icao, iata, name, flight_icao, flight_iata} or None (e.g. tail numbers like
+    N12345, or an ICAO designator not in the table).
     """
     if not cs:
         return None
@@ -703,7 +707,7 @@ def selftest():
           and ac["aircraft"][0]["alt"] == 38000 and ac["aircraft"][0]["gs"] == 450, str(ac))
     check("track: message counter", ac["messages"] == 3)
 
-    # Airline code derivation: ICAO callsign prefix -> IATA + name + flight nums.
+    # Airline cross-reference: ICAO callsign designator -> IATA + name (lookup).
     al = airline_from_callsign("RYR123")
     check("airline: RYR123 -> Ryanair FR / FR123",
           al and al["iata"] == "FR" and al["name"] == "Ryanair"
