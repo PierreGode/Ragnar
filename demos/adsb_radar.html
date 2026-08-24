@@ -206,6 +206,10 @@
     if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){ cv.width=Math.round(w*d); cv.height=Math.round(h*d); ctx.setTransform(d,0,0,d,0,0); }
     return true; }
   function resize(){ ensureSize(); }
+  function wrapText(text,x,y,maxW,lh){ var words=String(text).split(' '),line='',yy=y;
+    for(var i=0;i<words.length;i++){ var t=line+words[i]+' ';
+      if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),x,yy); line=words[i]+' '; yy+=lh; } else { line=t; } }
+    ctx.fillText(line.trim(),x,yy); }
   function draw(){
     var W=cv.clientWidth||600, H=cv.clientHeight||600, cx=W/2, cy=H/2, R=Math.min(W,H)/2-24;
     ctx.clearRect(0,0,W,H);
@@ -251,6 +255,16 @@
     // no-location hint on the scope
     if(rx.lat==null){ ctx.fillStyle='rgba(245,185,66,.9)'; ctx.textAlign='center'; ctx.font='12px "IBM Plex Mono",monospace';
       ctx.fillText('Set your lat/lon to place aircraft', cx, cy+R-6); }
+    // reception hint: running (live), connected, but no aircraft decoded — almost
+    // always the antenna. Draw it big in the middle so it can't be missed.
+    if(mode==='live' && running && (!planes||!planes.length) && lastHint){
+      ctx.textAlign='center';
+      ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
+      ctx.fillText('No aircraft decoded', cx, cy-14);
+      ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
+      wrapText('Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
+        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.', cx, cy+6, Math.min(R*1.6,420), 15);
+    }
   }
 
   function anim(){ if(ensureSize()){ sweepAng=(sweepAng+1.6)%360; draw(); } requestAnimationFrame(anim); }
