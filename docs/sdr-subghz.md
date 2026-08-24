@@ -185,9 +185,11 @@ heading vectors + a contacts table.
   correct — aircraft carry their own GPS position; the page computes distance and
   bearing relative to you client-side.
 - **Each contact is identified three ways:** the **ICAO** callsign (e.g.
-  `DLH427`), the derived **IATA** flight + airline (`LH427 · Lufthansa`), and the
-  **tail registration** + country decoded from the ICAO 24-bit address (exact
-  N-number algorithm for the US; country from the ICAO address block elsewhere).
+  `DLH427`); the airline's **IATA** flight + name looked up from a cross-reference
+  table (`LH427 · Lufthansa` — ICAO and IATA are separate code systems, so this
+  is a lookup, not a conversion); and the **tail registration** + country decoded
+  from the ICAO 24-bit address (exact N-number algorithm for the US; country from
+  the ICAO address block elsewhere).
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -204,6 +206,17 @@ power sweep to a JSONL file under `data/rf_recordings/` (gitignored), and a
 transport bar (play/pause, seek, restart, delete). Frames are small, so a
 recording is cheap; capped at a few thousand frames. Routes:
 `/api/net/rtl/record/{start,stop,status,list,get,delete}`.
+
+## Local Radio (FM / AM, listen)
+
+The RF Waterfall page has a **📻 Local Radio** bar: type a frequency, pick a mode
+(**FM** broadcast, **NFM** narrowband, **AM**), and press **Listen**. `radio.py`
+runs `rtl_fm` to demodulate and streams the audio to the browser as a live WAV
+(`/api/net/radio/stream?freq_hz=…&mode=…`) that an `<audio>` element plays, with a
+volume slider and band presets (FM broadcast, airband AM, marine/PMR NFM, MW).
+Frequencies below 24 MHz use the dongle's direct-sampling mode (MW/SW AM,
+best-effort). One dongle, so listening pauses the sub-GHz sweep. `rtl_fm` ships
+in the already-installed `rtl-sdr` package. Receive-only.
 
 ## Pager Decode (POCSAG / FLEX)
 

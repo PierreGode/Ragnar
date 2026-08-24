@@ -49,6 +49,7 @@ import adsb
 import meshtastic_node
 import pager
 import acars
+import radio
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -18794,7 +18795,7 @@ def register_network_diagnostics(app, logger=None):
         label = data.get('label')
         label = str(label).strip()[:24] if label else None
         _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
-        try: adsb.stop(); pager.stop(); acars.stop()   # one dongle: free it for the sweep
+        try: adsb.stop(); pager.stop(); acars.stop(); radio.stop()   # one dongle: free it for the sweep
         except Exception: pass
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
                                            hi_hz=data.get('hi_hz'), label=label))
@@ -18863,7 +18864,7 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/adsb/start', methods=['POST'])
     def net_adsb_start():
         _log("net/adsb/start")
-        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop(); pager.stop(); acars.stop()   # hand the dongle to dump1090
+        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop(); pager.stop(); acars.stop(); radio.stop()   # hand the dongle to dump1090
         except Exception: pass
         return jsonify(adsb.start())
 
@@ -18936,7 +18937,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         _log(f"net/pager/start freq={data.get('freq_hz')}")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); acars.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); acars.stop(); radio.stop()
         except Exception:
             pass
         return jsonify(pager.start(freq_hz=data.get('freq_hz')))
@@ -18969,7 +18970,7 @@ def register_network_diagnostics(app, logger=None):
     def net_acars_start():
         _log("net/acars/start")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); radio.stop()
         except Exception:
             pass
         return jsonify(acars.start())
@@ -18988,6 +18989,42 @@ def register_network_diagnostics(app, logger=None):
     def net_acars_selftest():
         return jsonify(acars.selftest())
 
+    # Local radio (FM/AM) via rtl_fm — streams demodulated audio to the browser.
+    # Uses the whole RTL-SDR, so tuning stops the sweep/ISM/ADS-B/pager/ACARS.
+    @app.route('/api/net/radio/status', methods=['GET'])
+    def net_radio_status():
+        return jsonify(radio.status())
+
+    @app.route('/api/net/radio/stop', methods=['POST'])
+    def net_radio_stop():
+        _log("net/radio/stop")
+        return jsonify(radio.stop())
+
+    @app.route('/api/net/radio/install', methods=['POST'])
+    def net_radio_install():
+        _log("net/radio/install")
+        return jsonify(radio.install())
+
+    @app.route('/api/net/radio/selftest', methods=['GET'])
+    def net_radio_selftest():
+        return jsonify(radio.selftest())
+
+    # Live audio stream (WAV) an <audio> element plays. Spawns rtl_fm for the
+    # requested freq/mode and streams until the client disconnects.
+    @app.route('/api/net/radio/stream', methods=['GET'])
+    def net_radio_stream():
+        from flask import Response
+        freq = request.args.get('freq_hz', '98000000')
+        mode = request.args.get('mode', 'wfm')
+        _log(f"net/radio/stream freq={freq} mode={mode}")
+        try:
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop()
+        except Exception:
+            pass
+        resp = Response(radio.stream(freq, mode), mimetype="audio/wav")
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+
     # rtl_433 ISM device decoder — names the sub-GHz transmitters (TPMS, weather
     # stations, doorbells, …). One dongle, so the scanner and the power sweep are
     # mutually exclusive: starting one stops the other (handled in rtl_sdr.py).
@@ -18996,7 +19033,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
         _log(f"net/rtl/ism/start band={band}")
-        try: adsb.stop(); pager.stop(); acars.stop()   # one dongle: free it for the decoder
+        try: adsb.stop(); pager.stop(); acars.stop(); radio.stop()   # one dongle: free it for the decoder
         except Exception: pass
         return jsonify(rtl_sdr.ism_start(band=band))
 

@@ -62,6 +62,8 @@
   th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
   td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
   tr:hover td{background:rgba(46,160,150,.06)}
+  tr.prow{cursor:pointer}
+  tr.prow.sel td{background:rgba(245,185,66,.12);box-shadow:inset 3px 0 0 var(--accent)}
   td.cs{color:var(--ink);font-weight:500}
   .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
   .acarscard{margin-top:16px}
@@ -152,8 +154,16 @@
 (function(){
   "use strict";
   var running=false, DEMO_ON=false, mode='idle', maxKm=100, unit='km';
-  var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null};
+  var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null}, selectedIcao=null;
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Click a contact row to highlight that aircraft on the radar (toggle off by
+  // re-clicking). Delegated so it survives table re-renders.
+  document.getElementById('tbody').addEventListener('click',function(e){
+    var tr=e.target.closest('tr[data-icao]'); if(!tr) return;
+    var id=tr.getAttribute('data-icao');
+    selectedIcao=(selectedIcao===id)?null:id;
+    renderTable();
+  });
 
   var cv=document.getElementById('radar'), ctx=cv.getContext('2d');
   var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs');
@@ -241,15 +251,24 @@
       var frac=p._dist/maxKm; if(frac>1.02) return; if(frac>1) frac=1;
       var r=frac*R, ang=toRad(p._brg), x=cx+r*Math.sin(ang), y=cy-r*Math.cos(ang);
       var col=altColor(p.alt), fresh=p.seen==null||p.seen<8;
+      var sel=(selectedIcao && p.icao===selectedIcao);
       ctx.globalAlpha=fresh?1:0.45;
+      // selection highlight: leader line from centre + pulsing ring
+      if(sel){ ctx.globalAlpha=1;
+        ctx.strokeStyle='rgba(245,185,66,.5)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke(); ctx.setLineDash([]);
+        var pr=8+2.5*Math.sin(sweepAng/12);
+        ctx.strokeStyle='var(--accent)'; ctx.strokeStyle='#f5b942'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(x,y,pr,0,2*Math.PI); ctx.stroke(); }
       // heading vector
       if(p.track!=null){var ta=toRad(p.track); ctx.strokeStyle=col; ctx.lineWidth=1.5;
         ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+12*Math.sin(ta),y-12*Math.cos(ta)); ctx.stroke();}
-      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(x,y,3.2,0,2*Math.PI); ctx.fill();
+      ctx.fillStyle=sel?'#f5b942':col; ctx.beginPath(); ctx.arc(x,y,sel?4.2:3.2,0,2*Math.PI); ctx.fill();
       // label
-      ctx.fillStyle='rgba(232,238,246,.92)'; ctx.textAlign='left'; ctx.font='10px "IBM Plex Mono",monospace';
+      ctx.fillStyle=sel?'#f5b942':'rgba(232,238,246,.92)'; ctx.textAlign='left';
+      ctx.font=(sel?'600 11px':'10px')+' "IBM Plex Mono",monospace';
       var lab=(p.callsign||p.icao); ctx.fillText(lab, x+7, y-2);
-      if(p.alt!=null){ ctx.fillStyle='rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
+      if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
       ctx.globalAlpha=1; shown++;
     });
     // no-location hint on the scope
@@ -290,7 +309,8 @@
       var air = p.airline ? ('<span style="color:var(--cyan)">'+esc(p.iata||'')+'</span> '+esc(p.airline)) : '<span style="color:#546074">—</span>';
       var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
       var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
-      return '<tr>'
+      var selc = (selectedIcao && p.icao===selectedIcao) ? ' sel' : '';
+      return '<tr class="prow'+selc+'" data-icao="'+esc(p.icao)+'">'
       +'<td class="cs">'+esc(flight)+fl2+'</td>'
       +'<td>'+air+'</td>'
       +'<td class="cs">'+reg+'</td>'
