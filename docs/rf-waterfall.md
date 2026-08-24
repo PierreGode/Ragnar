@@ -1,8 +1,9 @@
 # RF Waterfall page
 
-A dedicated full-screen page that stacks two true-RF **waterfalls** — sub-GHz
-ISM (RTL-SDR, 433/868/915 MHz) over the Wi-Fi bands (HackRF, 2.4/5/6 GHz) — each
-scrolling a power-over-frequency heatmap.
+A dedicated full-screen page that stacks two true-RF **waterfalls** — an RTL-SDR
+sub-GHz/broadcast panel (24 MHz–1.7 GHz) over a HackRF panel (1 MHz–6 GHz) —
+each scrolling a power-over-frequency heatmap, with band-scope presets and a
+free-frequency manual tune.
 
 - Page: `demos/rf_waterfall.html`
 - Route: `GET /rf-waterfall` (alias `GET /demo/rf-waterfall`), login required
@@ -21,8 +22,25 @@ Each panel decides its own state every few seconds:
   metering, 915 MHz hoppers, Wi-Fi OFDM on ch 1/6/11) so the display stays alive.
 - **IDLE** — no radio and demo off: the panel shows a "connect a device" note.
 
-The band selector on each panel retunes the real sweep when live (RTL-SDR:
-433/868/915; HackRF: 2.4/5/6) and swaps the synthetic model otherwise.
+## Band presets + manual tune
+
+Each panel has a row of **band-scope presets** and a **Manual tune** box:
+
+- **Presets** retune the real sweep when live and swap the synthetic model
+  otherwise. Both radios carry the same broadcast/ISM scopes —
+  `AM · SW · FM · Air · 27 · 40 · 315 · 433 · 868 · 915` — and the HackRF panel
+  adds the Wi-Fi bands `2.4G · 5G · 6G` (it reaches 1 MHz–6 GHz, so it can sweep
+  everything the RTL-SDR can). The band tables live in `rtl_sdr.RTL_BANDS` and
+  `sdr_spectrum.BANDS`; keep them and the page's `SUBGHZ_BANDS`/`BAND_MHZ` in sync.
+- **Manual tune** (the `Tune ___ MHz ± ___ Go` box) sweeps an arbitrary window
+  centred on any frequency the dongle can reach, reusing the zoom path
+  (`lo_hz`/`hi_hz`). Hardware reach is clamped per panel:
+  - **RTL-SDR:** 24–1766 MHz (the `rtl_power` tuner range). It can't sweep below
+    ~24 MHz — HF broadcast (AM/SW) only *listens* via the Local Radio bar
+    (`rtl_fm -E direct` direct sampling), it doesn't waterfall.
+  - **HackRF:** 1–6000 MHz. AM's low edge is clamped to HackRF's 1 MHz floor;
+    narrow scopes (AM/27/40) are widened to a ≥2 MHz sweep window internally so
+    `hackrf_sweep` is happy, while the display still bins to the requested span.
 
 ## The button and the toggle (WiFi Spectrum Analyzer)
 
