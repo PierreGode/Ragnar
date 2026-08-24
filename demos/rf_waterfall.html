@@ -185,7 +185,8 @@
     <div class="seg" id="r-mode" role="group" aria-label="Mode">
       <button data-m="wfm" aria-pressed="true">FM</button><button data-m="nfm">NFM</button><button data-m="am">AM</button>
     </div>
-    <select id="r-preset"><option value="">Presets…</option></select>
+    <select id="r-preset"><option value="">Stations…</option></select>
+    <button class="rlisten" id="r-save" title="Save this station to your presets">&#9734;&nbsp;Save</button>
     <button class="rlisten" id="r-listen" aria-pressed="false" title="Listen — uses the RTL-SDR (pauses the sub-GHz sweep)">&#9654;&nbsp;Listen</button>
     <div class="grp"><span class="lbl">Vol</span><input type="range" id="r-vol" min="0" max="100" value="80"></div>
     <span class="rnow" id="r-now">off · one dongle, so listening pauses the sub-GHz sweep</span>
@@ -899,20 +900,47 @@
   (function(){
     var freqEl=document.getElementById('r-freq'), modeSeg=document.getElementById('r-mode'),
         presetEl=document.getElementById('r-preset'), listenBtn=document.getElementById('r-listen'),
+        saveBtn=document.getElementById('r-save'),
         volEl=document.getElementById('r-vol'), nowEl=document.getElementById('r-now'),
         audio=document.getElementById('r-audio');
-    var rmode='wfm', playing=false;
+    var rmode='wfm', playing=false, builtins={};
     audio.volume=0.8;
     volEl.addEventListener('input',function(){ audio.volume=(parseInt(volEl.value,10)||0)/100; });
+    // --- saved stations (favourites) persisted per-browser in localStorage ---
+    function loadFavs(){ try{ return JSON.parse(localStorage.getItem('ragnar_radio_favs')||'[]')||[]; }catch(e){ return []; } }
+    function saveFavs(a){ try{ localStorage.setItem('ragnar_radio_favs',JSON.stringify(a)); }catch(e){} }
+    function fMHz(){ var v=parseFloat(freqEl.value); return isFinite(v)?Math.round(v*1e6):null; }
+    function curKey(){ var hz=fMHz(); return hz==null?null:(hz+'|'+rmode); }
+    function isFav(){ var k=curKey(); return loadFavs().some(function(f){return (f.freq_hz+'|'+f.mode)===k;}); }
+    function updateSaveBtn(){ if(isFav()){ saveBtn.innerHTML='&#9733;&nbsp;Saved'; saveBtn.style.color='var(--accent)'; saveBtn.title='Remove this station from your presets'; }
+      else { saveBtn.innerHTML='&#9734;&nbsp;Save'; saveBtn.style.color=''; saveBtn.title='Save this station to your presets'; } }
+    function rebuildPresets(){
+      var favs=loadFavs(), html='<option value="">Stations…</option>';
+      if(favs.length){ html+='<optgroup label="★ My stations">'+favs.map(function(f){
+        return '<option value="'+f.freq_hz+'|'+f.mode+'">'+esc(f.name)+'</option>'; }).join('')+'</optgroup>'; }
+      var bk=Object.keys(builtins);
+      if(bk.length){ html+='<optgroup label="Presets">'+bk.map(function(k){ var v=builtins[k];
+        return '<option value="'+v[0]+'|'+v[1]+'">'+esc(k)+'</option>'; }).join('')+'</optgroup>'; }
+      presetEl.innerHTML=html;
+    }
+    saveBtn.addEventListener('click',function(){ var hz=fMHz(); if(hz==null)return;
+      var favs=loadFavs(), key=hz+'|'+rmode;
+      var i=favs.map(function(f){return f.freq_hz+'|'+f.mode;}).indexOf(key);
+      if(i>=0){ favs.splice(i,1); saveFavs(favs); }         // toggle off — remove
+      else { var def=(freqEl.value)+' '+rmode.toUpperCase();
+        var name=(window.prompt('Name this station:', def)||'').trim() || def;
+        favs.push({name:name, freq_hz:hz, mode:rmode}); saveFavs(favs); }
+      rebuildPresets(); updateSaveBtn();
+    });
     modeSeg.addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
       rmode=b.getAttribute('data-m');
       Array.prototype.forEach.call(modeSeg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});
-      if(playing) tune(); });
+      updateSaveBtn(); if(playing) tune(); });
+    freqEl.addEventListener('input',updateSaveBtn);
     presetEl.addEventListener('change',function(){ if(!presetEl.value)return; var p=presetEl.value.split('|');
       freqEl.value=(parseFloat(p[0])/1e6); rmode=p[1]||'wfm';
       Array.prototype.forEach.call(modeSeg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===rmode?'true':'false');});
-      tune(); });
-    function fMHz(){ var v=parseFloat(freqEl.value); return isFinite(v)?Math.round(v*1e6):null; }
+      updateSaveBtn(); tune(); });
     function tune(){ var hz=fMHz(); if(hz==null)return;
       playing=true; listenBtn.setAttribute('aria-pressed','true'); listenBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
       // stop the RTL scope (one dongle) so the UI reflects it
@@ -927,11 +955,11 @@
       nowEl.textContent='off · one dongle, so listening pauses the sub-GHz sweep'; }
     listenBtn.addEventListener('click',function(){ playing?stop():tune(); });
     audio.addEventListener('error',function(){ if(playing){ nowEl.innerHTML='<span style="color:#fb7185">Audio failed — check rtl_fm / dongle</span>'; } });
-    // load presets + rtl_fm availability
+    rebuildPresets(); updateSaveBtn();   // show any saved stations immediately
+    // load built-in presets + rtl_fm availability
     fetch('/api/net/radio/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{};
-      if(det.presets){ presetEl.innerHTML='<option value="">Presets…</option>'+Object.keys(det.presets).map(function(k){
-        var v=det.presets[k]; return '<option value="'+v[0]+'|'+v[1]+'">'+esc(k)+'</option>'; }).join(''); }
+      if(det.presets){ builtins=det.presets; rebuildPresets(); }
       if(det.tools_installed===false){ listenBtn.disabled=true; nowEl.innerHTML='<span style="color:#fb7185">rtl_fm not installed — apt install rtl-sdr</span>'; }
     }).catch(function(){});
   })();

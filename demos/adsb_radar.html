@@ -306,7 +306,12 @@
       // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
       var fl2 = (p.flight_iata && p.flight_iata!==p.callsign)
         ? ' <span style="color:var(--cyan);font-weight:600">'+esc(p.flight_iata)+'</span>' : '';
-      var air = p.airline ? ('<span style="color:var(--cyan)">'+esc(p.iata||'')+'</span> '+esc(p.airline)) : '<span style="color:#546074">—</span>';
+      // Airline shows BOTH codes: ICAO designator (muted) + IATA (cyan) + name.
+      var opicao = p.op_icao || ((p.airline && p.callsign) ? p.callsign.slice(0,3) : '');
+      var air = p.airline
+        ? '<span style="color:var(--muted)" title="ICAO airline code">'+esc(opicao)+'</span> '
+          +'<span style="color:var(--cyan)" title="IATA airline code">'+esc(p.iata||'')+'</span> '+esc(p.airline)
+        : '<span style="color:#546074">—</span>';
       var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
       var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
       var selc = (selectedIcao && p.icao===selectedIcao) ? ' sel' : '';
@@ -386,7 +391,7 @@
       var d=destPoint(rx.lat,rx.lon,brg,dist), a=synthAir[(Math.random()*synthAir.length)|0], num=(100+((Math.random()*899)|0));
       var reg=synthReg[(Math.random()*synthReg.length)|0];
       out.push({icao:(0x400000+((Math.random()*0xBFFFFF)|0)).toString(16).toUpperCase(),
-        callsign:a[0]+num, iata:a[1], airline:a[2], flight_iata:a[1]+num,
+        callsign:a[0]+num, op_icao:a[0], iata:a[1], airline:a[2], flight_iata:a[1]+num,
         tail:synthTail(reg[2]), country:reg[0], country_code:reg[1],
         lat:d.lat,lon:d.lon,alt:2000+((Math.random()*38000)|0),gs:180+((Math.random()*320)|0),
         track:Math.random()*360,vert:((Math.random()*2000)|0)-1000,seen:0}); }
