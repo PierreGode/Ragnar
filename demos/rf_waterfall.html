@@ -907,7 +907,8 @@
   var rtl=new Scope({ name:"Sub-GHz ISM", short:"RTL-SDR", dev:"RTL-SDR · rtl_power / rtl_433", rig:"rig-rtl",
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
-    synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
+    synth:function(b,lo,hi){ if(lo!=null&&hi!=null) return subGhzModel(lo,hi); var r=BAND_MHZ[b]; return r?subGhzModel(r[0],r[1]):subGhzModel(); },
+    synthDefault:'433', synthBands:true, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
     hwLo:24, hwHi:1766, tuneSpan:2,   // rtl_power sweep reach (MHz); HF listen is on the radio bar
     liveBands:SUBGHZ_BANDS, defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
