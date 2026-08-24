@@ -549,8 +549,10 @@
     // On the RTL panel, dropping a marker also loads it into the Local Radio bar
     // (pick a sensible demod by band) so the flow is: sweep → click a station →
     // Listen. One dongle, so listening pauses this sweep.
-    if(this.cfg.tuner && window.RADIO && f>=24 && f<=1766){
-      var m=(f>=88&&f<=108)?'wfm':((f>108&&f<=137)?'am':'nfm');
+    if(this.cfg.tuner && window.RADIO && f>=0.5 && f<=1766){
+      // WFM for the FM band; AM for airband + all HF broadcast (AM/shortwave,
+      // which the dongle only reaches via direct sampling); NFM otherwise.
+      var m=(f>=88&&f<=108)?'wfm':((f>108&&f<=137)||f<30?'am':'nfm');
       window.RADIO.set(f, m);
       this.markTxt.innerHTML+=' <span class="zi">→ radio '+m.toUpperCase()+' · press Listen</span>';
     }
@@ -843,7 +845,7 @@
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
     synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
-    liveBands:[{id:'fm',label:'FM'},{id:'air',label:'Air'},{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
+    liveBands:[{id:'am',label:'AM'},{id:'sw',label:'SW'},{id:'fm',label:'FM'},{id:'air',label:'Air'},{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
