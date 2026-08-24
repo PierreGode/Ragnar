@@ -41,6 +41,15 @@ Each panel has a row of **band-scope presets** and a **Manual tune** box:
   - **HackRF:** 1–6000 MHz. AM's low edge is clamped to HackRF's 1 MHz floor;
     narrow scopes (AM/27/40) are widened to a ≥2 MHz sweep window internally so
     `hackrf_sweep` is happy, while the display still bins to the requested span.
+- **📡 Mesh / LoRa overlay** (the dropdown, on *both* panels) sweeps a chosen
+  mesh/LPWAN band and overlays its exact channel centres — Z-Wave (FSK) regions
+  plus the LoRa meshes Meshtastic / MeshCore / LoRaWAN. It's an
+  **energy/occupancy view only** (LoRa CSS can't be demodulated by
+  `rtl_power`/`hackrf_sweep`, and the payloads are encrypted): you see bursts
+  land on the channels, not IDs or messages. Options come from
+  `rtl_sdr.zwave_plan()` / `lora_plan()` via `/api/net/rtl/{zwave,lora}`. Some
+  overlay spans are narrow (e.g. Meshtastic-EU868 is 0.45 MHz), so the HackRF
+  custom-span gate accepts ≥0.1 MHz and `_run_loop` widens the actual sweep.
 
 ## The button and the toggle (WiFi Spectrum Analyzer)
 

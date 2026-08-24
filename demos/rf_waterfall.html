@@ -914,8 +914,8 @@
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"RF Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
-    synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, minSpan:1,
-    hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz
+    synth:hackrfSynth, synthDefault:'2.4', synthBands:true, decode:false, zwave:true, minSpan:1,
+    hwLo:1, hwHi:6000, tuneSpan:20,   // HackRF One: 1 MHz-6 GHz (sweeps every mesh/LoRa overlay band too)
     liveBands:SUBGHZ_BANDS.concat([{id:'2.4',label:'2.4G'},{id:'5',label:'5G'},{id:'6',label:'6G'}]), defaultBand:'2.4' });
   scopes.push(hackrf); stack.appendChild(hackrf.el);
 

@@ -302,13 +302,16 @@ class SweepCapture:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self, band="2.4", lna=None, vga=None, lo_mhz=None, hi_mhz=None):
-        # A custom [lo_mhz, hi_mhz] span (the page's zoom) overrides the named
-        # band when both edges are sane (>=1 MHz wide, inside 1-7250 MHz).
+        # A custom [lo_mhz, hi_mhz] span (the page's zoom, a manual tune, or a
+        # mesh/LoRa overlay) overrides the named band when both edges are sane:
+        # >=0.1 MHz wide, inside 1-7250 MHz. Narrow spans (e.g. a 0.45 MHz
+        # Meshtastic-EU868 overlay) are widened to a real sweep window in
+        # _run_loop; the display still bins to the requested [lo, hi].
         custom = None
         try:
             if lo_mhz is not None and hi_mhz is not None:
                 lo_mhz, hi_mhz = float(lo_mhz), float(hi_mhz)
-                if hi_mhz - lo_mhz >= 1 and lo_mhz >= 1 and hi_mhz <= 7250:
+                if hi_mhz - lo_mhz >= 0.1 and lo_mhz >= 1 and hi_mhz <= 7250:
                     custom = (lo_mhz, hi_mhz)
         except (TypeError, ValueError):
             custom = None
