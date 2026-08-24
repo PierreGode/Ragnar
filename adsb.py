@@ -498,7 +498,22 @@ class AdsbTracker:
             # --net enables the SBS BaseStation server; force its port to 30003
             # explicitly so it doesn't matter what a given fork defaults to.
             # (No --quiet: not all forks accept it, and stdout is discarded anyway.)
-            cmd = [dump, "--net", "--net-sbs-port", str(_SBS_PORT)]
+            # Force MAX tuner gain: ADS-B is weak/bursty and dump1090's default
+            # varies by fork (some use AGC, which is worse here). 49.6 dB is the
+            # top R820T2/R860 step; PPM correction from the shared tuner config.
+            ppm = 0
+            gain = None
+            try:
+                import rtl_sdr
+                _t = rtl_sdr.get_tuning()
+                ppm = _t.get("ppm", 0) or 0
+                gain = None if _t.get("gain_is_auto") else _t.get("gain")
+            except Exception:
+                pass
+            cmd = [dump, "--net", "--net-sbs-port", str(_SBS_PORT),
+                   "--gain", (str(gain) if gain is not None else "49.6")]
+            if ppm:
+                cmd += ["--ppm", str(ppm)]
             try:
                 self._proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
