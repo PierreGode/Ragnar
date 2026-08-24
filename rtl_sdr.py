@@ -60,6 +60,8 @@ _RTL_POWER = _which("rtl_power")
 RTL_BANDS = {
     "27":     (26900000, 27500000),     # CB / 27 MHz RC (near the tuner's low edge)
     "40":     (40000000, 41000000),     # 40 MHz RC / toys
+    "fm":     (88000000, 108000000),    # FM broadcast band scope (listen w/ radio)
+    "air":    (108000000, 137000000),   # VHF airband (AM voice) band scope
     "315":    (313500000, 316500000),   # US keyfobs / TPMS / garage & gate remotes
     "433":    (433050000, 434790000),   # EU 433 ISM
     "868":    (863000000, 870000000),   # EU 868 SRD
@@ -1525,6 +1527,9 @@ def selftest():
     # --- new bands: 315 (US keyfobs/TPMS/garage) + 40/27 present ---
     check("bands: 315/40/27 MHz added",
           all(b in RTL_BANDS for b in ("315", "40", "27")) and "315" in ISM_FREQS)
+    check("bands: FM (88-108) + airband (108-137) band scopes present",
+          RTL_BANDS.get("fm") == (88000000, 108000000)
+          and RTL_BANDS.get("air") == (108000000, 137000000))
 
     # --- tuner corrections (PPM + gain) build the right rtl_* flags ---
     _saved_ppm, _saved_gain = _ppm, _gain

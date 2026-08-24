@@ -546,6 +546,14 @@
     frac=Math.max(0,Math.min(1,frac)); var f=this.lo+frac*(this.hi-this.lo);
     this.marker=f; this.placeMarker();
     this.markTxt.innerHTML='Marked <span class="mk">'+fmtMHz(f)+'</span>';
+    // On the RTL panel, dropping a marker also loads it into the Local Radio bar
+    // (pick a sensible demod by band) so the flow is: sweep → click a station →
+    // Listen. One dongle, so listening pauses this sweep.
+    if(this.cfg.tuner && window.RADIO && f>=24 && f<=1766){
+      var m=(f>=88&&f<=108)?'wfm':((f>108&&f<=137)?'am':'nfm');
+      window.RADIO.set(f, m);
+      this.markTxt.innerHTML+=' <span class="zi">→ radio '+m.toUpperCase()+' · press Listen</span>';
+    }
     var canZoom=(this.mode==='live')||(this.mode==='synth'); this.zoomBtn.disabled=!canZoom;
     this.resetBtn.disabled=!this.zoom;
     this.zoomBtn.title=(this.mode==='live')?'Retune a narrow sweep around the marker':'Zoom the synthetic view (a real radio retunes the hardware)';
@@ -835,7 +843,7 @@
     api:{status:'/api/net/rtl/status',start:'/api/net/rtl/power/start',stop:'/api/net/rtl/power/stop',frames:'/api/net/rtl/power/frames',
          ismStart:'/api/net/rtl/ism/start',ismStop:'/api/net/rtl/ism/stop',ismDevices:'/api/net/rtl/ism/devices'},
     synth:function(b,lo,hi){return subGhzModel(lo,hi);}, synthDefault:'433', synthBands:false, decode:true, zwave:true, tuner:true, record:true, minSpan:0.2,
-    liveBands:[{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
+    liveBands:[{id:'fm',label:'FM'},{id:'air',label:'Air'},{id:'27',label:'27'},{id:'40',label:'40'},{id:'315',label:'315'},{id:'433',label:'433'},{id:'868',label:'868'},{id:'915',label:'915'}], defaultBand:'433' });
   scopes.push(rtl); stack.appendChild(rtl.el);
   var hackrf=new Scope({ name:"Wi-Fi Bands", short:"HackRF", dev:"HackRF One · hackrf_sweep", rig:"rig-hackrf",
     api:{status:'/api/net/sdr/status',start:'/api/net/sdr/start',stop:'/api/net/sdr/stop',frames:'/api/net/sdr/frames'},
@@ -955,6 +963,14 @@
       nowEl.textContent='off · one dongle, so listening pauses the sub-GHz sweep'; }
     listenBtn.addEventListener('click',function(){ playing?stop():tune(); });
     audio.addEventListener('error',function(){ if(playing){ nowEl.innerHTML='<span style="color:#fb7185">Audio failed — check rtl_fm / dongle</span>'; } });
+    // Public hook: the sub-GHz waterfall calls this when you click a peak, so
+    // "sweep → click a station → Listen" works. Sets freq + mode, doesn't play.
+    window.RADIO={ set:function(mhz,mode){ if(!isFinite(mhz))return;
+      freqEl.value=(Math.round(mhz*1000)/1000);
+      if(mode){ rmode=mode; Array.prototype.forEach.call(modeSeg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===rmode?'true':'false');}); }
+      updateSaveBtn();
+      if(!playing) nowEl.innerHTML='<span style="color:var(--accent)">tuned '+freqEl.value+' MHz '+rmode.toUpperCase()+'</span> · press Listen';
+    }};
     rebuildPresets(); updateSaveBtn();   // show any saved stations immediately
     // load built-in presets + rtl_fm availability
     fetch('/api/net/radio/status').then(function(r){return r.json();}).then(function(st){
