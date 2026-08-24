@@ -281,6 +281,13 @@ EOF
             echo -e "  ${GREEN}✓${NC} Installed dump1090 (ADS-B radar, 1090 MHz)"
         fi
     fi
+    # acarsdec powers the ADS-B ACARS panel (VHF datalink). Build from source.
+    if ! command -v acarsdec >/dev/null 2>&1; then
+        if [ -x "$ragnar_PATH/scripts/install_acarsdec.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_acarsdec.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed acarsdec (ADS-B ACARS datalink)"
+        fi
+    fi
     # meshtastic Python package for the Mesh Nodes page (USB companion node).
     if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
         command -v pip3 >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-pip >/dev/null 2>&1

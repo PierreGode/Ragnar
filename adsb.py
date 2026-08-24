@@ -139,10 +139,12 @@ def parse_sbs(line):
     return rec
 
 
-# Airline designators: ICAO 3-letter callsign prefix -> (IATA 2-letter, name).
-# A curated set of the busiest carriers worldwide — covers the large majority of
-# flights seen; unknown prefixes just fall back to the raw callsign. ADS-B
-# callsigns carry the ICAO code (e.g. "RYR123"); we derive IATA ("FR123") + name.
+# Airline cross-reference: ICAO 3-letter designator -> (IATA 2-letter, name).
+# ICAO and IATA are DIFFERENT organisations with independent, unrelated code
+# systems — there's no formula between them, so this is a lookup table, not a
+# derivation. ADS-B callsigns carry the ICAO airline designator (e.g. "RYR123");
+# we look up the matching IATA code + name here. A curated set of the busiest
+# carriers worldwide; unknown prefixes just fall back to the raw callsign.
 AIRLINES = {
     "AAL": ("AA", "American Airlines"), "UAL": ("UA", "United Airlines"),
     "DAL": ("DL", "Delta Air Lines"), "SWA": ("WN", "Southwest"),
@@ -186,15 +188,55 @@ AIRLINES = {
     "DLA": ("D0", "DHL"), "GEC": ("LH", "Lufthansa Cargo"), "FDX": ("FX", "FedEx"),
     "UPS": ("5X", "UPS"), "CLX": ("CV", "Cargolux"), "GTI": ("5Y", "Atlas Air"),
     "BOX": ("BX", "AeroLogic"), "ABW": ("RU", "AirBridgeCargo"),
+    # --- extended coverage: more mainline, low-cost, regional & cargo ---
+    "RPA": ("YX", "Republic Airways"), "EDV": ("9E", "Endeavor Air"),
+    "ENY": ("MQ", "Envoy Air"), "ASH": ("YV", "Mesa Airlines"),
+    "PDT": ("PT", "Piedmont"), "JIA": ("OH", "PSA Airlines"), "QXE": ("QX", "Horizon Air"),
+    "GJS": ("ZW", "GoJet"), "UCA": ("C5", "CommutAir"),
+    "SCX": ("SY", "Sun Country"), "AWI": ("ZW", "Air Wisconsin"),
+    "TSC": ("TS", "Air Transat"), "FLE": ("F8", "Flair Airlines"), "SWG": ("WG", "Sunwing"),
+    "POE": ("PD", "Porter Airlines"), "WEN": ("WR", "WestJet Encore"),
+    "CFG": ("DE", "Condor"), "TUI": ("X3", "TUI fly"), "SXS": ("XQ", "SunExpress"),
+    "EJA": ("1I", "NetJets"), "VOE": ("V7", "Volotea"),
+    "BTI": ("BT", "airBaltic"), "LGL": ("LG", "Luxair"),
+    "CTN": ("OU", "Croatia Airlines"), "ROT": ("RO", "TAROM"),
+    "DAH": ("AH", "Air Algerie"), "TAR": ("TU", "Tunisair"), "AMC": ("KM", "Air Malta"),
+    "CYP": ("CY", "Cyprus Airways"), "MEA": ("ME", "Middle East Airlines"),
+    "IRA": ("IR", "Iran Air"), "IAW": ("IA", "Iraqi Airways"),
+    "UZB": ("HY", "Uzbekistan Airways"), "AZG": ("7L", "Silk Way West"),
+    "KZR": ("KC", "Air Astana"), "JZR": ("J9", "Jazeera Airways"),
+    "FAD": ("F3", "flyadeal"), "XAX": ("D7", "AirAsia X"), "BKP": ("PG", "Bangkok Airways"),
+    "AKJ": ("QP", "Akasa Air"), "SEJ": ("SG", "SpiceJet"),
+    "CQH": ("9C", "Spring Airlines"), "CHH": ("HU", "Hainan Airlines"),
+    "CXA": ("MF", "XiamenAir"), "CSC": ("3U", "Sichuan Airlines"), "CDG": ("SC", "Shandong"),
+    "CSZ": ("ZH", "Shenzhen Airlines"), "HKE": ("UO", "HK Express"),
+    "CRK": ("HX", "Hong Kong Airlines"), "SKY": ("BC", "Skymark"), "SNJ": ("6J", "Solaseed"),
+    "APJ": ("MM", "Peach"), "JJP": ("GK", "Jetstar Japan"),
+    "TWB": ("TW", "T'way Air"), "JNA": ("LJ", "Jin Air"), "ABL": ("BX", "Air Busan"),
+    "ESR": ("ZE", "Eastar Jet"), "SLK": ("MI", "SilkAir"), "TGW": ("TR", "Scoot"),
+    "LNI": ("JT", "Lion Air"), "CTV": ("QG", "Citilink"), "BTK": ("ID", "Batik Air"),
+    "CEB": ("5J", "Cebu Pacific"), "ALK": ("UL", "SriLankan"),
+    "BBC": ("BG", "Biman Bangladesh"), "PIA": ("PK", "Pakistan Intl"),
+    "RXA": ("ZL", "Rex"), "FJI": ("FJ", "Fiji Airways"), "ANG": ("PX", "Air Niugini"),
+    "TAI": ("TA", "TACA/Avianca"), "ONE": ("O6", "Avianca Brasil"),
+    "VIV": ("VB", "VivaAerobus"), "SKU": ("H2", "Sky Airline"),
+    "RWD": ("WB", "RwandAir"), "MSC": ("SM", "Air Cairo"), "NOS": ("NO", "Neos"),
+    "LAM": ("TM", "LAM Mozambique"), "CXI": ("XC", "Corendon"),
+    "WUK": ("W9", "Wizz Air UK"), "WMT": ("8Z", "Wizz Air Malta"),
+    "FHY": ("FH", "Freebird"), "OHY": ("8Q", "Onur Air"),
+    "CKS": ("K4", "Kalitta Air"), "PAC": ("PO", "Polar Air Cargo"),
+    "NCA": ("KZ", "Nippon Cargo"), "TAY": ("3V", "ASL Airlines"),
 }
 
 
 def airline_from_callsign(cs):
-    """Derive airline (ICAO+IATA+name) and the IATA flight number from a callsign.
+    """Look up the airline (ICAO designator, IATA code, name) + IATA flight no.
 
     ADS-B callsigns are the ICAO airline designator + flight number ("RYR123").
-    Returns {icao, iata, name, flight_icao, flight_iata} or None (e.g. for tail
-    numbers like N12345, or unknown prefixes).
+    The IATA code is a separate code system, so it comes from the AIRLINES
+    cross-reference table (not computed from ICAO). Returns
+    {icao, iata, name, flight_icao, flight_iata} or None (e.g. tail numbers like
+    N12345, or an ICAO designator not in the table).
     """
     if not cs:
         return None
@@ -363,13 +405,34 @@ class AdsbTracker:
         self._error = None
         self._msgs = 0
         self._started = None
+        self._connected = False    # SBS socket connected to dump1090
+        self._sbs_lines = 0        # raw lines received on 30003 (reception proof)
+        self._stderr_tail = ""     # last bit of dump1090 stderr (device errors)
+
+    def _diag(self):
+        """A human hint distinguishing 'no reception' from a real fault."""
+        if not (self._reader and self._reader.is_alive()):
+            return None
+        if not self._connected:
+            return "starting dump1090 / connecting to SBS 30003…"
+        elapsed = time.time() - (self._started or time.time())
+        if self._sbs_lines == 0:
+            if elapsed > 15:
+                return ("dump1090 running but no 1090 MHz messages — check the "
+                        "antenna (needs a 1090 MHz / ADS-B antenna), placement, and "
+                        "that aircraft are overhead")
+            return "listening for aircraft…"
+        return None
 
     def status(self):
         with self._lock:
             running = bool(self._reader and self._reader.is_alive())
             self._prune()
             return {"running": running, "aircraft": len(self._planes),
-                    "messages": self._msgs, "error": self._error,
+                    "messages": self._msgs, "sbs_lines": self._sbs_lines,
+                    "connected": self._connected, "error": self._error,
+                    "hint": self._diag(),
+                    "stderr": (self._stderr_tail or "").strip()[-300:],
                     "since": self._started}
 
     def _prune(self):
@@ -401,6 +464,8 @@ class AdsbTracker:
                 out.append(a)
             out.sort(key=lambda a: a.get("callsign") or a["icao"])
             return {"aircraft": out, "count": len(out), "messages": self._msgs,
+                    "sbs_lines": self._sbs_lines, "connected": self._connected,
+                    "hint": self._diag(),
                     "running": bool(self._reader and self._reader.is_alive()),
                     "error": self._error}
 
@@ -430,19 +495,56 @@ class AdsbTracker:
             self._planes = {}
             self._msgs = 0
             self._error = None
+            self._connected = False
+            self._sbs_lines = 0
+            self._stderr_tail = ""
             self._started = time.time()
+            # --net enables the SBS BaseStation server; force its port to 30003
+            # explicitly so it doesn't matter what a given fork defaults to.
+            # (No --quiet: not all forks accept it, and stdout is discarded anyway.)
+            # Force MAX tuner gain: ADS-B is weak/bursty and dump1090's default
+            # varies by fork (some use AGC, which is worse here). 49.6 dB is the
+            # top R820T2/R860 step; PPM correction from the shared tuner config.
+            ppm = 0
+            gain = None
             try:
-                # --net turns on the SBS (30003) server; --quiet keeps stdout clean.
+                import rtl_sdr
+                _t = rtl_sdr.get_tuning()
+                ppm = _t.get("ppm", 0) or 0
+                gain = None if _t.get("gain_is_auto") else _t.get("gain")
+            except Exception:
+                pass
+            cmd = [dump, "--net", "--net-sbs-port", str(_SBS_PORT),
+                   "--gain", (str(gain) if gain is not None else "49.6")]
+            if ppm:
+                cmd += ["--ppm", str(ppm)]
+            try:
                 self._proc = subprocess.Popen(
-                    [dump, "--net", "--quiet"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             except Exception as exc:
                 self._error = "failed to launch dump1090: %s" % exc
                 return {"ok": False, "error": self._error}
+            # Drain stderr so dump1090 can't block on a full pipe, and keep a tail
+            # for diagnostics (device-open errors, gain warnings).
+            threading.Thread(target=self._drain_stderr, daemon=True,
+                             name="adsb-stderr").start()
             self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                             name="adsb-sbs")
             self._reader.start()
         return {"ok": True}
+
+    def _drain_stderr(self):  # pragma: no cover - hardware path
+        proc = self._proc
+        if not (proc and proc.stderr):
+            return
+        try:
+            for line in proc.stderr:
+                if self._stop.is_set():
+                    break
+                with self._lock:
+                    self._stderr_tail = (self._stderr_tail + line)[-1000:]
+        except Exception:
+            pass
 
     def _read_loop(self):
         # dump1090 needs a moment to open the device and bind :30003.
@@ -454,12 +556,19 @@ class AdsbTracker:
                 break
             except OSError:
                 if self._proc and self._proc.poll() is not None:
-                    self._error = "dump1090 exited (device busy? no RTL-SDR?)"
+                    tail = (self._stderr_tail or "").strip().splitlines()
+                    self._error = ("dump1090 exited (device busy / held by another "
+                                   "capture, or no RTL-SDR)"
+                                   + (" — " + tail[-1] if tail else ""))
                     return
                 time.sleep(0.5)
         if sock is None:
-            self._error = "could not connect to dump1090 SBS port 30003"
+            self._error = ("could not connect to dump1090 SBS port 30003"
+                           + (" — " + self._stderr_tail.strip().splitlines()[-1]
+                              if self._stderr_tail.strip() else ""))
             return
+        with self._lock:
+            self._connected = True
         sock.settimeout(1.0)
         buf = ""
         try:
@@ -475,6 +584,9 @@ class AdsbTracker:
                 buf += data.decode("ascii", "replace")
                 while "\n" in buf:
                     line, buf = buf.split("\n", 1)
+                    if line.strip():
+                        with self._lock:
+                            self._sbs_lines += 1   # reception proof (any SBS line)
                     rec = parse_sbs(line)
                     if rec:
                         self._ingest(rec)
@@ -595,7 +707,7 @@ def selftest():
           and ac["aircraft"][0]["alt"] == 38000 and ac["aircraft"][0]["gs"] == 450, str(ac))
     check("track: message counter", ac["messages"] == 3)
 
-    # Airline code derivation: ICAO callsign prefix -> IATA + name + flight nums.
+    # Airline cross-reference: ICAO callsign designator -> IATA + name (lookup).
     al = airline_from_callsign("RYR123")
     check("airline: RYR123 -> Ryanair FR / FR123",
           al and al["iata"] == "FR" and al["name"] == "Ryanair"

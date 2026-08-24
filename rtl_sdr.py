@@ -289,8 +289,8 @@ def parse_rtl_test(text):
 # the USB product string and the tuner chip, so identity is best-effort: the
 # EEPROM product string ("Blog V4", "NESDR SMArt", …) is authoritative when a
 # vendor flashed one, otherwise we fall back to the tuner chip.
-_TUNER_FAMILIES = ("R828D", "R820T2", "R820T", "E4000", "FC0013", "FC0012",
-                   "FC2580", "R828")
+_TUNER_FAMILIES = ("R828D", "R820T2", "R820T", "R860", "E4000", "FC0013",
+                   "FC0012", "FC2580", "R828")
 
 
 def identify_model(device, tuner):
@@ -326,6 +326,8 @@ def identify_model(device, tuner):
                    "R828D tuner — needs the RTL-SDR Blog librtlsdr fork")
     if "R820T2" in tun:
         return out("RTL-SDR (R820T2)", "R820T2", False, "")
+    if "R860" in tun:   # Rafael Micro R860 = R820T2-class (e.g. Nooelec NESDR SMArt v5)
+        return out("RTL-SDR (R860 / R820T2)", "R860", False, "")
     if "R820T" in tun:
         return out("RTL-SDR (R820T)", "R820T", False, "")
     if fam in _TUNER_FAMILIES:

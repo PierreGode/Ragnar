@@ -20,7 +20,7 @@
   body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;
     padding:20px;min-height:100vh;
     background-image:radial-gradient(120% 80% at 50% -10%, rgba(46,160,150,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
-  .wrap{max-width:1280px;margin:0 auto}
+  .wrap{max-width:none;margin:0 auto}
   header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
   .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
   .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--radar);box-shadow:0 0 10px var(--radar)}
@@ -42,10 +42,12 @@
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
   .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:6px 11px;cursor:pointer}
   .seg button[aria-pressed="true"]{background:rgba(46,160,150,.16);color:var(--radar)}
-  .layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px}
+  /* Radar column hugs the (now ~20% smaller) radar square so Contacts takes all
+     the remaining width. min(66vh,46vw) keeps the radar from ever dominating. */
+  .layout{display:grid;grid-template-columns:min(66vh,46vw) minmax(340px,1fr);gap:16px;align-items:start}
   @media (max-width:880px){.layout{grid-template-columns:1fr}}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
-  .scopewrap{position:relative;background:#05080d;aspect-ratio:1/1;width:100%}
+  .scopewrap{position:relative;background:#05080d;aspect-ratio:1/1;width:100%;max-height:66vh}
   canvas#radar{display:block;width:100%;height:100%}
   .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:rgba(5,8,13,.78);text-align:center;padding:20px}
   .veil.show{display:flex}
@@ -60,8 +62,20 @@
   th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
   td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
   tr:hover td{background:rgba(46,160,150,.06)}
+  tr.prow{cursor:pointer}
+  tr.prow.sel td{background:rgba(245,185,66,.12);box-shadow:inset 3px 0 0 var(--accent)}
   td.cs{color:var(--ink);font-weight:500}
   .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .acarscard{margin-top:16px}
+  .acars-list{max-height:none;padding:4px 0}
+  .acars-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 78px 1fr auto;gap:12px;align-items:start}
+  @media (max-width:720px){.acars-msg{grid-template-columns:1fr;gap:2px}}
+  .acars-msg .who{font-family:var(--mono);font-size:12px}
+  .acars-msg .who .tail{color:var(--cyan);font-weight:600} .acars-msg .who .flt{color:var(--ink-dim)}
+  .acars-msg .lbl{font-family:var(--mono);font-size:10px} .acars-msg .lbl .code{color:var(--accent)} .acars-msg .lbl .mean{color:var(--muted);display:block;font-size:9px}
+  .acars-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+  .acars-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
+  .acars-msg.match{background:rgba(46,160,150,.05)} .acars-msg .who .onradar{color:var(--live);font-size:9px}
   .stat{display:flex;flex-direction:column;gap:1px}
   .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .stat .v{font-family:var(--mono);font-size:14px;color:var(--radar)}
@@ -118,8 +132,20 @@
     </div>
   </div>
 
+  <div class="card acarscard">
+    <div class="tcap">
+      <span class="t">✉ ACARS datalink <span class="c" id="acars-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="tag idle" id="acars-mode">off</span>
+        <button class="ctl" id="acars-btn" style="padding:5px 11px" title="ACARS uses the RTL-SDR at ~131 MHz — starting it stops the 1090 MHz radar (one dongle)">&#9654;&nbsp;Start ACARS</button>
+      </span>
+    </div>
+    <div class="acars-list" id="acars-list"><div class="empty" id="acars-empty">ACARS off — start it to read aircraft datalink messages (VHF ~131 MHz). One dongle, so this pauses the radar.</div></div>
+  </div>
+
   <footer>
     <div><b>How it works:</b> dump1090 decodes 1090 MHz ADS-B; each aircraft is placed by its own broadcast lat/lon relative to your receiver location. Set <b>My lat/lon</b> (or use the browser location) so the range rings and bearings are correct. Blip colour = altitude. Range rings label in the selected unit.</div>
+    <div style="margin-top:6px"><b>✉ ACARS:</b> aircraft VHF datalink (~131 MHz) — position reports, OOOI times, weather, load sheets and free-text crew↔ops messages, in the clear via acarsdec. Matched to the contacts above by tail/flight. One dongle means ACARS and the 1090 MHz radar can't run at once.</div>
     <div style="margin-top:6px"><b>One dongle:</b> starting the radar takes the RTL-SDR from the sub-GHz sweep/decoder (and vice-versa). Receive-only — Ragnar never transmits.</div>
   </footer>
 </div>
@@ -128,8 +154,16 @@
 (function(){
   "use strict";
   var running=false, DEMO_ON=false, mode='idle', maxKm=100, unit='km';
-  var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null};
+  var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null}, selectedIcao=null;
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  // Click a contact row to highlight that aircraft on the radar (toggle off by
+  // re-clicking). Delegated so it survives table re-renders.
+  document.getElementById('tbody').addEventListener('click',function(e){
+    var tr=e.target.closest('tr[data-icao]'); if(!tr) return;
+    var id=tr.getAttribute('data-icao');
+    selectedIcao=(selectedIcao===id)?null:id;
+    renderTable();
+  });
 
   var cv=document.getElementById('radar'), ctx=cv.getContext('2d');
   var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs');
@@ -182,6 +216,10 @@
     if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){ cv.width=Math.round(w*d); cv.height=Math.round(h*d); ctx.setTransform(d,0,0,d,0,0); }
     return true; }
   function resize(){ ensureSize(); }
+  function wrapText(text,x,y,maxW,lh){ var words=String(text).split(' '),line='',yy=y;
+    for(var i=0;i<words.length;i++){ var t=line+words[i]+' ';
+      if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),x,yy); line=words[i]+' '; yy+=lh; } else { line=t; } }
+    ctx.fillText(line.trim(),x,yy); }
   function draw(){
     var W=cv.clientWidth||600, H=cv.clientHeight||600, cx=W/2, cy=H/2, R=Math.min(W,H)/2-24;
     ctx.clearRect(0,0,W,H);
@@ -213,20 +251,39 @@
       var frac=p._dist/maxKm; if(frac>1.02) return; if(frac>1) frac=1;
       var r=frac*R, ang=toRad(p._brg), x=cx+r*Math.sin(ang), y=cy-r*Math.cos(ang);
       var col=altColor(p.alt), fresh=p.seen==null||p.seen<8;
+      var sel=(selectedIcao && p.icao===selectedIcao);
       ctx.globalAlpha=fresh?1:0.45;
+      // selection highlight: leader line from centre + pulsing ring
+      if(sel){ ctx.globalAlpha=1;
+        ctx.strokeStyle='rgba(245,185,66,.5)'; ctx.lineWidth=1; ctx.setLineDash([4,4]);
+        ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x,y); ctx.stroke(); ctx.setLineDash([]);
+        var pr=8+2.5*Math.sin(sweepAng/12);
+        ctx.strokeStyle='var(--accent)'; ctx.strokeStyle='#f5b942'; ctx.lineWidth=2;
+        ctx.beginPath(); ctx.arc(x,y,pr,0,2*Math.PI); ctx.stroke(); }
       // heading vector
       if(p.track!=null){var ta=toRad(p.track); ctx.strokeStyle=col; ctx.lineWidth=1.5;
         ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(x+12*Math.sin(ta),y-12*Math.cos(ta)); ctx.stroke();}
-      ctx.fillStyle=col; ctx.beginPath(); ctx.arc(x,y,3.2,0,2*Math.PI); ctx.fill();
+      ctx.fillStyle=sel?'#f5b942':col; ctx.beginPath(); ctx.arc(x,y,sel?4.2:3.2,0,2*Math.PI); ctx.fill();
       // label
-      ctx.fillStyle='rgba(232,238,246,.92)'; ctx.textAlign='left'; ctx.font='10px "IBM Plex Mono",monospace';
+      ctx.fillStyle=sel?'#f5b942':'rgba(232,238,246,.92)'; ctx.textAlign='left';
+      ctx.font=(sel?'600 11px':'10px')+' "IBM Plex Mono",monospace';
       var lab=(p.callsign||p.icao); ctx.fillText(lab, x+7, y-2);
-      if(p.alt!=null){ ctx.fillStyle='rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
+      if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
       ctx.globalAlpha=1; shown++;
     });
     // no-location hint on the scope
     if(rx.lat==null){ ctx.fillStyle='rgba(245,185,66,.9)'; ctx.textAlign='center'; ctx.font='12px "IBM Plex Mono",monospace';
       ctx.fillText('Set your lat/lon to place aircraft', cx, cy+R-6); }
+    // reception hint: running (live), connected, but no aircraft decoded — almost
+    // always the antenna. Draw it big in the middle so it can't be missed.
+    if(mode==='live' && running && (!planes||!planes.length) && lastHint){
+      ctx.textAlign='center';
+      ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
+      ctx.fillText('No aircraft decoded', cx, cy-14);
+      ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
+      wrapText('Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
+        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.', cx, cy+6, Math.min(R*1.6,420), 15);
+    }
   }
 
   function anim(){ if(ensureSize()){ sweepAng=(sweepAng+1.6)%360; draw(); } requestAnimationFrame(anim); }
@@ -243,14 +300,22 @@
     document.getElementById('tblcount').textContent=list.length+' contacts';
     document.getElementById('s-count').textContent=list.length;
     document.getElementById('s-msgs').textContent=msgs;
-    if(!list.length){ tb.innerHTML='<tr><td colspan="7" class="empty">'+(running||mode==='synth'?'Listening…':'Not started')+'</td></tr>'; return; }
+    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="7" class="empty">'+esc(em)+'</td></tr>'; return; }
     tb.innerHTML=list.map(function(p){
       var flight = p.callsign||'—';
-      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign) ? '<span style="color:var(--muted)"> · '+esc(p.flight_iata)+'</span>' : '';
-      var air = p.airline ? ('<span style="color:var(--cyan)">'+esc(p.iata||'')+'</span> '+esc(p.airline)) : '<span style="color:#546074">—</span>';
+      // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
+      var fl2 = (p.flight_iata && p.flight_iata!==p.callsign)
+        ? ' <span style="color:var(--cyan);font-weight:600">'+esc(p.flight_iata)+'</span>' : '';
+      // Airline shows BOTH codes: ICAO designator (muted) + IATA (cyan) + name.
+      var opicao = p.op_icao || ((p.airline && p.callsign) ? p.callsign.slice(0,3) : '');
+      var air = p.airline
+        ? '<span style="color:var(--muted)" title="ICAO airline code">'+esc(opicao)+'</span> '
+          +'<span style="color:var(--cyan)" title="IATA airline code">'+esc(p.iata||'')+'</span> '+esc(p.airline)
+        : '<span style="color:#546074">—</span>';
       var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
       var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
-      return '<tr>'
+      var selc = (selectedIcao && p.icao===selectedIcao) ? ' sel' : '';
+      return '<tr class="prow'+selc+'" data-icao="'+esc(p.icao)+'">'
       +'<td class="cs">'+esc(flight)+fl2+'</td>'
       +'<td>'+air+'</td>'
       +'<td class="cs">'+reg+'</td>'
@@ -292,10 +357,12 @@
     fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
     if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
   }
+  var lastHint='', lastSbs=0;
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
-      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); }
+      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0;
+        lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); }
       else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
@@ -324,7 +391,7 @@
       var d=destPoint(rx.lat,rx.lon,brg,dist), a=synthAir[(Math.random()*synthAir.length)|0], num=(100+((Math.random()*899)|0));
       var reg=synthReg[(Math.random()*synthReg.length)|0];
       out.push({icao:(0x400000+((Math.random()*0xBFFFFF)|0)).toString(16).toUpperCase(),
-        callsign:a[0]+num, iata:a[1], airline:a[2], flight_iata:a[1]+num,
+        callsign:a[0]+num, op_icao:a[0], iata:a[1], airline:a[2], flight_iata:a[1]+num,
         tail:synthTail(reg[2]), country:reg[0], country_code:reg[1],
         lat:d.lat,lon:d.lon,alt:2000+((Math.random()*38000)|0),gs:180+((Math.random()*320)|0),
         track:Math.random()*360,vert:((Math.random()*2000)|0)-1000,seen:0}); }
@@ -343,6 +410,98 @@
     return {lat:p2*180/Math.PI, lon:((l2*180/Math.PI+540)%360)-180};
   }
   function stopSynth(){ if(synthTimer){clearInterval(synthTimer);synthTimer=null;} }
+
+  // ---- ACARS datalink ----
+  var acarsRunning=false, acarsMode='off', acarsMsgs=[], acarsSeq=0, acarsPoll=null, acarsSynthTimer=null;
+  var acarsBtn=document.getElementById('acars-btn');
+  function setAcarsMode(m){ acarsMode=m; var el=document.getElementById('acars-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'off')); }
+  function tailsOnRadar(){ var set={}; planes.forEach(function(p){ if(p.tail)set[p.tail.toUpperCase()]=1; if(p.callsign)set[p.callsign.toUpperCase()]=1; if(p.flight_iata)set[p.flight_iata.toUpperCase()]=1; }); return set; }
+  function renderAcars(){
+    var el=document.getElementById('acars-list'); document.getElementById('acars-count').textContent=acarsMsgs.length?('· '+acarsMsgs.length):'';
+    if(!acarsMsgs.length){ el.innerHTML='<div class="empty" id="acars-empty">'+(acarsRunning||acarsMode==='synth'?'Listening for ACARS… (VHF ~131 MHz)':'ACARS off — start it to read aircraft datalink messages. One dongle, so this pauses the radar.')+'</div>'; return; }
+    var onradar=tailsOnRadar();
+    el.innerHTML=acarsMsgs.slice().reverse().slice(0,80).map(function(m){
+      var match=(m.tail&&onradar[m.tail.toUpperCase()])||(m.flight&&onradar[m.flight.toUpperCase()]);
+      var who='<span class="tail">'+esc(m.tail||'—')+'</span>'+(m.flight?' <span class="flt">'+esc(m.flight)+'</span>':'')
+        +(match?' <span class="onradar">● on radar</span>':'');
+      var lbl='<span class="code">'+esc(m.label||'—')+'</span>'+(m.label_meaning?'<span class="mean">'+esc(m.label_meaning)+'</span>':'');
+      var body=m.text?esc(m.text):'<span style="color:var(--muted)">(no text — '+(m.label_meaning||'link')+')</span>';
+      var meta=(m.freq_mhz?esc(m.freq_mhz)+' MHz':'')+(m.level!=null?' · '+m.level+'dB':'')+(m.msgno?' · '+esc(m.msgno):'');
+      return '<div class="acars-msg'+(match?' match':'')+'"><div class="who">'+who+'</div><div class="lbl">'+lbl+'</div>'
+        +'<div class="body">'+body+'</div><div class="meta">'+meta+'</div></div>';
+    }).join('');
+  }
+  acarsBtn.addEventListener('click',function(){ acarsRunning?stopAcars():startAcars(); });
+  function startAcars(){
+    // one dongle: ACARS at 131 MHz can't coexist with the 1090 MHz radar
+    if(running){ stopRun(); }
+    acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS';
+    acarsSeq=0; acarsMsgs=[]; renderAcars();
+    fetch('/api/net/acars/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ if(DEMO_ON) acarsSynth(); else { document.getElementById('acars-list').innerHTML='<div class="empty">Could not start ACARS: '+esc(res.error)+(res.error&&res.error.indexOf('not installed')>=0?' — <button class="ctl" id="acars-install" style="margin-left:6px;padding:3px 8px">⬇ Install acarsdec</button>':'')+'</div>'; wireAcarsInstall(); } }
+    }).catch(function(){});
+    if(acarsPoll)clearInterval(acarsPoll); acarsPoll=setInterval(pollAcars,2000); pollAcars();
+  }
+  function stopAcars(){
+    acarsRunning=false; acarsBtn.setAttribute('aria-pressed','false'); acarsBtn.innerHTML='&#9654;&nbsp;Start ACARS';
+    if(acarsPoll){clearInterval(acarsPoll);acarsPoll=null;}
+    fetch('/api/net/acars/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) acarsSynth(); else { setAcarsMode('off'); renderAcars(); }
+  }
+  function wireAcarsInstall(){ var b=document.getElementById('acars-install'); if(!b)return;
+    b.addEventListener('click',function(){ b.textContent='Building… (~2-4 min)'; b.disabled=true;
+      fetch('/api/net/acars/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+        if(res&&res.ok){ startAcars(); } else { b.textContent='⬇ Install acarsdec'; b.disabled=false; }
+      }).catch(function(){ b.textContent='⬇ Install acarsdec'; b.disabled=false; }); }); }
+  function pollAcars(){
+    fetch('/api/net/acars/messages?since='+acarsSeq).then(function(r){return r.json();}).then(function(d){
+      if(!d)return;
+      if(d.running){ setAcarsMode('live'); if(d.messages&&d.messages.length){ d.messages.forEach(function(m){acarsMsgs.push(m);}); acarsSeq=d.seq; if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500); renderAcars(); } }
+      else if(d.error && DEMO_ON){ acarsSynth(); }
+    }).catch(function(){});
+  }
+  // synthetic ACARS — rich, all fields, tied to synthetic aircraft
+  var ACSAMPLES=[
+    {label:'15',mean:'Position report',text:'POS N51.482 W000.451 FL360 M0.79 OAT-54 WIND 270/48'},
+    {label:'22',mean:'Departure/arrival (OOOI)',text:'OUT 1412 OFF 1428 GATE A22 RWY 27R'},
+    {label:'5U',mean:'Weather request',text:'REQ METAR EGLL EHAM LFPG'},
+    {label:'12',mean:'Weather / ATIS',text:'ATIS EGLL INFO K 1420Z 25008KT 9999 SCT035 18/09 Q1018'},
+    {label:'83',mean:'Load sheet',text:'ZFW 61.2 TOW 74.8 FUEL 13.6 PAX 174 CG 24.3%'},
+    {label:'H1',mean:'Free text',text:'OPS: SLOT CTOT 1455 EXPECT HOLDING BIG'},
+    {label:'B9',mean:'Request oceanic clearance',text:'RCL NAT A 56N020W 340 M082'},
+    {label:'44',mean:'Flight plan',text:'FPL EGLL-KJFK STEP 340/360/380 ETA 1735'},
+    {label:'10',mean:'Airline-defined',text:'ENG2 N1 92.4 EGT 610 OIL 45 VIB 0.8 - NORMAL'},
+    {label:'2Z',mean:'OOOI times',text:'ON 1731 IN 1738 GATE T4-411'}
+  ];
+  function acarsSynth(){
+    setAcarsMode('synth');
+    if(!acarsMsgs._synth){ acarsMsgs=[]; acarsMsgs._synth=true; }
+    if(acarsSynthTimer) { renderAcars(); return; }
+    // seed a few immediately so the panel isn't empty
+    for(var i=0;i<6;i++) pushSynthAcars();
+    renderAcars();
+    acarsSynthTimer=setInterval(function(){ if(Math.random()<0.8){ pushSynthAcars(); renderAcars(); } },2600);
+  }
+  function pushSynthAcars(){
+    var p=(planes&&planes.length)?planes[(Math.random()*planes.length)|0]:null;
+    var s=ACSAMPLES[(Math.random()*ACSAMPLES.length)|0];
+    var ch=[131.550,131.725,130.025,131.475][(Math.random()*4)|0];
+    acarsMsgs.push({tail:p?p.tail:'G-'+('ABCDEFGHJKLMNPQRSTUVWXYZ'[(Math.random()*24)|0]+'ZZZ'),
+      flight:p?p.callsign:'BAW'+(100+((Math.random()*899)|0)), label:s.label, label_meaning:s.mean,
+      text:s.text, freq_mhz:ch, level:-(10+((Math.random()*20)|0)), mode:'2',
+      msgno:'M'+(10+((Math.random()*89)|0))+'A', block_id:''+((Math.random()*9)|0), ts:Date.now()/1000});
+    if(acarsMsgs.length>500)acarsMsgs=acarsMsgs.slice(-500);
+  }
+  function acarsCheckStatus(){
+    fetch('/api/net/acars/status').then(function(r){return r.json();}).then(function(st){
+      if(st&&st.running){ acarsRunning=true; acarsBtn.setAttribute('aria-pressed','true'); acarsBtn.innerHTML='&#10074;&#10074;&nbsp;Stop ACARS'; if(!acarsPoll){acarsPoll=setInterval(pollAcars,2000);pollAcars();} return; }
+      var det=(st&&st.detect)||{};
+      // enable button label with install hint if acarsdec missing
+      if(det.tools_installed===false && !acarsRunning && acarsMode!=='synth' && !DEMO_ON){ acarsBtn.title='acarsdec not installed — click to install & start'; }
+      if(DEMO_ON && acarsMode==='off'){ acarsSynth(); }
+    }).catch(function(){});
+  }
 
   // ---- boot ----
   function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
@@ -364,7 +523,8 @@
   resize();
   window.addEventListener('resize',function(){resize();});
   requestAnimationFrame(anim);
-  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus();
+    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); }); },5000); });
 })();
 </script>
 </body>

@@ -185,9 +185,11 @@ heading vectors + a contacts table.
   correct — aircraft carry their own GPS position; the page computes distance and
   bearing relative to you client-side.
 - **Each contact is identified three ways:** the **ICAO** callsign (e.g.
-  `DLH427`), the derived **IATA** flight + airline (`LH427 · Lufthansa`), and the
-  **tail registration** + country decoded from the ICAO 24-bit address (exact
-  N-number algorithm for the US; country from the ICAO address block elsewhere).
+  `DLH427`); the airline's **IATA** flight + name looked up from a cross-reference
+  table (`LH427 · Lufthansa` — ICAO and IATA are separate code systems, so this
+  is a lookup, not a conversion); and the **tail registration** + country decoded
+  from the ICAO 24-bit address (exact N-number algorithm for the US; country from
+  the ICAO address block elsewhere).
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -204,6 +206,17 @@ power sweep to a JSONL file under `data/rf_recordings/` (gitignored), and a
 transport bar (play/pause, seek, restart, delete). Frames are small, so a
 recording is cheap; capped at a few thousand frames. Routes:
 `/api/net/rtl/record/{start,stop,status,list,get,delete}`.
+
+## Local Radio (FM / AM, listen)
+
+The RF Waterfall page has a **📻 Local Radio** bar: type a frequency, pick a mode
+(**FM** broadcast, **NFM** narrowband, **AM**), and press **Listen**. `radio.py`
+runs `rtl_fm` to demodulate and streams the audio to the browser as a live WAV
+(`/api/net/radio/stream?freq_hz=…&mode=…`) that an `<audio>` element plays, with a
+volume slider and band presets (FM broadcast, airband AM, marine/PMR NFM, MW).
+Frequencies below 24 MHz use the dongle's direct-sampling mode (MW/SW AM,
+best-effort). One dongle, so listening pauses the sub-GHz sweep. `rtl_fm` ships
+in the already-installed `rtl-sdr` package. Receive-only.
 
 ## Pager Decode (POCSAG / FLEX)
 
@@ -223,6 +236,22 @@ function bits, and alphanumeric/numeric text, live.
 - **Legality** — pager traffic is unencrypted but frequently *sensitive*
   (patient data, security callouts). Decode third-party traffic only where
   lawful; this is receive-only.
+
+## ACARS datalink (on the ADS-B radar)
+
+The ADS-B radar page has an **✉ ACARS datalink** panel. ACARS is the VHF text
+system airliners use for ops — position reports, OOOI (out/off/on/in) times,
+weather, load sheets, and free-text crew↔ops messages — transmitted in the clear
+around **131 MHz**. `acars.py` drives `acarsdec` and shows each message's tail,
+flight, label (+ its meaning), text, and frequency/level. Messages are matched to
+the radar contacts by tail/flight and flagged **● on radar**.
+
+- **One dongle** — ACARS (131 MHz) and the 1090 MHz radar can't run at once, so
+  starting ACARS pauses the radar (and vice-versa). The panel has its own
+  Start/Stop.
+- **`acarsdec`** isn't in apt, so the installer/updater build it from source
+  (`scripts/install_acarsdec.sh`); if missing, the panel shows an **⬇ Install
+  acarsdec** button. Receive-only.
 
 ## API
 
@@ -248,6 +277,8 @@ function bits, and alphanumeric/numeric text, live.
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
 | `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state + decoded POCSAG/FLEX messages |
 | `POST /api/net/pager/start` `{freq_hz}` · `/stop` · `/install` | Start/stop pager decode on a channel; install multimon-ng |
+| `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
+| `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
 | `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
 
 ## CLI
