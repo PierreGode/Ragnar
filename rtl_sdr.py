@@ -58,6 +58,10 @@ _RTL_POWER = _which("rtl_power")
 
 # Power-sweep ranges (Hz). Kept inside the RTL-SDR's reach (~24 MHz–1.7 GHz).
 RTL_BANDS = {
+    # HF broadcast bands (below the R820T2 tuner floor -> need the dongle's
+    # DIRECT-SAMPLING path, ~0.1-24 MHz, not the normal quadrature tuner).
+    "am":     (530000, 1710000),        # AM / medium-wave broadcast (direct sampling)
+    "sw":     (3000000, 24000000),      # shortwave HF broadcast (direct sampling; capped at ~25 MHz DS ceiling)
     "27":     (26900000, 27500000),     # CB / 27 MHz RC (near the tuner's low edge)
     "40":     (40000000, 41000000),     # 40 MHz RC / toys
     "fm":     (88000000, 108000000),    # FM broadcast band scope (listen w/ radio)
@@ -1530,6 +1534,9 @@ def selftest():
     check("bands: FM (88-108) + airband (108-137) band scopes present",
           RTL_BANDS.get("fm") == (88000000, 108000000)
           and RTL_BANDS.get("air") == (108000000, 137000000))
+    check("bands: AM (0.53-1.71) + shortwave (3-24) HF band scopes present",
+          RTL_BANDS.get("am") == (530000, 1710000)
+          and RTL_BANDS.get("sw") == (3000000, 24000000))
 
     # --- tuner corrections (PPM + gain) build the right rtl_* flags ---
     _saved_ppm, _saved_gain = _ppm, _gain
