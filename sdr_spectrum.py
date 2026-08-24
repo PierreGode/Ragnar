@@ -88,6 +88,20 @@ BANDS = {
 # sweep command; the display still bins to the requested [lo, hi].
 _MIN_SWEEP_MHZ = 2.0
 
+
+def _widen_span(lo, hi):
+    """Widen a too-narrow [lo, hi] MHz window symmetrically to _MIN_SWEEP_MHZ.
+
+    Below ~_GRID_BINS * (hackrf_sweep's ~2.5 kHz FFT floor) ~= 1.3 MHz, a span
+    can't feed every display column, so narrow requests (small zoom, a manual
+    tune, a 0.45 MHz mesh overlay) are widened. Pure so selftest can exercise it.
+    """
+    if hi - lo < _MIN_SWEEP_MHZ:
+        c = (lo + hi) / 2.0
+        lo = max(1.0, c - _MIN_SWEEP_MHZ / 2.0)
+        hi = min(7250.0, lo + _MIN_SWEEP_MHZ)
+    return lo, hi
+
 _GRID_BINS = 512          # display columns per frame (band binned into this many)
 _RING_FRAMES = 600        # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120         # sentinel for a bucket no sweep bin landed in
@@ -266,12 +280,23 @@ class _FrameBuilder:
             self._reset()
         self._last_low = hz_low
         for i, db in enumerate(dbs):
-            center = hz_low + (i + 0.5) * bin_hz
-            b = self._bucket(center)
-            if b is not None:
+            # Fill every display column this raw FFT bin covers, not just the one
+            # its centre lands in. On a narrow span the raw bins (>=2500 Hz, the
+            # hackrf_sweep FFT floor) are wider than a column, so centre-only
+            # bucketing would skip columns and paint floor streaks; on a wide
+            # span both edges map to one column, so this stays a single fill.
+            lo_edge = max(hz_low + i * bin_hz, self.lo)
+            hi_edge = min(hz_low + (i + 1) * bin_hz, self.hi)
+            if hi_edge <= lo_edge:
+                continue                    # this bin lies outside [lo, hi]
+            b0 = self._bucket(lo_edge)
+            b1 = self._bucket(hi_edge - 1)
+            if b0 is None or b1 is None:
+                continue
+            for b in range(b0, b1 + 1):
                 if db > self.grid[b]:
                     self.grid[b] = db
-                self._filled = True
+            self._filled = True
         return frame
 
 
@@ -305,8 +330,7 @@ class SweepCapture:
         # A custom [lo_mhz, hi_mhz] span (the page's zoom, a manual tune, or a
         # mesh/LoRa overlay) overrides the named band when both edges are sane:
         # >=0.1 MHz wide, inside 1-7250 MHz. Narrow spans (e.g. a 0.45 MHz
-        # Meshtastic-EU868 overlay) are widened to a real sweep window in
-        # _run_loop; the display still bins to the requested [lo, hi].
+        # Meshtastic-EU868 overlay) are widened below to a usable window.
         custom = None
         try:
             if lo_mhz is not None and hi_mhz is not None:
@@ -320,6 +344,11 @@ class SweepCapture:
         else:
             band = band if band in BANDS else "2.4"
             label, (lo, hi) = band, BANDS[band]
+        # Widen a too-narrow window so hackrf_sweep gets a sane range and every
+        # display column receives a raw FFT bin (no floor streaks). Widens BOTH
+        # sweep and display together -- the frame's band_mhz reports [lo, hi], so
+        # the page's ruler matches what's actually drawn.
+        lo, hi = _widen_span(lo, hi)
         sig = (label, round(lo, 3), round(hi, 3))
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -367,17 +396,10 @@ class SweepCapture:
         span_hz = (hi - lo) * 1_000_000
         bin_hz = int(span_hz / (_GRID_BINS * 2)) or _BIN_WIDTH_HZ
         bin_hz = max(2500, min(_BIN_WIDTH_HZ, bin_hz))
-        builder = _FrameBuilder(lo, hi)           # display still bins to [lo, hi]
-        # Widen the actual sweep window so hackrf_sweep is happy on narrow bands
-        # (AM/27/40) -- it needs max>min after MHz truncation. The display range
-        # above is unchanged; we just give the radio a wider window to tune.
-        s_lo, s_hi = lo, hi
-        if s_hi - s_lo < _MIN_SWEEP_MHZ:
-            c = (s_lo + s_hi) / 2.0
-            s_lo, s_hi = c - _MIN_SWEEP_MHZ / 2.0, c + _MIN_SWEEP_MHZ / 2.0
-        s_lo = max(1.0, s_lo)
-        s_hi = min(7250.0, s_hi)
-        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(s_lo), int(s_hi) + 1),
+        builder = _FrameBuilder(lo, hi)           # [lo, hi] already widened in start()
+        # +1 on the top edge so hackrf_sweep always sees max > min after MHz
+        # truncation (the span is >= _MIN_SWEEP_MHZ, so this never inverts).
+        cmd = [_HACKRF_SWEEP, "-f", "%d:%d" % (int(lo), int(hi) + 1),
                "-w", str(bin_hz), "-l", str(self._lna),
                "-g", str(self._vga)]
         self._stderr_tail = None
@@ -646,6 +668,29 @@ def selftest():
           all(b in BANDS for b in ("am", "sw", "fm", "air", "27", "40",
                                    "315", "433", "868", "915")))
     check("bands: AM clamped to HackRF's 1 MHz floor", BANDS["am"][0] >= 1.0)
+
+    # --- narrow-span widening (mesh overlays / manual tune) ---
+    _wlo, _whi = _widen_span(869.3, 869.75)     # 0.45 MHz Meshtastic-EU868
+    check("widen: narrow span grown to >= min sweep",
+          _whi - _wlo >= _MIN_SWEEP_MHZ - 1e-9 and _wlo >= 1.0)
+    check("widen: wide span left untouched", _widen_span(2400.0, 2500.0) == (2400.0, 2500.0))
+    check("widen: stays above the 1 MHz floor", _widen_span(1.0, 1.71)[0] >= 1.0)
+
+    # --- no floor streaks: a widened narrow span fills every display column ---
+    _fb = _FrameBuilder(100.0, 102.0)           # 2 MHz display window
+    _bw = 2500                                  # hackrf_sweep FFT floor (Hz/bin)
+    _segs = [(95_000_000, 100_000_000), (100_000_000, 105_000_000)]  # 2 lines/sweep
+    def _sweep():
+        _f = None
+        for _slo, _shi in _segs:
+            _r = _fb.add(_slo, _shi, _bw, [-50.0] * ((_shi - _slo) // _bw))
+            if _r is not None:
+                _f = _r
+        return _f
+    _sweep()                                    # first sweep fills the grid
+    _frame = _sweep()                           # wrap completes + returns frame 1
+    check("fill: widened narrow span leaves no floor-streak columns",
+          _frame is not None and all(v > _FLOOR_DBM for v in _frame))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
