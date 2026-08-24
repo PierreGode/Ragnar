@@ -43,6 +43,15 @@
     padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius)}
   .bar .grp{display:flex;align-items:center;gap:8px}
   .bar .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+  .radiobar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 20px;padding:10px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .radiobar .rtag{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+  .radiobar input.rf{width:96px;font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  .radiobar select{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px}
+  .radiobar .seg button[aria-pressed="true"]{background:rgba(245,185,66,.14);color:var(--accent)}
+  .radiobar button.rlisten{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 13px;cursor:pointer}
+  .radiobar button.rlisten[aria-pressed="true"]{background:rgba(63,181,107,.16);border-color:rgba(63,181,107,.5);color:var(--live)}
+  .radiobar input[type="range"]{width:90px;accent-color:var(--accent)}
+  .radiobar .rnow{color:var(--muted)}
   button.ctl{font-family:var(--head);font-weight:600;font-size:13px;letter-spacing:.02em;color:var(--ink);
     background:var(--panel);border:1px solid var(--line);padding:7px 14px;border-radius:7px;cursor:pointer;transition:border-color .15s,color .15s,background .15s}
   button.ctl:hover{border-color:var(--cyan);color:#fff}
@@ -168,6 +177,19 @@
     <div class="spacer"></div>
     <div class="legend"><span>&minus;110&nbsp;dBm</span><span class="grad" aria-hidden="true"></span><span>&minus;20&nbsp;dBm</span></div>
     <span class="clock" id="clock">--:--:--</span>
+  </div>
+
+  <div class="radiobar" id="radiobar">
+    <span class="rtag">📻 Local Radio</span>
+    <div class="grp"><span class="lbl">Freq</span><input class="rf" id="r-freq" type="number" step="0.001" value="98.0"><span class="lbl">MHz</span></div>
+    <div class="seg" id="r-mode" role="group" aria-label="Mode">
+      <button data-m="wfm" aria-pressed="true">FM</button><button data-m="nfm">NFM</button><button data-m="am">AM</button>
+    </div>
+    <select id="r-preset"><option value="">Presets…</option></select>
+    <button class="rlisten" id="r-listen" aria-pressed="false" title="Listen — uses the RTL-SDR (pauses the sub-GHz sweep)">&#9654;&nbsp;Listen</button>
+    <div class="grp"><span class="lbl">Vol</span><input type="range" id="r-vol" min="0" max="100" value="80"></div>
+    <span class="rnow" id="r-now">off · one dongle, so listening pauses the sub-GHz sweep</span>
+    <audio id="r-audio" style="display:none"></audio>
   </div>
 
   <div class="stack" id="stack"></div>
@@ -872,6 +894,47 @@
   if(reduce){ setRunning(false); } else { setRunning(true); }
   window.addEventListener('resize',function(){ scopes.forEach(function(s){ if(s.resize()){s.drawRuler();s.placeMarker();} }); });
   window.addEventListener('beforeunload',function(){ scopes.forEach(function(s){ if(s.mode==='live')s.stopLive(); if(s.decoding)s.stopIsm(); }); });
+
+  // ---- Local radio (FM/AM) — rtl_fm demod streamed to an <audio> element ----
+  (function(){
+    var freqEl=document.getElementById('r-freq'), modeSeg=document.getElementById('r-mode'),
+        presetEl=document.getElementById('r-preset'), listenBtn=document.getElementById('r-listen'),
+        volEl=document.getElementById('r-vol'), nowEl=document.getElementById('r-now'),
+        audio=document.getElementById('r-audio');
+    var rmode='wfm', playing=false;
+    audio.volume=0.8;
+    volEl.addEventListener('input',function(){ audio.volume=(parseInt(volEl.value,10)||0)/100; });
+    modeSeg.addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+      rmode=b.getAttribute('data-m');
+      Array.prototype.forEach.call(modeSeg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x===b?'true':'false');});
+      if(playing) tune(); });
+    presetEl.addEventListener('change',function(){ if(!presetEl.value)return; var p=presetEl.value.split('|');
+      freqEl.value=(parseFloat(p[0])/1e6); rmode=p[1]||'wfm';
+      Array.prototype.forEach.call(modeSeg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===rmode?'true':'false');});
+      tune(); });
+    function fMHz(){ var v=parseFloat(freqEl.value); return isFinite(v)?Math.round(v*1e6):null; }
+    function tune(){ var hz=fMHz(); if(hz==null)return;
+      playing=true; listenBtn.setAttribute('aria-pressed','true'); listenBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
+      // stop the RTL scope (one dongle) so the UI reflects it
+      scopes.forEach(function(s){ if(s.cfg.tuner && s.mode==='live') s.stopLive(); });
+      audio.src='/api/net/radio/stream?freq_hz='+hz+'&mode='+rmode+'&t='+Date.now();
+      audio.play().catch(function(){});
+      nowEl.innerHTML='<span style="color:var(--live)">▶ '+(freqEl.value)+' MHz '+rmode.toUpperCase()+'</span> · sub-GHz sweep paused (one dongle)';
+    }
+    function stop(){ playing=false; listenBtn.setAttribute('aria-pressed','false'); listenBtn.innerHTML='&#9654;&nbsp;Listen';
+      audio.pause(); audio.removeAttribute('src'); audio.load();
+      fetch('/api/net/radio/stop',{method:'POST'}).catch(function(){});
+      nowEl.textContent='off · one dongle, so listening pauses the sub-GHz sweep'; }
+    listenBtn.addEventListener('click',function(){ playing?stop():tune(); });
+    audio.addEventListener('error',function(){ if(playing){ nowEl.innerHTML='<span style="color:#fb7185">Audio failed — check rtl_fm / dongle</span>'; } });
+    // load presets + rtl_fm availability
+    fetch('/api/net/radio/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{};
+      if(det.presets){ presetEl.innerHTML='<option value="">Presets…</option>'+Object.keys(det.presets).map(function(k){
+        var v=det.presets[k]; return '<option value="'+v[0]+'|'+v[1]+'">'+esc(k)+'</option>'; }).join(''); }
+      if(det.tools_installed===false){ listenBtn.disabled=true; nowEl.innerHTML='<span style="color:#fb7185">rtl_fm not installed — apt install rtl-sdr</span>'; }
+    }).catch(function(){});
+  })();
 })();
 </script>
 </body>

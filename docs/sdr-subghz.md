@@ -207,6 +207,17 @@ transport bar (play/pause, seek, restart, delete). Frames are small, so a
 recording is cheap; capped at a few thousand frames. Routes:
 `/api/net/rtl/record/{start,stop,status,list,get,delete}`.
 
+## Local Radio (FM / AM, listen)
+
+The RF Waterfall page has a **📻 Local Radio** bar: type a frequency, pick a mode
+(**FM** broadcast, **NFM** narrowband, **AM**), and press **Listen**. `radio.py`
+runs `rtl_fm` to demodulate and streams the audio to the browser as a live WAV
+(`/api/net/radio/stream?freq_hz=…&mode=…`) that an `<audio>` element plays, with a
+volume slider and band presets (FM broadcast, airband AM, marine/PMR NFM, MW).
+Frequencies below 24 MHz use the dongle's direct-sampling mode (MW/SW AM,
+best-effort). One dongle, so listening pauses the sub-GHz sweep. `rtl_fm` ships
+in the already-installed `rtl-sdr` package. Receive-only.
+
 ## Pager Decode (POCSAG / FLEX)
 
 Pagers are still everywhere — hospitals, industrial SCADA/telemetry, alarms,
