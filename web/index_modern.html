@@ -492,7 +492,7 @@
         }
         .wifi-hm-zoom-btn:hover { background: #334155; color: #fff; }
 
-        /* ---------- Spectrum Analyzer: full-screen console ---------- */
+        /* ---------- Signal Intelligence: full-screen console ---------- */
         #wifi-fs {
             position: fixed;
             inset: 0;
@@ -1285,7 +1285,7 @@
                 <button id="net-subtab-diagnostics" onclick="showNetworkSubtab('diagnostics')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Diagnostics</button>
                 <button id="net-subtab-switch" onclick="showNetworkSubtab('switch')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Switch &amp; L2/L3</button>
                 <button id="net-subtab-interfaces" onclick="showNetworkSubtab('interfaces')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Interfaces</button>
-                <button id="net-subtab-wifi" onclick="showNetworkSubtab('wifi')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">WiFi Analyzer</button>
+                <button id="net-subtab-wifi" onclick="showNetworkSubtab('wifi')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Signal Intelligence</button>
             </div>
 
             <div id="net-sub-hosts" class="net-subview">
@@ -2459,12 +2459,12 @@
                 </div>
             </div><!-- /#net-sub-interfaces -->
 
-            <!-- ============================ WiFi Analyzer ============================ -->
+            <!-- ============================ Signal Intelligence ============================ -->
             <div id="net-sub-wifi" class="net-subview hidden">
                 <div class="glass rounded-xl p-6 mb-5">
                     <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 mb-2">
                         <div>
-                            <h3 class="text-lg font-semibold flex items-center gap-2">📊 WiFi Spectrum Analyzer</h3>
+                            <h3 class="text-lg font-semibold flex items-center gap-2">📡 Signal Intelligence</h3>
                             <p class="text-sm text-gray-400 mt-1">A passive, Ekahau Sidekick-style tri-band RF troubleshooter. <strong>Strictly passive</strong> — it only listens for beacons (<span class="font-mono">iw scan passive</span>) and <strong>never transmits a probe</strong> to any AP. Shows every BSS with RSSI, channel + width, SSID and the AP-advertised channel utilisation; flags co-/adjacent-channel interference and DFS/radar channels; estimates an AP's coverage radius. Tuned for the Alfa AWUS036AXM (Wi-Fi 6E, <span class="font-mono">mt7921u</span>).</p>
                         </div>
                     </div>
@@ -2889,7 +2889,7 @@
 
             <!-- AP inventory -->
             <div class="glass rounded-xl p-4">
-                <h3 class="font-semibold mb-3 text-sm">Access Points seen <span id="wifidef-ap-count" class="text-gray-500 font-normal"></span> <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in the Spectrum Analyzer</span></h3>
+                <h3 class="font-semibold mb-3 text-sm">Access Points seen <span id="wifidef-ap-count" class="text-gray-500 font-normal"></span> <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in Signal Intelligence</span></h3>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm">
                         <thead><tr class="text-left text-gray-400 border-b border-slate-800">
@@ -2904,7 +2904,7 @@
             <div class="glass rounded-xl p-4 mt-5">
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
                     <div>
-                        <h3 class="font-semibold text-sm">Airtime &amp; link quality <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in the Spectrum Analyzer</span></h3>
+                        <h3 class="font-semibold text-sm">Airtime &amp; link quality <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in Signal Intelligence</span></h3>
                         <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Passive per-AP <strong>airtime %</strong>, <strong>retry rate</strong> and <strong>PHY-rate</strong> spread, plus <strong>per-client airtime</strong> and <strong>ERP-protection</strong> detection — pinpoints a legacy <strong>802.11b</strong> device that's taxing the whole cell. Best on a <strong>fixed channel</strong> (airtime % is only meaningful when not hopping).</p>
                     </div>
                     <div class="flex flex-wrap items-end gap-2">
@@ -2945,7 +2945,7 @@
             <div class="glass rounded-xl p-4 mt-5">
                 <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
                     <div>
-                        <h3 class="font-semibold text-sm">Client isolation observer <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in the Spectrum Analyzer</span></h3>
+                        <h3 class="font-semibold text-sm">Client isolation observer <span class="text-[11px] text-gray-500 font-normal">— click a row to inspect it in Signal Intelligence</span></h3>
                         <p class="text-[11px] text-gray-500 mt-0.5 max-w-2xl">Audits whether an AP or mesh enforces <strong>client isolation</strong> — purely passively, from cleartext 802.11 headers (works on encrypted networks; payloads are never read). If the AP is seen <strong>relaying unicast frames between two of its own wireless clients</strong>, isolation is <strong>OFF</strong>; if clients address each other (or broadcast) but the AP relays nothing back, it's <strong>blocking</strong>. A multi-node SSID gets a mesh rollup incl. <strong>cross-node forwarding</strong>. Best on a <strong>fixed channel</strong> — catching a request <em>and</em> its relay needs to dwell on the BSS's channel.</p>
                     </div>
                     <div class="flex flex-wrap items-end gap-2">
@@ -8134,7 +8134,7 @@
     </div>
 
     <!-- ==================================================================
-         WiFi Spectrum Analyzer — full-screen console.
+         Signal Intelligence — full-screen console.
          Lives at body level (a .glass ancestor's backdrop-filter would
          otherwise become the containing block for position:fixed).
          Shares _wifiState with the in-page analyzer: same scan, same
@@ -8142,7 +8142,7 @@
     =================================================================== -->
     <div id="wifi-fs" class="hidden" aria-hidden="true">
         <div class="wifi-fs-bar">
-            <span class="wifi-fs-title">📊 Spectrum Analyzer</span>
+            <span class="wifi-fs-title">📡 Signal Intelligence</span>
             <span id="wifi-fs-iface" class="wifi-fs-meta"></span>
             <div class="wifi-hm-segment" id="wifi-fs-band">
                 <button data-band="all" class="wifi-hm-seg-btn wifi-hm-seg-on">All</button>
@@ -8199,7 +8199,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260823-mesh-btn"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260823-sigint"></script>
 
 
 
