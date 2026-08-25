@@ -109,6 +109,10 @@ DEFAULT_SOURCES = {
                       'paths': ['/var/log/ragnar/ssh_watch.jsonl']},
     'telnet_watch':  {'label': 'Telnet Watch (CVE-2026-24061 / 32746)',
                       'paths': ['/var/log/ragnar/telnet_watch.jsonl']},
+    # Asset inventory change-detection (asset_inventory.py) emits new-device /
+    # IP-move / spoof / offline events here so they page + forward like any alert.
+    'asset_inventory': {'label': 'Asset Inventory',
+                        'paths': ['/var/log/ragnar/asset_inventory.jsonl']},
 }
 
 # Directories globbed for `*.jsonl`; the basename becomes the source name. This is

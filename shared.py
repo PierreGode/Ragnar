@@ -815,6 +815,19 @@ class SharedData:
             "incident_correlation_enabled": True,
             "incident_window_s": 600,                # entity-correlation sliding window
             "incident_notify_min_confidence": 50,    # page a named incident at/above this %
+            # Asset inventory: change-detection layer over the discovered-hosts
+            # table (asset_inventory.py). Emits new-device / IP-move / spoof /
+            # offline events into the Watchtower log so they page + forward.
+            "asset_inventory_enabled": False,        # run the periodic snapshotter
+            "asset_inventory_interval_s": 120,       # seconds between diffs (min 30)
+            "asset_inventory_alert_on_baseline": False,  # page every host on first run
+            # SIEM / outbound forwarding: ship every normalized alert to external
+            # collectors (syslog CEF/LEEF, Splunk HEC, Elastic, webhook). Egress
+            # rides the Watchtower poll cycle, so watchtower_enabled must be on.
+            # Per-target secrets may be 'env:RAGNAR_*' to stay out of this JSON.
+            "siem_enabled": False,
+            "siem_min_severity": "high",             # forward floor: critical/high/medium/low/info
+            "siem_targets": [],                      # list of {type, ...} target dicts
             # IP attribution (ip_intel.py): country/ASN/owner/abuse contact for a
             # hostile IP. Registry-derived (RDAP + Team Cymru); never a street
             # address. Set ip_intel_allow_network false to stay fully offline

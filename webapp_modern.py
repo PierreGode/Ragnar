@@ -2120,6 +2120,125 @@ _incident_engine = None
 _inc_notified = {}            # incident id -> {'pattern', 'severity'}
 _incidents_summary = {'total': 0, 'named': 0}
 
+# SIEM / outbound forwarding: the Watchtower poll cycle is the one place every
+# normalized alert from every detector converges, so that is where we tap the
+# stream and ship it out (syslog/CEF/LEEF, Splunk HEC, Elastic, webhook).
+_siem_forwarder = None
+_siem_cfg_sig = None
+_siem_last = {'ts': None, 'forwarded': 0, 'results': []}
+
+# Asset inventory: change-detection layer over the hosts table (see
+# asset_inventory.py). Emits new-device / IP-move / spoof / offline events into
+# the Watchtower log dir so they ride the same pane + Pushover + SIEM path.
+_asset_inventory = None
+
+
+def _siem_resolve_secrets(targets):
+    """Allow a target field to read a secret from .env instead of storing it in
+    the config JSON: any value of the form 'env:RAGNAR_FOO' is resolved against
+    the environment (keeps tokens out of shared_config.json)."""
+    resolved = []
+    for t in (targets or []):
+        if not isinstance(t, dict):
+            continue
+        out = {}
+        for k, v in t.items():
+            if isinstance(v, str) and v.startswith('env:'):
+                out[k] = os.environ.get(v[4:], '')
+            else:
+                out[k] = v
+        resolved.append(out)
+    return resolved
+
+
+def _siem_get():
+    """Build (or rebuild on config change) the SIEM forwarder. Returns None when
+    SIEM is disabled or no valid target is configured."""
+    global _siem_forwarder, _siem_cfg_sig
+    cfg = shared_data.config
+    if not cfg.get('siem_enabled', False):
+        return None
+    targets = cfg.get('siem_targets') or []
+    min_sev = cfg.get('siem_min_severity') or None
+    sig = json.dumps({'t': targets, 'm': min_sev}, sort_keys=True, default=str)
+    if _siem_forwarder is None or sig != _siem_cfg_sig:
+        try:
+            import siem_forwarder as _sf
+            _siem_forwarder = _sf.SiemForwarder(_siem_resolve_secrets(targets),
+                                                min_severity=min_sev)
+            _siem_cfg_sig = sig
+        except Exception as exc:
+            logger.debug(f"[siem] forwarder build failed: {exc}")
+            return None
+    return _siem_forwarder if _siem_forwarder.enabled_count else None
+
+
+def _siem_forward(alerts):
+    """Best-effort: ship the newly-seen normalized alerts to every SIEM target.
+    Never raises into the monitor loop."""
+    global _siem_last
+    fwd = _siem_get()
+    if fwd is None or not alerts:
+        return
+    try:
+        results = fwd.forward(alerts)
+        _siem_last = {'ts': time.time(),
+                      'forwarded': sum(r.get('sent', 0) for r in results),
+                      'results': results}
+        errs = [r for r in results if r.get('error')]
+        if errs:
+            logger.warning("[siem] %d/%d target(s) errored: %s",
+                           len(errs), len(results), errs[0].get('error'))
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[siem] forward failed: {exc}")
+
+
+def _asset_inv_get():
+    """Lazily build the AssetInventory over the shared hosts DB."""
+    global _asset_inventory
+    if _asset_inventory is not None:
+        return _asset_inventory
+    import asset_inventory as _ai
+    log_dir = (shared_data.config.get('watchtower_dirs') or
+               [os.environ.get('RAGNAR_WATCH_LOG_DIR', '/var/log/ragnar')])[0]
+    gw = None
+    try:
+        gw = shared_data.config.get('gateway_ip') or None
+    except Exception:                                       # noqa: BLE001
+        gw = None
+    _asset_inventory = _ai.AssetInventory(
+        db=getattr(shared_data, 'db', None),
+        datadir=shared_data.datadir, log_dir=log_dir,
+        config=shared_data.config, gateway_ip=gw)
+    return _asset_inventory
+
+
+def asset_inventory_monitor_loop():
+    """Background snapshotter. No-op while disabled; when enabled, diffs the
+    hosts table on an interval and emits change events (which Watchtower then
+    pages + forwards). Cheap: pure DB read + dict diff."""
+    import time as _time
+    _time.sleep(35)   # let discovery populate the hosts table first
+    while not getattr(shared_data, 'webapp_should_exit', False):
+        if not shared_data.config.get('asset_inventory_enabled', False):
+            _time.sleep(15)
+            continue
+        try:
+            _asset_inv_get().snapshot()
+        except Exception as exc:                            # noqa: BLE001
+            logger.debug(f"[asset_inventory] snapshot cycle failed: {exc}")
+        try:
+            interval = max(30, int(shared_data.config.get(
+                'asset_inventory_interval_s', 120)))
+        except (TypeError, ValueError):
+            interval = 120
+        for _ in range(interval // 5):
+            if getattr(shared_data, 'webapp_should_exit', False):
+                return
+            if not shared_data.config.get('asset_inventory_enabled', False):
+                break
+            _time.sleep(5)
+
 
 def _inc_get():
     global _incident_engine
@@ -2308,6 +2427,11 @@ def _watchtower_check_once():
         except Exception as exc:
             logger.debug(f"[watchtower] pushover alert skipped: {exc}")
         logger.warning(f"[watchtower] {msg}")
+
+    # SIEM egress: forward the full new-alert delta (each target applies its own
+    # severity floor). This is the single outbound tap for every detector.
+    if new:
+        _siem_forward(new)
     return _wt_summary
 
 
@@ -2454,6 +2578,229 @@ def incidents_status():
         'summary': summary,
         'incidents': incidents,
     })
+
+
+# ==========================================================================
+# Asset Inventory — change-aware view over the discovered-hosts table, with
+# operator ownership/criticality/authorized metadata. New/moved/spoofed/offline
+# devices are emitted as events into the Watchtower log (asset_inventory.jsonl),
+# so they page + forward through the same pipeline as every other detector.
+# ==========================================================================
+
+@app.route('/api/inventory', methods=['GET'])
+def inventory_status():
+    """Enriched current asset list + summary + recent change events."""
+    try:
+        data = _asset_inv_get().inventory()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[asset_inventory] status failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc),
+                        'assets': [], 'summary': {}, 'recent_events': []})
+    cfg = shared_data.config
+    return jsonify({
+        'success': True,
+        'enabled': bool(cfg.get('asset_inventory_enabled', False)),
+        'interval_s': cfg.get('asset_inventory_interval_s', 120),
+        'assets': data['assets'],
+        'summary': data['summary'],
+        'recent_events': data['recent_events'],
+    })
+
+
+@app.route('/api/inventory/meta', methods=['POST'])
+def inventory_set_meta():
+    """Annotate one asset (by MAC): owner, criticality, authorized, tags, notes,
+    label. Only supplied fields change."""
+    body = request.get_json(silent=True) or {}
+    mac = body.get('mac')
+    if not mac:
+        return jsonify({'success': False, 'error': 'mac required'}), 400
+    try:
+        rec = _asset_inv_get().set_meta(
+            mac, owner=body.get('owner'), criticality=body.get('criticality'),
+            authorized=body.get('authorized'), tags=body.get('tags'),
+            notes=body.get('notes'), label=body.get('label'))
+        return jsonify({'success': True, 'mac': mac.lower(), 'meta': rec})
+    except Exception as exc:                                # noqa: BLE001
+        return jsonify({'success': False, 'error': str(exc)}), 400
+
+
+@app.route('/api/inventory/scan', methods=['POST'])
+def inventory_scan_now():
+    """Run one change-detection snapshot immediately and return the events."""
+    try:
+        body = request.get_json(silent=True) or {}
+        res = _asset_inv_get().snapshot(
+            alert_on_baseline=bool(body.get('alert_on_baseline', False)))
+        return jsonify({'success': True, 'baseline': res['baseline'],
+                        'events': res['events'],
+                        'tracked': res['new_state_count']})
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[asset_inventory] manual scan failed: {exc}")
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/inventory/config', methods=['POST'])
+def inventory_config():
+    """Toggle the periodic snapshotter and its interval."""
+    body = request.get_json(silent=True) or {}
+    cfg = shared_data.config
+    if 'enabled' in body:
+        cfg['asset_inventory_enabled'] = bool(body['enabled'])
+    if 'interval_s' in body:
+        try:
+            cfg['asset_inventory_interval_s'] = max(30, int(body['interval_s']))
+        except (TypeError, ValueError):
+            pass
+    try:
+        shared_data.save_config()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[asset_inventory] save_config failed: {exc}")
+    return jsonify({'success': True,
+                    'enabled': bool(cfg.get('asset_inventory_enabled', False)),
+                    'interval_s': cfg.get('asset_inventory_interval_s', 120)})
+
+
+# ==========================================================================
+# SIEM / outbound forwarding — ship every normalized alert to external
+# collectors (syslog CEF/LEEF, Splunk HEC, Elastic, webhook). Config lives in
+# shared_config.json (siem_*); per-target secrets may use an 'env:RAGNAR_*'
+# reference to keep tokens out of the JSON. Egress happens in the Watchtower
+# poll cycle, so Watchtower must be enabled for events to leave the box.
+# ==========================================================================
+
+@app.route('/api/siem', methods=['GET'])
+def siem_status():
+    """Current SIEM config (secrets redacted), configured targets, last result."""
+    cfg = shared_data.config
+    described = []
+    try:
+        import siem_forwarder as _sf
+        fwd = _sf.SiemForwarder(_siem_resolve_secrets(cfg.get('siem_targets') or []),
+                                min_severity=cfg.get('siem_min_severity') or None)
+        described = fwd.describe()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[siem] describe failed: {exc}")
+    return jsonify({
+        'success': True,
+        'enabled': bool(cfg.get('siem_enabled', False)),
+        'min_severity': cfg.get('siem_min_severity', 'high'),
+        'watchtower_enabled': bool(cfg.get('watchtower_enabled', False)),
+        'targets': described,
+        'target_count': len(cfg.get('siem_targets') or []),
+        'last': _siem_last,
+        'supported_types': ['syslog', 'splunk_hec', 'elastic', 'webhook', 'slack'],
+    })
+
+
+@app.route('/api/siem/config', methods=['POST'])
+def siem_config():
+    """Persist SIEM settings. Body: {enabled, min_severity, targets:[...]}.
+    Targets are stored verbatim (use 'env:RAGNAR_X' values for secrets)."""
+    global _siem_forwarder, _siem_cfg_sig
+    body = request.get_json(silent=True) or {}
+    cfg = shared_data.config
+    if 'enabled' in body:
+        cfg['siem_enabled'] = bool(body['enabled'])
+    if 'min_severity' in body:
+        ms = str(body['min_severity']).lower()
+        if ms in ('critical', 'high', 'medium', 'low', 'info'):
+            cfg['siem_min_severity'] = ms
+    if 'targets' in body:
+        if not isinstance(body['targets'], list):
+            return jsonify({'success': False, 'error': 'targets must be a list'}), 400
+        cfg['siem_targets'] = body['targets']
+    try:
+        shared_data.save_config()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[siem] save_config failed: {exc}")
+    _siem_forwarder = None       # force rebuild on next cycle
+    _siem_cfg_sig = None
+    return jsonify({'success': True, 'enabled': bool(cfg.get('siem_enabled')),
+                    'min_severity': cfg.get('siem_min_severity', 'high'),
+                    'target_count': len(cfg.get('siem_targets') or [])})
+
+
+@app.route('/api/siem/test', methods=['POST'])
+def siem_test():
+    """Send one synthetic alert to a target given inline (body=target dict) or,
+    if none given, to every configured target. Returns per-target delivery."""
+    body = request.get_json(silent=True) or {}
+    cfg = shared_data.config
+    demo = {'ts': time.time(), 'source': 'siem_test', 'module': 'siem_test',
+            'severity': body.get('severity', 'high'), 'rank': 3,
+            'title': 'Ragnar SIEM connectivity test',
+            'codes': ['TEST-001'], 'src': '10.0.0.1', 'target': '10.0.0.2',
+            'label': 'SIEM Test'}
+    try:
+        import siem_forwarder as _sf
+        stored = cfg.get('siem_targets') or []
+        if body.get('target'):
+            targets = _siem_resolve_secrets([body['target']])
+        elif body.get('index') is not None:
+            try:
+                idx = int(body['index'])
+            except (TypeError, ValueError):
+                return jsonify({'success': False, 'error': 'bad index'}), 400
+            if not 0 <= idx < len(stored):
+                return jsonify({'success': False, 'error': 'index out of range'}), 400
+            targets = _siem_resolve_secrets([stored[idx]])
+        else:
+            targets = _siem_resolve_secrets(stored)
+        if not targets:
+            return jsonify({'success': False, 'error': 'no target configured'}), 400
+        fwd = _sf.SiemForwarder(targets)
+        results = fwd.forward([demo])
+        ok = all(not r.get('error') for r in results) and bool(results)
+        return jsonify({'success': ok, 'results': results})
+    except Exception as exc:                                # noqa: BLE001
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/siem/targets/add', methods=['POST'])
+def siem_target_add():
+    """Append one target dict to the stored list."""
+    global _siem_forwarder, _siem_cfg_sig
+    body = request.get_json(silent=True) or {}
+    tgt = body.get('target')
+    if not isinstance(tgt, dict) or not tgt.get('type'):
+        return jsonify({'success': False, 'error': 'target with a type required'}), 400
+    cfg = shared_data.config
+    targets = list(cfg.get('siem_targets') or [])
+    targets.append(tgt)
+    cfg['siem_targets'] = targets
+    try:
+        shared_data.save_config()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[siem] save_config failed: {exc}")
+    _siem_forwarder = None
+    _siem_cfg_sig = None
+    return jsonify({'success': True, 'target_count': len(targets)})
+
+
+@app.route('/api/siem/targets/remove', methods=['POST'])
+def siem_target_remove():
+    """Remove one stored target by list index."""
+    global _siem_forwarder, _siem_cfg_sig
+    body = request.get_json(silent=True) or {}
+    cfg = shared_data.config
+    targets = list(cfg.get('siem_targets') or [])
+    try:
+        idx = int(body.get('index'))
+    except (TypeError, ValueError):
+        return jsonify({'success': False, 'error': 'integer index required'}), 400
+    if not 0 <= idx < len(targets):
+        return jsonify({'success': False, 'error': 'index out of range'}), 400
+    removed = targets.pop(idx)
+    cfg['siem_targets'] = targets
+    try:
+        shared_data.save_config()
+    except Exception as exc:                                # noqa: BLE001
+        logger.debug(f"[siem] save_config failed: {exc}")
+    _siem_forwarder = None
+    _siem_cfg_sig = None
+    return jsonify({'success': True, 'removed': removed.get('type'),
+                    'target_count': len(targets)})
 
 
 # ============================================================================
@@ -25687,6 +26034,7 @@ def run_server(host='0.0.0.0', port=8000, ssl_cert=None, ssl_key=None, https_por
         socketio.start_background_task(_rusense_notify_loop)
         socketio.start_background_task(net_integrity_monitor_loop)
         socketio.start_background_task(watchtower_monitor_loop)
+        socketio.start_background_task(asset_inventory_monitor_loop)
         socketio.start_background_task(mesh_monitor_loop)
 
         # Bring up the BLE provisioning peripheral if the user has enabled it.
