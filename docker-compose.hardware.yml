@@ -1,0 +1,33 @@
+# docker-compose.hardware.yml — OPTIONAL, BEST-EFFORT, native-Linux ONLY.
+#
+# Overlay that grants the container broad device access so USB radios and serial
+# dongles *may* work inside it: SDR (HackRF/RTL-SDR), GPS/serial pucks, Bluetooth,
+# and Wi-Fi monitor mode. It is fiddly and driver-dependent, and it does NOT work
+# through a VM (Docker Desktop on macOS/Windows, or WSL2) — there is no clean USB
+# passthrough across that boundary. For wardriving, SDR, GPS, monitor-mode WIDS
+# and Bluetooth, the native install on a Raspberry Pi remains the supported path.
+#
+# Use (native Linux host only):
+#   docker compose -f docker-compose.yml -f docker-compose.hardware.yml up -d --build
+#
+# Security note: `privileged` gives the container near-host access. Only run this
+# on a host you control and trust.
+
+services:
+  ragnar:
+    # Broad access for USB/SDR/rfkill/monitor mode. Supersedes the base cap_add.
+    privileged: true
+
+    volumes:
+      # Hotplug-capable access to all USB devices (SDR dongles, adapters).
+      - /dev/bus/usb:/dev/bus/usb
+      # Wi-Fi radio soft/hard-block control for monitor mode.
+      - /dev/rfkill:/dev/rfkill
+      # Bluetooth via the host's BlueZ daemon (best-effort).
+      - /run/dbus:/run/dbus:ro
+
+    # Serial dongles (GPS, Meshtastic, Zigbee) expose a specific device node that
+    # varies per host. Uncomment and edit to match `ls /dev/ttyUSB* /dev/ttyACM*`:
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    #   - /dev/ttyACM0:/dev/ttyACM0

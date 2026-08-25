@@ -5,8 +5,24 @@ the **headless web UI** — the full dashboard, scanning engine, and network
 watchers — without any Raspberry-Pi hardware (e-Paper display, buttons, UPS,
 LED-matrix). Those are skipped automatically via `RAGNAR_HEADLESS=1`.
 
-This is the easiest way to try Ragnar on an x86 server, a NAS, a VM, or a
-Raspberry Pi you'd rather manage with Docker than the native installer.
+### Is Docker the right choice for you?
+
+Docker is for the **network / server** side of Ragnar — running the dashboard
+and scanning engine on a Linux host (server, VM, NAS, or a Pi you'd rather manage
+with Docker). It is **not** a substitute for the native install when you use
+radios or USB hardware:
+
+| Your use case | Best option |
+|---|---|
+| LAN discovery, asset inventory, port/vuln scanning, passive L2/L3 watchers, incident correlation, SIEM/forwarding, the dashboard | **Docker on a Linux host** ✅ |
+| Wardriving, Wi-Fi monitor mode / WIDS, SDR, GPS, Bluetooth, e-Paper | **Native install on a Raspberry Pi** ✅ |
+| Any of the above on macOS / Windows (Docker Desktop) or WSL2 | Docker **runs**, but host networking and USB passthrough go through a VM — LAN scanning is crippled and radios effectively don't work. Use a Linux host or a native Pi. |
+
+USB radios *can* be coaxed into a container **on a native Linux host** (no VM) —
+see [Hardware passthrough](#hardware-passthrough-advanced-native-linux-only)
+below — but it is fiddly and best-effort. Through a VM (Docker Desktop / WSL2)
+there is no clean USB passthrough, which is why the native Pi install stays the
+supported path for anything with an antenna.
 
 ---
 
@@ -170,6 +186,35 @@ are unavailable (or need extra host wiring) under Docker:
 
 For the full hardware experience (e-Paper HAT, radios, GPS), use the native
 installer described in the main [README](../README.md).
+
+## Hardware passthrough (advanced, native Linux only)
+
+**Best-effort and unsupported.** On a **native Linux host** (no VM) you can try
+giving the container access to USB radios and serial dongles with the optional
+overlay `docker-compose.hardware.yml`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hardware.yml up -d --build
+```
+
+It sets `privileged`, mounts `/dev/bus/usb` (SDR/adapters), `/dev/rfkill` (Wi-Fi
+block control) and `/run/dbus` (Bluetooth), and has commented `devices:` lines
+for serial pucks (GPS/Meshtastic/Zigbee) you edit to match your `/dev/ttyUSB*`.
+
+Caveats, so nobody is surprised:
+
+- **VMs need not apply.** Docker Desktop (macOS/Windows) and WSL2 run containers
+  inside a VM; USB passthrough across that boundary (`usbipd` etc.) is unreliable
+  for monitor mode/SDR and a non-starter on macOS. This overlay is for bare Linux.
+- **Still fiddly.** Even on Linux, monitor mode, SDR and Bluetooth depend on the
+  right host drivers, `rfkill` state, and udev — the overlay opens the door, it
+  doesn't guarantee the device lights up.
+- **`privileged` is broad.** It grants near-host access; only use it on a host
+  you control and trust.
+
+If you actually rely on radios/GPS/wardriving, the **native install on a Pi** is
+still the recommended, tested path — this overlay is an escape hatch, not the
+happy path.
 
 ## Updating
 

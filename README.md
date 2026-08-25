@@ -33,9 +33,13 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 
 ### 🐳 Docker
 
-Prefer containers? Run the headless web UI on any Linux host with Docker — no
-Raspberry-Pi hardware required. The installer offers it as a menu choice
-(**Docker container**), or set it up yourself:
+Prefer containers? Run the headless web UI on any **Linux** host with Docker —
+great for the network/server side (LAN scanning, watchers, SIEM, dashboard) on a
+server, VM or NAS. Radios and USB hardware (Wi-Fi monitor mode, SDR, GPS,
+Bluetooth) are best on the **native Pi install** — through Docker they need
+fiddly passthrough on Linux and don't work through a VM (Docker Desktop / WSL2).
+The installer offers Docker as a menu choice (**Docker container**), or set it up
+yourself:
 
 ```bash
 git clone https://github.com/PierreGode/Ragnar.git
