@@ -1346,6 +1346,7 @@ function initTerminal() {
 function showTab(tabName) {
     // Backward-compat: these tabs are now sub-tabs of Network / Discovered
     if (tabName === 'networks') { showTab('network'); showNetworkSubtab('archive'); return; }
+    if (tabName === 'assets') { showTab('network'); showNetworkSubtab('assets'); return; }
     if (tabName === 'network-map') { showTab('network'); showNetworkSubtab('map'); return; }
     if (tabName === 'credentials') { showTab('discovered'); showDiscoveredSubtab('credentials'); return; }
     if (tabName === 'diagnostics') { showTab('network'); showNetworkSubtab('diagnostics'); return; }
@@ -1423,7 +1424,8 @@ function _setSubtabActive(btn, active) {
 
 function showNetworkSubtab(name) {
     const views = {
-        hosts: 'net-sub-hosts', archive: 'net-sub-archive', map: 'net-sub-map',
+        hosts: 'net-sub-hosts', archive: 'net-sub-archive', assets: 'net-sub-assets',
+        map: 'net-sub-map',
         diagnostics: 'net-sub-diagnostics', switch: 'net-sub-switch', interfaces: 'net-sub-interfaces',
         wifi: 'net-sub-wifi'
     };
@@ -1434,6 +1436,8 @@ function showNetworkSubtab(name) {
     });
     if (name === 'archive') {
         loadAllNetworksData();
+    } else if (name === 'assets') {
+        loadAssetsData();
     } else if (name === 'map') {
         if (!_mapInitialized) { loadNetworkMap(); }
     } else if (name === 'hosts') {
@@ -10440,9 +10444,6 @@ async function loadTabData(tabName) {
                 ]);
             }
             await refreshPwnagotchiStatus({ silent: true });
-            break;
-        case 'assets':
-            await loadAssetsData();
             break;
         case 'threat-intel':
             // Always refresh threat intel data when switching to this tab
