@@ -2193,6 +2193,22 @@ def _siem_forward(alerts):
         logger.debug(f"[siem] forward failed: {exc}")
 
 
+def _detect_default_gateway():
+    """Best-effort default-gateway IP from the routing table, so the asset
+    classifier can mark it as the router (confidence 1.0)."""
+    try:
+        import subprocess
+        out = subprocess.run(['ip', 'route', 'show', 'default'],
+                             capture_output=True, text=True, timeout=3).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if 'via' in parts:
+                return parts[parts.index('via') + 1]
+    except Exception:                                       # noqa: BLE001
+        pass
+    return None
+
+
 def _asset_inv_get():
     """Lazily build the AssetInventory over the shared hosts DB."""
     global _asset_inventory
@@ -2206,6 +2222,8 @@ def _asset_inv_get():
         gw = shared_data.config.get('gateway_ip') or None
     except Exception:                                       # noqa: BLE001
         gw = None
+    if not gw:
+        gw = _detect_default_gateway()
     _asset_inventory = _ai.AssetInventory(
         db=getattr(shared_data, 'db', None),
         datadir=shared_data.datadir, log_dir=log_dir,

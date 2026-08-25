@@ -32,6 +32,7 @@ self-testable with a fake DB:  ``python3 asset_inventory.py --self-test``
 
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -70,6 +71,41 @@ def _iso(ts):
 
 def _norm_mac(mac):
     return str(mac or '').strip().lower()
+
+
+_DUP_RE = re.compile(r'\s*\(DUP:\s*\d+\)\s*$')
+
+
+def _clean_vendor(vendor):
+    """Strip the hosts-table dedup marker, e.g. 'Acme Inc. (DUP: 2)' -> 'Acme Inc.'.
+    Also collapse the placeholder '(Unknown…)' strings to a plain 'Unknown'."""
+    v = str(vendor or '').strip()
+    v = _DUP_RE.sub('', v).strip()
+    return v
+
+
+def _is_broadcast_ip(ip):
+    """True for an IPv4 network/broadcast address that isn't a real host — the
+    subnet broadcast (.255) or network (.0) under the common /24, or the global
+    255.255.255.255. These leak into the hosts table from broadcast traffic and
+    should never be listed or alerted on as devices."""
+    ip = str(ip or '').strip()
+    if not ip or ip == '255.255.255.255':
+        return ip == '255.255.255.255'
+    parts = ip.split('.')
+    if len(parts) != 4 or not all(p.isdigit() for p in parts):
+        return False
+    last = int(parts[3])
+    return last in (0, 255)
+
+
+def _is_pseudo_mac(mac):
+    """The hosts table synthesizes a placeholder MAC of the form 00:00:c0:a8:xx:xx
+    (00:00 + the hex of the IPv4) for hosts discovered without a real MAC (ping /
+    passive). These are *real* hosts, so they're kept — just marked so the UI can
+    show that the MAC is inferred, not observed."""
+    m = _norm_mac(mac)
+    return m.startswith('00:00:')
 
 
 def _parse_ports(row):
@@ -234,7 +270,7 @@ class AssetInventory:
                 'mac': mac,
                 'ip': row.get('ip'),
                 'hostname': row.get('hostname'),
-                'vendor': row.get('vendor'),
+                'vendor': _clean_vendor(row.get('vendor')),
                 'ports': _parse_ports(row),
                 'status': row.get('status') or 'alive',
                 'first_seen': row.get('first_seen'),
@@ -242,6 +278,7 @@ class AssetInventory:
                 'device_type': cls.get('device_type'),
                 'device_label': cls.get('label'),
                 'confidence': cls.get('confidence'),
+                'pseudo_mac': _is_pseudo_mac(mac),
                 'threats': thr,
                 'owner': m.get('owner'),
                 'criticality': m.get('criticality', 'none'),
@@ -273,7 +310,10 @@ class AssetInventory:
             rows = self.db.get_all_hosts()
         except Exception:                                   # noqa: BLE001
             return []
-        return [dict(r) for r in (rows or [])]
+        # Drop broadcast/network pseudo-hosts (e.g. x.x.x.255) that broadcast
+        # traffic leaves in the hosts table — they are not devices.
+        return [dict(r) for r in (rows or [])
+                if not _is_broadcast_ip((r if isinstance(r, dict) else dict(r)).get('ip'))]
 
     # -- change detection --------------------------------------------------
 
@@ -282,7 +322,7 @@ class AssetInventory:
         return {
             'ip': row.get('ip'),
             'hostname': row.get('hostname'),
-            'vendor': row.get('vendor'),
+            'vendor': _clean_vendor(row.get('vendor')),
             'ports': _parse_ports(row),
             'status': row.get('status') or 'alive',
             'last_seen': row.get('last_seen'),
@@ -365,7 +405,7 @@ class AssetInventory:
             'mac': mac,
             'ip': ip,
             'hostname': row.get('hostname'),
-            'vendor': row.get('vendor'),
+            'vendor': _clean_vendor(row.get('vendor')),
             'summary': summary,
         }
         if extra:
@@ -633,6 +673,43 @@ def _self_test():
                            tags='a, b ,c')
         ck('bad criticality coerced to none', rec['criticality'] == 'none')
         ck('tags parsed from csv', rec['tags'] == ['a', 'b', 'c'])
+
+        # --- data hygiene: broadcast filter / pseudo-MAC / vendor / gateway --
+        ck('broadcast .255 is noise', _is_broadcast_ip('192.168.1.255'))
+        ck('network .0 is noise', _is_broadcast_ip('10.0.0.0'))
+        ck('global broadcast is noise', _is_broadcast_ip('255.255.255.255'))
+        ck('real host is not noise', not _is_broadcast_ip('192.168.1.42'))
+        ck('pseudo-mac detected', _is_pseudo_mac('00:00:c0:a8:01:c3'))
+        ck('real mac not pseudo', not _is_pseudo_mac('b8:27:eb:00:00:01'))
+        ck('vendor DUP marker stripped',
+           _clean_vendor('Raspberry Pi Foundation (DUP: 2)') == 'Raspberry Pi Foundation')
+        ck('vendor without marker unchanged',
+           _clean_vendor('Dell Inc.') == 'Dell Inc.')
+
+        hyg_rows = [
+            {'mac': '00:00:c0:a8:01:ff', 'ip': '192.168.1.255', 'vendor': '',
+             'ports': '138', 'status': 'degraded'},                 # broadcast: dropped
+            {'mac': '00:00:c0:a8:01:c3', 'ip': '192.168.1.195', 'hostname': 'srv',
+             'vendor': 'Unknown (discovered by ping) (DUP: 2)',
+             'ports': '22,80,3000', 'status': 'alive'},             # pseudo-mac: kept
+            {'mac': 'b0:6e:bf:28:00:a0', 'ip': '10.9.9.1', 'hostname': 'gw',
+             'vendor': 'ASUSTek COMPUTER INC.', 'ports': '53,67,80',
+             'status': 'alive'},                                    # the gateway
+        ]
+        hyg = AssetInventory(db=_FakeDB(hyg_rows), datadir=os.path.join(d, 'h2'),
+                             log_dir=os.path.join(d, 'h2log'), gateway_ip='10.9.9.1')
+        os.makedirs(os.path.join(d, 'h2'), exist_ok=True)
+        hview = hyg.inventory()
+        ips = [a['ip'] for a in hview['assets']]
+        ck('broadcast host filtered from inventory', '192.168.1.255' not in ips)
+        ck('pseudo-mac host retained', '192.168.1.195' in ips)
+        srv = next(a for a in hview['assets'] if a['ip'] == '192.168.1.195')
+        ck('pseudo_mac flagged on inventory row', srv['pseudo_mac'] is True)
+        ck('inventory vendor is cleaned',
+           srv['vendor'] == 'Unknown (discovered by ping)')
+        gw = next(a for a in hview['assets'] if a['ip'] == '10.9.9.1')
+        ck('gateway classified as router', gw['device_type'] == 'router')
+        ck('gateway confidence is 1.0', gw['confidence'] == 1.0)
 
         # --- every emitted record is Watchtower-normalizable ------------
         try:

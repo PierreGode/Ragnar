@@ -34762,7 +34762,7 @@ function renderAssetsTable(assets) {
         const statusCls = (a.status === 'alive') ? 'text-green-400' : (a.status === 'lost' ? 'text-red-400' : 'text-amber-400');
         const ports = (a.ports || []);
         return '<tr class="border-b border-slate-800 hover:bg-slate-800/40">' +
-            '<td class="py-2 pr-3">' + name + threats + '<div class="text-xs text-gray-500">' + escapeHtml(mac) + '</div></td>' +
+            '<td class="py-2 pr-3">' + name + threats + '<div class="text-xs text-gray-500">' + escapeHtml(mac) + (a.pseudo_mac ? '<span title="MAC inferred from IP (no observed hardware address)" class="ml-1 text-slate-600">~</span>' : '') + '</div></td>' +
             '<td class="py-2 pr-3">' + escapeHtml(a.ip || '') + '</td>' +
             '<td class="py-2 pr-3">' + escapeHtml(a.device_label || a.device_type || '') + '</td>' +
             '<td class="py-2 pr-3 max-w-[160px] truncate" title="' + escapeHtml(a.vendor || '') + '">' + escapeHtml(a.vendor || '') + '</td>' +
