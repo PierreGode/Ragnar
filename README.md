@@ -31,6 +31,22 @@ sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
+### 🐳 Docker
+
+Prefer containers? Run the headless web UI on any Linux host with Docker — no
+Raspberry-Pi hardware required:
+
+```bash
+git clone https://github.com/PierreGode/Ragnar.git
+cd Ragnar
+docker compose up -d --build
+```
+
+Then open **http://<host-ip>:8000**. This runs the full dashboard, scanning
+engine, and network watchers; Pi-only hardware (e-Paper, GPS, SDR, Wi-Fi monitor
+mode) is not available in a container. See the [Docker Guide](docs/DOCKER.md) for
+networking, persistence, and updates.
+
 For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new. Keeping a box current — from the web UI or the terminal, and what to do when an update complains — is covered in [Updating Ragnar](docs/updates.md).
 
 ---

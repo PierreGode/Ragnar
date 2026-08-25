@@ -1,0 +1,43 @@
+services:
+  ragnar:
+    build: .
+    image: ragnar:latest
+    container_name: ragnar
+    restart: unless-stopped
+
+    # Host networking lets Ragnar see the real LAN it is meant to scan (ARP
+    # discovery, host inventory, monitor interfaces). This is the recommended
+    # mode on Linux. To use bridge networking instead, comment `network_mode`
+    # out and uncomment the `ports` block — note that LAN scanning will then be
+    # limited to Docker's bridge subnet, not your physical network.
+    #
+    # ⚠️  PORT CONFLICT: if this machine ALSO runs a native Ragnar install
+    # (the `ragnar` systemd service), it already owns port 8000 and the
+    # container will fail to bind. Don't run both on the same port. Either stop
+    # the native service (`sudo systemctl stop ragnar`), or set a different port
+    # via RAGNAR_WEB_PORT below (host mode) / the `ports` mapping (bridge mode).
+    network_mode: host
+    # ports:
+    #   - "${RAGNAR_WEB_PORT:-8000}:8000"
+
+    cap_add:
+      - NET_ADMIN   # interface config / monitor mode / raw scanning
+      - NET_RAW     # raw sockets for scapy, nmap, tcpdump
+
+    environment:
+      - RAGNAR_HEADLESS=1
+      # Web UI port. In host mode this is the actual bind port; change it to run
+      # alongside a native install (or another service) already on 8000.
+      - RAGNAR_WEB_PORT=${RAGNAR_WEB_PORT:-8000}
+      - TZ=UTC
+
+    # Runtime state persists on the host across rebuilds/updates.
+    volumes:
+      - ./data:/opt/ragnar/data
+      - ./config:/opt/ragnar/config
+      - ./certs:/opt/ragnar/certs
+
+    # Optional: API keys / secrets (OpenAI, Pushover, etc.). Copy .env.example
+    # if the repo ships one, or create your own, then uncomment.
+    # env_file:
+    #   - .env
