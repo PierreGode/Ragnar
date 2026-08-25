@@ -26,10 +26,32 @@ Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) pro
 ```bash
 wget https://raw.githubusercontent.com/PierreGode/Ragnar/main/install_ragnar.sh
 sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
-# On Raspberry Pi: choose between e-Paper HAT, server/headless, or Pineapple Pager deployment.
-# On other hardware: choose between server install or Pineapple Pager deployment.
+# On Raspberry Pi: choose e-Paper HAT, TFT LCD, server/headless, Pineapple Pager, or Docker container.
+# On other hardware: choose server install, Pineapple Pager, or Docker container.
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
+
+### 🐳 Docker
+
+Prefer containers? Run the headless web UI on any **Linux** host with Docker —
+great for the network/server side (LAN scanning, watchers, SIEM, dashboard) on a
+server, VM or NAS. Radios and USB hardware (Wi-Fi monitor mode, SDR, GPS,
+Bluetooth) are best on the **native Pi install** — through Docker they need
+fiddly passthrough on Linux and don't work through a VM (Docker Desktop / WSL2).
+The installer offers Docker as a menu choice (**Docker container**), or set it up
+yourself:
+
+```bash
+git clone https://github.com/PierreGode/Ragnar.git
+cd Ragnar
+docker compose up -d --build
+```
+
+Then open **http://<host-ip>:8000**. Prefer no build? Once a release is
+published you can `docker pull ghcr.io/pierregode/ragnar:latest` instead. This runs the full dashboard, scanning
+engine, and network watchers; Pi-only hardware (e-Paper, GPS, SDR, Wi-Fi monitor
+mode) is not available in a container. See the [Docker Guide](docs/DOCKER.md) for
+networking, persistence, and updates.
 
 For detailed information see the [Install Guide](docs/INSTALL.md). To get the box onto a network — including moving it somewhere new — see [Ragnar AP Mode](docs/RagnarAP.md). See [Release Notes](docs/RELEASE_NOTES.md) for what's new. Keeping a box current — from the web UI or the terminal, and what to do when an update complains — is covered in [Updating Ragnar](docs/updates.md).
 

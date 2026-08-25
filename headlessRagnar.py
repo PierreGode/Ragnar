@@ -234,11 +234,16 @@ if __name__ == "__main__":
         shared_data.config['pwnagotchi_last_status'] = 'Ragnar service is running'
         shared_data.save_config()
 
-        # Stop the swap-button listener if it was left running
-        subprocess.Popen(
-            ['systemctl', 'stop', 'ragnar-swap-button'],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        # Stop the swap-button listener if it was left running. Guarded because
+        # containers (and other non-systemd hosts) have no `systemctl` — a
+        # missing binary must not abort startup and take the web server with it.
+        try:
+            subprocess.Popen(
+                ['systemctl', 'stop', 'ragnar-swap-button'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            logger.debug(f"Skipping 'systemctl stop ragnar-swap-button': {exc}")
 
         # Start Ragnar core logic
         logger.info("Starting Ragnar thread...")
@@ -252,9 +257,17 @@ if __name__ == "__main__":
 
         # Start web server if enabled
         if shared_data.config.get("websrv", True):
-            logger.info("Starting the web server...")
+            # Allow the web port to be overridden via env (e.g. running inside a
+            # container in host-network mode alongside a native install already
+            # on 8000). Falls back to run_server's default (8000) when unset.
+            try:
+                web_port = int(os.environ.get("RAGNAR_WEB_PORT", "8000"))
+            except ValueError:
+                web_port = 8000
+            logger.info(f"Starting the web server on port {web_port}...")
             web_thread = threading.Thread(
-                target=run_server, name="RagnarWeb", daemon=True
+                target=lambda: run_server(port=web_port),
+                name="RagnarWeb", daemon=True
             )
             web_thread.start()
         else:
