@@ -49,7 +49,7 @@ alert that both a home lab and a SOC want.
 | `ASSET-NEW` | a MAC never seen before appears | info / medium / high (by authorized) |
 | `ASSET-THREAT-*` | a rogue-device signature matches | signature's own severity |
 | `ASSET-IP-CHANGE` | a known MAC moves to a new IP | medium |
-| `ASSET-VENDOR-CHANGE` | the OUI vendor for a MAC changes | high *(possible spoof/clone)* |
+| `ASSET-VENDOR-CHANGE` | the resolved OUI vendor for a MAC changes from one **real** vendor to a different **real** vendor | high *(possible spoof/clone)* |
 | `ASSET-HOSTNAME-CHANGE` | a known asset's hostname changes | low |
 | `ASSET-PORT-OPENED` | a new listening port appears | medium, **high** if sensitive¹ |
 | `ASSET-PORT-CLOSED` | a port a host had is gone | info |

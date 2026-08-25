@@ -84,6 +84,17 @@ def _clean_vendor(vendor):
     return v
 
 
+def _is_real_vendor(vendor):
+    """True only for an actually-resolved OUI vendor string. The hosts table uses
+    placeholders when no MAC/OUI is known — 'Unknown (discovered by ping)',
+    '(Unknown)', '(Unknown: locally administered)', '' — and these flip in and out
+    as a host is seen via ARP vs ping between scans. A transition into or out of a
+    placeholder is enrichment noise, NOT a MAC spoof, so vendor-change detection
+    must ignore it and only fire on real -> real changes."""
+    v = _clean_vendor(vendor).lower()
+    return bool(v) and 'unknown' not in v
+
+
 def _is_broadcast_ip(ip):
     """True for an IPv4 network/broadcast address that isn't a real host — the
     subnet broadcast (.255) or network (.0) under the common /24, or the global
@@ -451,14 +462,19 @@ class AssetInventory:
                     _label(row, meta, mac), old['ip'], fp['ip']),
                 {'old_ip': old['ip'], 'new_ip': fp['ip']}))
 
-        # vendor change on the same MAC — a classic spoofing / clone tell
-        if old.get('vendor') and fp.get('vendor') and \
-                old['vendor'] != fp['vendor']:
+        # vendor change on the same MAC — a classic spoofing / clone tell, BUT
+        # only when both sides are real resolved OUI vendors. The hosts table
+        # flaps the 'Unknown (discovered by ping)' placeholder in and out as a
+        # host is seen via ping vs ARP between scans; treating that as a vendor
+        # change fired a storm of bogus "possible spoof" alerts (both directions).
+        if _is_real_vendor(old.get('vendor')) and _is_real_vendor(fp.get('vendor')) \
+                and _clean_vendor(old['vendor']) != _clean_vendor(fp['vendor']):
             events.append(self._base_event(
                 mac, row, 'ASSET-VENDOR-CHANGE', 'high',
                 'MAC %s vendor changed: %s -> %s (possible spoof)' % (
-                    mac, old['vendor'], fp['vendor']),
-                {'old_vendor': old['vendor'], 'new_vendor': fp['vendor']}))
+                    mac, _clean_vendor(old['vendor']), _clean_vendor(fp['vendor'])),
+                {'old_vendor': _clean_vendor(old['vendor']),
+                 'new_vendor': _clean_vendor(fp['vendor'])}))
 
         # hostname change
         if old.get('hostname') and fp.get('hostname') and \
@@ -631,11 +647,34 @@ def _self_test():
         ck('sensitive port recorded', 3389 in pe['detail']['sensitive'])
 
         # --- vendor change (spoof tell) ---------------------------------
-        rows[0]['vendor'] = 'Dell Inc.'
+        rows[0]['vendor'] = 'Dell Inc.'      # Synology -> Dell: real -> real
         r = inv.snapshot()
-        ck('vendor change -> high',
+        ck('real->real vendor change -> high',
            any(e['code'] == 'ASSET-VENDOR-CHANGE' and e['severity'] == 'high'
                for e in r['events']))
+
+        # placeholder flapping must NOT fire a spoof alert (the live FP class)
+        ck('real vendor is real', _is_real_vendor('Dell Inc.'))
+        ck('ping placeholder is not real',
+           not _is_real_vendor('Unknown (discovered by ping)'))
+        ck('paren-unknown is not real', not _is_real_vendor('(Unknown)'))
+        ck('locally-admin unknown is not real',
+           not _is_real_vendor('(Unknown: locally administered)'))
+        ck('empty vendor is not real', not _is_real_vendor(''))
+
+        rows[0]['vendor'] = 'Unknown (discovered by ping)'   # Dell -> placeholder
+        r = inv.snapshot()
+        ck('real->placeholder does NOT fire vendor change',
+           not any(e['code'] == 'ASSET-VENDOR-CHANGE' for e in r['events']))
+        rows[0]['vendor'] = 'Dell Inc.'                      # placeholder -> Dell
+        r = inv.snapshot()
+        ck('placeholder->real does NOT fire vendor change',
+           not any(e['code'] == 'ASSET-VENDOR-CHANGE' for e in r['events']))
+        # DUP-marker-only difference must not fire either
+        rows[0]['vendor'] = 'Dell Inc. (DUP: 2)'
+        r = inv.snapshot()
+        ck('DUP-marker-only change does NOT fire vendor change',
+           not any(e['code'] == 'ASSET-VENDOR-CHANGE' for e in r['events']))
 
         # --- offline: critical asset escalates --------------------------
         # sw1 is criticality=high; take it offline
