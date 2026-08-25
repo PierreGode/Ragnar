@@ -40,6 +40,31 @@ docker compose up -d                # start
 git pull && docker compose up -d --build   # update to latest
 ```
 
+## Prebuilt image (GHCR) — no local build
+
+Once a release/tag is published, a multi-arch image (amd64 + arm64) is built by
+GitHub Actions and pushed to the GitHub Container Registry, so you can skip the
+build entirely:
+
+```bash
+docker run -d --name ragnar \
+  --network host --cap-add NET_ADMIN --cap-add NET_RAW \
+  -e RAGNAR_WEB_PORT=8010 \
+  ghcr.io/pierregode/ragnar:latest
+```
+
+Tags: `latest`, the version (`v1.2.3` -> `1.2.3` and `1.2`), and a commit SHA.
+
+**One-time setup (repo owner):** the first publish creates the package as
+*private*. Make it public so anyone can pull: GitHub -> your profile ->
+**Packages** -> `ragnar` -> *Package settings* -> **Change visibility -> Public**
+(and, optionally, *Connect repository* so it links to Ragnar). Publishing is
+free for public images on a public repo.
+
+The workflow (`.github/workflows/docker-publish.yml`) runs on a version tag
+(`v*`), on a published release, or manually via **Actions -> Publish Docker
+image (GHCR) -> Run workflow**.
+
 ## Quick start (plain Docker)
 
 ```bash

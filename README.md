@@ -43,7 +43,8 @@ cd Ragnar
 docker compose up -d --build
 ```
 
-Then open **http://<host-ip>:8000**. This runs the full dashboard, scanning
+Then open **http://<host-ip>:8000**. Prefer no build? Once a release is
+published you can `docker pull ghcr.io/pierregode/ragnar:latest` instead. This runs the full dashboard, scanning
 engine, and network watchers; Pi-only hardware (e-Paper, GPS, SDR, Wi-Fi monitor
 mode) is not available in a container. See the [Docker Guide](docs/DOCKER.md) for
 networking, persistence, and updates.
