@@ -20,6 +20,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # shared libraries a few Python wheels load at runtime. Hardware-only packages
 # (SPI, GPIO, e-Paper) are intentionally omitted — the container is headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        sudo \
         nmap \
         tcpdump \
         iproute2 \

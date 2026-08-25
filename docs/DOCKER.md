@@ -133,9 +133,33 @@ are unavailable (or need extra host wiring) under Docker:
   control. Use the native installer on a Pi for these.
 - **GPS, SDR (HackRF/RTL-SDR), Zigbee/Meshtastic serial dongles, Bluetooth** —
   require USB device passthrough (`--device`) and are not wired up by default.
+- **Host/Pi-only CLI tools** — `nmcli` (NetworkManager), `systemctl` (systemd),
+  `vcgencmd`, `hostapd_cli`, `loginctl`. Features that call these degrade
+  gracefully (logged, non-fatal); interface *viewing* and scanning still work.
 
 For the full hardware experience (e-Paper HAT, radios, GPS), use the native
 installer described in the main [README](../README.md).
+
+## Updating
+
+Two paths, and the durable one is a rebuild:
+
+**Recommended — rebuild the image (durable):**
+
+```bash
+git pull                       # on the host, in your Ragnar clone
+docker compose up -d --build   # rebuild + restart the container
+```
+
+**In-app Updates tab (works, but ephemeral):** `git` is installed in the image,
+and the image ships without `.git` — which looks to Ragnar exactly like a
+"tarball install". On the first update check the container self-reattaches to
+upstream (`git init` + `fetch`, keeping the working tree) and the one-click
+updater then works. **Caveat:** those updates land on the container's writable
+layer, so they are lost the next time you rebuild or recreate the container
+(they survive a plain `docker restart`). To make in-app updates persist, mount
+the app directory as a volume; otherwise treat the rebuild flow as the real
+update mechanism and the tab as a convenience.
 
 ## Troubleshooting
 
