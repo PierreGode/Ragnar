@@ -26,15 +26,16 @@ Ragnar is a fork of the awesome [Bjorn](https://github.com/infinition/Bjorn) pro
 ```bash
 wget https://raw.githubusercontent.com/PierreGode/Ragnar/main/install_ragnar.sh
 sudo chmod +x install_ragnar.sh && sudo ./install_ragnar.sh
-# On Raspberry Pi: choose between e-Paper HAT, server/headless, or Pineapple Pager deployment.
-# On other hardware: choose between server install or Pineapple Pager deployment.
+# On Raspberry Pi: choose e-Paper HAT, TFT LCD, server/headless, Pineapple Pager, or Docker container.
+# On other hardware: choose server install, Pineapple Pager, or Docker container.
 # It may take a while as many packages and modules will be installed. Reboot when it finishes.
 ```
 
 ### 🐳 Docker
 
 Prefer containers? Run the headless web UI on any Linux host with Docker — no
-Raspberry-Pi hardware required:
+Raspberry-Pi hardware required. The installer offers it as a menu choice
+(**Docker container**), or set it up yourself:
 
 ```bash
 git clone https://github.com/PierreGode/Ragnar.git

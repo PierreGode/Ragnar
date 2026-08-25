@@ -1898,6 +1898,76 @@ clean_exit() {
 }
 
 # Display the installation menu with banner
+# ── Docker deployment ────────────────────────────────────────────────────────
+# Alternative to the native install: run the headless web UI in a container.
+# Terminal action (like the Pineapple path) — it does not fall through into the
+# pip/systemd install. Full guide: docs/DOCKER.md.
+deploy_docker() {
+    log "INFO" "Docker container deployment selected"
+    local repo_dir="$ragnar_PATH"
+    if [ ! -f "$repo_dir/Dockerfile" ]; then
+        log "ERROR" "Dockerfile not found in $repo_dir — is this a full clone?"
+        return 1
+    fi
+
+    # 1. Ensure the Docker engine is present (official convenience script covers
+    #    Raspberry Pi OS, Debian and Ubuntu).
+    if ! command -v docker >/dev/null 2>&1; then
+        log "INFO" "Docker not installed — installing via get.docker.com ..."
+        if curl -fsSL https://get.docker.com | sh; then
+            log "SUCCESS" "Docker engine installed"
+        else
+            log "ERROR" "Docker install failed. Install Docker yourself, then run:"
+            log "INFO" "  cd $repo_dir && docker compose up -d --build"
+            return 1
+        fi
+    fi
+    systemctl enable --now docker >/dev/null 2>&1 || true
+
+    # 2. Pick the compose command (v2 plugin preferred, v1 fallback).
+    local compose_cmd=""
+    if docker compose version >/dev/null 2>&1; then
+        compose_cmd="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        compose_cmd="docker-compose"
+    else
+        log "ERROR" "Docker Compose not available (need the 'docker compose' plugin)"
+        log "INFO" "Install docker-compose-plugin, then: cd $repo_dir && docker compose up -d --build"
+        return 1
+    fi
+
+    # 3. Let the invoking user drive docker without sudo next time.
+    if [ -n "${SUDO_USER:-}" ]; then
+        usermod -aG docker "$SUDO_USER" 2>/dev/null             && log "INFO" "Added $SUDO_USER to the 'docker' group (re-login to take effect)" || true
+    fi
+
+    # 4. Avoid colliding with a native ragnar.service already on :8000.
+    local web_port=8000
+    if systemctl is-active --quiet ragnar 2>/dev/null; then
+        web_port=8010
+        log "WARNING" "A native ragnar.service is active on :8000 — the container will use :$web_port"
+    fi
+
+    # 5. Build the image and start the container (host networking is set in the
+    #    compose file, so the container sees the real LAN; RAGNAR_WEB_PORT drives
+    #    the bind port). The build pulls Python/network deps and can take a while.
+    log "INFO" "Building image and starting container (this can take several minutes)..."
+    if ( cd "$repo_dir" && RAGNAR_WEB_PORT="$web_port" $compose_cmd up -d --build ); then
+        local ip
+        ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        log "SUCCESS" "Ragnar container is up"
+        echo ""
+        echo -e "   ${GREEN}Web UI:${NC} http://${ip:-<host-ip>}:$web_port"
+        echo -e "   ${CYAN}Logs:${NC}   cd $repo_dir && $compose_cmd logs -f"
+        echo -e "   ${CYAN}Update:${NC} cd $repo_dir && git pull && $compose_cmd up -d --build"
+        echo -e "   ${YELLOW}Note:${NC} radios (Wi-Fi monitor/SDR/GPS/BT) need hardware passthrough — see docs/DOCKER.md"
+        return 0
+    else
+        log "ERROR" "docker compose failed. Inspect with: cd $repo_dir && $compose_cmd logs"
+        return 1
+    fi
+}
+
 show_install_menu() {
     local is_pi=$1
     clear
@@ -1928,10 +1998,12 @@ BANNER
         echo -e "   ${CYAN}*${YELLOW} 3)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 5)${CYAN} WiFi Pineapple Pager ${RED}(beta)                    ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 6)${CYAN} Docker container (headless web UI)             ${NC}"
     else
         echo -e "   ${CYAN}*${YELLOW} 1)${CYAN} Server install with display                    ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 2)${CYAN} Server install (headless, no display)           ${NC}"
         echo -e "   ${CYAN}*${YELLOW} 3)${CYAN} WiFi Pineapple Pager                            ${NC}"
+        echo -e "   ${CYAN}*${YELLOW} 4)${CYAN} Docker container (headless web UI)             ${NC}"
     fi
     echo ""
     echo -e "${CYAN}  ══════════════════════════════════════════════════════════${NC}"
@@ -2096,8 +2168,13 @@ main() {
                     fi
                     clean_exit $pager_exit_code
                     ;;
+                6)
+                    docker_exit_code=0
+                    deploy_docker || docker_exit_code=$?
+                    clean_exit $docker_exit_code
+                    ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, or 5.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, 4, 5, or 6.${NC}"
                     sleep 1
                     ;;
             esac
@@ -2140,8 +2217,13 @@ main() {
                     fi
                     clean_exit $pager_exit_code
                     ;;
+                4)
+                    docker_exit_code=0
+                    deploy_docker || docker_exit_code=$?
+                    clean_exit $docker_exit_code
+                    ;;
                 *)
-                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, or 3.${NC}"
+                    echo -e "\n   ${RED}Invalid option. Please select 1, 2, 3, or 4.${NC}"
                     sleep 1
                     ;;
             esac

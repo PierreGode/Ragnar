@@ -12,6 +12,12 @@ Raspberry Pi you'd rather manage with Docker than the native installer.
 
 ## Quick start (Docker Compose)
 
+The easiest path is the installer itself: run `sudo ./install_ragnar.sh` and pick
+**Docker container** from the menu — it installs Docker if missing and brings the
+container up for you (auto-selecting port 8010 if a native install already holds
+8000). To do it by hand instead:
+
+
 ```bash
 git clone https://github.com/PierreGode/Ragnar.git
 cd Ragnar
