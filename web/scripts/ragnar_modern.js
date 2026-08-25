@@ -1346,6 +1346,7 @@ function initTerminal() {
 function showTab(tabName) {
     // Backward-compat: these tabs are now sub-tabs of Network / Discovered
     if (tabName === 'networks') { showTab('network'); showNetworkSubtab('archive'); return; }
+    if (tabName === 'assets') { showTab('network'); showNetworkSubtab('assets'); return; }
     if (tabName === 'network-map') { showTab('network'); showNetworkSubtab('map'); return; }
     if (tabName === 'credentials') { showTab('discovered'); showDiscoveredSubtab('credentials'); return; }
     if (tabName === 'diagnostics') { showTab('network'); showNetworkSubtab('diagnostics'); return; }
@@ -1423,7 +1424,8 @@ function _setSubtabActive(btn, active) {
 
 function showNetworkSubtab(name) {
     const views = {
-        hosts: 'net-sub-hosts', archive: 'net-sub-archive', map: 'net-sub-map',
+        hosts: 'net-sub-hosts', archive: 'net-sub-archive', assets: 'net-sub-assets',
+        map: 'net-sub-map',
         diagnostics: 'net-sub-diagnostics', switch: 'net-sub-switch', interfaces: 'net-sub-interfaces',
         wifi: 'net-sub-wifi'
     };
@@ -1434,6 +1436,8 @@ function showNetworkSubtab(name) {
     });
     if (name === 'archive') {
         loadAllNetworksData();
+    } else if (name === 'assets') {
+        loadAssetsData();
     } else if (name === 'map') {
         if (!_mapInitialized) { loadNetworkMap(); }
     } else if (name === 'hosts') {
@@ -34688,3 +34692,314 @@ window.meshLeave = meshLeave;
 window.meshLeaveShare = meshLeaveShare;
 window.meshEnable = meshEnable;
 window.meshDiagnose = meshDiagnose;
+
+// ==========================================================================
+// Assets tab — Asset Inventory + SIEM outbound forwarding
+// ==========================================================================
+let _assetsState = { assets: [], summary: {}, recent: [] };
+let _siemState = { enabled: false, min_severity: 'high', targets: [], watchtower_enabled: false };
+
+async function loadAssetsData() {
+    await Promise.all([loadAssetInventory(), loadSiemConfig()]);
+}
+
+async function loadAssetInventory() {
+    try {
+        const d = await fetchAPI('/api/inventory');
+        _assetsState = { assets: d.assets || [], summary: d.summary || {}, recent: d.recent_events || [] };
+        const t = document.getElementById('asset-enabled-toggle');
+        if (t) t.checked = !!d.enabled;
+        renderAssetsSummary(d.summary || {});
+        renderAssetsTable(d.assets || []);
+        renderAssetsRecent(d.recent_events || []);
+    } catch (e) {
+        const b = document.getElementById('assets-table-body');
+        if (b) b.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-red-400">Failed to load inventory</td></tr>';
+    }
+}
+
+function _assetTile(label, value, cls) {
+    return '<div class="bg-slate-800/60 rounded-lg p-3 text-center">' +
+        '<div class="text-2xl font-bold ' + (cls || '') + '">' + value + '</div>' +
+        '<div class="text-xs text-gray-400">' + label + '</div></div>';
+}
+
+function renderAssetsSummary(s) {
+    const el = document.getElementById('assets-summary');
+    if (!el) return;
+    el.innerHTML = [
+        _assetTile('Total assets', s.total || 0, ''),
+        _assetTile('Authorized', s.authorized || 0, 'text-green-400'),
+        _assetTile('Unauthorized', s.unauthorized || 0, 'text-red-400'),
+        _assetTile('Unclassified', s.unclassified || 0, 'text-amber-400'),
+        _assetTile('With threats', s.with_threats || 0, 'text-red-400'),
+        _assetTile('Offline', s.offline || 0, 'text-gray-400')
+    ].join('');
+}
+
+function renderAssetsTable(assets) {
+    const b = document.getElementById('assets-table-body');
+    if (!b) return;
+    if (!assets.length) {
+        b.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-gray-500">No assets yet. Run a network scan first.</td></tr>';
+        return;
+    }
+    b.innerHTML = assets.map(function (a) {
+        const mac = a.mac;
+        const thr = (a.threats || []);
+        const threats = thr.length
+            ? '<span title="' + escapeHtml(thr.map(function (t) { return t.name; }).join(', ')) + '" class="ml-1 text-red-400">&#9888;' + thr.length + '</span>'
+            : '';
+        const authSel = '<select onchange="assetSetAuth(\'' + mac + '\', this.value)" class="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">' +
+            '<option value=""' + (a.authorized === null ? ' selected' : '') + '>&mdash;</option>' +
+            '<option value="yes"' + (a.authorized === true ? ' selected' : '') + '>yes</option>' +
+            '<option value="no"' + (a.authorized === false ? ' selected' : '') + '>no</option></select>';
+        const critSel = '<select onchange="assetSetCrit(\'' + mac + '\', this.value)" class="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">' +
+            ['none', 'low', 'medium', 'high', 'critical'].map(function (c) {
+                return '<option value="' + c + '"' + ((a.criticality || 'none') === c ? ' selected' : '') + '>' + c + '</option>';
+            }).join('') + '</select>';
+        const name = escapeHtml(a.label || a.hostname || '(unknown)');
+        const statusCls = (a.status === 'alive') ? 'text-green-400' : (a.status === 'lost' ? 'text-red-400' : 'text-amber-400');
+        const ports = (a.ports || []);
+        return '<tr class="border-b border-slate-800 hover:bg-slate-800/40">' +
+            '<td class="py-2 pr-3 asset-cell-device">' + name + threats + '<div class="text-xs text-gray-500">' + escapeHtml(mac) + (a.pseudo_mac ? '<span title="MAC inferred from IP (no observed hardware address)" class="ml-1 text-slate-600">~</span>' : '') + '</div></td>' +
+            '<td class="py-2 pr-3" data-label="IP">' + escapeHtml(a.ip || '') + '</td>' +
+            '<td class="py-2 pr-3" data-label="Type">' + escapeHtml(a.device_label || a.device_type || '') + '</td>' +
+            '<td class="py-2 pr-3 sm:max-w-[160px] sm:truncate" data-label="Vendor" title="' + escapeHtml(a.vendor || '') + '">' + escapeHtml(a.vendor || '') + '</td>' +
+            '<td class="py-2 pr-3 text-xs" data-label="Ports">' + ports.slice(0, 8).join(', ') + (ports.length > 8 ? '&hellip;' : '') + '</td>' +
+            '<td class="py-2 pr-3 ' + statusCls + '" data-label="Status">' + escapeHtml(a.status || '') + '</td>' +
+            '<td class="py-2 pr-3" data-label="Authorized">' + authSel + '</td>' +
+            '<td class="py-2 pr-3" data-label="Criticality">' + critSel + '</td></tr>';
+    }).join('');
+}
+
+const _assetSevColor = { critical: 'text-red-400', high: 'text-orange-400', medium: 'text-amber-400', low: 'text-slate-300', info: 'text-gray-400' };
+
+function renderAssetsRecent(events) {
+    const el = document.getElementById('assets-recent');
+    if (!el) return;
+    if (!events.length) {
+        el.innerHTML = '<div class="text-gray-500">No recorded changes yet.</div>';
+        return;
+    }
+    el.innerHTML = events.map(function (e) {
+        const sev = (e.severity || 'info');
+        const t = e.iso ? String(e.iso).replace('T', ' ').slice(0, 19) : '';
+        return '<div class="flex gap-2"><span class="text-gray-500 shrink-0">' + t + '</span>' +
+            '<span class="' + (_assetSevColor[sev] || '') + ' shrink-0 uppercase text-xs w-16">' + sev + '</span>' +
+            '<span>' + escapeHtml(e.summary || e.code || '') + '</span></div>';
+    }).join('');
+}
+
+async function assetSetMeta(mac, fields) {
+    try {
+        await postAPI('/api/inventory/meta', Object.assign({ mac: mac }, fields));
+        addConsoleMessage('Asset ' + mac + ' updated', 'success');
+    } catch (e) {
+        addConsoleMessage('Failed to update ' + mac, 'error');
+    }
+}
+function assetSetAuth(mac, v) { assetSetMeta(mac, { authorized: v === '' ? null : (v === 'yes') }); }
+function assetSetCrit(mac, v) { assetSetMeta(mac, { criticality: v }); }
+
+async function assetsToggleEnabled(on) {
+    try {
+        await postAPI('/api/inventory/config', { enabled: !!on });
+        addConsoleMessage('Asset auto-monitor ' + (on ? 'enabled' : 'disabled'), 'success');
+    } catch (e) {
+        addConsoleMessage('Failed to change asset monitor', 'error');
+    }
+}
+
+async function assetsScanNow() {
+    try {
+        const d = await postAPI('/api/inventory/scan', {});
+        const n = (d.events || []).length;
+        addConsoleMessage(d.baseline ? 'Baseline captured (' + d.tracked + ' assets)' : (n + ' change event(s) detected'), 'success');
+        await loadAssetInventory();
+    } catch (e) {
+        addConsoleMessage('Asset scan failed', 'error');
+    }
+}
+
+// ---- SIEM ----------------------------------------------------------------
+
+const _SIEM_FIELDS = {
+    syslog: [
+        { k: 'host', label: 'Host', ph: 'siem.example.com' },
+        { k: 'port', label: 'Port', ph: '514' },
+        { k: 'protocol', label: 'Protocol', opts: ['udp', 'tcp'] },
+        { k: 'format', label: 'Format', opts: ['cef', 'leef', 'plain'] },
+        { k: 'rfc', label: 'Framing', opts: ['5424', '3164'] },
+        { k: 'tls', label: 'TLS (tcp)', type: 'checkbox' }
+    ],
+    splunk_hec: [
+        { k: 'url', label: 'HEC URL', ph: 'https://splunk:8088/services/collector' },
+        { k: 'token', label: 'Token', ph: 'env:RAGNAR_SPLUNK_HEC or value' },
+        { k: 'index', label: 'Index (optional)', ph: 'main' },
+        { k: 'sourcetype', label: 'Sourcetype', ph: 'ragnar:alert' }
+    ],
+    elastic: [
+        { k: 'url', label: 'Base URL', ph: 'https://es:9200' },
+        { k: 'index', label: 'Index', ph: 'ragnar-alerts' },
+        { k: 'username', label: 'Username (optional)', ph: 'elastic' },
+        { k: 'password', label: 'Password / api_key', ph: 'env:RAGNAR_ES_PW or value' }
+    ],
+    webhook: [{ k: 'url', label: 'Webhook URL', ph: 'https://…' }],
+    slack: [{ k: 'url', label: 'Slack/Teams webhook URL', ph: 'https://hooks.slack.com/…' }]
+};
+
+async function loadSiemConfig() {
+    try {
+        const d = await fetchAPI('/api/siem');
+        _siemState.enabled = !!d.enabled;
+        _siemState.min_severity = d.min_severity || 'high';
+        _siemState.watchtower_enabled = !!d.watchtower_enabled;
+        const t = document.getElementById('siem-enabled-toggle');
+        if (t) t.checked = _siemState.enabled;
+        const ms = document.getElementById('siem-min-severity');
+        if (ms) ms.value = _siemState.min_severity;
+        const warn = document.getElementById('siem-watchtower-warn');
+        if (warn) warn.classList.toggle('hidden', !(_siemState.enabled && !_siemState.watchtower_enabled));
+        renderSiemTargets(d.targets || [], d.last || {});
+        siemRenderNewFields();
+    } catch (e) { /* ignore */ }
+}
+
+function renderSiemTargets(described, last) {
+    const el = document.getElementById('siem-targets');
+    if (!el) return;
+    if (!described.length) {
+        el.innerHTML = '<div class="text-gray-500 text-sm">No targets configured yet.</div>';
+        return;
+    }
+    el.innerHTML = described.map(function (t, i) {
+        const cfg = t.config || {};
+        const bits = Object.keys(cfg).filter(function (k) {
+            return ['type', 'name', 'enabled'].indexOf(k) === -1 && cfg[k] !== '' && cfg[k] != null;
+        }).map(function (k) { return k + '=' + cfg[k]; }).join('  ');
+        return '<div class="flex items-center justify-between bg-slate-800/60 rounded-lg px-3 py-2">' +
+            '<div class="min-w-0"><span class="font-semibold">' + escapeHtml(t.name || t.type) + '</span>' +
+            '<span class="ml-2 text-xs px-2 py-0.5 rounded bg-slate-700">' + escapeHtml(t.type) + '</span>' +
+            '<div class="text-xs text-gray-400 truncate">' + escapeHtml(bits) + '</div></div>' +
+            '<div class="flex gap-2 shrink-0"><button onclick="siemTestOne(' + i + ')" class="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded">Test</button>' +
+            '<button onclick="siemRemoveTarget(' + i + ')" class="text-xs bg-red-700 hover:bg-red-600 px-2 py-1 rounded">Remove</button></div></div>';
+    }).join('');
+}
+
+function siemRenderNewFields() {
+    const type = document.getElementById('siem-new-type');
+    const wrap = document.getElementById('siem-new-fields');
+    if (!type || !wrap) return;
+    const fields = _SIEM_FIELDS[type.value] || [];
+    wrap.innerHTML = fields.map(function (f) {
+        const id = 'siem-nf-' + f.k;
+        if (f.type === 'checkbox') {
+            return '<label class="text-sm text-gray-300 flex items-center gap-2 mt-5"><input type="checkbox" id="' + id + '" class="w-4 h-4">' + f.label + '</label>';
+        }
+        if (f.opts) {
+            return '<label class="text-sm text-gray-300">' + f.label +
+                '<select id="' + id + '" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1">' +
+                f.opts.map(function (o) { return '<option value="' + o + '">' + o + '</option>'; }).join('') + '</select></label>';
+        }
+        return '<label class="text-sm text-gray-300">' + f.label +
+            '<input id="' + id + '" type="text" placeholder="' + (f.ph || '') + '" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1"></label>';
+    }).join('');
+}
+
+function _siemCollectNewTarget() {
+    const type = document.getElementById('siem-new-type').value;
+    const name = (document.getElementById('siem-new-name').value || '').trim();
+    const tgt = { type: type };
+    if (name) tgt.name = name;
+    (_SIEM_FIELDS[type] || []).forEach(function (f) {
+        const el = document.getElementById('siem-nf-' + f.k);
+        if (!el) return;
+        if (f.type === 'checkbox') { tgt[f.k] = el.checked; return; }
+        const v = (el.value || '').trim();
+        if (v !== '') tgt[f.k] = (f.k === 'port') ? parseInt(v, 10) : v;
+    });
+    return tgt;
+}
+
+async function siemAddTarget() {
+    const tgt = _siemCollectNewTarget();
+    try {
+        await postAPI('/api/siem/targets/add', { target: tgt });
+        addConsoleMessage('SIEM target added', 'success');
+        await loadSiemConfig();
+    } catch (e) {
+        addConsoleMessage('Failed to add target: ' + (e.message || e), 'error');
+    }
+}
+
+async function siemRemoveTarget(index) {
+    try {
+        await postAPI('/api/siem/targets/remove', { index: index });
+        addConsoleMessage('SIEM target removed', 'success');
+        await loadSiemConfig();
+    } catch (e) {
+        addConsoleMessage('Failed to remove target', 'error');
+    }
+}
+
+async function siemToggleEnabled(on) {
+    try {
+        await postAPI('/api/siem/config', { enabled: !!on });
+        _siemState.enabled = !!on;
+        const warn = document.getElementById('siem-watchtower-warn');
+        if (warn) warn.classList.toggle('hidden', !(_siemState.enabled && !_siemState.watchtower_enabled));
+        addConsoleMessage('SIEM forwarding ' + (on ? 'enabled' : 'disabled'), 'success');
+    } catch (e) {
+        addConsoleMessage('Failed to toggle SIEM', 'error');
+    }
+}
+
+async function siemSetMinSeverity(v) {
+    try {
+        await postAPI('/api/siem/config', { min_severity: v });
+        addConsoleMessage('SIEM min severity: ' + v, 'success');
+    } catch (e) { /* ignore */ }
+}
+
+function _siemReportTest(results) {
+    if (!Array.isArray(results) || !results.length) { addConsoleMessage('No target tested', 'error'); return; }
+    results.forEach(function (r) {
+        if (r.error) addConsoleMessage('SIEM ' + (r.target || r.type) + ': ' + r.error, 'error');
+        else addConsoleMessage('SIEM ' + (r.target || r.type) + ': delivered ' + r.sent, 'success');
+    });
+}
+
+async function siemTestAll() {
+    try {
+        const d = await postAPI('/api/siem/test', {});
+        _siemReportTest(d.results);
+    } catch (e) {
+        addConsoleMessage('SIEM test failed: ' + (e.message || e), 'error');
+    }
+}
+
+async function siemTestOne(index) {
+    // Test a stored target: the server resolves its (possibly env-backed) secret.
+    try {
+        const d = await postAPI('/api/siem/test', { index: index });
+        _siemReportTest(d.results);
+    } catch (e) {
+        addConsoleMessage('SIEM test failed', 'error');
+    }
+}
+
+if (typeof window !== 'undefined') {
+    window.loadAssetsData = loadAssetsData;
+    window.assetsToggleEnabled = assetsToggleEnabled;
+    window.assetsScanNow = assetsScanNow;
+    window.assetSetAuth = assetSetAuth;
+    window.assetSetCrit = assetSetCrit;
+    window.siemToggleEnabled = siemToggleEnabled;
+    window.siemSetMinSeverity = siemSetMinSeverity;
+    window.siemRenderNewFields = siemRenderNewFields;
+    window.siemAddTarget = siemAddTarget;
+    window.siemRemoveTarget = siemRemoveTarget;
+    window.siemTestAll = siemTestAll;
+    window.siemTestOne = siemTestOne;
+}

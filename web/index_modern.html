@@ -1281,6 +1281,7 @@
             <div class="flex flex-wrap items-center gap-1 mb-5 border-b border-slate-800 pb-2">
                 <button id="net-subtab-hosts" onclick="showNetworkSubtab('hosts')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors bg-Ragnar-600 text-white">Hosts</button>
                 <button id="net-subtab-archive" onclick="showNetworkSubtab('archive')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">AP Archive</button>
+                <button id="net-subtab-assets" onclick="showNetworkSubtab('assets')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Assets</button>
                 <button id="net-subtab-map" onclick="showNetworkSubtab('map')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Map</button>
                 <button id="net-subtab-diagnostics" onclick="showNetworkSubtab('diagnostics')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Diagnostics</button>
                 <button id="net-subtab-switch" onclick="showNetworkSubtab('switch')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Switch &amp; L2/L3</button>
@@ -1483,6 +1484,149 @@
                 </div>
             </div>
             </div><!-- /#net-sub-archive -->
+        <!-- Assets sub-tab (Asset Inventory + SIEM outbound) -->
+        <style>
+        /* Mobile: collapse the wide asset table into labeled cards (<=640px). */
+        @media (max-width: 640px) {
+            .asset-table thead { display: none; }
+            .asset-table, .asset-table tbody, .asset-table tr, .asset-table td { display: block; width: 100%; }
+            .asset-table tr {
+                border: 1px solid rgb(51 65 85);
+                border-radius: 0.5rem;
+                margin-bottom: 0.5rem;
+                padding: 0.25rem 0.75rem;
+                background: rgba(30, 41, 59, 0.4);
+            }
+            .asset-table td {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 0.75rem;
+                padding: 0.3rem 0;
+                border: 0;
+                text-align: right;
+                max-width: none !important;
+                white-space: normal;
+                overflow: visible;
+                text-overflow: clip;
+            }
+            .asset-table td::before {
+                content: attr(data-label);
+                color: rgb(148 163 184);
+                font-size: 0.65rem;
+                text-transform: uppercase;
+                letter-spacing: 0.03em;
+                text-align: left;
+                flex: 0 0 auto;
+                margin-right: auto;
+            }
+            /* The device cell carries name + MAC; show it full-width, no label. */
+            .asset-table td.asset-cell-device {
+                display: block;
+                text-align: left;
+                padding-top: 0.5rem;
+                font-weight: 600;
+            }
+            .asset-table td.asset-cell-device::before { display: none; }
+        }
+        </style>
+        <div id="net-sub-assets" class="net-subview hidden">
+            <div class="glass rounded-xl p-6 mb-6">
+                <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+                    <div>
+                        <h2 class="text-2xl font-bold">Asset Inventory</h2>
+                        <p class="text-gray-400 text-sm">Change-aware view of every device seen on the network. New, moved, spoofed and offline devices raise events that flow to Watchtower and your SIEM.</p>
+                    </div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <label class="flex items-center gap-2 text-sm text-gray-300">
+                            <input type="checkbox" id="asset-enabled-toggle" onchange="assetsToggleEnabled(this.checked)" class="w-4 h-4">
+                            Auto-monitor
+                        </label>
+                        <button onclick="assetsScanNow()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm">Scan now</button>
+                        <button onclick="loadAssetsData()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded-lg text-sm">Refresh</button>
+                    </div>
+                </div>
+                <div id="assets-summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4"></div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm asset-table">
+                        <thead class="text-left text-gray-400 border-b border-slate-700">
+                            <tr>
+                                <th class="py-2 pr-3">Device</th>
+                                <th class="py-2 pr-3">IP</th>
+                                <th class="py-2 pr-3">Type</th>
+                                <th class="py-2 pr-3">Vendor</th>
+                                <th class="py-2 pr-3">Ports</th>
+                                <th class="py-2 pr-3">Status</th>
+                                <th class="py-2 pr-3">Authorized</th>
+                                <th class="py-2 pr-3">Criticality</th>
+                            </tr>
+                        </thead>
+                        <tbody id="assets-table-body">
+                            <tr><td colspan="8" class="py-6 text-center text-gray-500">Loading…</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="glass rounded-xl p-6 mb-6">
+                <h3 class="text-lg font-bold mb-3">Recent changes</h3>
+                <div id="assets-recent" class="space-y-1 text-sm max-h-72 overflow-y-auto"></div>
+            </div>
+
+            <!-- SIEM / Outbound Forwarding -->
+            <div class="glass rounded-xl p-6">
+                <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+                    <div>
+                        <h2 class="text-2xl font-bold">SIEM &amp; Outbound Forwarding</h2>
+                        <p class="text-gray-400 text-sm">Ship every detector alert to syslog (CEF/LEEF), Splunk HEC, Elasticsearch, or a webhook. Egress runs through Watchtower — keep it enabled.</p>
+                    </div>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <label class="flex items-center gap-2 text-sm text-gray-300">
+                            <input type="checkbox" id="siem-enabled-toggle" onchange="siemToggleEnabled(this.checked)" class="w-4 h-4">
+                            Enabled
+                        </label>
+                        <label class="text-sm text-gray-300">Min severity
+                            <select id="siem-min-severity" onchange="siemSetMinSeverity(this.value)" class="ml-1 bg-slate-800 border border-slate-600 rounded px-2 py-1 text-sm">
+                                <option value="critical">critical</option>
+                                <option value="high">high</option>
+                                <option value="medium">medium</option>
+                                <option value="low">low</option>
+                                <option value="info">info</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+                <div id="siem-watchtower-warn" class="hidden mb-3 text-amber-400 text-sm bg-amber-900/20 border border-amber-700/40 rounded px-3 py-2">
+                    ⚠ Watchtower is disabled — alerts won't be forwarded until it's on (Network → Diagnostics → Watchtower).
+                </div>
+                <div id="siem-targets" class="space-y-2 mb-4"></div>
+
+                <div class="border border-slate-700 rounded-lg p-4">
+                    <h4 class="font-semibold mb-3">Add a target</h4>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <label class="text-sm text-gray-300">Type
+                            <select id="siem-new-type" onchange="siemRenderNewFields()" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1">
+                                <option value="syslog">Syslog (CEF/LEEF)</option>
+                                <option value="splunk_hec">Splunk HEC</option>
+                                <option value="elastic">Elasticsearch</option>
+                                <option value="webhook">Webhook (JSON)</option>
+                                <option value="slack">Slack / Teams</option>
+                            </select>
+                        </label>
+                        <label class="text-sm text-gray-300">Name
+                            <input id="siem-new-name" type="text" placeholder="my-splunk" class="w-full mt-1 bg-slate-800 border border-slate-600 rounded px-2 py-1">
+                        </label>
+                    </div>
+                    <div id="siem-new-fields" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-3"></div>
+                    <div class="flex items-center gap-2 mt-3">
+                        <button onclick="siemAddTarget()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded-lg text-sm">Add target</button>
+                        <button onclick="siemTestAll()" class="bg-slate-700 hover:bg-slate-600 text-white px-3 py-1.5 rounded-lg text-sm">Send test to all</button>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Tip: for secrets, enter <code>env:RAGNAR_MYTOKEN</code> to read from <code>.env</code> instead of storing the value here.</p>
+                </div>
+            </div>
+        </div>
+
 
             <div id="net-sub-map" class="net-subview hidden">
             <div class="glass rounded-xl p-6">
@@ -8199,7 +8343,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260823-dome"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260825-assets4"></script>
 
 
 
