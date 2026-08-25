@@ -95,6 +95,66 @@ if [ ! -d "$ragnar_PATH/.git" ]; then
     fi
 fi
 
+# ── Docker deployment: update the container, skip the native flow ─────────────
+# If Ragnar runs here as a Docker container (compose service name 'ragnar') and
+# there is NO native systemd service, this box is a container deployment. Update
+# it the Docker way — pull the code, rebuild the image, restart the container —
+# and skip every native step (service stop/start, host pip installs, hardware
+# tweaks). Detection is deliberately strict: a real native install (service
+# present) always falls through to the unchanged flow below, even if a stray
+# 'ragnar' container also exists, so nothing here can break native updates.
+if command -v docker >/dev/null 2>&1 \
+   && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx 'ragnar' \
+   && ! systemctl is-active --quiet ragnar.service 2>/dev/null \
+   && ! systemctl list-unit-files 2>/dev/null | grep -q '^ragnar\.service'; then
+    echo -e "\n${BLUE}Docker deployment detected — updating the container instead of a native install.${NC}"
+
+    # Same dubious-ownership guard the native path uses (root over a ragnar-owned
+    # checkout), so the pull below does not stop on it.
+    git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$ragnar_PATH" \
+        || git config --global --add safe.directory "$ragnar_PATH"
+    find "$ragnar_PATH/.git" -name '*.lock' -type f -delete 2>/dev/null || true
+
+    DOCKER_BRANCH="$(git -C "$ragnar_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    echo -e "${BLUE}Pulling latest code (${DOCKER_BRANCH})...${NC}"
+    if ! git -C "$ragnar_PATH" pull --ff-only origin "$DOCKER_BRANCH"; then
+        echo -e "${YELLOW}Fast-forward pull failed — forcing to origin/${DOCKER_BRANCH} (local edits are kept in git's reflog)...${NC}"
+        if ! { git -C "$ragnar_PATH" fetch origin "$DOCKER_BRANCH" \
+               && git -C "$ragnar_PATH" reset --hard "origin/${DOCKER_BRANCH}"; }; then
+            echo -e "${RED}git update failed — aborting Docker update (container left running).${NC}"
+            exit 1
+        fi
+    fi
+
+    # Pick the compose command (v2 plugin preferred, v1 fallback).
+    if docker compose version >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker compose"
+    elif command -v docker-compose >/dev/null 2>&1; then
+        DOCKER_COMPOSE="docker-compose"
+    else
+        echo -e "${RED}Docker Compose not found. Rebuild manually:${NC} cd $ragnar_PATH && docker compose up -d --build"
+        exit 1
+    fi
+
+    # Preserve the port the container is already bound to (host networking uses
+    # RAGNAR_WEB_PORT), so an update never silently moves the UI off its port.
+    DOCKER_WEB_PORT="$(docker inspect ragnar --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+        | sed -n 's/^RAGNAR_WEB_PORT=//p' | head -1)"
+    DOCKER_WEB_PORT="${DOCKER_WEB_PORT:-8000}"
+
+    echo -e "${BLUE}Rebuilding image and restarting container (RAGNAR_WEB_PORT=${DOCKER_WEB_PORT}) — this can take a few minutes...${NC}"
+    if ( cd "$ragnar_PATH" && RAGNAR_WEB_PORT="$DOCKER_WEB_PORT" $DOCKER_COMPOSE up -d --build ); then
+        DOCKER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+        echo -e "\n${GREEN}Docker deployment updated successfully.${NC}"
+        echo -e "  ${GREEN}Web UI:${NC} http://${DOCKER_IP:-<host-ip>}:${DOCKER_WEB_PORT}"
+        echo -e "  ${BLUE}Logs:${NC}   cd $ragnar_PATH && $DOCKER_COMPOSE logs -f"
+        exit 0
+    else
+        echo -e "\n${RED}Docker rebuild failed. Inspect with:${NC} cd $ragnar_PATH && $DOCKER_COMPOSE logs"
+        exit 1
+    fi
+fi
+
 echo -e "\n${BLUE}Step 1: Stopping ragnar service...${NC}"
 systemctl stop ragnar.service
 

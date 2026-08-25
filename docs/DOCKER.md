@@ -157,6 +157,11 @@ git pull                       # on the host, in your Ragnar clone
 docker compose up -d --build   # rebuild + restart the container
 ```
 
+`sudo ./update_ragnar.sh` also handles a Docker deployment automatically: when it
+sees the `ragnar` container and no native systemd service, it pulls the code and
+runs the rebuild for you (preserving the container's current port). On a native
+install it behaves exactly as before.
+
 **In-app Updates tab (works, but ephemeral):** `git` is installed in the image,
 and the image ships without `.git` — which looks to Ragnar exactly like a
 "tarball install". On the first update check the container self-reattaches to
