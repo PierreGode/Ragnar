@@ -1452,17 +1452,24 @@ class WiFiManager:
         """Check if Wi-Fi is connected using multiple methods"""
         try:
             self._ensure_wifi_interfaces_up()
-            # Method 1: Check using nmcli for active wireless connections
-            result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,TYPE', 'con', 'show'], 
-                                  capture_output=True, text=True, timeout=30)
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if line and 'yes:802-11-wireless' in line:
-                        # Double-check with device status
-                        dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'status'], 
-                                                  capture_output=True, text=True, timeout=5)
-                        if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
-                            return True
+            # Method 1: Check using nmcli for active wireless connections.
+            # Guarded: hosts without NetworkManager (containers, minimal
+            # installs) have no nmcli — a missing binary must fall through to
+            # the iwconfig/ping methods below, not abort the whole check and
+            # report "disconnected" on a perfectly good uplink.
+            try:
+                result = subprocess.run(['nmcli', '-t', '-f', 'ACTIVE,TYPE', 'con', 'show'], 
+                                      capture_output=True, text=True, timeout=30)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        if line and 'yes:802-11-wireless' in line:
+                            # Double-check with device status
+                            dev_result = subprocess.run(['nmcli', '-t', '-f', 'DEVICE,STATE', 'dev', 'status'], 
+                                                      capture_output=True, text=True, timeout=5)
+                            if dev_result.returncode == 0 and 'connected' in dev_result.stdout:
+                                return True
+            except FileNotFoundError:
+                pass  # nmcli not available — fall through to iwconfig/ping
             
             # Methods 2 and 3 name an interface, so they must name the one
             # actually carrying the connection. With a dongle that is wlan1,
