@@ -3571,7 +3571,7 @@ function _wifiDrawRadius(d) {
 // ---- WiFi coverage heatmap (walk-around survey) ----------------------------
 const _wifiHm = { floorplan: null, data: null, inited: false, metric: 'rssi',
     mode: 'survey', tool: 'wall', walls: [], columns: [], predictAps: [], predicting: true,
-    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false,
+    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false, fp: null,
     view: { zoom: 1, cx: 0.5, cy: 0.5 }, pan: null };
 
 // ---- Floor scale + zoomable viewport ---------------------------------------
@@ -3803,6 +3803,49 @@ function wifiHeatmapInit() {
                 wifiHeatmapLoad();
             }).catch(() => { st.textContent = 'sample failed'; });
     });
+    // --- Hover tooltip: identify the survey sample under the cursor -------
+    if (cv) {
+        let tip = document.getElementById('wifi-hm-tip');
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.id = 'wifi-hm-tip';
+            tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;display:none;'
+                + 'background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:6px;'
+                + 'padding:5px 8px;font:11px sans-serif;line-height:1.35;max-width:260px;'
+                + 'box-shadow:0 4px 14px rgba(0,0,0,.5)';
+            document.body.appendChild(tip);
+        }
+        const hideTip = () => { tip.style.display = 'none'; };
+        cv.addEventListener('mousemove', (e) => {
+            if (_wifiHm.pan || _wifiHm.drag) { hideTip(); return; }
+            const samples = (_wifiHm.data && _wifiHm.data.samples) || [];
+            if (!samples.length) { hideTip(); return; }
+            const rect = cv.getBoundingClientRect();
+            const px = e.clientX - rect.left, py = e.clientY - rect.top;
+            const vp = _wifiHmViewport(cv.clientWidth, cv.clientHeight || cv.clientWidth);
+            let best = null, bestD = 12 * 12;
+            for (const sp of samples) {
+                const dx = vp.toX(sp.x) - px, dy = vp.toY(sp.y) - py;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = sp; }
+            }
+            if (!best) { hideTip(); return; }
+            const ssid = best.ssid || best.serving || '<hidden>';
+            const bssid = best.bssid || best.serving || '\u2014';
+            const parts = [];
+            if (best.rssi != null) parts.push(best.rssi + ' dBm');
+            if (best.snr != null) parts.push('SNR ' + best.snr);
+            if (best.band) parts.push(best.band + 'GHz');
+            if (best.channel) parts.push('ch' + best.channel);
+            tip.innerHTML = '<b>' + _esc(ssid) + '</b><br>'
+                + '<span style="font-family:monospace;color:#93c5fd">' + _esc(bssid) + '</span>'
+                + (parts.length ? '<br><span style="color:#94a3b8">' + _esc(parts.join(' \u00b7 ')) + '</span>' : '');
+            tip.style.left = (e.clientX + 12) + 'px';
+            tip.style.top = (e.clientY + 12) + 'px';
+            tip.style.display = 'block';
+        });
+        cv.addEventListener('mouseleave', hideTip);
+    }
     // --- Zoom (wheel) + pan (drag) + drag existing AP nodes / walls ---
     if (cv) {
         const norm = (e) => {
@@ -3875,6 +3918,7 @@ function wifiHeatmapInit() {
             if (_wifiHm.dragMoved) {
                 if (_wifiHm.drag.kind === 'ap') _wifiHmPersistAp();
                 else if (_wifiHm.drag.kind === 'column' || _wifiHm.drag.kind === 'column-resize') _wifiHmPersistColumns();
+                else if (_wifiHm.drag.kind === 'fp-move' || _wifiHm.drag.kind === 'fp-resize') _wifiHmPersistFp();
                 else _wifiHmPersistWalls();
             }
             _wifiHm.suppressClick = true;   // swallow the click that follows this press
@@ -3925,10 +3969,12 @@ function wifiHmSetTool(t) {
     sel('wifi-hm-tool-wall', t === 'wall');
     sel('wifi-hm-tool-ap', t === 'ap');
     sel('wifi-hm-tool-column', t === 'column');
+    sel('wifi-hm-tool-floorplan', t === 'floorplan');
     const st = document.getElementById('wifi-hm-design-status');
     const msg = { wall: 'Click two points to draw a wall — or drag an existing wall to move it.',
         ap: 'Click the plan to drop an AP node (add several for a mesh) — or drag a node to move it.',
-        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.' };
+        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.',
+        floorplan: 'Drag the image to move it; drag its blue corner handle to resize. Line the plan up with the metre grid, then switch back to a placement tool. Use Fit to reset.' };
     if (st) st.textContent = msg[t] || '';
 }
 
@@ -3954,6 +4000,13 @@ function _wifiHmColumnPxRadius(c, vp) {
 // or null. Distances in CSS px.
 function _wifiHmHitTest(p) {
     const { px, py, wx, wy, vp } = p, R = 12;
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp;
+        const hx = vp.toX(f.x + f.w), hy = vp.toY(f.y + f.h);
+        if (Math.hypot(hx - px, hy - py) <= 12) return { kind: 'fp-resize' };
+        if (wx >= f.x && wx <= f.x + f.w && wy >= f.y && wy <= f.y + f.h)
+            return { kind: 'fp-move', ox: f.x - wx, oy: f.y - wy };
+    }
     for (let i = _wifiHm.predictAps.length - 1; i >= 0; i--) {
         const ap = _wifiHm.predictAps[i];
         if (Math.hypot(vp.toX(ap.x) - px, vp.toY(ap.y) - py) <= R)
@@ -3990,12 +4043,29 @@ function _wifiHmHitTest(p) {
 }
 
 const _clamp01 = v => Math.max(0, Math.min(1, v));
+function _wifiHmPersistFp() {
+    fetch('/api/net/wifi/heatmap', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'floorplan_transform', transform: _wifiHm.fp }) }).catch(() => {});
+}
+function wifiHmFitFloorplan() {
+    const im = _wifiHm.floorplan; if (!im) return;
+    const s = Math.min(1 / im.width, 1 / im.height);
+    _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2, w: im.width * s, h: im.height * s };
+    _wifiHmPersistFp(); wifiHeatmapRender();
+}
 
 function _wifiHmApplyDrag(nx, ny) {
     const d = _wifiHm.drag; if (!d) return;
     if (d.kind === 'ap') {
         const ap = _wifiHm.predictAps[d.idx]; if (!ap) return;
         ap.x = _clamp01(nx + d.ox); ap.y = _clamp01(ny + d.oy);
+    } else if (d.kind === 'fp-move') {
+        const f = _wifiHm.fp; if (!f) return;
+        f.x = nx + d.ox; f.y = ny + d.oy;
+    } else if (d.kind === 'fp-resize') {
+        const f = _wifiHm.fp, im = _wifiHm.floorplan; if (!f || !im) return;
+        const w = Math.max(0.05, nx - f.x);
+        f.w = w; f.h = w * (im.height / im.width);
     } else if (d.kind === 'column') {
         const c = _wifiHm.columns[d.idx]; if (!c) return;
         c.x = _clamp01(nx + d.ox); c.y = _clamp01(ny + d.oy);
@@ -4255,13 +4325,59 @@ function wifiHeatmapLoad() {
         const st = document.getElementById('wifi-hm-status');
         if (st && d.samples) st.textContent = d.samples.length + ' sample(s)';
         if (d.floorplan) {
+            _wifiHm.fp = d.floorplan_transform || null;
             const img = new Image();
             img.onload = () => { _wifiHm.floorplan = img; wifiHeatmapRender(); };
+            img.onerror = () => {
+                _wifiHm.floorplan = null; wifiHeatmapRender();
+                const st = document.getElementById('wifi-hm-status');
+                if (st) st.textContent = '\u26a0 Could not display that floorplan \u2014 use PNG or JPG (TIFF/HEIC/PDF are not supported by browsers).';
+            };
             img.src = d.floorplan;
         } else { _wifiHm.floorplan = null; wifiHeatmapRender(); }
     }).catch(() => {});
 }
 
+// ── RoomScan touchscreen device (Waveshare ESP32-S3 4B over USB serial) ──
+function _roomscanStatusEl() { return document.getElementById('roomscan-status'); }
+function _roomscanPost(body) {
+    return fetch('/api/net/wifi/heatmap', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    }).then(r => r.json());
+}
+function roomscanStatus() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Checking\u2026';
+    _roomscanPost({ action: 'roomscan_status' }).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Connected ' + (r.port || ''))
+            : ('Not found' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Error'; });
+}
+function roomscanPushAps() {
+    const el = _roomscanStatusEl();
+    const aps = (_wifiState.data && _wifiState.data.aps) || [];
+    const slim = aps.map(a => ({ ssid: a.ssid, bssid: a.bssid, signal: a.signal, band: a.band, channel: a.channel }));
+    if (el) el.textContent = 'Pushing ' + slim.length + ' APs\u2026';
+    const body = { action: 'roomscan_push_aps' };
+    if (slim.length) body.aps = slim;
+    else { const s = document.getElementById('wifi-iface'); body.interface = _wifiState.iface || (s ? s.value : ''); }
+    _roomscanPost(body).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Pushed ' + (r.pushed || 0) + ' APs to device')
+            : ('Push failed' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Push error'; });
+}
+function roomscanImport() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Importing from device\u2026';
+    _roomscanPost({ action: 'roomscan_import' }).then(r => {
+        if (!r || !r.ok) { if (el) el.textContent = 'Import failed' + (r && r.error ? ' \u2014 ' + r.error : ''); return; }
+        if (el) el.textContent = 'Imported ' + (r.rooms || 0) + ' room(s), ' + (r.aps || 0) + ' AP(s)';
+        try { wifiHmSetMode('design'); } catch (e) {}
+        if (typeof wifiHeatmapLoad === 'function') wifiHeatmapLoad();
+        else if (typeof wifiHeatmapRender === 'function') wifiHeatmapRender();
+    }).catch(() => { if (el) el.textContent = 'Import error'; });
+}
 function wifiHeatmapRender() {
     const cv = document.getElementById('wifi-heatmap'); if (!cv) return;
     const dpr = window.devicePixelRatio || 1;
@@ -4284,11 +4400,14 @@ function wifiHeatmapRender() {
     // Floorplan (contain, centred on the square floor)
     if (_wifiHm.floorplan) {
         const im = _wifiHm.floorplan;
-        const s = Math.min(1 / im.width, 1 / im.height);   // world units per image px
-        const iw = im.width * s, ih = im.height * s;
-        const pxPerWorld = vp.pw / vp.span;
+        if (!_wifiHm.fp) {
+            const s = Math.min(1 / im.width, 1 / im.height);
+            _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2,
+                           w: im.width * s, h: im.height * s };
+        }
+        const f = _wifiHm.fp, pxPerWorld = vp.pw / vp.span;
         ctx.globalAlpha = 0.85;
-        ctx.drawImage(im, vp.toX((1 - iw) / 2), vp.toY((1 - ih) / 2), iw * pxPerWorld, ih * pxPerWorld);
+        ctx.drawImage(im, vp.toX(f.x), vp.toY(f.y), f.w * pxPerWorld, f.h * pxPerWorld);
         ctx.globalAlpha = 1;
     }
     const design = _wifiHm.mode === 'design';
@@ -4409,6 +4528,18 @@ function _wifiHmDrawRulers(ctx, vp, floorM) {
 }
 
 function _wifiHmDrawDesign(ctx, vp) {
+    // Floorplan move/resize handles (only while the Image tool is active)
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp, ppw = vp.pw / vp.span;
+        ctx.save();
+        ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.strokeRect(vp.toX(f.x), vp.toY(f.y), f.w * ppw, f.h * ppw);
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(vp.toX(f.x + f.w), vp.toY(f.y + f.h), 6, 0, 2 * Math.PI);
+        ctx.fillStyle = '#38bdf8'; ctx.fill();
+        ctx.strokeStyle = '#0b1220'; ctx.stroke();
+        ctx.restore();
+    }
     // Walls
     ctx.lineCap = 'round';
     _wifiHm.walls.forEach(w => {
@@ -4458,8 +4589,16 @@ function _wifiHmDrawDesign(ctx, vp) {
         ctx.beginPath(); ctx.arc(x, y, 8, 0, 2 * Math.PI);
         ctx.fillStyle = '#22d3ee'; ctx.fill();
         ctx.strokeStyle = '#0b1220'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('AP' + (i + 1), x, y - 12);
+        ctx.textAlign = 'center';
+        // Real name when known (imported/scanned AP), else AP1, AP2, …
+        const nm = ap.ssid || ap.bssid || ('AP' + (i + 1));
+        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif';
+        ctx.fillText(nm.length > 18 ? nm.slice(0, 17) + '\u2026' : nm, x, y - 12);
+        if (ap.bssid || ap.rssi != null) {
+            ctx.fillStyle = '#94a3b8'; ctx.font = '8px sans-serif';
+            const sub = (ap.bssid || '') + (ap.rssi != null ? '  ' + ap.rssi + 'dBm' : '');
+            ctx.fillText(sub, x, y - 23);
+        }
     });
 }
 

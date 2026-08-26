@@ -1248,6 +1248,7 @@ def _heatmap_load():
         data["predict_aps"] = [data["predict_ap"]] if data.get("predict_ap") else []
     # Mesh survey: registry of the nodes (BSSIDs) seen for the surveyed SSID.
     data.setdefault("mesh_nodes", {})
+    data.setdefault("floorplan_transform", None)
     return data
 
 
@@ -1263,12 +1264,62 @@ def heatmap_get():
     return _heatmap_load()
 
 
+def _floorplan_to_web(data_uri):
+    """Browsers cannot display TIFF/BMP/etc. in <img>, so an uploaded floorplan
+    in one of those formats silently fails to render. Transcode anything that is
+    not a web-native image to PNG (via Pillow); web formats pass through."""
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        return data_uri
+    try:
+        header, b64 = data_uri.split(",", 1)
+    except ValueError:
+        return data_uri
+    mime = header[5:].split(";", 1)[0].lower()
+    web_ok = {"image/png", "image/jpeg", "image/jpg", "image/webp",
+             "image/gif", "image/svg+xml", "image/avif"}
+    if mime in web_ok:
+        return data_uri
+    try:
+        import base64, io
+        from PIL import Image
+        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+        im.load()
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA" if (im.mode == "P" or "A" in im.mode) else "RGB")
+        maxd = 2500
+        if max(im.size) > maxd:
+            r = maxd / float(max(im.size))
+            im = im.resize((max(1, int(im.size[0] * r)), max(1, int(im.size[1] * r))))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return data_uri   # let the client show its unsupported-format message
+
+
 def heatmap_set_floorplan(floorplan_data_uri, target_bssid=None, target_ssid=None):
     data = _heatmap_load()
-    data["floorplan"] = floorplan_data_uri
+    data["floorplan"] = _floorplan_to_web(floorplan_data_uri)
+    data["floorplan_transform"] = None  # new image re-fits to the floor
     data["target_bssid"] = target_bssid
     data["target_ssid"] = target_ssid
     data["samples"] = []  # new floorplan => reset survey
+    _heatmap_save(data)
+    return data
+
+
+def heatmap_set_floorplan_transform(transform):
+    """Persist how the floorplan image is placed on the floor (world rect
+    x,y,w,h in 0..1) so the operator can move/scale it onto the metre grid."""
+    data = _heatmap_load()
+    t = None
+    if isinstance(transform, dict):
+        try:
+            t = {"x": float(transform["x"]), "y": float(transform["y"]),
+                 "w": max(0.02, float(transform["w"])), "h": max(0.02, float(transform["h"]))}
+        except (KeyError, TypeError, ValueError):
+            t = None
+    data["floorplan_transform"] = t
     _heatmap_save(data)
     return data
 
@@ -1326,7 +1377,7 @@ def _clean_predict_ap(ap):
     `width_m`/`height_m` give the floorplan's real size so normalized distances
     become metres for the path-loss model."""
     try:
-        return {
+        out = {
             "x": float(ap["x"]), "y": float(ap["y"]),
             "tx_dbm": float(ap.get("tx_dbm", _DEFAULT_TX_DBM)),
             "freq": float(ap.get("freq", 5200)),
@@ -1336,6 +1387,16 @@ def _clean_predict_ap(ap):
         }
     except (KeyError, TypeError, ValueError):
         return None
+    # Preserve optional identity so imported/scanned APs keep their real name.
+    for _k in ("ssid", "bssid"):
+        if ap.get(_k):
+            out[_k] = str(ap[_k])
+    try:
+        if ap.get("rssi") is not None:
+            out["rssi"] = int(ap["rssi"])
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def heatmap_set_predict_aps(aps):

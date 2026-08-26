@@ -16,6 +16,7 @@ on:
       - 'rusense_flasher/**'
       - 'espnow_bridge_firmware/espnow_bridge_c5/**'
       - 'espnow_bridge_firmware/espnow_bridge_s3_lcd/**'
+      - 'roomscan_firmware/**'
       - '.github/workflows/build-rusense-flasher.yml'
   workflow_dispatch:
 
@@ -91,6 +92,16 @@ jobs:
             --export-binaries \
             "espnow_bridge_firmware/espnow_bridge_s3_lcd"
 
+      - name: Compile ESP32-S3 RoomScan (touchscreen floor-plan tracer)
+        # Same Waveshare 4B board as the S3 LCD coordinator (RGB ST7701 + GT911).
+        # -fpermissive for the same GFX 1.6.7 i80 databus gpio_num_t reason.
+        run: |
+          arduino-cli compile \
+            --fqbn "esp32:esp32:esp32s3:CDCOnBoot=cdc,USBMode=hwcdc,PartitionScheme=default_8MB,PSRAM=opi,FlashSize=8M" \
+            --build-property "compiler.cpp.extra_flags=-fpermissive" \
+            --export-binaries \
+            "roomscan_firmware/roomscan_s3_lcd"
+
       - name: Install esptool
         run: pip install esptool
 
@@ -145,9 +156,25 @@ jobs:
             0xe000  "$BOOT_APP0" \
             0x10000 "$S3_BUILD/espnow_bridge_s3_lcd.ino.bin"
 
+          RS_BUILD=$(find roomscan_firmware/roomscan_s3_lcd/build \
+            -name "roomscan_s3_lcd.ino.bin" -printf '%h\n' | head -n 1)
+          if [ -z "$RS_BUILD" ]; then
+            echo "::error::RoomScan build output not found"
+            exit 1
+          fi
+          echo "RoomScan build dir: $RS_BUILD"
+          python -m esptool --chip esp32s3 merge_bin \
+            --output site/firmware/roomscan-s3-lcd.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            --target-offset 0x0 \
+            0x0000  "$RS_BUILD/roomscan_s3_lcd.ino.bootloader.bin" \
+            0x8000  "$RS_BUILD/roomscan_s3_lcd.ino.partitions.bin" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$RS_BUILD/roomscan_s3_lcd.ino.bin"
+
           # Stamp the coordinator manifests with a build version too.
           COORD_VERSION="$(date -u +%-m.%-d).${GITHUB_SHA::7}"
-          for m in manifest-coordinator-c5.json manifest-coordinator-s3-lcd.json; do
+          for m in manifest-coordinator-c5.json manifest-coordinator-s3-lcd.json manifest-roomscan-s3-lcd.json; do
             if [ -f "site/$m" ]; then
               jq --arg v "$COORD_VERSION" '.version = $v' "site/$m" > "site/$m.tmp"
               mv "site/$m.tmp" "site/$m"

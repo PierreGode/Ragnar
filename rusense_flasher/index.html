@@ -238,6 +238,37 @@
         </div>
       </section>
 
+      <section class="flash-panel" id="roomscan">
+        <h2>📐 RoomScan Floor-Plan Tracer <span class="panel-sub">(Waveshare ESP32-S3-Touch-LCD-4B · 480×480 touch)</span></h2>
+        <p>
+          A handheld <strong>touchscreen floor-plan tracer</strong> for the Ragnar Coverage Heatmap.
+          Sketch a room by tapping its corners on the 4″ panel, then place the access points Ragnar
+          scanned — pushed to the device over USB — exactly where they sit. Sync the finished map
+          (outline + AP positions) straight back into <strong>Signal Intelligence → Coverage Heatmap</strong>
+          over the same USB cable. No blueprint required.
+        </p>
+
+        <div class="prereq">
+          <div class="prereq-title">Before the forge fires</div>
+          <ol>
+            <li>Close Arduino IDE, Serial Monitor, or any other app holding the port</li>
+            <li>Use a <strong>data-capable</strong> USB-C cable (charge-only cables are runes that do nothing)</li>
+            <li>Click Forge and pick <code>USB JTAG/serial debug unit</code> from the port list</li>
+            <li>If the board isn&rsquo;t spotted, hold <strong>BOOT</strong> while tapping <strong>RST</strong></li>
+          </ol>
+        </div>
+
+        <div class="chip-badges">
+          <span class="chip-badge"><span class="dot"></span>ESP32-S3 &middot; 16&nbsp;MB flash &middot; 8&nbsp;MB PSRAM &middot; 480×480 touch</span>
+        </div>
+
+        <div class="flash-buttons">
+          <button class="btn-flash" onclick="flashDevice('manifest-roomscan-s3-lcd.json')">
+            🔨 Forge RoomScan
+          </button>
+        </div>
+      </section>
+
       <!-- Shared serial monitor button -->
       <section class="flash-panel" id="serial-tools">
         <h2>📡 Skald&rsquo;s Ear <span class="panel-sub"><strong>(serial monitor)</strong></span></h2>
