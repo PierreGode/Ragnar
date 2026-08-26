@@ -8821,6 +8821,17 @@ def vor_radial_page():
     return _no_store(make_response(send_from_directory('demos', 'vor_radial.html')))
 
 
+@app.route('/aprs')
+def aprs_page():
+    """Serve the APRS page.
+
+    Always served (login required): the RF decode needs an RTL-SDR, but the
+    APRS-IS Internet feed works with no dongle at all, so the page is useful to
+    everyone.
+    """
+    return _no_store(make_response(send_from_directory('demos', 'aprs.html')))
+
+
 # Captive portal detection routes for mobile devices
 @app.route('/generate_204')
 @app.route('/gen_204')
