@@ -2069,6 +2069,14 @@ function _wifiRfwfShow() {
         pager.classList.toggle('hidden', !showP);
         pager.classList.toggle('inline-flex', showP);
     }
+    // VOR radial decode needs an RTL-SDR tuned to 108–118 MHz; show when RTL
+    // present or demo on (synthetic radial).
+    const vor = document.getElementById('wifi-vor-btn');
+    if (vor) {
+        const showV = rtl || demo;
+        vor.classList.toggle('hidden', !showV);
+        vor.classList.toggle('inline-flex', showV);
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.
