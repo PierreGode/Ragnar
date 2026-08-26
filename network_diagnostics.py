@@ -18673,6 +18673,126 @@ def register_network_diagnostics(app, logger=None):
             return jsonify(wifi_analyzer.heatmap_add_sample(
                 data.get('x'), data.get('y'), data.get('rssi'),
                 data.get('bssid'), data.get('ssid')))
+        if action == 'roomscan_status':
+            # Is a RoomScan touchscreen device connected over USB serial?
+            try:
+                import roomscan_bridge
+                return jsonify(roomscan_bridge.ping(data.get('port')))
+            except Exception as e:
+                return _bad('roomscan: %s' % e)
+        if action == 'roomscan_push_aps':
+            # Push the current Wi-Fi scan to the device so the operator can
+            # place real, scanned APs on the sketched floor-plan.
+            try:
+                import roomscan_bridge
+            except Exception as e:
+                return _bad('roomscan: %s' % e)
+            aps = data.get('aps')
+            scanned = None
+            if not aps:
+                iface = (data.get('interface') or 'wlan0').strip()
+                if not _valid_iface(iface):
+                    return _bad('Invalid interface')
+                try:
+                    survey = wifi_analyzer.do_scan(iface, data.get('band') or 'all')
+                    aps = survey.get('aps', []) if isinstance(survey, dict) else []
+                    scanned = len(aps)
+                except Exception as e:
+                    return _bad('scan failed: %s' % e)
+            slim = [{'ssid': a.get('ssid', ''), 'bssid': a.get('bssid', ''),
+                     'signal': a.get('signal'), 'band': a.get('band', ''),
+                     'channel': a.get('channel', 0)} for a in (aps or [])][:48]
+            res = roomscan_bridge.push_aps(slim, data.get('port'))
+            if scanned is not None:
+                res['scanned'] = scanned
+            return jsonify(res)
+        if action == 'roomscan_import':
+            # Pull the finished map (room outline + placed APs) from the device
+            # and load it into the Coverage Heatmap as walls + predict APs.
+            try:
+                import roomscan_bridge
+            except Exception as e:
+                return _bad('roomscan: %s' % e)
+            r = roomscan_bridge.pull_map(data.get('port'))
+            if not r.get('ok'):
+                return jsonify(r)
+            m = r.get('map') or {}
+            try:
+                scale = float(m.get('scale_m', 10) or 10)
+            except (TypeError, ValueError):
+                scale = 10.0
+            walls = []
+            for room in (m.get('rooms') or []):
+                pts = [p for p in room if isinstance(p, (list, tuple)) and len(p) == 2]
+                n = len(pts)
+                for i in range(n):
+                    x1, y1 = pts[i]
+                    x2, y2 = pts[(i + 1) % n]
+                    walls.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'material': 'wall'})
+            paps_new = []
+            for ap in (m.get('aps') or []):
+                try:
+                    e = {'x': float(ap.get('x', 0.5)), 'y': float(ap.get('y', 0.5)),
+                         'width_m': scale, 'height_m': scale}
+                except (TypeError, ValueError):
+                    continue
+                if ap.get('ssid'):
+                    e['ssid'] = str(ap['ssid'])
+                if ap.get('bssid'):
+                    e['bssid'] = str(ap['bssid'])
+                try:
+                    if ap.get('rssi') is not None:
+                        e['rssi'] = int(ap['rssi'])
+                except (TypeError, ValueError):
+                    pass
+                paps_new.append(e)
+            # Furniture / structural objects -> heatmap columns (footprint + dB
+            # loss) so predicted coverage shadows behind them.
+            cols = []
+            for ob in (m.get('objects') or []):
+                try:
+                    cols.append({'x': float(ob.get('x', 0.5)), 'y': float(ob.get('y', 0.5)),
+                                 'radius_m': float(ob.get('radius_m', 0.3) or 0.3),
+                                 'loss_db': float(ob.get('loss_db', 10) or 10),
+                                 'material': str(ob.get('type', 'object'))})
+                except (TypeError, ValueError):
+                    continue
+            if not walls and not paps_new and not cols:
+                # Empty device map -> import nothing; never clobber existing walls/APs.
+                return jsonify({'ok': False, 'empty': True,
+                                'error': 'device map is empty - draw a room first'})
+            # Merge imported APs into existing predict APs by BSSID: move a
+            # matching AP to its imported position instead of duplicating it.
+            existing = (wifi_analyzer.heatmap_get() or {}).get('predict_aps') or []
+            by_b = {}
+            for a in existing:
+                b = (a.get('bssid') or '').lower()
+                if b:
+                    by_b[b] = a
+            merged = list(existing)
+            moved = 0
+            for e in paps_new:
+                b = (e.get('bssid') or '').lower()
+                if b and b in by_b:
+                    tgt = by_b[b]
+                    tgt['x'] = e['x']; tgt['y'] = e['y']
+                    tgt['width_m'] = e['width_m']; tgt['height_m'] = e['height_m']
+                    if e.get('ssid'):
+                        tgt['ssid'] = e['ssid']
+                    if 'rssi' in e:
+                        tgt['rssi'] = e['rssi']
+                    moved += 1
+                else:
+                    merged.append(e)
+                    if b:
+                        by_b[b] = e
+            wifi_analyzer.heatmap_set_walls(walls)
+            wifi_analyzer.heatmap_set_predict_aps(merged)
+            wifi_analyzer.heatmap_set_columns(cols)
+            return jsonify({'ok': True, 'rooms': len(m.get('rooms') or []),
+                            'walls': len(walls), 'aps': len(paps_new), 'moved': moved,
+                            'objects': len(cols), 'scale_m': scale,
+                            'placed': m.get('aps') or []})
         return _bad('Unknown action')
 
     @app.route('/api/net/wifi/surveys', methods=['GET', 'POST'])

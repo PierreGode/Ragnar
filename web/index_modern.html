@@ -2878,6 +2878,14 @@
                         <button onclick="wifiThroughputTest()" class="wifi-hm-btn" title="Run one throughput/latency test here without dropping a sample">Test now</button>
                         <span id="wifi-hm-tp-status" class="text-[11px] text-gray-500"></span>
                     </div>
+                    <!-- RoomScan touchscreen device (Waveshare ESP32-S3 4B over USB serial) -->
+                    <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-800">
+                        <span class="text-[11px] text-gray-400 font-medium" title="Sketch the room on a Waveshare ESP32-S3 touchscreen on-site, place scanned APs by tapping, and sync over USB serial.">📐 RoomScan device</span>
+                        <button onclick="roomscanStatus()" class="wifi-hm-btn" title="Check if a RoomScan touchscreen device is connected over USB serial">🔌 Detect</button>
+                        <button onclick="roomscanPushAps()" class="wifi-hm-btn" title="Push the Wi-Fi scan you see here to the device, so you can place those real APs on the sketched plan">▲ Push APs → device</button>
+                        <button onclick="roomscanImport()" class="wifi-hm-btn" title="Pull the sketched room outline + placed AP positions from the device into this heatmap (Design/Predict)">▼ Import map ← device</button>
+                        <span id="roomscan-status" class="text-[11px] text-gray-500"></span>
+                    </div>
                     <!-- Design / predictive coverage -->
                     <div class="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-800">
                         <span class="text-[11px] text-gray-400 font-medium">Mode</span>
@@ -8347,7 +8355,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260826-vor"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260826-roomscan3"></script>
 
 
 

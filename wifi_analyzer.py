@@ -1326,7 +1326,7 @@ def _clean_predict_ap(ap):
     `width_m`/`height_m` give the floorplan's real size so normalized distances
     become metres for the path-loss model."""
     try:
-        return {
+        out = {
             "x": float(ap["x"]), "y": float(ap["y"]),
             "tx_dbm": float(ap.get("tx_dbm", _DEFAULT_TX_DBM)),
             "freq": float(ap.get("freq", 5200)),
@@ -1336,6 +1336,16 @@ def _clean_predict_ap(ap):
         }
     except (KeyError, TypeError, ValueError):
         return None
+    # Preserve optional identity so imported/scanned APs keep their real name.
+    for _k in ("ssid", "bssid"):
+        if ap.get(_k):
+            out[_k] = str(ap[_k])
+    try:
+        if ap.get("rssi") is not None:
+            out["rssi"] = int(ap["rssi"])
+    except (TypeError, ValueError):
+        pass
+    return out
 
 
 def heatmap_set_predict_aps(aps):

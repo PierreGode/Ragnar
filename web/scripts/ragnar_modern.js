@@ -3803,6 +3803,49 @@ function wifiHeatmapInit() {
                 wifiHeatmapLoad();
             }).catch(() => { st.textContent = 'sample failed'; });
     });
+    // --- Hover tooltip: identify the survey sample under the cursor -------
+    if (cv) {
+        let tip = document.getElementById('wifi-hm-tip');
+        if (!tip) {
+            tip = document.createElement('div');
+            tip.id = 'wifi-hm-tip';
+            tip.style.cssText = 'position:fixed;z-index:9999;pointer-events:none;display:none;'
+                + 'background:#0b1220;color:#e2e8f0;border:1px solid #334155;border-radius:6px;'
+                + 'padding:5px 8px;font:11px sans-serif;line-height:1.35;max-width:260px;'
+                + 'box-shadow:0 4px 14px rgba(0,0,0,.5)';
+            document.body.appendChild(tip);
+        }
+        const hideTip = () => { tip.style.display = 'none'; };
+        cv.addEventListener('mousemove', (e) => {
+            if (_wifiHm.pan || _wifiHm.drag) { hideTip(); return; }
+            const samples = (_wifiHm.data && _wifiHm.data.samples) || [];
+            if (!samples.length) { hideTip(); return; }
+            const rect = cv.getBoundingClientRect();
+            const px = e.clientX - rect.left, py = e.clientY - rect.top;
+            const vp = _wifiHmViewport(cv.clientWidth, cv.clientHeight || cv.clientWidth);
+            let best = null, bestD = 12 * 12;
+            for (const sp of samples) {
+                const dx = vp.toX(sp.x) - px, dy = vp.toY(sp.y) - py;
+                const d = dx * dx + dy * dy;
+                if (d < bestD) { bestD = d; best = sp; }
+            }
+            if (!best) { hideTip(); return; }
+            const ssid = best.ssid || best.serving || '<hidden>';
+            const bssid = best.bssid || best.serving || '\u2014';
+            const parts = [];
+            if (best.rssi != null) parts.push(best.rssi + ' dBm');
+            if (best.snr != null) parts.push('SNR ' + best.snr);
+            if (best.band) parts.push(best.band + 'GHz');
+            if (best.channel) parts.push('ch' + best.channel);
+            tip.innerHTML = '<b>' + _esc(ssid) + '</b><br>'
+                + '<span style="font-family:monospace;color:#93c5fd">' + _esc(bssid) + '</span>'
+                + (parts.length ? '<br><span style="color:#94a3b8">' + _esc(parts.join(' \u00b7 ')) + '</span>' : '');
+            tip.style.left = (e.clientX + 12) + 'px';
+            tip.style.top = (e.clientY + 12) + 'px';
+            tip.style.display = 'block';
+        });
+        cv.addEventListener('mouseleave', hideTip);
+    }
     // --- Zoom (wheel) + pan (drag) + drag existing AP nodes / walls ---
     if (cv) {
         const norm = (e) => {
@@ -4262,6 +4305,46 @@ function wifiHeatmapLoad() {
     }).catch(() => {});
 }
 
+// ── RoomScan touchscreen device (Waveshare ESP32-S3 4B over USB serial) ──
+function _roomscanStatusEl() { return document.getElementById('roomscan-status'); }
+function _roomscanPost(body) {
+    return fetch('/api/net/wifi/heatmap', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    }).then(r => r.json());
+}
+function roomscanStatus() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Checking\u2026';
+    _roomscanPost({ action: 'roomscan_status' }).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Connected ' + (r.port || ''))
+            : ('Not found' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Error'; });
+}
+function roomscanPushAps() {
+    const el = _roomscanStatusEl();
+    const aps = (_wifiState.data && _wifiState.data.aps) || [];
+    const slim = aps.map(a => ({ ssid: a.ssid, bssid: a.bssid, signal: a.signal, band: a.band, channel: a.channel }));
+    if (el) el.textContent = 'Pushing ' + slim.length + ' APs\u2026';
+    const body = { action: 'roomscan_push_aps' };
+    if (slim.length) body.aps = slim;
+    else { const s = document.getElementById('wifi-iface'); body.interface = _wifiState.iface || (s ? s.value : ''); }
+    _roomscanPost(body).then(r => {
+        if (el) el.textContent = (r && r.ok)
+            ? ('Pushed ' + (r.pushed || 0) + ' APs to device')
+            : ('Push failed' + (r && r.error ? ' \u2014 ' + r.error : ''));
+    }).catch(() => { if (el) el.textContent = 'Push error'; });
+}
+function roomscanImport() {
+    const el = _roomscanStatusEl(); if (el) el.textContent = 'Importing from device\u2026';
+    _roomscanPost({ action: 'roomscan_import' }).then(r => {
+        if (!r || !r.ok) { if (el) el.textContent = 'Import failed' + (r && r.error ? ' \u2014 ' + r.error : ''); return; }
+        if (el) el.textContent = 'Imported ' + (r.rooms || 0) + ' room(s), ' + (r.aps || 0) + ' AP(s)';
+        try { wifiHmSetMode('design'); } catch (e) {}
+        if (typeof wifiHeatmapLoad === 'function') wifiHeatmapLoad();
+        else if (typeof wifiHeatmapRender === 'function') wifiHeatmapRender();
+    }).catch(() => { if (el) el.textContent = 'Import error'; });
+}
 function wifiHeatmapRender() {
     const cv = document.getElementById('wifi-heatmap'); if (!cv) return;
     const dpr = window.devicePixelRatio || 1;
@@ -4458,8 +4541,16 @@ function _wifiHmDrawDesign(ctx, vp) {
         ctx.beginPath(); ctx.arc(x, y, 8, 0, 2 * Math.PI);
         ctx.fillStyle = '#22d3ee'; ctx.fill();
         ctx.strokeStyle = '#0b1220'; ctx.lineWidth = 2; ctx.stroke();
-        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('AP' + (i + 1), x, y - 12);
+        ctx.textAlign = 'center';
+        // Real name when known (imported/scanned AP), else AP1, AP2, …
+        const nm = ap.ssid || ap.bssid || ('AP' + (i + 1));
+        ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 10px sans-serif';
+        ctx.fillText(nm.length > 18 ? nm.slice(0, 17) + '\u2026' : nm, x, y - 12);
+        if (ap.bssid || ap.rssi != null) {
+            ctx.fillStyle = '#94a3b8'; ctx.font = '8px sans-serif';
+            const sub = (ap.bssid || '') + (ap.rssi != null ? '  ' + ap.rssi + 'dBm' : '');
+            ctx.fillText(sub, x, y - 23);
+        }
     });
 }
 
