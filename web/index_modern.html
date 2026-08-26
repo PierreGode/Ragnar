@@ -2899,6 +2899,8 @@
                                 <button id="wifi-hm-tool-wall" onclick="wifiHmSetTool('wall')" class="wifi-hm-seg-btn wifi-hm-seg-on" title="Click two points on the plan to draw a wall">✏ Draw wall</button>
                                 <button id="wifi-hm-tool-ap" onclick="wifiHmSetTool('ap')" class="wifi-hm-seg-btn wifi-hm-seg-off" title="Click the plan to drop AP nodes — add as many as you like to plan a mesh">📶 Place AP nodes</button>
                                 <button id="wifi-hm-tool-column" onclick="wifiHmSetTool('column')" class="wifi-hm-seg-btn wifi-hm-seg-off" title="Click the plan to drop structural columns/pillars — they shadow WiFi behind them. Drag a column's white edge handle to resize it.">⬤ Column</button>
+                                <button id="wifi-hm-tool-floorplan" onclick="wifiHmSetTool('floorplan')" class="wifi-hm-seg-btn wifi-hm-seg-off" title="Move/scale the uploaded floorplan image to line it up with the metre grid. Drag the image to move; drag its blue corner handle to resize.">🖼 Move image</button>
+                                <button onclick="wifiHmFitFloorplan()" class="wifi-hm-seg-btn wifi-hm-seg-off" title="Reset the floorplan to fit the floor">⤢ Fit</button>
                             </div>
                             <select id="wifi-hm-wall-mat" class="wifi-hm-select" title="Wall material — sets its dB attenuation">
                                 <option value="drywall">Drywall (3 dB)</option>
@@ -8355,7 +8357,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260826-roomscan4"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260826-roomscan5"></script>
 
 
 

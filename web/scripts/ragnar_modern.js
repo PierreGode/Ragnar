@@ -3571,7 +3571,7 @@ function _wifiDrawRadius(d) {
 // ---- WiFi coverage heatmap (walk-around survey) ----------------------------
 const _wifiHm = { floorplan: null, data: null, inited: false, metric: 'rssi',
     mode: 'survey', tool: 'wall', walls: [], columns: [], predictAps: [], predicting: true,
-    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false,
+    wallStart: null, mesh: false, drag: null, dragMoved: false, suppressClick: false, fp: null,
     view: { zoom: 1, cx: 0.5, cy: 0.5 }, pan: null };
 
 // ---- Floor scale + zoomable viewport ---------------------------------------
@@ -3918,6 +3918,7 @@ function wifiHeatmapInit() {
             if (_wifiHm.dragMoved) {
                 if (_wifiHm.drag.kind === 'ap') _wifiHmPersistAp();
                 else if (_wifiHm.drag.kind === 'column' || _wifiHm.drag.kind === 'column-resize') _wifiHmPersistColumns();
+                else if (_wifiHm.drag.kind === 'fp-move' || _wifiHm.drag.kind === 'fp-resize') _wifiHmPersistFp();
                 else _wifiHmPersistWalls();
             }
             _wifiHm.suppressClick = true;   // swallow the click that follows this press
@@ -3968,10 +3969,12 @@ function wifiHmSetTool(t) {
     sel('wifi-hm-tool-wall', t === 'wall');
     sel('wifi-hm-tool-ap', t === 'ap');
     sel('wifi-hm-tool-column', t === 'column');
+    sel('wifi-hm-tool-floorplan', t === 'floorplan');
     const st = document.getElementById('wifi-hm-design-status');
     const msg = { wall: 'Click two points to draw a wall — or drag an existing wall to move it.',
         ap: 'Click the plan to drop an AP node (add several for a mesh) — or drag a node to move it.',
-        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.' };
+        column: 'Click to drop a structural column (pillar) — drag it to move, or drag its white edge handle to resize. Columns shadow WiFi behind them.',
+        floorplan: 'Drag the image to move it; drag its blue corner handle to resize. Line the plan up with the metre grid, then switch back to a placement tool. Use Fit to reset.' };
     if (st) st.textContent = msg[t] || '';
 }
 
@@ -3997,6 +4000,13 @@ function _wifiHmColumnPxRadius(c, vp) {
 // or null. Distances in CSS px.
 function _wifiHmHitTest(p) {
     const { px, py, wx, wy, vp } = p, R = 12;
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp;
+        const hx = vp.toX(f.x + f.w), hy = vp.toY(f.y + f.h);
+        if (Math.hypot(hx - px, hy - py) <= 12) return { kind: 'fp-resize' };
+        if (wx >= f.x && wx <= f.x + f.w && wy >= f.y && wy <= f.y + f.h)
+            return { kind: 'fp-move', ox: f.x - wx, oy: f.y - wy };
+    }
     for (let i = _wifiHm.predictAps.length - 1; i >= 0; i--) {
         const ap = _wifiHm.predictAps[i];
         if (Math.hypot(vp.toX(ap.x) - px, vp.toY(ap.y) - py) <= R)
@@ -4033,12 +4043,29 @@ function _wifiHmHitTest(p) {
 }
 
 const _clamp01 = v => Math.max(0, Math.min(1, v));
+function _wifiHmPersistFp() {
+    fetch('/api/net/wifi/heatmap', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'floorplan_transform', transform: _wifiHm.fp }) }).catch(() => {});
+}
+function wifiHmFitFloorplan() {
+    const im = _wifiHm.floorplan; if (!im) return;
+    const s = Math.min(1 / im.width, 1 / im.height);
+    _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2, w: im.width * s, h: im.height * s };
+    _wifiHmPersistFp(); wifiHeatmapRender();
+}
 
 function _wifiHmApplyDrag(nx, ny) {
     const d = _wifiHm.drag; if (!d) return;
     if (d.kind === 'ap') {
         const ap = _wifiHm.predictAps[d.idx]; if (!ap) return;
         ap.x = _clamp01(nx + d.ox); ap.y = _clamp01(ny + d.oy);
+    } else if (d.kind === 'fp-move') {
+        const f = _wifiHm.fp; if (!f) return;
+        f.x = nx + d.ox; f.y = ny + d.oy;
+    } else if (d.kind === 'fp-resize') {
+        const f = _wifiHm.fp, im = _wifiHm.floorplan; if (!f || !im) return;
+        const w = Math.max(0.05, nx - f.x);
+        f.w = w; f.h = w * (im.height / im.width);
     } else if (d.kind === 'column') {
         const c = _wifiHm.columns[d.idx]; if (!c) return;
         c.x = _clamp01(nx + d.ox); c.y = _clamp01(ny + d.oy);
@@ -4298,6 +4325,7 @@ function wifiHeatmapLoad() {
         const st = document.getElementById('wifi-hm-status');
         if (st && d.samples) st.textContent = d.samples.length + ' sample(s)';
         if (d.floorplan) {
+            _wifiHm.fp = d.floorplan_transform || null;
             const img = new Image();
             img.onload = () => { _wifiHm.floorplan = img; wifiHeatmapRender(); };
             img.onerror = () => {
@@ -4372,11 +4400,14 @@ function wifiHeatmapRender() {
     // Floorplan (contain, centred on the square floor)
     if (_wifiHm.floorplan) {
         const im = _wifiHm.floorplan;
-        const s = Math.min(1 / im.width, 1 / im.height);   // world units per image px
-        const iw = im.width * s, ih = im.height * s;
-        const pxPerWorld = vp.pw / vp.span;
+        if (!_wifiHm.fp) {
+            const s = Math.min(1 / im.width, 1 / im.height);
+            _wifiHm.fp = { x: (1 - im.width * s) / 2, y: (1 - im.height * s) / 2,
+                           w: im.width * s, h: im.height * s };
+        }
+        const f = _wifiHm.fp, pxPerWorld = vp.pw / vp.span;
         ctx.globalAlpha = 0.85;
-        ctx.drawImage(im, vp.toX((1 - iw) / 2), vp.toY((1 - ih) / 2), iw * pxPerWorld, ih * pxPerWorld);
+        ctx.drawImage(im, vp.toX(f.x), vp.toY(f.y), f.w * pxPerWorld, f.h * pxPerWorld);
         ctx.globalAlpha = 1;
     }
     const design = _wifiHm.mode === 'design';
@@ -4497,6 +4528,18 @@ function _wifiHmDrawRulers(ctx, vp, floorM) {
 }
 
 function _wifiHmDrawDesign(ctx, vp) {
+    // Floorplan move/resize handles (only while the Image tool is active)
+    if (_wifiHm.tool === 'floorplan' && _wifiHm.floorplan && _wifiHm.fp) {
+        const f = _wifiHm.fp, ppw = vp.pw / vp.span;
+        ctx.save();
+        ctx.strokeStyle = '#38bdf8'; ctx.lineWidth = 1.5; ctx.setLineDash([6, 4]);
+        ctx.strokeRect(vp.toX(f.x), vp.toY(f.y), f.w * ppw, f.h * ppw);
+        ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(vp.toX(f.x + f.w), vp.toY(f.y + f.h), 6, 0, 2 * Math.PI);
+        ctx.fillStyle = '#38bdf8'; ctx.fill();
+        ctx.strokeStyle = '#0b1220'; ctx.stroke();
+        ctx.restore();
+    }
     // Walls
     ctx.lineCap = 'round';
     _wifiHm.walls.forEach(w => {

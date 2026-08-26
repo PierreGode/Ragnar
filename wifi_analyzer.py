@@ -1248,6 +1248,7 @@ def _heatmap_load():
         data["predict_aps"] = [data["predict_ap"]] if data.get("predict_ap") else []
     # Mesh survey: registry of the nodes (BSSIDs) seen for the surveyed SSID.
     data.setdefault("mesh_nodes", {})
+    data.setdefault("floorplan_transform", None)
     return data
 
 
@@ -1299,9 +1300,26 @@ def _floorplan_to_web(data_uri):
 def heatmap_set_floorplan(floorplan_data_uri, target_bssid=None, target_ssid=None):
     data = _heatmap_load()
     data["floorplan"] = _floorplan_to_web(floorplan_data_uri)
+    data["floorplan_transform"] = None  # new image re-fits to the floor
     data["target_bssid"] = target_bssid
     data["target_ssid"] = target_ssid
     data["samples"] = []  # new floorplan => reset survey
+    _heatmap_save(data)
+    return data
+
+
+def heatmap_set_floorplan_transform(transform):
+    """Persist how the floorplan image is placed on the floor (world rect
+    x,y,w,h in 0..1) so the operator can move/scale it onto the metre grid."""
+    data = _heatmap_load()
+    t = None
+    if isinstance(transform, dict):
+        try:
+            t = {"x": float(transform["x"]), "y": float(transform["y"]),
+                 "w": max(0.02, float(transform["w"])), "h": max(0.02, float(transform["h"]))}
+        except (KeyError, TypeError, ValueError):
+            t = None
+    data["floorplan_transform"] = t
     _heatmap_save(data)
     return data
 

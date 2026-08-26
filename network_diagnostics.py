@@ -18624,6 +18624,8 @@ def register_network_diagnostics(app, logger=None):
         if action == 'floorplan':
             return jsonify(wifi_analyzer.heatmap_set_floorplan(
                 data.get('floorplan'), data.get('bssid'), data.get('ssid')))
+        if action == 'floorplan_transform':
+            return jsonify(wifi_analyzer.heatmap_set_floorplan_transform(data.get('transform')))
         if action == 'clear':
             return jsonify(wifi_analyzer.heatmap_clear())
         if action == 'walls':
