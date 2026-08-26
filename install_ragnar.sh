@@ -819,11 +819,19 @@ EOF
         fi
     fi
 
-    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — in the apt repos.
+    # multimon-ng powers Pager Decode (POCSAG/FLEX/QCII) and APRS RF — in the apt
+    # repos. Self-heal a stale apt cache the way the in-app Install button does:
+    # if the first install can't locate the package, refresh the cache and retry.
     if ! command -v multimon-ng >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
-            && log "SUCCESS" "Installed multimon-ng (Pager Decode)" \
-            || log "INFO" "multimon-ng not installed - Pager Decode stays disabled (apt install multimon-ng to enable)"
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1; then
+            apt-get update -y >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 || true
+        fi
+        if command -v multimon-ng >/dev/null 2>&1; then
+            log "SUCCESS" "Installed multimon-ng (Pager Decode / APRS)"
+        else
+            log "INFO" "multimon-ng not installed - Pager Decode / APRS RF stay disabled (apt install multimon-ng to enable)"
+        fi
     fi
 
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).

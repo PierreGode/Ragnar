@@ -355,10 +355,16 @@ EOF
             echo -e "  ${GREEN}✓${NC} Installed meshtastic (Mesh Nodes companion)"
         fi
     fi
-    # multimon-ng powers the Pager Decode page (POCSAG/FLEX) — it IS in the repos.
+    # multimon-ng powers Pager Decode (POCSAG/FLEX/QCII) and APRS RF — it IS in the
+    # repos. Self-heal a stale apt cache: if the first install can't locate the
+    # package, refresh the cache and retry (mirrors the in-app Install button).
     if ! command -v multimon-ng >/dev/null 2>&1; then
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
-            && echo -e "  ${GREEN}✓${NC} Installed multimon-ng (Pager Decode)"
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1; then
+            apt-get update -y >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 || true
+        fi
+        command -v multimon-ng >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed multimon-ng (Pager Decode / APRS)"
     fi
 fi
 
