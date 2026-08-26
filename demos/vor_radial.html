@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>VOR Radial</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --vor:#5ec8f0;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace; --head:'Chakra Petch',system-ui,sans-serif; --radius:12px;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:20px;min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(94,200,240,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
+  .wrap{max-width:none;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--vor);box-shadow:0 0 10px var(--vor)}
+  h1{font-family:var(--head);font-weight:700;font-size:34px;margin:2px 0 0}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:560px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .stat{display:flex;flex-direction:column;gap:1px} .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)} .stat .v{font-family:var(--mono);font-size:14px;color:var(--vor)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px} .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s}
+  button.ctl:hover,a.ctl:hover{border-color:var(--vor);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  select.tin,input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input.tin{width:100px}
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:16px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;position:relative}
+  .cap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .rose{display:flex;align-items:center;justify-content:center;padding:16px}
+  canvas{max-width:100%;height:auto}
+  .read{padding:14px}
+  .read .row{display:flex;align-items:baseline;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--line-soft)}
+  .read .row:last-child{border-bottom:none}
+  .read .k{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .read .v{font-family:var(--mono);font-size:16px;color:var(--ink)}
+  .read .v.big{font-size:22px;color:var(--vor)}
+  .qwrap{height:8px;border-radius:5px;background:var(--panel-2);border:1px solid var(--line);overflow:hidden;margin-top:4px}
+  .qbar{height:100%;width:0;background:linear-gradient(90deg,var(--vor),var(--live));transition:width .3s}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.86);text-align:center;padding:22px}
+  .veil.show{display:flex} .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>VOR Radial</h1>
+      <div class="sub">Decode a live VOR nav beacon (108–118 MHz) the way an aircraft receiver does — the phase between its reference and variable 30 Hz tones gives the <b>radial</b> you're on (bearing FROM the station). Receive-only.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Radial</span><span class="v" id="s-radial">—</span></div>
+      <div class="stat"><span class="k">Station</span><span class="v" id="s-freq">—</span></div>
+      <div class="stat"><span class="k">Mode</span><span class="v"><span class="tag idle" id="s-mode">idle</span></span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/adsb-radar" class="ctl">&#9992;&nbsp;ADS-B Radar</a></div>
+    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Start / stop decoding (uses the RTL-SDR)">&#9654;&nbsp;Start</button></div>
+    <div class="grp"><span class="lbl">Station</span><select class="tin" id="preset"></select></div>
+    <div class="grp"><span class="lbl">or MHz</span><input class="tin" id="freq" type="number" step="0.05" placeholder="113.60"></div>
+    <div class="grp"><span class="lbl">Cal°</span><input class="tin" id="cal" type="number" step="1" value="0" style="width:64px" title="Fixed calibration offset added to the radial"></div>
+    <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="cap"><span class="t">Compass rose</span><span class="c" id="rosecap">no fix</span></div>
+      <div class="rose"><canvas id="rose" width="520" height="520"></canvas></div>
+      <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div></div>
+    </div>
+    <div class="card">
+      <div class="cap"><span class="t">Fix</span><span class="c">30 Hz phase</span></div>
+      <div class="read">
+        <div class="row"><span class="k">Radial (FROM)</span><span class="v big" id="r-from">—</span></div>
+        <div class="row"><span class="k">Bearing TO</span><span class="v" id="r-to">—</span></div>
+        <div class="row"><span class="k">Lock</span><span class="v" id="r-lock">—</span></div>
+        <div class="row"><span class="k">Variable 30 Hz</span><span class="v" id="r-var">—</span></div>
+        <div class="row"><span class="k">Reference 30 Hz</span><span class="v" id="r-ref">—</span></div>
+        <div class="row" style="display:block"><span class="k">Signal quality</span><div class="qwrap"><div class="qbar" id="r-q"></div></div></div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> rtl_fm AM-demodulates the VOR. The <b>reference</b> 30 Hz is FM-modulated on a 9960 Hz subcarrier (same phase everywhere); the <b>variable</b> 30 Hz is AM'd by the station's rotating pattern (phase = your bearing). Ragnar recovers both and reports their phase difference — your radial. The <b>Cal°</b> box trims a fixed receiver/site offset.</div>
+    <div style="margin-top:6px"><b>One dongle:</b> this takes the RTL-SDR from the sub-GHz sweep / ADS-B / pager while running. <b>Not for navigation</b> — a hobby SDR + wire antenna is a demonstrator, not a certified nav receiver.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var running=false, DEMO_ON=false, mode='idle', freqHz=null, cur=null;
+  var cv=document.getElementById('rose'), ctx=cv.getContext('2d');
+  var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs');
+  function fmtF(hz){ return hz?(hz/1e6).toFixed(2)+' MHz':'—'; }
+  function d3(x){ return (x==null)?'—':(('00'+Math.round(((x%360)+360)%360)).slice(-3)+'°'); }
+
+  var PRESETS={};
+  var presetSel=document.getElementById('preset'), freqIn=document.getElementById('freq'), calIn=document.getElementById('cal');
+  function fillPresets(p){ PRESETS=p||{}; var keys=Object.keys(PRESETS);
+    presetSel.innerHTML=keys.map(function(k){return '<option value="'+PRESETS[k]+'">'+k+'</option>';}).join('')||'<option value="">—</option>';
+    if(keys.length && !freqIn.value){ freqIn.value=(PRESETS[keys[0]]/1e6); } }
+  presetSel.addEventListener('change',function(){ if(presetSel.value){ freqIn.value=(parseInt(presetSel.value,10)/1e6); if(running) startRun(); } });
+  function chosenFreqHz(){ var v=parseFloat(freqIn.value); if(isFinite(v)) return Math.round(v*1e6); if(presetSel.value) return parseInt(presetSel.value,10); return null; }
+  function calDeg(){ var v=parseFloat(calIn.value); return isFinite(v)?v:0; }
+  calIn.addEventListener('change',function(){ if(running) startRun(); });
+
+  function setMode(m){ mode=m; var el=document.getElementById('s-mode'); el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'decoding':(m==='synth'?'synthetic':'idle')); }
+  function showVeil(t,s){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');}
+  function hideVeil(){veil.classList.remove('show');}
+
+  function drawRose(radial, locked){
+    var w=cv.width, h=cv.height, cx=w/2, cy=h/2, R=Math.min(cx,cy)-24;
+    ctx.clearRect(0,0,w,h);
+    // dial face
+    ctx.save();
+    ctx.strokeStyle='#26323f'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(cx,cy,R,0,2*Math.PI); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx,cy,R*0.7,0,2*Math.PI); ctx.strokeStyle='#1a232f'; ctx.stroke();
+    // ticks + labels
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    for(var deg=0;deg<360;deg+=5){
+      var a=(deg-90)*Math.PI/180, major=(deg%30===0), r0=major?R-16:R-8;
+      ctx.beginPath();
+      ctx.moveTo(cx+r0*Math.cos(a), cy+r0*Math.sin(a));
+      ctx.lineTo(cx+R*Math.cos(a), cy+R*Math.sin(a));
+      ctx.strokeStyle=major?'#4a5b6d':'#2b3745'; ctx.lineWidth=major?2:1; ctx.stroke();
+      if(major){
+        var lbl={0:'N',90:'E',180:'S',270:'W'}[deg]|| (deg/10);
+        var rl=R-30;
+        ctx.fillStyle=(deg%90===0)?'#c2ccd8':'#7c8aa0';
+        ctx.font=(deg%90===0?'bold ':'')+ (deg%90===0?18:12)+"px 'IBM Plex Mono',monospace";
+        ctx.fillText(String(lbl), cx+rl*Math.cos(a), cy+rl*Math.sin(a));
+      }
+    }
+    if(radial!=null){
+      var ar=(radial-90)*Math.PI/180;
+      var col=locked?'#5ec8f0':'#7c8aa0';
+      // FROM needle (thick, out to the ring)
+      ctx.strokeStyle=col; ctx.lineWidth=4; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx+(R-18)*Math.cos(ar), cy+(R-18)*Math.sin(ar)); ctx.stroke();
+      // arrow head
+      var hx=cx+(R-18)*Math.cos(ar), hy=cy+(R-18)*Math.sin(ar);
+      ctx.fillStyle=col; ctx.beginPath();
+      ctx.moveTo(hx,hy);
+      ctx.lineTo(hx-12*Math.cos(ar-0.4), hy-12*Math.sin(ar-0.4));
+      ctx.lineTo(hx-12*Math.cos(ar+0.4), hy-12*Math.sin(ar+0.4));
+      ctx.closePath(); ctx.fill();
+      // reciprocal (TO) tail, faint
+      ctx.strokeStyle='rgba(124,138,160,.5)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(cx-(R*0.55)*Math.cos(ar), cy-(R*0.55)*Math.sin(ar)); ctx.stroke();
+      // centre readout
+      ctx.fillStyle=col; ctx.font="bold 46px 'IBM Plex Mono',monospace"; ctx.textAlign='center';
+      ctx.fillText(d3(radial), cx, cy-6);
+      ctx.fillStyle='#7c8aa0'; ctx.font="12px 'IBM Plex Mono',monospace";
+      ctx.fillText(locked?'RADIAL · FROM':'NO LOCK', cx, cy+22);
+    } else {
+      ctx.fillStyle='#4a5b6d'; ctx.font="16px 'IBM Plex Mono',monospace"; ctx.textAlign='center';
+      ctx.fillText('— — —', cx, cy);
+    }
+    // hub
+    ctx.fillStyle='#0d1420'; ctx.strokeStyle='#4a5b6d'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(cx,cy,6,0,2*Math.PI); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function paint(fix){
+    cur=fix;
+    var rad=(fix&&fix.locked)?fix.radial_deg:null;
+    drawRose(rad, !!(fix&&fix.locked));
+    document.getElementById('s-radial').textContent=d3(rad);
+    document.getElementById('r-from').textContent=d3(rad);
+    document.getElementById('r-to').textContent=(rad==null)?'—':d3(rad+180);
+    document.getElementById('r-lock').textContent=(fix&&fix.locked)?'LOCKED':'—';
+    document.getElementById('r-lock').style.color=(fix&&fix.locked)?'var(--live)':'var(--muted)';
+    document.getElementById('r-var').textContent=fix&&fix.var_amp!=null?fix.var_amp.toFixed(3):'—';
+    document.getElementById('r-ref').textContent=fix&&fix.ref_amp!=null?fix.ref_amp.toFixed(3):'—';
+    var q=Math.max(0,Math.min(1,(fix&&fix.quality!=null?fix.quality:0)/0.3));
+    document.getElementById('r-q').style.width=(q*100).toFixed(0)+'%';
+    document.getElementById('rosecap').textContent=(fix&&fix.locked)?('radial '+d3(rad)):'no fix';
+    document.getElementById('s-freq').textContent=fmtF(freqHz||chosenFreqHz());
+  }
+
+  var poll=null;
+  function startRun(){
+    var hz=chosenFreqHz(); if(!hz){ return; }
+    running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Stop';
+    freqHz=hz;
+    fetch('/api/net/vor/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq_hz:hz,cal_deg:calDeg()})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON)synthMode(); else showVeil('Could not start',res.error); } }).catch(function(){});
+    if(poll)clearInterval(poll); poll=setInterval(pollLive,700); pollLive();
+  }
+  function stopRun(){
+    running=false; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Start';
+    if(poll){clearInterval(poll);poll=null;}
+    fetch('/api/net/vor/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) synthMode(); else setMode('idle');
+  }
+  document.getElementById('startbtn').addEventListener('click',function(){ running?stopRun():startRun(); });
+
+  function pollLive(){
+    fetch('/api/net/vor/status').then(function(r){return r.json();}).then(function(st){
+      if(!st) return;
+      if(st.running){ hideVeil(); setMode('live'); if(st.freq_hz)freqHz=st.freq_hz; paint(st.fix||null); }
+      else if(st.error){ if(DEMO_ON)synthMode(); else showVeil('Decoder stopped',st.error); }
+    }).catch(function(){});
+  }
+
+  // ---- synthetic feed (demo / no hardware): a station on a fixed radial ----
+  var synthTimer=null, synthRadial=42.0;
+  function synthMode(){ setMode('synth'); hideVeil(); if(!freqHz)freqHz=chosenFreqHz()||113600000;
+    if(synthTimer) return;
+    synthTimer=setInterval(function(){
+      var jitter=(Math.random()-0.5)*0.8, cal=calDeg();
+      paint({locked:true, radial_deg:((synthRadial+cal+jitter)%360+360)%360,
+             var_amp:0.29+Math.random()*0.02, ref_amp:0.30+Math.random()*0.02, quality:0.25+Math.random()*0.04});
+    },700);
+    paint({locked:true, radial_deg:synthRadial, var_amp:0.30, ref_amp:0.30, quality:0.27});
+  }
+
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function checkStatus(){
+    fetch('/api/net/vor/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{}, dt=document.getElementById('devtag');
+      if(det.presets) fillPresets(det.presets);
+      if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Stop'; if(!poll){poll=setInterval(pollLive,700);pollLive();} return; }
+      if(det.available){ dt.className='tag live'; dt.textContent='RTL-SDR ready'; hideVeil(); if(!running&&mode!=='synth') drawRose(null,false); }
+      else { dt.className='tag idle'; dt.textContent=det.error?'unavailable':'detecting…';
+        if(DEMO_ON){ if(!Object.keys(PRESETS).length) fillPresets({'113.60':113600000,'114.10':114100000,'115.80':115800000}); synthMode(); }
+        else if(!running){ setMode('idle'); drawRose(null,false); showVeil('VOR decode unavailable', det.error||'Connect an RTL-SDR (and antenna) tuned to a VOR, or enable the RF Waterfall demo for a synthetic radial.'); } }
+    }).catch(function(){ if(DEMO_ON) synthMode(); });
+  }
+
+  drawRose(null,false);
+  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running&&mode!=='synth') refreshConfig().then(checkStatus); },5000); });
+})();
+</script>
+</body>
+</html>

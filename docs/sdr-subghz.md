@@ -222,9 +222,15 @@ in the already-installed `rtl-sdr` package. Receive-only.
 
 Pagers are still everywhere — hospitals, industrial SCADA/telemetry, alarms,
 on-call teams — and **POCSAG/FLEX are transmitted in the clear**. The **Pager
-Decode** page (`/pager-decode`, `pager.py`) tunes a pager channel with `rtl_fm`
-and decodes it with `multimon-ng`, showing each message's capcode (address),
-function bits, and alphanumeric/numeric text, live.
+Decode** page (`/pager-decode`, `pagerdecode.py`) tunes a pager channel with
+`rtl_fm` and decodes it with `multimon-ng`, showing each message's capcode
+(address), function bits, and alphanumeric/numeric text, live. A second mode
+adds **Motorola Quick Call II** (two-tone sequential, fire/EMS dispatch),
+decoded in-process (no multimon-ng) — see `qcii_detect` in `pagerdecode.py`.
+
+> Note: the decoder is `pagerdecode.py`, deliberately **not** `pager.py` — a
+> separate `pager/` package (a physical pager-device UI) already owns the
+> `pager` import name, so the decoder module was renamed to avoid the clash.
 
 - **Channels** — a preset list of common POCSAG/FLEX frequencies plus a
   free-form MHz box. Uses the current PPM/gain tuning.
@@ -253,6 +259,27 @@ the radar contacts by tail/flight and flagged **● on radar**.
   (`scripts/install_acarsdec.sh`); if missing, the panel shows an **⬇ Install
   acarsdec** button. Receive-only.
 
+## VOR radial decode (108–118 MHz nav beacon)
+
+The **VOR Radial** page (`/vor-radial`, `vor.py`) decodes a VOR nav beacon the
+way an aircraft's receiver does, and shows the **radial** you're on — the
+magnetic bearing *from* the station — on a compass rose.
+
+A VOR transmits two 30 Hz tones: a **reference** (FM-modulated on a 9960 Hz
+subcarrier, the same phase in every direction) and a **variable** (AM-modulated
+by the station's rotating pattern, so its phase equals your bearing). The phase
+difference between them *is* the radial. `rtl_fm -M am` gives the composite
+audio; `vor_decode` recovers the variable 30 Hz straight from it and the
+reference 30 Hz by FM-demodulating the 9960 Hz subcarrier, then reports
+`(reference_phase − variable_phase) mod 360`. It's pure numpy DSP (no scipy) —
+`vor.selftest` recovers synthesised radials to <2°.
+
+- **Cal°** — a fixed offset added to the radial, to trim a receiver/site bias.
+- **One dongle** — VOR uses `rtl_fm` (the whole RTL-SDR), so it's mutually
+  exclusive with the sweep/ISM, ADS-B, pager, ACARS and radio.
+- **Not for navigation** — a hobby SDR + wire antenna is a demonstrator, not a
+  certified nav receiver. Receive-only.
+
 ## API
 
 | Route | Purpose |
@@ -275,11 +302,13 @@ the radar contacts by tail/flight and flagged **● on radar**.
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
 | `GET  /api/net/mesh/status` · `/nodes` · `/messages` | Mesh Nodes: link state + enumerated nodes + decoded messages |
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
-| `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state + decoded POCSAG/FLEX messages |
-| `POST /api/net/pager/start` `{freq_hz}` · `/stop` · `/install` | Start/stop pager decode on a channel; install multimon-ng |
+| `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state (`mode`, `qcii_available`) + decoded POCSAG/FLEX/QCII messages |
+| `POST /api/net/pager/start` `{freq_hz, mode?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`); install multimon-ng |
+| `GET  /api/net/vor/status` | VOR decode state + latest `fix` (radial/lock/quality) |
+| `POST /api/net/vor/start` `{freq_hz, cal_deg?}` · `/stop` | Start/stop VOR radial decode on a 108–118 MHz station |
 | `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
 | `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
-| `GET  /api/net/rtl/selftest` | Offline parser / frame-assembly self-test |
+| `GET  /api/net/{pager,vor}/selftest` · `/api/net/rtl/selftest` | Offline DSP / parser self-tests |
 
 ## CLI
 
@@ -290,6 +319,8 @@ python3 rtl_sdr.py detect
 python3 rtl_sdr.py ism   --band 433 --seconds 20
 python3 rtl_sdr.py power --band subghz --seconds 20
 python3 rtl_sdr.py selftest
+python3 pagerdecode.py run --freq 154.265M --seconds 30   # POCSAG/FLEX/QCII
+python3 vor.py run --freq 113.600M --seconds 30           # live VOR radial
 ```
 
 ## Legality

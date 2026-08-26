@@ -8791,13 +8791,34 @@ def pager_decode_page():
     present = _any_sdr_present()
     if not present:
         try:
-            import pager
+            import pagerdecode as pager
             present = bool(pager.detect().get('available'))
         except Exception:
             present = False
     if not (demo or present):
         return ('Not Found', 404)
     return _no_store(make_response(send_from_directory('demos', 'pager_decode.html')))
+
+
+@app.route('/vor-radial')
+def vor_radial_page():
+    """Serve the VOR radial decode page.
+
+    Served when any SDR is present, when VOR decode is ready, or in demo mode.
+    404s otherwise. Login required.
+    """
+    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
+    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
+    present = _any_sdr_present()
+    if not present:
+        try:
+            import vor
+            present = bool(vor.detect().get('available'))
+        except Exception:
+            present = False
+    if not (demo or present):
+        return ('Not Found', 404)
+    return _no_store(make_response(send_from_directory('demos', 'vor_radial.html')))
 
 
 # Captive portal detection routes for mobile devices
