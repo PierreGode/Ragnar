@@ -1263,9 +1263,42 @@ def heatmap_get():
     return _heatmap_load()
 
 
+def _floorplan_to_web(data_uri):
+    """Browsers cannot display TIFF/BMP/etc. in <img>, so an uploaded floorplan
+    in one of those formats silently fails to render. Transcode anything that is
+    not a web-native image to PNG (via Pillow); web formats pass through."""
+    if not isinstance(data_uri, str) or not data_uri.startswith("data:"):
+        return data_uri
+    try:
+        header, b64 = data_uri.split(",", 1)
+    except ValueError:
+        return data_uri
+    mime = header[5:].split(";", 1)[0].lower()
+    web_ok = {"image/png", "image/jpeg", "image/jpg", "image/webp",
+             "image/gif", "image/svg+xml", "image/avif"}
+    if mime in web_ok:
+        return data_uri
+    try:
+        import base64, io
+        from PIL import Image
+        im = Image.open(io.BytesIO(base64.b64decode(b64)))
+        im.load()
+        if im.mode not in ("RGB", "RGBA"):
+            im = im.convert("RGBA" if (im.mode == "P" or "A" in im.mode) else "RGB")
+        maxd = 2500
+        if max(im.size) > maxd:
+            r = maxd / float(max(im.size))
+            im = im.resize((max(1, int(im.size[0] * r)), max(1, int(im.size[1] * r))))
+        out = io.BytesIO()
+        im.save(out, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(out.getvalue()).decode("ascii")
+    except Exception:
+        return data_uri   # let the client show its unsupported-format message
+
+
 def heatmap_set_floorplan(floorplan_data_uri, target_bssid=None, target_ssid=None):
     data = _heatmap_load()
-    data["floorplan"] = floorplan_data_uri
+    data["floorplan"] = _floorplan_to_web(floorplan_data_uri)
     data["target_bssid"] = target_bssid
     data["target_ssid"] = target_ssid
     data["samples"] = []  # new floorplan => reset survey

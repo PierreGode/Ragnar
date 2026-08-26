@@ -4300,6 +4300,11 @@ function wifiHeatmapLoad() {
         if (d.floorplan) {
             const img = new Image();
             img.onload = () => { _wifiHm.floorplan = img; wifiHeatmapRender(); };
+            img.onerror = () => {
+                _wifiHm.floorplan = null; wifiHeatmapRender();
+                const st = document.getElementById('wifi-hm-status');
+                if (st) st.textContent = '\u26a0 Could not display that floorplan \u2014 use PNG or JPG (TIFF/HEIC/PDF are not supported by browsers).';
+            };
             img.src = d.floorplan;
         } else { _wifiHm.floorplan = null; wifiHeatmapRender(); }
     }).catch(() => {});
