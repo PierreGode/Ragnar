@@ -280,6 +280,36 @@ reference 30 Hz by FM-demodulating the 9960 Hz subcarrier, then reports
 - **Not for navigation** — a hobby SDR + wire antenna is a demonstrator, not a
   certified nav receiver. Receive-only.
 
+## APRS (ham packet + messaging)
+
+The **APRS** page (`/aprs`, `aprs.py`) receives APRS — the ham packet network of
+position beacons, weather, telemetry and short **messages** — from two sources
+into one station map + packet feed + message view:
+
+- **RF (SDR)** — `rtl_fm | multimon-ng -a AFSK1200` decodes the local APRS
+  channel (144.390 MHz North America, 144.800 Europe, 145.175 Australia, …; a
+  region picker sets the frequency, or type your own MHz). Receive-only; no
+  licence needed to listen.
+- **APRS-IS (Internet)** — a TCP client to the global network
+  (`rotate.aprs2.net:14580`). A **read-only** login (no callsign) streams **any
+  region** via a server filter (`r/lat/lon/km`); with **your own callsign +
+  passcode** you get **write access to send messages**, which IGates near the
+  recipient relay onward. The passcode is the standard APRS-IS callsign hash
+  (`aprs.aprs_passcode`).
+
+`parse_aprs` handles uncompressed & compressed positions (with/without
+timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather —
+13 selftests including a Mic-E round-trip and the passcode algorithm.
+
+- **One dongle** — RF APRS shares the RTL-SDR with the sweep / ISM / ADS-B /
+  pager / VOR / radio, so starting one stops the others. **APRS-IS is
+  independent** (Internet only) and keeps running regardless — so the page is
+  useful even with no dongle at all.
+- **No RF transmit** — RTL-SDR can't transmit and HackRF TX (licence + amp/
+  filter care) is deliberately out of scope; APRS-IS carries the messaging.
+  Sending still injects under your callsign on the ham network — **only licensed
+  operators should send.**
+
 ## API
 
 | Route | Purpose |
@@ -306,6 +336,10 @@ reference 30 Hz by FM-demodulating the 9960 Hz subcarrier, then reports
 | `POST /api/net/pager/start` `{freq_hz, mode?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`); install multimon-ng |
 | `GET  /api/net/vor/status` | VOR decode state + latest `fix` (radial/lock/quality) |
 | `POST /api/net/vor/start` `{freq_hz, cal_deg?}` · `/stop` | Start/stop VOR radial decode on a 108–118 MHz station |
+| `GET  /api/net/aprs/status` · `/packets?since=` · `/stations` · `/messages?since=` | APRS state + packet feed + station map + messages |
+| `POST /api/net/aprs/rf/start` `{freq_hz}` · `/rf/stop` | Start/stop off-air APRS decode (rtl_fm\|multimon-ng, one dongle) |
+| `POST /api/net/aprs/is/connect` `{callsign,passcode,filter}` · `/is/disconnect` | Connect/disconnect APRS-IS (read-only, or write with a valid passcode) |
+| `POST /api/net/aprs/send` `{to,text}` | Send an APRS message via APRS-IS (needs write access) |
 | `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
 | `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
 | `GET  /api/net/{pager,vor}/selftest` · `/api/net/rtl/selftest` | Offline DSP / parser self-tests |
@@ -321,6 +355,8 @@ python3 rtl_sdr.py power --band subghz --seconds 20
 python3 rtl_sdr.py selftest
 python3 pagerdecode.py run --freq 154.265M --seconds 30   # POCSAG/FLEX/QCII
 python3 vor.py run --freq 113.600M --seconds 30           # live VOR radial
+python3 aprs.py parse 'SRC>APRS,WIDE1-1:=5132.07N/00007.24W-hi'   # APRS parser
+python3 aprs.py selftest
 ```
 
 ## Legality

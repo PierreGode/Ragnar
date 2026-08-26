@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>APRS</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --aprs:#5fd08a; --rf:#f0a35e; --is:#5ec8f0; --tx:#c98bf0;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace; --head:'Chakra Petch',system-ui,sans-serif; --radius:12px;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:20px;min-height:100vh;
+    background-image:radial-gradient(120% 80% at 50% -10%, rgba(95,208,138,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
+  .wrap{max-width:none;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--aprs);box-shadow:0 0 10px var(--aprs)}
+  h1{font-family:var(--head);font-weight:700;font-size:34px;margin:2px 0 0}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:600px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .stat{display:flex;flex-direction:column;gap:1px} .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)} .stat .v{font-family:var(--mono);font-size:14px;color:var(--aprs)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px} .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none;transition:border-color .15s,color .15s}
+  button.ctl:hover,a.ctl:hover{border-color:var(--aprs);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  button.ctl:disabled{opacity:.45;cursor:not-allowed}
+  select.tin,input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
+  input.tin{width:110px}
+  .grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:16px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;position:relative}
+  .cap{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .maphold{position:relative} canvas{display:block;width:100%;height:auto}
+  .legend{position:absolute;left:10px;bottom:10px;display:flex;gap:12px;font-family:var(--mono);font-size:10px;color:var(--muted);background:rgba(10,14,20,.7);padding:5px 9px;border-radius:6px;border:1px solid var(--line-soft)}
+  .legend b{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+  .sect{padding:12px 14px;border-bottom:1px solid var(--line-soft)}
+  .sect:last-child{border-bottom:none}
+  .sect h3{margin:0 0 8px;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);font-weight:500}
+  .row{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+  .msgs{max-height:240px;overflow-y:auto;font-family:var(--mono);font-size:12px}
+  .msg{padding:6px 4px;border-bottom:1px solid var(--line-soft);display:flex;gap:8px;align-items:baseline}
+  .msg .who{color:var(--aprs);min-width:78px} .msg.out .who{color:var(--tx)} .msg .arr{color:var(--muted)} .msg .to{color:var(--is);min-width:78px} .msg .tx{color:var(--ink);overflow-wrap:anywhere}
+  .feedtbl{max-height:340px;overflow:auto}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+  th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.05em;text-transform:uppercase;font-size:9px;border-bottom:1px solid var(--line)}
+  td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);vertical-align:top;white-space:nowrap}
+  td.cmt{white-space:normal;overflow-wrap:anywhere;color:var(--ink);width:99%}
+  tr.sel td{background:rgba(95,208,138,.1)}
+  .src{font-size:9px;padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
+  .src.rf{color:var(--rf);border-color:rgba(240,163,94,.4)} .src.is{color:var(--is);border-color:rgba(94,200,240,.4)} .src.tx{color:var(--tx);border-color:rgba(201,139,240,.4)}
+  .empty{padding:24px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.86);text-align:center;padding:22px;z-index:5}
+  .veil.show{display:flex} .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
+  .hint{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>APRS</h1>
+      <div class="sub">Ham-radio packet: positions, weather &amp; <b>messages</b>. Listen off-air with the RTL-SDR, and/or connect to <b>APRS-IS</b> (the Internet backbone) to watch any region and send messages worldwide via IGates.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Packets</span><span class="v" id="s-pkts">—</span></div>
+      <div class="stat"><span class="k">Stations</span><span class="v" id="s-stns">—</span></div>
+      <div class="stat"><span class="k">Messages</span><span class="v" id="s-msgs">—</span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><a href="/rf-waterfall" class="ctl">〜&nbsp;RF Waterfall</a></div>
+    <div class="grp"><span class="lbl">Region</span><select class="tin" id="region" style="width:auto"></select></div>
+    <div class="grp"><span class="tag idle" id="rftag">RF idle</span></div>
+    <div class="grp"><span class="tag idle" id="istag">APRS-IS off</span></div>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="cap"><span class="t">Station map</span><span class="c" id="mapcap">no stations yet</span></div>
+      <div class="maphold">
+        <canvas id="map" width="900" height="560"></canvas>
+        <div class="legend"><span><b style="background:var(--rf)"></b>RF</span><span><b style="background:var(--is)"></b>APRS-IS</span><span><b style="background:var(--tx)"></b>you</span></div>
+        <div class="veil" id="veil"><div class="vt"></div><div class="vs"></div>
+          <button class="ctl" id="veil-install" style="display:none;margin-top:6px;border-color:rgba(95,208,138,.5);color:var(--aprs)">⬇ Install multimon-ng</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="cap"><span class="t">Sources &amp; messaging</span></div>
+
+      <div class="sect">
+        <h3>RF · off-air (RTL-SDR)</h3>
+        <div class="row">
+          <button class="ctl go" id="rf-btn" aria-pressed="false" title="Start / stop off-air APRS decode (uses the RTL-SDR)">&#9654;&nbsp;RF Start</button>
+          <span class="lbl">MHz</span><input class="tin" id="rf-freq" type="number" step="0.001" style="width:92px" placeholder="144.390">
+          <span class="hint" id="rf-hint">receive-only</span>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h3>APRS-IS · Internet</h3>
+        <div class="row" style="margin-bottom:6px">
+          <button class="ctl go" id="is-btn" aria-pressed="false" title="Connect / disconnect the APRS-IS Internet feed">&#9654;&nbsp;Connect</button>
+          <span class="lbl">Filter</span><input class="tin" id="is-filter" style="width:150px" title="APRS-IS server filter, e.g. r/lat/lon/km" placeholder="r/39.8/-98.6/3000">
+        </div>
+        <div class="row">
+          <span class="lbl">Call</span><input class="tin" id="is-call" style="width:88px" placeholder="N0CALL">
+          <span class="lbl">Passcode</span><input class="tin" id="is-pass" style="width:74px" placeholder="-1" title="APRS-IS passcode for your callsign (leave blank/-1 to receive only)">
+          <span class="hint" id="is-hint">read-only (no callsign)</span>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h3>Messages</h3>
+        <div class="msgs" id="msgs"><div class="empty">No messages yet.</div></div>
+        <div class="row" style="margin-top:8px">
+          <input class="tin" id="m-to" style="width:88px" placeholder="TO-CALL" title="Recipient callsign">
+          <input class="tin" id="m-text" style="flex:1;min-width:120px" placeholder="message…" maxlength="67">
+          <button class="ctl" id="m-send" disabled title="Send via APRS-IS — needs a valid callsign + passcode">Send ▸</button>
+        </div>
+        <div class="hint" id="m-hint" style="margin-top:5px">Sending needs APRS-IS write access (your ham callsign + passcode).</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="cap"><span class="t">Packet feed</span><span class="c" id="feedcap"></span></div>
+    <div class="feedtbl">
+      <table>
+        <thead><tr><th>Time</th><th>Src</th><th>Station</th><th>Type</th><th>Info</th></tr></thead>
+        <tbody id="feed"><tr><td colspan="5" class="empty">Start RF or connect APRS-IS…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> RF decode is <code>rtl_fm | multimon-ng -a AFSK1200</code> — receive-only, no licence needed to listen. APRS-IS is a TCP client to the global network: a read-only login streams any region via a server filter; with your own callsign + passcode you get write access to send messages, which IGates relay to the recipient.</div>
+    <div style="margin-top:6px"><b>One dongle:</b> RF APRS shares the RTL-SDR with the sweep / ADS-B / pager / VOR — starting one stops the others. APRS-IS is independent and keeps running. <b>Legality:</b> sending injects packets under your callsign on the ham network — only licensed operators should transmit/send. No RF transmit is performed here.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var DEMO_ON=false, pseq=0, mseq=0, packets=[], stations={}, messages=[], sel=null, isWrite=false;
+  var cv=document.getElementById('map'), ctx=cv.getContext('2d');
+  var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs'), veilInstall=document.getElementById('veil-install');
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function hhmm(ts){ return new Date((ts||Date.now()/1000)*1000).toLocaleTimeString(); }
+
+  var REGIONS={}, RFILTERS={};
+  var regionSel=document.getElementById('region'), rfFreq=document.getElementById('rf-freq'),
+      isFilter=document.getElementById('is-filter'), isCall=document.getElementById('is-call'), isPass=document.getElementById('is-pass');
+  function fillRegions(freqs, filters){ REGIONS=freqs||{}; RFILTERS=filters||{}; var keys=Object.keys(REGIONS);
+    regionSel.innerHTML=keys.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join('')||'<option>—</option>';
+    if(keys.length){ applyRegion(keys[0]); } }
+  function applyRegion(k){ if(REGIONS[k]) rfFreq.value=(REGIONS[k]/1e6); if(RFILTERS[k]&&!isFilter.value) isFilter.value=RFILTERS[k]; if(RFILTERS[k]) isFilter.value=RFILTERS[k]; }
+  regionSel.addEventListener('change',function(){ applyRegion(regionSel.value); });
+
+  function showVeil(t,s,inst){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');veilInstall.style.display=inst?'inline-block':'none';}
+  function hideVeil(){veil.classList.remove('show');}
+  veilInstall.addEventListener('click',function(){ veilInstall.textContent='Installing…'; veilInstall.disabled=true;
+    fetch('/api/net/aprs/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      veilInstall.textContent='⬇ Install multimon-ng'; veilInstall.disabled=false;
+      if(res&&res.ok){ hideVeil(); } else showVeil('Install did not complete',(res&&res.error)||'apt failed',true); }).catch(function(){});
+  });
+
+  // ---- map (auto-fit lat/lon scatter with graticule) ----
+  function drawMap(){
+    var w=cv.width,h=cv.height; ctx.clearRect(0,0,w,h);
+    ctx.fillStyle='#0b1119'; ctx.fillRect(0,0,w,h);
+    var list=Object.keys(stations).map(function(k){return stations[k];}).filter(function(s){return s.lat!=null&&s.lon!=null;});
+    document.getElementById('mapcap').textContent=list.length?(list.length+' stations'):'no stations yet';
+    if(!list.length){ ctx.fillStyle='#33404f'; ctx.font="15px 'IBM Plex Mono',monospace"; ctx.textAlign='center';
+      ctx.fillText('waiting for positions…', w/2, h/2); return; }
+    var lats=list.map(function(s){return s.lat;}), lons=list.map(function(s){return s.lon;});
+    var la0=Math.min.apply(null,lats), la1=Math.max.apply(null,lats), lo0=Math.min.apply(null,lons), lo1=Math.max.apply(null,lons);
+    var pad=Math.max(0.3,(la1-la0)*0.12,(lo1-lo0)*0.12); la0-=pad;la1+=pad;lo0-=pad;lo1+=pad;
+    if(la1-la0<0.01){la0-=0.5;la1+=0.5;} if(lo1-lo0<0.01){lo0-=0.5;lo1+=0.5;}
+    var M=34;
+    function X(lon){ return M+(lon-lo0)/(lo1-lo0)*(w-2*M); }
+    function Y(lat){ return M+(la1-lat)/(la1-la0)*(h-2*M); }
+    // graticule
+    ctx.strokeStyle='#141c27'; ctx.fillStyle='#3a4757'; ctx.font="9px 'IBM Plex Mono',monospace"; ctx.lineWidth=1;
+    function nice(span){ var steps=[0.1,0.25,0.5,1,2,5,10,15,30]; for(var i=0;i<steps.length;i++){ if(span/steps[i]<=8) return steps[i]; } return 45; }
+    var gs=nice(Math.max(la1-la0,lo1-lo0));
+    for(var lo=Math.ceil(lo0/gs)*gs; lo<=lo1; lo+=gs){ ctx.beginPath(); ctx.moveTo(X(lo),M); ctx.lineTo(X(lo),h-M); ctx.stroke();
+      ctx.textAlign='center'; ctx.fillText(lo.toFixed(gs<1?1:0), X(lo), h-M+12); }
+    for(var la=Math.ceil(la0/gs)*gs; la<=la1; la+=gs){ ctx.beginPath(); ctx.moveTo(M,Y(la)); ctx.lineTo(w-M,Y(la)); ctx.stroke();
+      ctx.textAlign='right'; ctx.fillText(la.toFixed(gs<1?1:0), M-4, Y(la)+3); }
+    ctx.strokeStyle='#1e2836'; ctx.strokeRect(M,M,w-2*M,h-2*M);
+    // stations
+    var col={rf:'#f0a35e',is:'#5ec8f0',tx:'#c98bf0'};
+    list.sort(function(a,b){return a.ts-b.ts;}).forEach(function(s){
+      var x=X(s.lon),y=Y(s.lat),c=col[s.src_kind]||'#5fd08a',hot=(sel===s.call);
+      ctx.beginPath(); ctx.arc(x,y,hot?6:3.4,0,2*Math.PI); ctx.fillStyle=c; ctx.fill();
+      if(hot){ ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke(); }
+      if(hot||list.length<=60){ ctx.fillStyle=hot?'#fff':'#8b98ab'; ctx.font=(hot?'bold ':'')+"10px 'IBM Plex Mono',monospace"; ctx.textAlign='left';
+        ctx.fillText(s.call, x+6, y+3); }
+    });
+  }
+  cv.addEventListener('click',function(e){
+    var r=cv.getBoundingClientRect(), sx=cv.width/r.width, sy=cv.height/r.height;
+    var mx=(e.clientX-r.left)*sx, my=(e.clientY-r.top)*sy;
+    var list=Object.keys(stations).map(function(k){return stations[k];}).filter(function(s){return s.lat!=null;});
+    if(!list.length) return;
+    var lats=list.map(function(s){return s.lat;}), lons=list.map(function(s){return s.lon;});
+    var la0=Math.min.apply(null,lats),la1=Math.max.apply(null,lats),lo0=Math.min.apply(null,lons),lo1=Math.max.apply(null,lons);
+    var pad=Math.max(0.3,(la1-la0)*0.12,(lo1-lo0)*0.12); la0-=pad;la1+=pad;lo0-=pad;lo1+=pad;
+    if(la1-la0<0.01){la0-=0.5;la1+=0.5;} if(lo1-lo0<0.01){lo0-=0.5;lo1+=0.5;}
+    var M=34,best=null,bd=1e9;
+    list.forEach(function(s){ var x=M+(s.lon-lo0)/(lo1-lo0)*(cv.width-2*M), y=M+(la1-s.lat)/(la1-la0)*(cv.height-2*M);
+      var d=(x-mx)*(x-mx)+(y-my)*(y-my); if(d<bd){bd=d;best=s;} });
+    if(best&&bd<400){ sel=(sel===best.call?null:best.call); drawMap(); renderFeed(); }
+  });
+
+  // ---- feed + messages ----
+  function renderStats(st){ document.getElementById('s-pkts').textContent=st.packets!=null?st.packets:'—';
+    document.getElementById('s-stns').textContent=st.stations!=null?st.stations:'—';
+    document.getElementById('s-msgs').textContent=st.messages!=null?st.messages:'—'; }
+  function infoText(p){
+    if(p.type==='message') return (p.outbound?'▸ ':'')+'to '+esc(p.addressee||'?')+': '+esc(p.text||'');
+    if(p.type==='ack') return 'ack '+esc(p.addressee||'')+' #'+esc(p.msgno||'');
+    if(p.type==='status') return '“'+esc(p.comment||'')+'”';
+    if(p.type==='object') return 'obj '+esc(p.object||'')+(p.comment?' '+esc(p.comment):'');
+    if(p.type==='weather') return 'wx '+(p.weather?JSON.stringify(p.weather):esc(p.comment||''));
+    var bits=[]; if(p.lat!=null) bits.push(p.lat.toFixed(4)+','+p.lon.toFixed(4));
+    if(p.speed_kt) bits.push(p.speed_kt+'kt'); if(p.course!=null&&p.speed_kt) bits.push(p.course+'°');
+    if(p.altitude_ft) bits.push(p.altitude_ft+'ft'); if(p.comment) bits.push(esc(p.comment));
+    return bits.join(' · ')||esc(p.type);
+  }
+  function renderFeed(){
+    var tb=document.getElementById('feed');
+    document.getElementById('feedcap').textContent=packets.length+' shown';
+    if(!packets.length){ tb.innerHTML='<tr><td colspan="5" class="empty">Start RF or connect APRS-IS…</td></tr>'; return; }
+    tb.innerHTML=packets.slice().reverse().slice(0,250).map(function(p){
+      return '<tr class="'+(sel===p.source?'sel':'')+'">'
+        +'<td>'+hhmm(p.ts)+'</td>'
+        +'<td><span class="src '+(p.src_kind||'')+'">'+esc((p.src_kind||'').toUpperCase())+'</span></td>'
+        +'<td style="color:var(--aprs)">'+esc(p.source||'')+'</td>'
+        +'<td>'+esc(p.type||'')+'</td>'
+        +'<td class="cmt">'+infoText(p)+'</td></tr>'; }).join('');
+  }
+  function renderMsgs(){
+    var el=document.getElementById('msgs');
+    if(!messages.length){ el.innerHTML='<div class="empty">No messages yet.</div>'; return; }
+    el.innerHTML=messages.slice().reverse().slice(0,120).map(function(m){
+      if(m.type==='ack') return '<div class="msg"><span class="who">'+esc(m.source)+'</span><span class="arr">ack→</span><span class="to">'+esc(m.addressee)+'</span><span class="tx">#'+esc(m.msgno||'')+'</span></div>';
+      return '<div class="msg'+(m.outbound?' out':'')+'"><span class="who">'+esc(m.source)+'</span><span class="arr">→</span><span class="to">'+esc(m.addressee||'')+'</span><span class="tx">'+esc(m.text||'')+'</span></div>';
+    }).join('');
+    el.scrollTop=el.scrollHeight;
+  }
+
+  // ---- RF controls ----
+  var rfOn=false;
+  document.getElementById('rf-btn').addEventListener('click',function(){
+    if(rfOn){ rfOn=false; setBtn('rf-btn',false,'&#9654;&nbsp;RF Start'); fetch('/api/net/aprs/rf/stop',{method:'POST'}).catch(function(){}); if(DEMO_ON)demoTick(); return; }
+    var hz=Math.round(parseFloat(rfFreq.value||'144.39')*1e6);
+    rfOn=true; setBtn('rf-btn',true,'&#10074;&#10074;&nbsp;RF Stop');
+    fetch('/api/net/aprs/rf/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq_hz:hz})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON){demoStart('rf');} else showVeil('Could not start RF',res.error,/multimon/.test(res.error||'')); } }).catch(function(){});
+  });
+  // ---- APRS-IS controls ----
+  var isOn=false;
+  document.getElementById('is-btn').addEventListener('click',function(){
+    if(isOn){ isOn=false; setBtn('is-btn',false,'&#9654;&nbsp;Connect'); fetch('/api/net/aprs/is/disconnect',{method:'POST'}).catch(function(){}); return; }
+    isOn=true; setBtn('is-btn',true,'&#10074;&#10074;&nbsp;Disconnect');
+    var body={callsign:isCall.value||'N0CALL',passcode:isPass.value||'-1',filter:isFilter.value||''};
+    if(DEMO_ON){ demoStart('is'); return; }
+    fetch('/api/net/aprs/is/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){ isWrite=!!(res&&res.write); updateSend(); }).catch(function(){});
+  });
+  function setBtn(id,on,html){ var b=document.getElementById(id); b.setAttribute('aria-pressed',on?'true':'false'); b.innerHTML=html; }
+  function updateSend(){ var b=document.getElementById('m-send');
+    b.disabled=!isWrite; document.getElementById('m-hint').textContent = isWrite
+      ? 'APRS-IS write access — messages send under '+(isCall.value||'your call')+'.'
+      : 'Sending needs APRS-IS write access (your ham callsign + passcode).';
+    document.getElementById('is-hint').textContent = isWrite ? 'write access ✓' : 'read-only (no callsign)'; }
+  isCall.addEventListener('input',function(){ isWrite=false; updateSend(); });
+  document.getElementById('m-send').addEventListener('click',function(){
+    var to=document.getElementById('m-to').value.trim(), tx=document.getElementById('m-text').value.trim();
+    if(!to||!tx) return;
+    if(DEMO_ON){ ingest([{source:isCall.value||'N0CALL',addressee:to.toUpperCase(),text:tx,type:'message',outbound:true,src_kind:'tx',ts:Date.now()/1000,seq:++mseq}]); document.getElementById('m-text').value=''; renderMsgs(); return; }
+    fetch('/api/net/aprs/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:to,text:tx})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.ok){ document.getElementById('m-text').value=''; } else if(res&&res.error){ document.getElementById('m-hint').textContent=res.error; } }).catch(function(){});
+  });
+
+  // ---- polling ----
+  var poll=null;
+  function pollAll(){
+    fetch('/api/net/aprs/status').then(function(r){return r.json();}).then(function(st){ if(st){ renderStats(st);
+      isWrite=!!st.is_write; updateSend();
+      document.getElementById('rftag').className='tag '+(st.rf_running?'live':'idle'); document.getElementById('rftag').textContent=st.rf_running?('RF '+((st.rf_freq_hz||0)/1e6).toFixed(3)):'RF idle';
+      document.getElementById('istag').className='tag '+(st.is_connected?'live':'idle'); document.getElementById('istag').textContent=st.is_connected?('APRS-IS '+(st.is_write?'(tx)':'(rx)')):'APRS-IS off';
+      if(st.rf_running||st.is_connected) hideVeil();
+    } }).catch(function(){});
+    fetch('/api/net/aprs/packets?since='+pseq).then(function(r){return r.json();}).then(function(d){ if(d&&d.packets&&d.packets.length){ ingest(d.packets); pseq=d.seq; } }).catch(function(){});
+  }
+  function ingest(pkts){
+    pkts.forEach(function(p){ packets.push(p); if(p.seq>pseq)pseq=p.seq;
+      if(p.lat!=null&&p.lon!=null) stations[p.source]={call:p.source,lat:p.lat,lon:p.lon,src_kind:p.src_kind,ts:p.ts,comment:p.comment,speed_kt:p.speed_kt,course:p.course};
+      if(p.type==='message'||p.type==='ack') messages.push(p);
+    });
+    if(packets.length>800) packets=packets.slice(-800);
+    if(messages.length>400) messages=messages.slice(-400);
+    renderFeed(); renderMsgs(); drawMap();
+  }
+
+  // ---- demo (no hardware / offline) ----
+  var demoTimer=null, DCITY={lat:39.95,lon:-98.6}, DEMO_CALLS=['K4ABC-9','N0XYZ','W1AW','KJ7QRP-7','VE3MAP','G0RAG-1'];
+  function demoStart(which){ hideVeil();
+    if(which==='rf'){ DCITY={lat:parseFloat(rfFreq.value)>145?-33:39.95, lon:parseFloat(rfFreq.value)>145?151:-98.6}; }
+    if(!demoTimer){ demoTick(); demoTimer=setInterval(demoTick,2200); } }
+  function demoTick(){ if(!DEMO_ON) return; if(!rfOn&&!isOn){ return; }
+    var c=DEMO_CALLS[(Math.random()*DEMO_CALLS.length)|0];
+    var src=isOn?(Math.random()<0.7?'is':'rf'):'rf';
+    var lat=DCITY.lat+(Math.random()-0.5)*(src==='is'?18:1.4), lon=DCITY.lon+(Math.random()-0.5)*(src==='is'?36:1.8);
+    var r=Math.random(), p;
+    if(r<0.65){ p={source:c,type:'position',lat:lat,lon:lon,symbol:'/>',comment:'demo beacon',speed_kt:(Math.random()*40)|0,course:(Math.random()*360)|0,src_kind:src,ts:Date.now()/1000,seq:++pseq}; }
+    else if(r<0.85){ p={source:c,type:'status',comment:'Ragnar APRS demo',src_kind:src,ts:Date.now()/1000,seq:++pseq}; }
+    else { p={source:c,type:'message',addressee:'RAGNAR',text:'hello from '+c,src_kind:src,ts:Date.now()/1000,seq:++pseq}; }
+    ingest([p]);
+    renderStats({packets:pseq,stations:Object.keys(stations).length,messages:messages.length});
+  }
+
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function boot(){
+    fetch('/api/net/aprs/status').then(function(r){return r.json();}).then(function(st){
+      var det=(st&&st.detect)||{};
+      fillRegions(det.regions, det.region_filters);
+      renderStats(st||{});
+      if(!(st&&(st.rf_running||st.is_connected))){
+        if(DEMO_ON){ /* wait for user to hit Start/Connect */ }
+        else if(det.rf_available===false && det.is_available){ /* IS still usable */ }
+      }
+      if(det.rf_available===false && !DEMO_ON){ document.getElementById('rf-hint').textContent=det.error||'RF unavailable — APRS-IS still works'; }
+    }).catch(function(){});
+    if(poll)clearInterval(poll); poll=setInterval(pollAll,2000); pollAll();
+  }
+  drawMap();
+  refreshConfig().then(boot);
+})();
+</script>
+</body>
+</html>

@@ -2077,6 +2077,13 @@ function _wifiRfwfShow() {
         vor.classList.toggle('hidden', !showV);
         vor.classList.toggle('inline-flex', showV);
     }
+    // APRS off-air needs an RTL-SDR, but the APRS-IS Internet feed works with no
+    // dongle at all — so always offer it (it's the one that doesn't need hardware).
+    const aprs = document.getElementById('wifi-aprs-btn');
+    if (aprs) {
+        aprs.classList.remove('hidden');
+        aprs.classList.add('inline-flex');
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.
