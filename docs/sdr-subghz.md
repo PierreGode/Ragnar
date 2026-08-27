@@ -166,10 +166,20 @@ decoded mesh:
   on the dark base when offline.
 - **🌍 World** — one button connects the **public MQTT broker** on its global
   topic and zooms the map out to the whole planet: **public mesh nodes worldwide**
-  stream in and cluster as they beacon. It's a large *live sample* (only nodes
-  whose gateways uplink JSON to the public broker appear, and it fills in over a
-  minute or two), not a full census. MQTT positions are capped
-  (`_MQTT_STATION_MAX`) so the world feed stays bounded.
+  stream in and cluster as they beacon.
+  - **Encrypted feed decoded.** The MQTT subscription is `msh/+/2/#`, covering
+    both the JSON stream *and* the encrypted protobuf stream (`/e/`) that carries
+    most nodes — few gateways enable JSON, so JSON-only saw almost nothing.
+    `parse_mqtt_protobuf` hand-parses the ServiceEnvelope→MeshPacket→Data
+    protobuf wire format (no protobuf/meshtastic dependency) and AES-CTR-decrypts
+    the public-channel payload with the well-known default key. Private-channel
+    packets don't decrypt and are dropped, so only shareable public traffic shows.
+  - **Viewport-prioritised.** The map sends its current bounds
+    (`/api/net/mesh/nodes?s=&w=&n=&e=`) and reloads on pan/zoom, so a zoomed-in
+    view loads just that area instead of the whole world; results are capped
+    most-recent-first, and MQTT positions are capped (`_MQTT_STATION_MAX`).
+  - Still a large *live sample* (nodes appear as they beacon; RF-only/private
+    nodes never reach MQTT), not a full census.
 - **Public-channel messages** — the default Meshtastic channel key is
   well-known, so its text traffic is decoded and shown live. Private channels
   stay encrypted.

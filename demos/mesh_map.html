@@ -194,8 +194,18 @@
       if(det.mqtt_defaults&&det.mqtt_defaults.topic){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
     }).catch(function(){});
     if(DEMO_ON) return;   // in demo the synth timers own the map; don't wipe them with the empty live feed
-    fetch('/api/net/mesh/nodes').then(function(r){return r.json();}).then(function(d){ if(d&&d.nodes) render(d.nodes); }).catch(function(){});
+    loadNodes();
   }
+  // load only the nodes in the current viewport (prioritise where you've zoomed)
+  function loadNodes(){
+    if(DEMO_ON) return;
+    var b=map.getBounds();
+    var q='?s='+b.getSouth().toFixed(4)+'&w='+b.getWest().toFixed(4)+'&n='+b.getNorth().toFixed(4)+'&e='+b.getEast().toFixed(4);
+    fetch('/api/net/mesh/nodes'+q).then(function(r){return r.json();}).then(function(d){ if(d&&d.nodes) render(d.nodes); }).catch(function(){});
+  }
+  // reload the viewport shortly after the user pans/zooms
+  var _mvT=null;
+  map.on('moveend', function(){ if(_mvT)clearTimeout(_mvT); _mvT=setTimeout(loadNodes, 400); });
 
   // ---- demo (offline / no hardware) ----
   var demoTimer=null;
