@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh Map</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+<link rel="stylesheet" href="/web/vendor/leaflet/markercluster/MarkerCluster.css"/>
+<link rel="stylesheet" href="/web/vendor/leaflet/markercluster/MarkerCluster.Default.css"/>
+<script src="/web/vendor/leaflet/leaflet.js"></script>
+<script src="/web/vendor/leaflet/markercluster/leaflet.markercluster.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074; --mesh:#7b8cd2; --is:#5ec8f0; --tx:#c98bf0;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp)}
+  #map{position:fixed;inset:0;background:#0b1119;z-index:1}
+  .leaflet-container{background:#0b1119;font-family:var(--mono)}
+  /* floating top bar */
+  .bar{position:fixed;top:12px;left:12px;right:12px;z-index:1000;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
+    padding:9px 12px;background:rgba(13,20,32,.92);border:1px solid var(--line);border-radius:12px;backdrop-filter:blur(6px)}
+  .title{display:flex;align-items:center;gap:8px;font-family:var(--disp);font-weight:700;font-size:16px;margin-right:6px}
+  .title .dot{width:8px;height:8px;border-radius:50%;background:var(--mesh);box-shadow:0 0 10px var(--mesh)}
+  .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .stat{font-family:var(--mono);font-size:12px;color:var(--mesh)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:6px 11px;border-radius:7px;cursor:pointer;text-decoration:none}
+  button.ctl:hover,a.ctl:hover{border-color:var(--mesh);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
+  input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:5px 7px;width:140px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.1em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .spacer{flex:1}
+  /* node markers */
+  .nodemk{font-family:var(--mono);font-size:10px;font-weight:600;line-height:1;white-space:nowrap;color:#0a0e14;
+    padding:3px 6px;border-radius:6px;border:2px solid rgba(0,0,0,.4);box-shadow:0 1px 4px rgba(0,0,0,.5);transform:translate(-50%,-50%)}
+  .nodemk.src-serial{background:#7b8cd2} .nodemk.src-mqtt{background:#5ec8f0} .nodemk.self{background:#3fb56b;color:#04120a;border-color:#0a0e14}
+  .nodemk.router{border-color:#f5b942}
+  .leaflet-popup-content-wrapper{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px}
+  .leaflet-popup-tip{background:var(--panel);border:1px solid var(--line)}
+  .pop{font-family:var(--mono);font-size:12px;min-width:180px}
+  .pop b{color:var(--mesh)} .pop .r{display:flex;justify-content:space-between;gap:12px;padding:2px 0;border-bottom:1px solid var(--line-soft)}
+  .pop .r:last-child{border-bottom:none} .pop .k{color:var(--muted)}
+  .veil{position:fixed;left:50%;top:72px;transform:translateX(-50%);z-index:1200;background:rgba(13,20,32,.95);border:1px solid var(--line);
+    border-radius:10px;padding:12px 16px;text-align:center;font-family:var(--mono);font-size:12px;color:var(--ink-dim);max-width:520px;display:none}
+  .veil.show{display:block} .veil a{color:var(--cyan)}
+  .leaflet-bar a,.leaflet-control-layers{background:var(--panel)!important;color:var(--ink)!important;border-color:var(--line)!important}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="bar">
+  <div class="title"><span class="dot"></span> Mesh Map</div>
+  <a href="/mesh-nodes" class="ctl back">&#8592;&nbsp;Nodes</a>
+  <button class="ctl go" id="node-btn" aria-pressed="false" title="Connect the USB Meshtastic node">&#9654;&nbsp;Node</button>
+  <button class="ctl go" id="mqtt-btn" aria-pressed="false" title="Connect the MQTT Internet feed (no node needed)">&#9729;&nbsp;MQTT</button>
+  <input class="tin" id="mqtt-topic" placeholder="msh/+/2/json/#" title="APRS-IS-style topic filter">
+  <button class="ctl" id="fit-btn" title="Fit the view to all positioned nodes">&#9974;&nbsp;Fit</button>
+  <button class="ctl go" id="links-btn" aria-pressed="true" title="Draw links from your node to the others (coloured by SNR)">&#8618;&nbsp;Links</button>
+  <div class="spacer"></div>
+  <span class="lbl">Nodes</span><span class="stat" id="s-nodes">—</span>
+  <span class="lbl">On map</span><span class="stat" id="s-pos">—</span>
+  <span class="tag idle" id="nodetag">no node</span>
+  <span class="tag idle" id="mqtttag">MQTT off</span>
+</div>
+
+<div class="veil" id="veil"></div>
+
+<script>
+(function(){
+  "use strict";
+  var DEMO_ON=false, running=false, mqttOn=false, showLinks=true;
+  var nodesById={}, markers={}, links=[], selfLL=null, firstFit=false;
+
+  var map=L.map('map',{zoomControl:true, attributionControl:true}).setView([59.33,18.07],11);
+  var bases={
+    "Dark":  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:20, subdomains:'abcd', attribution:'&copy; OpenStreetMap &copy; CARTO'}),
+    "Streets": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap'}),
+    "Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19, attribution:'&copy; Esri'})
+  };
+  bases["Dark"].addTo(map);
+  L.control.layers(bases,null,{position:'topright'}).addTo(map);
+  var cluster=L.markerClusterGroup({maxClusterRadius:44, spiderfyOnMaxZoom:true, showCoverageOnHover:false,
+    disableClusteringAtZoom:15});
+  map.addLayer(cluster);
+  var linkLayer=L.layerGroup().addTo(map);
+
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function ago(ts){ if(!ts)return '—'; var s=Math.max(0,Math.floor(Date.now()/1000-ts)); if(s<60)return s+'s'; if(s<3600)return (s/60|0)+'m'; return (s/3600|0)+'h'; }
+  function snrColor(snr){ if(snr==null)return '#7c8aa0'; if(snr>=5)return '#3fb56b'; if(snr>=0)return '#a3c644'; if(snr>=-8)return '#f5b942'; return '#e0533d'; }
+  function showVeil(html){ var v=document.getElementById('veil'); v.innerHTML=html; v.classList.add('show'); }
+  function hideVeil(){ document.getElementById('veil').classList.remove('show'); }
+
+  function markerHTML(n){
+    var cls='nodemk '+('src-'+(n.src||'serial'))+(n.is_self?' self':'')+((n.role||'').toUpperCase().indexOf('ROUTER')>=0?' router':'');
+    var name=n.short_name||n.long_name||(n.id||'').replace(/^!/,'').slice(0,4)||'?';
+    return '<div class="'+cls+'">'+esc(name)+'</div>';
+  }
+  function popupHTML(n){
+    function row(k,v){ return v==null||v===''?'':'<div class="r"><span class="k">'+k+'</span><span>'+esc(v)+'</span></div>'; }
+    return '<div class="pop"><div style="margin-bottom:5px"><b>'+esc(n.long_name||n.short_name||n.id||'node')+'</b>'
+      +(n.is_self?' <span style="color:var(--live)">(you)</span>':'')+'</div>'
+      +row('ID', n.id)+row('Hardware', n.hw_model)+row('Role', n.role)
+      +row('SNR', n.snr!=null?n.snr+' dB':'')+row('Hops', n.hops)
+      +row('Battery', n.battery!=null?n.battery+'%':'')+row('Altitude', n.altitude!=null?n.altitude+' m':'')
+      +row('Source', (n.src||'serial').toUpperCase())+row('Heard', ago(n.last_heard))+'</div>';
+  }
+  function upsertMarker(n){
+    if(n.lat==null||n.lon==null) return;
+    var icon=L.divIcon({className:'', html:markerHTML(n), iconSize:null});
+    var m=markers[n.id];
+    if(m){ m.setLatLng([n.lat,n.lon]); m.setIcon(icon); m.setPopupContent(popupHTML(n)); }
+    else { m=L.marker([n.lat,n.lon],{icon:icon}); m.bindPopup(popupHTML(n)); markers[n.id]=m; cluster.addLayer(m); }
+    if(n.is_self) selfLL=[n.lat,n.lon];
+  }
+  function drawLinks(list){
+    linkLayer.clearLayers();
+    if(!showLinks||!selfLL) return;
+    list.forEach(function(n){ if(n.is_self||n.lat==null||n.lon==null)return;
+      L.polyline([selfLL,[n.lat,n.lon]],{color:snrColor(n.snr),weight:1.6,opacity:.55}).addTo(linkLayer); });
+  }
+  function render(list){
+    var pos=0, seen={};
+    list.forEach(function(n){ if(!n.id)return; nodesById[n.id]=n; seen[n.id]=1; if(n.lat!=null&&n.lon!=null){ upsertMarker(n); pos++; } });
+    // drop markers for nodes no longer present
+    Object.keys(markers).forEach(function(id){ if(!seen[id]){ cluster.removeLayer(markers[id]); delete markers[id]; } });
+    drawLinks(list);
+    document.getElementById('s-nodes').textContent=list.length;
+    document.getElementById('s-pos').textContent=pos+(list.length-pos?(' · '+(list.length-pos)+' no GPS'):'');
+    if(pos && !firstFit){ fit(); firstFit=true; }
+    if(!list.length && !running && !mqttOn){ showVeil('No mesh data yet. <b>▶ Node</b> for a USB device, or <b>☁ MQTT</b> to watch the mesh over the Internet — or open the <a href="/mesh-nodes">Mesh Nodes</a> page.'); }
+    else hideVeil();
+  }
+  function fit(){ var b=[]; Object.keys(markers).forEach(function(id){ b.push(markers[id].getLatLng()); });
+    if(b.length===1) map.setView(b[0],13); else if(b.length){ map.fitBounds(L.latLngBounds(b).pad(0.15)); } }
+  document.getElementById('fit-btn').addEventListener('click',fit);
+  document.getElementById('links-btn').addEventListener('click',function(){ showLinks=!showLinks; this.setAttribute('aria-pressed',showLinks?'true':'false'); drawLinks(Object.keys(nodesById).map(function(k){return nodesById[k];})); });
+
+  // ---- source controls ----
+  document.getElementById('node-btn').addEventListener('click',function(){
+    var b=this;
+    if(running){ running=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Node'; fetch('/api/net/mesh/stop',{method:'POST'}).catch(function(){}); return; }
+    running=true; b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Node';
+    if(DEMO_ON){ demoSeed(); return; }
+    fetch('/api/net/mesh/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ running=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Node'; showVeil('Could not connect node: '+esc(res.error)); } }).catch(function(){});
+  });
+  document.getElementById('mqtt-btn').addEventListener('click',function(){
+    var b=this;
+    if(mqttOn){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; fetch('/api/net/mesh/mqtt/disconnect',{method:'POST'}).catch(function(){}); return; }
+    mqttOn=true; b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;MQTT';
+    if(DEMO_ON){ demoSeed(); return; }
+    var topic=document.getElementById('mqtt-topic').value.trim();
+    fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(topic?{topic:topic}:{})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; showVeil('MQTT connect failed: '+esc(res.error)); } }).catch(function(){});
+  });
+
+  // ---- polling ----
+  function poll(){
+    fetch('/api/net/mesh/status').then(function(r){return r.json();}).then(function(st){
+      if(!st) return; var det=st.detect||{}, mq=st.mqtt||{};
+      var nt=document.getElementById('nodetag'); nt.className='tag '+(st.running?'live':'idle'); nt.textContent=st.running?'node live':(det.error?'no node':'node idle');
+      if(st.running){ running=true; document.getElementById('node-btn').setAttribute('aria-pressed','true'); document.getElementById('node-btn').innerHTML='&#10074;&#10074;&nbsp;Node'; }
+      var mt=document.getElementById('mqtttag'); mt.className='tag '+(mq.connected?'live':'idle'); mt.textContent=mq.connected?'MQTT on':(det.mqtt_available===false?'MQTT n/a':'MQTT off');
+      if(mq.connected){ mqttOn=true; document.getElementById('mqtt-btn').setAttribute('aria-pressed','true'); document.getElementById('mqtt-btn').innerHTML='&#10074;&#10074;&nbsp;MQTT'; }
+      if(det.mqtt_defaults&&det.mqtt_defaults.topic){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
+    }).catch(function(){});
+    fetch('/api/net/mesh/nodes').then(function(r){return r.json();}).then(function(d){ if(d&&d.nodes) render(d.nodes); }).catch(function(){});
+  }
+
+  // ---- demo (offline / no hardware) ----
+  var demoTimer=null;
+  var SN=[['Base Camp','BASE','HELTEC_V3','ROUTER',0,59.3293,18.0686,9.5,92],['Trail Node','TRL','RAK4631','CLIENT',2,59.352,18.09,-3,64],
+    ['Ridge Relay','RDG','TBEAM','ROUTER',1,59.312,18.02,4,78],['Harbor','HARB','TLORA_V2','CLIENT',3,59.322,18.135,-8.8,41],
+    ['Rooftop','ROOF','HELTEC_V3','CLIENT',1,59.345,18.045,2.6,88],['Sodermalm','SODR','TECHO','CLIENT',2,59.314,18.072,-5.9,55],
+    ['Kista','KIST','STATION_G2','ROUTER',2,59.403,17.945,1.1,73],['Nacka','NCK','RAK4631','CLIENT',3,59.31,18.16,-7.2,60]];
+  function demoSeed(){ hideVeil();
+    var list=SN.map(function(s,i){ return {id:'!'+(0x7c000000+i*0x1111).toString(16),long_name:s[0],short_name:s[1],hw_model:s[2],
+      role:s[3],hops:s[4],lat:s[5],lon:s[6],snr:s[7],battery:s[8],src:(i%3===0?'serial':'mqtt'),last_heard:Math.floor(Date.now()/1000)-((Math.random()*120)|0),is_self:i===0}; });
+    render(list);
+    if(demoTimer)return;
+    demoTimer=setInterval(function(){ if(!running&&!mqttOn)return; SN.forEach(function(s,i){ if(i){ s[5]+= (Math.random()-0.5)*0.001; s[6]+=(Math.random()-0.5)*0.001; s[7]=Math.round((s[7]+(Math.random()-0.5)*2)*10)/10; } });
+      render(SN.map(function(s,i){ return {id:'!'+(0x7c000000+i*0x1111).toString(16),long_name:s[0],short_name:s[1],hw_model:s[2],role:s[3],hops:s[4],lat:s[5],lon:s[6],snr:s[7],battery:s[8],src:(i%3===0?'serial':'mqtt'),last_heard:Math.floor(Date.now()/1000)-((Math.random()*90)|0),is_self:i===0}; })); },3000);
+  }
+
+  fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){})
+    .then(function(){ poll(); setInterval(poll,3000);
+      if(DEMO_ON){ showVeil('Demo mode — press <b>▶ Node</b> or <b>☁ MQTT</b> to drop a synthetic Stockholm mesh onto the map.'); }
+    });
+})();
+</script>
+</body>
+</html>

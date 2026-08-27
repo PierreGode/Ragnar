@@ -154,8 +154,15 @@ demodulation in hardware, and the `meshtastic` Python API hands Ragnar the
 decoded mesh:
 
 - **Node DB** — id, long/short name, hardware model, role, SNR, hops away,
-  battery/voltage, GPS position, last-heard. Plotted on a node map (self at
-  centre, links coloured by SNR) plus a full table.
+  battery/voltage, GPS position, last-heard. Plotted on a compact node radar
+  (self at centre, links coloured by SNR) plus a full table.
+- **🗺 Full map view** (`/mesh-map`, `demos/mesh_map.html`) — a full-screen
+  **Leaflet** slippy map (vendored `web/vendor/leaflet`, dark CARTO/OSM/satellite
+  tile layers) with clustered node markers, popups (hw/role/SNR/hops/battery),
+  SNR-coloured links from your node, and Fit/Links controls. Fed by the same
+  serial+MQTT node data, so it works with a node or MQTT-only. Reached from the
+  Mesh Nodes toolbar. Map tiles need Internet (CSP allows remote `https:`
+  images); markers still render on the dark base when offline.
 - **Public-channel messages** — the default Meshtastic channel key is
   well-known, so its text traffic is decoded and shown live. Private channels
   stay encrypted.

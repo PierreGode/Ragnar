@@ -8763,6 +8763,17 @@ def mesh_nodes_page():
     return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
 
 
+@app.route('/mesh-map')
+def mesh_map_page():
+    """Serve the full-screen Meshtastic map (Leaflet slippy map of the mesh).
+
+    Always served (login required), same as /mesh-nodes — the map is fed by the
+    same node data, which can come from a USB node or from MQTT over the Internet
+    with no hardware at all.
+    """
+    return _no_store(make_response(send_from_directory('demos', 'mesh_map.html')))
+
+
 @app.route('/pager-decode')
 def pager_decode_page():
     """Serve the POCSAG/FLEX pager decode page.
