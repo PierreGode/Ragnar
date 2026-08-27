@@ -8753,28 +8753,13 @@ def adsb_radar_page():
 
 @app.route('/mesh-nodes')
 def mesh_nodes_page():
-    """Serve the Meshtastic mesh map/node list (real enumeration via a USB node).
+    """Serve the Meshtastic mesh map/node list.
 
-    Served when a Meshtastic node/serial device is present (so the page can offer
-    its Install-meshtastic button even before the pip pkg exists), when any SDR is
-    present (it sits with the other SDR tools), or when the RF Waterfall demo
-    toggle is on (synthetic mesh). 404s otherwise. Login required.
+    Always served (login required): the USB-node path needs a Meshtastic device,
+    but the MQTT source works over the Internet with no node/SDR at all, so the
+    page is useful to everyone — and its always-visible Signal Intelligence
+    button would otherwise land on a 404. Same rule as the APRS page.
     """
-    env = os.environ.get('RAGNAR_SDR_DEMO', '').strip().lower()
-    demo = bool(shared_data.config.get('sdr_demo')) or env in ('1', 'true', 'yes', 'on')
-    # Serve when a Meshtastic node OR its serial device is present (so the page
-    # can show its "Install meshtastic" button when only the pip pkg is missing),
-    # or when any SDR is present (this page sits with the other SDR tools), or in
-    # demo mode. Gating on the pip pkg alone 404'd before the install button.
-    present = False
-    try:
-        import meshtastic_node
-        det = meshtastic_node.detect()
-        present = bool(det.get('available') or det.get('device_present'))
-    except Exception:
-        present = False
-    if not (demo or present or _any_sdr_present()):
-        return ('Not Found', 404)
     return _no_store(make_response(send_from_directory('demos', 'mesh_nodes.html')))
 
 
