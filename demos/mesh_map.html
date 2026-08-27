@@ -80,10 +80,15 @@
   var nodesById={}, markers={}, links=[], selfLL=null, firstFit=false;
 
   var map=L.map('map',{zoomControl:true, attributionControl:true}).setView([59.33,18.07],11);
+  // All key-free tile providers (no account/API key needed), like the wardrive
+  // map's OpenStreetMap tiles. Dark = Esri's Dark Gray canvas (base + labels).
+  var esriAttr='Tiles &copy; Esri';
+  var darkBase=L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:20,attribution:esriAttr});
+  var darkRef =L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:20,attribution:''});
   var bases={
-    "Dark":  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:20, subdomains:'abcd', attribution:'&copy; OpenStreetMap &copy; CARTO'}),
+    "Dark":  L.layerGroup([darkBase, darkRef]),
     "Streets": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap'}),
-    "Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19, attribution:'&copy; Esri'})
+    "Satellite": L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:19,maxZoom:20,attribution:esriAttr})
   };
   bases["Dark"].addTo(map);
   L.control.layers(bases,null,{position:'topright'}).addTo(map);
