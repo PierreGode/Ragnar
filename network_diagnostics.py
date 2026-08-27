@@ -19042,6 +19042,28 @@ def register_network_diagnostics(app, logger=None):
         _log("net/mesh/install")
         return jsonify(meshtastic_node.install())
 
+    # Meshtastic MQTT (Internet bridge) — independent of the USB node, so it can
+    # run with no device at all (like APRS-IS for APRS).
+    @app.route('/api/net/mesh/mqtt/connect', methods=['POST'])
+    def net_mesh_mqtt_connect():
+        data = request.get_json(silent=True) or {}
+        _log(f"net/mesh/mqtt/connect host={data.get('host')} topic={data.get('topic')}")
+        return jsonify(meshtastic_node.connect_mqtt(host=data.get('host'), port=data.get('port'),
+                                                    user=data.get('user'), password=data.get('password'),
+                                                    topic=data.get('topic')))
+
+    @app.route('/api/net/mesh/mqtt/disconnect', methods=['POST'])
+    def net_mesh_mqtt_disconnect():
+        _log("net/mesh/mqtt/disconnect")
+        return jsonify(meshtastic_node.disconnect_mqtt())
+
+    @app.route('/api/net/mesh/send', methods=['POST'])
+    def net_mesh_send():
+        data = request.get_json(silent=True) or {}
+        _log(f"net/mesh/send to={data.get('to')} via={data.get('via')}")
+        return jsonify(meshtastic_node.send_text(data.get('text'), dest=data.get('to'),
+                                                 channel=data.get('channel', 0), via=data.get('via', 'auto')))
+
     @app.route('/api/net/mesh/selftest', methods=['GET'])
     def net_mesh_selftest():
         return jsonify(meshtastic_node.selftest())
