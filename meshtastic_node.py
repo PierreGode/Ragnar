@@ -60,6 +60,9 @@ _MESH_USB_IDS = {
 
 _MSG_RING = 200            # keep the last N decoded text messages
 _MQTT_STATION_MAX = 9000   # cap MQTT-derived positions (the public world feed is big)
+_MQTT_MAX_PPS = 90         # process at most N MQTT packets/sec (the public firehose is
+                           # ~400/s; each needs AES-decrypt + protobuf parse, so cap the
+                           # CPU + lock churn and just sample — the map still fills fast)
 
 
 def _run(args, timeout=6):
@@ -385,8 +388,11 @@ def _pb_iter(buf):
     """Yield (field_number, wire_type, value) for a protobuf message.
 
     value is an int for varint(0)/fixed64(1)/fixed32(5) and bytes for
-    length-delimited(2). Enough to read the few Meshtastic fields we need.
+    length-delimited(2). Bounds-safe: stops on malformed input (e.g. the garbage
+    a wrong-key decrypt produces) instead of raising, and no-ops on non-bytes.
     """
+    if not isinstance(buf, (bytes, bytearray)):
+        return
     i, n = 0, len(buf)
     while i < n:
         tag, i = _pb_varint(buf, i)
@@ -394,13 +400,20 @@ def _pb_iter(buf):
         if wt == 0:
             v, i = _pb_varint(buf, i); yield fn, wt, v
         elif wt == 2:
-            ln, i = _pb_varint(buf, i); yield fn, wt, buf[i:i + ln]; i += ln
+            ln, i = _pb_varint(buf, i)
+            if ln < 0 or i + ln > n:
+                return
+            yield fn, wt, buf[i:i + ln]; i += ln
         elif wt == 5:
+            if i + 4 > n:
+                return
             yield fn, wt, int.from_bytes(buf[i:i + 4], "little"); i += 4
         elif wt == 1:
+            if i + 8 > n:
+                return
             yield fn, wt, int.from_bytes(buf[i:i + 8], "little"); i += 8
         else:
-            break
+            return
 
 
 def _s32(v):
@@ -434,12 +447,12 @@ def parse_mqtt_protobuf(topic, payload, key=_MESH_DEFAULT_KEY):
         return None
     frm = pid = channel = None; decoded = encrypted = None; snr = None
     for fn, wt, v in _pb_iter(packet):
-        if fn == 1: frm = v                     # from (fixed32)
-        elif fn == 3: channel = v               # channel (varint)
-        elif fn == 4: decoded = v               # Data (plaintext)
-        elif fn == 5: encrypted = v             # bytes (encrypted Data)
-        elif fn == 6: pid = v                   # id (fixed32)
-        elif fn == 8:
+        if fn == 1 and wt == 5: frm = v         # from (fixed32)
+        elif fn == 3 and wt == 0: channel = v   # channel (varint)
+        elif fn == 4 and wt == 2: decoded = v   # Data (plaintext, bytes)
+        elif fn == 5 and wt == 2: encrypted = v  # encrypted Data (bytes)
+        elif fn == 6 and wt == 5: pid = v       # id (fixed32)
+        elif fn == 8 and wt == 5:
             import struct
             snr = round(struct.unpack("<f", v.to_bytes(4, "little"))[0], 1)
     data = decoded
@@ -448,12 +461,14 @@ def parse_mqtt_protobuf(topic, payload, key=_MESH_DEFAULT_KEY):
             data = _mesh_decrypt(encrypted, frm, pid, key)
         except Exception:
             return None
-    if not data:
+    if not isinstance(data, (bytes, bytearray)) or not data:
         return None
     portnum = None; pl = None
     for fn, wt, v in _pb_iter(data):
-        if fn == 1: portnum = v                 # Data.portnum
-        elif fn == 2: pl = v                    # Data.payload
+        if fn == 1 and wt == 0: portnum = v      # Data.portnum
+        elif fn == 2 and wt == 2: pl = v         # Data.payload (bytes)
+    if portnum is None or portnum > 511:         # a wrong-key decrypt yields junk
+        return None
     sender = ("!%08x" % (frm & 0xFFFFFFFF)) if frm is not None else None
     rec = {"src": "mqtt", "from_num": frm, "sender": sender, "channel": channel,
            "topic": topic, "ts": time.time(), "snr": snr}
@@ -530,6 +545,8 @@ class MeshMqtt:
         self._connected = False
         self._error = None
         self._cfg = {}
+        self._rl_sec = 0            # rate-limit window (integer second)
+        self._rl_n = 0              # packets processed in the current window
 
     def status(self):
         with self._lock:
@@ -549,7 +566,10 @@ class MeshMqtt:
             self._cfg = cfg
             self._error = None
             try:
-                c = _mqtt_client.Client()
+                try:                            # paho-mqtt 2.x wants an explicit
+                    c = _mqtt_client.Client(_mqtt_client.CallbackAPIVersion.VERSION1)
+                except (AttributeError, TypeError):   # paho-mqtt 1.x
+                    c = _mqtt_client.Client()
                 if cfg["user"]:
                     c.username_pw_set(cfg["user"], cfg["password"] or "")
                 c.on_connect = self._on_connect
@@ -581,6 +601,16 @@ class MeshMqtt:
             self._connected = False
 
     def _on_message(self, client, userdata, msg):  # pragma: no cover - network
+        # Rate-limit: the public firehose is ~400 msg/s and each needs an
+        # AES-decrypt + protobuf parse. Process at most _MQTT_MAX_PPS per second
+        # and drop the rest (cheaply, before any crypto) — we're sampling to build
+        # a node map, not archiving every packet, so this just bounds the CPU.
+        sec = int(time.time())
+        if sec != self._rl_sec:
+            self._rl_sec = sec; self._rl_n = 0
+        self._rl_n += 1
+        if self._rl_n > _MQTT_MAX_PPS:
+            return
         try:
             if "/json/" in msg.topic:
                 rec = parse_mqtt_json(msg.topic, msg.payload.decode("utf-8", "replace"))
@@ -711,7 +741,7 @@ def status():
     return st
 
 
-def nodes(bbox=None, limit=3000):
+def nodes(bbox=None, limit=1500):
     """Merged serial + MQTT nodes.
 
     ``bbox`` = (south, west, north, east): when the map passes its viewport, only
