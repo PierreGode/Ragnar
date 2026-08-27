@@ -2052,14 +2052,13 @@ function _wifiRfwfShow() {
         adsb.classList.toggle('hidden', !showA);
         adsb.classList.toggle('inline-flex', showA);
     }
-    // Mesh Nodes uses a separate USB Meshtastic node. Show it alongside the other
-    // SDR tools whenever an SDR is present, a Meshtastic node is detected, or the
-    // demo is on — the page itself guides plugging in a node / installing the pkg.
+    // Mesh Nodes reads a USB Meshtastic node, but its MQTT source works over the
+    // Internet with no node at all (like APRS-IS), so always offer it — the page
+    // guides plugging in a node / connecting MQTT / installing the packages.
     const mesh = document.getElementById('wifi-mesh-btn');
     if (mesh) {
-        const showM = rtl || hackrf || !!_wifiState.meshAvailable || demo;
-        mesh.classList.toggle('hidden', !showM);
-        mesh.classList.toggle('inline-flex', showM);
+        mesh.classList.remove('hidden');
+        mesh.classList.add('inline-flex');
     }
     // Pager decode needs an RTL-SDR (rtl_fm|multimon-ng); show when RTL present
     // or demo on (synthetic feed).
