@@ -536,6 +536,26 @@ def parse_mqtt_json(topic, payload):
     return rec
 
 
+def _stop_paho(client):
+    """Cleanly stop a paho client — MUST be called with no lock held.
+
+    loop_stop() joins the network thread, which grabs MeshMqtt._lock inside
+    _on_message; calling this under that lock deadlocks (the bug where MQTT
+    'won't stop'). disconnect() first so the DISCONNECT is sent while the loop
+    is still alive, then loop_stop() ends the thread.
+    """
+    if not client:
+        return
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.loop_stop()
+    except Exception:
+        pass
+
+
 class MeshMqtt:
     def __init__(self):
         self._lock = threading.Lock()
@@ -561,8 +581,13 @@ class MeshMqtt:
                "user": user if user is not None else MESH_MQTT["user"],
                "password": password if password is not None else MESH_MQTT["password"],
                "topic": topic or MESH_MQTT["topic"]}
+        # Stop any prior client FIRST, outside the lock — loop_stop() joins the
+        # network thread, which itself grabs self._lock in _on_message, so doing
+        # it under the lock would deadlock.
         with self._lock:
-            self._disconnect_locked()
+            old, self._client, self._connected = self._client, None, False
+        _stop_paho(old)
+        with self._lock:
             self._cfg = cfg
             self._error = None
             try:
@@ -621,6 +646,8 @@ class MeshMqtt:
         if not rec:
             return
         with self._lock:
+            if self._client is None:            # disconnected mid-flight: don't re-add
+                return
             if rec.get("type") == "text" and rec.get("text"):
                 rec["ts"] = time.time()
                 self._messages.append(rec)
@@ -665,22 +692,17 @@ class MeshMqtt:
         with self._lock:
             return list(self._positions.values())
 
-    def _disconnect_locked(self):
-        if self._client:
-            try:
-                self._client.loop_stop()
-                self._client.disconnect()
-            except Exception:
-                pass
-        self._client = None
-        self._connected = False
-
     def disconnect(self):
+        # Null the client + clear the feed under the lock, then stop the client
+        # OUTSIDE the lock (loop_stop() joins the network thread, which needs the
+        # lock in _on_message — stopping it while holding the lock deadlocks).
         with self._lock:
-            self._disconnect_locked()
-            # drop the accumulated world feed so the map clears on disconnect
+            old = self._client
+            self._client = None
+            self._connected = False
             self._positions = {}
             self._messages = []
+        _stop_paho(old)
         return {"ok": True}
 
 
