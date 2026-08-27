@@ -39,7 +39,7 @@
   .stat .v{font-family:var(--mono);font-size:14px;color:var(--mesh)}
   .layout{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px}
   @media (max-width:900px){.layout{grid-template-columns:1fr}}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;min-height:0}
   .cap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
   .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
   .scopewrap{position:relative;background:#05080d;aspect-ratio:4/3;width:100%;max-height:74vh}
@@ -47,7 +47,7 @@
   .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.80);text-align:center;padding:20px}
   .veil.show{display:flex}
   .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
-  .tbl{overflow:auto;max-height:360px}
+  .tbl{overflow:auto;flex:1 1 auto;min-height:200px;max-height:74vh}
   table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
   th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;letter-spacing:.06em;text-transform:uppercase;font-size:9.5px;border-bottom:1px solid var(--line)}
   td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
