@@ -154,8 +154,32 @@ demodulation in hardware, and the `meshtastic` Python API hands Ragnar the
 decoded mesh:
 
 - **Node DB** — id, long/short name, hardware model, role, SNR, hops away,
-  battery/voltage, GPS position, last-heard. Plotted on a node map (self at
-  centre, links coloured by SNR) plus a full table.
+  battery/voltage, GPS position, last-heard. Plotted on a compact node radar
+  (self at centre, links coloured by SNR) plus a full table.
+- **🗺 Full map view** (`/mesh-map`, `demos/mesh_map.html`) — a full-screen
+  **Leaflet** slippy map (vendored `web/vendor/leaflet`, key-free dark
+  Esri / OSM / satellite tile layers — no API key, like the wardrive map) with
+  clustered node markers, popups (hw/role/SNR/hops/battery), SNR-coloured links
+  from your node, and Fit/Links controls. Fed by the same serial+MQTT node data,
+  so it works with a node or MQTT-only. Reached from the Mesh Nodes toolbar. Map
+  tiles need Internet (CSP allows remote `https:` images); markers still render
+  on the dark base when offline.
+- **🌍 World** — one button connects the **public MQTT broker** on its global
+  topic and zooms the map out to the whole planet: **public mesh nodes worldwide**
+  stream in and cluster as they beacon.
+  - **Encrypted feed decoded.** The MQTT subscription is `msh/+/2/#`, covering
+    both the JSON stream *and* the encrypted protobuf stream (`/e/`) that carries
+    most nodes — few gateways enable JSON, so JSON-only saw almost nothing.
+    `parse_mqtt_protobuf` hand-parses the ServiceEnvelope→MeshPacket→Data
+    protobuf wire format (no protobuf/meshtastic dependency) and AES-CTR-decrypts
+    the public-channel payload with the well-known default key. Private-channel
+    packets don't decrypt and are dropped, so only shareable public traffic shows.
+  - **Viewport-prioritised.** The map sends its current bounds
+    (`/api/net/mesh/nodes?s=&w=&n=&e=`) and reloads on pan/zoom, so a zoomed-in
+    view loads just that area instead of the whole world; results are capped
+    most-recent-first, and MQTT positions are capped (`_MQTT_STATION_MAX`).
+  - Still a large *live sample* (nodes appear as they beacon; RF-only/private
+    nodes never reach MQTT), not a full census.
 - **Public-channel messages** — the default Meshtastic channel key is
   well-known, so its text traffic is decoded and shown live. Private channels
   stay encrypted.

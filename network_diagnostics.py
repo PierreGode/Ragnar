@@ -19020,7 +19020,14 @@ def register_network_diagnostics(app, logger=None):
 
     @app.route('/api/net/mesh/nodes', methods=['GET'])
     def net_mesh_nodes():
-        return jsonify(meshtastic_node.nodes())
+        bbox = None
+        try:
+            s, w, n, e = (request.args.get(k) for k in ('s', 'w', 'n', 'e'))
+            if None not in (s, w, n, e):
+                bbox = (float(s), float(w), float(n), float(e))
+        except (TypeError, ValueError):
+            bbox = None
+        return jsonify(meshtastic_node.nodes(bbox=bbox))
 
     @app.route('/api/net/mesh/messages', methods=['GET'])
     def net_mesh_messages():

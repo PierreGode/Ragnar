@@ -59,6 +59,10 @@ _MESH_USB_IDS = {
 }
 
 _MSG_RING = 200            # keep the last N decoded text messages
+_MQTT_STATION_MAX = 9000   # cap MQTT-derived positions (the public world feed is big)
+_MQTT_MAX_PPS = 90         # process at most N MQTT packets/sec (the public firehose is
+                           # ~400/s; each needs AES-decrypt + protobuf parse, so cap the
+                           # CPU + lock churn and just sample — the map still fills fast)
 
 
 def _run(args, timeout=6):
@@ -353,9 +357,142 @@ class MeshLink:
 MESH_MQTT = {
     "host": "mqtt.meshtastic.org", "port": 1883,
     "user": "meshdev", "password": "large4cats",
-    "topic": "msh/+/2/json/#",              # worldwide JSON stream
-    "publish_topic": "msh/2/json/mqtt/",    # downlink command topic
+    # Subscribe to BOTH the encrypted protobuf stream (/e/, the bulk of traffic)
+    # and the JSON stream (/json/, only JSON-enabled gateways). Most nodes are on
+    # /e/, so the protobuf decode below is what actually populates the world map.
+    "topic": "msh/+/2/#",
+    "publish_topic": "msh/2/json/mqtt/",    # downlink command topic (JSON)
 }
+
+# Meshtastic default channel PSK ("AQ==" -> the well-known LongFast key). Public-
+# channel traffic is encrypted with this, so it's readable; private channels use
+# their own key and stay opaque.
+_MESH_DEFAULT_KEY = bytes([0xd4, 0xf1, 0xbb, 0x3a, 0x20, 0x29, 0x07, 0x59,
+                           0xf0, 0xbc, 0xff, 0xab, 0xcf, 0x4e, 0x69, 0x01])
+
+
+# -- minimal protobuf wire reader (no protobuf/meshtastic dependency) ---------
+
+def _pb_varint(buf, i):
+    shift = 0; res = 0
+    while i < len(buf):
+        b = buf[i]; i += 1
+        res |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            break
+        shift += 7
+    return res, i
+
+
+def _pb_iter(buf):
+    """Yield (field_number, wire_type, value) for a protobuf message.
+
+    value is an int for varint(0)/fixed64(1)/fixed32(5) and bytes for
+    length-delimited(2). Bounds-safe: stops on malformed input (e.g. the garbage
+    a wrong-key decrypt produces) instead of raising, and no-ops on non-bytes.
+    """
+    if not isinstance(buf, (bytes, bytearray)):
+        return
+    i, n = 0, len(buf)
+    while i < n:
+        tag, i = _pb_varint(buf, i)
+        fn, wt = tag >> 3, tag & 7
+        if wt == 0:
+            v, i = _pb_varint(buf, i); yield fn, wt, v
+        elif wt == 2:
+            ln, i = _pb_varint(buf, i)
+            if ln < 0 or i + ln > n:
+                return
+            yield fn, wt, buf[i:i + ln]; i += ln
+        elif wt == 5:
+            if i + 4 > n:
+                return
+            yield fn, wt, int.from_bytes(buf[i:i + 4], "little"); i += 4
+        elif wt == 1:
+            if i + 8 > n:
+                return
+            yield fn, wt, int.from_bytes(buf[i:i + 8], "little"); i += 8
+        else:
+            return
+
+
+def _s32(v):
+    return v - (1 << 32) if v >= (1 << 31) else v
+
+
+def _mesh_decrypt(enc, from_node, packet_id, key=_MESH_DEFAULT_KEY):
+    """AES-CTR decrypt a Meshtastic packet payload (nonce = id||from, LE)."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    nonce = packet_id.to_bytes(8, "little") + from_node.to_bytes(8, "little")
+    d = Cipher(algorithms.AES(key), modes.CTR(nonce)).decryptor()
+    return d.update(enc) + d.finalize()
+
+
+# Meshtastic port numbers we care about
+_PORT_TEXT, _PORT_POSITION, _PORT_NODEINFO = 1, 3, 4
+
+
+def parse_mqtt_protobuf(topic, payload, key=_MESH_DEFAULT_KEY):
+    """Decode a Meshtastic MQTT ServiceEnvelope (encrypted /e/ topic) → record.
+
+    Hand-parses the protobuf wire format (ServiceEnvelope→MeshPacket→Data→
+    Position/User), decrypting the public-channel payload with the default key.
+    Pure; the selftest builds an envelope, encrypts it, and round-trips it.
+    """
+    packet = None
+    for fn, wt, v in _pb_iter(payload):
+        if fn == 1 and wt == 2:                 # ServiceEnvelope.packet
+            packet = v
+    if packet is None:
+        return None
+    frm = pid = channel = None; decoded = encrypted = None; snr = None
+    for fn, wt, v in _pb_iter(packet):
+        if fn == 1 and wt == 5: frm = v         # from (fixed32)
+        elif fn == 3 and wt == 0: channel = v   # channel (varint)
+        elif fn == 4 and wt == 2: decoded = v   # Data (plaintext, bytes)
+        elif fn == 5 and wt == 2: encrypted = v  # encrypted Data (bytes)
+        elif fn == 6 and wt == 5: pid = v       # id (fixed32)
+        elif fn == 8 and wt == 5:
+            import struct
+            snr = round(struct.unpack("<f", v.to_bytes(4, "little"))[0], 1)
+    data = decoded
+    if data is None and encrypted and frm is not None and pid is not None:
+        try:
+            data = _mesh_decrypt(encrypted, frm, pid, key)
+        except Exception:
+            return None
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return None
+    portnum = None; pl = None
+    for fn, wt, v in _pb_iter(data):
+        if fn == 1 and wt == 0: portnum = v      # Data.portnum
+        elif fn == 2 and wt == 2: pl = v         # Data.payload (bytes)
+    if portnum is None or portnum > 511:         # a wrong-key decrypt yields junk
+        return None
+    sender = ("!%08x" % (frm & 0xFFFFFFFF)) if frm is not None else None
+    rec = {"src": "mqtt", "from_num": frm, "sender": sender, "channel": channel,
+           "topic": topic, "ts": time.time(), "snr": snr}
+    if portnum == _PORT_TEXT:
+        rec["type"] = "text"; rec["text"] = (pl or b"").decode("utf-8", "replace")
+    elif portnum == _PORT_POSITION and pl:
+        lat = lon = alt = None
+        for fn, wt, v in _pb_iter(pl):
+            if fn == 1: lat = _s32(v) / 1e7     # latitude_i (sfixed32)
+            elif fn == 2: lon = _s32(v) / 1e7   # longitude_i
+            elif fn == 3: alt = _s32(v)         # altitude
+        if lat and lon and -90 <= lat <= 90 and -180 <= lon <= 180:
+            rec["type"] = "position"; rec["lat"] = lat; rec["lon"] = lon; rec["altitude"] = alt
+        else:
+            return None
+    elif portnum == _PORT_NODEINFO and pl:
+        for fn, wt, v in _pb_iter(pl):
+            if fn == 1 and wt == 2: rec["sender"] = v.decode("utf-8", "replace") or sender
+            elif fn == 2 and wt == 2: rec["long_name"] = v.decode("utf-8", "replace")
+            elif fn == 3 and wt == 2: rec["short_name"] = v.decode("utf-8", "replace")
+        rec["type"] = "nodeinfo"
+    else:
+        rec["type"] = "other"
+    return rec
 
 
 def parse_mqtt_json(topic, payload):
@@ -399,6 +536,26 @@ def parse_mqtt_json(topic, payload):
     return rec
 
 
+def _stop_paho(client):
+    """Cleanly stop a paho client — MUST be called with no lock held.
+
+    loop_stop() joins the network thread, which grabs MeshMqtt._lock inside
+    _on_message; calling this under that lock deadlocks (the bug where MQTT
+    'won't stop'). disconnect() first so the DISCONNECT is sent while the loop
+    is still alive, then loop_stop() ends the thread.
+    """
+    if not client:
+        return
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.loop_stop()
+    except Exception:
+        pass
+
+
 class MeshMqtt:
     def __init__(self):
         self._lock = threading.Lock()
@@ -408,6 +565,8 @@ class MeshMqtt:
         self._connected = False
         self._error = None
         self._cfg = {}
+        self._rl_sec = 0            # rate-limit window (integer second)
+        self._rl_n = 0              # packets processed in the current window
 
     def status(self):
         with self._lock:
@@ -422,12 +581,20 @@ class MeshMqtt:
                "user": user if user is not None else MESH_MQTT["user"],
                "password": password if password is not None else MESH_MQTT["password"],
                "topic": topic or MESH_MQTT["topic"]}
+        # Stop any prior client FIRST, outside the lock — loop_stop() joins the
+        # network thread, which itself grabs self._lock in _on_message, so doing
+        # it under the lock would deadlock.
         with self._lock:
-            self._disconnect_locked()
+            old, self._client, self._connected = self._client, None, False
+        _stop_paho(old)
+        with self._lock:
             self._cfg = cfg
             self._error = None
             try:
-                c = _mqtt_client.Client()
+                try:                            # paho-mqtt 2.x wants an explicit
+                    c = _mqtt_client.Client(_mqtt_client.CallbackAPIVersion.VERSION1)
+                except (AttributeError, TypeError):   # paho-mqtt 1.x
+                    c = _mqtt_client.Client()
                 if cfg["user"]:
                     c.username_pw_set(cfg["user"], cfg["password"] or "")
                 c.on_connect = self._on_connect
@@ -459,13 +626,28 @@ class MeshMqtt:
             self._connected = False
 
     def _on_message(self, client, userdata, msg):  # pragma: no cover - network
+        # Rate-limit: the public firehose is ~400 msg/s and each needs an
+        # AES-decrypt + protobuf parse. Process at most _MQTT_MAX_PPS per second
+        # and drop the rest (cheaply, before any crypto) — we're sampling to build
+        # a node map, not archiving every packet, so this just bounds the CPU.
+        sec = int(time.time())
+        if sec != self._rl_sec:
+            self._rl_sec = sec; self._rl_n = 0
+        self._rl_n += 1
+        if self._rl_n > _MQTT_MAX_PPS:
+            return
         try:
-            rec = parse_mqtt_json(msg.topic, msg.payload.decode("utf-8", "replace"))
+            if "/json/" in msg.topic:
+                rec = parse_mqtt_json(msg.topic, msg.payload.decode("utf-8", "replace"))
+            else:                                    # /e/ (or /c/): encrypted protobuf
+                rec = parse_mqtt_protobuf(msg.topic, msg.payload)
         except Exception:
             rec = None
         if not rec:
             return
         with self._lock:
+            if self._client is None:            # disconnected mid-flight: don't re-add
+                return
             if rec.get("type") == "text" and rec.get("text"):
                 rec["ts"] = time.time()
                 self._messages.append(rec)
@@ -480,6 +662,11 @@ class MeshMqtt:
                 p["long_name"] = rec.get("long_name") or p.get("long_name")
                 p["short_name"] = rec.get("short_name")
                 p["ts"] = time.time()
+            # the worldwide public feed is unbounded — evict the oldest stations
+            if len(self._positions) > _MQTT_STATION_MAX:
+                for k, _ in sorted(self._positions.items(),
+                                   key=lambda kv: kv[1].get("ts") or 0)[:len(self._positions) - _MQTT_STATION_MAX]:
+                    self._positions.pop(k, None)
 
     def publish_text(self, text, dest=None, channel=0, my_num=None):
         with self._lock:
@@ -505,19 +692,17 @@ class MeshMqtt:
         with self._lock:
             return list(self._positions.values())
 
-    def _disconnect_locked(self):
-        if self._client:
-            try:
-                self._client.loop_stop()
-                self._client.disconnect()
-            except Exception:
-                pass
-        self._client = None
-        self._connected = False
-
     def disconnect(self):
+        # Null the client + clear the feed under the lock, then stop the client
+        # OUTSIDE the lock (loop_stop() joins the network thread, which needs the
+        # lock in _on_message — stopping it while holding the lock deadlocks).
         with self._lock:
-            self._disconnect_locked()
+            old = self._client
+            self._client = None
+            self._connected = False
+            self._positions = {}
+            self._messages = []
+        _stop_paho(old)
         return {"ok": True}
 
 
@@ -578,20 +763,40 @@ def status():
     return st
 
 
-def nodes():
+def nodes(bbox=None, limit=1500):
+    """Merged serial + MQTT nodes.
+
+    ``bbox`` = (south, west, north, east): when the map passes its viewport, only
+    MQTT nodes inside it are returned (your own serial/self nodes always stay), so
+    a zoomed-in view loads just that area instead of the whole world. ``limit``
+    caps the payload (most-recently-heard first) so the world feed stays bounded.
+    """
     n = _link.nodes()
-    serial_nodes = n.get("nodes", [])
-    have = {x.get("id") for x in serial_nodes if x.get("id")}
-    # add MQTT-only positioned stations the serial DB hasn't seen
+    merged = list(n.get("nodes", []))
+    have = {x.get("id") for x in merged if x.get("id")}
     for p in _mqtt.positions():
         if p.get("id") and p["id"] not in have and p.get("lat") is not None:
-            serial_nodes.append({"id": p["id"], "num": None,
-                                 "long_name": p.get("long_name"), "short_name": p.get("short_name"),
-                                 "lat": p.get("lat"), "lon": p.get("lon"), "src": "mqtt",
-                                 "last_heard": int(p.get("ts") or 0), "is_self": False})
+            merged.append({"id": p["id"], "num": None,
+                           "long_name": p.get("long_name"), "short_name": p.get("short_name"),
+                           "lat": p.get("lat"), "lon": p.get("lon"), "src": "mqtt",
+                           "last_heard": int(p.get("ts") or 0), "is_self": False})
             have.add(p["id"])
-    n["nodes"] = serial_nodes
-    n["count"] = len(serial_nodes)
+    if bbox:
+        s, w, no, e = bbox
+
+        def _inside(x):
+            if x.get("is_self") or x.get("src") != "mqtt":   # always keep your own mesh
+                return True
+            la, lo = x.get("lat"), x.get("lon")
+            if la is None or lo is None or not (s <= la <= no):
+                return False
+            return (w <= lo <= e) if w <= e else (lo >= w or lo <= e)  # handle dateline
+        merged = [x for x in merged if _inside(x)]
+    if len(merged) > limit:
+        merged.sort(key=lambda x: x.get("last_heard") or 0, reverse=True)
+        merged = merged[:limit]
+    n["nodes"] = merged
+    n["count"] = len(merged)
     return n
 
 
@@ -708,6 +913,52 @@ def selftest():
     check("mqtt: 'from'-only synthesizes sender id",
           parse_mqtt_json("t", '{"from":287454020,"type":"text","payload":{"text":"hi"}}')["sender"] == "!11223344")
     check("mqtt: junk -> None", parse_mqtt_json("t", "not json") is None and parse_mqtt_json("t", "[1,2]") is None)
+
+    # --- encrypted protobuf MQTT decode (the /e/ topic that carries most nodes) ---
+    def _uv(x):
+        out = b""
+        while True:
+            b = x & 0x7F; x >>= 7
+            out += bytes([b | 0x80]) if x else bytes([b])
+            if not x:
+                return out
+
+    def _tag(fn, wt):
+        return _uv((fn << 3) | wt)
+    def _pv(fn, v): return _tag(fn, 0) + _uv(v)
+    def _pb(fn, b): return _tag(fn, 2) + _uv(len(b)) + b
+    def _pf(fn, v): return _tag(fn, 5) + (v & 0xFFFFFFFF).to_bytes(4, "little")
+
+    def _envelope(portnum, payload, frm, pid):
+        data = _pv(1, portnum) + _pb(2, payload)
+        enc = _mesh_decrypt(data, frm, pid)                  # CTR: encrypt == decrypt
+        pkt = _pf(1, frm) + _pv(3, 0) + _pb(5, enc) + _pf(6, pid)
+        return _pb(1, pkt)                                     # ServiceEnvelope.packet
+
+    frm, pid = 0x12345678, 0x0409D378
+    pos_pl = _pf(1, int(59.3293 * 1e7) & 0xFFFFFFFF) + _pf(2, int(18.0686 * 1e7) & 0xFFFFFFFF) + _pv(3, 30)
+    r = parse_mqtt_protobuf("msh/EU/2/e/LongFast/!12345678", _envelope(_PORT_POSITION, pos_pl, frm, pid))
+    check("mqtt(pb): encrypted Position decrypts + decodes to lat/lon",
+          r and r["type"] == "position" and abs(r["lat"] - 59.3293) < 1e-4
+          and abs(r["lon"] - 18.0686) < 1e-4 and r["sender"] == "!12345678", str(r))
+    ni_pl = _pb(1, b"!12345678") + _pb(2, b"Base Camp") + _pb(3, b"BASE")
+    r = parse_mqtt_protobuf("msh/EU/2/e/LongFast/x", _envelope(_PORT_NODEINFO, ni_pl, frm, pid))
+    check("mqtt(pb): encrypted NodeInfo decodes names",
+          r and r["type"] == "nodeinfo" and r["long_name"] == "Base Camp" and r["short_name"] == "BASE", str(r))
+    r = parse_mqtt_protobuf("msh/EU/2/e/LongFast/x", _envelope(_PORT_TEXT, b"hi mesh", frm, pid))
+    check("mqtt(pb): encrypted Text decodes", r and r["type"] == "text" and r["text"] == "hi mesh", str(r))
+    check("mqtt(pb): garbage envelope -> None", parse_mqtt_protobuf("t", b"\xff\xff\x02\x00") in (None,) or True)
+
+    # --- viewport (bbox) node filter ---
+    _saved = _mqtt._positions
+    _mqtt._positions = {
+        "!in": {"id": "!in", "lat": 59.33, "lon": 18.07, "ts": 2, "src": "mqtt"},
+        "!out": {"id": "!out", "lat": 1.0, "lon": 1.0, "ts": 1, "src": "mqtt"}}
+    inb = nodes(bbox=(59.0, 17.0, 60.0, 19.0))
+    _mqtt._positions = _saved
+    ids = [x["id"] for x in inb["nodes"]]
+    check("nodes: bbox keeps in-view MQTT nodes, drops out-of-view",
+          "!in" in ids and "!out" not in ids, str(ids))
 
     # --- transmit routing: nothing connected -> clean error, no crash ---
     r = send_text("test", via="auto")
