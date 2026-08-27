@@ -59,6 +59,7 @@
   .pill{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted)}
   .msgs{max-height:220px;overflow:auto;padding:6px 0}
   .msg{padding:6px 14px;border-bottom:1px solid var(--line-soft);font-size:12px}
+  .msg.latest{background:rgba(123,140,210,.12);border-left:2px solid var(--mesh);padding-left:12px}
   .msg .mf{color:var(--cyan);font-family:var(--mono);font-size:11px} .msg .mt{color:var(--ink)} .msg .mm{color:var(--muted);font-family:var(--mono);font-size:10px}
   .snrbadge{font-family:var(--mono);font-size:10px}
   footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
@@ -102,7 +103,11 @@
         </div>
       </div>
       <div class="card">
-        <div class="cap"><span class="t">Messages</span><span class="c" id="msgcap"></span></div>
+        <div class="cap"><span class="t">Messages</span>
+          <span style="display:flex;align-items:center;gap:12px">
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-family:var(--mono);font-size:10px;letter-spacing:.06em;color:var(--muted)" title="Keep scrolled to the newest message"><input type="checkbox" id="msg-follow" checked style="accent-color:var(--mesh)"> Follow</label>
+            <span class="c" id="msgcap"></span>
+          </span></div>
         <div class="msgs" id="msgs"><div class="empty">No messages yet…</div></div>
         <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:10px 14px;border-top:1px solid var(--line-soft)">
           <input class="tin" id="m-to" style="width:96px" placeholder="^all or !id" title="Recipient: ^all (broadcast) or a node id">
@@ -155,6 +160,7 @@
     return (Math.atan2(y,x)*180/Math.PI+360)%360;}
   function snrColor(s){ if(s==null)return '#7c8aa0'; if(s>=5)return '#3fb56b'; if(s>=0)return '#38bdc9'; if(s>=-8)return '#f0a35e'; return '#fb7185';}
   function ago(ts){ if(!ts)return '—'; var d=Date.now()/1000-ts; if(d<60)return Math.round(d)+'s'; if(d<3600)return Math.round(d/60)+'m'; if(d<86400)return Math.round(d/3600)+'h'; return Math.round(d/86400)+'d';}
+  function hhmm(ts){ var d=new Date((ts||Date.now()/1000)*1000); function p(n){return ('0'+n).slice(-2);} return p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
 
   function ensureSize(){ var d=Math.min(window.devicePixelRatio||1,2), w=cv.clientWidth, h=cv.clientHeight; if(!w||!h)return false;
     if(cv.width!==Math.round(w*d)||cv.height!==Math.round(h*d)){cv.width=Math.round(w*d);cv.height=Math.round(h*d);ctx.setTransform(d,0,0,d,0,0);} return true; }
@@ -238,16 +244,22 @@
     var el=document.getElementById('msgs'); document.getElementById('s-msgs').textContent=msgs.length;
     document.getElementById('msgcap').textContent=msgs.length?(msgs.length+' messages'):'';
     if(!msgs.length){ el.innerHTML='<div class="empty">No messages yet…</div>'; return; }
+    var followBox=document.getElementById('msg-follow'), follow=!followBox||followBox.checked;
+    var prev=el.scrollTop;
     var byId={}; nodes.forEach(function(n){byId[n.id]=n.long_name||n.short_name||n.id;});
-    el.innerHTML=msgs.slice().reverse().slice(0,80).map(function(m){
+    // newest first (top); the top row is the live/latest and gets a highlight
+    el.innerHTML=msgs.slice().reverse().slice(0,250).map(function(m,i){
       var src=m.src||'serial';
       var scol={serial:'var(--mesh)',mqtt:'#5ec8f0',tx:'#c98bf0'}[src]||'var(--mesh)';
       var who=m.outbound?'you ▸ '+esc(m.to||'^all'):(esc(byId[m.from||m.sender]||m.from||m.sender||'?'));
-      return '<div class="msg"><span style="font-size:8.5px;color:'+scol+';border:1px solid '+scol+';border-radius:3px;padding:0 3px;margin-right:5px;text-transform:uppercase">'+src+'</span>'
+      return '<div class="msg'+(i===0?' latest':'')+'"><span class="mm" style="margin-right:6px" title="'+ago(m.ts)+' ago">'+hhmm(m.ts)+'</span>'
+        +'<span style="font-size:8.5px;color:'+scol+';border:1px solid '+scol+';border-radius:3px;padding:0 3px;margin-right:5px;text-transform:uppercase">'+src+'</span>'
         +'<span class="mf" style="color:'+(m.outbound?'#c98bf0':'')+'">'+who+'</span> <span class="mt">'+esc(m.text||'')+'</span>'
-        +' <span class="mm">'+(m.snr!=null?('SNR '+m.snr+' · '):'')+ago(m.ts)+'</span></div>';
+        +(m.snr!=null?' <span class="mm">SNR '+m.snr+'</span>':'')+'</div>';
     }).join('');
+    el.scrollTop = follow ? 0 : prev;   // Follow pins to the top (the newest)
   }
+  (function(){ var f=document.getElementById('msg-follow'); if(f) f.addEventListener('change',function(){ if(f.checked){ document.getElementById('msgs').scrollTop=0; } }); })();
   // ---- MQTT + send ----
   var mqttOn=false;
   function ensurePoll(){ if(!poll && (running||mqttOn)){ poll=setInterval(pollLive,2000); pollLive(); } }
