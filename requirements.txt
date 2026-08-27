@@ -36,3 +36,7 @@ simple-websocket>=1.0.0
 # WiFi Defense 802.11 frame monitor (wifi_defense.py). Declared here so a fresh
 # clone always has it rather than relying on an ambient install.
 scapy>=2.5.0
+# paho-mqtt drives the Meshtastic MQTT source/transmit (meshtastic_node.py) —
+# receive mesh traffic over the Internet and send via a downlink gateway. The
+# code degrades gracefully when it's absent (MQTT features just disable).
+paho-mqtt>=1.6.0

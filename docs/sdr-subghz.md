@@ -159,16 +159,30 @@ decoded mesh:
 - **Public-channel messages** — the default Meshtastic channel key is
   well-known, so its text traffic is decoded and shown live. Private channels
   stay encrypted.
+- **MQTT (Internet bridge)** — Meshtastic gateways bridge the mesh to an MQTT
+  broker the way APRS IGates bridge to APRS-IS. The **☁ MQTT** button connects a
+  broker (default the public `mqtt.meshtastic.org`, JSON topic `msh/+/2/json/#`)
+  and streams mesh traffic **worldwide with no node at all** — nodes, positions
+  and text messages parsed from the JSON stream (`parse_mqtt_json`). Runs
+  independently of the USB node and of the RTL-SDR. Uses **paho-mqtt** (in
+  `requirements.txt`; the Install button grabs it too).
+- **Transmit** — the **Send** box puts a text message onto the mesh: through the
+  connected node's **LoRa RF** when a node is present (licence-free ISM), else
+  over **MQTT** (which reaches RF only via a downlink-enabled gateway). Messages
+  you send show in the feed tagged `TX`; RF/serial and MQTT sources are tagged
+  too.
 - **Own USB radio** — this does *not* contend for the RTL-SDR, so it can run
   alongside the sub-GHz sweep / ADS-B.
-- **Needs the `meshtastic` pip package** — installed best-effort by the
-  installer/updater; if missing, the page shows an **⬇ Install meshtastic**
-  button (`POST /api/net/mesh/install`).
+- **Needs the `meshtastic` pip package** (serial) and **paho-mqtt** (MQTT) —
+  installed best-effort by the installer/updater; if missing, the page shows an
+  **⬇ Install meshtastic** button (`POST /api/net/mesh/install`, installs both).
 - **MeshCore:** its companion tooling is still immature, so only the spectrum
   overlay covers it for now; node enumeration here is Meshtastic.
 
-Ragnar never *sends* mesh messages — it reads the node DB and listens. (The
-device itself still beacons as a normal mesh node.)
+> Meshtastic transmit is licence-free ISM (unlike ham APRS), so sending through
+> your own node is fine; over MQTT, mind the network's etiquette (don't flood
+> the public broker). Public-channel traffic is readable; private channels stay
+> encrypted.
 
 ## ADS-B radar (1090 MHz aircraft)
 
@@ -330,8 +344,10 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
-| `GET  /api/net/mesh/status` · `/nodes` · `/messages` | Mesh Nodes: link state + enumerated nodes + decoded messages |
-| `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install the pip package |
+| `GET  /api/net/mesh/status` · `/nodes` · `/messages` | Mesh Nodes: serial + MQTT link state + merged nodes/messages (src-tagged) |
+| `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install meshtastic + paho-mqtt |
+| `POST /api/net/mesh/mqtt/connect` `{host?,port?,user?,password?,topic?}` · `/mqtt/disconnect` | Connect/disconnect the Meshtastic MQTT Internet feed (no node needed) |
+| `POST /api/net/mesh/send` `{text,to?,channel?,via?}` | Send a mesh text message via the node (LoRa) or MQTT (`via`=auto\|serial\|mqtt) |
 | `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state (`mode`, `qcii_available`) + decoded POCSAG/FLEX/QCII messages |
 | `POST /api/net/pager/start` `{freq_hz, mode?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`); install multimon-ng |
 | `GET  /api/net/vor/status` | VOR decode state + latest `fix` (radial/lock/quality) |
