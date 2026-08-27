@@ -59,6 +59,7 @@ _MESH_USB_IDS = {
 }
 
 _MSG_RING = 200            # keep the last N decoded text messages
+_MQTT_STATION_MAX = 9000   # cap MQTT-derived positions (the public world feed is big)
 
 
 def _run(args, timeout=6):
@@ -480,6 +481,11 @@ class MeshMqtt:
                 p["long_name"] = rec.get("long_name") or p.get("long_name")
                 p["short_name"] = rec.get("short_name")
                 p["ts"] = time.time()
+            # the worldwide public feed is unbounded — evict the oldest stations
+            if len(self._positions) > _MQTT_STATION_MAX:
+                for k, _ in sorted(self._positions.items(),
+                                   key=lambda kv: kv[1].get("ts") or 0)[:len(self._positions) - _MQTT_STATION_MAX]:
+                    self._positions.pop(k, None)
 
     def publish_text(self, text, dest=None, channel=0, my_num=None):
         with self._lock:

@@ -61,6 +61,7 @@
   <a href="/mesh-nodes" class="ctl back">&#8592;&nbsp;Nodes</a>
   <button class="ctl go" id="node-btn" aria-pressed="false" title="Connect the USB Meshtastic node">&#9654;&nbsp;Node</button>
   <button class="ctl go" id="mqtt-btn" aria-pressed="false" title="Connect the MQTT Internet feed (no node needed)">&#9729;&nbsp;MQTT</button>
+  <button class="ctl go" id="world-btn" aria-pressed="false" title="Public worldwide feed — every mesh node beaconing to the public MQTT broker" style="border-color:rgba(94,200,240,.55);color:var(--is)">&#127758;&nbsp;World</button>
   <input class="tin" id="mqtt-topic" placeholder="msh/+/2/json/#" title="APRS-IS-style topic filter">
   <button class="ctl" id="fit-btn" title="Fit the view to all positioned nodes">&#9974;&nbsp;Fit</button>
   <button class="ctl go" id="links-btn" aria-pressed="true" title="Draw links from your node to the others (coloured by SNR)">&#8618;&nbsp;Links</button>
@@ -159,12 +160,27 @@
   });
   document.getElementById('mqtt-btn').addEventListener('click',function(){
     var b=this;
-    if(mqttOn){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; fetch('/api/net/mesh/mqtt/disconnect',{method:'POST'}).catch(function(){}); return; }
+    if(mqttOn){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT';
+      worldMode=false; document.getElementById('world-btn').setAttribute('aria-pressed','false'); hideVeil();
+      fetch('/api/net/mesh/mqtt/disconnect',{method:'POST'}).catch(function(){}); return; }
     mqttOn=true; b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;MQTT';
     if(DEMO_ON){ demoSeed(); return; }
     var topic=document.getElementById('mqtt-topic').value.trim();
     fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(topic?{topic:topic}:{})})
       .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; showVeil('MQTT connect failed: '+esc(res.error)); } }).catch(function(){});
+  });
+  // 🌍 World — the public worldwide feed: connect the public MQTT broker on its
+  // global topic and zoom the map out to the whole planet.
+  var worldMode=false;
+  var WORLD_HINT='🌍 <b>Public worldwide mesh</b> — nodes stream in as they beacon to the public MQTT broker (via JSON-enabled gateways). It fills in over a minute or two, and not every node uplinks — so this is a large live sample of the world, not a full census.';
+  document.getElementById('world-btn').addEventListener('click',function(){
+    worldMode=true; this.setAttribute('aria-pressed','true');
+    document.getElementById('mqtt-topic').value='';   // '' -> backend default global topic
+    firstFit=true;                                     // keep the world view; don't auto-zoom to the first few
+    map.setView([20,0],2);
+    showVeil(WORLD_HINT);
+    if(DEMO_ON){ demoSeedWorld(); return; }
+    if(!mqttOn){ document.getElementById('mqtt-btn').click(); }
   });
 
   // ---- polling ----
@@ -177,6 +193,7 @@
       if(mq.connected){ mqttOn=true; document.getElementById('mqtt-btn').setAttribute('aria-pressed','true'); document.getElementById('mqtt-btn').innerHTML='&#10074;&#10074;&nbsp;MQTT'; }
       if(det.mqtt_defaults&&det.mqtt_defaults.topic){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
     }).catch(function(){});
+    if(DEMO_ON) return;   // in demo the synth timers own the map; don't wipe them with the empty live feed
     fetch('/api/net/mesh/nodes').then(function(r){return r.json();}).then(function(d){ if(d&&d.nodes) render(d.nodes); }).catch(function(){});
   }
 
@@ -193,6 +210,21 @@
     if(demoTimer)return;
     demoTimer=setInterval(function(){ if(!running&&!mqttOn)return; SN.forEach(function(s,i){ if(i){ s[5]+= (Math.random()-0.5)*0.001; s[6]+=(Math.random()-0.5)*0.001; s[7]=Math.round((s[7]+(Math.random()-0.5)*2)*10)/10; } });
       render(SN.map(function(s,i){ return {id:'!'+(0x7c000000+i*0x1111).toString(16),long_name:s[0],short_name:s[1],hw_model:s[2],role:s[3],hops:s[4],lat:s[5],lon:s[6],snr:s[7],battery:s[8],src:(i%3===0?'serial':'mqtt'),last_heard:Math.floor(Date.now()/1000)-((Math.random()*90)|0),is_self:i===0}; })); },3000);
+  }
+  // demo world scatter — nodes across the globe (offline preview of the public feed)
+  var WCITY=[[59.33,18.07,'STHLM'],[51.5,-0.12,'LDN'],[40.71,-74.0,'NYC'],[37.77,-122.42,'SF'],[52.52,13.4,'BER'],
+    [48.85,2.35,'PAR'],[35.68,139.69,'TYO'],[-33.87,151.21,'SYD'],[1.35,103.82,'SGP'],[19.43,-99.13,'MEX'],
+    [-23.55,-46.63,'SAO'],[55.75,37.62,'MSK'],[28.61,77.21,'DEL'],[-26.2,28.04,'JNB'],[43.65,-79.38,'TOR'],
+    [45.42,-75.7,'OTT'],[41.9,12.5,'ROM'],[25.2,55.27,'DXB'],[-34.6,-58.38,'BUE'],[13.75,100.5,'BKK']];
+  function demoSeedWorld(){ hideVeil();
+    function build(){ var list=[]; WCITY.forEach(function(c,i){ var n=1+((Math.random()*4)|0);
+      for(var j=0;j<n;j++){ list.push({id:'!w'+i+'_'+j, long_name:c[2]+' node', short_name:c[2], hw_model:'HELTEC_V3',
+        role:(j===0?'ROUTER':'CLIENT'), hops:(Math.random()*4)|0, lat:c[0]+(Math.random()-0.5)*0.6, lon:c[1]+(Math.random()-0.5)*0.6,
+        snr:Math.round((10-Math.random()*20)*10)/10, battery:40+((Math.random()*60)|0), src:'mqtt',
+        last_heard:Math.floor(Date.now()/1000)-((Math.random()*300)|0), is_self:false}); } }); return list; }
+    render(build());
+    if(demoTimer)return;
+    demoTimer=setInterval(function(){ if(worldMode) render(build()); },4000);
   }
 
   fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){})
