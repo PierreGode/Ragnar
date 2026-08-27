@@ -14,8 +14,16 @@ traffic is readable; private channels stay encrypted).
 This is the honest counterpart to the spectrum overlay: the overlay shows *where*
 a mesh is on the band; this shows *who is on it*.
 
-Receive-only in spirit — this module never sends mesh messages; it only reads the
-node DB and listens. (The device itself still beacons as a normal mesh node.)
+Two sources, and transmit
+--------------------------
+  * **Serial (USB node)** — the local node does the LoRa demod and hands us the
+    node DB + public-channel messages, as above.
+  * **MQTT (Internet)** — Meshtastic gateways bridge the mesh to an MQTT broker
+    (the way APRS IGates bridge to APRS-IS). We subscribe to the broker's JSON
+    stream to watch mesh traffic worldwide, no node required — and can publish a
+    message back for a downlink-enabled gateway to inject.
+  * **Transmit** — send a text message onto the mesh through the connected USB
+    node (real LoRa RF, licence-free ISM), or over MQTT via a downlink gateway.
 
 CLI
 ---
@@ -25,11 +33,17 @@ CLI
 """
 
 import glob
+import json
 import os
 import subprocess
 import sys
 import threading
 import time
+
+try:
+    import paho.mqtt.client as _mqtt_client       # Meshtastic MQTT source/transmit
+except Exception:                                  # pragma: no cover - optional dep
+    _mqtt_client = None
 
 
 # Common USB-serial chips used by Meshtastic boards (VID:PID) — for detection
@@ -93,12 +107,17 @@ def _serial_ports():
 
 
 def detect():
-    """Report whether a Meshtastic companion node is usable.
+    """Report Meshtastic capability.
 
-    ``available`` needs the meshtastic Python package AND a serial device that
-    looks like a node. Mirrors the other SDR gates.
+    ``available`` (serial) needs the meshtastic package AND a USB node.
+    ``mqtt_available`` needs only paho-mqtt — the MQTT source/transmit works over
+    the Internet with no node at all, so it's reported independently.
     """
     have_pkg = _have_meshtastic()
+    mqtt_ok = _mqtt_client is not None
+    mqtt_extra = {"mqtt_available": mqtt_ok, "mqtt_defaults": {
+        "host": MESH_MQTT["host"], "port": MESH_MQTT["port"],
+        "user": MESH_MQTT["user"], "topic": MESH_MQTT["topic"]}}
     usb_id, usb_desc = None, None
     rc, out, _ = _run(["lsusb"], timeout=4)
     if rc == 0 and out:
@@ -110,14 +129,14 @@ def detect():
                 "device_present": device_present, "usb_id": usb_id,
                 "ports": ports,
                 "error": "meshtastic Python package not installed "
-                         "(pip install meshtastic)"}
+                         "(pip install meshtastic)", **mqtt_extra}
     if not device_present:
         return {"available": False, "tools_installed": True,
                 "device_present": False, "usb_id": None, "ports": [],
                 "error": "no Meshtastic device on USB — plug a node in "
-                         "(Heltec / RAK / T-Beam …) via USB"}
+                         "(Heltec / RAK / T-Beam …) via USB", **mqtt_extra}
     return {"available": True, "tools_installed": True, "device_present": True,
-            "usb_id": usb_id, "usb_desc": usb_desc, "ports": ports}
+            "usb_id": usb_id, "usb_desc": usb_desc, "ports": ports, **mqtt_extra}
 
 
 # --------------------------------------------------------------------------
@@ -225,7 +244,7 @@ class MeshLink:
                    "to": packet.get("toId") or packet.get("to"),
                    "channel": packet.get("channel", 0),
                    "snr": packet.get("rxSnr"), "rssi": packet.get("rxRssi"),
-                   "text": text, "ts": time.time()}
+                   "text": text, "ts": time.time(), "src": "serial"}
             with self._lock:
                 self._messages.append(rec)
                 if len(self._messages) > _MSG_RING:
@@ -287,6 +306,31 @@ class MeshLink:
                 break
             self._refresh_nodes()
 
+    def _store_outbound(self, text, dest, channel, via):
+        """Log a message we sent into the feed (tagged outbound)."""
+        rec = {"from": self._info.get("id") or "you", "to": dest or "^all",
+               "channel": int(channel or 0), "text": text, "ts": time.time(),
+               "src": "tx", "via": via, "outbound": True}
+        with self._lock:
+            self._messages.append(rec)
+            if len(self._messages) > _MSG_RING:
+                self._messages = self._messages[-_MSG_RING:]
+
+    def send_text(self, text, dest=None, channel=0):  # pragma: no cover - hardware path
+        """Transmit a text message onto the mesh through the connected node."""
+        with self._lock:
+            iface = self._iface
+            if not (iface and self._connected):
+                return {"ok": False, "error": "no Meshtastic node connected"}
+        try:
+            kwargs = {"channelIndex": int(channel or 0)}
+            if dest and dest not in ("^all", "!ffffffff", "", None):
+                kwargs["destinationId"] = dest
+            iface.sendText((text or "")[:228], **kwargs)
+            return {"ok": True, "via": "serial", "to": dest or "^all", "channel": int(channel or 0)}
+        except Exception as exc:
+            return {"ok": False, "error": "send failed: %s" % exc}
+
     def stop(self):
         self._stop.set()
         try:
@@ -300,7 +344,185 @@ class MeshLink:
         return {"ok": True}
 
 
+# --------------------------------------------------------------------------
+# MQTT source + transmit — Meshtastic's Internet bridge (like APRS-IS)
+# --------------------------------------------------------------------------
+
+# The public community broker + its well-known read credentials, and the JSON
+# topic that JSON-enabled gateways publish to. The UI takes a custom broker too.
+MESH_MQTT = {
+    "host": "mqtt.meshtastic.org", "port": 1883,
+    "user": "meshdev", "password": "large4cats",
+    "topic": "msh/+/2/json/#",              # worldwide JSON stream
+    "publish_topic": "msh/2/json/mqtt/",    # downlink command topic
+}
+
+
+def parse_mqtt_json(topic, payload):
+    """Parse one Meshtastic MQTT JSON message into a flat record, or None.
+
+    JSON-enabled gateways publish {type, from, sender, to, channel, payload, …}.
+    Pure — drives the selftest.
+    """
+    try:
+        d = json.loads(payload)
+    except Exception:
+        return None
+    if not isinstance(d, dict):
+        return None
+    t = d.get("type")
+    pl = d.get("payload")
+    frm = d.get("from")
+    sender = d.get("sender")
+    if not sender and isinstance(frm, int):
+        sender = "!%08x" % (frm & 0xFFFFFFFF)
+    rec = {"type": t, "from_num": frm, "sender": sender, "to": d.get("to"),
+           "channel": d.get("channel", 0), "ts": d.get("timestamp") or time.time(),
+           "topic": topic, "src": "mqtt"}
+    if t == "text":
+        rec["text"] = pl.get("text") if isinstance(pl, dict) else (pl if isinstance(pl, str) else None)
+    elif t == "position" and isinstance(pl, dict):
+        if isinstance(pl.get("latitude_i"), (int, float)):
+            rec["lat"] = pl["latitude_i"] / 1e7
+        if isinstance(pl.get("longitude_i"), (int, float)):
+            rec["lon"] = pl["longitude_i"] / 1e7
+        rec["altitude"] = pl.get("altitude")
+    elif t == "nodeinfo" and isinstance(pl, dict):
+        rec["long_name"] = pl.get("longname")
+        rec["short_name"] = pl.get("shortname")
+        rec["hw_model"] = pl.get("hardware")
+        if pl.get("id"):
+            rec["sender"] = pl["id"]
+    elif t == "telemetry" and isinstance(pl, dict):
+        rec["battery"] = pl.get("battery_level")
+        rec["voltage"] = pl.get("voltage")
+    return rec
+
+
+class MeshMqtt:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._client = None
+        self._messages = []
+        self._positions = {}        # sender -> {lat,lon,name,ts,src}
+        self._connected = False
+        self._error = None
+        self._cfg = {}
+
+    def status(self):
+        with self._lock:
+            return {"connected": self._connected, "error": self._error,
+                    "host": self._cfg.get("host"), "topic": self._cfg.get("topic"),
+                    "messages": len(self._messages), "positions": len(self._positions)}
+
+    def connect(self, host=None, port=None, user=None, password=None, topic=None):
+        if _mqtt_client is None:
+            return {"ok": False, "error": "paho-mqtt not installed (pip install paho-mqtt)"}
+        cfg = {"host": host or MESH_MQTT["host"], "port": int(port or MESH_MQTT["port"]),
+               "user": user if user is not None else MESH_MQTT["user"],
+               "password": password if password is not None else MESH_MQTT["password"],
+               "topic": topic or MESH_MQTT["topic"]}
+        with self._lock:
+            self._disconnect_locked()
+            self._cfg = cfg
+            self._error = None
+            try:
+                c = _mqtt_client.Client()
+                if cfg["user"]:
+                    c.username_pw_set(cfg["user"], cfg["password"] or "")
+                c.on_connect = self._on_connect
+                c.on_message = self._on_message
+                c.on_disconnect = self._on_disconnect
+                c.connect_async(cfg["host"], cfg["port"], keepalive=60)
+                c.loop_start()
+                self._client = c
+            except Exception as exc:
+                self._error = "MQTT connect failed: %s" % exc
+                return {"ok": False, "error": self._error}
+        return {"ok": True, "host": cfg["host"], "topic": cfg["topic"]}
+
+    def _on_connect(self, client, userdata, flags, rc, *a):  # pragma: no cover - network
+        if rc == 0:
+            with self._lock:
+                self._connected = True
+                self._error = None
+            try:
+                client.subscribe(self._cfg.get("topic") or MESH_MQTT["topic"])
+            except Exception:
+                pass
+        else:
+            with self._lock:
+                self._error = "MQTT rejected (rc=%s)" % rc
+
+    def _on_disconnect(self, *a):  # pragma: no cover - network
+        with self._lock:
+            self._connected = False
+
+    def _on_message(self, client, userdata, msg):  # pragma: no cover - network
+        try:
+            rec = parse_mqtt_json(msg.topic, msg.payload.decode("utf-8", "replace"))
+        except Exception:
+            rec = None
+        if not rec:
+            return
+        with self._lock:
+            if rec.get("type") == "text" and rec.get("text"):
+                rec["ts"] = time.time()
+                self._messages.append(rec)
+                if len(self._messages) > _MSG_RING:
+                    self._messages = self._messages[-_MSG_RING:]
+            if rec.get("lat") is not None and rec.get("lon") is not None and rec.get("sender"):
+                self._positions[rec["sender"]] = {
+                    "id": rec["sender"], "lat": rec["lat"], "lon": rec["lon"],
+                    "long_name": rec.get("long_name"), "ts": time.time(), "src": "mqtt"}
+            if rec.get("type") == "nodeinfo" and rec.get("sender"):
+                p = self._positions.setdefault(rec["sender"], {"id": rec["sender"], "src": "mqtt"})
+                p["long_name"] = rec.get("long_name") or p.get("long_name")
+                p["short_name"] = rec.get("short_name")
+                p["ts"] = time.time()
+
+    def publish_text(self, text, dest=None, channel=0, my_num=None):
+        with self._lock:
+            client = self._client
+            connected = self._connected
+        if not (client and connected):
+            return {"ok": False, "error": "MQTT not connected"}
+        cmd = {"from": my_num or 0, "type": "sendtext", "payload": (text or "")[:228],
+               "channel": int(channel or 0)}
+        if dest and dest not in ("^all", "!ffffffff"):
+            cmd["to"] = dest
+        try:
+            client.publish(self._cfg.get("publish_topic") or MESH_MQTT["publish_topic"], json.dumps(cmd))
+            return {"ok": True, "via": "mqtt", "to": dest or "^all", "channel": int(channel or 0)}
+        except Exception as exc:
+            return {"ok": False, "error": "MQTT publish failed: %s" % exc}
+
+    def messages(self):
+        with self._lock:
+            return list(self._messages)
+
+    def positions(self):
+        with self._lock:
+            return list(self._positions.values())
+
+    def _disconnect_locked(self):
+        if self._client:
+            try:
+                self._client.loop_stop()
+                self._client.disconnect()
+            except Exception:
+                pass
+        self._client = None
+        self._connected = False
+
+    def disconnect(self):
+        with self._lock:
+            self._disconnect_locked()
+        return {"ok": True}
+
+
 _link = MeshLink()
+_mqtt = MeshMqtt()
 
 
 def start(port=None):
@@ -314,25 +536,85 @@ def stop():
     return _link.stop()
 
 
+def connect_mqtt(host=None, port=None, user=None, password=None, topic=None):
+    return _mqtt.connect(host, port, user, password, topic)
+
+
+def disconnect_mqtt():
+    return _mqtt.disconnect()
+
+
+def send_text(text, dest=None, channel=0, via="auto"):
+    """Send a mesh text message via the connected node (serial) or MQTT.
+
+    ``via``: 'serial', 'mqtt', or 'auto' (serial if a node is connected, else MQTT).
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty message"}
+    serial_up = _link.status().get("running")
+    mqtt_up = _mqtt.status().get("connected")
+    order = {"serial": ["serial"], "mqtt": ["mqtt"]}.get(via, ["serial", "mqtt"])
+    last = {"ok": False, "error": "no Meshtastic node connected and MQTT not connected"}
+    for how in order:
+        if how == "serial" and serial_up:
+            last = _link.send_text(text, dest=dest, channel=channel)
+        elif how == "mqtt" and mqtt_up:
+            last = _mqtt.publish_text(text, dest=dest, channel=channel, my_num=_link._my_num)
+        else:
+            continue
+        if last.get("ok"):
+            _link._store_outbound(text, dest, channel, last.get("via"))
+            return last
+    return last
+
+
 def status():
     st = _link.status()
+    st["mqtt"] = _mqtt.status()
     st["detect"] = detect()
+    # merged counts across both sources
+    st["messages"] = st.get("messages", 0) + st["mqtt"].get("messages", 0)
     return st
 
 
 def nodes():
-    return _link.nodes()
+    n = _link.nodes()
+    serial_nodes = n.get("nodes", [])
+    have = {x.get("id") for x in serial_nodes if x.get("id")}
+    # add MQTT-only positioned stations the serial DB hasn't seen
+    for p in _mqtt.positions():
+        if p.get("id") and p["id"] not in have and p.get("lat") is not None:
+            serial_nodes.append({"id": p["id"], "num": None,
+                                 "long_name": p.get("long_name"), "short_name": p.get("short_name"),
+                                 "lat": p.get("lat"), "lon": p.get("lon"), "src": "mqtt",
+                                 "last_heard": int(p.get("ts") or 0), "is_self": False})
+            have.add(p["id"])
+    n["nodes"] = serial_nodes
+    n["count"] = len(serial_nodes)
+    return n
 
 
 def messages():
-    return _link.messages()
+    merged = []
+    for m in _link.messages().get("messages", []):
+        mm = dict(m); mm.setdefault("src", "serial"); merged.append(mm)
+    merged.extend(_mqtt.messages())
+    merged.sort(key=lambda m: m.get("ts") or 0)
+    return {"messages": merged[-_MSG_RING:], "count": len(merged)}
+
+
+def _pip_install(pkg):
+    for args in (["pip3", "install", "--break-system-packages", pkg],
+                 ["pip3", "install", pkg]):
+        rc, o, e = _run(args, timeout=600)
+        if rc == 0:
+            return (o or "") + (e or "")
+    return (o or "") + (e or "")
 
 
 def install():
-    """One-click install of the meshtastic Python package (pip). Fixed name."""
-    if _have_meshtastic():
-        return {"ok": True, "already": True, "detect": detect()}
-    out = ""
+    """One-click install of meshtastic (serial node) + paho-mqtt (MQTT/transmit)."""
     # Ensure pip3 exists (fresh Pi OS images sometimes ship without it).
     if _run(["pip3", "--version"], timeout=10)[0] == 127:
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
@@ -341,17 +623,19 @@ def install():
                            capture_output=True, text=True, timeout=300, check=False, env=env)
         except Exception:
             pass
-    for args in (["pip3", "install", "--break-system-packages", "meshtastic"],
-                 ["pip3", "install", "meshtastic"]):
-        rc, o, e = _run(args, timeout=600)
-        out = (o or "") + (e or "")
-        if rc == 0 and _have_meshtastic():
-            return {"ok": True, "detect": detect(),
-                    "output": "\n".join(out.strip().splitlines()[-10:])}
-    return {"ok": _have_meshtastic(), "detect": detect(),
-            "output": "\n".join((out or "").strip().splitlines()[-10:]),
-            "error": None if _have_meshtastic()
-            else "pip could not install meshtastic — check network/pip3, or run: pip3 install meshtastic"}
+    out = ""
+    if not _have_meshtastic():
+        out += _pip_install("meshtastic")
+    if _mqtt_client is None:                     # MQTT source/transmit
+        out += "\n" + _pip_install("paho-mqtt")
+    # re-probe paho (import cache): a fresh install won't flip _mqtt_client until
+    # restart, so report success on the pip result rather than the live import.
+    ok = _have_meshtastic() or ("paho-mqtt" in out.lower())
+    err = None
+    if not _have_meshtastic() and _mqtt_client is None:
+        err = "pip could not install meshtastic/paho-mqtt — check network/pip3"
+    return {"ok": ok if err is None else False, "detect": detect(),
+            "output": "\n".join(out.strip().splitlines()[-12:]), "error": err}
 
 
 # --------------------------------------------------------------------------
@@ -405,6 +689,31 @@ def selftest():
     check("usb: nRF52 VID-only match", parse_lsusb_for_mesh(
         "Bus 001 Device 003: ID 239a:8029 Adafruit")[0] == "239a:")
     check("usb: nothing -> None", parse_lsusb_for_mesh("ID 1d6b:0002 root hub") == (None, None))
+
+    # --- MQTT JSON parsing (Meshtastic Internet bridge) ---
+    txt = parse_mqtt_json("msh/US/2/json/LongFast/!33668914",
+                          '{"channel":0,"from":862243668,"sender":"!33668914","to":4294967295,'
+                          '"type":"text","payload":{"text":"Hello mesh"},"timestamp":1700000000}')
+    check("mqtt: text message parsed",
+          txt and txt["type"] == "text" and txt["text"] == "Hello mesh"
+          and txt["sender"] == "!33668914" and txt["src"] == "mqtt", str(txt))
+    pos = parse_mqtt_json("msh/EU/2/json/x/!abcd",
+                          '{"from":1,"sender":"!abcd","type":"position",'
+                          '"payload":{"latitude_i":593293000,"longitude_i":180686000,"altitude":30}}')
+    check("mqtt: position lat/lon (1e-7) decoded",
+          pos and abs(pos["lat"] - 59.3293) < 1e-4 and abs(pos["lon"] - 18.0686) < 1e-4, str(pos))
+    ni = parse_mqtt_json("t", '{"from":2,"type":"nodeinfo","payload":{"id":"!dead","longname":"Base","shortname":"BAS","hardware":31}}')
+    check("mqtt: nodeinfo names read",
+          ni and ni["long_name"] == "Base" and ni["short_name"] == "BAS" and ni["sender"] == "!dead", str(ni))
+    check("mqtt: 'from'-only synthesizes sender id",
+          parse_mqtt_json("t", '{"from":287454020,"type":"text","payload":{"text":"hi"}}')["sender"] == "!11223344")
+    check("mqtt: junk -> None", parse_mqtt_json("t", "not json") is None and parse_mqtt_json("t", "[1,2]") is None)
+
+    # --- transmit routing: nothing connected -> clean error, no crash ---
+    r = send_text("test", via="auto")
+    check("tx: send with no serial/mqtt -> error (no crash)",
+          r.get("ok") is False and "connected" in (r.get("error") or ""), str(r))
+    check("tx: empty message rejected", send_text("   ").get("ok") is False)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

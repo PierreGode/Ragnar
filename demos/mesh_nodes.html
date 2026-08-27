@@ -70,7 +70,7 @@
     <div>
       <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
       <h1>Mesh Nodes</h1>
-      <div class="sub">Real Meshtastic enumeration via a USB companion node — the node DB (names, hardware, role, SNR, hops, battery, GPS) and decoded public-channel messages. This is the <i>who's on it</i> to the spectrum overlay's <i>where it is</i>.</div>
+      <div class="sub">Real Meshtastic mesh — the node DB (names, hardware, role, SNR, hops, battery, GPS) and messages, from a USB node <b>and/or MQTT</b> (the Internet bridge, like APRS-IS — no node needed). <b>Send</b> messages onto the mesh through your node's LoRa or via MQTT.</div>
     </div>
     <div style="display:flex;gap:16px;align-items:flex-end">
       <div class="stat"><span class="k">Nodes</span><span class="v" id="s-count">—</span></div>
@@ -82,8 +82,11 @@
   <div class="bar">
     <div class="grp"><a href="/" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
     <div class="grp"><a href="/rf-waterfall" class="ctl" title="LoRa spectrum overlay (energy view)">〜&nbsp;RF Waterfall</a></div>
-    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Connect to the USB Meshtastic node">&#9654;&nbsp;Connect</button></div>
+    <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Connect to the USB Meshtastic node (real LoRa RF)">&#9654;&nbsp;Node</button></div>
+    <div class="grp"><button class="ctl go" id="mqtt-btn" aria-pressed="false" title="Connect the Meshtastic MQTT Internet feed (no node needed)">&#9729;&nbsp;MQTT</button></div>
+    <div class="grp"><span class="lbl">Topic</span><input class="tin" id="mqtt-topic" style="width:148px" placeholder="msh/+/2/json/#"></div>
     <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
+    <div class="grp"><span class="tag idle" id="mqtttag">MQTT off</span></div>
   </div>
 
   <div class="layout">
@@ -98,8 +101,15 @@
         </div>
       </div>
       <div class="card">
-        <div class="cap"><span class="t">Public channel</span><span class="c" id="msgcap"></span></div>
+        <div class="cap"><span class="t">Messages</span><span class="c" id="msgcap"></span></div>
         <div class="msgs" id="msgs"><div class="empty">No messages yet…</div></div>
+        <div style="display:flex;flex-wrap:wrap;gap:7px;align-items:center;padding:10px 14px;border-top:1px solid var(--line-soft)">
+          <input class="tin" id="m-to" style="width:96px" placeholder="^all or !id" title="Recipient: ^all (broadcast) or a node id">
+          <input class="tin" id="m-ch" type="number" style="width:52px" value="0" title="Channel index">
+          <input class="tin" id="m-text" style="flex:1;min-width:120px" placeholder="message…" maxlength="200">
+          <button class="ctl" id="m-send" disabled title="Send via the connected node (LoRa RF) or MQTT">Send ▸</button>
+        </div>
+        <div style="padding:0 14px 10px;font-family:var(--mono);font-size:10.5px;color:var(--muted)" id="m-hint">Connect a node or MQTT to send.</div>
       </div>
     </div>
     <div class="card">
@@ -114,8 +124,8 @@
   </div>
 
   <footer>
-    <div><b>How it works:</b> a Meshtastic device (Heltec / RAK / T-Beam …) on USB does the LoRa demodulation in hardware; the meshtastic Python API hands Ragnar the decoded node DB and messages. The <b>public</b> channel key is well-known so its traffic is readable; private channels stay encrypted. The device's own USB radio is used, so this does not contend for the RTL-SDR.</div>
-    <div style="margin-top:6px"><b>Map:</b> nodes with a GPS position are plotted relative to your node (self = green centre). SNR colours the link. Nodes without GPS appear in the table only.</div>
+    <div><b>How it works:</b> a Meshtastic device (Heltec / RAK / T-Beam …) on USB does the LoRa demod in hardware; the meshtastic Python API hands Ragnar the node DB + messages. <b>MQTT</b> is Meshtastic's Internet bridge — gateways publish mesh traffic to a broker (default the public <code>mqtt.meshtastic.org</code>), so ☁ MQTT streams the mesh worldwide with no node. The public channel key is well-known so its traffic is readable; private channels stay encrypted. The USB radio is used, so this doesn't contend for the RTL-SDR.</div>
+    <div style="margin-top:6px"><b>Send:</b> a message goes out via your connected node's LoRa (real RF, licence-free ISM) when a node is connected, otherwise via MQTT (which needs a downlink-enabled gateway to reach RF). <b>Map:</b> GPS-positioned nodes are plotted relative to your node (self = green centre); MQTT-only stations show too. SNR colours the link.</div>
   </footer>
 </div>
 
@@ -228,34 +238,67 @@
     document.getElementById('msgcap').textContent=msgs.length?(msgs.length+' messages'):'';
     if(!msgs.length){ el.innerHTML='<div class="empty">No messages yet…</div>'; return; }
     var byId={}; nodes.forEach(function(n){byId[n.id]=n.long_name||n.short_name||n.id;});
-    el.innerHTML=msgs.slice().reverse().slice(0,60).map(function(m){
-      var who=byId[m.from]||m.from||'?';
-      return '<div class="msg"><span class="mf">'+esc(who)+'</span> <span class="mt">'+esc(m.text||'')+'</span>'
+    el.innerHTML=msgs.slice().reverse().slice(0,80).map(function(m){
+      var src=m.src||'serial';
+      var scol={serial:'var(--mesh)',mqtt:'#5ec8f0',tx:'#c98bf0'}[src]||'var(--mesh)';
+      var who=m.outbound?'you ▸ '+esc(m.to||'^all'):(esc(byId[m.from||m.sender]||m.from||m.sender||'?'));
+      return '<div class="msg"><span style="font-size:8.5px;color:'+scol+';border:1px solid '+scol+';border-radius:3px;padding:0 3px;margin-right:5px;text-transform:uppercase">'+src+'</span>'
+        +'<span class="mf" style="color:'+(m.outbound?'#c98bf0':'')+'">'+who+'</span> <span class="mt">'+esc(m.text||'')+'</span>'
         +' <span class="mm">'+(m.snr!=null?('SNR '+m.snr+' · '):'')+ago(m.ts)+'</span></div>';
     }).join('');
   }
+  // ---- MQTT + send ----
+  var mqttOn=false;
+  function ensurePoll(){ if(!poll && (running||mqttOn)){ poll=setInterval(pollLive,2000); pollLive(); } }
+  document.getElementById('mqtt-btn').addEventListener('click',function(){
+    var b=document.getElementById('mqtt-btn');
+    if(mqttOn){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT';
+      fetch('/api/net/mesh/mqtt/disconnect',{method:'POST'}).catch(function(){}); updateSend(); if(DEMO_ON)synthMode(); return; }
+    mqttOn=true; b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;MQTT';
+    var topic=document.getElementById('mqtt-topic').value.trim();
+    if(DEMO_ON){ hideVeil(); setMode('synth'); synthMode(); updateSend(); return; }
+    fetch('/api/net/mesh/mqtt/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(topic?{topic:topic}:{})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT'; showVeil('MQTT connect failed',res.error); } else { hideVeil(); ensurePoll(); } updateSend(); }).catch(function(){});
+  });
+  function updateSend(){ var can=running||mqttOn; document.getElementById('m-send').disabled=!can;
+    document.getElementById('m-hint').textContent = can
+      ? (running?'Sends via the connected node (LoRa RF).':'Sends via MQTT (needs a downlink-enabled gateway to reach RF).')
+      : 'Connect a node or MQTT to send.'; }
+  document.getElementById('m-send').addEventListener('click',function(){
+    var to=document.getElementById('m-to').value.trim()||'^all', ch=parseInt(document.getElementById('m-ch').value,10)||0,
+        tx=document.getElementById('m-text').value.trim();
+    if(!tx) return;
+    if(DEMO_ON){ msgs.push({from:'you',to:to,text:tx,channel:ch,src:'tx',outbound:true,ts:Date.now()/1000}); if(msgs.length>200)msgs=msgs.slice(-200); document.getElementById('m-text').value=''; renderMsgs(); return; }
+    fetch('/api/net/mesh/send',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:tx,to:to,channel:ch,via:'auto'})})
+      .then(function(r){return r.json();}).then(function(res){ if(res&&res.ok){ document.getElementById('m-text').value=''; pollLive(); } else if(res&&res.error){ document.getElementById('m-hint').textContent=res.error; } }).catch(function(){});
+  });
 
   var poll=null;
   function startRun(){
-    running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Disconnect';
+    running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Node';
     fetch('/api/net/mesh/start',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
       .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON)synthMode(); else showVeil('Could not connect',res.error); } }).catch(function(){});
-    if(poll)clearInterval(poll); poll=setInterval(pollLive,2000); pollLive();
+    updateSend(); if(poll)clearInterval(poll); poll=setInterval(pollLive,2000); pollLive();
   }
   function stopRun(){
-    running=false; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Connect';
-    if(poll){clearInterval(poll);poll=null;}
+    running=false; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','false'); b.innerHTML='&#9654;&nbsp;Node';
     fetch('/api/net/mesh/stop',{method:'POST'}).catch(function(){});
-    if(DEMO_ON) synthMode(); else { setMode('idle'); nodes=[]; msgs=[]; renderTable(); renderMsgs(); }
+    updateSend();
+    if(mqttOn){ pollLive(); }   // MQTT feed keeps running
+    else if(poll){clearInterval(poll);poll=null;}
+    if(!mqttOn){ if(DEMO_ON) synthMode(); else { setMode('idle'); nodes=[]; msgs=[]; renderTable(); renderMsgs(); } }
   }
   document.getElementById('startbtn').addEventListener('click',function(){ running?stopRun():startRun(); });
 
   function pollLive(){
+    if(!(running||mqttOn)) return;
     Promise.all([fetch('/api/net/mesh/nodes').then(function(r){return r.json();}).catch(function(){return null;}),
                  fetch('/api/net/mesh/messages').then(function(r){return r.json();}).catch(function(){return null;})])
       .then(function(res){ var nd=res[0],mg=res[1];
-        if(nd&&nd.connected){ hideVeil(); setMode('live'); nodes=nd.nodes||[]; msgs=(mg&&mg.messages)||[]; renderTable(); renderMsgs(); }
-        else if(nd&&nd.error){ if(DEMO_ON)synthMode(); else showVeil('Mesh link error',nd.error); }
+        if(!nd) return;
+        nodes=nd.nodes||[]; msgs=(mg&&mg.messages)||[];
+        if(nd.connected||mqttOn){ hideVeil(); setMode('live'); renderTable(); renderMsgs(); }
+        else if(nd.error && running){ if(DEMO_ON)synthMode(); else showVeil('Mesh link error',nd.error); }
       });
   }
 
@@ -283,11 +326,17 @@
   function checkStatus(){
     fetch('/api/net/mesh/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{}; var dt=document.getElementById('devtag');
-      if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Disconnect'; if(!poll){poll=setInterval(pollLive,2000);pollLive();} }
-      if(det.available){ dt.className='tag live'; dt.textContent=(det.usb_desc||'Meshtastic')+' ready'; hideVeil(); if(!running&&mode==='idle'){} }
+      if(det.mqtt_defaults&&det.mqtt_defaults.topic&&!document.getElementById('mqtt-topic').value){ document.getElementById('mqtt-topic').placeholder=det.mqtt_defaults.topic; }
+      // MQTT (Internet) state — independent of the USB node
+      var mq=(st&&st.mqtt)||{}, mt=document.getElementById('mqtttag'), mb=document.getElementById('mqtt-btn');
+      if(mq.connected){ mqttOn=true; mt.className='tag live'; mt.textContent='MQTT on'; mb.setAttribute('aria-pressed','true'); mb.innerHTML='&#10074;&#10074;&nbsp;MQTT'; ensurePoll(); }
+      else { mt.className='tag idle'; mt.textContent=det.mqtt_available===false?'MQTT n/a':'MQTT off'; }
+      if(st&&st.running){ running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Node'; ensurePoll(); }
+      updateSend();
+      if(det.available){ dt.className='tag live'; dt.textContent=(det.usb_desc||'Meshtastic')+' ready'; if(running||mqttOn)hideVeil(); }
       else { dt.className='tag idle'; dt.textContent=det.error?'no node':'detecting…';
-        if(DEMO_ON){ synthMode(); }
-        else if(!running){ setMode('idle'); showVeil('No Meshtastic node', det.error||'Plug a Meshtastic device in via USB, or enable the RF Waterfall demo for a synthetic mesh.', det.tools_installed===false); } }
+        if(DEMO_ON){ if(!running&&!mqttOn) synthMode(); }
+        else if(!running&&!mqttOn){ setMode('idle'); showVeil('No Meshtastic node', (det.error||'Plug a Meshtastic device in via USB')+' — or connect ☁ MQTT to watch the mesh over the Internet with no node.', det.tools_installed===false); } }
     }).catch(function(){ if(DEMO_ON) synthMode(); });
   }
 
