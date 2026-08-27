@@ -648,6 +648,9 @@ class MeshMqtt:
     def disconnect(self):
         with self._lock:
             self._disconnect_locked()
+            # drop the accumulated world feed so the map clears on disconnect
+            self._positions = {}
+            self._messages = []
         return {"ok": True}
 
 

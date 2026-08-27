@@ -146,6 +146,9 @@
   }
   function fit(){ var b=[]; Object.keys(markers).forEach(function(id){ b.push(markers[id].getLatLng()); });
     if(b.length===1) map.setView(b[0],13); else if(b.length){ map.fitBounds(L.latLngBounds(b).pad(0.15)); } }
+  function clearAll(){ cluster.clearLayers(); linkLayer.clearLayers(); markers={}; nodesById={}; selfLL=null; firstFit=false;
+    document.getElementById('s-nodes').textContent='0'; document.getElementById('s-pos').textContent='0';
+    document.getElementById('mapcap').textContent='no stations yet'; }
   document.getElementById('fit-btn').addEventListener('click',fit);
   document.getElementById('links-btn').addEventListener('click',function(){ showLinks=!showLinks; this.setAttribute('aria-pressed',showLinks?'true':'false'); drawLinks(Object.keys(nodesById).map(function(k){return nodesById[k];})); });
 
@@ -162,6 +165,8 @@
     var b=this;
     if(mqttOn){ mqttOn=false; b.setAttribute('aria-pressed','false'); b.innerHTML='&#9729;&nbsp;MQTT';
       worldMode=false; document.getElementById('world-btn').setAttribute('aria-pressed','false'); hideVeil();
+      if(demoTimer){ clearInterval(demoTimer); demoTimer=null; }
+      clearAll();   // wipe the map immediately; backend also drops its stored positions
       fetch('/api/net/mesh/mqtt/disconnect',{method:'POST'}).catch(function(){}); return; }
     mqttOn=true; b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;MQTT';
     if(DEMO_ON){ demoSeed(); return; }
@@ -174,7 +179,15 @@
   var worldMode=false;
   var WORLD_HINT='🌍 <b>Public worldwide mesh</b> — nodes stream in as they beacon to the public MQTT broker (via JSON-enabled gateways). It fills in over a minute or two, and not every node uplinks — so this is a large live sample of the world, not a full census.';
   document.getElementById('world-btn').addEventListener('click',function(){
-    worldMode=true; this.setAttribute('aria-pressed','true');
+    var wb=this;
+    if(worldMode){                                     // toggle OFF: hide the public nodes
+      worldMode=false; wb.setAttribute('aria-pressed','false'); hideVeil();
+      if(demoTimer){ clearInterval(demoTimer); demoTimer=null; }
+      if(mqttOn){ document.getElementById('mqtt-btn').click(); }  // disconnect (also clears the map)
+      else { clearAll(); }
+      return;
+    }
+    worldMode=true; wb.setAttribute('aria-pressed','true');
     document.getElementById('mqtt-topic').value='';   // '' -> backend default global topic
     firstFit=true;                                     // keep the world view; don't auto-zoom to the first few
     map.setView([20,0],2);
