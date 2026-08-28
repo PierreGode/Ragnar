@@ -70,14 +70,22 @@ def setup_pager_shared_data(shared_data):
 
     # Image series paths for animations (b_class -> list of file paths)
     shared_data.pager_image_series = {}
+    shared_data.pager_female_image_series = {}
     for status in shared_data.status_list:
         shared_data.pager_image_series[status] = []
+        shared_data.pager_female_image_series[status] = []
         status_dir = os.path.join(statuspicdir, status)
         if os.path.isdir(status_dir):
             for image_name in sorted(os.listdir(status_dir)):
                 if image_name.endswith('.bmp') and re.search(r'\d', image_name):
                     image_path = os.path.join(status_dir, image_name)
                     shared_data.pager_image_series[status].append(image_path)
+        female_dir = os.path.join(status_dir, 'female')
+        if os.path.isdir(female_dir):
+            for image_name in sorted(os.listdir(female_dir)):
+                if image_name.endswith('.bmp') and re.search(r'\d', image_name):
+                    shared_data.pager_female_image_series[status].append(
+                        os.path.join(female_dir, image_name))
 
     # Current animation frame path
     shared_data.current_image_path = None
@@ -104,15 +112,18 @@ def setup_pager_shared_data(shared_data):
         try:
             status = shared_data.ragnarstatustext
             series = shared_data.pager_image_series
-            if status in series and series[status]:
-                idx = random.randint(0, len(series[status]) - 1)
-                shared_data.current_image_path = series[status][idx]
+            female = getattr(shared_data, 'pager_female_image_series', {})
+            if (status == "IDLE" and female.get("IDLE")
+                    and shared_data.unit_is_female()):
+                pool = female["IDLE"]
+            elif status in series and series[status]:
+                pool = series[status]
             else:
-                if "IDLE" in series and series["IDLE"]:
-                    idx = random.randint(0, len(series["IDLE"]) - 1)
-                    shared_data.current_image_path = series["IDLE"][idx]
-                else:
-                    shared_data.current_image_path = None
+                pool = series.get("IDLE") or []
+            if pool:
+                shared_data.current_image_path = pool[random.randint(0, len(pool) - 1)]
+            else:
+                shared_data.current_image_path = None
         except Exception as e:
             logger.error(f"Error updating image randomizer: {e}")
 

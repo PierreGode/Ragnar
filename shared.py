@@ -1831,8 +1831,10 @@ class SharedData:
 
             # Load image series dynamically from subdirectories
             self.image_series = {}
+            self.female_image_series = {}
             for status in self.status_list:
                 self.image_series[status] = []
+                self.female_image_series[status] = []
                 status_dir = os.path.join(self.statuspicdir, status)
                 if not os.path.isdir(status_dir):
                     os.makedirs(status_dir)
@@ -1845,11 +1847,22 @@ class SharedData:
                         if image:
                             self.image_series[status].append(image)
 
+                female_dir = os.path.join(status_dir, 'female')
+                if os.path.isdir(female_dir):
+                    for image_name in os.listdir(female_dir):
+                        if image_name.endswith('.bmp') and re.search(r'\d', image_name):
+                            image = self.load_image(os.path.join(female_dir, image_name), scale=img_scale)
+                            if image:
+                                self.female_image_series[status].append(image)
+
             if not self.image_series:
                 logger.error("No images loaded.")
             else:
                 for status, images in self.image_series.items():
                     logger.info(f"Loaded {len(images)} images for status {status}.")
+                for status, images in self.female_image_series.items():
+                    if images:
+                        logger.info(f"Loaded {len(images)} female images for status {status}.")
 
 
             """Calculate the position of the Ragnar image on the screen to center it"""
@@ -1896,25 +1909,49 @@ class SharedData:
             logger.error(f"Error loading image {image_path}: {e}")
             raise
 
+    def unit_is_female(self):
+        """Whether this unit's Ragnar should render as the shieldmaiden.
+
+        Mirrors webapp_modern._mesh_viking_female: an explicit mesh_viking_gender
+        wins; otherwise the gender is derived from the Viking name."""
+        try:
+            gender = (self.config.get('mesh_viking_gender') or '').strip().lower()
+            if gender == 'female':
+                return True
+            if gender == 'male':
+                return False
+            import mesh_manager
+            name = (self.config.get('mesh_viking_name') or '').strip()
+            if not name:
+                name = mesh_manager.derive_viking_name()
+            return mesh_manager.is_female_viking(name)
+        except Exception:
+            return False
+
+    def status_frames(self, status):
+        """Return the image pool for a status. Female units draw dedicated IDLE
+        art when it exists; every other status uses the shared pool. Falls back
+        to the shared IDLE pool when a status has no images of its own."""
+        female = getattr(self, 'female_image_series', None)
+        if (status == "IDLE" and female and female.get("IDLE")
+                and self.unit_is_female()):
+            return female["IDLE"]
+        if self.image_series.get(status):
+            return self.image_series[status]
+        return self.image_series.get("IDLE") or []
+
     def update_image_randomizer(self):
         """Update the image randomizer and the imagegen variable."""
         try:
             status = self.ragnarstatustext
-            if status in self.image_series and self.image_series[status]:
-                random_index = random.randint(0, len(self.image_series[status]) - 1)
-                self.imagegen = self.image_series[status][random_index]
+            frames = self.status_frames(status)
+            if frames:
+                self.imagegen = frames[random.randint(0, len(frames) - 1)]
                 self.x_center = (self.width - self.imagegen.width) // 2
                 self.y_bottom = self.height - self.imagegen.height
             else:
-                logger.warning(f"Warning: No images available for status {status}, defaulting to IDLE images.")
-                if "IDLE" in self.image_series and self.image_series["IDLE"]:
-                    random_index = random.randint(0, len(self.image_series["IDLE"]) - 1)
-                    self.imagegen = self.image_series["IDLE"][random_index]
-                    self.x_center = (self.width - self.imagegen.width) // 2
-                    self.y_bottom = self.height - self.imagegen.height
-                else:
-                    logger.error("No IDLE images available either.")
-                    self.imagegen = None
+                logger.error(f"No images available for status {status} and no IDLE fallback.")
+                self.imagegen = None
         except Exception as e:
             logger.error(f"Error updating image randomizer: {e}")
             self.imagegen = None

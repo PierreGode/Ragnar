@@ -3205,8 +3205,7 @@ class Display:
             key = (status, idx, tint)
             if key in _frame_cache:
                 return _frame_cache[key]
-            series = getattr(self.shared_data, "image_series", {})
-            frames = series.get(status) or series.get("IDLE") or []
+            frames = self.shared_data.status_frames(status)
             if not frames:
                 _frame_cache[key] = None
                 return None
@@ -3224,8 +3223,7 @@ class Display:
             return _frame_cache[key]
 
         def _frame_count(status):
-            series = getattr(self.shared_data, "image_series", {})
-            frames = series.get(status) or series.get("IDLE") or []
+            frames = self.shared_data.status_frames(status)
             return max(1, len(frames))
 
         # ── state helpers ─────────────────────────────────────────────────
