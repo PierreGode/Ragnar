@@ -283,7 +283,7 @@
     clearTimeout(locNote._t); if(t&&!hold){ locNote._t=setTimeout(function(){ locNoteEl.textContent=''; },6000); } }
   function setRx(la,lo){ rx.lat=+(+la).toFixed(5); rx.lon=+(+lo).toFixed(5); saveRx();
     document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon; }
-  function onLocated(){ if(DEMO_ON) synthMode(); }   // (re)start the real nearby feed in demo
+  function onLocated(){ if(DEMO_ON && !running) synthMode(); }   // (re)start the real nearby feed in demo (never during real SDR)
   function browserLocate(cb){
     if(!navigator.geolocation || !window.isSecureContext){ if(cb)cb(false,'insecure'); return; }
     navigator.geolocation.getCurrentPosition(
@@ -375,9 +375,19 @@
       if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
       ctx.globalAlpha=1; shown++;
     });
-    // no-location hint on the scope
-    if(rx.lat==null){ ctx.fillStyle='rgba(245,185,66,.9)'; ctx.textAlign='center'; ctx.font='12px "IBM Plex Mono",monospace';
-      ctx.fillText('Set your lat/lon to place aircraft', cx, cy+R-6); }
+    // no-location hint. If aircraft ARE being received but there's no receiver
+    // location, they can't be placed — that reads as an empty radar, so call it
+    // out loudly (this is the usual cause of "nothing on radar" with a live SDR).
+    if(rx.lat==null){ ctx.textAlign='center';
+      if(running && planes && planes.length){
+        ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
+        ctx.fillText(planes.length+' aircraft received — set your location to place them', cx, cy-14);
+        ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
+        wrapText('Click ◎ My location or type your lat/lon above. (Auto-locate needs the updated backend — restart Ragnar if it was just updated.)', cx, cy+8, Math.min(R*1.6,420), 15);
+      } else {
+        ctx.fillStyle='rgba(245,185,66,.9)'; ctx.font='12px "IBM Plex Mono",monospace';
+        ctx.fillText('Set your location (◎ My location) to place aircraft', cx, cy+R-6);
+      } }
     // reception hint: running (live), connected, but no aircraft decoded — almost
     // always the antenna. Draw it big in the middle so it can't be missed.
     if(mode==='live' && running && (!planes||!planes.length) && lastHint){
@@ -481,6 +491,7 @@
   // is no location yet or no internet.
   var nearbyTimer=null, usingNearby=false;
   function synthMode(){
+    if(running) return;                            // real SDR is active — never run the demo feeds
     hideVeil();
     if(rx.lat==null){ ensureLocation(); }          // async → onLocated() re-enters when ready
     if(rx.lat!=null){ startNearby(); } else { startSynthSky(); }
@@ -488,7 +499,7 @@
   function startNearby(){
     stopSynthSky();
     if(nearbyTimer) return;
-    function pull(){ if(rx.lat==null) return;
+    function pull(){ if(running){ stopNearby(); return; } if(rx.lat==null) return;
       var dnm=Math.max(20,Math.round(maxKm/1.852*1.3));
       fetch('/api/net/adsb/nearby?lat='+rx.lat+'&lon='+rx.lon+'&dist='+dnm)
         .then(function(r){return r.json();}).then(function(d){
@@ -501,7 +512,7 @@
   }
   function stopNearby(){ if(nearbyTimer){clearInterval(nearbyTimer);nearbyTimer=null;} usingNearby=false; }
   function startSynthSky(){
-    if(usingNearby) return;
+    if(usingNearby || running) return;
     setMode('synth');
     if(rx.lat==null){ setRx(51.5074,-0.1278); }
     if(!planes.length || planes._synth!==true){ planes=makeSynth(); planes._synth=true; }
