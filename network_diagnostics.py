@@ -19001,6 +19001,19 @@ def register_network_diagnostics(app, logger=None):
     def net_adsb_aircraft():
         return jsonify(adsb.aircraft())
 
+    @app.route('/api/net/adsb/route', methods=['GET'])
+    def net_adsb_route():
+        # On-demand filed-route + live-progress lookup for one aircraft (the map
+        # view). callsign is required; lat/lon/gs (live position + ground speed)
+        # let the backend compute % flown and ETA. Cache-first, adsbdb on a miss.
+        def _f(k):
+            try:
+                return float(request.args.get(k))
+            except (TypeError, ValueError):
+                return None
+        return jsonify(adsb.route(request.args.get('callsign', ''),
+                                  lat=_f('lat'), lon=_f('lon'), gs=_f('gs')))
+
     @app.route('/api/net/adsb/selftest', methods=['GET'])
     def net_adsb_selftest():
         return jsonify(adsb.selftest())

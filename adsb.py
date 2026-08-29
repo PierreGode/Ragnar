@@ -26,6 +26,7 @@ CLI
     python3 adsb.py selftest
 """
 
+import json
 import math
 import os
 import socket
@@ -33,6 +34,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 
 
 def _which(name):
@@ -392,6 +395,124 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 
 
 # --------------------------------------------------------------------------
+# Flight-route enrichment (callsign -> origin/destination airports)
+#
+# ADS-B carries the live position but NOT the filed route, so the origin and
+# destination airports come from a lookup keyed on the callsign. We use
+# adsbdb.com (free, no API key) and cache every answer to data/adsb_routes.json
+# so repeat sightings are instant and known routes still render with no
+# connectivity. The live position/track never need the network; only the first
+# look-up of a given callsign does. Look-ups are on-demand (when the operator
+# clicks an aircraft), not a background poll, to stay light on the free service.
+# --------------------------------------------------------------------------
+
+_ADSBDB_BASE = "https://api.adsbdb.com/v0"
+_ROUTE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "adsb_routes.json")
+_ROUTE_TTL = 30 * 24 * 3600     # filed routes are stable — refresh ~monthly
+_ROUTE_NEG_TTL = 6 * 3600       # retry "unknown" callsigns after a while
+_HTTP_TIMEOUT = 6
+_route_lock = threading.Lock()
+_route_cache = None             # lazy-loaded {callsign: {route, fetched}}
+
+
+def _airport_from_adsbdb(d):
+    """Normalize one adsbdb airport object to our compact shape (pure)."""
+    if not isinstance(d, dict):
+        return None
+    try:
+        lat = float(d.get("latitude"))
+        lon = float(d.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+    return {"iata": d.get("iata_code") or "", "icao": d.get("icao_code") or "",
+            "name": d.get("name") or "", "municipality": d.get("municipality") or "",
+            "country": d.get("country_name") or "", "lat": lat, "lon": lon}
+
+
+def parse_adsbdb_route(payload):
+    """Parse an adsbdb /v0/callsign response into a normalized route (pure).
+
+    Returns {callsign, callsign_iata, origin, destination} with origin/destination
+    each a compact airport dict, or None when the callsign is unknown or the
+    payload lacks both endpoints. Never raises on malformed input.
+    """
+    if not isinstance(payload, dict):
+        return None
+    resp = payload.get("response")
+    if not isinstance(resp, dict):
+        return None                      # "unknown callsign" comes back as a string
+    fr = resp.get("flightroute")
+    if not isinstance(fr, dict):
+        return None
+    origin = _airport_from_adsbdb(fr.get("origin"))
+    dest = _airport_from_adsbdb(fr.get("destination"))
+    if not origin and not dest:
+        return None
+    return {"callsign": fr.get("callsign") or fr.get("callsign_icao") or "",
+            "callsign_iata": fr.get("callsign_iata") or "",
+            "origin": origin, "destination": dest}
+
+
+def great_circle_points(lat1, lon1, lat2, lon2, n=48):
+    """Sample n points along the great circle from 1 to 2 (pure).
+
+    Spherical interpolation so a long route draws as the true curved arc a plane
+    flies, not a straight line on the map. Returns [[lat, lon], ...].
+    """
+    n = max(2, int(n))
+    p1, l1 = math.radians(lat1), math.radians(lon1)
+    p2, l2 = math.radians(lat2), math.radians(lon2)
+    d = 2 * math.asin(min(1.0, math.sqrt(
+        math.sin((p2 - p1) / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin((l2 - l1) / 2) ** 2)))
+    if d == 0:
+        return [[lat1, lon1], [lat2, lon2]]
+    out = []
+    for i in range(n):
+        f = i / (n - 1)
+        a = math.sin((1 - f) * d) / math.sin(d)
+        b = math.sin(f * d) / math.sin(d)
+        x = a * math.cos(p1) * math.cos(l1) + b * math.cos(p2) * math.cos(l2)
+        y = a * math.cos(p1) * math.sin(l1) + b * math.cos(p2) * math.sin(l2)
+        z = a * math.sin(p1) + b * math.sin(p2)
+        out.append([math.degrees(math.atan2(z, math.sqrt(x * x + y * y))),
+                    math.degrees(math.atan2(y, x))])
+    return out
+
+
+def route_progress(route_rec, lat, lon, gs=None):
+    """Great-circle geometry + progress for a route given the live position (pure).
+
+    progress is flown / (flown + remaining) — robust to a plane slightly off the
+    filed track or past the destination. eta_min uses ground speed (knots) when
+    supplied. Returns None unless both endpoints are known.
+    """
+    if not route_rec:
+        return None
+    o, d = route_rec.get("origin"), route_rec.get("destination")
+    if not (o and d):
+        return None
+    total = haversine_km(o["lat"], o["lon"], d["lat"], d["lon"])
+    out = {"total_km": round(total, 1),
+           "arc": great_circle_points(o["lat"], o["lon"], d["lat"], d["lon"])}
+    if lat is not None and lon is not None:
+        flown = haversine_km(o["lat"], o["lon"], lat, lon)
+        remaining = haversine_km(lat, lon, d["lat"], d["lon"])
+        denom = flown + remaining
+        out["flown_km"] = round(flown, 1)
+        out["remaining_km"] = round(remaining, 1)
+        out["progress"] = round(flown / denom, 3) if denom > 0 else 0.0
+        try:
+            g = float(gs)
+            if g > 20:
+                out["eta_min"] = round(remaining / (g * 1.852) * 60)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+# --------------------------------------------------------------------------
 # Live aircraft tracker (drives dump1090 + reads its SBS stream)
 # --------------------------------------------------------------------------
 
@@ -668,6 +789,93 @@ def install():
 
 
 # --------------------------------------------------------------------------
+# Route look-up + cache (stateful; the only part that touches the network)
+# --------------------------------------------------------------------------
+
+def _route_cache_get():
+    global _route_cache
+    if _route_cache is None:
+        try:
+            with open(_ROUTE_CACHE, "r") as f:
+                _route_cache = json.load(f)
+            if not isinstance(_route_cache, dict):
+                _route_cache = {}
+        except (OSError, ValueError):
+            _route_cache = {}
+    return _route_cache
+
+
+def _route_cache_put(cs, entry):
+    with _route_lock:
+        cache = _route_cache_get()
+        cache[cs] = entry
+        try:
+            os.makedirs(os.path.dirname(_ROUTE_CACHE), exist_ok=True)
+            tmp = _ROUTE_CACHE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp, _ROUTE_CACHE)
+        except OSError:
+            pass
+
+
+def _adsbdb_fetch(cs):
+    """Query adsbdb for a callsign; return a parsed route or None (network)."""
+    url = "%s/callsign/%s" % (_ADSBDB_BASE, urllib.parse.quote(cs))
+    req = urllib.request.Request(url, headers={"User-Agent": "Ragnar-ADSB/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None                      # offline / 404 / timeout -> just no route
+    return parse_adsbdb_route(payload)
+
+
+def route_lookup(callsign, use_network=True):
+    """Resolve a callsign to its filed route, cache-first (see module note).
+
+    Returns {origin, destination, ..., source, fetched} or None. Cache hits are
+    served offline; a miss consults adsbdb (when use_network) and is cached —
+    including a short-lived negative so unknown callsigns aren't re-hammered.
+    """
+    if not callsign:
+        return None
+    cs = str(callsign).strip().upper()
+    if not cs:
+        return None
+    now = time.time()
+    with _route_lock:
+        entry = _route_cache_get().get(cs)
+    if entry:
+        age = now - entry.get("fetched", 0)
+        if entry.get("route") and age < _ROUTE_TTL:
+            r = dict(entry["route"])
+            r["source"], r["fetched"] = "cache", entry["fetched"]
+            return r
+        if not entry.get("route") and age < _ROUTE_NEG_TTL:
+            return None                  # cached "unknown", still fresh
+    if not use_network:
+        return None
+    fetched = _adsbdb_fetch(cs)
+    _route_cache_put(cs, {"route": fetched, "fetched": now})
+    if fetched:
+        r = dict(fetched)
+        r["source"], r["fetched"] = "adsbdb", now
+        return r
+    return None
+
+
+def route(callsign, lat=None, lon=None, gs=None, use_network=True):
+    """Public: filed route + live progress for a callsign (drives the map view)."""
+    r = route_lookup(callsign, use_network=use_network)
+    cs = (callsign or "").strip().upper()
+    if not r:
+        return {"callsign": cs, "route": None, "progress": None}
+    return {"callsign": r.get("callsign") or cs, "route": r,
+            "progress": route_progress(r, lat, lon, gs)}
+
+
+# --------------------------------------------------------------------------
 # Selftest (pure parsers + geo, no hardware)
 # --------------------------------------------------------------------------
 
@@ -746,6 +954,34 @@ def selftest():
     check("geo: haversine Dublin-London ~464 km", abs(d - 464) < 15, "%.1f" % d)
     check("geo: bearing Dublin-London ~118 deg", abs(b - 118) < 8, "%.1f" % b)
 
+    # Route enrichment: parse an adsbdb payload (pure, no network).
+    sample = {"response": {"flightroute": {
+        "callsign": "RYR123", "callsign_iata": "FR123",
+        "origin": {"iata_code": "DUB", "icao_code": "EIDW", "name": "Dublin",
+                   "country_name": "Ireland", "latitude": 53.4213, "longitude": -6.2701},
+        "destination": {"iata_code": "STN", "icao_code": "EGSS", "name": "Stansted",
+                        "country_name": "United Kingdom", "latitude": 51.885, "longitude": 0.235}}}}
+    pr = parse_adsbdb_route(sample)
+    check("route: adsbdb payload -> DUB->STN",
+          pr and pr["origin"]["iata"] == "DUB" and pr["destination"]["icao"] == "EGSS"
+          and abs(pr["origin"]["lat"] - 53.4213) < 1e-3, str(pr))
+    check("route: unknown/garbage payload -> None",
+          parse_adsbdb_route({"response": "unknown callsign"}) is None
+          and parse_adsbdb_route({}) is None and parse_adsbdb_route(None) is None)
+    # Great-circle midpoint of the route reads ~50% flown.
+    mid = great_circle_points(pr["origin"]["lat"], pr["origin"]["lon"],
+                              pr["destination"]["lat"], pr["destination"]["lon"], 3)[1]
+    prog = route_progress(pr, mid[0], mid[1], gs=420)
+    check("route: midpoint progress ~0.5",
+          prog and abs(prog["progress"] - 0.5) < 0.05 and prog.get("eta_min", 0) > 0, str(prog))
+    check("route: great-circle arc keeps its endpoints",
+          len(prog["arc"]) >= 2
+          and abs(prog["arc"][0][0] - pr["origin"]["lat"]) < 1e-6
+          and abs(prog["arc"][-1][0] - pr["destination"]["lat"]) < 1e-6, str(prog["arc"][:1]))
+    # Offline path: no cache + no network -> None, and never raises.
+    check("route: lookup offline w/o cache -> None",
+          route_lookup("ZZZRAGNARTEST", use_network=False) is None)
+
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
             "total": len(results), "results": results}
@@ -754,7 +990,6 @@ def selftest():
 def _main(argv):
     cmd = argv[1] if len(argv) > 1 else "detect"
     if cmd == "detect":
-        import json
         print(json.dumps(detect(), indent=2))
     elif cmd == "selftest":
         r = selftest()
@@ -777,8 +1012,14 @@ def _main(argv):
                 print("aircraft=%d messages=%d" % (a["count"], a["messages"]))
         finally:
             stop()
+    elif cmd == "route":
+        cs = argv[2] if len(argv) > 2 else ""
+        if not cs:
+            print("usage: adsb.py route <CALLSIGN>   (e.g. RYR123)")
+            return 1
+        print(json.dumps(route(cs), indent=2))
     else:
-        print("usage: adsb.py [detect|run|selftest]")
+        print("usage: adsb.py [detect|run|selftest|route <CALLSIGN>]")
     return 0
 
 

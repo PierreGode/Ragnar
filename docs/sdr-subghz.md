@@ -236,6 +236,32 @@ heading vectors + a contacts table.
   is receive-only, and ADS-B is unauthenticated/unencrypted by design — the same
   data every flight-tracking site shows.
 
+### Flight routes (click a contact → world map)
+
+ADS-B carries the live position but **not** the filed route (origin →
+destination). Click any contact (row or blip) and Ragnar opens a **world-map
+route view**, FlightAware-style:
+
+- **Origin/destination** come from a lookup on the callsign via
+  [adsbdb.com](https://www.adsbdb.com) — **free, no API key**. Answers are cached
+  to `data/adsb_routes.json` (gitignored), so repeat sightings are instant and
+  known routes still render with **no connectivity**. Only the first look-up of a
+  given callsign touches the network, and only when you click an aircraft (no
+  background polling — light on the free service).
+- The map is drawn on a self-contained canvas (bundled `demos/adsb_world.json`
+  coastline, ~66 KB, public-domain Natural Earth) — **no tile server, no external
+  map library**, so it works offline. It auto-fits to the route, draws the true
+  **great-circle** arc (curved, not a straight line), splits it **flown** (cyan)
+  vs **remaining** (dashed) at the live position, and marks both airports and the
+  aircraft (heading-oriented).
+- The side panel shows **% progress**, distance flown / remaining / total, a
+  rough **ETA** from ground speed, and current altitude/speed — all recomputed
+  live from your own receiver as the plane moves.
+- **Offline / unknown callsign:** the live position still plots on the map; the
+  panel notes no filed route was found (adsbdb had no match, or you're offline).
+  Backed by `GET /api/net/adsb/route?callsign=…&lat=&lon=&gs=` (`adsb.route()`);
+  the pure parsers/geometry are covered by `adsb.py selftest`.
+
 ## Session record & replay
 
 The sub-GHz waterfall toolbar has a **● Rec** button that captures the running
@@ -365,6 +391,7 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `GET  /api/net/rtl/lora` | LoRa mesh plan — Meshtastic/MeshCore/LoRaWAN (spans + channels) |
 | `GET  /api/net/rtl/tuning` · POST `{ppm,gain}` | Read / set PPM freq-correction + tuner gain (reapplied live) |
 | `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft (icao/iata/tail/country) |
+| `GET  /api/net/adsb/route?callsign=…&lat=&lon=&gs=` | Filed route (origin/dest via adsbdb, cache-first) + live great-circle progress for the map view |
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
