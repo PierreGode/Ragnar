@@ -59,6 +59,7 @@
   .src{font-size:9px;padding:1px 5px;border-radius:4px;border:1px solid var(--line)}
   .src.rf{color:var(--rf);border-color:rgba(240,163,94,.4)} .src.is{color:var(--is);border-color:rgba(94,200,240,.4)} .src.tx{color:var(--tx);border-color:rgba(201,139,240,.4)}
   .empty{padding:24px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;line-height:1.4;padding:1px 6px;margin-left:4px;border-radius:6px;background:#1b2740;color:#7fd4ff;border:1px solid #2a3a5a;vertical-align:middle}
   .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.86);text-align:center;padding:22px;z-index:5}
   .veil.show{display:flex} .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
   .hint{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
@@ -139,7 +140,7 @@
   </div>
 
   <div class="card" style="margin-top:16px">
-    <div class="cap"><span class="t">Packet feed</span><span class="c" id="feedcap"></span></div>
+    <div class="cap"><span class="t">Packet feed</span><span class="c" id="feedcap"></span><span class="c" id="masterTag" style="display:none;color:#7fd4ff;margin-left:8px"></span></div>
     <div class="feedtbl">
       <table>
         <thead><tr><th>Time</th><th>Src</th><th>Station</th><th>Type</th><th>Info</th></tr></thead>
@@ -157,7 +158,8 @@
 <script>
 (function(){
   "use strict";
-  var DEMO_ON=false, pseq=0, mseq=0, packets=[], stations={}, messages=[], sel=null, isWrite=false;
+  var DEMO_ON=false, MASTER=false, mpoll=null, mdemo=false, _mrecs=[], MDEMO_UNITS=['heimdall','frigg','odin'];
+  var pseq=0, mseq=0, packets=[], stations={}, messages=[], sel=null, isWrite=false;
   var cv=document.getElementById('map'), ctx=cv.getContext('2d');
   var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs'), veilInstall=document.getElementById('veil-install');
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
@@ -252,7 +254,7 @@
       return '<tr class="'+(sel===p.source?'sel':'')+'">'
         +'<td>'+hhmm(p.ts)+'</td>'
         +'<td><span class="src '+(p.src_kind||'')+'">'+esc((p.src_kind||'').toUpperCase())+'</span></td>'
-        +'<td style="color:var(--aprs)">'+esc(p.source||'')+'</td>'
+        +'<td style="color:var(--aprs)">'+esc(p.source||'')+srcChips(p)+'</td>'
         +'<td>'+esc(p.type||'')+'</td>'
         +'<td class="cmt">'+infoText(p)+'</td></tr>'; }).join('');
   }
@@ -338,7 +340,55 @@
     renderStats({packets:pseq,stations:Object.keys(stations).length,messages:messages.length});
   }
 
-  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  // ---- master mode: pull deduped APRS stations from the whole Ragnar mesh ----
+  function srcChips(p){
+    if(!MASTER) return '';
+    var hb=p.heard_by||p.units||[]; if(!hb||!hb.length) return '';
+    return hb.map(function(u){ return '<span class="srcchip">'+esc(u)+'</span>'; }).join('');
+  }
+  function applyMaster(recs){
+    hideVeil(); stations={}; packets=[];
+    recs.forEach(function(r){
+      var call=r.call||r.source||'?';
+      if(r.lat!=null&&r.lon!=null) stations[call]={call:call,lat:r.lat,lon:r.lon,src_kind:r.src_kind,ts:r.ts,comment:r.comment,speed_kt:r.speed_kt,course:r.course,heard_by:r.heard_by};
+      packets.push({source:call,type:'station',ts:r.ts,comment:r.comment,lat:r.lat,lon:r.lon,speed_kt:r.speed_kt,course:r.course,src_kind:r.src_kind,heard_by:r.heard_by});
+    });
+    renderFeed(); drawMap();
+    renderStats({packets:recs.length,stations:Object.keys(stations).length,messages:messages.length});
+  }
+  function pollMaster(){
+    fetch('/api/net/aggregate/aprs').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.records)||[];
+      if(!recs.length && DEMO_ON){ demoMaster(); return; }
+      mdemo=false; applyMaster(recs);
+    }).catch(function(){ if(DEMO_ON) demoMaster(); });
+  }
+  function demoMaster(){
+    if(!mdemo){ var out=[], base={lat:59.3293,lon:18.0686};
+      for(var i=0;i<10;i++){ var c=DEMO_CALLS[i%DEMO_CALLS.length]+'-'+((Math.random()*15)|0);
+        var a=MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0];
+        out.push({call:c,lat:base.lat+(Math.random()-0.5)*1.6,lon:base.lon+(Math.random()-0.5)*2.2,
+          comment:'mesh beacon',src_kind:Math.random()<0.5?'rf':'is',ts:Date.now()/1000-(Math.random()*600),
+          speed_kt:(Math.random()*40)|0,course:(Math.random()*360)|0,
+          heard_by:(Math.random()<0.3)?[a,MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0]]:[a]}); }
+      _mrecs=out; mdemo=true;
+    } else { _mrecs.forEach(function(r){ r.lat+=(Math.random()-0.5)*0.02; r.lon+=(Math.random()-0.5)*0.02; r.ts=Date.now()/1000-(Math.random()*300); }); }
+    applyMaster(_mrecs);
+  }
+  function startMaster(){
+    var mt=document.getElementById('masterTag'); if(mt){ mt.style.display=''; mt.textContent='🛰 Master · all mesh units'; }
+    if(poll){clearInterval(poll);poll=null;} rfOn=false; isOn=false;
+    ['rf-btn','is-btn','m-send'].forEach(function(id){ var b=document.getElementById(id); if(b){ b.disabled=true; } });
+    if(mpoll) return; mpoll=setInterval(pollMaster,2500); pollMaster();
+  }
+  function stopMaster(){
+    if(mpoll){clearInterval(mpoll);mpoll=null;}
+    ['rf-btn','is-btn'].forEach(function(id){ var b=document.getElementById(id); if(b){ b.disabled=false; } });
+    var mt=document.getElementById('masterTag'); if(mt) mt.style.display='none';
+    stations={}; packets=[]; renderFeed(); drawMap();
+  }
+
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); MASTER=!!(c&&(c.sdr_master===true||c.sdr_master==='true')); }).catch(function(){}); }
   function boot(){
     fetch('/api/net/aprs/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{};
@@ -352,8 +402,15 @@
     }).catch(function(){});
     if(poll)clearInterval(poll); poll=setInterval(pollAll,2000); pollAll();
   }
+  function applyModeFromConfig(){
+    if(MASTER){ startMaster(); }
+    else { if(mpoll){ stopMaster(); } if(!poll){ boot(); } }
+  }
   drawMap();
-  refreshConfig().then(boot);
+  refreshConfig().then(function(){
+    applyModeFromConfig();
+    setInterval(function(){ refreshConfig().then(applyModeFromConfig); },5000);
+  });
 })();
 </script>
 </body>

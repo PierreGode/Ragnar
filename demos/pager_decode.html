@@ -46,6 +46,7 @@
   td.txt{color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere;width:99%} td.cap-c{color:var(--cyan)}
   .proto{font-size:9.5px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
   .empty{padding:30px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;line-height:1.4;padding:1px 6px;margin-left:4px;border-radius:6px;background:#1b2740;color:var(--cyan);border:1px solid #2a3a5a;vertical-align:middle}
   .veil{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:rgba(5,8,13,.82);text-align:center;padding:22px}
   .veil.show{display:flex} .veil .vt{font-family:var(--head);font-size:18px} .veil .vs{font-family:var(--mono);font-size:12px;color:var(--muted);max-width:520px}
   footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
@@ -79,7 +80,7 @@
   </div>
 
   <div class="card">
-    <div class="cap"><span class="t">Decoded messages</span><span class="c" id="tblcount"></span></div>
+    <div class="cap"><span class="t">Decoded messages</span><span class="c" id="tblcount"></span><span class="c" id="masterTag" style="display:none;color:var(--cyan);margin-left:8px"></span></div>
     <div class="tbl">
       <table>
         <thead><tr><th>Time</th><th>Protocol</th><th>Capcode</th><th>Fn</th><th>Message</th></tr></thead>
@@ -100,7 +101,7 @@
 <script>
 (function(){
   "use strict";
-  var running=false, DEMO_ON=false, mode='idle', seq=0, msgs=[], freqHz=null;
+  var running=false, DEMO_ON=false, MASTER=false, mpoll=null, mode='idle', seq=0, msgs=[], freqHz=null;
   var veil=document.getElementById('veil'), veilT=veil.querySelector('.vt'), veilS=veil.querySelector('.vs'), veilInstall=document.getElementById('veil-install');
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
   function fmtF(hz){ return hz?(hz/1e6).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')+' MHz':'—'; }
@@ -138,7 +139,7 @@
       return '<tr>'
         +'<td>'+hhmm(m.ts)+'</td>'
         +'<td><span class="proto">'+esc(m.protocol||'')+'</span></td>'
-        +'<td class="cap-c">'+esc(m.capcode||'—')+'</td>'
+        +'<td class="cap-c">'+esc(m.capcode||'—')+srcChips(m)+'</td>'
         +'<td>'+(m.function!=null?m.function:'—')+'</td>'
         +'<td class="txt">'+(m.text?esc(m.text):'<span style="color:var(--muted)">('+(m.kind||'tone')+')</span>')+'</td>'
         +'</tr>'; }).join('');
@@ -170,6 +171,44 @@
     }).catch(function(){});
   }
 
+  // ---- master mode: pull deduped pager pages from the whole Ragnar mesh ----
+  function srcChips(m){
+    if(!MASTER) return '';
+    var hb=m.heard_by||m.units||[]; if(!hb||!hb.length) return '';
+    return hb.map(function(u){ return '<span class="srcchip">'+esc(u)+'</span>'; }).join('');
+  }
+  var MDEMO_UNITS=['heimdall','frigg','odin'], mdemo=false;
+  function pollMaster(){
+    fetch('/api/net/aggregate/pager').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.records)||[];
+      if(!recs.length && DEMO_ON){ demoMaster(); return; }
+      mdemo=false; hideVeil(); setMode('live');
+      msgs=recs.slice(); renderTable();
+    }).catch(function(){ if(DEMO_ON) demoMaster(); });
+  }
+  function mkSynthPage(){ var s=SAMPLES[(Math.random()*SAMPLES.length)|0];
+    var a=MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0];
+    return {protocol:s[0],capcode:s[1],function:s[2],kind:s[3],text:s[4]||null,ts:Date.now()/1000,
+      heard_by:(Math.random()<0.3)?[a,MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0]]:[a]}; }
+  function demoMaster(){
+    hideVeil(); setMode('synth'); if(!freqHz)freqHz=chosenFreqHz()||153350000;
+    if(!mdemo){ msgs=[]; for(var i=0;i<7;i++){ msgs.push(mkSynthPage()); } mdemo=true; }
+    else if(Math.random()<0.7){ msgs.push(mkSynthPage()); if(msgs.length>500)msgs=msgs.slice(-500); }
+    renderTable();
+  }
+  function startMaster(){
+    var mt=document.getElementById('masterTag'); if(mt){ mt.style.display=''; mt.textContent='🛰 Master · all mesh units'; }
+    if(poll){clearInterval(poll);poll=null;} running=false;
+    var b=document.getElementById('startbtn'); if(b){ b.disabled=true; b.title='Master mode — showing mesh-wide data'; }
+    if(mpoll) return; mpoll=setInterval(pollMaster,2500); pollMaster();
+  }
+  function stopMaster(){
+    if(mpoll){clearInterval(mpoll);mpoll=null;}
+    var b=document.getElementById('startbtn'); if(b){ b.disabled=false; b.title=''; }
+    var mt=document.getElementById('masterTag'); if(mt) mt.style.display='none';
+    msgs=[]; renderTable();
+  }
+
   // ---- synthetic feed (demo / no hardware) ----
   var synthTimer=null;
   var SAMPLES=[['POCSAG1200','1234567',3,'Alpha','ICU bed 4 requesting on-call cardiology'],
@@ -188,7 +227,7 @@
              :{protocol:s[0],capcode:s[1],function:s[2],kind:s[3],text:s[4]||null,ts:Date.now()/1000};
       msgs.push(m); if(msgs.length>500)msgs=msgs.slice(-500); renderTable(); } },2500); renderTable(); }
 
-  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); MASTER=!!(c&&(c.sdr_master===true||c.sdr_master==='true')); }).catch(function(){}); }
   function checkStatus(){
     fetch('/api/net/pager/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{}, dt=document.getElementById('devtag');
@@ -201,7 +240,15 @@
     }).catch(function(){ if(DEMO_ON) synthMode(); });
   }
 
-  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+  refreshConfig().then(function(){
+    if(MASTER){ startMaster(); } else { checkStatus(); }
+    setInterval(function(){
+      refreshConfig().then(function(){
+        if(MASTER){ startMaster(); }
+        else { if(mpoll){ stopMaster(); } if(!running){ checkStatus(); } }
+      });
+    },5000);
+  });
 })();
 </script>
 </body>

@@ -57,6 +57,7 @@
   td.nm{color:var(--ink);font-weight:500} .self td{background:rgba(63,181,107,.07)}
   .empty{padding:24px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
   .pill{font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted)}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;line-height:1.4;padding:1px 6px;margin-left:4px;border-radius:6px;background:#1b2740;color:#7fd4ff;border:1px solid #2a3a5a;vertical-align:middle}
   .msgs{max-height:220px;overflow:auto;padding:6px 0}
   .msg{padding:6px 14px;border-bottom:1px solid var(--line-soft);font-size:12px}
   .msg.latest{background:rgba(123,140,210,.12);border-left:2px solid var(--mesh);padding-left:12px}
@@ -119,7 +120,7 @@
       </div>
     </div>
     <div class="card">
-      <div class="cap"><span class="t">Nodes</span><span class="c" id="tblcount"></span></div>
+      <div class="cap"><span class="t">Nodes</span><span class="c" id="tblcount"></span><span class="c" id="masterTag" style="display:none;color:#7fd4ff;margin-left:8px"></span></div>
       <div class="tbl">
         <table>
           <thead><tr><th>Name</th><th>ID</th><th>HW</th><th>SNR</th><th>Hops</th><th>Batt</th><th>Heard</th></tr></thead>
@@ -138,7 +139,7 @@
 <script>
 (function(){
   "use strict";
-  var running=false, DEMO_ON=false, mode='idle', nodes=[], msgs=[], selectedId=null;
+  var running=false, DEMO_ON=false, MASTER=false, mpoll=null, mode='idle', nodes=[], msgs=[], selectedId=null;
   var cv=document.getElementById('map'), ctx=cv.getContext('2d');
   // Click a node row to highlight it on the map and zoom in on it (toggle off by
   // re-clicking). Delegated so it survives table re-renders.
@@ -231,7 +232,7 @@
         +(n.role&&n.role!=='CLIENT'?' <span class="pill">'+esc(n.role)+'</span>':'');
       var sel=(selectedId && n.id===selectedId)?' sel':'';
       return '<tr class="nrow'+(n.is_self?' self':'')+sel+'" data-id="'+esc(n.id||'')+'">'
-        +'<td class="nm">'+nm+'</td>'
+        +'<td class="nm">'+nm+srcChips(n)+'</td>'
         +'<td>'+esc(n.id||'—')+'</td>'
         +'<td>'+esc(n.hw_model||'—')+'</td>'
         +'<td class="snrbadge" style="color:'+snrColor(n.snr)+'">'+(n.snr!=null?n.snr:'—')+'</td>'
@@ -315,6 +316,43 @@
       });
   }
 
+  // ---- master mode: pull deduped Meshtastic nodes from the whole Ragnar mesh ----
+  function srcChips(n){
+    if(!MASTER) return '';
+    var hb=n.heard_by||n.units||[]; if(!hb||!hb.length) return '';
+    return hb.map(function(u){ return '<span class="srcchip">'+esc(u)+'</span>'; }).join('');
+  }
+  var MDEMO_UNITS=['heimdall','frigg','odin'], mdemo=false;
+  function pollMaster(){
+    fetch('/api/net/aggregate/mesh').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.records)||[];
+      if(!recs.length && DEMO_ON){ demoMaster(); return; }
+      mdemo=false; hideVeil(); setMode('live');
+      nodes=recs.slice(); renderTable(); renderMsgs();
+    }).catch(function(){ if(DEMO_ON) demoMaster(); });
+  }
+  function demoMaster(){
+    hideVeil(); setMode('synth');
+    if(!mdemo){ nodes=makeSynth();
+      nodes.forEach(function(n){ if(!n.is_self){ var a=MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0];
+        n.heard_by=(Math.random()<0.3)?[a,MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0]]:[a]; } });
+      nodes._synth=true; mdemo=true; }
+    else { stepSynth(); }
+    renderTable(); renderMsgs();
+  }
+  function startMaster(){
+    var mt=document.getElementById('masterTag'); if(mt){ mt.style.display=''; mt.textContent='🛰 Master · all mesh units'; }
+    if(poll){clearInterval(poll);poll=null;} running=false; mqttOn=false;
+    ['startbtn','mqtt-btn'].forEach(function(id){ var b=document.getElementById(id); if(b){ b.disabled=true; b.title='Master mode — showing mesh-wide data'; } });
+    if(mpoll) return; mpoll=setInterval(pollMaster,2500); pollMaster();
+  }
+  function stopMaster(){
+    if(mpoll){clearInterval(mpoll);mpoll=null;}
+    ['startbtn','mqtt-btn'].forEach(function(id){ var b=document.getElementById(id); if(b){ b.disabled=false; b.title=''; } });
+    var mt=document.getElementById('masterTag'); if(mt) mt.style.display='none';
+    nodes=[]; renderTable();
+  }
+
   // ---- synthetic mesh (demo / no hardware) ----
   var synthTimer=null;
   function synthMode(){ setMode('synth'); hideVeil();
@@ -335,7 +373,7 @@
       msgs.push({from:from.id,to:'^all',channel:0,snr:from.snr,text:chat[(Math.random()*chat.length)|0],ts:Date.now()/1000});
       if(msgs.length>200)msgs=msgs.slice(-200); } }
 
-  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); MASTER=!!(c&&(c.sdr_master===true||c.sdr_master==='true')); }).catch(function(){}); }
   function checkStatus(){
     fetch('/api/net/mesh/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{}; var dt=document.getElementById('devtag');
@@ -354,7 +392,15 @@
   }
 
   ensureSize(); window.addEventListener('resize',ensureSize); requestAnimationFrame(anim);
-  refreshConfig().then(function(){ checkStatus(); setInterval(function(){ if(!running) refreshConfig().then(checkStatus); },5000); });
+  refreshConfig().then(function(){
+    if(MASTER){ startMaster(); } else { checkStatus(); }
+    setInterval(function(){
+      refreshConfig().then(function(){
+        if(MASTER){ startMaster(); }
+        else { if(mpoll){ stopMaster(); } if(!running){ checkStatus(); } }
+      });
+    },5000);
+  });
 })();
 </script>
 </body>

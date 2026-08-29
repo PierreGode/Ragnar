@@ -66,6 +66,7 @@
   tr.prow.sel td{background:rgba(245,185,66,.12);box-shadow:inset 3px 0 0 var(--accent)}
   td.cs{color:var(--ink);font-weight:500}
   .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;line-height:1.4;padding:1px 6px;margin-left:4px;border-radius:6px;background:#1b2740;color:var(--cyan);border:1px solid #2a3a5a;vertical-align:middle}
   .acarscard{margin-top:16px}
   .acars-list{max-height:none;padding:4px 0}
   .acars-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 78px 1fr auto;gap:12px;align-items:start}
@@ -123,7 +124,7 @@
       </div>
     </div>
     <div class="card tablecard">
-      <div class="tcap"><span class="t">Contacts</span><span class="c" id="tblcount"></span></div>
+      <div class="tcap"><span class="t">Contacts</span><span class="c" id="tblcount"></span><span class="c" id="masterTag" style="display:none;color:var(--cyan);margin-left:8px"></span></div>
       <div class="tbl">
         <table>
           <thead><tr><th>Flight</th><th>Airline</th><th>Reg</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Dist</th></tr></thead>
@@ -154,7 +155,7 @@
 <script>
 (function(){
   "use strict";
-  var running=false, DEMO_ON=false, mode='idle', maxKm=100, unit='km';
+  var running=false, DEMO_ON=false, MASTER=false, mpoll=null, mode='idle', maxKm=100, unit='km';
   var planes=[], msgs=0, sweepAng=0, rx={lat:null,lon:null}, selectedIcao=null;
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   // Click a contact row to highlight that aircraft on the radar (toggle off by
@@ -320,7 +321,7 @@
       +'<td class="cs">'+esc(flight)+fl2+'</td>'
       +'<td>'+air+'</td>'
       +'<td class="cs">'+reg+'</td>'
-      +'<td>'+esc(p.icao)+cc+'</td>'
+      +'<td>'+esc(p.icao)+cc+srcChips(p)+'</td>'
       +'<td>'+(p.alt!=null?('FL'+Math.round(p.alt/100)):'—')+'</td>'
       +'<td>'+(p.gs!=null?Math.round(p.gs):'—')+'</td>'
       +'<td>'+fmtDist(p._dist)+'</td>'
@@ -366,6 +367,48 @@
         lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); }
       else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
+  }
+
+  // ---- master mode: pull deduped ADS-B from the whole Ragnar mesh ----
+  var MDEMO_UNITS=['heimdall','frigg','odin'], mdemo=false;
+  function pollMaster(){
+    fetch('/api/net/aggregate/adsb').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.records)||[];
+      if(!recs.length && DEMO_ON){ demoMaster(); return; }
+      mdemo=false; hideVeil(); setMode('live');
+      planes=recs.slice(); msgs=(d&&d.reports)||planes.length;
+      enrich(); renderTable();
+    }).catch(function(){ if(DEMO_ON) demoMaster(); });
+  }
+  // demo: no local ADS-B hardware — show a synthetic mesh sky tagged with source units
+  function demoMaster(){
+    hideVeil(); setMode('synth');
+    if(rx.lat==null){ rx.lat=59.3293; rx.lon=18.0686; document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon; }
+    if(!mdemo){ planes=makeSynth();
+      planes.forEach(function(p){ var a=MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0];
+        p.heard_by=(Math.random()<0.3)?[a,MDEMO_UNITS[(Math.random()*MDEMO_UNITS.length)|0]]:[a]; });
+      mdemo=true; }
+    else { stepSynth(); }
+    msgs=planes.length; enrich(); renderTable();
+  }
+  function startMaster(){
+    var mt=document.getElementById('masterTag');
+    if(mt){ mt.style.display=''; mt.textContent='🛰 Master · all mesh units'; }
+    if(poll){clearInterval(poll);poll=null;} running=false;
+    if(startBtn){ startBtn.disabled=true; startBtn.title='Master mode — showing mesh-wide data'; }
+    if(mpoll) return; mpoll=setInterval(pollMaster,2000); pollMaster();
+  }
+  function stopMaster(){
+    if(mpoll){clearInterval(mpoll);mpoll=null;}
+    if(startBtn){ startBtn.disabled=false; startBtn.title=''; }
+    var mt=document.getElementById('masterTag'); if(mt) mt.style.display='none';
+    planes=[]; enrich(); renderTable();
+  }
+  // source chips: the mesh unit(s) that contributed this contact (not the master)
+  function srcChips(p){
+    if(!MASTER) return '';
+    var hb=p.heard_by||p.units||[]; if(!hb||!hb.length) return '';
+    return hb.map(function(u){ return '<span class="srcchip">'+esc(u)+'</span>'; }).join('');
   }
 
   // ---- synthetic sky (no hardware / demo) ----
@@ -505,7 +548,7 @@
   }
 
   // ---- boot ----
-  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); MASTER=!!(c&&(c.sdr_master===true||c.sdr_master==='true')); }).catch(function(){}); }
   function checkStatus(){
     fetch('/api/net/adsb/status').then(function(r){return r.json();}).then(function(st){
       var det=(st&&st.detect)||{};
@@ -524,8 +567,16 @@
   resize();
   window.addEventListener('resize',function(){resize();});
   requestAnimationFrame(anim);
-  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus();
-    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); }); },5000); });
+  refreshConfig().then(function(){
+    if(MASTER){ startMaster(); } else { checkStatus(); }
+    acarsCheckStatus();
+    setInterval(function(){
+      refreshConfig().then(function(){
+        if(MASTER){ startMaster(); }
+        else { if(mpoll){ stopMaster(); } if(!running){ checkStatus(); } acarsCheckStatus(); }
+      });
+    },5000);
+  });
 })();
 </script>
 </body>

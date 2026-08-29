@@ -1569,6 +1569,7 @@ function wifiInit() {
     _wifiZbCheck();
     _wifiRtlCheck();
     _wifiRfwfDemoInit();
+    _wifiMasterInit();
     if (!_wifiState.sdr.statusPoll)
         _wifiState.sdr.statusPoll = setInterval(() => { _wifiSdrCheck(); _wifiZbCheck(); _wifiRtlCheck(); }, 15000);
     window.addEventListener('beforeunload', () => { if (_wifiState.sdr.running) _wifiSdrStop(); });
@@ -2083,13 +2084,8 @@ function _wifiRfwfShow() {
         aprs.classList.remove('hidden');
         aprs.classList.add('inline-flex');
     }
-    // Mesh Aggregate fuses SDR across mesh units — a mesh feature, not tied to
-    // local hardware, so always offer it (the page shows 'mesh off' if solo).
-    const agg = document.getElementById('wifi-aggregate-btn');
-    if (agg) {
-        agg.classList.remove('hidden');
-        agg.classList.add('inline-flex');
-    }
+    // Mesh Aggregate button is shown only when this unit is the mesh master —
+    // its visibility is driven by the master toggle (_wifiMasterInit).
 }
 
 // Load the demo toggle's state from config and persist changes.
@@ -2106,6 +2102,25 @@ function _wifiRfwfDemoInit() {
         _wifiState.rfwfDemo = cb.checked;
         postAPI('/api/config', { sdr_demo: cb.checked }).catch(() => {});
         _wifiRfwfShow();
+    });
+}
+
+// Mesh master toggle: when on, this unit aggregates the mesh — the SDR tool
+// pages read the fused feed (and show the Mesh Aggregate button). Config flag
+// sdr_master, persisted like the demo toggle.
+function _wifiMasterInit() {
+    const cb = document.getElementById('wifi-master');
+    if (!cb || cb._wired) return;
+    cb._wired = true;
+    fetch('/api/config').then(r => r.json()).then(c => {
+        cb.checked = !!(c && (c.sdr_master === true || c.sdr_master === 'true'));
+        const agg = document.getElementById('wifi-aggregate-btn');
+        if (agg) { agg.classList.toggle('hidden', !cb.checked); agg.classList.toggle('inline-flex', cb.checked); }
+    }).catch(() => {});
+    cb.addEventListener('change', () => {
+        postAPI('/api/config', { sdr_master: cb.checked }).catch(() => {});
+        const agg = document.getElementById('wifi-aggregate-btn');
+        if (agg) { agg.classList.toggle('hidden', !cb.checked); agg.classList.toggle('inline-flex', cb.checked); }
     });
 }
 

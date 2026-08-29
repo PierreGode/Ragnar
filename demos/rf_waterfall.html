@@ -114,6 +114,7 @@
   .logrow .t{color:var(--muted);font-size:11px}
   .logrow .f{color:var(--ink)} .logrow .d{color:var(--accent);text-align:right;font-variant-numeric:tabular-nums}
   .logrow.dev .f{color:var(--cyan)} .logrow .meta{color:var(--ink-dim);font-size:11px}
+  .srcchip{display:inline-block;font-family:var(--mono);font-size:10px;line-height:1.4;padding:1px 6px;margin-left:4px;border-radius:6px;background:#12242c;color:var(--cyan);border:1px solid rgba(56,189,201,.4);vertical-align:middle}
   .logempty{font-family:var(--mono);font-size:11.5px;color:var(--muted);padding:6px 0 10px}
   /* decode view: hide the sweep surfaces, let the device list breathe */
   .scope.decoding .fall-wrap,.scope.decoding .ruler,.scope.decoding canvas.trace,.scope.decoding .toolbar{display:none}
@@ -268,7 +269,7 @@
         if(chans.length && Math.random()<0.15)
           bump(row,lo,hi,chans[(Math.random()*chans.length)|0]+w,w*0.8,-60);}};}
 
-  var running=true, HZ=12, DEMO_ON=false, OVERLAYS={};
+  var running=true, HZ=12, DEMO_ON=false, MASTER=false, OVERLAYS={};
   var reduce=window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   function fmtF(mhz){return (mhz>=1000)?(mhz/1000).toFixed(mhz%1000?2:0)+"G":(mhz>=100?mhz.toFixed(1):mhz.toFixed(2));}
   function genTicks(lo,hi){var n=6,out=[];for(var i=0;i<=n;i++)out.push(lo+(hi-lo)*i/n);return out;}
@@ -684,12 +685,12 @@
   };
   Scope.prototype.setView=function(v){
     var want=(v==='decode');
-    if(want && !this.available){ this.flashDecodeHint(); return; }
+    if(want && !this.available && !MASTER){ this.flashDecodeHint(); return; }
     if(want===this.decoding) return;
     this.decoding=want;
     Array.prototype.forEach.call(this.viewSel.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-view')===(want?'decode':'wf')?'true':'false');});
     if(this.tuneSel) this.tuneSel.classList.toggle('hidden', want || !(this.mode==='live'||this.mode==='synth'));
-    if(want){ this.el.classList.add('decoding'); this.stopLive(); this.logTitle.textContent='ISM devices (rtl_433)'; this.log=[]; this.renderLog(); this.startIsm(); }
+    if(want){ this.el.classList.add('decoding'); this.stopLive(); this.logTitle.textContent=MASTER?'ISM devices · 🛰 mesh':'ISM devices (rtl_433)'; this.log=[]; this.renderLog(); if(MASTER){ this.startMasterIsm(); } else { this.startIsm(); } }
     else{ this.el.classList.remove('decoding'); this.stopIsm(); this.logTitle.textContent='Detections'; this.log=[]; this.renderLog(); this.startLive(); }
   };
   Scope.prototype.flashDecodeHint=function(){
@@ -710,7 +711,7 @@
       if(self.devEl && self.available && self.board) self.devEl.textContent=self.board
         +(det.needs_blog_driver?' · needs RTL-SDR Blog driver':'');
       // radio vanished mid-decode -> drop back
-      if(self.decoding && !self.available){ self.setView('wf'); }
+      if(self.decoding && !self.available && !MASTER){ self.setView('wf'); }
       self.applyDesired(); self.updateTag();
     }).catch(function(){});
   };
@@ -784,6 +785,33 @@
     if(!running || !this.decoding) return; var self=this;
     fetch(this.cfg.api.ismDevices).then(function(r){return r.json();}).then(function(d){ self.renderDevices(d); }).catch(function(){});
   };
+  // ---- master mode: pull deduped ISM devices from the whole Ragnar mesh ----
+  Scope.prototype.startMasterIsm=function(){
+    var self=this; if(this._ismPoll){clearInterval(this._ismPoll);this._ismPoll=null;}
+    this._ismPoll=setInterval(function(){ self.masterIsmPoll(); },2500); this.masterIsmPoll();
+  };
+  Scope.prototype.masterIsmPoll=function(){
+    if(!this.decoding) return; var self=this;
+    fetch('/api/net/aggregate/ism').then(function(r){return r.json();}).then(function(d){
+      var recs=(d&&d.records)||[];
+      if(!recs.length && DEMO_ON){ self.renderDevices(self.synthIsm()); return; }
+      self.renderDevices({devices:recs,events:(d&&d.reports)||recs.length});
+    }).catch(function(){ if(DEMO_ON) self.renderDevices(self.synthIsm()); });
+  };
+  Scope.prototype.synthIsm=function(){
+    var units=['heimdall','frigg','odin'];
+    var models=[['Acurite-Tower',4412,{temperature_C:21.4,humidity:47,battery_ok:1}],
+      ['LaCrosse-TX141',881,{temperature_C:18.9,humidity:52}],
+      ['Nexus-TH',122,{temperature_C:5.2,humidity:80,battery_ok:1}],
+      ['Prologue-TH',203,{temperature_C:23.1}],
+      ['TPMS-Toyota',18975,{pressure_kPa:230,battery_ok:1}],
+      ['Fineoffset-WH2',77,{temperature_C:12.0,humidity:66}]];
+    var devs=models.map(function(m){ var a=units[(Math.random()*units.length)|0];
+      return {model:m[0],id:m[1],fields:m[2],count:1+((Math.random()*8)|0),
+        freq_mhz:433.92+(Math.random()-0.5)*0.3,rssi:-40-((Math.random()*40)|0),
+        heard_by:(Math.random()<0.3)?[a,units[(Math.random()*units.length)|0]]:[a]}; });
+    return {devices:devs,events:devs.length*3};
+  };
   Scope.prototype.renderDevices=function(d){
     var devs=(d&&d.devices)||[]; this.logCount.textContent=devs.length+' seen · '+((d&&d.events)||0)+' events';
     if(d&&d.error){ this.logList.innerHTML='<div class="logempty">⚠ '+esc(d.error)+'</div>'; return; }
@@ -794,9 +822,10 @@
       ['temperature_C','humidity','battery_ok','pressure_kPa','wind_avg_km_h','depth_cm','moisture'].forEach(function(k){ if(f[k]!=null) meta.push(k.replace(/_/g,' ')+' '+f[k]); });
       var freq=(v.freq_mhz!=null)?v.freq_mhz.toFixed(3)+' MHz':'';
       var rssi=(v.rssi!=null)?Math.round(v.rssi)+' dB':'';
+      var src=(v.heard_by&&v.heard_by.length)?v.heard_by.map(function(u){return '<span class="srcchip">'+esc(u)+'</span>';}).join(''):'';
       html+='<div class="logrow dev"><span class="t">×'+(v.count||1)+'</span>'
         +'<span class="f">'+esc(v.model)+(v.id!=null?' <span class="meta">#'+esc(String(v.id))+'</span>':'')
-        +(meta.length?' <span class="meta">· '+esc(meta.join(' · '))+'</span>':'')+'</span>'
+        +(meta.length?' <span class="meta">· '+esc(meta.join(' · '))+'</span>':'')+src+'</span>'
         +'<span class="d">'+esc(freq)+(rssi?' '+esc(rssi):'')+'</span></div>';
     });
     this.logList.innerHTML=html;
@@ -952,7 +981,7 @@
     document.getElementById('foot-msg').innerHTML=msg;
   }
 
-  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
+  function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); MASTER=!!(c&&(c.sdr_master===true||c.sdr_master==='true')); }).catch(function(){}); }
   function pollAll(){ scopes.forEach(function(s){s.checkStatus();}); setTimeout(updateFoot,400); }
 
   // Load the Z-Wave regional plan once and build the region selector on scopes
@@ -967,8 +996,15 @@
     scopes.forEach(function(s){ s.populateOverlays(OVERLAYS); });
   }).catch(function(){});
 
-  refreshConfig().then(function(){ scopes.forEach(function(s){s.applyDesired();s.updateTag();}); updateFoot(); pollAll();
-    setInterval(function(){ refreshConfig().then(pollAll); },5000); });
+  // master mode: sub-GHz ISM is fed from the whole mesh — auto-enter decode, no dongle needed
+  function applyMasterIsm(){
+    scopes.forEach(function(s){ if(s.cfg.decode){
+      if(MASTER && !s.decoding){ s.setView('decode'); }
+      else if(!MASTER && s.decoding && !s.available){ s.setView('wf'); }
+    }});
+  }
+  refreshConfig().then(function(){ scopes.forEach(function(s){s.applyDesired();s.updateTag();}); applyMasterIsm(); updateFoot(); pollAll();
+    setInterval(function(){ refreshConfig().then(function(){ applyMasterIsm(); pollAll(); }); },5000); });
   scopes.forEach(function(s){s.setRate(HZ);});
   if(reduce){ setRunning(false); } else { setRunning(true); }
   window.addEventListener('resize',function(){ scopes.forEach(function(s){ if(s.resize()){s.drawRuler();s.placeMarker();} }); });

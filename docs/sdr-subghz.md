@@ -372,6 +372,26 @@ by three units is one row that says "heard by: stockholm, goteborg, malmo".
 - The merge/dedup core is pure and unit-tested (`mesh_aggregate.selftest`); the
   tailnet fan-out is best-effort.
 
+### Master mode — every tool page shows the whole mesh
+
+Ticking **🛰 Mesh master** in Signal Intelligence sets `sdr_master` in config and
+turns this unit into the master. From then on **each SDR tool page** — ADS-B
+Radar, APRS, Mesh Nodes, Pager Decode and the RF Waterfall's ISM **Decode**
+view — stops showing only its *local* catch and instead polls
+`GET /api/net/aggregate/<kind>` (`adsb`/`aprs`/`mesh`/`ism`/`pager`), rendering
+the same **de-duplicated, mesh-wide** records. Every row carries a small cyan
+**source chip** naming the mesh unit(s) that fed it (`heard by: frigg, odin`) —
+the *contributing* unit, never the master. The Mesh Aggregate overview button
+also appears next to the tool buttons while master is on.
+
+Each page reads `sdr_master` from `/api/config` on load and re-checks every 5 s,
+so toggling master on/off flips all pages live with no reload. In master mode a
+page needs no local dongle (data comes from the mesh), so its local Start/decode
+controls are disabled; with the **RF Waterfall demo** on and no mesh data yet,
+pages fall back to a synthetic sky/feed tagged with demo unit names so the view
+is never blank. Master state is read from the live `SharedData.config`
+singleton (`init_shared.shared_data`), the same object the web config writes.
+
 ## API
 
 | Route | Purpose |
@@ -407,6 +427,10 @@ by three units is one row that says "heard by: stockholm, goteborg, malmo".
 | `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
 | `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
 | `GET  /api/net/{pager,vor}/selftest` · `/api/net/rtl/selftest` | Offline DSP / parser self-tests |
+| `GET  /api/net/aggregate/status` | Mesh-aggregate state: master flag, peers, per-kind local counts |
+| `GET  /api/net/aggregate/<kind>` | De-duplicated mesh-wide records (`adsb`/`aprs`/`mesh`/`ism`/`pager`), each with a `heard_by` unit list |
+| `GET  /api/net/aggregate/selftest` | Merge/dedup core self-test |
+| `GET  /api/mesh/sdr/<kind>` | A peer's own local snapshot for `<kind>` — peer-readable over the tailnet; the master pulls these |
 
 ## CLI
 

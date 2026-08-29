@@ -32,7 +32,7 @@ import socket
 import sys
 import time
 
-KINDS = ("adsb", "aprs", "mesh", "ism")
+KINDS = ("adsb", "aprs", "mesh", "ism", "pager")
 
 # Natural unique key per kind — dedup is "merge by this".
 _KEY = {
@@ -41,6 +41,9 @@ _KEY = {
     "mesh": lambda r: r.get("id"),
     "ism":  lambda r: (None if r.get("model") is None else
                        "%s/%s" % (r.get("model"), "" if r.get("id") is None else r.get("id"))),
+    # a page = the same capcode + text, so two units hearing one transmission merge
+    "pager": lambda r: (None if r.get("capcode") is None else
+                        "%s|%s" % (r.get("capcode"), r.get("text") or "")),
 }
 
 # Which of two reports of the same entity to keep (higher score wins): prefer a
@@ -53,7 +56,10 @@ def _score_mesh(r):
     return (1e12 if r.get("lat") is not None else 0) + float(r.get("last_heard") or 0)
 def _score_ism(r):
     return float(r.get("last_ts") or r.get("ts") or 0) * 1.0 + float(r.get("rssi") or -999) / 1e6
-_SCORE = {"adsb": _score_adsb, "aprs": _score_aprs, "mesh": _score_mesh, "ism": _score_ism}
+def _score_pager(r):
+    return float(r.get("ts") or 0)
+_SCORE = {"adsb": _score_adsb, "aprs": _score_aprs, "mesh": _score_mesh,
+          "ism": _score_ism, "pager": _score_pager}
 
 
 # --------------------------------------------------------------------------
@@ -88,6 +94,9 @@ def _local_list(kind):
         if kind == "ism":
             import rtl_sdr
             return (rtl_sdr.ism_devices() or {}).get("devices", [])
+        if kind == "pager":
+            import pagerdecode
+            return (pagerdecode.messages() or {}).get("messages", [])
     except Exception:
         return []
     return []
@@ -222,17 +231,38 @@ def aggregate(kind, fetch=None):
     return res
 
 
-def status():
-    """Aggregation status: mesh state, peers, and this unit's per-kind counts."""
-    mesh_on = False
+def _config():
+    """The live SharedData.config dict.
+
+    The singleton lives in ``init_shared`` (what the webapp imports); ``shared``
+    only re-exports the class, so read init_shared first and fall back."""
+    for mod in ("init_shared", "shared"):
+        try:
+            m = __import__(mod)
+            sd = getattr(m, "shared_data", None)
+            if sd is not None and getattr(sd, "config", None) is not None:
+                return sd.config
+        except Exception:
+            continue
+    return {}
+
+
+def is_master():
+    """True when this unit is marked the mesh SDR master (config sdr_master)."""
     try:
-        import shared
-        mesh_on = bool(getattr(shared, "shared_data", None)
-                       and shared.shared_data.config.get("mesh_enabled"))
+        return bool(_config().get("sdr_master"))
+    except Exception:
+        return False
+
+
+def status():
+    """Aggregation status: mesh state, master flag, peers, per-kind counts."""
+    try:
+        mesh_on = bool(_config().get("mesh_enabled"))
     except Exception:
         mesh_on = False
     peers = _peers()
-    return {"unit": _unit_name(), "mesh_enabled": mesh_on,
+    return {"unit": _unit_name(), "mesh_enabled": mesh_on, "master": is_master(),
             "peers": [p["name"] for p in peers], "peer_count": len(peers),
             "local": {k: len(local_snapshot(k)["records"]) for k in KINDS}}
 
@@ -286,6 +316,14 @@ def selftest():
           len(i["records"]) == 2 and i["deduped"] == 1, str(i))
     check("ism: key builder handles model/id", _KEY["ism"]({"model": "X", "id": 9}) == "X/9"
           and _KEY["ism"]({"model": None, "id": 1}) is None)
+
+    # Pager: same page (capcode+text) heard by 2 units -> one row, heard_by both
+    pg = merge("pager", [snap("a", "pager", [{"capcode": "1234567", "text": "Fire call ward 4", "ts": 5}]),
+                         snap("b", "pager", [{"capcode": "1234567", "text": "Fire call ward 4", "ts": 6},
+                                             {"capcode": "9999999", "text": "Test", "ts": 7}])])
+    check("pager: dedup identical page by capcode+text, heard_by both",
+          len(pg["records"]) == 2 and pg["deduped"] == 1
+          and next(r for r in pg["records"] if r["capcode"] == "1234567")["units"] == 2, str(pg))
 
     # empty / unknown kind
     check("merge: no snapshots -> empty", merge("adsb", [])["records"] == [] and merge("adsb", [])["reports"] == 0)
