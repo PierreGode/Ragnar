@@ -348,6 +348,30 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
   Sending still injects under your callsign on the ham network — **only licensed
   operators should send.**
 
+## Mesh Aggregate (fuse SDR across units)
+
+Several Ragnar units in a **Ragnar Mesh** (Tailscale) each receive RF locally.
+The **Mesh Aggregate** page (`/mesh-aggregate`, `mesh_aggregate.py`) makes the
+unit you open it on the **master**: it pulls every peer's local catch over the
+tailnet and merges it into one **de-duplicated** view — wider coverage, no
+doubles.
+
+Dedup is natural because every entity has a stable key, so *merge = dedup*:
+ADS-B by **ICAO**, APRS by **callsign-SSID**, Meshtastic by **node id**, ISM by
+**model+id**. For each key the master keeps the single best report (positioned +
+freshest/strongest) and records a **heard-by** list, so the same aircraft seen
+by three units is one row that says "heard by: stockholm, goteborg, malmo".
+
+- **Pull model, no peer changes.** The master GETs each peer's
+  `/api/mesh/sdr/<kind>` snapshot — peer-readable over the tailnet (same rule as
+  `/api/mesh/unit` and the scan delegation), so a peer serves only its own
+  already-decoded data (no control, no raw capture).
+- **Coverage, not multilateration.** This unions what every unit hears; it does
+  *not* compute positions from time-of-arrival (that needs precise synced
+  clocks). Units at *different* locations add the most.
+- The merge/dedup core is pure and unit-tested (`mesh_aggregate.selftest`); the
+  tailnet fan-out is best-effort.
+
 ## API
 
 | Route | Purpose |

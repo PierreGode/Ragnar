@@ -2672,6 +2672,10 @@
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
                             APRS
                         </a>
+                        <a href="/mesh-aggregate" id="wifi-aggregate-btn" title="Mesh Aggregate — fuse ADS-B/APRS/Meshtastic/ISM from every Ragnar mesh unit into one de-duplicated view" class="hidden items-center gap-1.5 bg-slate-600 hover:bg-slate-500 text-white px-3 py-2 rounded text-sm font-semibold">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h16M4 12h16M4 17h10M18 15l3 3-3 3"/></svg>
+                            Mesh Aggregate
+                        </a>
                         <button type="button" onclick="wifiSdrCheck()" id="wifi-sdr-check" title="Diagnose why an SDR (HackRF / RTL-SDR) isn't detected — checks the USB bus, drivers, tools and power, and tells you the fix" class="flex items-center gap-1.5 bg-slate-700 hover:bg-slate-600 text-gray-100 px-3 py-2 rounded text-sm font-semibold border border-slate-600">🩺 SDR check</button>
                         <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifi-auto" class="accent-Ragnar-600"> Auto-refresh (8s)</label>
                         <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none" title="Overlay Bluetooth / BLE device activity on the 2.4 GHz band (device-discovery estimate, not measured RF)"><input type="checkbox" id="wifi-bt" class="accent-sky-500"> <span class="text-sky-400">📶 Bluetooth</span></label>
@@ -8361,7 +8365,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260827-btnfix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260828-aggregate"></script>
 
 
 

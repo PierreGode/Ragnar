@@ -52,6 +52,7 @@ import acars
 import radio
 import vor
 import aprs
+import mesh_aggregate
 import zigbee_scan
 from ldap_watch import do_ldap_watch
 from tls_watch import do_tls_watch
@@ -19194,6 +19195,21 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/aprs/selftest', methods=['GET'])
     def net_aprs_selftest():
         return jsonify(aprs.selftest())
+
+    # Mesh aggregation — this unit acts as "master": pull every mesh peer's local
+    # ADS-B / APRS / Meshtastic / ISM catch over the tailnet and merge it deduped.
+    @app.route('/api/net/aggregate/status', methods=['GET'])
+    def net_aggregate_status():
+        return jsonify(mesh_aggregate.status())
+
+    @app.route('/api/net/aggregate/<kind>', methods=['GET'])
+    def net_aggregate_kind(kind):
+        _log(f"net/aggregate/{kind}")
+        return jsonify(mesh_aggregate.aggregate(kind))
+
+    @app.route('/api/net/aggregate/selftest', methods=['GET'])
+    def net_aggregate_selftest():
+        return jsonify(mesh_aggregate.selftest())
 
     # ACARS (aircraft VHF datalink ~131 MHz) via acarsdec — plain-text ops
     # messages, matched to ADS-B aircraft by tail/flight. Uses the whole RTL-SDR.

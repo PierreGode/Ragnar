@@ -3178,6 +3178,24 @@ def mesh_unit_alerts():
                     'alerts': alerts})
 
 
+@app.route('/api/mesh/sdr/<kind>', methods=['GET'])
+def mesh_unit_sdr(kind):
+    """This unit's local SDR catch for one kind, for a master to aggregate.
+
+    Peer-readable (GET /api/mesh/*), like /api/mesh/unit and /api/mesh/alerts, so
+    a mesh 'master' can pull every unit's ADS-B / APRS / Meshtastic / ISM
+    snapshot over the tailnet and merge them deduped (mesh_aggregate.py). Serves
+    only this unit's own already-decoded data — no control, no raw capture.
+    """
+    try:
+        import mesh_aggregate
+        if kind not in mesh_aggregate.KINDS:
+            return jsonify({'success': False, 'error': 'unknown kind'}), 404
+        return jsonify({'success': True, **mesh_aggregate.local_snapshot(kind)})
+    except Exception as exc:
+        return jsonify({'success': False, 'error': str(exc)}), 500
+
+
 # Canonical severity ladder for the fleet findings view. Kept local so the mesh
 # never hard-depends on watchtower's constants being importable.
 _MESH_SEV_RANK = {'critical': 4, 'high': 3, 'medium': 2, 'low': 1, 'info': 0}
@@ -8772,6 +8790,16 @@ def mesh_map_page():
     with no hardware at all.
     """
     return _no_store(make_response(send_from_directory('demos', 'mesh_map.html')))
+
+
+@app.route('/mesh-aggregate')
+def mesh_aggregate_page():
+    """Serve the Mesh Aggregate 'master' view (fused, deduped SDR across units).
+
+    Always served (login required); it pulls each mesh peer's SDR snapshot and
+    merges it. Shows 'mesh off' when this unit isn't in a mesh.
+    """
+    return _no_store(make_response(send_from_directory('demos', 'mesh_aggregate.html')))
 
 
 @app.route('/pager-decode')

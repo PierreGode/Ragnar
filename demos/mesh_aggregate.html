@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mesh Aggregate</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+<link rel="stylesheet" href="/web/vendor/leaflet/markercluster/MarkerCluster.css"/>
+<script src="/web/vendor/leaflet/leaflet.js"></script>
+<script src="/web/vendor/leaflet/markercluster/leaflet.markercluster.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ground:#0a0e14; --panel:#111722; --panel-2:#0d1420; --line:#1e2836; --line-soft:#161d29;
+    --ink:#e8eef6; --ink-dim:#c2ccd8; --muted:#7c8aa0; --cyan:#38bdc9; --accent:#f5b942;
+    --live:#3fb56b; --idle:#546074;
+    --adsb:#2ea096; --aprs:#5fd08a; --mesh:#7b8cd2; --ism:#f0a35e;
+    --disp:'Chakra Petch',system-ui,sans-serif; --mono:'IBM Plex Mono',ui-monospace,monospace; --radius:12px;
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:20px;min-height:100vh}
+  .wrap{max-width:none;margin:0 auto}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+  .eyebrow{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted)}
+  .eyebrow .dot{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+  h1{font-family:var(--head,var(--disp));font-weight:700;font-size:34px;margin:2px 0 0}
+  .sub{color:var(--ink-dim);font-size:13px;max-width:640px}
+  .tag{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
+  .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
+  .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
+  .stat{display:flex;flex-direction:column;gap:1px} .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)} .stat .v{font-family:var(--mono);font-size:14px;color:var(--cyan)}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
+  .grp{display:flex;align-items:center;gap:7px} .lbl{font-family:var(--mono);font-size:9px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  button.ctl,a.ctl{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);padding:7px 13px;border-radius:7px;cursor:pointer;text-decoration:none}
+  button.ctl:hover,a.ctl:hover{border-color:var(--cyan);color:#fff} a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:6px 11px;cursor:pointer}
+  .seg button[aria-pressed="true"]{background:rgba(56,189,201,.16);color:var(--cyan)}
+  .kinds{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+  @media(max-width:820px){.kinds{grid-template-columns:repeat(2,1fr)}}
+  .kcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px}
+  .kcard .h{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em}
+  .kcard .h b{width:9px;height:9px;border-radius:2px}
+  .kcard .n{font-family:var(--mono);font-size:26px;margin:6px 0 0}
+  .kcard .d{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .kcard .dd{color:var(--accent)}
+  .grid{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:16px}
+  @media(max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;min-height:0}
+  .cap{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .cap .t{font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  #map{height:460px;background:#0b1119}
+  .tbl{overflow:auto;flex:1 1 auto;min-height:200px;max-height:460px}
+  table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11.5px}
+  th{position:sticky;top:0;background:var(--panel-2);color:var(--muted);font-weight:500;text-align:left;padding:7px 10px;text-transform:uppercase;font-size:9px;border-bottom:1px solid var(--line)}
+  td{padding:6px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink-dim);white-space:nowrap}
+  td.hb{white-space:normal}
+  .chip{font-size:9px;padding:1px 5px;border-radius:4px;border:1px solid var(--line);color:var(--muted);margin-right:3px}
+  .empty{padding:26px 14px;text-align:center;color:var(--muted);font-family:var(--mono);font-size:12px}
+  .nodemk{font-family:var(--mono);font-size:10px;font-weight:600;color:#0a0e14;padding:2px 5px;border-radius:5px;border:2px solid rgba(0,0,0,.4);transform:translate(-50%,-50%);white-space:nowrap}
+  .leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+  .pop{font-family:var(--mono);font-size:12px} .pop b{color:var(--cyan)}
+  footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="dot"></span> Ragnar · Signal Intelligence</div>
+      <h1>Mesh Aggregate</h1>
+      <div class="sub">This unit is the <b>master</b>: it pulls every Ragnar mesh unit's ADS-B, APRS, Meshtastic &amp; ISM catch over the tailnet and merges it into one <b>de-duplicated</b> view. Each entity is keyed by its natural ID, so the same aircraft/station/node seen by several units is one row — tagged with who heard it.</div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:flex-end">
+      <div class="stat"><span class="k">Units</span><span class="v" id="s-units">—</span></div>
+      <div class="stat"><span class="k">Entities</span><span class="v" id="s-ent">—</span></div>
+      <div class="stat"><span class="k">Dupes merged</span><span class="v" id="s-dd">—</span></div>
+    </div>
+  </header>
+
+  <div class="bar">
+    <div class="grp"><a href="/#network/wifi" class="ctl back">&#8592;&nbsp;Ragnar</a></div>
+    <div class="grp"><span class="lbl">Master</span><span class="tag idle" id="mastertag">—</span></div>
+    <div class="grp"><span class="lbl">Peers</span><span class="tag idle" id="peertag">0</span></div>
+    <div class="grp"><button class="ctl" id="refresh">↻ Refresh</button></div>
+    <div class="grp"><span class="lbl">Table</span><div class="seg" id="kindseg">
+      <button data-k="adsb" aria-pressed="true">ADS-B</button><button data-k="aprs">APRS</button>
+      <button data-k="mesh">Mesh</button><button data-k="ism">ISM</button></div></div>
+  </div>
+
+  <div class="kinds" id="kinds"></div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="cap"><span class="t">Combined map</span><span class="c" id="mapcap">positioned entities from all units</span></div>
+      <div id="map"></div>
+    </div>
+    <div class="card">
+      <div class="cap"><span class="t" id="tblt">ADS-B</span><span class="c" id="tblc"></span></div>
+      <div class="tbl"><table><thead id="thead"></thead><tbody id="tbody"><tr><td class="empty">—</td></tr></tbody></table></div>
+    </div>
+  </div>
+
+  <footer>
+    <div><b>How it works:</b> the master GETs each peer's <code>/api/mesh/sdr/&lt;kind&gt;</code> snapshot over the tailnet (peer-readable, like the scan delegation) and merges by natural key — ICAO for aircraft, callsign for APRS, node id for Meshtastic, model+id for ISM. Duplicates collapse to one best report (positioned + freshest) with a <b>heard-by</b> list. No changes needed on the other units.</div>
+    <div style="margin-top:6px"><b>Coverage, not multilateration:</b> this widens what you see by unioning every unit's catch — it does not compute positions from time-of-arrival (that needs precise synced clocks). Units at <i>different</i> locations add the most.</div>
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var DEMO_ON=false, curKind='adsb', data={adsb:null,aprs:null,mesh:null,ism:null};
+  var KINDMETA={adsb:{name:'ADS-B',col:'#2ea096'},aprs:{name:'APRS',col:'#5fd08a'},mesh:{name:'Mesh',col:'#7b8cd2'},ism:{name:'ISM',col:'#f0a35e'}};
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+
+  var map=L.map('map',{zoomControl:true}).setView([57.9,14],5);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxNativeZoom:16,maxZoom:19,attribution:'Tiles &copy; Esri'}).addTo(map);
+  var cluster=L.markerClusterGroup({maxClusterRadius:40,showCoverageOnHover:false,disableClusteringAtZoom:12}); map.addLayer(cluster);
+  var markers=[], firstFit=false;
+
+  function label(kind,r){ if(kind==='adsb')return r.callsign||r.icao; if(kind==='aprs')return r.call||r.source;
+    if(kind==='mesh')return r.short_name||r.long_name||r.id; return (r.model||'?'); }
+  function drawMap(){
+    cluster.clearLayers(); markers=[]; var bounds=[];
+    Object.keys(data).forEach(function(kind){ var d=data[kind]; if(!d||!d.records)return; var col=KINDMETA[kind].col;
+      d.records.forEach(function(r){ if(r.lat==null||r.lon==null)return;
+        var icon=L.divIcon({className:'',html:'<div class="nodemk" style="background:'+col+'">'+esc(label(kind,r))+'</div>'});
+        var m=L.marker([r.lat,r.lon],{icon:icon});
+        m.bindPopup('<div class="pop"><b>'+esc(label(kind,r))+'</b> <span style="color:'+col+'">'+KINDMETA[kind].name+'</span>'
+          +'<br>key '+esc(r.key||'')+'<br>heard by: '+esc((r.heard_by||[]).join(', ')||'—')+'</div>');
+        cluster.addLayer(m); markers.push(m); bounds.push([r.lat,r.lon]); });
+    });
+    if(bounds.length && !firstFit){ try{ map.fitBounds(L.latLngBounds(bounds).pad(0.2)); firstFit=true; }catch(e){} }
+  }
+
+  var COLS={
+    adsb:[['Flight',function(r){return esc(r.callsign||'')}],['ICAO',function(r){return esc(r.icao||'')}],['Alt',function(r){return r.alt!=null?r.alt:''}],['Spd',function(r){return r.gs!=null?r.gs:''}]],
+    aprs:[['Station',function(r){return esc(r.call||r.source||'')}],['Comment',function(r){return esc(r.comment||'')}]],
+    mesh:[['Name',function(r){return esc(r.long_name||r.short_name||'')}],['ID',function(r){return esc(r.id||'')}],['SNR',function(r){return r.snr!=null?r.snr:''}]],
+    ism:[['Model',function(r){return esc(r.model||'')}],['ID',function(r){return esc(String(r.id==null?'':r.id))}],['RSSI',function(r){return r.rssi!=null?r.rssi:''}]]
+  };
+  function renderTable(){
+    var d=data[curKind], cols=COLS[curKind];
+    document.getElementById('tblt').textContent=KINDMETA[curKind].name;
+    var th='<tr>'+cols.map(function(c){return '<th>'+c[0]+'</th>';}).join('')+'<th>Heard by</th></tr>';
+    document.getElementById('thead').innerHTML=th;
+    var tb=document.getElementById('tbody');
+    if(!d||!d.records||!d.records.length){ tb.innerHTML='<tr><td class="empty" colspan="'+(cols.length+1)+'">No '+KINDMETA[curKind].name+' — connect the mesh + start the receivers.</td></tr>'; document.getElementById('tblc').textContent=''; return; }
+    document.getElementById('tblc').textContent=d.records.length+' unique';
+    var recs=d.records.slice().sort(function(a,b){return (b.units||1)-(a.units||1);}).slice(0,300);
+    tb.innerHTML=recs.map(function(r){
+      return '<tr>'+cols.map(function(c){return '<td>'+c[1](r)+'</td>';}).join('')
+        +'<td class="hb">'+(r.heard_by||[]).map(function(u){return '<span class="chip">'+esc(u)+'</span>';}).join('')+'</td></tr>';
+    }).join('');
+  }
+  function renderKinds(){
+    var el=document.getElementById('kinds'), tot=0, dd=0, units={};
+    el.innerHTML=Object.keys(KINDMETA).map(function(kind){ var d=data[kind]||{records:[],reports:0,deduped:0,units:[]}; var m=KINDMETA[kind];
+      tot+=d.records.length; dd+=(d.deduped||0); (d.units||[]).forEach(function(u){units[u]=1;});
+      return '<div class="kcard"><div class="h"><b style="background:'+m.col+'"></b>'+m.name+'</div>'
+        +'<div class="n" style="color:'+m.col+'">'+d.records.length+'</div>'
+        +'<div class="d">from '+(d.reports||0)+' reports · <span class="dd">'+(d.deduped||0)+' merged</span></div>'
+        +'<div class="d">units: '+((d.units||[]).join(', ')||'—')+'</div></div>';
+    }).join('');
+    document.getElementById('s-ent').textContent=tot;
+    document.getElementById('s-dd').textContent=dd;
+    document.getElementById('s-units').textContent=Object.keys(units).length||'—';
+  }
+
+  document.getElementById('kindseg').addEventListener('click',function(e){ var b=e.target.closest('button'); if(!b)return;
+    curKind=b.getAttribute('data-k'); Array.prototype.forEach.call(this.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x===b?'true':'false');}); renderTable(); });
+  document.getElementById('refresh').addEventListener('click',loadAll);
+
+  function loadAll(){
+    if(DEMO_ON){ demo(); return; }
+    fetch('/api/net/aggregate/status').then(function(r){return r.json();}).then(function(st){ if(!st)return;
+      document.getElementById('mastertag').textContent=st.unit||'this unit';
+      document.getElementById('mastertag').className='tag live';
+      document.getElementById('peertag').textContent=(st.peer_count||0)+(st.mesh_enabled?'':' · mesh off');
+    }).catch(function(){});
+    ['adsb','aprs','mesh','ism'].forEach(function(kind){
+      fetch('/api/net/aggregate/'+kind).then(function(r){return r.json();}).then(function(d){ if(d&&!d.error){ data[kind]=d; renderKinds(); if(kind===curKind)renderTable(); drawMap(); } }).catch(function(){});
+    });
+  }
+
+  // ---- demo: 3 units (this + goteborg + malmo) with overlapping catches ----
+  function demo(){
+    document.getElementById('mastertag').textContent='stockholm'; document.getElementById('mastertag').className='tag live';
+    document.getElementById('peertag').textContent='2';
+    function mk(kind, recs){ // recs: [record, [units]]
+      var out=[]; recs.forEach(function(rw){ var r=rw[0]; r=JSON.parse(JSON.stringify(r)); r.heard_by=rw[1]; r.units=rw[1].length; out.push(r); });
+      var reports=recs.reduce(function(a,rw){return a+rw[1].length;},0);
+      return {kind:kind,records:out,reports:reports,deduped:reports-out.length,units:['stockholm','goteborg','malmo']}; }
+    data.adsb=mk('adsb',[
+      [{icao:'4ca7b1',callsign:'SAS123',lat:59.35,lon:18.0,alt:34000,gs:420,key:'4ca7b1'},['stockholm','goteborg']],
+      [{icao:'3c6dd2',callsign:'DLH9LX',lat:58.4,lon:15.6,alt:38000,gs:450,key:'3c6dd2'},['goteborg']],
+      [{icao:'478120',callsign:'NAX41',lat:57.7,lon:11.97,alt:12000,gs:280,key:'478120'},['goteborg','malmo']],
+      [{icao:'4ac902',callsign:'RYR8AB',lat:55.6,lon:13.0,alt:9000,gs:300,key:'4ac902'},['malmo']]]);
+    data.aprs=mk('aprs',[
+      [{call:'SM0ABC-9',source:'SM0ABC-9',lat:59.33,lon:18.06,comment:'mobile',ts:2,key:'SM0ABC-9'},['stockholm','goteborg','malmo']],
+      [{call:'SA6XYZ',source:'SA6XYZ',lat:57.72,lon:12.0,comment:'wx',ts:1,key:'SA6XYZ'},['goteborg']]]);
+    data.mesh=mk('mesh',[
+      [{id:'!7c00a1',long_name:'Base',short_name:'BASE',lat:59.34,lon:18.02,snr:8,key:'!7c00a1'},['stockholm']],
+      [{id:'!7c00b2',long_name:'Ridge',short_name:'RDG',lat:57.7,lon:11.9,snr:-3,key:'!7c00b2'},['goteborg','malmo']]]);
+    data.ism=mk('ism',[
+      [{model:'Acurite-Tower',id:4421,rssi:-58,key:'Acurite-Tower/4421'},['stockholm']],
+      [{model:'TPMS',id:7712,rssi:-64,key:'TPMS/7712'},['stockholm','goteborg']],
+      [{model:'Nexus-TH',id:120,rssi:-71,key:'Nexus-TH/120'},['malmo']]]);
+    renderKinds(); renderTable(); drawMap();
+  }
+
+  fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){})
+    .then(function(){ loadAll(); setInterval(loadAll,5000); });
+})();
+</script>
+</body>
+</html>

@@ -2083,6 +2083,13 @@ function _wifiRfwfShow() {
         aprs.classList.remove('hidden');
         aprs.classList.add('inline-flex');
     }
+    // Mesh Aggregate fuses SDR across mesh units — a mesh feature, not tied to
+    // local hardware, so always offer it (the page shows 'mesh off' if solo).
+    const agg = document.getElementById('wifi-aggregate-btn');
+    if (agg) {
+        agg.classList.remove('hidden');
+        agg.classList.add('inline-flex');
+    }
 }
 
 // Load the demo toggle's state from config and persist changes.
