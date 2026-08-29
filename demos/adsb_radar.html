@@ -337,7 +337,7 @@
   function wrapText(text,x,y,maxW,lh){ var words=String(text).split(' '),line='',yy=y;
     for(var i=0;i<words.length;i++){ var t=line+words[i]+' ';
       if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),x,yy); line=words[i]+' '; yy+=lh; } else { line=t; } }
-    ctx.fillText(line.trim(),x,yy); }
+    ctx.fillText(line.trim(),x,yy); return yy; }   // returns y of the last line drawn
   function draw(){
     var W=cv.clientWidth||600, H=cv.clientHeight||600, cx=W/2, cy=H/2, R=Math.min(W,H)/2-24;
     ctx.clearRect(0,0,W,H);
@@ -402,6 +402,15 @@
         ctx.fillStyle='rgba(245,185,66,.9)'; ctx.font='12px "IBM Plex Mono",monospace';
         ctx.fillText('Set your location (◎ My location) to place aircraft', cx, cy+R-6);
       } }
+    // internet fallback: the SDR is running but hears nothing (RF-starved), so the
+    // radar is showing REAL aircraft near you from the internet, not local RF. Say
+    // so plainly at the top so it's never mistaken for what the antenna decoded.
+    if(netFallback && rx.lat!=null){ ctx.textAlign='center'; var bw=Math.min(W-14,520);
+      ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 12px "Chakra Petch",system-ui,sans-serif';
+      var by=wrapText('Local SDR quiet — showing INTERNET traffic near you', cx, 15, bw, 14);
+      ctx.fillStyle='rgba(124,138,160,.9)'; ctx.font='10px "IBM Plex Mono",monospace';
+      wrapText('dump1090 running · '+lastSbs+' msgs · use a 1090 antenna by a window for local decodes', cx, by+13, bw, 12);
+    }
     // reception hint: running (live), connected, but no aircraft decoded — almost
     // always the antenna. Draw it big in the middle so it can't be missed.
     if(mode==='live' && running && (!planes||!planes.length) && lastHint){
@@ -475,7 +484,7 @@
   // ---- live ----
   var poll=null;
   function startRun(){
-    running=true; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
+    running=true; netFallback=false; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
     startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
     fetch('/api/net/adsb/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
       if(res&&res.error){ /* fall through to synth if demo, else veil */ if(DEMO_ON){synthMode();} else {showVeil('Could not start dump1090',res.error);} }
@@ -483,18 +492,27 @@
     if(poll) clearInterval(poll); poll=setInterval(pollLive,1000); pollLive();
   }
   function stopRun(){
-    running=false; startBtn.setAttribute('aria-pressed','false'); startBtn.innerHTML='&#9654;&nbsp;Start';
+    running=false; netFallback=false; startBtn.setAttribute('aria-pressed','false'); startBtn.innerHTML='&#9654;&nbsp;Start';
     if(poll){clearInterval(poll);poll=null;}
     fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
     if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
   }
-  var lastHint='', lastSbs=0;
+  var lastHint='', lastSbs=0, netFallback=false;
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
-      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0;
-        lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); routeTick(); }
-      else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
+      if(d.running){ hideVeil(); lastHint=d.hint||''; lastSbs=d.sbs_lines||0;
+        var local=d.aircraft||[];
+        if(local.length){                       // real local RF contacts always win
+          netFallback=false; stopNearby();
+          setMode('live'); planes=local; msgs=d.messages||0; enrich(); renderTable(); routeTick();
+        } else if(rx.lat!=null){                 // SDR running but hears nothing (RF-starved)
+          netFallback=true; setMode('net');      // show REAL internet traffic near you instead
+          startNearby();                         // fills `planes`; keeps them (never wiped to [])
+        } else {                                 // deaf and no location yet
+          netFallback=false; planes=[]; msgs=d.messages||0; enrich(); renderTable();
+        } }
+      else if(d.error){ netFallback=false; if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
 
@@ -513,7 +531,7 @@
   function startNearby(){
     stopSynthSky();
     if(nearbyTimer) return;
-    function pull(){ if(running){ stopNearby(); return; } if(rx.lat==null) return;
+    function pull(){ if(running && !netFallback){ stopNearby(); return; } if(rx.lat==null) return;
       var dnm=Math.max(20,Math.round(maxKm/1.852*1.3));
       fetch('/api/net/adsb/nearby?lat='+rx.lat+'&lon='+rx.lon+'&dist='+dnm)
         .then(function(r){return r.json();}).then(function(d){
@@ -718,7 +736,7 @@
       +(p.lat!=null?'&lat='+p.lat+'&lon='+p.lon:'')+(p.gs!=null?'&gs='+p.gs:'');
     fetch(q).then(function(r){return r.json();}).then(function(d){
       if(!curRoute||curRoute.icao!==icao) return;
-      curRoute.route=(d&&d.route)||null; curRoute.live=(d&&d.live)||null;
+      curRoute.route=(d&&d.route)||null; curRoute.live=(d&&d.live)||null; curRoute.match=(d&&d.route_match)||null;
       curRoute.acType=(d&&((d.aircraft&&d.aircraft.type)||(d.live&&d.live.type)))||curRoute.acType;
       curRoute.loading=false; drawRoute(true); renderRouteInfo();
     }).catch(function(){ if(curRoute&&curRoute.icao===icao){ curRoute.loading=false;
@@ -754,15 +772,23 @@
       document.getElementById('r-o-cty').textContent=g.o.municipality||g.o.name||g.o.country||'';
       document.getElementById('r-d-code').textContent=g.d.iata||g.d.icao||'???';
       document.getElementById('r-d-cty').textContent=g.d.municipality||g.d.name||g.d.country||'';
-      document.getElementById('r-flown').textContent=fmtKmU(g.flown);
-      document.getElementById('r-remain').textContent=fmtKmU(g.remaining);
-      if(g.frac!=null){ pw.style.display='flex';
+      var stale=!!(curRoute.match&&curRoute.match.ok===false);
+      document.getElementById('r-flown').textContent=stale?'—':fmtKmU(g.flown);
+      document.getElementById('r-remain').textContent=stale?'—':fmtKmU(g.remaining);
+      if(g.frac!=null&&!stale){ pw.style.display='flex';
         document.getElementById('r-fill').style.width=Math.round(g.frac*100)+'%';
         document.getElementById('r-pct').textContent=Math.round(g.frac*100)+'% · '+fmtKmU(g.total)+' total';
         document.getElementById('r-eta').textContent=(g.eta!=null&&g.eta>0)?('~'+g.eta+' min left'):'';
       } else { pw.style.display='none'; }
       var src=(curRoute.route.source==='cache')?'cache':'adsbdb';
-      document.getElementById('r-note').innerHTML='Filed route via <b>'+src+'</b>. Great-circle path; live position from your receiver.';
+      var m=curRoute.match;
+      if(m&&m.ok===false){
+        document.getElementById('r-note').innerHTML='⚠ <b>Filed route may be stale.</b> This aircraft is heading '
+          +m.delta+'° away from '+(g.d.iata||g.d.icao||'the filed destination')
+          +' — the callsign was likely reused for another leg. Live position is accurate; the route is not.';
+      } else {
+        document.getElementById('r-note').innerHTML='Filed route via <b>'+src+'</b>. Great-circle path; live position from adsb.lol.';
+      }
     } else {
       rr.style.display='none'; pw.style.display='none';
       document.getElementById('r-flown').textContent='—'; document.getElementById('r-remain').textContent='—';
@@ -782,8 +808,13 @@
     var samp=unwrap(gcSample(g.o.lat,g.o.lon,g.d.lat,g.d.lon,96)), splitK=samp.length-1;
     if(g.plane){ var best=1e9; for(var k=0;k<samp.length;k++){ var lo=((samp[k][1]+540)%360)-180,
       dd=haversineKm(g.plane.lat,g.plane.lon,samp[k][0],lo); if(dd<best){best=dd;splitK=k;} } }
-    L.polyline(samp.slice(splitK),{color:'#7c8aa0',weight:1.6,opacity:.6,dashArray:'5,7'}).addTo(routeLayer);   // remaining
-    L.polyline(samp.slice(0,splitK+1),{color:'#38bdc9',weight:2.8,opacity:.95}).addTo(routeLayer);              // flown
+    var stale=!!(curRoute.match&&curRoute.match.ok===false);
+    if(stale){ // filed route disagrees with the live heading — draw it all as low-confidence amber
+      L.polyline(samp,{color:'#f5b942',weight:1.6,opacity:.5,dashArray:'3,8'}).addTo(routeLayer);
+    } else {
+      L.polyline(samp.slice(splitK),{color:'#7c8aa0',weight:1.6,opacity:.6,dashArray:'5,7'}).addTo(routeLayer);   // remaining
+      L.polyline(samp.slice(0,splitK+1),{color:'#38bdc9',weight:2.8,opacity:.95}).addTo(routeLayer);              // flown
+    }
     airportDot(g.o,'#3fb56b').addTo(routeLayer);
     airportDot(g.d,'#f5b942').addTo(routeLayer);
     if(g.plane) L.marker([g.plane.lat,g.plane.lon],{icon:planeIcon(g.plane.track)}).addTo(routeLayer);

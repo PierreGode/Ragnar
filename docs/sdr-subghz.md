@@ -244,6 +244,15 @@ heading vectors + a contacts table.
   route maps show the **real** aircraft near you, pulled live from **adsb.lol**
   (`/api/net/adsb/nearby`) — real positions, types and routes — falling back to a
   synthetic sky only with no location or no internet. Mode reads **internet**.
+- **SDR connected but hearing nothing?** A poor/indoor antenna at 1090 MHz (e.g. a
+  wide-band telescopic whip) may decode zero aircraft even with dump1090 running.
+  Rather than leave the radar empty, Ragnar falls back to the **internet** feed
+  (real aircraft near you) and says so plainly — a banner reads *"Local SDR quiet
+  — showing INTERNET traffic near you"* with the live msg count, so it's never
+  mistaken for what the antenna actually decoded. As soon as your receiver decodes
+  a real contact, local RF takes over automatically. Tip: for 1090 MHz a
+  quarter-wave whip is ≈6.9 cm (or 3/4-wave ≈20.7 cm) — *shorter is better here* —
+  placed at a window.
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -277,6 +286,15 @@ route view**, FlightAware-style:
   reality (not a stale/synthetic local fix). The side panel shows **% progress**,
   distance flown / remaining / total, a rough **ETA** from ground speed, and
   current altitude/speed — recomputed as the plane moves.
+- **Stale-route guard:** adsbdb keys routes on the *callsign*, which is the
+  *scheduled* route — but a callsign is reused across legs/days, so the aircraft
+  flying it right now may be on a different (or return) leg, and adsbdb then hands
+  back a confidently-wrong destination. Ragnar cross-checks the filed route against
+  the aircraft's **real live heading**: if it is well en-route yet flying *away*
+  from the filed destination (>100° off), the route is drawn faded/amber and the
+  panel warns *"Filed route may be stale"* (progress/ETA are hidden, since they'd
+  be meaningless). The live position stays accurate — only the filed route is
+  flagged. Exposed as `route_match: {ok, delta}` on `/flight`.
 - **Offline / unknown callsign:** the live position still plots on the map; the
   panel notes no filed route was found (adsbdb had no match, or you're offline).
   Backed by `GET /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=`

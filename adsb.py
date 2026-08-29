@@ -512,6 +512,49 @@ def route_progress(route_rec, lat, lon, gs=None):
     return out
 
 
+def _bearing(lat1, lon1, lat2, lon2):
+    """Initial great-circle bearing from point 1 to point 2, degrees 0-360."""
+    a1, b1, a2, b2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    dl = b2 - b1
+    y = math.sin(dl) * math.cos(a2)
+    x = math.cos(a1) * math.sin(a2) - math.sin(a1) * math.cos(a2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def _ang_diff(a, b):
+    """Smallest absolute angle between two bearings (0-180 degrees)."""
+    d = abs(a - b) % 360.0
+    return d if d <= 180.0 else 360.0 - d
+
+
+def route_live_match(route_rec, lat, lon, track):
+    """Sanity-check a *filed* route against the aircraft's REAL live heading.
+
+    adsbdb keys routes on callsign, which is the *scheduled* route. But a callsign
+    is reused across legs/days, so the live aircraft flying it right now may be on
+    a different (or the return) leg — adsbdb then hands back a confidently-wrong
+    destination. We already have the live position + track, so we can catch this:
+    if the plane is well en-route yet heading *away* from the filed destination,
+    the route is almost certainly stale.
+
+    Returns None when it can't judge (missing data, or too close to the
+    destination where approach turns make heading unreliable); otherwise
+    {"ok": bool, "delta": deg} where delta is |track − bearing-to-destination|.
+    """
+    if not route_rec or lat is None or lon is None or track is None:
+        return None
+    d = route_rec.get("destination")
+    if not (d and d.get("lat") is not None and d.get("lon") is not None):
+        return None
+    # Within ~60 km of the destination the aircraft may be turning onto approach;
+    # heading is no longer a reliable "am I going there" signal.
+    if haversine_km(lat, lon, d["lat"], d["lon"]) < 60:
+        return None
+    delta = _ang_diff(float(track), _bearing(lat, lon, d["lat"], d["lon"]))
+    # >100 deg off = flying away from the filed destination -> stale route.
+    return {"ok": delta <= 100.0, "delta": round(delta)}
+
+
 # --------------------------------------------------------------------------
 # Live aircraft tracker (drives dump1090 + reads its SBS stream)
 # --------------------------------------------------------------------------
@@ -867,13 +910,14 @@ def route_lookup(callsign, use_network=True):
     return None
 
 
-def route(callsign, lat=None, lon=None, gs=None, use_network=True):
+def route(callsign, lat=None, lon=None, gs=None, use_network=True, track=None):
     """Public: filed route + live progress for a callsign (drives the map view)."""
     r = route_lookup(callsign, use_network=use_network)
     cs = (callsign or "").strip().upper()
     if not r:
         return {"callsign": cs, "route": None, "progress": None}
     return {"callsign": r.get("callsign") or cs, "route": r,
+            "route_match": route_live_match(r, lat, lon, track),
             "progress": route_progress(r, lat, lon, gs)}
 
 
@@ -984,11 +1028,13 @@ def flight(hexid, callsign, lat=None, lon=None, gs=None, use_network=True):
     plat = live["lat"] if (live and live.get("lat") is not None) else lat
     plon = live["lon"] if (live and live.get("lon") is not None) else lon
     pgs = live["gs"] if (live and live.get("gs") is not None) else gs
+    ptrk = live.get("track") if live else None
     ac = None
     if live and (live.get("type") or live.get("tail")):
         ac = {"type": live.get("type"), "tail": live.get("tail")}
     return {"callsign": (r or {}).get("callsign") or cs, "route": r, "live": live,
-            "aircraft": ac, "progress": route_progress(r, plat, plon, pgs) if r else None}
+            "aircraft": ac, "route_match": route_live_match(r, plat, plon, ptrk),
+            "progress": route_progress(r, plat, plon, pgs) if r else None}
 
 
 def iploc():
@@ -1206,6 +1252,23 @@ def selftest():
     check("live: adsb.lol 'ground' alt -> 0, empty/garbage -> None",
           parse_adsblol_ac({"hex": "abc", "alt_baro": "ground"})["alt"] == 0
           and parse_adsblol_ac({"hex": ""}) is None and parse_adsblol_ac(None) is None)
+
+    # bearing/angle helpers (pure geometry).
+    check("bearing: due north / due east",
+          abs(_bearing(0, 0, 1, 0) - 0) < 1 and abs(_bearing(0, 0, 0, 1) - 90) < 1)
+    check("ang_diff: wraps across 0/360",
+          _ang_diff(350, 10) == 20 and _ang_diff(10, 350) == 20 and _ang_diff(0, 180) == 180)
+    # route_live_match: a plane heading AT vs AWAY from the filed destination.
+    # dest far north (lat 60); track 0 (north) agrees, track 180 (south) is stale.
+    rr = {"destination": {"lat": 60.0, "lon": 10.0}}
+    mok = route_live_match(rr, 50.0, 10.0, 0)
+    mbad = route_live_match(rr, 50.0, 10.0, 180)
+    check("route_match: heading toward dest -> ok, away -> stale",
+          mok and mok["ok"] is True and mbad and mbad["ok"] is False, str((mok, mbad)))
+    check("route_match: None when near dest or missing track/data",
+          route_live_match(rr, 59.9, 10.0, 180) is None      # within 60km of dest
+          and route_live_match(rr, 50.0, 10.0, None) is None
+          and route_live_match(None, 50.0, 10.0, 0) is None)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
