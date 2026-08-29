@@ -147,7 +147,7 @@
     <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Start / stop dump1090 (uses the RTL-SDR — stops the sub-GHz sweep)">&#9654;&nbsp;Start</button></div>
     <div class="grp"><span class="lbl">My&nbsp;lat</span><input class="tin" id="rx-lat" type="number" step="0.0001" placeholder="51.5074"></div>
     <div class="grp"><span class="lbl">My&nbsp;lon</span><input class="tin" id="rx-lon" type="number" step="0.0001" placeholder="-0.1278"></div>
-    <div class="grp"><button class="ctl" id="geobtn" title="Use this browser's location (falls back to approximate IP location on plain-HTTP)">◎ My location</button>
+    <div class="grp"><button class="ctl" id="geobtn" title="Set receiver location: GPS fix → browser location → approximate IP location">◎ My location</button>
       <span class="lbl" id="loc-note" style="color:var(--cyan)"></span></div>
     <div class="grp"><span class="lbl">Range</span>
       <div class="seg" id="rangeseg">
@@ -291,16 +291,30 @@
       function(err){ if(cb)cb(false, (err&&err.code===1)?'denied':'error'); },
       {enableHighAccuracy:false,timeout:8000,maximumAge:600000});
   }
+  // Best source first: the box's own GPS (exact — it's where the antenna is),
+  // reusing the shared wardriving GPS so we don't open a second serial reader.
+  function gpsLocate(cb){
+    fetch('/api/wardriving/gps').then(function(r){return r.json();}).then(function(d){
+      var la=null, lo=null;
+      if(d){ if(d.has_fix && d.latitude!=null){ la=d.latitude; lo=d.longitude; }
+             else if(d.last_known && d.last_known.lat!=null){ la=d.last_known.lat; lo=d.last_known.lon; } }
+      if(la!=null && lo!=null){ setRx(la,lo); locNote('📍 GPS fix'); onLocated(); if(cb)cb(true); }
+      else if(cb) cb(false);
+    }).catch(function(){ if(cb)cb(false); });
+  }
   function ipLocate(cb){ locNote('locating by IP…',true);
     fetch('/api/net/adsb/iploc').then(function(r){return r.json();}).then(function(d){
-      if(d&&d.lat!=null){ setRx(d.lat,d.lon); locNote('📍 ~'+(d.city||'IP location')); onLocated(); if(cb)cb(true); }
+      if(d&&d.lat!=null){ setRx(d.lat,d.lon); locNote('📍 ~'+(d.city||'IP location')+' (approx)'); onLocated(); if(cb)cb(true); }
       else { locNote('location unavailable'+(d&&d.error?' ('+d.error+')':'')); if(cb)cb(false); }
     }).catch(function(){ locNote('location lookup failed'); if(cb)cb(false); }); }
+  // Priority chain: GPS fix → browser geolocation → rough IP location.
   function ensureLocation(cb){ if(rx.lat!=null){ if(cb)cb(true); return; }
-    browserLocate(function(ok){ if(ok){ if(cb)cb(true); } else ipLocate(cb); }); }
+    gpsLocate(function(g){ if(g){ if(cb)cb(true); return; }
+      browserLocate(function(ok){ if(ok){ if(cb)cb(true); } else ipLocate(cb); }); }); }
   document.getElementById('geobtn').addEventListener('click',function(){
     locNote('locating…',true);
-    browserLocate(function(ok,why){ if(!ok){ ipLocate(); } });   // insecure/denied → IP fallback
+    gpsLocate(function(g){ if(g) return;
+      browserLocate(function(ok){ if(!ok){ ipLocate(); } }); });   // GPS → browser → IP
   });
 
   // ---- controls ----

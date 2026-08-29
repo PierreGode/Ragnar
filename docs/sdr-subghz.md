@@ -232,12 +232,14 @@ heading vectors + a contacts table.
   doesn't broadcast type, so it's looked up by ICAO hex from **adsb.lol** (free,
   no key) in the background and cached to `data/adsb_types.json` (gitignored), so
   the column fills in over a few seconds and is instant thereafter.
-- **My location:** the **◎ My location** button uses the browser's Geolocation
-  API — but browsers **block that on plain-HTTP origins** (how Ragnar is usually
-  reached on a LAN), so it falls back to the box's **public-IP location**
-  (`/api/net/adsb/iploc` → ipapi.co; same LAN ⇒ same town). The page also
-  auto-locates on load when no location is saved, so the radar can place aircraft
-  without manual lat/lon entry.
+- **My location** (receiver position) resolves in priority order: **GPS fix →
+  browser geolocation → rough IP location**. The **GPS** comes from the box's own
+  receiver (the shared wardriving `/api/wardriving/gps`, so no second serial
+  reader) and is exact. Browsers **block geolocation on plain-HTTP origins** (how
+  Ragnar is usually reached on a LAN), so with no GPS it falls back to the box's
+  **public-IP location** (`/api/net/adsb/iploc` → ipapi.co; same LAN ⇒ same town,
+  ~city accuracy — fine for a 100–400 km radar). The page auto-locates on load
+  when nothing is saved, so the radar can place aircraft without manual entry.
 - **No SDR? (demo)** With the RF-waterfall demo on but no dump1090, the radar and
   route maps show the **real** aircraft near you, pulled live from **adsb.lol**
   (`/api/net/adsb/nearby`) — real positions, types and routes — falling back to a
