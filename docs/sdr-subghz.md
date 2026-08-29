@@ -248,12 +248,14 @@ route view**, FlightAware-style:
   known routes still render with **no connectivity**. Only the first look-up of a
   given callsign touches the network, and only when you click an aircraft (no
   background polling — light on the free service).
-- The map is drawn on a self-contained canvas (bundled `demos/adsb_world.json`
-  coastline, ~66 KB, public-domain Natural Earth) — **no tile server, no external
-  map library**, so it works offline. It auto-fits to the route, draws the true
-  **great-circle** arc (curved, not a straight line), splits it **flown** (cyan)
-  vs **remaining** (dashed) at the live position, and marks both airports and the
-  aircraft (heading-oriented).
+- The map is **Leaflet** with **Esri dark-gray tiles** — the same vendored
+  library (`/web/vendor/leaflet/`) and basemap as the **Mesh Map**, for one
+  consistent map UX across Ragnar. It auto-fits (`fitBounds`) to the route, draws
+  the true **great-circle** arc (curved, not a straight line) as a sampled
+  polyline, splits it **flown** (cyan) vs **remaining** (dashed) at the live
+  position, and marks both airports (labelled) and the aircraft (heading-oriented
+  marker). The basemap tiles need connectivity like any slippy map; the route
+  data itself is cached, so a known route still draws its line/markers offline.
 - The side panel shows **% progress**, distance flown / remaining / total, a
   rough **ETA** from ground speed, and current altitude/speed — all recomputed
   live from your own receiver as the plane moves.

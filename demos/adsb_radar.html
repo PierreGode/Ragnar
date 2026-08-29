@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <title>ADS-B Radar</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+<script src="/web/vendor/leaflet/leaflet.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -96,9 +98,13 @@
   .rclose:hover{border-color:var(--radar);color:#fff}
   .rbody{display:grid;grid-template-columns:1.55fr 1fr;gap:0;min-height:0}
   @media (max-width:760px){.rbody{grid-template-columns:1fr}}
-  .rmapwrap{position:relative;background:#05080d;aspect-ratio:16/10;min-height:240px}
-  canvas#worldmap{display:block;width:100%;height:100%}
-  .rmaptag{position:absolute;left:10px;bottom:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
+  .rmapwrap{position:relative;background:#0b1119;aspect-ratio:16/10;min-height:240px}
+  #worldmap{position:absolute;inset:0;width:100%;height:100%;background:#0b1119}
+  .leaflet-container{background:#0b1119;font-family:var(--mono)}
+  .leaflet-bar a,.leaflet-control-layers{background:var(--panel)!important;color:var(--ink)!important;border-color:var(--line)!important}
+  .aptip{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    font-family:var(--mono);font-size:10px;font-weight:600;padding:1px 5px;box-shadow:none}
+  .aptip::before{display:none}
   .rinfo{padding:16px;display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--line-soft);min-width:0}
   @media (max-width:760px){.rinfo{border-left:0;border-top:1px solid var(--line-soft)}}
   .rroute{display:flex;align-items:center;gap:10px}
@@ -183,8 +189,7 @@
       </div>
       <div class="rbody">
         <div class="rmapwrap">
-          <canvas id="worldmap"></canvas>
-          <div class="rmaptag" id="r-maptag">World route</div>
+          <div id="worldmap"></div>
         </div>
         <div class="rinfo">
           <div class="rroute" id="r-routerow" style="display:none">
@@ -583,14 +588,31 @@
   // the backend (cache-first, adsbdb on a miss) and draw a world map: the great-
   // circle it flies, its live position, and % progress. The live position is
   // always local; only the filed route needs the one-time network look-up.
-  var rmask=document.getElementById('rmask'), curRoute=null, worldRings=null, routeCache={};
-  var wc=document.getElementById('worldmap'), wctx=wc.getContext('2d');
+  var rmask=document.getElementById('rmask'), curRoute=null, routeCache={};
+  var rmap=null, routeLayer=null, mapReady=false;
 
-  function loadWorld(){ if(worldRings!==null) return Promise.resolve();
-    return fetch('adsb_world.json').then(function(r){return r.json();})
-      .then(function(d){ worldRings=(d&&d.rings)||[]; }).catch(function(){ worldRings=[]; }); }
   function planeById(icao){ for(var i=0;i<planes.length;i++){ if(planes[i].icao===icao) return planes[i]; } return null; }
-  function wrapLon(d){ return ((d+540)%360)-180; }
+
+  // Leaflet map — same vendored lib + Esri dark tiles as the Mesh Map.
+  function ensureMap(){
+    if(rmap||typeof L==='undefined') return;
+    rmap=L.map('worldmap',{zoomControl:true, attributionControl:false, worldCopyJump:true, minZoom:1}).setView([25,0],2);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:16}).addTo(rmap);
+    routeLayer=L.layerGroup().addTo(rmap); mapReady=true;
+  }
+  function planeIcon(track){ return L.divIcon({className:'', iconSize:[26,26], iconAnchor:[13,13],
+    html:'<div style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;transform:rotate('+(track||0)+'deg)">'
+      +'<svg width="20" height="20" viewBox="-9 -9 18 18"><path d="M0,-8 L5.5,6 L0,3 L-5.5,6 Z" fill="#f5b942" stroke="#05080d" stroke-width="1.2"/></svg></div>'}); }
+  function airportDot(o,color){ return L.circleMarker([o.lat,o.lon],{radius:5,color:'#05080d',weight:1.5,fillColor:color,fillOpacity:1})
+    .bindTooltip(o.iata||o.icao||'',{permanent:true,direction:'top',className:'aptip',offset:[0,-3]}); }
+  function gcSample(la1,lo1,la2,lo2,n){ var p1=toRad(la1),l1=toRad(lo1),p2=toRad(la2),l2=toRad(lo2);
+    var dl=2*Math.asin(Math.min(1,Math.sqrt(Math.pow(Math.sin((p2-p1)/2),2)+Math.cos(p1)*Math.cos(p2)*Math.pow(Math.sin((l2-l1)/2),2))));
+    if(dl===0) return [[la1,lo1],[la2,lo2]];
+    var out=[]; for(var i=0;i<n;i++){ var f=i/(n-1), a=Math.sin((1-f)*dl)/Math.sin(dl), b=Math.sin(f*dl)/Math.sin(dl);
+      var x=a*Math.cos(p1)*Math.cos(l1)+b*Math.cos(p2)*Math.cos(l2), y=a*Math.cos(p1)*Math.sin(l1)+b*Math.cos(p2)*Math.sin(l2), z=a*Math.sin(p1)+b*Math.sin(p2);
+      out.push([Math.atan2(z,Math.sqrt(x*x+y*y))*180/Math.PI, Math.atan2(y,x)*180/Math.PI]); }
+    return out; }
+  function unwrap(pts){ for(var i=1;i<pts.length;i++){ var d=pts[i][1]-pts[i-1][1]; if(d>180) pts[i][1]-=360; else if(d<-180) pts[i][1]+=360; } return pts; }
 
   function openRoute(icao){
     var p=planeById(icao); if(!p) return;
@@ -602,7 +624,9 @@
     document.getElementById('r-note').innerHTML='Looking up route…';
     document.getElementById('r-routerow').style.display='none';
     document.getElementById('r-progwrap').style.display='none';
-    loadWorld().then(function(){ if(curRoute&&curRoute.icao===icao){ drawWorld(); renderRouteInfo(); } });
+    ensureMap();
+    // the map div was hidden until now — let Leaflet recompute its size, then draw
+    setTimeout(function(){ if(!curRoute||curRoute.icao!==icao) return; if(rmap) rmap.invalidateSize(); drawRoute(true); renderRouteInfo(); }, 90);
     var cs=(p.callsign||'').trim();
     if(!cs){ curRoute.loading=false;
       document.getElementById('r-note').innerHTML='No callsign broadcast yet — can\'t look up a route. Live position is shown.';
@@ -612,16 +636,16 @@
       +(p.lat!=null?'&lat='+p.lat+'&lon='+p.lon:'')+(p.gs!=null?'&gs='+p.gs:'');
     fetch(q).then(function(r){return r.json();}).then(function(d){
       routeCache[cs]=(d&&d.route)||null;
-      if(curRoute&&curRoute.icao===icao){ curRoute.route=routeCache[cs]; curRoute.loading=false; drawWorld(); renderRouteInfo(); }
+      if(curRoute&&curRoute.icao===icao){ curRoute.route=routeCache[cs]; curRoute.loading=false; drawRoute(true); renderRouteInfo(); }
     }).catch(function(){ if(curRoute&&curRoute.icao===icao){ curRoute.loading=false;
       document.getElementById('r-note').innerHTML='Route look-up failed (offline?). Live position is still tracked.';
-      drawWorld(); renderRouteInfo(); } });
+      drawRoute(true); renderRouteInfo(); } });
   }
   function closeRoute(){ rmask.classList.remove('show'); curRoute=null; }
   document.getElementById('r-close').addEventListener('click',closeRoute);
   rmask.addEventListener('click',function(e){ if(e.target===rmask) closeRoute(); });
   document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&rmask.classList.contains('show')) closeRoute(); });
-  function routeTick(){ if(rmask.classList.contains('show')){ drawWorld(); renderRouteInfo(); } }
+  function routeTick(){ if(rmask.classList.contains('show')){ drawRoute(false); renderRouteInfo(); } }
 
   function fmtKmU(km){ return km==null?'—':(Math.round(kmToUnit(km))+' '+unit); }
   function routeGeo(){   // live progress from the current plane position + filed route
@@ -661,75 +685,25 @@
     }
   }
 
-  function drawWorld(){
-    var dp=Math.min(window.devicePixelRatio||1,2), W=wc.clientWidth, H=wc.clientHeight;
-    if(!W||!H) return;
-    if(wc.width!==Math.round(W*dp)||wc.height!==Math.round(H*dp)){ wc.width=Math.round(W*dp); wc.height=Math.round(H*dp); }
-    wctx.setTransform(dp,0,0,dp,0,0); wctx.clearRect(0,0,W,H);
-    var g=routeGeo(), p=curRoute?planeById(curRoute.icao):null, pts=[];
-    if(g){ pts.push([g.o.lat,g.o.lon]); pts.push([g.d.lat,g.d.lon]); }
-    if(p&&p.lat!=null) pts.push([p.lat,p.lon]);
-    var lon0, kx, ky, lat0, cx=W/2, cy=H/2;
-    if(pts.length){
-      var sx=0,sy=0; pts.forEach(function(q){ sx+=Math.cos(toRad(q[1])); sy+=Math.sin(toRad(q[1])); });
-      lon0=Math.atan2(sy,sx)*180/Math.PI;
-      var dmin=1e9,dmax=-1e9,amin=90,amax=-90;
-      pts.forEach(function(q){ var dd=wrapLon(q[1]-lon0); if(dd<dmin)dmin=dd; if(dd>dmax)dmax=dd; if(q[0]<amin)amin=q[0]; if(q[0]>amax)amax=q[0]; });
-      lon0=wrapLon(lon0+(dmin+dmax)/2); lat0=(amin+amax)/2;
-      var lonSpan=Math.max(8,(dmax-dmin)*1.35), latSpan=Math.max(8,(amax-amin)*1.5);
-      var cosC=Math.max(0.15,Math.cos(toRad(lat0)));
-      ky=Math.min((H*0.82)/latSpan,(W*0.82)/(lonSpan*cosC)); kx=ky*cosC;
-    } else { lon0=0; lat0=20; ky=H/190; kx=ky; }
-    function SX(lat,lon){ return cx+wrapLon(lon-lon0)*kx; }
-    function SY(lat){ return cy-(lat-lat0)*ky; }
-    // graticule
-    wctx.strokeStyle='rgba(46,160,150,.10)'; wctx.lineWidth=1;
-    for(var mer=-180;mer<180;mer+=30){ var gx=SX(lat0,mer); if(gx>=0&&gx<=W){ wctx.beginPath(); wctx.moveTo(gx,0); wctx.lineTo(gx,H); wctx.stroke(); } }
-    for(var par=-60;par<=60;par+=30){ var gy=SY(par); if(gy>=0&&gy<=H){ wctx.beginPath(); wctx.moveTo(0,gy); wctx.lineTo(W,gy); wctx.stroke(); } }
-    // coastlines
-    if(worldRings&&worldRings.length){
-      wctx.strokeStyle='rgba(120,150,170,.34)'; wctx.lineWidth=1; wctx.beginPath();
-      for(var i=0;i<worldRings.length;i++){ var ring=worldRings[i], started=false, px=0;
-        for(var j=0;j<ring.length;j++){ var x=SX(ring[j][1],ring[j][0]), y=SY(ring[j][1]);
-          if(started&&Math.abs(x-px)>W*0.6) started=false;
-          if(!started){ wctx.moveTo(x,y); started=true; } else { wctx.lineTo(x,y); } px=x; } }
-      wctx.stroke();
-    }
-    if(!g){
-      if(p&&p.lat!=null) drawPlaneDot(SX(p.lat,p.lon),SY(p.lat),p.track);
-      wctx.fillStyle='rgba(124,138,160,.85)'; wctx.font='12px "IBM Plex Mono",monospace'; wctx.textAlign='center';
-      wctx.fillText(curRoute&&curRoute.loading?'Looking up route…':'No filed route', cx, H-14);
+  function drawRoute(fit){
+    if(!mapReady||!curRoute) return;
+    routeLayer.clearLayers();
+    var g=routeGeo(), p=planeById(curRoute.icao);
+    if(!g){ // no filed route yet: show the live plane alone if we have a position
+      if(p&&p.lat!=null){ L.marker([p.lat,p.lon],{icon:planeIcon(p.track)}).addTo(routeLayer);
+        if(fit) rmap.setView([p.lat,p.lon],5); }
       return;
     }
-    var samp=gcSample(g.o.lat,g.o.lon,g.d.lat,g.d.lon,64), splitK=samp.length-1;
-    if(g.plane){ var best=1e9; for(var k=0;k<samp.length;k++){ var dd=haversineKm(g.plane.lat,g.plane.lon,samp[k][0],samp[k][1]); if(dd<best){best=dd;splitK=k;} } }
-    drawArc(samp.slice(splitK),'rgba(124,138,160,.55)',1.5,true,SX,SY);   // remaining — dim dashed
-    drawArc(samp.slice(0,splitK+1),'rgba(56,189,201,.95)',2.2,false,SX,SY); // flown — cyan solid
-    drawAirport(SX(g.o.lat,g.o.lon),SY(g.o.lat),g.o.iata||g.o.icao,'#3fb56b');
-    drawAirport(SX(g.d.lat,g.d.lon),SY(g.d.lat),g.d.iata||g.d.icao,'#f5b942');
-    if(g.plane) drawPlaneDot(SX(g.plane.lat,g.plane.lon),SY(g.plane.lat),g.plane.track);
+    var samp=unwrap(gcSample(g.o.lat,g.o.lon,g.d.lat,g.d.lon,96)), splitK=samp.length-1;
+    if(g.plane){ var best=1e9; for(var k=0;k<samp.length;k++){ var lo=((samp[k][1]+540)%360)-180,
+      dd=haversineKm(g.plane.lat,g.plane.lon,samp[k][0],lo); if(dd<best){best=dd;splitK=k;} } }
+    L.polyline(samp.slice(splitK),{color:'#7c8aa0',weight:1.6,opacity:.6,dashArray:'5,7'}).addTo(routeLayer);   // remaining
+    L.polyline(samp.slice(0,splitK+1),{color:'#38bdc9',weight:2.8,opacity:.95}).addTo(routeLayer);              // flown
+    airportDot(g.o,'#3fb56b').addTo(routeLayer);
+    airportDot(g.d,'#f5b942').addTo(routeLayer);
+    if(g.plane) L.marker([g.plane.lat,g.plane.lon],{icon:planeIcon(g.plane.track)}).addTo(routeLayer);
+    if(fit){ var b=L.latLngBounds(samp); if(p&&p.lat!=null) b.extend([p.lat,p.lon]); rmap.fitBounds(b.pad(0.18)); }
   }
-  function gcSample(la1,lo1,la2,lo2,n){ var p1=toRad(la1),l1=toRad(lo1),p2=toRad(la2),l2=toRad(lo2);
-    var dl=2*Math.asin(Math.min(1,Math.sqrt(Math.pow(Math.sin((p2-p1)/2),2)+Math.cos(p1)*Math.cos(p2)*Math.pow(Math.sin((l2-l1)/2),2))));
-    if(dl===0) return [[la1,lo1],[la2,lo2]];
-    var out=[]; for(var i=0;i<n;i++){ var f=i/(n-1), a=Math.sin((1-f)*dl)/Math.sin(dl), b=Math.sin(f*dl)/Math.sin(dl);
-      var x=a*Math.cos(p1)*Math.cos(l1)+b*Math.cos(p2)*Math.cos(l2), y=a*Math.cos(p1)*Math.sin(l1)+b*Math.cos(p2)*Math.sin(l2), z=a*Math.sin(p1)+b*Math.sin(p2);
-      out.push([Math.atan2(z,Math.sqrt(x*x+y*y))*180/Math.PI, Math.atan2(y,x)*180/Math.PI]); }
-    return out; }
-  function drawArc(seg,color,w,dash,SX,SY){ if(seg.length<2) return; wctx.strokeStyle=color; wctx.lineWidth=w;
-    if(dash) wctx.setLineDash([5,5]); wctx.beginPath(); var started=false,px=0;
-    for(var i=0;i<seg.length;i++){ var x=SX(seg[i][0],seg[i][1]), y=SY(seg[i][0]);
-      if(started&&Math.abs(x-px)>wc.clientWidth*0.6) started=false;
-      if(!started){ wctx.moveTo(x,y); started=true; } else { wctx.lineTo(x,y); } px=x; }
-    wctx.stroke(); wctx.setLineDash([]); }
-  function drawAirport(x,y,label,color){ wctx.fillStyle=color; wctx.beginPath(); wctx.arc(x,y,4,0,2*Math.PI); wctx.fill();
-    wctx.strokeStyle='rgba(5,8,13,.85)'; wctx.lineWidth=1.5; wctx.stroke();
-    wctx.fillStyle='rgba(232,238,246,.95)'; wctx.font='600 11px "IBM Plex Mono",monospace'; wctx.textAlign='center';
-    wctx.fillText(label||'', x, y-9); }
-  function drawPlaneDot(x,y,track){ wctx.save(); wctx.translate(x,y); if(track!=null) wctx.rotate(toRad(track));
-    wctx.fillStyle='#f5b942'; wctx.strokeStyle='rgba(5,8,13,.9)'; wctx.lineWidth=1;
-    wctx.beginPath(); wctx.moveTo(0,-7); wctx.lineTo(5,6); wctx.lineTo(0,3); wctx.lineTo(-5,6); wctx.closePath();
-    wctx.fill(); wctx.stroke(); wctx.restore(); }
 
   // ---- boot ----
   function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
