@@ -228,6 +228,20 @@ heading vectors + a contacts table.
   is a lookup, not a conversion); and the **tail registration** + country decoded
   from the ICAO 24-bit address (exact N-number algorithm for the US; country from
   the ICAO address block elsewhere).
+- **Aircraft type** (`A320`, `B738`, `B77W`…) fills the **Type** column: ADS-B
+  doesn't broadcast type, so it's looked up by ICAO hex from **adsb.lol** (free,
+  no key) in the background and cached to `data/adsb_types.json` (gitignored), so
+  the column fills in over a few seconds and is instant thereafter.
+- **My location:** the **◎ My location** button uses the browser's Geolocation
+  API — but browsers **block that on plain-HTTP origins** (how Ragnar is usually
+  reached on a LAN), so it falls back to the box's **public-IP location**
+  (`/api/net/adsb/iploc` → ipapi.co; same LAN ⇒ same town). The page also
+  auto-locates on load when no location is saved, so the radar can place aircraft
+  without manual lat/lon entry.
+- **No SDR? (demo)** With the RF-waterfall demo on but no dump1090, the radar and
+  route maps show the **real** aircraft near you, pulled live from **adsb.lol**
+  (`/api/net/adsb/nearby`) — real positions, types and routes — falling back to a
+  synthetic sky only with no location or no internet. Mode reads **internet**.
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -256,13 +270,17 @@ route view**, FlightAware-style:
   position, and marks both airports (labelled) and the aircraft (heading-oriented
   marker). The basemap tiles need connectivity like any slippy map; the route
   data itself is cached, so a known route still draws its line/markers offline.
-- The side panel shows **% progress**, distance flown / remaining / total, a
-  rough **ETA** from ground speed, and current altitude/speed — all recomputed
-  live from your own receiver as the plane moves.
+- The plane is placed at its **real live position** and its **type** is shown:
+  clicking fetches the flight from **adsb.lol** by hex, so the marker matches
+  reality (not a stale/synthetic local fix). The side panel shows **% progress**,
+  distance flown / remaining / total, a rough **ETA** from ground speed, and
+  current altitude/speed — recomputed as the plane moves.
 - **Offline / unknown callsign:** the live position still plots on the map; the
   panel notes no filed route was found (adsbdb had no match, or you're offline).
-  Backed by `GET /api/net/adsb/route?callsign=…&lat=&lon=&gs=` (`adsb.route()`);
-  the pure parsers/geometry are covered by `adsb.py selftest`.
+  Backed by `GET /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=`
+  (`adsb.flight()` = adsbdb route + adsb.lol live position/type); the older
+  `/api/net/adsb/route` remains. Pure parsers/geometry are covered by
+  `adsb.py selftest` (24/24).
 
 ## Session record & replay
 
@@ -394,6 +412,9 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `GET  /api/net/rtl/tuning` · POST `{ppm,gain}` | Read / set PPM freq-correction + tuner gain (reapplied live) |
 | `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft (icao/iata/tail/country) |
 | `GET  /api/net/adsb/route?callsign=…&lat=&lon=&gs=` | Filed route (origin/dest via adsbdb, cache-first) + live great-circle progress for the map view |
+| `GET  /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=` | Route (adsbdb) + REAL live position/type (adsb.lol) for the route map |
+| `GET  /api/net/adsb/nearby?lat=&lon=&dist=` | Real aircraft near a point (adsb.lol) — the no-SDR/demo live feed, with types |
+| `GET  /api/net/adsb/iploc` | Approx receiver location from the box's public IP (browser-geolocation fallback) |
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |

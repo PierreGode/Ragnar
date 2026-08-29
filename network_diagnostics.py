@@ -19014,6 +19014,33 @@ def register_network_diagnostics(app, logger=None):
         return jsonify(adsb.route(request.args.get('callsign', ''),
                                   lat=_f('lat'), lon=_f('lon'), gs=_f('gs')))
 
+    @app.route('/api/net/adsb/flight', methods=['GET'])
+    def net_adsb_flight():
+        # Route (adsbdb) + REAL live position/type (adsb.lol) for the map view.
+        def _f(k):
+            try:
+                return float(request.args.get(k))
+            except (TypeError, ValueError):
+                return None
+        return jsonify(adsb.flight(request.args.get('hex', ''),
+                                   request.args.get('callsign', ''),
+                                   lat=_f('lat'), lon=_f('lon'), gs=_f('gs')))
+
+    @app.route('/api/net/adsb/nearby', methods=['GET'])
+    def net_adsb_nearby():
+        # Real aircraft near a point (adsb.lol) — the no-SDR/demo live feed.
+        def _f(k):
+            try:
+                return float(request.args.get(k))
+            except (TypeError, ValueError):
+                return None
+        return jsonify(adsb.nearby(_f('lat'), _f('lon'), _f('dist') or 60))
+
+    @app.route('/api/net/adsb/iploc', methods=['GET'])
+    def net_adsb_iploc():
+        # Approx receiver location from the box's public IP (browser-geo fallback).
+        return jsonify(adsb.iploc())
+
     @app.route('/api/net/adsb/selftest', methods=['GET'])
     def net_adsb_selftest():
         return jsonify(adsb.selftest())
