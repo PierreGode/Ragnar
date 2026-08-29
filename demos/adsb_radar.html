@@ -405,21 +405,25 @@
     // internet fallback: the SDR is running but hears nothing (RF-starved), so the
     // radar is showing REAL aircraft near you from the internet, not local RF. Say
     // so plainly at the top so it's never mistaken for what the antenna decoded.
-    if(netFallback && rx.lat!=null){ ctx.textAlign='center'; var bw=Math.min(W-14,520);
+    if(netFallback && (planes&&planes.length)){ ctx.textAlign='center'; var bw=Math.min(W-14,520);
       ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 12px "Chakra Petch",system-ui,sans-serif';
-      var by=wrapText('Local SDR quiet — showing INTERNET traffic near you', cx, 15, bw, 14);
+      var btxt=(mode==='synth')?'Local SDR quiet — showing a DEMO sky':'Local SDR quiet — showing INTERNET traffic near you';
+      var by=wrapText(btxt, cx, 15, bw, 14);
       ctx.fillStyle='rgba(124,138,160,.9)'; ctx.font='10px "IBM Plex Mono",monospace';
       wrapText('dump1090 running · '+lastSbs+' msgs · use a 1090 antenna by a window for local decodes', cx, by+13, bw, 12);
     }
-    // reception hint: running (live), connected, but no aircraft decoded — almost
-    // always the antenna. Draw it big in the middle so it can't be missed.
-    if(mode==='live' && running && (!planes||!planes.length) && lastHint){
+    // reception hint: running, connected, but no aircraft to show (local decoded
+    // nothing AND the internet fallback has nothing yet) — almost always the
+    // antenna. Draw it big in the middle so it can't be missed.
+    if(running && (!planes||!planes.length) && rx.lat!=null){
       ctx.textAlign='center';
       ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
       ctx.fillText('No aircraft decoded', cx, cy-14);
       ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
-      wrapText('Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
-        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.', cx, cy+6, Math.min(R*1.6,420), 15);
+      var msg='Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
+        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.';
+      if(netFallback) msg+=' (No internet traffic nearby to fall back to — check connectivity, or restart Ragnar so the /nearby feed is served.)';
+      wrapText(msg, cx, cy+6, Math.min(R*1.6,420), 15);
     }
   }
 
@@ -504,13 +508,12 @@
       if(d.running){ hideVeil(); lastHint=d.hint||''; lastSbs=d.sbs_lines||0;
         var local=d.aircraft||[];
         if(local.length){                       // real local RF contacts always win
-          netFallback=false; stopNearby();
+          netFallback=false; stopNearby(); stopSynthSky();
           setMode('live'); planes=local; msgs=d.messages||0; enrich(); renderTable(); routeTick();
-        } else if(rx.lat!=null){                 // SDR running but hears nothing (RF-starved)
-          netFallback=true; setMode('net');      // show REAL internet traffic near you instead
-          startNearby();                         // fills `planes`; keeps them (never wiped to [])
-        } else {                                 // deaf and no location yet
-          netFallback=false; planes=[]; msgs=d.messages||0; enrich(); renderTable();
+        } else {                                 // SDR running but hears nothing (RF-starved)
+          netFallback=true; if(mode!=='synth') setMode('net');
+          if(rx.lat==null){ ensureLocation(); }  // auto-locate (GPS→browser→IP) so we can place planes
+          startNearby();                         // REAL internet traffic near you; synthetic sky only if demo
         } }
       else if(d.error){ netFallback=false; if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
@@ -537,14 +540,14 @@
         .then(function(r){return r.json();}).then(function(d){
           if(d&&d.aircraft&&d.aircraft.length){ usingNearby=true; stopSynthSky();
             setMode('net'); planes=d.aircraft; msgs=d.count||d.aircraft.length; enrich(); renderTable(); routeTick(); }
-          else if(!usingNearby){ startSynthSky(); }
-        }).catch(function(){ if(!usingNearby) startSynthSky(); });
+          else if(!usingNearby && DEMO_ON){ startSynthSky(); }   // no real traffic/offline → demo sky (demo only)
+        }).catch(function(){ if(!usingNearby && DEMO_ON) startSynthSky(); });
     }
     pull(); nearbyTimer=setInterval(pull,5000);
   }
   function stopNearby(){ if(nearbyTimer){clearInterval(nearbyTimer);nearbyTimer=null;} usingNearby=false; }
   function startSynthSky(){
-    if(usingNearby || running) return;
+    if(usingNearby || (running && !netFallback)) return;   // allowed as the deaf-SDR demo fallback
     setMode('synth');
     if(rx.lat==null){ setRx(51.5074,-0.1278); }
     if(!planes.length || planes._synth!==true){ planes=makeSynth(); planes._synth=true; }
