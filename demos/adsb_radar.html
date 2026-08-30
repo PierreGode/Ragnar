@@ -79,6 +79,25 @@
   .acars-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
   .acars-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
   .acars-msg.match{background:rgba(46,160,150,.05)} .acars-msg .who .onradar{color:var(--live);font-size:9px}
+  /* VDL Mode 2 / ATN — same layout as ACARS but a message-type column */
+  .vdl2card{margin-top:16px}
+  .vdl2-list{max-height:none;padding:4px 0}
+  .vdl2-msg{padding:9px 14px;border-bottom:1px solid var(--line-soft);display:grid;grid-template-columns:130px 92px 1fr auto;gap:12px;align-items:start}
+  @media (max-width:720px){.vdl2-msg{grid-template-columns:1fr;gap:2px}}
+  .vdl2-msg .who{font-family:var(--mono);font-size:12px}
+  .vdl2-msg .who .tail{color:var(--cyan);font-weight:600} .vdl2-msg .who .flt{color:var(--ink-dim)} .vdl2-msg .who .icao{color:var(--muted);font-size:10px}
+  .vdl2-msg .who .onradar{color:var(--live);font-size:9px}
+  .vdl2-msg .body{font-family:var(--mono);font-size:12px;color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+  .vdl2-msg .meta{font-family:var(--mono);font-size:10px;color:var(--muted);text-align:right;white-space:nowrap}
+  .vdl2-msg.match{background:rgba(46,160,150,.05)}
+  .vtype{font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.03em;padding:1px 5px;border-radius:4px;display:inline-block}
+  .vtype.cpdlc{color:#f2b155;background:rgba(242,177,85,.13)}        /* ATC controller link */
+  .vtype.adsc{color:#b98bff;background:rgba(185,139,255,.13)}       /* surveillance contract */
+  .vtype.acars{color:var(--cyan);background:rgba(46,160,150,.13)}
+  .vtype.avlc,.vtype.x25{color:var(--muted);background:rgba(150,150,150,.12)}
+  .vdl2-msg .dir{font-size:10px;color:var(--muted);display:block;margin-top:2px}
+  .vdl2-msg .dir.up{color:#f2b155}  /* uplink: ground → aircraft */
+  .vdl2-msg .dir.down{color:#7fd1c4} /* downlink: aircraft → ground */
   .stat{display:flex;flex-direction:column;gap:1px}
   .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .stat .v{font-family:var(--mono);font-size:14px;color:var(--radar)}
@@ -227,9 +246,21 @@
     <div class="acars-list" id="acars-list"><div class="empty" id="acars-empty">ACARS off — start it to read aircraft datalink messages (VHF ~131 MHz). One dongle, so this pauses the radar.</div></div>
   </div>
 
+  <div class="card vdl2card">
+    <div class="tcap">
+      <span class="t">📡 VDL Mode 2 / ATN <span class="c" id="vdl2-count"></span></span>
+      <span style="display:flex;gap:8px;align-items:center">
+        <span class="tag idle" id="vdl2-mode">off</span>
+        <button class="ctl" id="vdl2-btn" style="padding:5px 11px" title="VDL Mode 2 uses the RTL-SDR at ~136 MHz — starting it stops the 1090 MHz radar (one dongle)">&#9654;&nbsp;Start VDL2</button>
+      </span>
+    </div>
+    <div class="vdl2-list" id="vdl2-list"><div class="empty" id="vdl2-empty">VDL Mode 2 off — the modern datalink (~136 MHz): ACARS-over-VDL2, <b>CPDLC</b> controller↔pilot clearances and <b>ADS-C</b> position contracts, decoded via dumpvdl2 + libacars. One dongle, so this pauses the radar.</div></div>
+  </div>
+
   <footer>
     <div><b>How it works:</b> dump1090 decodes 1090 MHz ADS-B; each aircraft is placed by its own broadcast lat/lon relative to your receiver location. Set <b>My lat/lon</b> (or use the browser location) so the range rings and bearings are correct. Blip colour = altitude. Range rings label in the selected unit.</div>
     <div style="margin-top:6px"><b>✉ ACARS:</b> aircraft VHF datalink (~131 MHz) — position reports, OOOI times, weather, load sheets and free-text crew↔ops messages, in the clear via acarsdec. Matched to the contacts above by tail/flight. One dongle means ACARS and the 1090 MHz radar can't run at once.</div>
+    <div style="margin-top:6px"><b>📡 VDL Mode 2 / ATN:</b> the modern successor to VHF ACARS — a D8PSK datalink on ~136 MHz decoded by <b>dumpvdl2 + libacars</b>. Carries ACARS-over-VDL2, <b>CPDLC</b> (controller↔pilot clearances: climb/descend, "CONTACT &lt;freq&gt;", "MONITOR &lt;unit&gt;", WILCO) and <b>ADS-C</b> (contracted position/intent reports). ↑ uplink = ground→aircraft, ↓ downlink = aircraft→ground. All in the clear, receive-only.</div>
     <div style="margin-top:6px"><b>One dongle:</b> starting the radar takes the RTL-SDR from the sub-GHz sweep/decoder (and vice-versa). Receive-only — Ragnar never transmits.</div>
   </footer>
 </div>
@@ -671,6 +702,105 @@
     }).catch(function(){});
   }
 
+  // ---- VDL Mode 2 / ATN datalink ----
+  // Modern successor to VHF ACARS: dumpvdl2 + libacars decode ACARS-over-VDL2,
+  // CPDLC (controller<->pilot) and ADS-C (position contracts) on ~136 MHz.
+  var vdl2Running=false, vdl2Mode='off', vdl2Msgs=[], vdl2Seq=0, vdl2Poll=null, vdl2SynthTimer=null;
+  var vdl2Btn=document.getElementById('vdl2-btn');
+  function setVdl2Mode(m){ vdl2Mode=m; var el=document.getElementById('vdl2-mode');
+    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'off')); }
+  function icaosOnRadar(){ var set={}; planes.forEach(function(p){ if(p.icao)set[String(p.icao).toUpperCase()]=1; }); return set; }
+  function vtypeClass(t){ t=(t||'').toLowerCase(); return t==='cpdlc'?'cpdlc':(t==='ads-c'?'adsc':(t==='acars'?'acars':(t==='x.25'?'x25':'avlc'))); }
+  function renderVdl2(){
+    var el=document.getElementById('vdl2-list'); document.getElementById('vdl2-count').textContent=vdl2Msgs.length?('· '+vdl2Msgs.length):'';
+    if(!vdl2Msgs.length){ el.innerHTML='<div class="empty" id="vdl2-empty">'+(vdl2Running||vdl2Mode==='synth'?'Listening for VDL Mode 2… (~136 MHz)':'VDL Mode 2 off — CPDLC / ADS-C / ACARS-over-VDL2. One dongle, so this pauses the radar.')+'</div>'; return; }
+    var onradar=tailsOnRadar(), onicao=icaosOnRadar();
+    el.innerHTML=vdl2Msgs.slice().reverse().slice(0,80).map(function(m){
+      var match=(m.reg&&onradar[m.reg.toUpperCase()])||(m.flight&&onradar[m.flight.toUpperCase()])||(m.icao&&onicao[String(m.icao).toUpperCase()]);
+      var id=m.reg?('<span class="tail">'+esc(m.reg)+'</span>'):(m.icao?'<span class="icao">'+esc(m.icao)+'</span>':'<span class="tail">—</span>');
+      var who=id+(m.flight?' <span class="flt">'+esc(m.flight)+'</span>':'')+(m.reg&&m.icao?' <span class="icao">'+esc(m.icao)+'</span>':'')
+        +(match?' <span class="onradar">● on radar</span>':'');
+      var dir=m.direction==='uplink'?'<span class="dir up">↑ uplink (ATC→ac)</span>':(m.direction==='downlink'?'<span class="dir down">↓ downlink (ac→ATC)</span>':'');
+      var tlabel=m.type==='ADS-C'?'ADS-C':(m.type||'AVLC');
+      var typ='<span class="vtype '+vtypeClass(m.type)+'">'+esc(tlabel)+'</span>'+dir;
+      var body=m.text?esc(m.text):'<span style="color:var(--muted)">('+esc(tlabel)+' frame)</span>';
+      if(m.type==='ACARS'&&m.label_meaning) body+='<span style="color:var(--muted);font-size:10px;display:block">'+esc(m.label+' · '+m.label_meaning)+'</span>';
+      var meta=(m.freq_mhz?esc(m.freq_mhz)+' MHz':'')+(m.level!=null?' · '+m.level+'dB':'');
+      return '<div class="vdl2-msg'+(match?' match':'')+'"><div class="who">'+who+'</div><div>'+typ+'</div>'
+        +'<div class="body">'+body+'</div><div class="meta">'+meta+'</div></div>';
+    }).join('');
+  }
+  vdl2Btn.addEventListener('click',function(){ vdl2Running?stopVdl2():startVdl2(); });
+  function startVdl2(){
+    // one dongle: VDL2 at 136 MHz can't coexist with the 1090 MHz radar (or ACARS)
+    if(running){ stopRun(); }
+    if(acarsRunning){ stopAcars(); }
+    vdl2Running=true; vdl2Btn.setAttribute('aria-pressed','true'); vdl2Btn.innerHTML='&#10074;&#10074;&nbsp;Stop VDL2';
+    vdl2Seq=0; vdl2Msgs=[]; renderVdl2();
+    fetch('/api/net/vdl2/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+      if(res&&res.error){ if(DEMO_ON) vdl2Synth(); else { document.getElementById('vdl2-list').innerHTML='<div class="empty">Could not start VDL2: '+esc(res.error)+(res.error&&res.error.indexOf('not installed')>=0?' — <button class="ctl" id="vdl2-install" style="margin-left:6px;padding:3px 8px">⬇ Install dumpvdl2</button>':'')+'</div>'; wireVdl2Install(); } }
+    }).catch(function(){});
+    if(vdl2Poll)clearInterval(vdl2Poll); vdl2Poll=setInterval(pollVdl2,2000); pollVdl2();
+  }
+  function stopVdl2(){
+    vdl2Running=false; vdl2Btn.setAttribute('aria-pressed','false'); vdl2Btn.innerHTML='&#9654;&nbsp;Start VDL2';
+    if(vdl2Poll){clearInterval(vdl2Poll);vdl2Poll=null;}
+    fetch('/api/net/vdl2/stop',{method:'POST'}).catch(function(){});
+    if(DEMO_ON) vdl2Synth(); else { setVdl2Mode('off'); renderVdl2(); }
+  }
+  function wireVdl2Install(){ var b=document.getElementById('vdl2-install'); if(!b)return;
+    b.addEventListener('click',function(){ b.textContent='Building… (~4-8 min, libacars+dumpvdl2)'; b.disabled=true;
+      fetch('/api/net/vdl2/install',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
+        if(res&&res.ok){ startVdl2(); } else { b.textContent='⬇ Install dumpvdl2'; b.disabled=false; }
+      }).catch(function(){ b.textContent='⬇ Install dumpvdl2'; b.disabled=false; }); }); }
+  function pollVdl2(){
+    fetch('/api/net/vdl2/messages?since='+vdl2Seq).then(function(r){return r.json();}).then(function(d){
+      if(!d)return;
+      if(d.running){ setVdl2Mode('live'); if(d.messages&&d.messages.length){ d.messages.forEach(function(m){vdl2Msgs.push(m);}); vdl2Seq=d.seq; if(vdl2Msgs.length>500)vdl2Msgs=vdl2Msgs.slice(-500); renderVdl2(); } }
+      else if(d.error && DEMO_ON){ vdl2Synth(); }
+    }).catch(function(){});
+  }
+  // synthetic VDL2 — mix of CPDLC, ADS-C and ACARS-over-VDL2, tied to synthetic aircraft
+  var VDSAMPLES=[
+    {type:'CPDLC',direction:'uplink',text:'[#12] CONTACT LONDON CONTROL 128.075'},
+    {type:'CPDLC',direction:'uplink',text:'[#14] CLIMB TO AND MAINTAIN FL380'},
+    {type:'CPDLC',direction:'downlink',text:'[#4] WILCO'},
+    {type:'CPDLC',direction:'downlink',text:'[#6] REQUEST DIRECT TO SURAT'},
+    {type:'CPDLC',direction:'uplink',text:'[#20] MONITOR SHANWICK 127.650'},
+    {type:'ADS-C',direction:'downlink',text:'POS 51.4820 -0.4510 / 38000 ft'},
+    {type:'ADS-C',direction:'downlink',text:'POS 55.9120 -12.3400 / 36000 ft'},
+    {type:'ACARS',direction:'downlink',label:'15',label_meaning:'Position report',text:'POS N54.1 W030.2 FL360 M0.80 OAT-56'},
+    {type:'ACARS',direction:'uplink',label:'22',label_meaning:'Departure/arrival (OOOI)',text:'OUT 1412 OFF 1428 GATE A22'},
+    {type:'ACARS',direction:'downlink',label:'H1',label_meaning:'Free text',text:'OPS: EXPECT HOLDING BIG, CTOT 1455'}
+  ];
+  function vdl2Synth(){
+    setVdl2Mode('synth');
+    if(!vdl2Msgs._synth){ vdl2Msgs=[]; vdl2Msgs._synth=true; }
+    if(vdl2SynthTimer) { renderVdl2(); return; }
+    for(var i=0;i<6;i++) pushSynthVdl2();
+    renderVdl2();
+    vdl2SynthTimer=setInterval(function(){ if(Math.random()<0.75){ pushSynthVdl2(); renderVdl2(); } },2800);
+  }
+  function pushSynthVdl2(){
+    var p=(planes&&planes.length)?planes[(Math.random()*planes.length)|0]:null;
+    var s=VDSAMPLES[(Math.random()*VDSAMPLES.length)|0];
+    var ch=[136.725,136.775,136.800,136.825,136.975][(Math.random()*5)|0];
+    var icao=p?p.icao:('3C'+('0123456789ABCDEF'[(Math.random()*16)|0])+('0123456789ABCDEF'[(Math.random()*16)|0])+('0123456789ABCDEF'[(Math.random()*16)|0])+'A');
+    vdl2Msgs.push({type:s.type,direction:s.direction,icao:icao,
+      reg:s.type==='ACARS'?(p?p.tail:'D-A'+('IBCM'[(Math.random()*4)|0]+'A')):null,
+      flight:p?p.callsign:'DLH'+(100+((Math.random()*899)|0)), label:s.label||null, label_meaning:s.label_meaning||null,
+      text:s.text, freq_mhz:ch, level:-(12+((Math.random()*22)|0)), ts:Date.now()/1000});
+    if(vdl2Msgs.length>500)vdl2Msgs=vdl2Msgs.slice(-500);
+  }
+  function vdl2CheckStatus(){
+    fetch('/api/net/vdl2/status').then(function(r){return r.json();}).then(function(st){
+      if(st&&st.running){ vdl2Running=true; vdl2Btn.setAttribute('aria-pressed','true'); vdl2Btn.innerHTML='&#10074;&#10074;&nbsp;Stop VDL2'; if(!vdl2Poll){vdl2Poll=setInterval(pollVdl2,2000);pollVdl2();} return; }
+      var det=(st&&st.detect)||{};
+      if(det.tools_installed===false && !vdl2Running && vdl2Mode!=='synth' && !DEMO_ON){ vdl2Btn.title='dumpvdl2 not installed — click to install & start'; }
+      if(DEMO_ON && vdl2Mode==='off'){ vdl2Synth(); }
+    }).catch(function(){});
+  }
+
   // ---- route / world map ----
   // Click a contact -> fetch its filed route (origin/destination airports) from
   // the backend (cache-first, adsbdb on a miss) and draw a world map: the great-
@@ -837,8 +967,8 @@
   resize();
   window.addEventListener('resize',function(){resize(); routeTick();});
   requestAnimationFrame(anim);
-  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus();
-    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); }); },5000); });
+  refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); vdl2CheckStatus();
+    setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); vdl2CheckStatus(); }); },5000); });
 })();
 </script>
 </body>

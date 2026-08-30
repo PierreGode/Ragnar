@@ -348,6 +348,13 @@ EOF
             echo -e "  ${GREEN}✓${NC} Installed acarsdec (ADS-B ACARS datalink)"
         fi
     fi
+    # dumpvdl2 (+ libacars) powers the VDL Mode 2 / ATN panel (CPDLC + ADS-C).
+    if ! command -v dumpvdl2 >/dev/null 2>&1; then
+        if [ -x "$ragnar_PATH/scripts/install_dumpvdl2.sh" ] \
+           && bash "$ragnar_PATH/scripts/install_dumpvdl2.sh" >/dev/null 2>&1; then
+            echo -e "  ${GREEN}✓${NC} Installed dumpvdl2 + libacars (VDL Mode 2 / ATN datalink)"
+        fi
+    fi
     # meshtastic Python package for the Mesh Nodes page (USB companion node).
     if ! python3 -c "import meshtastic" >/dev/null 2>&1; then
         command -v pip3 >/dev/null 2>&1 || DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-pip >/dev/null 2>&1

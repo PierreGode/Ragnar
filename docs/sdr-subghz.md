@@ -368,6 +368,38 @@ the radar contacts by tail/flight and flagged **● on radar**.
   (`scripts/install_acarsdec.sh`); if missing, the panel shows an **⬇ Install
   acarsdec** button. Receive-only.
 
+## VDL Mode 2 / ATN datalink (on the ADS-B radar)
+
+The ADS-B radar page also has a **📡 VDL Mode 2 / ATN** panel — the modern
+successor to VHF ACARS. Where legacy ACARS is a character link at ~131 MHz, VDL
+Mode 2 is a 31.5 kbit/s D8PSK link on a handful of **136 MHz** channels
+(worldwide Common Signalling Channel **136.975**, plus 136.725/136.775/136.800/
+136.825). `vdl2.py` drives **`dumpvdl2`** (built against **`libacars`**) and
+classifies every frame into one of:
+
+- **ACARS-over-VDL2** — the same ops messages (position, OOOI, weather, load
+  sheets, free text) riding VDL2 instead of the old VHF link.
+- **CPDLC** (Controller-Pilot Data Link Communications) — the **ATN** text
+  between controllers and pilots: climb/descend/heading/speed clearances,
+  `CONTACT <freq>`, `MONITOR <unit>`, logon/handoff, `WILCO`/`ROGER`. Decoded by
+  libacars. This is the part that makes Ragnar, as far as we know, the first
+  field tool to surface CPDLC/ADS-C alongside an ADS-B radar.
+- **ADS-C** (Automatic Dependent Surveillance – Contract) — contracted
+  position/intent reports an aircraft sends to an ATC ground system.
+
+Each row shows the aircraft (tail/ICAO/flight, flagged **● on radar** when it
+matches a contact), a coloured **type badge**, the **direction** (↑ uplink =
+ground→aircraft, ↓ downlink = aircraft→ground), the decoded text/summary, and
+frequency/level.
+
+- **One dongle** — VDL2 (136 MHz) can't run with the 1090 MHz radar or the
+  131 MHz ACARS panel; starting it pauses the others (and vice-versa).
+- **`dumpvdl2` + `libacars`** aren't in apt, so the installer/updater build both
+  from source (`scripts/install_dumpvdl2.sh`); if missing, the panel shows an
+  **⬇ Install dumpvdl2** button. Everything is in the clear, receive-only.
+- Pure parsers (ACARS/CPDLC/ADS-C classification, direction, nested-tree
+  extraction) are covered by `vdl2.py selftest` (13/13).
+
 ## VOR radial decode (108–118 MHz nav beacon)
 
 The **VOR Radial** page (`/vor-radial`, `vor.py`) decodes a VOR nav beacon the
@@ -456,7 +488,9 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `POST /api/net/aprs/send` `{to,text}` | Send an APRS message via APRS-IS (needs write access) |
 | `GET  /api/net/acars/status` · `/messages?since=` | ACARS datalink state + decoded messages (tail/flight/label/text) |
 | `POST /api/net/acars/start` · `/stop` · `/install` | Start/stop ACARS decode; build acarsdec from source |
-| `GET  /api/net/{pager,vor}/selftest` · `/api/net/rtl/selftest` | Offline DSP / parser self-tests |
+| `GET  /api/net/vdl2/status` · `/messages?since=` | VDL Mode 2 / ATN state + decoded messages (type=ACARS/CPDLC/ADS-C, direction, tail/ICAO/flight/text) |
+| `POST /api/net/vdl2/start` · `/stop` · `/install` | Start/stop VDL2 decode (dumpvdl2, 136 MHz, one dongle); build dumpvdl2 + libacars from source |
+| `GET  /api/net/{pager,vor,vdl2}/selftest` · `/api/net/rtl/selftest` | Offline DSP / parser self-tests |
 
 ## CLI
 
