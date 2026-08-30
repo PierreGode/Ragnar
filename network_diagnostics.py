@@ -19125,12 +19125,14 @@ def register_network_diagnostics(app, logger=None):
     def net_pager_start():
         data = request.get_json(silent=True) or {}
         mode = data.get('mode') or 'pocsag_flex'
-        _log(f"net/pager/start freq={data.get('freq_hz')} mode={mode}")
+        demods = data.get('demods')        # None -> default POCSAG+FLEX; list/str -> chosen baud set
+        invert = bool(data.get('invert'))  # multimon -i (flip bitstream) for a mis-polarised channel
+        _log(f"net/pager/start freq={data.get('freq_hz')} mode={mode} demods={demods} invert={invert}")
         try:
             rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()
         except Exception:
             pass
-        return jsonify(pager.start(freq_hz=data.get('freq_hz'), mode=mode))
+        return jsonify(pager.start(freq_hz=data.get('freq_hz'), mode=mode, demods=demods, invert=invert))
 
     @app.route('/api/net/pager/stop', methods=['POST'])
     def net_pager_stop():

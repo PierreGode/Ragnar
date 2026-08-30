@@ -54,6 +54,37 @@ _RTL_FM = _which("rtl_fm")
 _MULTIMON = _which("multimon-ng")
 _MSG_RING = 500
 
+# POCSAG has three on-air baud rates (512 / 1200 / 2400) — each is a *separate*
+# multimon-ng demodulator. FLEX is one demodulator that auto-detects its speed
+# (1600 / 3200 / 6400 baud, 2- or 4-level) from the sync frame, so a single
+# "FLEX" toggle covers all FLEX speeds. Letting the user pick *which* demods run
+# is the "baud rate setting": on a FLEX-only channel, leaving the POCSAG demods
+# on makes multimon slice noise into garbage POCSAG pages, so narrowing to just
+# the protocol actually on the channel is the main cure for gibberish output.
+POCSAG_FLEX_DEMODS = ("POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX", "FLEX_NEXT")
+_DEFAULT_DEMODS = ("POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX")
+
+
+def _clean_demods(demods):
+    """Normalise a requested demod list to the supported set, order preserved.
+
+    Accepts a list/tuple or comma/space string of demod names (case-insensitive).
+    Unknown names are dropped; an empty/None request falls back to the default
+    POCSAG-512/1200/2400 + FLEX set so the decoder is never launched with no
+    demodulators (which multimon rejects)."""
+    if demods is None:
+        return list(_DEFAULT_DEMODS)
+    if isinstance(demods, str):
+        demods = re.split(r"[,\s]+", demods.strip())
+    allow = {d.upper(): d for d in POCSAG_FLEX_DEMODS}
+    out, seen = [], set()
+    for d in demods:
+        key = str(d).strip().upper()
+        if key in allow and key not in seen:
+            seen.add(key)
+            out.append(allow[key])
+    return out or list(_DEFAULT_DEMODS)
+
 # Common pager channels (label -> Hz). Regional and non-exhaustive; the UI also
 # accepts a free-form frequency. POCSAG runs on scattered VHF/UHF channels.
 PAGER_PRESETS = {
@@ -108,6 +139,7 @@ def detect():
     qcii_ok = tools["rtl_fm"] and tools["numpy"] and device
     base = {"tools": tools, "device_present": device, "usb_id": usb,
             "presets": PAGER_PRESETS, "qcii_available": qcii_ok,
+            "demods": list(POCSAG_FLEX_DEMODS), "default_demods": list(_DEFAULT_DEMODS),
             "tools_installed": tools["multimon_ng"] and tools["rtl_fm"]}
     if not tools["rtl_fm"]:
         base.update(available=False, error="rtl_fm not installed (apt install rtl-sdr)")
@@ -321,6 +353,8 @@ class PagerDecoder:
         self._error = None
         self._started = None
         self._mode = "pocsag_flex"
+        self._demods = list(_DEFAULT_DEMODS)
+        self._invert = False
         self._qcii_recent = {}
 
     def status(self):
@@ -328,6 +362,7 @@ class PagerDecoder:
             return {"running": bool(self._thread and self._thread.is_alive()),
                     "freq_hz": self._freq, "messages": self._count,
                     "error": self._error, "mode": self._mode,
+                    "demods": list(self._demods), "invert": self._invert,
                     "seconds": round(time.time() - self._started, 1) if self._started else 0}
 
     def messages(self, since=0):
@@ -339,11 +374,17 @@ class PagerDecoder:
             new = [m for m in self._msgs if m["seq"] > since]
             return {"messages": new, "seq": self._count, "freq_hz": self._freq,
                     "running": bool(self._thread and self._thread.is_alive()),
-                    "mode": self._mode, "error": self._error}
+                    "mode": self._mode, "demods": list(self._demods),
+                    "invert": self._invert, "error": self._error}
 
-    _QCII_SR = 22050        # rtl_fm audio rate for the QCII tone path
+    # rtl_fm audio rate. multimon-ng's raw demodulators require exactly 22050 Hz
+    # 16-bit mono (see rtl_fm's own `-s 22050 | multimon` example); the QCII
+    # tone path reuses the same stream. Do NOT change this without re-checking
+    # multimon — a different rate is a classic cause of garbage decodes.
+    _QCII_SR = 22050
+    _RATE = 22050
 
-    def start(self, freq_hz, mode="pocsag_flex"):
+    def start(self, freq_hz, mode="pocsag_flex", demods=None, invert=False):
         try:
             freq_hz = int(float(freq_hz))
         except (TypeError, ValueError):
@@ -353,6 +394,8 @@ class PagerDecoder:
         mode = "qcii" if str(mode).lower() == "qcii" else "pocsag_flex"
         if mode == "qcii" and np is None:
             return {"ok": False, "error": "QCII decode needs numpy"}
+        demods = _clean_demods(demods)
+        invert = bool(invert)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 self._stop_locked()
@@ -362,6 +405,8 @@ class PagerDecoder:
             self._qcii_recent = {}
             self._freq = freq_hz
             self._mode = mode
+            self._demods = demods
+            self._invert = invert
             self._error = None
             self._started = time.time()
             ppm = 0
@@ -373,13 +418,25 @@ class PagerDecoder:
                 gain = None if t.get("gain_is_auto") else t.get("gain")
             except Exception:
                 pass
+            # -F 9 enables rtl_fm's low-leakage downsample FIR — noticeably
+            # cleaner narrowband FM than the default roll-off, which is exactly
+            # what marginal POCSAG/FLEX needs to slice symbols correctly.
             fm_cmd = [_RTL_FM, "-f", str(freq_hz), "-M", "fm",
-                      "-s", str(self._QCII_SR), "-l", "0", "-p", str(ppm or 0)]
+                      "-s", str(self._RATE), "-F", "9", "-l", "0", "-p", str(ppm or 0)]
             if gain is not None:
                 fm_cmd += ["-g", str(gain)]
             fm_cmd += ["-"]
-            mm_cmd = [_MULTIMON, "-a", "POCSAG512", "-a", "POCSAG1200",
-                      "-a", "POCSAG2400", "-a", "FLEX", "-f", "alpha", "-t", "raw", "-"]
+            # Only the demods the user selected (default: all POCSAG + FLEX).
+            # -u prunes statistically unlikely POCSAG decodes (kills a lot of
+            # noise-into-garbage). -i inverts the bitstream — multimon's own
+            # advice "try this if decoding fails" for a mis-polarised channel.
+            mm_cmd = [_MULTIMON]
+            for d in self._demods:
+                mm_cmd += ["-a", d]
+            mm_cmd += ["-f", "alpha", "-t", "raw", "-u"]
+            if invert:
+                mm_cmd += ["-i"]
+            mm_cmd += ["-"]
             try:
                 self._fm = subprocess.Popen(fm_cmd, stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL)
@@ -492,7 +549,7 @@ class PagerDecoder:
 _decoder = PagerDecoder()
 
 
-def start(freq_hz=None, mode="pocsag_flex"):
+def start(freq_hz=None, mode="pocsag_flex", demods=None, invert=False):
     d = detect()
     mode = "qcii" if str(mode).lower() == "qcii" else "pocsag_flex"
     if mode == "qcii":
@@ -504,7 +561,7 @@ def start(freq_hz=None, mode="pocsag_flex"):
         return {"ok": False, "error": d.get("error", "pager decode unavailable")}
     if freq_hz is None:
         freq_hz = list(PAGER_PRESETS.values())[0]
-    return _decoder.start(freq_hz, mode=mode)
+    return _decoder.start(freq_hz, mode=mode, demods=demods, invert=invert)
 
 
 def stop():
@@ -593,6 +650,18 @@ def selftest():
           str(got))
     check("presets: common pager channels present",
           any("POCSAG" in k for k in PAGER_PRESETS) and all(24e6 <= v <= 1766e6 for v in PAGER_PRESETS.values()))
+
+    # --- demod / baud selector normalisation ---
+    check("demods: None -> default POCSAG+FLEX set",
+          _clean_demods(None) == list(_DEFAULT_DEMODS), str(_clean_demods(None)))
+    check("demods: FLEX-only request kept as-is",
+          _clean_demods(["FLEX"]) == ["FLEX"], str(_clean_demods(["FLEX"])))
+    check("demods: case-insensitive + comma string + dedupe",
+          _clean_demods("flex, pocsag1200, POCSAG1200") == ["FLEX", "POCSAG1200"],
+          str(_clean_demods("flex, pocsag1200, POCSAG1200")))
+    check("demods: unknown names dropped, empty -> default",
+          _clean_demods(["bogus", "NOTAREAL"]) == list(_DEFAULT_DEMODS),
+          str(_clean_demods(["bogus"])))
 
     # --- Motorola QCII two-tone decode (synthesised audio, no hardware) ---
     if np is not None:
