@@ -19036,11 +19036,6 @@ def register_network_diagnostics(app, logger=None):
                 return None
         return jsonify(adsb.nearby(_f('lat'), _f('lon'), _f('dist') or 60))
 
-    @app.route('/api/net/adsb/iploc', methods=['GET'])
-    def net_adsb_iploc():
-        # Approx receiver location from the box's public IP (browser-geo fallback).
-        return jsonify(adsb.iploc())
-
     @app.route('/api/net/adsb/selftest', methods=['GET'])
     def net_adsb_selftest():
         return jsonify(adsb.selftest())
