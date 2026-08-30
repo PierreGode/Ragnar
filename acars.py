@@ -106,7 +106,7 @@ def label_meaning(label):
 def normalize_acars(obj):
     """Normalize one acarsdec JSON object into a flat message record (pure).
 
-    acarsdec ``-o 5`` (or ``--output json``) emits one JSON object per message.
+    acarsdec ``-o 4`` (msg JSON) emits one JSON object per message.
     Field names vary a little by version, so read defensively. Returns
     {tail, flight, label, block_id, msgno, mode, text, freq_mhz, level, ...}.
     """
@@ -196,8 +196,12 @@ class AcarsDecoder:
                 ppm = rtl_sdr.get_tuning().get("ppm", 0)
             except Exception:
                 pass
-            # acarsdec: RTL device 0, JSON to stdout, all default channels.
-            cmd = [_ACARSDEC, "-o", "5", "-p", str(ppm or 0), "-r", "0"] + \
+            # acarsdec: RTL device 0, per-message JSON to stdout, all channels.
+            # NOTE: in acarsdec 3.x `-o 4` is *msg* JSON (one object per ACARS
+            # message: tail/label/text/…) — what normalize_acars() expects.
+            # `-o 5` is *route* JSON (sparse per-flight route summaries), which
+            # almost never emits, so the panel looked silent. Use 4.
+            cmd = [_ACARSDEC, "-o", "4", "-p", str(ppm or 0), "-r", "0"] + \
                   ["%.3f" % f for f in ACARS_CHANNELS_MHZ]
             try:
                 self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
