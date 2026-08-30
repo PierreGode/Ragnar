@@ -342,7 +342,20 @@ decoded in-process (no multimon-ng) — see `qcii_detect` in `pagerdecode.py`.
 > `pager` import name, so the decoder module was renamed to avoid the clash.
 
 - **Channels** — a preset list of common POCSAG/FLEX frequencies plus a
-  free-form MHz box. Uses the current PPM/gain tuning.
+  free-form MHz box. Uses the current PPM/gain tuning. `rtl_fm` runs with its
+  low-leakage downsample filter (`-F 9`) for cleaner narrowband FM, and
+  multimon-ng with `-u` (prune statistically unlikely decodes).
+- **Baud / demod selector** — POCSAG has three on-air baud rates (512 / 1200 /
+  2400), each a *separate* multimon-ng demodulator; **FLEX** is one demodulator
+  that auto-detects its own speed (1600 / 3200 / 6400 baud, 2- or 4-level). The
+  page's **Baud** checkboxes choose which demods run (`{demods:[…]}` on the start
+  API). This is the main cure for **garbage output**: on a FLEX-only channel,
+  leaving the POCSAG demods enabled makes multimon slice noise into junk
+  "POCSAG" pages — untick the protocols the channel doesn't carry and the
+  garbage stops. Defaults to all four (512/1200/2400 + FLEX).
+- **Invert** — the **Invert** toggle adds multimon's `-i` (flip the demodulated
+  bitstream), multimon's own advice for a channel that decodes but comes out
+  scrambled (mis-polarised signal). `{invert:true}` on the start API.
 - **`multimon-ng`** is in the Debian/Pi OS apt repos, so the installer/updater
   install it cleanly; if missing, the page shows an **⬇ Install multimon-ng**
   button (`POST /api/net/pager/install`).
@@ -486,8 +499,8 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `POST /api/net/mesh/start` · `/stop` · `/install` | Connect / disconnect the USB Meshtastic node; install meshtastic + paho-mqtt |
 | `POST /api/net/mesh/mqtt/connect` `{host?,port?,user?,password?,topic?}` · `/mqtt/disconnect` | Connect/disconnect the Meshtastic MQTT Internet feed (no node needed) |
 | `POST /api/net/mesh/send` `{text,to?,channel?,via?}` | Send a mesh text message via the node (LoRa) or MQTT (`via`=auto\|serial\|mqtt) |
-| `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state (`mode`, `qcii_available`) + decoded POCSAG/FLEX/QCII messages |
-| `POST /api/net/pager/start` `{freq_hz, mode?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`); install multimon-ng |
+| `GET  /api/net/pager/status` · `/messages?since=` | Pager decode state (`mode`, `demods`, `invert`, `qcii_available`) + decoded POCSAG/FLEX/QCII messages |
+| `POST /api/net/pager/start` `{freq_hz, mode?, demods?, invert?}` · `/stop` · `/install` | Start/stop pager decode (`mode`=`pocsag_flex`\|`qcii`; `demods`=subset of POCSAG512/1200/2400/FLEX; `invert`=flip bitstream); install multimon-ng |
 | `GET  /api/net/vor/status` | VOR decode state + latest `fix` (radial/lock/quality) |
 | `POST /api/net/vor/start` `{freq_hz, cal_deg?}` · `/stop` | Start/stop VOR radial decode on a 108–118 MHz station |
 | `GET  /api/net/aprs/status` · `/packets?since=` · `/stations` · `/messages?since=` | APRS state + packet feed + station map + messages |

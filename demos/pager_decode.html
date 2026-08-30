@@ -35,6 +35,9 @@
   button.go[aria-pressed="true"]{background:rgba(63,181,107,.14);border-color:rgba(63,181,107,.5);color:var(--live)}
   select.tin,input.tin{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 8px}
   input.tin{width:120px}
+  .chk{font-family:var(--mono);font-size:11px;color:var(--ink-dim);display:inline-flex;align-items:center;gap:4px;margin-right:8px;cursor:pointer;user-select:none}
+  .chk input{accent-color:var(--pager);cursor:pointer;margin:0}
+  #demodgrp,#invgrp{flex-wrap:wrap}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;position:relative}
   .cap{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
   .cap .t{font-family:var(--head);font-weight:600;font-size:14px} .cap .c{font-family:var(--mono);font-size:11px;color:var(--muted)}
@@ -75,6 +78,16 @@
     <div class="grp"><span class="lbl">Protocol</span><select class="tin" id="pmode" title="POCSAG/FLEX use multimon-ng; QCII is Motorola two-tone (decoded in-process)">
       <option value="pocsag_flex">POCSAG / FLEX</option>
       <option value="qcii">Motorola QCII</option></select></div>
+    <div class="grp" id="demodgrp" title="Which demodulators multimon-ng runs. On a FLEX-only channel, leaving POCSAG on makes it slice noise into garbage — narrow to just the protocol that's actually there.">
+      <span class="lbl">Baud</span>
+      <label class="chk"><input type="checkbox" class="dm" value="POCSAG512" checked>POCSAG&nbsp;512</label>
+      <label class="chk"><input type="checkbox" class="dm" value="POCSAG1200" checked>POCSAG&nbsp;1200</label>
+      <label class="chk"><input type="checkbox" class="dm" value="POCSAG2400" checked>POCSAG&nbsp;2400</label>
+      <label class="chk"><input type="checkbox" class="dm" value="FLEX" checked>FLEX</label>
+    </div>
+    <div class="grp" id="invgrp" title="multimon -i: flip the demodulated bitstream. Try this if a channel decodes but the text is gibberish (mis-polarised signal).">
+      <label class="chk"><input type="checkbox" id="invert">Invert</label>
+    </div>
     <div class="grp"><span class="tag idle" id="devtag">detecting…</span></div>
   </div>
 
@@ -92,7 +105,8 @@
   </div>
 
   <footer>
-    <div><b>How it works:</b> rtl_fm FM-demodulates the channel. POCSAG512/1200/2400 + FLEX are decoded by multimon-ng. <b>Motorola QCII</b> (fire/EMS two-tone sequential) has no multimon decoder, so Ragnar detects the ~1 s A-tone and ~3 s B-tone itself (FFT + duration gating) and reports the tone pair — the pager's address. All are unencrypted.</div>
+    <div><b>How it works:</b> rtl_fm FM-demodulates the channel (low-leakage FIR). POCSAG 512/1200/2400 + FLEX are decoded by multimon-ng. <b>Motorola QCII</b> (fire/EMS two-tone sequential) has no multimon decoder, so Ragnar detects the ~1 s A-tone and ~3 s B-tone itself (FFT + duration gating) and reports the tone pair — the pager's address. All are unencrypted.</div>
+    <div style="margin-top:6px"><b>Getting garbage?</b> The <b>Baud</b> boxes pick which demodulators run. POCSAG's three speeds (512/1200/2400) are separate demods; <b>FLEX</b> auto-detects its own speed (1600/3200/6400). On a FLEX-only channel, leaving POCSAG on makes multimon slice noise into junk "POCSAG" pages — <b>uncheck the ones the channel doesn't use</b> and the garbage stops. If a channel decodes but the text is scrambled, try <b>Invert</b> (flips the bitstream for a mis-polarised signal).</div>
     <div style="margin-top:6px"><b>One dongle:</b> this takes the RTL-SDR from the sub-GHz sweep / ADS-B while running. <b>Legality:</b> pager messages are often sensitive (medical, security) — decode third-party traffic only where lawful.</div>
   </footer>
 </div>
@@ -116,7 +130,17 @@
   function chosenFreqHz(){ var v=parseFloat(freqIn.value); if(isFinite(v)) return Math.round(v*1e6); if(presetSel.value) return parseInt(presetSel.value,10); return null; }
   var pmodeSel=document.getElementById('pmode');
   function chosenMode(){ return pmodeSel.value==='qcii'?'qcii':'pocsag_flex'; }
-  pmodeSel.addEventListener('change',function(){ if(running) startRun(); });
+  var demodGrp=document.getElementById('demodgrp'), invGrp=document.getElementById('invgrp'), invertCb=document.getElementById('invert');
+  function chosenDemods(){ return [].slice.call(document.querySelectorAll('.dm')).filter(function(c){return c.checked;}).map(function(c){return c.value;}); }
+  function chosenInvert(){ return !!invertCb.checked; }
+  // POCSAG baud + invert only apply to the multimon (POCSAG/FLEX) path — hide for QCII.
+  function syncDemodUI(){ var pf=chosenMode()==='pocsag_flex'; demodGrp.style.display=pf?'':'none'; invGrp.style.display=pf?'':'none'; }
+  pmodeSel.addEventListener('change',function(){ syncDemodUI(); if(running) startRun(); });
+  [].slice.call(document.querySelectorAll('.dm')).forEach(function(c){ c.addEventListener('change',function(){
+    if(!chosenDemods().length){ c.checked=true; return; }   // never allow zero demods
+    if(running) startRun(); }); });
+  invertCb.addEventListener('change',function(){ if(running) startRun(); });
+  syncDemodUI();
 
   function setMode(m){ mode=m; var el=document.getElementById('s-mode'); el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle')); el.textContent=(m==='live'?'decoding':(m==='synth'?'synthetic':'idle')); }
   function showVeil(t,s,inst){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');veilInstall.style.display=inst?'inline-block':'none';}
@@ -149,7 +173,7 @@
     var hz=chosenFreqHz(); if(!hz){ return; }
     running=true; var b=document.getElementById('startbtn'); b.setAttribute('aria-pressed','true'); b.innerHTML='&#10074;&#10074;&nbsp;Stop';
     seq=0; msgs=[]; freqHz=hz; renderTable();
-    fetch('/api/net/pager/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq_hz:hz,mode:chosenMode()})})
+    fetch('/api/net/pager/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq_hz:hz,mode:chosenMode(),demods:chosenDemods(),invert:chosenInvert()})})
       .then(function(r){return r.json();}).then(function(res){ if(res&&res.error){ if(DEMO_ON)synthMode(); else showVeil('Could not start',res.error); } }).catch(function(){});
     if(poll)clearInterval(poll); poll=setInterval(pollLive,1500); pollLive();
   }
