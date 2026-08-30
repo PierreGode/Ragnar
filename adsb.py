@@ -26,6 +26,7 @@ CLI
     python3 adsb.py selftest
 """
 
+import json
 import math
 import os
 import socket
@@ -33,6 +34,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 
 
 def _which(name):
@@ -392,6 +395,170 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 
 
 # --------------------------------------------------------------------------
+# Flight-route enrichment (callsign -> origin/destination airports)
+#
+# ADS-B carries the live position but NOT the filed route, so the origin and
+# destination airports come from a lookup keyed on the callsign. We use
+# adsbdb.com (free, no API key) and cache every answer to data/adsb_routes.json
+# so repeat sightings are instant and known routes still render with no
+# connectivity. The live position/track never need the network; only the first
+# look-up of a given callsign does. Look-ups are on-demand (when the operator
+# clicks an aircraft), not a background poll, to stay light on the free service.
+# --------------------------------------------------------------------------
+
+_ADSBDB_BASE = "https://api.adsbdb.com/v0"
+_ROUTE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "data", "adsb_routes.json")
+_ROUTE_TTL = 12 * 3600          # a callsign's route is a per-day fact (callsigns
+                                # are reused across legs) — a stored copy older
+                                # than ~half a day is suspect; refetch when online.
+                                # Past this we still serve the cache OFFLINE only.
+_ROUTE_NEG_TTL = 6 * 3600       # retry "unknown" callsigns after a while
+_HTTP_TIMEOUT = 6
+_route_lock = threading.Lock()
+_route_cache = None             # lazy-loaded {callsign: {route, fetched}}
+
+
+def _airport_from_adsbdb(d):
+    """Normalize one adsbdb airport object to our compact shape (pure)."""
+    if not isinstance(d, dict):
+        return None
+    try:
+        lat = float(d.get("latitude"))
+        lon = float(d.get("longitude"))
+    except (TypeError, ValueError):
+        return None
+    return {"iata": d.get("iata_code") or "", "icao": d.get("icao_code") or "",
+            "name": d.get("name") or "", "municipality": d.get("municipality") or "",
+            "country": d.get("country_name") or "", "lat": lat, "lon": lon}
+
+
+def parse_adsbdb_route(payload):
+    """Parse an adsbdb /v0/callsign response into a normalized route (pure).
+
+    Returns {callsign, callsign_iata, origin, destination} with origin/destination
+    each a compact airport dict, or None when the callsign is unknown or the
+    payload lacks both endpoints. Never raises on malformed input.
+    """
+    if not isinstance(payload, dict):
+        return None
+    resp = payload.get("response")
+    if not isinstance(resp, dict):
+        return None                      # "unknown callsign" comes back as a string
+    fr = resp.get("flightroute")
+    if not isinstance(fr, dict):
+        return None
+    origin = _airport_from_adsbdb(fr.get("origin"))
+    dest = _airport_from_adsbdb(fr.get("destination"))
+    if not origin and not dest:
+        return None
+    return {"callsign": fr.get("callsign") or fr.get("callsign_icao") or "",
+            "callsign_iata": fr.get("callsign_iata") or "",
+            "origin": origin, "destination": dest}
+
+
+def great_circle_points(lat1, lon1, lat2, lon2, n=48):
+    """Sample n points along the great circle from 1 to 2 (pure).
+
+    Spherical interpolation so a long route draws as the true curved arc a plane
+    flies, not a straight line on the map. Returns [[lat, lon], ...].
+    """
+    n = max(2, int(n))
+    p1, l1 = math.radians(lat1), math.radians(lon1)
+    p2, l2 = math.radians(lat2), math.radians(lon2)
+    d = 2 * math.asin(min(1.0, math.sqrt(
+        math.sin((p2 - p1) / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin((l2 - l1) / 2) ** 2)))
+    if d == 0:
+        return [[lat1, lon1], [lat2, lon2]]
+    out = []
+    for i in range(n):
+        f = i / (n - 1)
+        a = math.sin((1 - f) * d) / math.sin(d)
+        b = math.sin(f * d) / math.sin(d)
+        x = a * math.cos(p1) * math.cos(l1) + b * math.cos(p2) * math.cos(l2)
+        y = a * math.cos(p1) * math.sin(l1) + b * math.cos(p2) * math.sin(l2)
+        z = a * math.sin(p1) + b * math.sin(p2)
+        out.append([math.degrees(math.atan2(z, math.sqrt(x * x + y * y))),
+                    math.degrees(math.atan2(y, x))])
+    return out
+
+
+def route_progress(route_rec, lat, lon, gs=None):
+    """Great-circle geometry + progress for a route given the live position (pure).
+
+    progress is flown / (flown + remaining) — robust to a plane slightly off the
+    filed track or past the destination. eta_min uses ground speed (knots) when
+    supplied. Returns None unless both endpoints are known.
+    """
+    if not route_rec:
+        return None
+    o, d = route_rec.get("origin"), route_rec.get("destination")
+    if not (o and d):
+        return None
+    total = haversine_km(o["lat"], o["lon"], d["lat"], d["lon"])
+    out = {"total_km": round(total, 1),
+           "arc": great_circle_points(o["lat"], o["lon"], d["lat"], d["lon"])}
+    if lat is not None and lon is not None:
+        flown = haversine_km(o["lat"], o["lon"], lat, lon)
+        remaining = haversine_km(lat, lon, d["lat"], d["lon"])
+        denom = flown + remaining
+        out["flown_km"] = round(flown, 1)
+        out["remaining_km"] = round(remaining, 1)
+        out["progress"] = round(flown / denom, 3) if denom > 0 else 0.0
+        try:
+            g = float(gs)
+            if g > 20:
+                out["eta_min"] = round(remaining / (g * 1.852) * 60)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _bearing(lat1, lon1, lat2, lon2):
+    """Initial great-circle bearing from point 1 to point 2, degrees 0-360."""
+    a1, b1, a2, b2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    dl = b2 - b1
+    y = math.sin(dl) * math.cos(a2)
+    x = math.cos(a1) * math.sin(a2) - math.sin(a1) * math.cos(a2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360.0) % 360.0
+
+
+def _ang_diff(a, b):
+    """Smallest absolute angle between two bearings (0-180 degrees)."""
+    d = abs(a - b) % 360.0
+    return d if d <= 180.0 else 360.0 - d
+
+
+def route_live_match(route_rec, lat, lon, track):
+    """Sanity-check a *filed* route against the aircraft's REAL live heading.
+
+    adsbdb keys routes on callsign, which is the *scheduled* route. But a callsign
+    is reused across legs/days, so the live aircraft flying it right now may be on
+    a different (or the return) leg — adsbdb then hands back a confidently-wrong
+    destination. We already have the live position + track, so we can catch this:
+    if the plane is well en-route yet heading *away* from the filed destination,
+    the route is almost certainly stale.
+
+    Returns None when it can't judge (missing data, or too close to the
+    destination where approach turns make heading unreliable); otherwise
+    {"ok": bool, "delta": deg} where delta is |track − bearing-to-destination|.
+    """
+    if not route_rec or lat is None or lon is None or track is None:
+        return None
+    d = route_rec.get("destination")
+    if not (d and d.get("lat") is not None and d.get("lon") is not None):
+        return None
+    # Within ~60 km of the destination the aircraft may be turning onto approach;
+    # heading is no longer a reliable "am I going there" signal.
+    if haversine_km(lat, lon, d["lat"], d["lon"]) < 60:
+        return None
+    delta = _ang_diff(float(track), _bearing(lat, lon, d["lat"], d["lon"]))
+    # >100 deg off = flying away from the filed destination -> stale route.
+    return {"ok": delta <= 100.0, "delta": round(delta)}
+
+
+# --------------------------------------------------------------------------
 # Live aircraft tracker (drives dump1090 + reads its SBS stream)
 # --------------------------------------------------------------------------
 
@@ -630,7 +797,9 @@ def status():
 
 
 def aircraft():
-    return _tracker.aircraft()
+    d = _tracker.aircraft()
+    enrich_types(d.get("aircraft") or [])       # fill ICAO type (A320/B738) from adsb.lol, cached
+    return d
 
 
 def install():
@@ -665,6 +834,316 @@ def install():
     return {"ok": ok, "output": tail, "detect": detect(),
             "error": None if ok else ("could not install dump1090 — apt has no package and the "
                                       "source build failed (needs internet + build tools). See output.")}
+
+
+# --------------------------------------------------------------------------
+# Route look-up + cache (stateful; the only part that touches the network)
+# --------------------------------------------------------------------------
+
+def _route_cache_get():
+    global _route_cache
+    if _route_cache is None:
+        try:
+            with open(_ROUTE_CACHE, "r") as f:
+                _route_cache = json.load(f)
+            if not isinstance(_route_cache, dict):
+                _route_cache = {}
+        except (OSError, ValueError):
+            _route_cache = {}
+    return _route_cache
+
+
+def _route_cache_put(cs, entry):
+    with _route_lock:
+        cache = _route_cache_get()
+        cache[cs] = entry
+        try:
+            os.makedirs(os.path.dirname(_ROUTE_CACHE), exist_ok=True)
+            tmp = _ROUTE_CACHE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cache, f)
+            os.replace(tmp, _ROUTE_CACHE)
+        except OSError:
+            pass
+
+
+def _adsbdb_fetch(cs):
+    """Query adsbdb for a callsign; return a parsed route or None (network)."""
+    url = "%s/callsign/%s" % (_ADSBDB_BASE, urllib.parse.quote(cs))
+    req = urllib.request.Request(url, headers={"User-Agent": "Ragnar-ADSB/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            payload = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None                      # offline / 404 / timeout -> just no route
+    return parse_adsbdb_route(payload)
+
+
+def _cache_route(entry):
+    """Shape a cache entry into a returnable route tagged source='cache' (pure)."""
+    r = dict(entry["route"])
+    r["source"], r["fetched"] = "cache", entry.get("fetched", 0)
+    return r
+
+
+def route_lookup(callsign, use_network=True, prefer_fresh=False):
+    """Resolve a callsign to its filed route, cache-first (see module note).
+
+    Returns {origin, destination, ..., source, fetched} or None. A fresh-enough
+    cache hit is served without touching the network; a miss (or a stale entry)
+    consults adsbdb when use_network, and the answer is cached — including a
+    short-lived negative so unknown callsigns aren't re-hammered.
+
+    prefer_fresh forces a network refresh even when a cache entry is still within
+    TTL. Use it for a live/clicked aircraft: adsbdb keys routes on the callsign
+    (a per-day fact — callsigns are reused across legs), so a stored copy can name
+    a confidently-wrong destination; a live click should reflect the network's
+    current answer, with the cache kept only as the offline/failure fallback.
+    """
+    if not callsign:
+        return None
+    cs = str(callsign).strip().upper()
+    if not cs:
+        return None
+    now = time.time()
+    with _route_lock:
+        entry = _route_cache_get().get(cs)
+    # Serve a fresh-enough cache hit unless the caller asked for a live refresh.
+    if entry and not (prefer_fresh and use_network):
+        age = now - entry.get("fetched", 0)
+        if entry.get("route") and age < _ROUTE_TTL:
+            return _cache_route(entry)
+        if not entry.get("route") and age < _ROUTE_NEG_TTL:
+            return None                  # cached "unknown", still fresh
+    if not use_network:
+        # Offline: fall back to whatever we have, even past TTL — a stale route
+        # still draws, and is honestly tagged source='cache'.
+        return _cache_route(entry) if (entry and entry.get("route")) else None
+    fetched = _adsbdb_fetch(cs)
+    if fetched:
+        _route_cache_put(cs, {"route": fetched, "fetched": now})
+        r = dict(fetched)
+        r["source"], r["fetched"] = "adsbdb", now
+        return r
+    # Network fetch failed. Prefer a cached route (even stale) so the map still
+    # draws; only record a fresh negative when we have nothing to fall back on
+    # (never clobber a good cached route with a transient failure).
+    if entry and entry.get("route"):
+        return _cache_route(entry)
+    _route_cache_put(cs, {"route": None, "fetched": now})
+    return None
+
+
+def route(callsign, lat=None, lon=None, gs=None, use_network=True, track=None):
+    """Public: filed route + live progress for a callsign (drives the map view)."""
+    # A live position means this is a clicked/tracked aircraft — get adsbdb's
+    # current answer, not a possibly-stale stored copy (cache is the fallback).
+    prefer_fresh = lat is not None and lon is not None
+    r = route_lookup(callsign, use_network=use_network, prefer_fresh=prefer_fresh)
+    cs = (callsign or "").strip().upper()
+    if not r:
+        return {"callsign": cs, "route": None, "progress": None}
+    return {"callsign": r.get("callsign") or cs, "route": r,
+            "route_match": route_live_match(r, lat, lon, track),
+            "progress": route_progress(r, lat, lon, gs)}
+
+
+# --------------------------------------------------------------------------
+# Live global feed (adsb.lol) — real positions + aircraft TYPE
+#
+# ADS-B doesn't broadcast the aircraft type (A320/B738), and a local receiver
+# only sees its own bubble. adsb.lol is a free, no-key global aggregator whose
+# live records carry lat/lon/alt/gs/track PLUS the ICAO type ('t') and
+# registration ('r'). We use it three ways: to fill the **type** column for our
+# own (dump1090) contacts, to place a clicked flight at its **real** live
+# position on the route map (so the marker matches reality), and — when there is
+# no SDR but there is internet (demo) — to show the **real** aircraft near you.
+# --------------------------------------------------------------------------
+
+_ADSBLOL_BASE = "https://api.adsb.lol/v2/"
+_TYPE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "data", "adsb_types.json")
+_TYPE_NEG_TTL = 900            # retry a hex whose type we couldn't resolve
+_type_cache = None
+_type_pending = set()
+_type_lock = threading.Lock()
+_type_worker_started = False
+
+
+def _fnum(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_adsblol_ac(a):
+    """Normalize one adsb.lol aircraft record to our contact shape (pure)."""
+    if not isinstance(a, dict):
+        return None
+    hexid = (a.get("hex") or "").strip().upper().lstrip("~")
+    if not hexid:
+        return None
+    alt = a.get("alt_baro")
+    if alt == "ground":
+        alt = 0
+    cs = (a.get("flight") or "").strip() or None
+    return {"icao": hexid, "callsign": cs, "lat": _fnum(a.get("lat")),
+            "lon": _fnum(a.get("lon")), "alt": _fnum(alt), "gs": _fnum(a.get("gs")),
+            "track": _fnum(a.get("track")), "type": (a.get("t") or None),
+            "tail": (a.get("r") or None), "seen": _fnum(a.get("seen")) or 0}
+
+
+def _adsblol_get(path):
+    req = urllib.request.Request(_ADSBLOL_BASE + path,
+                                 headers={"User-Agent": "Ragnar-ADSB/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def live_lookup(hexid, callsign=None):
+    """Real live record for one aircraft from adsb.lol (by hex, then callsign)."""
+    d = _adsblol_get("hex/%s" % urllib.parse.quote((hexid or "").strip())) if hexid else None
+    ac = (d or {}).get("ac") or []
+    if not ac and callsign:
+        d = _adsblol_get("callsign/%s" % urllib.parse.quote(callsign.strip()))
+        ac = (d or {}).get("ac") or []
+    return parse_adsblol_ac(ac[0]) if ac else None
+
+
+def nearby(lat, lon, dist_nm=60):
+    """Real aircraft near a point (adsb.lol) — the demo/no-SDR live feed."""
+    la, lo = _fnum(lat), _fnum(lon)
+    if la is None or lo is None:
+        return {"aircraft": [], "error": "need lat/lon", "running": False}
+    dn = max(1, min(int(_fnum(dist_nm) or 60), 250))
+    d = _adsblol_get("lat/%s/lon/%s/dist/%d" % (la, lo, dn))
+    if d is None:
+        return {"aircraft": [], "error": "adsb.lol unreachable (offline?)",
+                "source": "adsb.lol", "running": False}
+    out = []
+    for a in (d.get("ac") or []):
+        r = parse_adsblol_ac(a)
+        if not r or r["lat"] is None:
+            continue
+        al = airline_from_callsign(r.get("callsign"))
+        if al:
+            r["airline"] = al["name"]; r["iata"] = al["iata"]
+            r["op_icao"] = al["icao"]; r["flight_iata"] = al["flight_iata"]
+        if not r.get("tail"):
+            reg = registration_from_icao(r["icao"])
+            if reg and reg.get("tail"):
+                r["tail"] = reg["tail"]
+        out.append(r)
+    out.sort(key=lambda a: a.get("callsign") or a["icao"])
+    return {"aircraft": out, "count": len(out), "source": "adsb.lol", "running": True}
+
+
+def flight(hexid, callsign, lat=None, lon=None, gs=None, use_network=True):
+    """Filed route (adsbdb) + REAL live position/type (adsb.lol) + progress.
+
+    Progress and the map marker use adsb.lol's authoritative live position when
+    available (so the plane matches reality), falling back to the position the
+    caller passed (our own receiver).
+    """
+    cs = (callsign or "").strip().upper()
+    # Clicked live aircraft: prefer adsbdb's current answer over a stored copy.
+    r = route_lookup(cs, use_network=use_network, prefer_fresh=use_network) if cs else None
+    live = live_lookup(hexid, cs) if use_network else None
+    plat = live["lat"] if (live and live.get("lat") is not None) else lat
+    plon = live["lon"] if (live and live.get("lon") is not None) else lon
+    pgs = live["gs"] if (live and live.get("gs") is not None) else gs
+    ptrk = live.get("track") if live else None
+    ac = None
+    if live and (live.get("type") or live.get("tail")):
+        ac = {"type": live.get("type"), "tail": live.get("tail")}
+    return {"callsign": (r or {}).get("callsign") or cs, "route": r, "live": live,
+            "aircraft": ac, "route_match": route_live_match(r, plat, plon, ptrk),
+            "progress": route_progress(r, plat, plon, pgs) if r else None}
+
+
+# NOTE: IP geolocation was removed on purpose. It could put the receiver hundreds
+# of km from its true position (ISPs register address ranges centrally), which
+# silently plotted aircraft at the wrong place. Receiver location now comes only
+# from GPS or manual entry; with neither, the radar self-centers on the aircraft
+# it actually receives (they are all within radio range) — see the web UI.
+
+
+# ---- aircraft-type enrichment for our own contacts (background, cached) ----
+
+def _type_cache_get():
+    global _type_cache
+    if _type_cache is None:
+        try:
+            with open(_TYPE_CACHE) as f:
+                _type_cache = json.load(f)
+            if not isinstance(_type_cache, dict):
+                _type_cache = {}
+        except (OSError, ValueError):
+            _type_cache = {}
+    return _type_cache
+
+
+def _type_cache_save():
+    try:
+        os.makedirs(os.path.dirname(_TYPE_CACHE), exist_ok=True)
+        tmp = _TYPE_CACHE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_type_cache, f)
+        os.replace(tmp, _TYPE_CACHE)
+    except OSError:
+        pass
+
+
+def _type_worker():
+    while True:
+        hexid = None
+        with _type_lock:
+            if _type_pending:
+                hexid = _type_pending.pop()
+        if not hexid:
+            time.sleep(0.5); continue
+        live = live_lookup(hexid)
+        with _type_lock:
+            _type_cache_get()[hexid] = {"type": (live or {}).get("type"),
+                                        "tail": (live or {}).get("tail"), "t": time.time()}
+            _type_cache_save()
+        time.sleep(0.8)                # rate-limit — be nice to the free service
+
+
+def _ensure_type_worker():
+    global _type_worker_started
+    if not _type_worker_started:
+        _type_worker_started = True
+        threading.Thread(target=_type_worker, daemon=True).start()
+
+
+def enrich_types(aclist):
+    """Attach cached ICAO type (+tail) to contacts; queue unknowns for lookup."""
+    if not aclist:
+        return aclist
+    _ensure_type_worker()
+    cache = _type_cache_get()
+    now = time.time()
+    for a in aclist:
+        h = a.get("icao")
+        if not h:
+            continue
+        e = cache.get(h)
+        if e:
+            if e.get("type") and not a.get("type"):
+                a["type"] = e["type"]
+            if e.get("tail") and not a.get("tail"):
+                a["tail"] = e["tail"]
+            if e.get("type") or (now - e.get("t", 0) < _TYPE_NEG_TTL):
+                continue              # resolved, or a fresh "unknown" — don't re-queue
+        with _type_lock:
+            if len(_type_pending) < 300:
+                _type_pending.add(h)
+    return aclist
 
 
 # --------------------------------------------------------------------------
@@ -746,6 +1225,63 @@ def selftest():
     check("geo: haversine Dublin-London ~464 km", abs(d - 464) < 15, "%.1f" % d)
     check("geo: bearing Dublin-London ~118 deg", abs(b - 118) < 8, "%.1f" % b)
 
+    # Route enrichment: parse an adsbdb payload (pure, no network).
+    sample = {"response": {"flightroute": {
+        "callsign": "RYR123", "callsign_iata": "FR123",
+        "origin": {"iata_code": "DUB", "icao_code": "EIDW", "name": "Dublin",
+                   "country_name": "Ireland", "latitude": 53.4213, "longitude": -6.2701},
+        "destination": {"iata_code": "STN", "icao_code": "EGSS", "name": "Stansted",
+                        "country_name": "United Kingdom", "latitude": 51.885, "longitude": 0.235}}}}
+    pr = parse_adsbdb_route(sample)
+    check("route: adsbdb payload -> DUB->STN",
+          pr and pr["origin"]["iata"] == "DUB" and pr["destination"]["icao"] == "EGSS"
+          and abs(pr["origin"]["lat"] - 53.4213) < 1e-3, str(pr))
+    check("route: unknown/garbage payload -> None",
+          parse_adsbdb_route({"response": "unknown callsign"}) is None
+          and parse_adsbdb_route({}) is None and parse_adsbdb_route(None) is None)
+    # Great-circle midpoint of the route reads ~50% flown.
+    mid = great_circle_points(pr["origin"]["lat"], pr["origin"]["lon"],
+                              pr["destination"]["lat"], pr["destination"]["lon"], 3)[1]
+    prog = route_progress(pr, mid[0], mid[1], gs=420)
+    check("route: midpoint progress ~0.5",
+          prog and abs(prog["progress"] - 0.5) < 0.05 and prog.get("eta_min", 0) > 0, str(prog))
+    check("route: great-circle arc keeps its endpoints",
+          len(prog["arc"]) >= 2
+          and abs(prog["arc"][0][0] - pr["origin"]["lat"]) < 1e-6
+          and abs(prog["arc"][-1][0] - pr["destination"]["lat"]) < 1e-6, str(prog["arc"][:1]))
+    # Offline path: no cache + no network -> None, and never raises.
+    check("route: lookup offline w/o cache -> None",
+          route_lookup("ZZZRAGNARTEST", use_network=False) is None)
+
+    # adsb.lol live record -> our contact shape (pure), incl. ICAO type.
+    la = parse_adsblol_ac({"hex": "48c2b2", "flight": "RYR7VK  ", "t": "B38M",
+                           "r": "SP-RZT", "lat": 51.39, "lon": -1.05, "alt_baro": 27925,
+                           "gs": 471.8, "track": 95})
+    check("live: adsb.lol ac -> icao/callsign/type/pos",
+          la and la["icao"] == "48C2B2" and la["callsign"] == "RYR7VK"
+          and la["type"] == "B38M" and la["tail"] == "SP-RZT"
+          and abs(la["lat"] - 51.39) < 1e-6 and la["alt"] == 27925, str(la))
+    check("live: adsb.lol 'ground' alt -> 0, empty/garbage -> None",
+          parse_adsblol_ac({"hex": "abc", "alt_baro": "ground"})["alt"] == 0
+          and parse_adsblol_ac({"hex": ""}) is None and parse_adsblol_ac(None) is None)
+
+    # bearing/angle helpers (pure geometry).
+    check("bearing: due north / due east",
+          abs(_bearing(0, 0, 1, 0) - 0) < 1 and abs(_bearing(0, 0, 0, 1) - 90) < 1)
+    check("ang_diff: wraps across 0/360",
+          _ang_diff(350, 10) == 20 and _ang_diff(10, 350) == 20 and _ang_diff(0, 180) == 180)
+    # route_live_match: a plane heading AT vs AWAY from the filed destination.
+    # dest far north (lat 60); track 0 (north) agrees, track 180 (south) is stale.
+    rr = {"destination": {"lat": 60.0, "lon": 10.0}}
+    mok = route_live_match(rr, 50.0, 10.0, 0)
+    mbad = route_live_match(rr, 50.0, 10.0, 180)
+    check("route_match: heading toward dest -> ok, away -> stale",
+          mok and mok["ok"] is True and mbad and mbad["ok"] is False, str((mok, mbad)))
+    check("route_match: None when near dest or missing track/data",
+          route_live_match(rr, 59.9, 10.0, 180) is None      # within 60km of dest
+          and route_live_match(rr, 50.0, 10.0, None) is None
+          and route_live_match(None, 50.0, 10.0, 0) is None)
+
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
             "total": len(results), "results": results}
@@ -754,7 +1290,6 @@ def selftest():
 def _main(argv):
     cmd = argv[1] if len(argv) > 1 else "detect"
     if cmd == "detect":
-        import json
         print(json.dumps(detect(), indent=2))
     elif cmd == "selftest":
         r = selftest()
@@ -777,8 +1312,21 @@ def _main(argv):
                 print("aircraft=%d messages=%d" % (a["count"], a["messages"]))
         finally:
             stop()
+    elif cmd == "route":
+        cs = argv[2] if len(argv) > 2 else ""
+        if not cs:
+            print("usage: adsb.py route <CALLSIGN>   (e.g. RYR123)")
+            return 1
+        print(json.dumps(route(cs), indent=2))
+    elif cmd == "flight":
+        print(json.dumps(flight(argv[2] if len(argv) > 2 else None,
+                                argv[3] if len(argv) > 3 else None), indent=2))
+    elif cmd == "nearby":
+        print(json.dumps(nearby(argv[2] if len(argv) > 2 else None,
+                                argv[3] if len(argv) > 3 else None,
+                                argv[4] if len(argv) > 4 else 60), indent=2))
     else:
-        print("usage: adsb.py [detect|run|selftest]")
+        print("usage: adsb.py [detect|run|selftest|route <CS>|flight <HEX> <CS>|nearby <lat> <lon> [nm]]")
     return 0
 
 

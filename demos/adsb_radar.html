@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <title>ADS-B Radar</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/web/vendor/leaflet/leaflet.css"/>
+<script src="/web/vendor/leaflet/leaflet.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -29,6 +31,7 @@
   .tag{font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid}
   .tag.live{color:var(--live);border-color:rgba(63,181,107,.45);background:rgba(63,181,107,.10)}
   .tag.synth{color:var(--accent);border-color:rgba(245,185,66,.4);background:rgba(245,185,66,.08)}
+  .tag.net{color:var(--cyan);border-color:rgba(56,189,201,.45);background:rgba(56,189,201,.10)}
   .tag.idle{color:var(--idle);border-color:rgba(84,96,116,.4);background:rgba(84,96,116,.10)}
   .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:12px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);margin-bottom:16px}
   .grp{display:flex;align-items:center;gap:7px}
@@ -80,6 +83,47 @@
   .stat .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .stat .v{font-family:var(--mono);font-size:14px;color:var(--radar)}
   footer{margin-top:16px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.6}
+  /* ---- route / world-map overlay ---- */
+  .rmask{position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;
+    background:rgba(3,6,11,.72);backdrop-filter:blur(3px);padding:20px}
+  .rmask.show{display:flex}
+  @media (max-width:520px){.rmask{padding:10px}}
+  .rmodal{width:min(1040px,100%);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;
+    background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  .rhead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+  .rhead .rt{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;min-width:0}
+  .rhead .cs{font-family:var(--head);font-weight:700;font-size:19px;color:var(--ink)}
+  .rhead .fi{font-family:var(--mono);font-size:13px;color:var(--cyan)}
+  .rhead .al{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .rclose{font-family:var(--mono);font-size:18px;line-height:1;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:8px;width:34px;height:34px;cursor:pointer;flex:0 0 auto}
+  .rclose:hover{border-color:var(--radar);color:#fff}
+  .rbody{display:grid;grid-template-columns:1.55fr 1fr;gap:0;min-height:0}
+  @media (max-width:760px){.rbody{grid-template-columns:1fr}}
+  .rmapwrap{position:relative;background:#0b1119;aspect-ratio:16/10;min-height:240px}
+  #worldmap{position:absolute;inset:0;width:100%;height:100%;background:#0b1119}
+  .leaflet-container{background:#0b1119;font-family:var(--mono)}
+  .leaflet-bar a,.leaflet-control-layers{background:var(--panel)!important;color:var(--ink)!important;border-color:var(--line)!important}
+  .aptip{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:5px;
+    font-family:var(--mono);font-size:10px;font-weight:600;padding:1px 5px;box-shadow:none}
+  .aptip::before{display:none}
+  .rinfo{padding:16px;display:flex;flex-direction:column;gap:14px;border-left:1px solid var(--line-soft);min-width:0}
+  @media (max-width:760px){.rinfo{border-left:0;border-top:1px solid var(--line-soft)}}
+  .rroute{display:flex;align-items:center;gap:10px}
+  .rap{display:flex;flex-direction:column;gap:1px;min-width:0}
+  .rap .code{font-family:var(--head);font-weight:700;font-size:22px;color:var(--ink);line-height:1}
+  .rap .cty{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+  .rarrow{flex:1;position:relative;height:2px;background:linear-gradient(90deg,var(--radar),var(--line));min-width:26px}
+  .rarrow::after{content:"\25B8";position:absolute;right:-3px;top:-9px;color:var(--radar);font-size:14px}
+  .rprog{display:flex;flex-direction:column;gap:6px}
+  .rprog .bar{height:8px;border-radius:5px;background:var(--line);overflow:hidden;position:relative}
+  .rprog .fill{height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--radar));transition:width .5s ease}
+  .rprog .pct{font-family:var(--mono);font-size:11px;color:var(--ink-dim);display:flex;justify-content:space-between}
+  .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:10px 14px}
+  .rmet{display:flex;flex-direction:column;gap:1px}
+  .rmet .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  .rmet .v{font-family:var(--mono);font-size:14px;color:var(--ink)}
+  .rnote{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.5}
+  .rnote b{color:var(--accent);font-weight:600}
 </style>
 </head>
 <body>
@@ -103,7 +147,8 @@
     <div class="grp"><button class="ctl go" id="startbtn" aria-pressed="false" title="Start / stop dump1090 (uses the RTL-SDR — stops the sub-GHz sweep)">&#9654;&nbsp;Start</button></div>
     <div class="grp"><span class="lbl">My&nbsp;lat</span><input class="tin" id="rx-lat" type="number" step="0.0001" placeholder="51.5074"></div>
     <div class="grp"><span class="lbl">My&nbsp;lon</span><input class="tin" id="rx-lon" type="number" step="0.0001" placeholder="-0.1278"></div>
-    <div class="grp"><button class="ctl" id="geobtn" title="Use this browser's location">◎ My location</button></div>
+    <div class="grp"><button class="ctl" id="geobtn" title="Set receiver location: GPS fix → browser location → approximate IP location">◎ My location</button>
+      <span class="lbl" id="loc-note" style="color:var(--cyan)"></span></div>
     <div class="grp"><span class="lbl">Range</span>
       <div class="seg" id="rangeseg">
         <button data-km="50">50</button><button data-km="100" aria-pressed="true">100</button>
@@ -126,9 +171,47 @@
       <div class="tcap"><span class="t">Contacts</span><span class="c" id="tblcount"></span></div>
       <div class="tbl">
         <table>
-          <thead><tr><th>Flight</th><th>Airline</th><th>Reg</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Dist</th></tr></thead>
-          <tbody id="tbody"><tr><td colspan="7" class="empty">No contacts yet…</td></tr></tbody>
+          <thead><tr><th>Flight</th><th>Type</th><th>Airline</th><th>Reg</th><th>ICAO</th><th>Alt</th><th>Spd</th><th>Dist</th></tr></thead>
+          <tbody id="tbody"><tr><td colspan="8" class="empty">No contacts yet…</td></tr></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- Route / world-map overlay: opens when a contact is clicked -->
+  <div class="rmask" id="rmask">
+    <div class="rmodal" role="dialog" aria-modal="true" aria-label="Flight route">
+      <div class="rhead">
+        <div class="rt">
+          <span class="cs" id="r-cs">—</span>
+          <span class="fi" id="r-fi"></span>
+          <span class="al" id="r-al"></span>
+          <span class="al" id="r-type" style="color:var(--ink-dim)"></span>
+        </div>
+        <button class="rclose" id="r-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="rbody">
+        <div class="rmapwrap">
+          <div id="worldmap"></div>
+        </div>
+        <div class="rinfo">
+          <div class="rroute" id="r-routerow" style="display:none">
+            <div class="rap"><span class="code" id="r-o-code">—</span><span class="cty" id="r-o-cty"></span></div>
+            <div class="rarrow"></div>
+            <div class="rap" style="text-align:right;align-items:flex-end"><span class="code" id="r-d-code">—</span><span class="cty" id="r-d-cty"></span></div>
+          </div>
+          <div class="rprog" id="r-progwrap" style="display:none">
+            <div class="bar"><div class="fill" id="r-fill"></div></div>
+            <div class="pct"><span id="r-pct">—</span><span id="r-eta"></span></div>
+          </div>
+          <div class="rgrid">
+            <div class="rmet"><span class="k">Altitude</span><span class="v" id="r-alt">—</span></div>
+            <div class="rmet"><span class="k">Ground speed</span><span class="v" id="r-gs">—</span></div>
+            <div class="rmet"><span class="k">Distance flown</span><span class="v" id="r-flown">—</span></div>
+            <div class="rmet"><span class="k">Remaining</span><span class="v" id="r-remain">—</span></div>
+          </div>
+          <div class="rnote" id="r-note"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -162,8 +245,7 @@
   document.getElementById('tbody').addEventListener('click',function(e){
     var tr=e.target.closest('tr[data-icao]'); if(!tr) return;
     var id=tr.getAttribute('data-icao');
-    selectedIcao=(selectedIcao===id)?null:id;
-    renderTable();
+    selectedIcao=id; renderTable(); openRoute(id);   // highlight on scope + open route map
   });
 
   var cv=document.getElementById('radar'), ctx=cv.getContext('2d');
@@ -189,15 +271,57 @@
     if(rx.lat!=null){document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon;} }
   function saveRx(){ try{localStorage.setItem('ragnar_adsb_rx',JSON.stringify(rx));}catch(e){} }
   function readRxInputs(){ var la=parseFloat(document.getElementById('rx-lat').value), lo=parseFloat(document.getElementById('rx-lon').value);
-    if(isFinite(la)&&isFinite(lo)){rx.lat=la;rx.lon=lo;saveRx();} else {rx.lat=null;rx.lon=null;} }
+    if(isFinite(la)&&isFinite(lo)){rx.lat=la;rx.lon=lo;saveRx(); onLocated();} else {rx.lat=null;rx.lon=null;} }
   document.getElementById('rx-lat').addEventListener('change',readRxInputs);
   document.getElementById('rx-lon').addEventListener('change',readRxInputs);
+  // Receiver location: the box's own GPS is the only trusted auto-source (it's
+  // exactly where the antenna is). No IP geolocation — it can be hundreds of km
+  // off depending on the ISP, which silently plots aircraft at the wrong place.
+  // With no GPS (and no manual entry) the scope self-centers on the aircraft it
+  // actually receives — see activeCenter(); we just show whatever we see.
+  var locNoteEl=document.getElementById('loc-note');
+  function locNote(t,hold){ if(!locNoteEl) return; locNoteEl.textContent=t||'';
+    clearTimeout(locNote._t); if(t&&!hold){ locNote._t=setTimeout(function(){ locNoteEl.textContent=''; },6000); } }
+  function setRx(la,lo){ rx.lat=+(+la).toFixed(5); rx.lon=+(+lo).toFixed(5); saveRx();
+    document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon; }
+  function onLocated(){ if(DEMO_ON && !running) synthMode(); }   // (re)start the real nearby feed in demo (never during real SDR)
+  function browserLocate(cb){
+    if(!navigator.geolocation || !window.isSecureContext){ if(cb)cb(false,'insecure'); return; }
+    navigator.geolocation.getCurrentPosition(
+      function(p){ setRx(p.coords.latitude,p.coords.longitude); locNote('📍 location from browser'); onLocated(); if(cb)cb(true); },
+      function(err){ if(cb)cb(false, (err&&err.code===1)?'denied':'error'); },
+      {enableHighAccuracy:false,timeout:8000,maximumAge:600000});
+  }
+  // Best source first: the box's own GPS (exact — it's where the antenna is),
+  // reusing the shared wardriving GPS so we don't open a second serial reader.
+  function gpsLocate(cb){
+    fetch('/api/wardriving/gps').then(function(r){return r.json();}).then(function(d){
+      var la=null, lo=null;
+      if(d){ if(d.has_fix && d.latitude!=null){ la=d.latitude; lo=d.longitude; }
+             else if(d.last_known && d.last_known.lat!=null){ la=d.last_known.lat; lo=d.last_known.lon; } }
+      if(la!=null && lo!=null){ setRx(la,lo); locNote('📍 GPS fix'); onLocated(); if(cb)cb(true); }
+      else if(cb) cb(false);
+    }).catch(function(){ if(cb)cb(false); });
+  }
+  // When there is no GPS/manual location, self-center the scope on the average
+  // position of the aircraft we're actually receiving — they are all within radio
+  // range, so their centroid is a good stand-in for the receiver. No IP guessing.
+  var derived={lat:null,lon:null};
+  function computeDerivedCenter(){ var la=0,lo=0,n=0;
+    for(var i=0;i<planes.length;i++){ var p=planes[i]; if(p.lat!=null&&p.lon!=null){ la+=p.lat; lo+=p.lon; n++; } }
+    if(n>0){ derived.lat=la/n; derived.lon=lo/n; } else { derived.lat=null; derived.lon=null; } }
+  // The location the scope is actually drawn around: real fix if we have one,
+  // otherwise the centroid of received traffic, otherwise nothing (empty scope).
+  function activeCenter(){ return rx.lat!=null ? rx : (derived.lat!=null ? derived : null); }
+  // Priority: box GPS → browser geolocation. No IP. If neither, the scope
+  // self-centers on received aircraft (activeCenter), so we still show what we see.
+  function ensureLocation(cb){ if(rx.lat!=null){ if(cb)cb(true); return; }
+    gpsLocate(function(g){ if(g){ if(cb)cb(true); return; }
+      browserLocate(function(ok){ if(cb)cb(!!ok); }); }); }
   document.getElementById('geobtn').addEventListener('click',function(){
-    if(!navigator.geolocation){return;}
-    navigator.geolocation.getCurrentPosition(function(p){
-      rx.lat=+p.coords.latitude.toFixed(5); rx.lon=+p.coords.longitude.toFixed(5); saveRx();
-      document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon;
-    },function(){},{enableHighAccuracy:false,timeout:8000});
+    locNote('locating…',true);
+    gpsLocate(function(g){ if(g) return;
+      browserLocate(function(ok){ if(!ok){ locNote('no GPS/geolocation — centering on received traffic; or type your lat/lon'); } }); });
   });
 
   // ---- controls ----
@@ -220,7 +344,7 @@
   function wrapText(text,x,y,maxW,lh){ var words=String(text).split(' '),line='',yy=y;
     for(var i=0;i<words.length;i++){ var t=line+words[i]+' ';
       if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),x,yy); line=words[i]+' '; yy+=lh; } else { line=t; } }
-    ctx.fillText(line.trim(),x,yy); }
+    ctx.fillText(line.trim(),x,yy); return yy; }   // returns y of the last line drawn
   function draw(){
     var W=cv.clientWidth||600, H=cv.clientHeight||600, cx=W/2, cy=H/2, R=Math.min(W,H)/2-24;
     ctx.clearRect(0,0,W,H);
@@ -243,8 +367,11 @@
       grd.addColorStop(0,'rgba(46,160,150,.0)'); grd.addColorStop(1,'rgba(46,160,150,.35)');
       ctx.strokeStyle=grd; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-R); ctx.stroke();
       ctx.restore(); }
-    // receiver dot
-    ctx.fillStyle=rx.lat!=null?'#38bdc9':'#546074'; ctx.beginPath(); ctx.arc(cx,cy,3.5,0,2*Math.PI); ctx.fill();
+    // receiver dot: cyan = real fix (GPS/manual), amber = self-centered on the
+    // aircraft we're receiving (no GPS), grey = nothing to center on yet.
+    var ctr=activeCenter();
+    ctx.fillStyle=(rx.lat!=null)?'#38bdc9':(ctr?'#f5b942':'#546074');
+    ctx.beginPath(); ctx.arc(cx,cy,3.5,0,2*Math.PI); ctx.fill();
     // planes
     var shown=0;
     planes.forEach(function(p){
@@ -272,26 +399,30 @@
       if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
       ctx.globalAlpha=1; shown++;
     });
-    // no-location hint on the scope
-    if(rx.lat==null){ ctx.fillStyle='rgba(245,185,66,.9)'; ctx.textAlign='center'; ctx.font='12px "IBM Plex Mono",monospace';
-      ctx.fillText('Set your lat/lon to place aircraft', cx, cy+R-6); }
-    // reception hint: running (live), connected, but no aircraft decoded — almost
-    // always the antenna. Draw it big in the middle so it can't be missed.
-    if(mode==='live' && running && (!planes||!planes.length) && lastHint){
+    // self-centered footer: no real fix, but we're showing received traffic
+    // centered on its own centroid — say so, quietly, so ranges read as relative.
+    if(rx.lat==null && ctr && mode==='live'){ ctx.textAlign='center';
+      ctx.fillStyle='rgba(124,138,160,.9)'; ctx.font='10px "IBM Plex Mono",monospace';
+      ctx.fillText('no GPS — centered on received traffic (type your lat/lon for true range)', cx, cy+R+30);
+    }
+    // honest empty: SDR running but nothing decoded (and not in demo). Almost
+    // always the antenna — say so plainly instead of showing anything fake.
+    if(running && mode==='live' && (!planes||!planes.length)){
       ctx.textAlign='center';
       ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
-      ctx.fillText('No aircraft decoded', cx, cy-14);
+      ctx.fillText('No aircraft in range', cx, cy-14);
       ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
-      wrapText('Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
-        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.', cx, cy+6, Math.min(R*1.6,420), 15);
+      wrapText('Nothing decoded yet — needs a 1090 MHz / ADS-B antenna with sky view '
+        +'(by/outside a window, away from the Pi). dump1090 is running — '+lastSbs+' msgs seen.',
+        cx, cy+6, Math.min(R*1.6,420), 15);
     }
   }
 
   function anim(){ if(ensureSize()){ sweepAng=(sweepAng+1.6)%360; draw(); } requestAnimationFrame(anim); }
 
-  // ---- data: enrich planes with dist/brg from receiver ----
-  function enrich(){ planes.forEach(function(p){
-    if(rx.lat!=null && p.lat!=null && p.lon!=null){ p._dist=haversineKm(rx.lat,rx.lon,p.lat,p.lon); p._brg=bearing(rx.lat,rx.lon,p.lat,p.lon); }
+  // ---- data: enrich planes with dist/brg from the active center ----
+  function enrich(){ computeDerivedCenter(); var c=activeCenter(); planes.forEach(function(p){
+    if(c && p.lat!=null && p.lon!=null){ p._dist=haversineKm(c.lat,c.lon,p.lat,p.lon); p._brg=bearing(c.lat,c.lon,p.lat,p.lon); }
     else { p._dist=null; p._brg=null; }
   }); }
 
@@ -301,7 +432,7 @@
     document.getElementById('tblcount').textContent=list.length+' contacts';
     document.getElementById('s-count').textContent=list.length;
     document.getElementById('s-msgs').textContent=msgs;
-    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="7" class="empty">'+esc(em)+'</td></tr>'; return; }
+    if(!list.length){ var em=(mode==='synth')?'Listening…':(running?(lastHint||('Listening'+(lastSbs?' · '+lastSbs+' msgs seen':'')+'…')):'Not started'); tb.innerHTML='<tr><td colspan="8" class="empty">'+esc(em)+'</td></tr>'; return; }
     tb.innerHTML=list.map(function(p){
       var flight = p.callsign||'—';
       // ICAO callsign, with the IATA flight prominently beside it (cyan) when known
@@ -316,8 +447,10 @@
       var reg = p.tail ? esc(p.tail) : '<span style="color:#546074">—</span>';
       var cc = p.country_code ? '<span style="color:var(--muted)" title="'+esc(p.country||'')+'"> '+esc(p.country_code)+'</span>' : '';
       var selc = (selectedIcao && p.icao===selectedIcao) ? ' sel' : '';
+      var typ = p.type ? '<span style="color:var(--ink-dim)">'+esc(p.type)+'</span>' : '<span style="color:#546074">—</span>';
       return '<tr class="prow'+selc+'" data-icao="'+esc(p.icao)+'">'
       +'<td class="cs">'+esc(flight)+fl2+'</td>'
+      +'<td>'+typ+'</td>'
       +'<td>'+air+'</td>'
       +'<td class="cs">'+reg+'</td>'
       +'<td>'+esc(p.icao)+cc+'</td>'
@@ -328,8 +461,8 @@
   }
 
   function setMode(m){ mode=m; var el=document.getElementById('s-mode');
-    el.className='tag '+(m==='live'?'live':(m==='synth'?'synth':'idle'));
-    el.textContent=(m==='live'?'live':(m==='synth'?'synthetic':'idle')); }
+    el.className='tag '+(m==='live'?'live':(m==='net'?'net':(m==='synth'?'synth':'idle')));
+    el.textContent=(m==='live'?'live':(m==='net'?'internet':(m==='synth'?'synthetic':'idle'))); }
   var veilInstall=document.getElementById('veil-install');
   function showVeil(t,s,canInstall){veilT.textContent=t;veilS.textContent=s||'';veil.classList.add('show');
     veilInstall.style.display=canInstall?'inline-block':'none';}
@@ -346,7 +479,9 @@
   // ---- live ----
   var poll=null;
   function startRun(){
-    running=true; startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
+    running=true; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
+    if(rx.lat==null){ ensureLocation(); }         // try GPS/browser once; else self-center on traffic
+    startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
     fetch('/api/net/adsb/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
       if(res&&res.error){ /* fall through to synth if demo, else veil */ if(DEMO_ON){synthMode();} else {showVeil('Could not start dump1090',res.error);} }
     }).catch(function(){});
@@ -362,22 +497,53 @@
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
-      if(d.running){ hideVeil(); setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0;
-        lastHint=d.hint||''; lastSbs=d.sbs_lines||0; enrich(); renderTable(); }
+      // Real-SDR mode: show ONLY what the receiver decodes. No demo/internet
+      // substitution — an empty scope means we genuinely hear nothing (draw()
+      // says so). The scope centers on GPS/manual, else on the received traffic.
+      if(d.running){ hideVeil(); lastHint=d.hint||''; lastSbs=d.sbs_lines||0;
+        stopNearby(); stopSynthSky();
+        setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); routeTick(); }
       else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
 
   // ---- synthetic sky (no hardware / demo) ----
   var synthTimer=null;
+  // "Demo" = no SDR. Prefer the REAL aircraft near you (adsb.lol) so the radar
+  // and route maps match reality; fall back to a synthetic sky only when there
+  // is no location yet or no internet.
+  var nearbyTimer=null, usingNearby=false;
   function synthMode(){
-    setMode('synth'); hideVeil();
-    if(rx.lat==null){ rx.lat=51.5074; rx.lon=-0.1278; document.getElementById('rx-lat').value=rx.lat; document.getElementById('rx-lon').value=rx.lon; }
+    if(running) return;                            // real SDR is active — never run the demo feeds
+    hideVeil();
+    if(rx.lat==null){ ensureLocation(); }          // async → onLocated() re-enters when ready
+    if(rx.lat!=null){ startNearby(); } else { startSynthSky(); }
+  }
+  function startNearby(){
+    stopSynthSky();
+    if(nearbyTimer) return;
+    function pull(){ if(running){ stopNearby(); return; } if(rx.lat==null) return;
+      var dnm=Math.max(20,Math.round(maxKm/1.852*1.3));
+      fetch('/api/net/adsb/nearby?lat='+rx.lat+'&lon='+rx.lon+'&dist='+dnm)
+        .then(function(r){return r.json();}).then(function(d){
+          if(d&&d.aircraft&&d.aircraft.length){ usingNearby=true; stopSynthSky();
+            setMode('net'); planes=d.aircraft; msgs=d.count||d.aircraft.length; enrich(); renderTable(); routeTick(); }
+          else if(!usingNearby && DEMO_ON){ startSynthSky(); }   // no real traffic/offline → demo sky (demo only)
+        }).catch(function(){ if(!usingNearby && DEMO_ON) startSynthSky(); });
+    }
+    pull(); nearbyTimer=setInterval(pull,5000);
+  }
+  function stopNearby(){ if(nearbyTimer){clearInterval(nearbyTimer);nearbyTimer=null;} usingNearby=false; }
+  function startSynthSky(){
+    if(usingNearby || running) return;   // demo sky never runs during a real SDR
+    setMode('synth');
+    if(rx.lat==null){ setRx(51.5074,-0.1278); }
     if(!planes.length || planes._synth!==true){ planes=makeSynth(); planes._synth=true; }
     if(synthTimer) return;
-    synthTimer=setInterval(function(){ stepSynth(); enrich(); renderTable(); }, 1000);
+    synthTimer=setInterval(function(){ stepSynth(); enrich(); renderTable(); routeTick(); }, 1000);
     enrich(); renderTable();
   }
+  function stopSynthSky(){ if(synthTimer){clearInterval(synthTimer);synthTimer=null;} }
   // [ICAO prefix, IATA, name] for a believable synthetic sky (with both codes).
   var synthAir=[['RYR','FR','Ryanair'],['EZY','U2','easyJet'],['BAW','BA','British Airways'],
     ['DLH','LH','Lufthansa'],['AFR','AF','Air France'],['KLM','KL','KLM'],['UAL','UA','United Airlines'],
@@ -387,13 +553,14 @@
   var synthReg=[['United States','US','N'],['United Kingdom','GB','G-'],['Germany','DE','D-'],
     ['France','FR','F-'],['Netherlands','NL','PH-'],['Ireland','IE','EI-'],['Spain','ES','EC-']];
   function synthTail(pfx){ var s=''; for(var i=0;i<(pfx==='N'?4:4);i++){ s+='ABCDEFGHJKLMNPQRSTUVWXYZ0123456789'[(Math.random()*34)|0]; } return pfx+s; }
+  var synthTypes=['A320','A321','A20N','B738','B38M','A319','B77W','A333','E190','B788','AT76'];
   function makeSynth(){ var n=9,out=[];
     for(var i=0;i<n;i++){ var brg=Math.random()*360, dist=8+Math.random()*maxKm*1.1;
       var d=destPoint(rx.lat,rx.lon,brg,dist), a=synthAir[(Math.random()*synthAir.length)|0], num=(100+((Math.random()*899)|0));
       var reg=synthReg[(Math.random()*synthReg.length)|0];
       out.push({icao:(0x400000+((Math.random()*0xBFFFFF)|0)).toString(16).toUpperCase(),
         callsign:a[0]+num, op_icao:a[0], iata:a[1], airline:a[2], flight_iata:a[1]+num,
-        tail:synthTail(reg[2]), country:reg[0], country_code:reg[1],
+        tail:synthTail(reg[2]), country:reg[0], country_code:reg[1], type:synthTypes[(Math.random()*synthTypes.length)|0],
         lat:d.lat,lon:d.lon,alt:2000+((Math.random()*38000)|0),gs:180+((Math.random()*320)|0),
         track:Math.random()*360,vert:((Math.random()*2000)|0)-1000,seen:0}); }
     return out;
@@ -504,6 +671,151 @@
     }).catch(function(){});
   }
 
+  // ---- route / world map ----
+  // Click a contact -> fetch its filed route (origin/destination airports) from
+  // the backend (cache-first, adsbdb on a miss) and draw a world map: the great-
+  // circle it flies, its live position, and % progress. The live position is
+  // always local; only the filed route needs the one-time network look-up.
+  var rmask=document.getElementById('rmask'), curRoute=null;
+  var rmap=null, routeLayer=null, mapReady=false;
+
+  function planeById(icao){ for(var i=0;i<planes.length;i++){ if(planes[i].icao===icao) return planes[i]; } return null; }
+
+  // Leaflet map — same vendored lib + Esri dark tiles as the Mesh Map.
+  function ensureMap(){
+    if(rmap||typeof L==='undefined') return;
+    rmap=L.map('worldmap',{zoomControl:true, attributionControl:false, worldCopyJump:true, minZoom:1}).setView([25,0],2);
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,maxNativeZoom:16}).addTo(rmap);
+    routeLayer=L.layerGroup().addTo(rmap); mapReady=true;
+  }
+  function planeIcon(track){ return L.divIcon({className:'', iconSize:[26,26], iconAnchor:[13,13],
+    html:'<div style="width:26px;height:26px;display:flex;align-items:center;justify-content:center;transform:rotate('+(track||0)+'deg)">'
+      +'<svg width="20" height="20" viewBox="-9 -9 18 18"><path d="M0,-8 L5.5,6 L0,3 L-5.5,6 Z" fill="#f5b942" stroke="#05080d" stroke-width="1.2"/></svg></div>'}); }
+  function airportDot(o,color){ return L.circleMarker([o.lat,o.lon],{radius:5,color:'#05080d',weight:1.5,fillColor:color,fillOpacity:1})
+    .bindTooltip(o.iata||o.icao||'',{permanent:true,direction:'top',className:'aptip',offset:[0,-3]}); }
+  function gcSample(la1,lo1,la2,lo2,n){ var p1=toRad(la1),l1=toRad(lo1),p2=toRad(la2),l2=toRad(lo2);
+    var dl=2*Math.asin(Math.min(1,Math.sqrt(Math.pow(Math.sin((p2-p1)/2),2)+Math.cos(p1)*Math.cos(p2)*Math.pow(Math.sin((l2-l1)/2),2))));
+    if(dl===0) return [[la1,lo1],[la2,lo2]];
+    var out=[]; for(var i=0;i<n;i++){ var f=i/(n-1), a=Math.sin((1-f)*dl)/Math.sin(dl), b=Math.sin(f*dl)/Math.sin(dl);
+      var x=a*Math.cos(p1)*Math.cos(l1)+b*Math.cos(p2)*Math.cos(l2), y=a*Math.cos(p1)*Math.sin(l1)+b*Math.cos(p2)*Math.sin(l2), z=a*Math.sin(p1)+b*Math.sin(p2);
+      out.push([Math.atan2(z,Math.sqrt(x*x+y*y))*180/Math.PI, Math.atan2(y,x)*180/Math.PI]); }
+    return out; }
+  function unwrap(pts){ for(var i=1;i<pts.length;i++){ var d=pts[i][1]-pts[i-1][1]; if(d>180) pts[i][1]-=360; else if(d<-180) pts[i][1]+=360; } return pts; }
+
+  function livePlane(){   // best-known position for the open flight: adsb.lol live > our own contact
+    if(curRoute&&curRoute.live&&curRoute.live.lat!=null) return curRoute.live;
+    return curRoute?planeById(curRoute.icao):null;
+  }
+  function openRoute(icao){
+    var p=planeById(icao); if(!p) return;
+    curRoute={icao:icao, cs:(p.callsign||icao), route:null, live:null, acType:(p.type||null), loading:true};
+    rmask.classList.add('show');
+    document.getElementById('r-cs').textContent=p.callsign||p.icao;
+    document.getElementById('r-fi').textContent=(p.flight_iata&&p.flight_iata!==p.callsign)?p.flight_iata:'';
+    document.getElementById('r-al').textContent=p.airline?('· '+p.airline):'';
+    document.getElementById('r-type').textContent=p.type?('· '+p.type):'';
+    document.getElementById('r-note').innerHTML='Looking up route…';
+    document.getElementById('r-routerow').style.display='none';
+    document.getElementById('r-progwrap').style.display='none';
+    ensureMap();
+    // the map div was hidden until now — let Leaflet recompute its size, then draw
+    setTimeout(function(){ if(!curRoute||curRoute.icao!==icao) return; if(rmap) rmap.invalidateSize(); drawRoute(true); renderRouteInfo(); }, 90);
+    // /flight = filed route (adsbdb) + REAL live position/type (adsb.lol), keyed on hex.
+    var cs=(p.callsign||'').trim();
+    var q='/api/net/adsb/flight?hex='+encodeURIComponent(icao)
+      +(cs?'&callsign='+encodeURIComponent(cs):'')
+      +(p.lat!=null?'&lat='+p.lat+'&lon='+p.lon:'')+(p.gs!=null?'&gs='+p.gs:'');
+    fetch(q).then(function(r){return r.json();}).then(function(d){
+      if(!curRoute||curRoute.icao!==icao) return;
+      curRoute.route=(d&&d.route)||null; curRoute.live=(d&&d.live)||null; curRoute.match=(d&&d.route_match)||null;
+      curRoute.acType=(d&&((d.aircraft&&d.aircraft.type)||(d.live&&d.live.type)))||curRoute.acType;
+      curRoute.loading=false; drawRoute(true); renderRouteInfo();
+    }).catch(function(){ if(curRoute&&curRoute.icao===icao){ curRoute.loading=false;
+      document.getElementById('r-note').innerHTML='Route look-up failed (offline?). Live position is still tracked.';
+      drawRoute(true); renderRouteInfo(); } });
+  }
+  function closeRoute(){ rmask.classList.remove('show'); curRoute=null; }
+  document.getElementById('r-close').addEventListener('click',closeRoute);
+  rmask.addEventListener('click',function(e){ if(e.target===rmask) closeRoute(); });
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape'&&rmask.classList.contains('show')) closeRoute(); });
+  function routeTick(){ if(rmask.classList.contains('show')){ drawRoute(false); renderRouteInfo(); } }
+
+  function fmtKmU(km){ return km==null?'—':(Math.round(kmToUnit(km))+' '+unit); }
+  function routeGeo(){   // live progress from the current plane position + filed route
+    if(!curRoute||!curRoute.route) return null;
+    var r=curRoute.route, o=r.origin, d=r.destination; if(!(o&&d)) return null;
+    var p=livePlane(), out={o:o,d:d,total:haversineKm(o.lat,o.lon,d.lat,d.lon)};
+    if(p&&p.lat!=null){ out.plane=p; out.flown=haversineKm(o.lat,o.lon,p.lat,p.lon); out.remaining=haversineKm(p.lat,p.lon,d.lat,d.lon);
+      var den=out.flown+out.remaining; out.frac=den>0?out.flown/den:0;
+      if(p.gs>20) out.eta=Math.round(out.remaining/(p.gs*1.852)*60); }
+    return out;
+  }
+  function renderRouteInfo(){
+    if(!curRoute) return;
+    var g=routeGeo(), p=livePlane();
+    document.getElementById('r-type').textContent=curRoute.acType?('· '+curRoute.acType):'';
+    document.getElementById('r-alt').textContent=(p&&p.alt!=null)?('FL'+Math.round(p.alt/100)):'—';
+    document.getElementById('r-gs').textContent=(p&&p.gs!=null)?(Math.round(p.gs)+' kt'):'—';
+    var rr=document.getElementById('r-routerow'), pw=document.getElementById('r-progwrap');
+    if(g){
+      rr.style.display='flex';
+      document.getElementById('r-o-code').textContent=g.o.iata||g.o.icao||'???';
+      document.getElementById('r-o-cty').textContent=g.o.municipality||g.o.name||g.o.country||'';
+      document.getElementById('r-d-code').textContent=g.d.iata||g.d.icao||'???';
+      document.getElementById('r-d-cty').textContent=g.d.municipality||g.d.name||g.d.country||'';
+      var stale=!!(curRoute.match&&curRoute.match.ok===false);
+      document.getElementById('r-flown').textContent=stale?'—':fmtKmU(g.flown);
+      document.getElementById('r-remain').textContent=stale?'—':fmtKmU(g.remaining);
+      if(g.frac!=null&&!stale){ pw.style.display='flex';
+        document.getElementById('r-fill').style.width=Math.round(g.frac*100)+'%';
+        document.getElementById('r-pct').textContent=Math.round(g.frac*100)+'% · '+fmtKmU(g.total)+' total';
+        document.getElementById('r-eta').textContent=(g.eta!=null&&g.eta>0)?('~'+g.eta+' min left'):'';
+      } else { pw.style.display='none'; }
+      var cached=(curRoute.route.source==='cache');
+      var m=curRoute.match;
+      if(m&&m.ok===false){
+        document.getElementById('r-note').innerHTML='⚠ <b>Filed route may be stale.</b> This aircraft is heading '
+          +m.delta+'° away from '+(g.d.iata||g.d.icao||'the filed destination')
+          +' — the callsign was likely reused for another leg. Live position is accurate; the route is not.';
+      } else if(cached){
+        // Live clicks force a fresh adsbdb fetch, so 'cache' now means the
+        // network was unreachable and we fell back to a stored (older) route.
+        document.getElementById('r-note').innerHTML='Filed route from <b>local cache</b> (adsbdb unreachable — this copy may be out of date). Great-circle path; live position from adsb.lol.';
+      } else {
+        document.getElementById('r-note').innerHTML='Filed route via <b>adsbdb</b> (fresh). Great-circle path; live position from adsb.lol.';
+      }
+    } else {
+      rr.style.display='none'; pw.style.display='none';
+      document.getElementById('r-flown').textContent='—'; document.getElementById('r-remain').textContent='—';
+      if(!curRoute.loading){ document.getElementById('r-note').innerHTML='No filed route found for <b>'+esc(curRoute.cs)+'</b> (adsbdb has no match, or offline). The live position is shown on the map.'; }
+    }
+  }
+
+  function drawRoute(fit){
+    if(!mapReady||!curRoute) return;
+    routeLayer.clearLayers();
+    var g=routeGeo(), p=livePlane();
+    if(!g){ // no filed route yet: show the live plane alone if we have a position
+      if(p&&p.lat!=null){ L.marker([p.lat,p.lon],{icon:planeIcon(p.track)}).addTo(routeLayer);
+        if(fit) rmap.setView([p.lat,p.lon],5); }
+      return;
+    }
+    var samp=unwrap(gcSample(g.o.lat,g.o.lon,g.d.lat,g.d.lon,96)), splitK=samp.length-1;
+    if(g.plane){ var best=1e9; for(var k=0;k<samp.length;k++){ var lo=((samp[k][1]+540)%360)-180,
+      dd=haversineKm(g.plane.lat,g.plane.lon,samp[k][0],lo); if(dd<best){best=dd;splitK=k;} } }
+    var stale=!!(curRoute.match&&curRoute.match.ok===false);
+    if(stale){ // filed route disagrees with the live heading — draw it all as low-confidence amber
+      L.polyline(samp,{color:'#f5b942',weight:1.6,opacity:.5,dashArray:'3,8'}).addTo(routeLayer);
+    } else {
+      L.polyline(samp.slice(splitK),{color:'#7c8aa0',weight:1.6,opacity:.6,dashArray:'5,7'}).addTo(routeLayer);   // remaining
+      L.polyline(samp.slice(0,splitK+1),{color:'#38bdc9',weight:2.8,opacity:.95}).addTo(routeLayer);              // flown
+    }
+    airportDot(g.o,'#3fb56b').addTo(routeLayer);
+    airportDot(g.d,'#f5b942').addTo(routeLayer);
+    if(g.plane) L.marker([g.plane.lat,g.plane.lon],{icon:planeIcon(g.plane.track)}).addTo(routeLayer);
+    if(fit){ var b=L.latLngBounds(samp); if(p&&p.lat!=null) b.extend([p.lat,p.lon]); rmap.fitBounds(b.pad(0.18)); }
+  }
+
   // ---- boot ----
   function refreshConfig(){ return fetch('/api/config').then(function(r){return r.json();}).then(function(c){ DEMO_ON=!!(c&&(c.sdr_demo===true||c.sdr_demo==='true')); }).catch(function(){}); }
   function checkStatus(){
@@ -521,8 +833,9 @@
   }
 
   loadRx();
+  if(rx.lat==null){ ensureLocation(); }   // no saved location → auto-locate so the radar can place aircraft
   resize();
-  window.addEventListener('resize',function(){resize();});
+  window.addEventListener('resize',function(){resize(); routeTick();});
   requestAnimationFrame(anim);
   refreshConfig().then(function(){ checkStatus(); acarsCheckStatus();
     setInterval(function(){ if(!running) refreshConfig().then(function(){ checkStatus(); acarsCheckStatus(); }); },5000); });

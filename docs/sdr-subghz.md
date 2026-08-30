@@ -228,6 +228,31 @@ heading vectors + a contacts table.
   is a lookup, not a conversion); and the **tail registration** + country decoded
   from the ICAO 24-bit address (exact N-number algorithm for the US; country from
   the ICAO address block elsewhere).
+- **Aircraft type** (`A320`, `B738`, `B77W`…) fills the **Type** column: ADS-B
+  doesn't broadcast type, so it's looked up by ICAO hex from **adsb.lol** (free,
+  no key) in the background and cached to `data/adsb_types.json` (gitignored), so
+  the column fills in over a few seconds and is instant thereafter.
+- **My location** (receiver position): the box's own **GPS** is the only trusted
+  auto-source (the shared wardriving `/api/wardriving/gps`, so no second serial
+  reader — and it's exactly where the antenna is). Browsers also expose
+  geolocation, but only on secure (HTTPS) origins. **There is no IP geolocation** —
+  it can place you hundreds of km off (ISPs register address ranges centrally),
+  which silently plots aircraft at the wrong spot. With no GPS and no manual entry,
+  the scope **self-centers on the aircraft it is actually receiving** (they are all
+  within radio range, so their centroid is a good stand-in for the receiver — the
+  centre dot turns amber and ranges are relative). Type a lat/lon into **My lat /
+  My lon** for true, absolute range rings; it's saved in the browser.
+- **Hearing nothing?** If the SDR is running but decodes no aircraft (common with a
+  poor/indoor 1090 MHz antenna), the radar says so plainly — *"No aircraft in
+  range"* with the live message count — rather than showing anything fake. As soon
+  as a real contact is decoded it appears. Tip: a 1090 MHz antenna with real sky
+  view (by/outside a window, away from the Pi and USB-3) makes the difference; a
+  quarter-wave is ≈6.9 cm, 3/4-wave ≈20.7 cm.
+- **No SDR? (demo)** With the RF-waterfall demo on and no dump1090, the radar and
+  route maps show the **real** aircraft near you, pulled live from **adsb.lol**
+  (`/api/net/adsb/nearby`) — real positions, types and routes — falling back to a
+  synthetic sky only with no location or no internet. Mode reads **internet**. A
+  real running SDR never shows the demo/internet feed — it shows only what it hears.
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -235,6 +260,52 @@ heading vectors + a contacts table.
   **⬇ Install dump1090** button (POSTs `/api/net/adsb/install`). Everything here
   is receive-only, and ADS-B is unauthenticated/unencrypted by design — the same
   data every flight-tracking site shows.
+
+### Flight routes (click a contact → world map)
+
+ADS-B carries the live position but **not** the filed route (origin →
+destination). Click any contact (row or blip) and Ragnar opens a **world-map
+route view**, FlightAware-style:
+
+- **Origin/destination** come from a lookup on the callsign via
+  [adsbdb.com](https://www.adsbdb.com) — **free, no API key**. Answers are cached
+  to `data/adsb_routes.json` (gitignored). Clicking an aircraft is a deliberate,
+  low-volume action, so a **live click always fetches the current answer from
+  adsbdb** rather than trusting a stored copy — adsbdb keys routes on the
+  *callsign*, a per-day fact (callsigns are reused across legs), so a stale cached
+  route was the main cause of a confidently-wrong destination. The cache is now
+  the **offline/failure fallback**: if adsbdb is unreachable the last stored route
+  still draws, honestly tagged *"from local cache (adsbdb unreachable — may be out
+  of date)"*. A cache entry older than ~12 h (`_ROUTE_TTL`) is refreshed on the
+  next online look-up. Still on-demand only — no background polling.
+- The map is **Leaflet** with **Esri dark-gray tiles** — the same vendored
+  library (`/web/vendor/leaflet/`) and basemap as the **Mesh Map**, for one
+  consistent map UX across Ragnar. It auto-fits (`fitBounds`) to the route, draws
+  the true **great-circle** arc (curved, not a straight line) as a sampled
+  polyline, splits it **flown** (cyan) vs **remaining** (dashed) at the live
+  position, and marks both airports (labelled) and the aircraft (heading-oriented
+  marker). The basemap tiles need connectivity like any slippy map; the route
+  data itself is cached, so a known route still draws its line/markers offline.
+- The plane is placed at its **real live position** and its **type** is shown:
+  clicking fetches the flight from **adsb.lol** by hex, so the marker matches
+  reality (not a stale/synthetic local fix). The side panel shows **% progress**,
+  distance flown / remaining / total, a rough **ETA** from ground speed, and
+  current altitude/speed — recomputed as the plane moves.
+- **Stale-route guard:** adsbdb keys routes on the *callsign*, which is the
+  *scheduled* route — but a callsign is reused across legs/days, so the aircraft
+  flying it right now may be on a different (or return) leg, and adsbdb then hands
+  back a confidently-wrong destination. Ragnar cross-checks the filed route against
+  the aircraft's **real live heading**: if it is well en-route yet flying *away*
+  from the filed destination (>100° off), the route is drawn faded/amber and the
+  panel warns *"Filed route may be stale"* (progress/ETA are hidden, since they'd
+  be meaningless). The live position stays accurate — only the filed route is
+  flagged. Exposed as `route_match: {ok, delta}` on `/flight`.
+- **Offline / unknown callsign:** the live position still plots on the map; the
+  panel notes no filed route was found (adsbdb had no match, or you're offline).
+  Backed by `GET /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=`
+  (`adsb.flight()` = adsbdb route + adsb.lol live position/type); the older
+  `/api/net/adsb/route` remains. Pure parsers/geometry are covered by
+  `adsb.py selftest` (24/24).
 
 ## Session record & replay
 
@@ -365,6 +436,9 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `GET  /api/net/rtl/lora` | LoRa mesh plan — Meshtastic/MeshCore/LoRaWAN (spans + channels) |
 | `GET  /api/net/rtl/tuning` · POST `{ppm,gain}` | Read / set PPM freq-correction + tuner gain (reapplied live) |
 | `GET  /api/net/adsb/status` · `/aircraft` | ADS-B radar: dump1090 state + live aircraft (icao/iata/tail/country) |
+| `GET  /api/net/adsb/route?callsign=…&lat=&lon=&gs=` | Filed route (origin/dest via adsbdb, cache-first) + live great-circle progress for the map view |
+| `GET  /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=` | Route (adsbdb) + REAL live position/type (adsb.lol) for the route map |
+| `GET  /api/net/adsb/nearby?lat=&lon=&dist=` | Real aircraft near a point (adsb.lol) — the no-SDR/demo live feed, with types |
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
