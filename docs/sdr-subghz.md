@@ -394,9 +394,17 @@ frequency/level.
 
 - **One dongle** — VDL2 (136 MHz) can't run with the 1090 MHz radar or the
   131 MHz ACARS panel; starting it pauses the others (and vice-versa).
-- **`dumpvdl2` + `libacars`** aren't in apt, so the installer/updater build both
-  from source (`scripts/install_dumpvdl2.sh`); if missing, the panel shows an
-  **⬇ Install dumpvdl2** button. Everything is in the clear, receive-only.
+- **`dumpvdl2` + `libacars`** aren't in apt (not even on Debian trixie), so the
+  installer/updater build both from source (`scripts/install_dumpvdl2.sh`); if
+  missing, the panel shows an **⬇ Install dumpvdl2** button. Everything is in the
+  clear, receive-only.
+- **If the build fails**, the script now prints the real cmake/compiler error and
+  which step failed (deps → libacars → dumpvdl2), so you can tell a Pi problem
+  from a package problem. The usual culprit on a small Pi is the parallel compile
+  running the board **out of RAM** (the OOM killer kills `cc1`): the script
+  auto-retries single-threaded, but if that still fails, add a swap file
+  (`sudo dphys-swapfile ...` or a 1 GB `/swapfile`) and retry. Other causes it
+  reports plainly: no internet (git clone fails) or a failed `apt-get update`.
 - Pure parsers (ACARS/CPDLC/ADS-C classification, direction, nested-tree
   extraction) are covered by `vdl2.py selftest` (13/13).
 
