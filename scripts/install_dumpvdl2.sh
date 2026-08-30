@@ -19,13 +19,18 @@ export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/lib/aarch64-linux-gn
 export LD_LIBRARY_PATH="/usr/local/lib:${LD_LIBRARY_PATH:-}"
 
 export DEBIAN_FRONTEND=noninteractive
+# Wait at most 90s for the dpkg lock instead of hanging forever if another apt /
+# unattended-upgrades run holds it (a common "the install just froze").
+APT_OPTS="-o DPkg::Lock::Timeout=90"
 say "Installing build dependencies via apt…"
-apt-get update >>"$LOG" 2>&1 || echo ">> apt-get update failed (stale mirror / offline?) — continuing, deps may already be present"
-# git/cmake/compiler + librtlsdr (SDR) + libjansson (JSON output, REQUIRED) +
-# libxml2/zlib (libacars formatting/compression).
-if ! apt-get install -y --no-install-recommends \
+apt-get $APT_OPTS update >>"$LOG" 2>&1 || echo ">> apt-get update failed (stale mirror / offline?) — continuing, deps may already be present"
+# Required to BUILD dumpvdl2: git/cmake/compiler, GLib (dumpvdl2 links glib-2.0 —
+# the usual missing dep on a minimal Pi), librtlsdr (SDR), libjansson (JSON
+# output). libacars pulls libxml2/zlib. All non-recommends to stay lean.
+if ! apt-get $APT_OPTS install -y --no-install-recommends \
         git build-essential cmake pkg-config \
-        librtlsdr-dev libusb-1.0-0-dev zlib1g-dev libxml2-dev libjansson-dev >>"$LOG" 2>&1; then
+        libglib2.0-dev librtlsdr-dev libusb-1.0-0-dev \
+        zlib1g-dev libxml2-dev libjansson-dev >>"$LOG" 2>&1; then
     fail "could not install build dependencies (need internet + apt). Try: sudo apt-get update"
 fi
 command -v cmake >/dev/null 2>&1 || fail "cmake missing after apt install"
