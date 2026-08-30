@@ -771,14 +771,18 @@
         document.getElementById('r-pct').textContent=Math.round(g.frac*100)+'% · '+fmtKmU(g.total)+' total';
         document.getElementById('r-eta').textContent=(g.eta!=null&&g.eta>0)?('~'+g.eta+' min left'):'';
       } else { pw.style.display='none'; }
-      var src=(curRoute.route.source==='cache')?'cache':'adsbdb';
+      var cached=(curRoute.route.source==='cache');
       var m=curRoute.match;
       if(m&&m.ok===false){
         document.getElementById('r-note').innerHTML='⚠ <b>Filed route may be stale.</b> This aircraft is heading '
           +m.delta+'° away from '+(g.d.iata||g.d.icao||'the filed destination')
           +' — the callsign was likely reused for another leg. Live position is accurate; the route is not.';
+      } else if(cached){
+        // Live clicks force a fresh adsbdb fetch, so 'cache' now means the
+        // network was unreachable and we fell back to a stored (older) route.
+        document.getElementById('r-note').innerHTML='Filed route from <b>local cache</b> (adsbdb unreachable — this copy may be out of date). Great-circle path; live position from adsb.lol.';
       } else {
-        document.getElementById('r-note').innerHTML='Filed route via <b>'+src+'</b>. Great-circle path; live position from adsb.lol.';
+        document.getElementById('r-note').innerHTML='Filed route via <b>adsbdb</b> (fresh). Great-circle path; live position from adsb.lol.';
       }
     } else {
       rr.style.display='none'; pw.style.display='none';

@@ -409,7 +409,10 @@ def bearing_deg(lat1, lon1, lat2, lon2):
 _ADSBDB_BASE = "https://api.adsbdb.com/v0"
 _ROUTE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "data", "adsb_routes.json")
-_ROUTE_TTL = 30 * 24 * 3600     # filed routes are stable — refresh ~monthly
+_ROUTE_TTL = 12 * 3600          # a callsign's route is a per-day fact (callsigns
+                                # are reused across legs) — a stored copy older
+                                # than ~half a day is suspect; refetch when online.
+                                # Past this we still serve the cache OFFLINE only.
 _ROUTE_NEG_TTL = 6 * 3600       # retry "unknown" callsigns after a while
 _HTTP_TIMEOUT = 6
 _route_lock = threading.Lock()
@@ -876,12 +879,26 @@ def _adsbdb_fetch(cs):
     return parse_adsbdb_route(payload)
 
 
-def route_lookup(callsign, use_network=True):
+def _cache_route(entry):
+    """Shape a cache entry into a returnable route tagged source='cache' (pure)."""
+    r = dict(entry["route"])
+    r["source"], r["fetched"] = "cache", entry.get("fetched", 0)
+    return r
+
+
+def route_lookup(callsign, use_network=True, prefer_fresh=False):
     """Resolve a callsign to its filed route, cache-first (see module note).
 
-    Returns {origin, destination, ..., source, fetched} or None. Cache hits are
-    served offline; a miss consults adsbdb (when use_network) and is cached —
-    including a short-lived negative so unknown callsigns aren't re-hammered.
+    Returns {origin, destination, ..., source, fetched} or None. A fresh-enough
+    cache hit is served without touching the network; a miss (or a stale entry)
+    consults adsbdb when use_network, and the answer is cached — including a
+    short-lived negative so unknown callsigns aren't re-hammered.
+
+    prefer_fresh forces a network refresh even when a cache entry is still within
+    TTL. Use it for a live/clicked aircraft: adsbdb keys routes on the callsign
+    (a per-day fact — callsigns are reused across legs), so a stored copy can name
+    a confidently-wrong destination; a live click should reflect the network's
+    current answer, with the cache kept only as the offline/failure fallback.
     """
     if not callsign:
         return None
@@ -891,28 +908,38 @@ def route_lookup(callsign, use_network=True):
     now = time.time()
     with _route_lock:
         entry = _route_cache_get().get(cs)
-    if entry:
+    # Serve a fresh-enough cache hit unless the caller asked for a live refresh.
+    if entry and not (prefer_fresh and use_network):
         age = now - entry.get("fetched", 0)
         if entry.get("route") and age < _ROUTE_TTL:
-            r = dict(entry["route"])
-            r["source"], r["fetched"] = "cache", entry["fetched"]
-            return r
+            return _cache_route(entry)
         if not entry.get("route") and age < _ROUTE_NEG_TTL:
             return None                  # cached "unknown", still fresh
     if not use_network:
-        return None
+        # Offline: fall back to whatever we have, even past TTL — a stale route
+        # still draws, and is honestly tagged source='cache'.
+        return _cache_route(entry) if (entry and entry.get("route")) else None
     fetched = _adsbdb_fetch(cs)
-    _route_cache_put(cs, {"route": fetched, "fetched": now})
     if fetched:
+        _route_cache_put(cs, {"route": fetched, "fetched": now})
         r = dict(fetched)
         r["source"], r["fetched"] = "adsbdb", now
         return r
+    # Network fetch failed. Prefer a cached route (even stale) so the map still
+    # draws; only record a fresh negative when we have nothing to fall back on
+    # (never clobber a good cached route with a transient failure).
+    if entry and entry.get("route"):
+        return _cache_route(entry)
+    _route_cache_put(cs, {"route": None, "fetched": now})
     return None
 
 
 def route(callsign, lat=None, lon=None, gs=None, use_network=True, track=None):
     """Public: filed route + live progress for a callsign (drives the map view)."""
-    r = route_lookup(callsign, use_network=use_network)
+    # A live position means this is a clicked/tracked aircraft — get adsbdb's
+    # current answer, not a possibly-stale stored copy (cache is the fallback).
+    prefer_fresh = lat is not None and lon is not None
+    r = route_lookup(callsign, use_network=use_network, prefer_fresh=prefer_fresh)
     cs = (callsign or "").strip().upper()
     if not r:
         return {"callsign": cs, "route": None, "progress": None}
@@ -1023,7 +1050,8 @@ def flight(hexid, callsign, lat=None, lon=None, gs=None, use_network=True):
     caller passed (our own receiver).
     """
     cs = (callsign or "").strip().upper()
-    r = route_lookup(cs, use_network=use_network) if cs else None
+    # Clicked live aircraft: prefer adsbdb's current answer over a stored copy.
+    r = route_lookup(cs, use_network=use_network, prefer_fresh=use_network) if cs else None
     live = live_lookup(hexid, cs) if use_network else None
     plat = live["lat"] if (live and live.get("lat") is not None) else lat
     plon = live["lon"] if (live and live.get("lon") is not None) else lon

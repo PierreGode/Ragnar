@@ -269,10 +269,15 @@ route view**, FlightAware-style:
 
 - **Origin/destination** come from a lookup on the callsign via
   [adsbdb.com](https://www.adsbdb.com) — **free, no API key**. Answers are cached
-  to `data/adsb_routes.json` (gitignored), so repeat sightings are instant and
-  known routes still render with **no connectivity**. Only the first look-up of a
-  given callsign touches the network, and only when you click an aircraft (no
-  background polling — light on the free service).
+  to `data/adsb_routes.json` (gitignored). Clicking an aircraft is a deliberate,
+  low-volume action, so a **live click always fetches the current answer from
+  adsbdb** rather than trusting a stored copy — adsbdb keys routes on the
+  *callsign*, a per-day fact (callsigns are reused across legs), so a stale cached
+  route was the main cause of a confidently-wrong destination. The cache is now
+  the **offline/failure fallback**: if adsbdb is unreachable the last stored route
+  still draws, honestly tagged *"from local cache (adsbdb unreachable — may be out
+  of date)"*. A cache entry older than ~12 h (`_ROUTE_TTL`) is refreshed on the
+  next online look-up. Still on-demand only — no background polling.
 - The map is **Leaflet** with **Esri dark-gray tiles** — the same vendored
   library (`/web/vendor/leaflet/`) and basemap as the **Mesh Map**, for one
   consistent map UX across Ragnar. It auto-fits (`fitBounds`) to the route, draws
