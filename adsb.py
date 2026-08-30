@@ -1037,72 +1037,11 @@ def flight(hexid, callsign, lat=None, lon=None, gs=None, use_network=True):
             "progress": route_progress(r, plat, plon, pgs) if r else None}
 
 
-_IPLOC_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "data", "adsb_iploc.json")
-_iploc_mem = None            # last good fix, in-memory (survives provider outages)
-
-# Free, no-key IP-geolocation providers, tried in order. Each free service rate-
-# limits aggressively, so any single one fails intermittently — we fan out across
-# a few (different networks/limits) and cache the first good answer.
-_IPLOC_PROVIDERS = (
-    ("https://ipapi.co/json/", "latitude", "longitude", "city", "country_name"),
-    ("http://ip-api.com/json/", "lat", "lon", "city", "country"),
-    ("https://ipwho.is/", "latitude", "longitude", "city", "country"),
-)
-
-
-def _iploc_fetch():
-    """Try each free provider; return the first {lat,lon,city,country} or None."""
-    for url, klat, klon, kcity, kctry in _IPLOC_PROVIDERS:
-        req = urllib.request.Request(url, headers={"User-Agent": "Ragnar-ADSB/1.0"})
-        try:
-            with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
-                d = json.loads(r.read().decode("utf-8", "replace"))
-        except Exception:
-            continue
-        if not isinstance(d, dict) or d.get("error") or d.get("success") is False \
-           or d.get("status") == "fail":
-            continue
-        la, lo = _fnum(d.get(klat)), _fnum(d.get(klon))
-        if la is None or lo is None:
-            continue
-        return {"lat": round(la, 4), "lon": round(lo, 4),
-                "city": d.get(kcity), "country": d.get(kctry)}
-    return None
-
-
-def iploc():
-    """Approximate receiver location from the box's public IP (multi-provider).
-
-    The Pi and the operator's browser usually share a public IP (same LAN), so
-    this is a good receiver default when browser geolocation is unavailable —
-    e.g. served over plain HTTP, where browsers block the Geolocation API.
-
-    Free geolocation services rate-limit hard, so we try several and, crucially,
-    **cache the last good fix** (in memory + data/adsb_iploc.json). A public IP
-    rarely moves, so a cached fix is a fine answer when every provider is briefly
-    unreachable — that's what keeps the deaf-SDR radar from blanking out.
-    """
-    global _iploc_mem
-    got = _iploc_fetch()
-    if got:
-        _iploc_mem = got
-        try:
-            with open(_IPLOC_CACHE, "w") as f:
-                json.dump(got, f)
-        except Exception:
-            pass
-        return got
-    # Every provider failed — fall back to the last good fix if we have one.
-    if _iploc_mem:
-        return dict(_iploc_mem, cached=True)
-    try:
-        with open(_IPLOC_CACHE) as f:
-            _iploc_mem = json.load(f)
-            return dict(_iploc_mem, cached=True)
-    except Exception:
-        pass
-    return {"error": "IP geolocation unreachable (offline?)"}
+# NOTE: IP geolocation was removed on purpose. It could put the receiver hundreds
+# of km from its true position (ISPs register address ranges centrally), which
+# silently plotted aircraft at the wrong place. Receiver location now comes only
+# from GPS or manual entry; with neither, the radar self-centers on the aircraft
+# it actually receives (they are all within radio range) — see the web UI.
 
 
 # ---- aircraft-type enrichment for our own contacts (background, cached) ----
@@ -1315,19 +1254,6 @@ def selftest():
           and route_live_match(rr, 50.0, 10.0, None) is None
           and route_live_match(None, 50.0, 10.0, 0) is None)
 
-    # iploc: when every provider is down, fall back to the last good fix so the
-    # deaf-SDR radar can still place aircraft (this is what stops it blanking out).
-    global _iploc_mem
-    _saved_fetch, _saved_mem = _iploc_fetch, _iploc_mem
-    try:
-        globals()["_iploc_fetch"] = lambda: None      # simulate total provider outage
-        _iploc_mem = {"lat": 55.6, "lon": 13.0, "city": "X", "country": "Y"}
-        r_cached = iploc()
-    finally:
-        globals()["_iploc_fetch"], _iploc_mem = _saved_fetch, _saved_mem
-    check("iploc: serves last-good fix on provider outage (no blank radar)",
-          r_cached.get("lat") == 55.6 and r_cached.get("cached") is True, str(r_cached))
-
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
             "total": len(results), "results": results}
@@ -1371,10 +1297,8 @@ def _main(argv):
         print(json.dumps(nearby(argv[2] if len(argv) > 2 else None,
                                 argv[3] if len(argv) > 3 else None,
                                 argv[4] if len(argv) > 4 else 60), indent=2))
-    elif cmd == "iploc":
-        print(json.dumps(iploc(), indent=2))
     else:
-        print("usage: adsb.py [detect|run|selftest|route <CS>|flight <HEX> <CS>|nearby <lat> <lon> [nm]|iploc]")
+        print("usage: adsb.py [detect|run|selftest|route <CS>|flight <HEX> <CS>|nearby <lat> <lon> [nm]]")
     return 0
 
 

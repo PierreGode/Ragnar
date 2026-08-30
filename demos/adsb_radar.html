@@ -274,10 +274,11 @@
     if(isFinite(la)&&isFinite(lo)){rx.lat=la;rx.lon=lo;saveRx(); onLocated();} else {rx.lat=null;rx.lon=null;} }
   document.getElementById('rx-lat').addEventListener('change',readRxInputs);
   document.getElementById('rx-lon').addEventListener('change',readRxInputs);
-  // Receiver location: browser geolocation, with an IP-based fallback. Browsers
-  // block the Geolocation API on insecure (plain-HTTP) origins — how Ragnar is
-  // usually reached on a LAN — so when the browser can't help we ask the backend
-  // for the box's public-IP location (same LAN ⇒ same town): a good default.
+  // Receiver location: the box's own GPS is the only trusted auto-source (it's
+  // exactly where the antenna is). No IP geolocation — it can be hundreds of km
+  // off depending on the ISP, which silently plots aircraft at the wrong place.
+  // With no GPS (and no manual entry) the scope self-centers on the aircraft it
+  // actually receives — see activeCenter(); we just show whatever we see.
   var locNoteEl=document.getElementById('loc-note');
   function locNote(t,hold){ if(!locNoteEl) return; locNoteEl.textContent=t||'';
     clearTimeout(locNote._t); if(t&&!hold){ locNote._t=setTimeout(function(){ locNoteEl.textContent=''; },6000); } }
@@ -302,19 +303,25 @@
       else if(cb) cb(false);
     }).catch(function(){ if(cb)cb(false); });
   }
-  function ipLocate(cb){ locNote('locating by IP…',true);
-    fetch('/api/net/adsb/iploc').then(function(r){return r.json();}).then(function(d){
-      if(d&&d.lat!=null){ setRx(d.lat,d.lon); locNote('📍 ~'+(d.city||'IP location')+' (approx)'); onLocated(); if(cb)cb(true); }
-      else { locNote('location unavailable'+(d&&d.error?' ('+d.error+')':'')); if(cb)cb(false); }
-    }).catch(function(){ locNote('location lookup failed'); if(cb)cb(false); }); }
-  // Priority chain: GPS fix → browser geolocation → rough IP location.
+  // When there is no GPS/manual location, self-center the scope on the average
+  // position of the aircraft we're actually receiving — they are all within radio
+  // range, so their centroid is a good stand-in for the receiver. No IP guessing.
+  var derived={lat:null,lon:null};
+  function computeDerivedCenter(){ var la=0,lo=0,n=0;
+    for(var i=0;i<planes.length;i++){ var p=planes[i]; if(p.lat!=null&&p.lon!=null){ la+=p.lat; lo+=p.lon; n++; } }
+    if(n>0){ derived.lat=la/n; derived.lon=lo/n; } else { derived.lat=null; derived.lon=null; } }
+  // The location the scope is actually drawn around: real fix if we have one,
+  // otherwise the centroid of received traffic, otherwise nothing (empty scope).
+  function activeCenter(){ return rx.lat!=null ? rx : (derived.lat!=null ? derived : null); }
+  // Priority: box GPS → browser geolocation. No IP. If neither, the scope
+  // self-centers on received aircraft (activeCenter), so we still show what we see.
   function ensureLocation(cb){ if(rx.lat!=null){ if(cb)cb(true); return; }
     gpsLocate(function(g){ if(g){ if(cb)cb(true); return; }
-      browserLocate(function(ok){ if(ok){ if(cb)cb(true); } else ipLocate(cb); }); }); }
+      browserLocate(function(ok){ if(cb)cb(!!ok); }); }); }
   document.getElementById('geobtn').addEventListener('click',function(){
     locNote('locating…',true);
     gpsLocate(function(g){ if(g) return;
-      browserLocate(function(ok){ if(!ok){ ipLocate(); } }); });   // GPS → browser → IP
+      browserLocate(function(ok){ if(!ok){ locNote('no GPS/geolocation — centering on received traffic; or type your lat/lon'); } }); });
   });
 
   // ---- controls ----
@@ -360,8 +367,11 @@
       grd.addColorStop(0,'rgba(46,160,150,.0)'); grd.addColorStop(1,'rgba(46,160,150,.35)');
       ctx.strokeStyle=grd; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,-R); ctx.stroke();
       ctx.restore(); }
-    // receiver dot
-    ctx.fillStyle=rx.lat!=null?'#38bdc9':'#546074'; ctx.beginPath(); ctx.arc(cx,cy,3.5,0,2*Math.PI); ctx.fill();
+    // receiver dot: cyan = real fix (GPS/manual), amber = self-centered on the
+    // aircraft we're receiving (no GPS), grey = nothing to center on yet.
+    var ctr=activeCenter();
+    ctx.fillStyle=(rx.lat!=null)?'#38bdc9':(ctr?'#f5b942':'#546074');
+    ctx.beginPath(); ctx.arc(cx,cy,3.5,0,2*Math.PI); ctx.fill();
     // planes
     var shown=0;
     planes.forEach(function(p){
@@ -389,49 +399,30 @@
       if(p.alt!=null){ ctx.fillStyle=sel?'rgba(245,185,66,.8)':'rgba(124,138,160,.9)'; ctx.fillText('FL'+Math.round(p.alt/100), x+7, y+9); }
       ctx.globalAlpha=1; shown++;
     });
-    // no-location hint. If aircraft ARE being received but there's no receiver
-    // location, they can't be placed — that reads as an empty radar, so call it
-    // out loudly (this is the usual cause of "nothing on radar" with a live SDR).
-    if(rx.lat==null){ ctx.textAlign='center';
-      if(running && planes && planes.length){
-        ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
-        ctx.fillText(planes.length+' aircraft received — set your location to place them', cx, cy-14);
-        ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
-        wrapText('Click ◎ My location or type your lat/lon above. (Auto-locate needs the updated backend — restart Ragnar if it was just updated.)', cx, cy+8, Math.min(R*1.6,420), 15);
-      } else {
-        ctx.fillStyle='rgba(245,185,66,.9)'; ctx.font='12px "IBM Plex Mono",monospace';
-        ctx.fillText('Set your location (◎ My location) to place aircraft', cx, cy+R-6);
-      } }
-    // internet fallback: the SDR is running but hears nothing (RF-starved), so the
-    // radar is showing REAL aircraft near you from the internet, not local RF. Say
-    // so plainly at the top so it's never mistaken for what the antenna decoded.
-    if(netFallback && (planes&&planes.length)){ ctx.textAlign='center'; var bw=Math.min(W-14,520);
-      ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 12px "Chakra Petch",system-ui,sans-serif';
-      var btxt=(mode==='synth')?'Local SDR quiet — showing a DEMO sky':'Local SDR quiet — showing INTERNET traffic near you';
-      var by=wrapText(btxt, cx, 15, bw, 14);
+    // self-centered footer: no real fix, but we're showing received traffic
+    // centered on its own centroid — say so, quietly, so ranges read as relative.
+    if(rx.lat==null && ctr && mode==='live'){ ctx.textAlign='center';
       ctx.fillStyle='rgba(124,138,160,.9)'; ctx.font='10px "IBM Plex Mono",monospace';
-      wrapText('dump1090 running · '+lastSbs+' msgs · use a 1090 antenna by a window for local decodes', cx, by+13, bw, 12);
+      ctx.fillText('no GPS — centered on received traffic (type your lat/lon for true range)', cx, cy+R+30);
     }
-    // reception hint: running, connected, but no aircraft to show (local decoded
-    // nothing AND the internet fallback has nothing yet) — almost always the
-    // antenna. Draw it big in the middle so it can't be missed.
-    if(running && (!planes||!planes.length) && rx.lat!=null){
+    // honest empty: SDR running but nothing decoded (and not in demo). Almost
+    // always the antenna — say so plainly instead of showing anything fake.
+    if(running && mode==='live' && (!planes||!planes.length)){
       ctx.textAlign='center';
       ctx.fillStyle='rgba(245,185,66,.95)'; ctx.font='600 14px "Chakra Petch",system-ui,sans-serif';
-      ctx.fillText('No aircraft decoded', cx, cy-14);
+      ctx.fillText('No aircraft in range', cx, cy-14);
       ctx.fillStyle='rgba(194,204,216,.85)'; ctx.font='11px "IBM Plex Mono",monospace';
-      var msg='Need a 1090 MHz / ADS-B antenna (the stock whip is poor at 1090). '
-        +'Place it high/by a window. dump1090 is running — '+lastSbs+' msgs seen.';
-      if(netFallback) msg+=' (No internet traffic nearby to fall back to — check connectivity, or restart Ragnar so the /nearby feed is served.)';
-      wrapText(msg, cx, cy+6, Math.min(R*1.6,420), 15);
+      wrapText('Nothing decoded yet — needs a 1090 MHz / ADS-B antenna with sky view '
+        +'(by/outside a window, away from the Pi). dump1090 is running — '+lastSbs+' msgs seen.',
+        cx, cy+6, Math.min(R*1.6,420), 15);
     }
   }
 
   function anim(){ if(ensureSize()){ sweepAng=(sweepAng+1.6)%360; draw(); } requestAnimationFrame(anim); }
 
-  // ---- data: enrich planes with dist/brg from receiver ----
-  function enrich(){ planes.forEach(function(p){
-    if(rx.lat!=null && p.lat!=null && p.lon!=null){ p._dist=haversineKm(rx.lat,rx.lon,p.lat,p.lon); p._brg=bearing(rx.lat,rx.lon,p.lat,p.lon); }
+  // ---- data: enrich planes with dist/brg from the active center ----
+  function enrich(){ computeDerivedCenter(); var c=activeCenter(); planes.forEach(function(p){
+    if(c && p.lat!=null && p.lon!=null){ p._dist=haversineKm(c.lat,c.lon,p.lat,p.lon); p._brg=bearing(c.lat,c.lon,p.lat,p.lon); }
     else { p._dist=null; p._brg=null; }
   }); }
 
@@ -488,7 +479,8 @@
   // ---- live ----
   var poll=null;
   function startRun(){
-    running=true; netFallback=false; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
+    running=true; stopNearby(); stopSynthSky();   // real SDR takes over from the demo feeds
+    if(rx.lat==null){ ensureLocation(); }         // try GPS/browser once; else self-center on traffic
     startBtn.setAttribute('aria-pressed','true'); startBtn.innerHTML='&#10074;&#10074;&nbsp;Stop';
     fetch('/api/net/adsb/start',{method:'POST'}).then(function(r){return r.json();}).then(function(res){
       if(res&&res.error){ /* fall through to synth if demo, else veil */ if(DEMO_ON){synthMode();} else {showVeil('Could not start dump1090',res.error);} }
@@ -496,26 +488,22 @@
     if(poll) clearInterval(poll); poll=setInterval(pollLive,1000); pollLive();
   }
   function stopRun(){
-    running=false; netFallback=false; startBtn.setAttribute('aria-pressed','false'); startBtn.innerHTML='&#9654;&nbsp;Start';
+    running=false; startBtn.setAttribute('aria-pressed','false'); startBtn.innerHTML='&#9654;&nbsp;Start';
     if(poll){clearInterval(poll);poll=null;}
     fetch('/api/net/adsb/stop',{method:'POST'}).catch(function(){});
     if(DEMO_ON){ synthMode(); } else { setMode('idle'); planes=[]; enrich(); renderTable(); }
   }
-  var lastHint='', lastSbs=0, netFallback=false;
+  var lastHint='', lastSbs=0;
   function pollLive(){
     fetch('/api/net/adsb/aircraft').then(function(r){return r.json();}).then(function(d){
       if(!d){return;}
+      // Real-SDR mode: show ONLY what the receiver decodes. No demo/internet
+      // substitution — an empty scope means we genuinely hear nothing (draw()
+      // says so). The scope centers on GPS/manual, else on the received traffic.
       if(d.running){ hideVeil(); lastHint=d.hint||''; lastSbs=d.sbs_lines||0;
-        var local=d.aircraft||[];
-        if(local.length){                       // real local RF contacts always win
-          netFallback=false; stopNearby(); stopSynthSky();
-          setMode('live'); planes=local; msgs=d.messages||0; enrich(); renderTable(); routeTick();
-        } else {                                 // SDR running but hears nothing (RF-starved)
-          netFallback=true; if(mode!=='synth') setMode('net');
-          if(rx.lat==null){ ensureLocation(); }  // auto-locate (GPS→browser→IP) so we can place planes
-          startNearby();                         // REAL internet traffic near you; synthetic sky only if demo
-        } }
-      else if(d.error){ netFallback=false; if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
+        stopNearby(); stopSynthSky();
+        setMode('live'); planes=d.aircraft||[]; msgs=d.messages||0; enrich(); renderTable(); routeTick(); }
+      else if(d.error){ if(DEMO_ON){synthMode();} else {showVeil('dump1090 not running',d.error);} }
     }).catch(function(){});
   }
 
@@ -534,7 +522,7 @@
   function startNearby(){
     stopSynthSky();
     if(nearbyTimer) return;
-    function pull(){ if(running && !netFallback){ stopNearby(); return; } if(rx.lat==null) return;
+    function pull(){ if(running){ stopNearby(); return; } if(rx.lat==null) return;
       var dnm=Math.max(20,Math.round(maxKm/1.852*1.3));
       fetch('/api/net/adsb/nearby?lat='+rx.lat+'&lon='+rx.lon+'&dist='+dnm)
         .then(function(r){return r.json();}).then(function(d){
@@ -547,7 +535,7 @@
   }
   function stopNearby(){ if(nearbyTimer){clearInterval(nearbyTimer);nearbyTimer=null;} usingNearby=false; }
   function startSynthSky(){
-    if(usingNearby || (running && !netFallback)) return;   // allowed as the deaf-SDR demo fallback
+    if(usingNearby || running) return;   // demo sky never runs during a real SDR
     setMode('synth');
     if(rx.lat==null){ setRx(51.5074,-0.1278); }
     if(!planes.length || planes._synth!==true){ planes=makeSynth(); planes._synth=true; }

@@ -232,32 +232,27 @@ heading vectors + a contacts table.
   doesn't broadcast type, so it's looked up by ICAO hex from **adsb.lol** (free,
   no key) in the background and cached to `data/adsb_types.json` (gitignored), so
   the column fills in over a few seconds and is instant thereafter.
-- **My location** (receiver position) resolves in priority order: **GPS fix →
-  browser geolocation → rough IP location**. The **GPS** comes from the box's own
-  receiver (the shared wardriving `/api/wardriving/gps`, so no second serial
-  reader) and is exact. Browsers **block geolocation on plain-HTTP origins** (how
-  Ragnar is usually reached on a LAN), so with no GPS it falls back to the box's
-  **public-IP location** (`/api/net/adsb/iploc`; same LAN ⇒ same town, ~city
-  accuracy — fine for a 100–400 km radar). Free geolocation services rate-limit
-  hard, so `iploc` fans out across several providers (ipapi.co, ip-api.com,
-  ipwho.is) and **caches the last good fix** (memory + `data/adsb_iploc.json`); a
-  public IP rarely moves, so a cached fix is served when every provider is briefly
-  down — this is what keeps the deaf-SDR radar from blanking out. The page
-  auto-locates on load when nothing is saved, so the radar can place aircraft
-  without manual entry.
-- **No SDR? (demo)** With the RF-waterfall demo on but no dump1090, the radar and
+- **My location** (receiver position): the box's own **GPS** is the only trusted
+  auto-source (the shared wardriving `/api/wardriving/gps`, so no second serial
+  reader — and it's exactly where the antenna is). Browsers also expose
+  geolocation, but only on secure (HTTPS) origins. **There is no IP geolocation** —
+  it can place you hundreds of km off (ISPs register address ranges centrally),
+  which silently plots aircraft at the wrong spot. With no GPS and no manual entry,
+  the scope **self-centers on the aircraft it is actually receiving** (they are all
+  within radio range, so their centroid is a good stand-in for the receiver — the
+  centre dot turns amber and ranges are relative). Type a lat/lon into **My lat /
+  My lon** for true, absolute range rings; it's saved in the browser.
+- **Hearing nothing?** If the SDR is running but decodes no aircraft (common with a
+  poor/indoor 1090 MHz antenna), the radar says so plainly — *"No aircraft in
+  range"* with the live message count — rather than showing anything fake. As soon
+  as a real contact is decoded it appears. Tip: a 1090 MHz antenna with real sky
+  view (by/outside a window, away from the Pi and USB-3) makes the difference; a
+  quarter-wave is ≈6.9 cm, 3/4-wave ≈20.7 cm.
+- **No SDR? (demo)** With the RF-waterfall demo on and no dump1090, the radar and
   route maps show the **real** aircraft near you, pulled live from **adsb.lol**
   (`/api/net/adsb/nearby`) — real positions, types and routes — falling back to a
-  synthetic sky only with no location or no internet. Mode reads **internet**.
-- **SDR connected but hearing nothing?** A poor/indoor antenna at 1090 MHz (e.g. a
-  wide-band telescopic whip) may decode zero aircraft even with dump1090 running.
-  Rather than leave the radar empty, Ragnar falls back to the **internet** feed
-  (real aircraft near you) and says so plainly — a banner reads *"Local SDR quiet
-  — showing INTERNET traffic near you"* with the live msg count, so it's never
-  mistaken for what the antenna actually decoded. As soon as your receiver decodes
-  a real contact, local RF takes over automatically. Tip: for 1090 MHz a
-  quarter-wave whip is ≈6.9 cm (or 3/4-wave ≈20.7 cm) — *shorter is better here* —
-  placed at a window.
+  synthetic sky only with no location or no internet. Mode reads **internet**. A
+  real running SDR never shows the demo/internet feed — it shows only what it hears.
 - **One dongle:** ADS-B uses the whole RTL-SDR, so starting the radar stops the
   sub-GHz sweep/decoder and vice-versa.
 - **Needs `dump1090`** (any fork: dump1090-fa / dump1090-mutability / dump1090).
@@ -439,7 +434,6 @@ timestamp), **Mic-E**, messages/acks, objects, status and best-effort weather �
 | `GET  /api/net/adsb/route?callsign=…&lat=&lon=&gs=` | Filed route (origin/dest via adsbdb, cache-first) + live great-circle progress for the map view |
 | `GET  /api/net/adsb/flight?hex=…&callsign=…&lat=&lon=&gs=` | Route (adsbdb) + REAL live position/type (adsb.lol) for the route map |
 | `GET  /api/net/adsb/nearby?lat=&lon=&dist=` | Real aircraft near a point (adsb.lol) — the no-SDR/demo live feed, with types |
-| `GET  /api/net/adsb/iploc` | Approx receiver location from the box's public IP — multi-provider + last-good cache (browser-geolocation fallback) |
 | `POST /api/net/adsb/start` · `/stop` | Start / stop dump1090 (takes the dongle from the sub-GHz sweep) |
 | `POST /api/net/adsb/install` | One-click install of dump1090 (fixed package set) |
 | `…/rtl/record/{start,stop,status,list,get,delete}` | Session record & replay of the power sweep |
