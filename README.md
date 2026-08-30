@@ -177,6 +177,15 @@ full-screen touch dashboard sized for the 4" panel plus a keyboard-driven contro
 panel, and keeps everything off system Python via an isolated virtualenv.
 See [**DezusAZ/ragnar-cyberdeck**](https://github.com/DezusAZ/ragnar-cyberdeck).
 
+### Flipper One (feasibility / planned)
+
+The [Flipper One](https://docs.flipper.net/one/how-to-join) is an ARM64 Linux
+multi-tool (Rockchip RK3576, 8 GB RAM, Wi-Fi 6E, dual Gigabit Ethernet) — the same
+class of `aarch64` Linux host Ragnar already supports, so the **headless / web-UI**
+configuration looks highly feasible with little core change. The device is still a
+community-development project with no shipping hardware to validate against yet.
+See the [Flipper One feasibility & porting notes](docs/flipper-one.md).
+
 ---
 
 ## 🔨 Installation Details
