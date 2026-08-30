@@ -49,6 +49,7 @@ import adsb
 import meshtastic_node
 import pagerdecode as pager   # decoder module (the `pager/` package is a separate device UI)
 import acars
+import vdl2
 import radio
 import vor
 import aprs
@@ -18919,7 +18920,7 @@ def register_network_diagnostics(app, logger=None):
         label = data.get('label')
         label = str(label).strip()[:24] if label else None
         _log(f"net/rtl/power/start band={band} zoom={data.get('lo_hz')}:{data.get('hi_hz')} label={label}")
-        try: adsb.stop(); pager.stop(); acars.stop(); radio.stop(); vor.stop(); aprs.stop()   # one dongle: free it for the sweep
+        try: adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()   # one dongle: free it for the sweep
         except Exception: pass
         return jsonify(rtl_sdr.power_start(band=band, lo_hz=data.get('lo_hz'),
                                            hi_hz=data.get('hi_hz'), label=label))
@@ -18988,7 +18989,7 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/adsb/start', methods=['POST'])
     def net_adsb_start():
         _log("net/adsb/start")
-        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop(); pager.stop(); acars.stop(); radio.stop(); vor.stop(); aprs.stop()   # hand the dongle to dump1090
+        try: rtl_sdr.power_stop(); rtl_sdr.ism_stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()   # hand the dongle to dump1090
         except Exception: pass
         return jsonify(adsb.start())
 
@@ -19126,7 +19127,7 @@ def register_network_diagnostics(app, logger=None):
         mode = data.get('mode') or 'pocsag_flex'
         _log(f"net/pager/start freq={data.get('freq_hz')} mode={mode}")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); acars.stop(); radio.stop(); vor.stop(); aprs.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()
         except Exception:
             pass
         return jsonify(pager.start(freq_hz=data.get('freq_hz'), mode=mode))
@@ -19156,7 +19157,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         _log(f"net/vor/start freq={data.get('freq_hz')} cal={data.get('cal_deg')}")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); radio.stop(); aprs.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); aprs.stop()
         except Exception:
             pass
         return jsonify(vor.start(freq_hz=data.get('freq_hz'), cal_deg=data.get('cal_deg', 0.0)))
@@ -19193,7 +19194,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         _log(f"net/aprs/rf/start freq={data.get('freq_hz')}")
         try:                                        # one dongle: free it for APRS RF
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); radio.stop(); vor.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop()
         except Exception:
             pass
         return jsonify(aprs.start_rf(freq_hz=data.get('freq_hz')))
@@ -19244,7 +19245,7 @@ def register_network_diagnostics(app, logger=None):
     def net_acars_start():
         _log("net/acars/start")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); radio.stop(); vor.stop(); aprs.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); vdl2.stop(); radio.stop(); vor.stop(); aprs.stop()
         except Exception:
             pass
         return jsonify(acars.start())
@@ -19262,6 +19263,42 @@ def register_network_diagnostics(app, logger=None):
     @app.route('/api/net/acars/selftest', methods=['GET'])
     def net_acars_selftest():
         return jsonify(acars.selftest())
+
+    # VDL Mode 2 / ATN (aircraft datalink ~136 MHz) via dumpvdl2 + libacars —
+    # the modern successor to VHF ACARS. Carries ACARS-over-AVLC, plus CPDLC
+    # (controller<->pilot clearances) and ADS-C (contracted position reports),
+    # all in the clear. Matched to ADS-B contacts by ICAO / tail / flight.
+    # Uses the whole RTL-SDR, so starting it stops the others (one dongle).
+    @app.route('/api/net/vdl2/status', methods=['GET'])
+    def net_vdl2_status():
+        return jsonify(vdl2.status())
+
+    @app.route('/api/net/vdl2/messages', methods=['GET'])
+    def net_vdl2_messages():
+        return jsonify(vdl2.messages(since=request.args.get('since', 0)))
+
+    @app.route('/api/net/vdl2/start', methods=['POST'])
+    def net_vdl2_start():
+        _log("net/vdl2/start")
+        try:
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()
+        except Exception:
+            pass
+        return jsonify(vdl2.start())
+
+    @app.route('/api/net/vdl2/stop', methods=['POST'])
+    def net_vdl2_stop():
+        _log("net/vdl2/stop")
+        return jsonify(vdl2.stop())
+
+    @app.route('/api/net/vdl2/install', methods=['POST'])
+    def net_vdl2_install():
+        _log("net/vdl2/install")
+        return jsonify(vdl2.install())
+
+    @app.route('/api/net/vdl2/selftest', methods=['GET'])
+    def net_vdl2_selftest():
+        return jsonify(vdl2.selftest())
 
     # Local radio (FM/AM) via rtl_fm — streams demodulated audio to the browser.
     # Uses the whole RTL-SDR, so tuning stops the sweep/ISM/ADS-B/pager/ACARS.
@@ -19292,7 +19329,7 @@ def register_network_diagnostics(app, logger=None):
         mode = request.args.get('mode', 'wfm')
         _log(f"net/radio/stream freq={freq} mode={mode}")
         try:
-            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vor.stop(); aprs.stop()
+            rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();vor.stop(); aprs.stop()
         except Exception:
             pass
         resp = Response(radio.stream(freq, mode), mimetype="audio/wav")
@@ -19307,7 +19344,7 @@ def register_network_diagnostics(app, logger=None):
         data = request.get_json(silent=True) or {}
         band = str(data.get('band') or '433').strip()
         _log(f"net/rtl/ism/start band={band}")
-        try: adsb.stop(); pager.stop(); acars.stop(); radio.stop(); vor.stop(); aprs.stop()   # one dongle: free it for the decoder
+        try: adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();radio.stop(); vor.stop(); aprs.stop()   # one dongle: free it for the decoder
         except Exception: pass
         return jsonify(rtl_sdr.ism_start(band=band))
 

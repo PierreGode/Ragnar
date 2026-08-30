@@ -806,6 +806,16 @@ EOF
                 log "INFO" "acarsdec not installed - ACARS panel stays disabled (use the in-app Install button later)"
             fi
         fi
+        # dumpvdl2 (+ libacars) powers the VDL Mode 2 / ATN panel (CPDLC + ADS-C
+        # on ~136 MHz). Not in apt, so build from source best-effort.
+        if ! command -v dumpvdl2 >/dev/null 2>&1; then
+            if [ -x "$ragnar_PATH/scripts/install_dumpvdl2.sh" ] \
+               && bash "$ragnar_PATH/scripts/install_dumpvdl2.sh" >/dev/null 2>&1; then
+                log "SUCCESS" "Installed dumpvdl2 + libacars (VDL Mode 2 / ATN datalink)"
+            else
+                log "INFO" "dumpvdl2 not installed - VDL Mode 2 panel stays disabled (use the in-app Install button later)"
+            fi
+        fi
     fi
 
     # meshtastic Python package powers the Mesh Nodes page (real enumeration of a
