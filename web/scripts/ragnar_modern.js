@@ -5318,10 +5318,12 @@ async function wifidefHaleHound() {
         const r = await fetch('/api/net/bt/scan?duration=8');
         if (r.ok) bt = await r.json();
     } catch (e) { /* BLE optional */ }
+    const subghz = !!(document.getElementById('wifidef-hh-subghz') || {}).checked;
+    if (subghz) body.innerHTML = '<span class="text-fuchsia-300">Sweeping SubGHz 300–439 MHz off the RTL-SDR (~20s)…</span>';
     try {
         const res = await fetch('/api/wifidef/halehound', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scan: _wifidef.data, bt: bt }),
+            body: JSON.stringify({ scan: _wifidef.data, bt: bt, subghz: subghz }),
         });
         const v = await res.json();
         if (v.error) { body.innerHTML = '<span class="text-red-300">⚠ ' + _esc(v.error) + '</span>'; return; }
@@ -5343,8 +5345,15 @@ async function wifidefHaleHound() {
         } else if (v.verdict === 'none') {
             html += '<div class="text-emerald-300 text-[12px]">✓ No HaleHound-class activity in the fused signals.</div>';
         }
+        if (v.subghz) {
+            const sg = v.subghz;
+            const sgTxt = sg.scanned
+                ? `📡 SubGHz swept ${_esc((sg.freqs || []).join(', '))} — ${sg.events} frame${sg.events === 1 ? '' : 's'} decoded`
+                : `📡 SubGHz not swept — ${_esc(sg.reason || 'unavailable')}`;
+            html += `<div class="mt-2 text-[10px] ${sg.scanned ? 'text-fuchsia-300' : 'text-amber-400'}">${sgTxt}</div>`;
+        }
         if (v.blind_spots && v.blind_spots.length) {
-            html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots (no receiver): ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
+            html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots: ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
         }
         if (v.score >= 25) {
             html += '<div class="mt-1 text-[10px] text-fuchsia-400">Fed into the Watchtower alert feed + incident correlation.</div>';

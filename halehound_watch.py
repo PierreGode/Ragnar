@@ -62,10 +62,14 @@ _LAN_WEIGHTS = {"halehound_cyd": 40, "esp32_marauder": 34, "esp_deauther": 34,
 _NAMED_TOOL_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther", "flipper_wifi")
 _BLE_WEIGHTS = {"apple_ble_flood": 18, "swiftpair_spam": 14,
                 "fastpair_spam": 16, "ble_advert_flood": 12}
+# SubGHz (RTL-SDR via rtl_433): a replay/brute burst is an attack on its own;
+# 'seen' is bare ISM telemetry (corroboration-weight only).
+_SUBGHZ_WEIGHTS = {("subghz_replay", "flood"): 22, ("subghz_brute", "flood"): 22,
+                   ("subghz_active", "seen"): 6}
 _PORTAL_WEIGHT = 30
 
 # A domain cannot contribute more than this on its own.
-_DOMAIN_CAP = {"wifi": 45, "lan": 45, "ble": 34, "portal": 30}
+_DOMAIN_CAP = {"wifi": 45, "lan": 45, "ble": 34, "portal": 30, "subghz": 30}
 
 # Minimum attack-grade contribution from a behaviour domain before an UNKNOWN
 # Espressif host (common IoT) is allowed to corroborate. A real flood/rogue/
@@ -74,7 +78,7 @@ _DOMAIN_CAP = {"wifi": 45, "lan": 45, "ble": 34, "portal": 30}
 _CORROBORATION_MIN = 10
 
 # Multi-domain bonus: coincident attacks across RF domains are the tell.
-_MULTI_DOMAIN_BONUS = {2: 10, 3: 18, 4: 24}
+_MULTI_DOMAIN_BONUS = {2: 10, 3: 18, 4: 24, 5: 30}
 
 # Verdict tiers keyed on the final 0-100 score.
 _TIERS = (
@@ -406,13 +410,20 @@ def score(signals):
     """
     signals = signals or {}
     reasons = []
-    domain_raw = {"wifi": 0, "lan": 0, "ble": 0, "portal": 0}
+    domain_raw = {"wifi": 0, "lan": 0, "ble": 0, "portal": 0, "subghz": 0}
 
     for det in signals.get("wifi", []) or []:
         w = _WIFI_WEIGHTS.get((det.get("type"), det.get("severity")))
         if w:
             domain_raw["wifi"] += w
             reasons.append({"domain": "wifi", "signal": det.get("type"),
+                            "weight": w, "detail": det.get("detail", "")})
+
+    for det in signals.get("subghz", []) or []:
+        w = _SUBGHZ_WEIGHTS.get((det.get("type"), det.get("severity")))
+        if w:
+            domain_raw["subghz"] += w
+            reasons.append({"domain": "subghz", "signal": det.get("type"),
                             "weight": w, "detail": det.get("detail", "")})
 
     for atk in signals.get("ble", []) or []:
@@ -453,7 +464,7 @@ def score(signals):
     # stray deauth frames, a dense-but-not-flooding airspace) shouldn't let a
     # smart plug tip into a verdict. Require a real flood/rogue-strength hit.
     behaviour_seen = any(domain_raw[d] >= _CORROBORATION_MIN
-                         for d in ("wifi", "ble", "portal"))
+                         for d in ("wifi", "ble", "portal", "subghz"))
     named_seen = any(t in _NAMED_TOOL_IDS for t in lan_ids)
     for tid in dict.fromkeys(lan_ids):          # unique, order-preserving
         w = _LAN_WEIGHTS.get(tid)
@@ -643,6 +654,11 @@ def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
     caps = dict(capabilities or {})
     caps.setdefault("bt", ble_devices is not None)
     verdict["blind_spots"] = _blind_spots(caps, subghz)
+    if isinstance(subghz, dict):
+        verdict["subghz"] = {"scanned": bool(subghz.get("scanned")),
+                             "events": subghz.get("events", 0),
+                             "reason": subghz.get("reason"),
+                             "freqs": subghz.get("freqs")}
     return verdict
 
 
@@ -718,6 +734,27 @@ def selftest():
           not any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(
               [{"mac": "3C:22:FB:00:00:%02x" % i, "addr_type": "public",
                 "service_uuids": [0xFE2C]} for i in range(8)])))
+
+    # --- SubGHz domain (RTL-SDR) scoring ---
+    sg_replay = score({"subghz": [{"type": "subghz_replay", "severity": "flood"}]})
+    check("SubGHz replay alone scores (>= possible)",
+          sg_replay["score"] >= 22 and "subghz" in sg_replay["domains"],
+          json.dumps({"s": sg_replay["score"], "d": sg_replay["domains"]}))
+    sg_seen = score({"subghz": [{"type": "subghz_active", "severity": "seen"}]})
+    check("bare SubGHz telemetry ('seen') stays low (corroboration weight)",
+          sg_seen["score"] < 25, json.dumps({"s": sg_seen["score"]}))
+    # An unknown ESP32 + a SubGHz replay (attack-grade) => corroboration kicks in.
+    sg_corr = score({"subghz": [{"type": "subghz_replay", "severity": "flood"}],
+                     "lan": ["rogue_espressif"]})
+    check("SubGHz replay lets an unknown ESP32 corroborate",
+          any(r["signal"] == "rogue_espressif" and r["weight"] > 0
+              for r in sg_corr["reasons"]), json.dumps(sg_corr["reasons"]))
+    # Wi-Fi flood + SubGHz brute => two RF domains => multi-domain bonus.
+    sg_multi = score({"wifi": [{"type": "auth_flood", "severity": "flood"}],
+                      "subghz": [{"type": "subghz_brute", "severity": "flood"}]})
+    check("Wi-Fi + SubGHz => multi-domain fusion (>= likely)",
+          sg_multi["score"] >= 50 and {"wifi", "subghz"} <= set(sg_multi["domains"]),
+          json.dumps({"s": sg_multi["score"], "d": sg_multi["domains"]}))
 
     # --- GARMR captive portal fingerprint ---
     fp = fingerprint_portal(["10.0.0.1", "10.0.0.1", "10.0.0.1", "10.0.0.1"],

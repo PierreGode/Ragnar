@@ -186,7 +186,7 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET /api/wifidef/isolation?interface=&seconds=&channel=` | passive per-BSS client-isolation audit (+ mesh/ESS rollup) |
 | `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
 | `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
-| `POST /api/wifidef/halehound` | `{scan?, bt?, portal?}` → fused HaleHound-CYD assessment (see below) |
+| `POST /api/wifidef/halehound` | `{scan?, bt?, portal?, subghz?}` → fused ESP32-attack-tool assessment (see below); `subghz:true` adds an opt-in RTL-SDR sweep |
 | `POST /api/wifidef/halehound/portal-probe` | `{url}` → **actively** fetch a captive portal (read-only) and match the GARMR signature (see below) |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 | `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
@@ -224,7 +224,8 @@ confirmed*), fusing signals across domains:
 > *alongside* an actual Wi-Fi/BLE attack, moves the needle. (OUI is also useless on
 > the *attack frames* themselves — those tools randomize their source MAC — which
 > is why the Wi-Fi detectors key on the randomization ratio, not the OUI.)
-| **BLE** | Apple (0x004C) FindMy/AirTag flood or Continuity pairing-popup spam, Microsoft Swift Pair (0x0006) spam, advertisement flood — **manufacturer-data only** | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
+| **BLE** | Apple (0x004C) FindMy/AirTag flood or Continuity pairing-popup spam, Microsoft Swift Pair (0x0006) spam, **Google Fast Pair** (service-data UUID `0xFE2C`) / WhisperPair spam, advertisement flood | the Bluetooth 2.4 GHz overlay (`bt_scanner` — now parses **both** manufacturer-data company IDs **and** service-data UUIDs) |
+| **SubGHz** | 300–439 MHz **replay** (one captured code re-sent many times) or **brute / rolling-code sweep** (many distinct codes from one protocol) | an **RTL-SDR** via `rtl_433` (`subghz_watch`), opt-in sweep — see below |
 | **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
 
 The correlation is deliberately **multi-domain**: a single noisy domain is capped
@@ -259,13 +260,39 @@ The signature table ships **empty** — so it never false-matches — with a
 documented schema (title/Server/form-fields/HTML-markers/SHA-256). Drop in the
 real GARMR fingerprints and the confirm goes live with no code change.
 
-**Blind spots (reported, not faked).** Ragnar has no receiver for these tools'
-NRF24 2.4 GHz (MouseJack, jammers), SubGHz 300–439 MHz (CC1101 replay/brute,
-Tesla) or NFC/RFID modules; and the passive BLE scan reads *manufacturer data*
-only, so **Google Fast Pair** (advertised as service-data UUID `0xFE2C`) and
-**GATT-level** BLE attacks (BLE Predator honeypot, Airoha RACE, SkeletonKey) are
-out of view. All of these are listed as blind spots rather than silently missed.
-Everything here is passive analysis — nothing is transmitted.
+### SubGHz sweep (RTL-SDR)
+
+SubGHz is **opt-in** because it briefly claims the RTL-SDR and takes ~20 s: tick
+**SubGHz sweep** on the card (or `POST /api/wifidef/halehound {"subghz": true}`).
+`subghz_watch.scan()` runs `rtl_433` across 433.92 MHz + 315 MHz and flags a
+**replay** (same model+id+payload re-sent ≥ 8× in the window — well above any real
+remote's cadence) or a **brute / rolling-code sweep** (≥ 16 distinct codes from
+one protocol). Thresholds are deliberately conservative so ordinary 433 MHz
+telemetry (weather stations, TPMS, doorbells — which repeat a few frames per
+burst) reads as benign `subghz_active`, not an attack. The sweep is **skipped**
+(with a stated reason) when no SDR is present or another SDR job — ADS-B, ACARS,
+VDL2, the waterfall — already holds the radio; Ragnar never yanks it away. *This
+path is validated end-to-end on real RTL-SDR hardware, but not yet against a live
+CC1101/HaleHound emitter.*
+
+**Blind spots are hardware-aware — the panel reports what THIS node can actually
+see.** The list adapts to the attached radios rather than claiming a fixed set:
+
+- **SubGHz** — with an RTL-SDR on the bus it is a *live domain* (or "present but
+  not swept this pass" until you enable it), **not** "needs an SDR". You do **not**
+  need a CC1101; an RTL-SDR covers 300–439 MHz. Only a bare node (no SDR) shows
+  "needs an SDR".
+- **Google Fast Pair (`0xFE2C`)** — no longer a blind spot when a BLE radio is
+  attached; `bt_scanner` now parses service-data, so Fast Pair spam is a scored
+  BLE signal.
+- **GATT-level** BLE attacks (BLE Predator honeypot, Airoha RACE, SkeletonKey)
+  remain out of view — that's a limit of *passive* scanning (they need an active
+  connection), independent of the radio.
+- **NRF24 2.4 GHz** (MouseJack, jammers) and **NFC/RFID** remain genuine hardware
+  gaps — Ragnar carries no nRF24 receiver or NFC reader.
+
+All of these are *listed* rather than silently missed. Everything here is passive
+analysis — nothing is transmitted (the SubGHz sweep only receives).
 
 ## Airtime & link quality
 

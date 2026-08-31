@@ -19626,14 +19626,18 @@ def register_network_diagnostics(app, logger=None):
                 caps['sdr'] = '1d50:6089' in (_out.stdout or '').lower()
             except Exception:
                 pass
-        # SubGHz capture off the RTL-SDR (only when one is present and idle).
+        # SubGHz capture off the RTL-SDR — OPT-IN only (data.subghz == True). It
+        # runs a ~20s rtl_433 sweep and briefly claims the radio, so the normal
+        # check stays fast and hands-off; the UI offers it as an explicit toggle.
         subghz = None
-        if caps.get('sdr') and data.get('subghz') is not False:
+        if caps.get('sdr') and data.get('subghz') is True:
             try:
                 import subghz_watch as _sg
-                subghz = _sg.scan()
+                subghz = _sg.scan(duration=int(data.get('subghz_seconds') or 20))
             except Exception as exc:
                 _log(f"wifidef/halehound subghz scan skipped: {exc}")
+                subghz = {"scanned": False, "detections": [],
+                          "reason": f"scan error: {exc}"}
 
         _log("wifidef/halehound assess")
         verdict = _hh.assess(wifi=scan, assets=assets, ble_devices=ble_devices,
