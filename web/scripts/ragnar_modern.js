@@ -4782,7 +4782,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-panel-iface2';
+const WIFIDEF_BUILD = '20260831-halehound-authflood';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -5255,13 +5255,17 @@ function wifidefRender() {
             } else if (x.type === 'rogue_ap') {
                 title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)' : '⚠ Duplicate SSID';
                 body = `<div>SSID <b>${x.ssid}</b></div><div class="font-mono text-[11px] text-gray-400">${(x.rogue_bssids || x.bssids || []).map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+            } else if (x.type === 'auth_flood') {
+                title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
+                const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
+                body = `<div>${x.count} auth frames from ${x.sources} MACs${laTag}.</div><div class="font-mono text-[11px] text-gray-400">target ${_wifidefMacLink(x.bssid)}</div>`;
             }
             return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in Signal Intelligence</span>' : ''}</div></div>`;
         }).join('');
     }
     // Counts
     const c = d.counts || {};
-    let chips = [['frames', d.frames], ['deauth', c.deauth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
+    let chips = [['frames', d.frames], ['deauth', c.deauth], ['auth', c.auth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
         .map(([k, v]) => `<span class="px-3 py-1 rounded bg-slate-800 border border-slate-700"><b>${v || 0}</b> <span class="text-gray-400">${k}</span></span>`).join('');
     // Airspace density vs the flood threshold — lets the user calibrate.
     const a = d.airspace;
@@ -5282,6 +5286,71 @@ function wifidefRender() {
         <td class="py-1 pr-2">${a.channel == null ? '—' : a.channel}</td>
         <td class="py-1 pr-2">${a.rssi == null ? '—' : a.rssi + ' dBm'}</td>
         <td class="py-1 pr-2">${a.beacons}</td></tr>`).join('');
+}
+
+// HaleHound-CYD correlation: fuse the current WIDS capture with a fresh BLE
+// overlay + the LAN asset inventory, score it server-side, and render the
+// verdict. Backend: POST /api/wifidef/halehound (halehound_watch.assess).
+const _WIFIDEF_HH = {
+    confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
+    likely: ['LIKELY', 'bg-red-500/80 text-red-50'],
+    possible: ['POSSIBLE', 'bg-amber-500/80 text-amber-950'],
+    trace: ['trace', 'bg-slate-600 text-slate-200'],
+    none: ['clear', 'bg-emerald-700/70 text-emerald-100'],
+};
+async function wifidefHaleHound() {
+    const vb = document.getElementById('wifidef-hh-verdict');
+    const body = document.getElementById('wifidef-hh-body');
+    const btn = document.getElementById('wifidef-hh-btn');
+    if (!_wifidef.data) {
+        body.innerHTML = '<span class="text-amber-300">Run a WiFi Defense scan first, then check for HaleHound.</span>';
+        return;
+    }
+    if (btn) btn.disabled = true;
+    vb.textContent = '…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300';
+    // Best-effort fresh BLE overlay so the Bluetooth attack domain can score.
+    let bt = null;
+    try {
+        const r = await fetch('/api/net/bt/scan?duration=8');
+        if (r.ok) bt = await r.json();
+    } catch (e) { /* BLE optional */ }
+    try {
+        const res = await fetch('/api/wifidef/halehound', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan: _wifidef.data, bt: bt }),
+        });
+        const v = await res.json();
+        if (v.error) { body.innerHTML = '<span class="text-red-300">⚠ ' + _esc(v.error) + '</span>'; return; }
+        const [label, cls] = _WIFIDEF_HH[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+        vb.textContent = `${label} · ${v.score}%`;
+        vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls;
+        let html = '';
+        if (v.domains && v.domains.length) {
+            html += '<div class="mb-2 flex flex-wrap gap-1">' + v.domains.map(d =>
+                `<span class="px-2 py-0.5 rounded bg-pink-900/40 border border-pink-700/50 text-pink-200 text-[11px]">${_esc(d)}</span>`).join('') + '</div>';
+        }
+        if (v.suspects && v.suspects.length) {
+            html += '<div class="text-[12px] text-gray-300 mb-2">Suspect host' + (v.suspects.length > 1 ? 's' : '') + ': '
+                + v.suspects.map(s => `<span class="font-mono text-red-300">${_esc(s.hostname || s.ip || s.mac || '?')}</span> <span class="text-gray-500">(${_esc(s.threat || '')})</span>`).join(', ') + '</div>';
+        }
+        if (v.reasons && v.reasons.length) {
+            html += '<ul class="list-disc pl-5 space-y-0.5 text-[12px] text-gray-300">'
+                + v.reasons.filter(r => r.detail).map(r => `<li><span class="text-gray-500">[${_esc(r.domain)}]</span> ${_esc(r.detail)}</li>`).join('') + '</ul>';
+        } else if (v.verdict === 'none') {
+            html += '<div class="text-emerald-300 text-[12px]">✓ No HaleHound-class activity in the fused signals.</div>';
+        }
+        if (v.blind_spots && v.blind_spots.length) {
+            html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots (no receiver): ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
+        }
+        if (v.score >= 25) {
+            html += '<div class="mt-1 text-[10px] text-pink-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+        }
+        body.innerHTML = html;
+    } catch (e) {
+        body.innerHTML = '<span class="text-red-300">Assessment failed.</span>';
+    } finally {
+        if (btn) btn.disabled = false;
+    }
 }
 
 // ============================================================================

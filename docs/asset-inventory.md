@@ -15,7 +15,9 @@ sends no packets of its own.
 - **Classification & enrichment.** Each host is tagged with a device type
   (router, switch, AP, phone, server, SBC, camera, printer…) and screened against
   Ragnar's rogue-device signatures (O.MG cable, Flipper/Marauder/Deauther
-  Espressif nodes, Pineapple-style APs, …). Reuses `device_classifier.py`.
+  Espressif nodes, **HaleHound-CYD** attack multitool, Pineapple-style APs, …).
+  Reuses `device_classifier.py`. A HaleHound-class Espressif host on the LAN is
+  also fused into the [HaleHound correlation](wifi-defense.md#halehound-cyd-correlation).
 - **Ownership & criticality.** Annotate any asset with an **owner**, a
   **criticality** (`none`→`critical`), an **authorized** flag (yes/no/—), free-form
   **tags**, and **notes**. Stored in `data/asset_meta.json`, keyed by MAC.

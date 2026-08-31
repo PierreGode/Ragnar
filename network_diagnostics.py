@@ -19556,6 +19556,91 @@ def register_network_diagnostics(app, logger=None):
         html = report_common.build_defense_report_html(scan, device_name=device, ai=ai)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
+    @app.route('/api/wifidef/halehound', methods=['POST'])
+    def wifidef_halehound():
+        """Fused HaleHound-CYD assessment.
+
+        HaleHound is an ESP32 "Cheap Yellow Display" attack multitool. It cannot
+        be uniquely fingerprinted (same silicon/techniques as Marauder/Bruce, and
+        it randomizes MACs), so we score how strongly the observed behaviour —
+        across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
+        a HaleHound-class device, and emit a Watchtower alert when it crosses a
+        confidence tier so it flows into the incident engine and Pushover.
+
+        Body (all optional; reuses whatever the panels already have on screen):
+          scan   : a wifi_defense.do_scan() result (WIDS detections)
+          bt     : a bt_scanner.do_scan() result (BLE devices)
+          portal : observed captive-portal behaviour
+                   {dns_answers, http_status, redirect_host, ap_ip}
+        """
+        import halehound_watch as _hh
+        import device_classifier as _dc
+        data = request.get_json(silent=True) or {}
+        scan = data.get('scan') if isinstance(data.get('scan'), dict) else None
+        bt = data.get('bt') if isinstance(data.get('bt'), dict) else None
+        portal = data.get('portal') if isinstance(data.get('portal'), dict) else None
+
+        # LAN side: enrich the current host table with rogue/threat device ids so
+        # a HaleHound-class Espressif host (IoT Recon joins the LAN) is fused in.
+        assets = []
+        try:
+            from init_shared import shared_data as _sd
+            db = getattr(_sd, 'db', None)
+            hosts = db.get_all_hosts() if db is not None else []
+            for r in (hosts or []):
+                row = r if isinstance(r, dict) else dict(r)
+                ports = []
+                for tok in str(row.get('ports') or '').split(','):
+                    tok = tok.strip().split('/')[0]
+                    if tok.isdigit():
+                        ports.append(int(tok))
+                threats = _dc.detect_threats(row.get('vendor') or '',
+                                             row.get('mac') or '',
+                                             hostname=row.get('hostname') or '',
+                                             ports=ports)
+                if threats:
+                    assets.append({'mac': row.get('mac'), 'ip': row.get('ip'),
+                                   'hostname': row.get('hostname'),
+                                   'threats': threats})
+        except Exception as exc:                              # never fail the assessment
+            _log(f"wifidef/halehound asset enrich skipped: {exc}")
+
+        ble_devices = (bt or {}).get('devices') if bt else None
+        _log("wifidef/halehound assess")
+        verdict = _hh.assess(wifi=scan, assets=assets, ble_devices=ble_devices,
+                             portal_obs=portal)
+
+        # Feed the unified alert pane / incident engine when it's more than trace.
+        if verdict.get('score', 0) >= 25:
+            try:
+                sus = verdict.get('suspects') or []
+                _guard_emit_jsonl('halehound', {
+                    'interface': (scan or {}).get('interface'),
+                    'findings': [{
+                        'code': verdict['code'],
+                        'name': 'HaleHound-class attack multitool (%s, %d%%)'
+                                % (verdict['verdict'], verdict['score']),
+                        'severity': verdict['severity'],
+                        'klass': 'attack-multitool',
+                        'src': (sus[0].get('mac') if sus else None),
+                        'cves': [],
+                        'detail': {'domains': verdict.get('domains'),
+                                   'suspects': sus,
+                                   'reasons': [r.get('detail')
+                                               for r in verdict.get('reasons', [])]},
+                    }],
+                })
+            except Exception as exc:
+                _log(f"wifidef/halehound jsonl emit skipped: {exc}")
+
+        return jsonify(verdict)
+
+    @app.route('/api/wifidef/halehound/selftest', methods=['GET'])
+    def wifidef_halehound_selftest():
+        import halehound_watch as _hh
+        _log("wifidef/halehound/selftest")
+        return jsonify(_hh.selftest())
+
     @app.route('/api/net/isp', methods=['GET'])
     def net_isp():
         iface = (request.args.get('interface') or '').strip() or None

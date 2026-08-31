@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260730-panel-iface2"
+_BUILD = "20260831-halehound-authflood"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -66,6 +66,17 @@ _BEACON_LA_BSSID_MIN = 18         # burst of distinct BSSIDs to consider LA-rati
 _BEACON_LA_RATIO = 0.5            # LA (randomized) BSSID fraction => fake-AP storm
 _KARMA_SSID_MIN = 5               # distinct SSIDs answered by ONE bssid => KARMA
 
+# Auth-frame flood (802.11 authentication DoS — HaleHound "Auth Flood", mdk4
+# 'a' mode, ESP32 Marauder/Bruce). The tool sprays authentication-request frames
+# from many spoofed/random source MACs at ONE AP to exhaust its client table.
+# The tells: a burst of auth frames all aimed at one BSSID, sourced from a large
+# number of DISTINCT MACs, most of them locally-administered (randomized). Real
+# roaming/association produces auth frames too, but from a handful of burned-in
+# client MACs — never dozens of randomized ones at once.
+_AUTH_FLOOD_MIN = 30        # auth frames at one BSSID => candidate flood
+_AUTH_FLOOD_SRCS = 12       # distinct source MACs at one BSSID => flood
+_AUTH_LA_RATIO = 0.5        # LA (randomized) source fraction => spoofed flood
+
 # Channels the hopper cycles when no fixed channel is requested (2.4 GHz + the
 # common U-NII-1/3 5 GHz set). Kept short so each channel gets real dwell time.
 _HOP_CHANNELS = [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]
@@ -76,6 +87,9 @@ _HOP_CHANNELS = [1, 6, 11, 36, 40, 44, 48, 149, 153, 157, 161]
 # freq = 5950 + 5*chan; these are the PSC (preferred scanning) channels.
 _HOP_6GHZ_FREQS = [5975, 6055, 6135, 6215, 6295, 6375, 6455, 6535,
                    6615, 6695, 6775, 6855, 6935, 7015, 7095]
+
+# Broadcast / unspecified receiver addresses (auth/deauth targeting logic).
+_BCAST_ADDRS = {"ff:ff:ff:ff:ff:ff", None}
 
 # 802.11 management subtype -> event kind
 _MGMT_SUBTYPES = {
@@ -1717,6 +1731,46 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                 "detail": "fake-AP/beacon flood — " + ", ".join(reasons),
             })
 
+    # --- Auth-frame flood (client-table exhaustion) ---
+    # HaleHound "Auth Flood" / mdk4 'a' / Marauder: many random-MAC auth requests
+    # aimed at one AP. Group auth frames by target BSSID (dst = addr1); flag any
+    # target hit by a burst from many distinct sources. A high locally-administered
+    # source ratio is the spoof signature that separates it from real roaming.
+    auths = [e for e in events if e["kind"] == "auth"]
+    if auths:
+        auth_min = int(th.get("auth_flood_frames", _AUTH_FLOOD_MIN))
+        src_min = int(th.get("auth_flood_srcs", _AUTH_FLOOD_SRCS))
+        la_min = float(th.get("auth_la_ratio", _AUTH_LA_RATIO))
+        by_target = {}
+        for e in auths:
+            dst = e.get("dst")
+            if not dst or dst in _BCAST_ADDRS:
+                continue
+            t = by_target.setdefault(dst, {"frames": 0, "srcs": set()})
+            t["frames"] += 1
+            if e.get("src"):
+                t["srcs"].add(e["src"])
+        for bssid, t in sorted(by_target.items(), key=lambda kv: -kv[1]["frames"]):
+            n_src = len(t["srcs"])
+            if t["frames"] < auth_min or n_src < src_min:
+                continue
+            rnd = {s for s in t["srcs"] if _is_locally_administered(s)}
+            la_ratio = (len(rnd) / n_src) if n_src else 0.0
+            spoofed = la_ratio >= la_min
+            sev = "flood" if spoofed else "auth_warn"
+            detail = (f"{t['frames']} auth frames at {bssid} from {n_src} "
+                      f"distinct MACs — authentication flood / client-table "
+                      f"exhaustion")
+            if spoofed:
+                detail += (f" ({len(rnd)}/{n_src} sources randomized, "
+                           f"LA ratio {la_ratio:.0%} — spoofed)")
+            detections.append({
+                "type": "auth_flood", "severity": sev, "bssid": bssid,
+                "count": t["frames"], "sources": n_src,
+                "random_sources": len(rnd), "la_ratio": round(la_ratio, 2),
+                "detail": detail,
+            })
+
     # --- KARMA / MANA: one BSSID answering many SSIDs ---
     by_ap = {}
     for e in presp + beacons:
@@ -1773,7 +1827,7 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
             ap["channel"] = e["channel"]
 
     sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3,
-                "duplicate_ssid": 2, "beacon_warn": 2, "seen": 1}
+                "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2, "seen": 1}
     threat = "clear"
     if detections:
         worst = max(sev_rank.get(d["severity"], 1) for d in detections)
@@ -1796,6 +1850,7 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
         "threat": threat,
         "frames": len(events),
         "counts": {"deauth": len(deauths), "beacon": len(beacons),
+                   "auth": sum(1 for e in events if e["kind"] == "auth"),
                    "probe_resp": len(presp),
                    "probe_req": sum(1 for e in events if e["kind"] == "probe_req")},
         "airspace": airspace,
@@ -1855,8 +1910,8 @@ def trust_aps(aps, merge=True):
 # --------------------------------------------------------------------------
 
 def _selftest_pcap(path):
-    from scapy.all import (RadioTap, Dot11, Dot11Beacon, Dot11Deauth, Dot11Elt,
-                           Dot11ProbeResp, wrpcap)
+    from scapy.all import (RadioTap, Dot11, Dot11Auth, Dot11Beacon, Dot11Deauth,
+                           Dot11Elt, Dot11ProbeResp, wrpcap)
     pkts = []
 
     def beacon(bssid, ssid, ch=6, rssi=-50):
@@ -1876,8 +1931,19 @@ def _selftest_pcap(path):
                       addr2=bssid, addr3=bssid) /
                 Dot11ProbeResp() / Dot11Elt(ID=0, info=ssid.encode()))
 
+    def authreq(src, bssid):
+        # subtype 11 = authentication, from a client (src) to an AP (addr1=bssid)
+        return (RadioTap() /
+                Dot11(type=0, subtype=11, addr1=bssid, addr2=src, addr3=bssid) /
+                Dot11Auth(seqnum=1))
+
     # Legit home AP
     pkts += [beacon("aa:aa:aa:00:00:01", "HomeNet")] * 3
+    # Auth flood (HaleHound Auth Flood): 40 auth frames from randomized (locally-
+    # administered) source MACs at the home AP — client-table exhaustion.
+    for i in range(40):
+        pkts.append(authreq("02:%02x:%02x:%02x:aa:bb" % (i, (i * 7) & 0xff, i),
+                            "aa:aa:aa:00:00:01"))
     # Deauth flood (20 frames) against it
     pkts += [deauth("aa:aa:aa:00:00:01", "cc:cc:cc:00:00:09") for _ in range(20)]
     # Beacon flood: 35 distinct fake SSIDs
@@ -1976,6 +2042,23 @@ def selftest():
           json.dumps(bd))
     check("KARMA detected", "karma" in types and types["karma"]["ssid_count"] >= 5,
           str(types.get("karma")))
+    # Auth flood (HaleHound Auth Flood): 40 randomized-MAC auth frames at one AP.
+    af = types.get("auth_flood", {})
+    check("auth flood detected (client-table exhaustion)",
+          af.get("severity") == "flood", json.dumps(af))
+    check("auth flood identifies target BSSID + randomized sources",
+          af.get("bssid") == "aa:aa:aa:00:00:01" and af.get("la_ratio", 0) >= 0.5
+          and af.get("sources", 0) >= _AUTH_FLOOD_SRCS, json.dumps(af))
+    check("auth frame count surfaced for calibration",
+          res["counts"].get("auth", 0) >= 40, json.dumps(res["counts"]))
+    # Legit roaming: a handful of auth frames from a few BURNED-IN client MACs must
+    # NOT trip the flood (this is the normal-association false positive we avoid).
+    roam = [{"kind": "auth", "src": "3c:22:fb:aa:00:%02x" % i,
+             "dst": "aa:aa:aa:00:00:01"} for i in range(4) for _ in range(5)]
+    roam_res = analyze(roam, baseline={})
+    check("legit roaming (few global-MAC clients) is NOT an auth flood",
+          not any(d["type"] == "auth_flood" for d in roam_res["detections"]),
+          json.dumps([d.get("detail") for d in roam_res["detections"]]))
     check("evil twin detected against baseline",
           types.get("rogue_ap", {}).get("severity") == "evil_twin"
           and "99:99:99:99:99:99" in types.get("rogue_ap", {}).get("rogue_bssids", []),

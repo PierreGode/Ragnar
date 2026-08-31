@@ -20,6 +20,7 @@ Wi-Fi attacks a defender cares about.
 | **Beacon flood** | A storm of fake APs (`mdk3`/`mdk4` beacon mode, ESP32 spammers) — bogus SSIDs to drown the air or bait clients. | Two triggers. **(1) Randomized-BSSID burst** — mdk4's beacon mode emits random, **locally-administered** MACs, so a burst of ≥ 18 distinct BSSIDs whose **LA ratio ≥ 50 %** is a fake-AP storm (**critical**) even *below* the absolute count threshold. Ordinary neighbourhood density uses burned-in (global) MACs (~0 % LA) and stays quiet — so this is robust in dense RF without guessing a count. **(2) Absolute count** — distinct SSIDs ≥ a user-tunable threshold (default 100) or BSSIDs ≥ 150; a dense airspace over the threshold but with global MACs is a **warning** (unusually dense), not a critical storm. The capture's live SSID/BSSID counts **and LA ratio** are shown for calibration. |
 | **Rogue AP / evil twin** | A look-alike AP advertising a **known** SSID from a BSSID that isn't yours, set up to harvest clients. | An SSID in the **trusted baseline** appearing from an untrusted BSSID → *evil twin*; or one SSID from ≥ 2 BSSIDs → *duplicate SSID* (set a baseline to confirm). |
 | **KARMA / MANA** | An AP that answers probe requests for **many different SSIDs** — it pretends to be every network a client has ever joined. | A single BSSID that beacons/probe-responds for ≥ 5 distinct SSIDs. |
+| **Auth flood** | The 802.11 authentication DoS (`mdk4 a`, ESP32 Marauder/Bruce, **HaleHound Auth Flood**): authentication-request frames sprayed from many spoofed/random source MACs at one AP to exhaust its client table. | Auth frames grouped by **target BSSID**; a target hit by ≥ 30 frames from ≥ 12 **distinct** source MACs is flagged. A high **locally-administered** (randomized) source ratio (≥ 50 %) is the spoof signature that separates it from ordinary roaming — real association comes from a handful of burned-in client MACs, never dozens of randomized ones at once. |
 
 A big banner summarises the capture: **CLEAR**, **WARNING**, or **⚠ UNDER
 ATTACK** (critical). Below it, one card per detection with the offending
@@ -185,7 +186,45 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET /api/wifidef/isolation?interface=&seconds=&channel=` | passive per-BSS client-isolation audit (+ mesh/ESS rollup) |
 | `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
 | `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
+| `POST /api/wifidef/halehound` | `{scan?, bt?, portal?}` → fused HaleHound-CYD assessment (see below) |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
+| `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
+
+## HaleHound-CYD correlation
+
+[HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 "Cheap
+Yellow Display" **attack multitool** — 40+ modules across Wi-Fi (deauth, beacon
+spam, auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair
+spam, FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and
+NFC. The **Check for HaleHound** button on the WiFi Defense panel scores whether
+one is present or attacking.
+
+**What it can and cannot do.** HaleHound cannot be *uniquely* fingerprinted: it
+runs on the same ESP32 silicon and uses the same techniques as ESP32 Marauder,
+Bruce and Ghost ESP, and it randomizes its source MACs during floods. So this
+does **not** claim "that is HaleHound" — it scores how strongly the observed
+behaviour matches a HaleHound-class device (0–100 → *trace / possible / likely /
+confirmed*), fusing signals across domains:
+
+| Domain | Signals | Source |
+|--------|---------|--------|
+| **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth | this WIDS capture |
+| **LAN** | an Espressif host flagged `halehound_cyd` / `rogue_espressif` — HaleHound's **IoT Recon** module joins your LAN with a real ESP32 MAC | asset inventory (`device_classifier.detect_threats`) |
+| **BLE** | Fast Pair spam, FindMy/AirTag flood, advertisement flood | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
+| **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
+
+The correlation is deliberately **multi-domain**: a single noisy domain is capped
+so it can only reach *possible* on its own, while behaviour spanning two or three
+RF domains at once — the CYD signature — escalates to *likely* / *confirmed*. A
+named HaleHound/GARMR host on the LAN is floored to at least *likely*. When the
+score crosses a tier it is emitted into the **Watchtower** feed as a
+`halehound` alert (`HH-CONFIRM` / `HH-LIKELY` / `HH-POSSIBLE`) and fused by the
+**incident engine** into a *HaleHound-class attack multitool active* incident.
+
+**Blind spots (reported, not faked).** Ragnar has no receiver for HaleHound's
+NRF24 2.4 GHz (MouseJack, jammers), SubGHz 300–439 MHz (CC1101 replay/brute,
+Tesla) or NFC/RFID modules, so those are listed as blind spots rather than
+silently missed. Everything here is passive analysis — nothing is transmitted.
 
 ## Airtime & link quality
 
