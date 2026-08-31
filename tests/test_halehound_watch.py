@@ -107,3 +107,24 @@ def test_alert_title_names_the_class_not_just_halehound():
                   "wifi": [{"type": "auth_flood", "severity": "flood"}]})
     title = hh.to_alert(v)["title"]
     assert "ESP32" in title and "Marauder" in title
+
+
+def test_quiet_esp32_iot_never_alerts():
+    # A home full of unknown ESP32 IoT (smart plugs/sensors) must score zero —
+    # no stacking, no verdict, no alert. This is the key false-positive guard.
+    for n in (1, 3, 6, 12):
+        v = hh.score({"lan": ["rogue_espressif"] * n})
+        assert v["verdict"] == "none" and v["score"] == 0, (n, v)
+
+
+def test_unknown_esp32_needs_attack_grade_corroboration():
+    # Ambient signals (a few stray deauths, a dense airspace) must NOT let an
+    # unknown ESP32 tip into an emitting verdict...
+    for weak in ({"type": "deauth", "severity": "seen"},
+                 {"type": "beacon_flood", "severity": "beacon_warn"}):
+        v = hh.score({"lan": ["rogue_espressif"], "wifi": [weak]})
+        assert v["score"] < 25, (weak, v)
+    # ...but a real flood does corroborate.
+    v = hh.score({"lan": ["rogue_espressif"],
+                  "wifi": [{"type": "auth_flood", "severity": "flood"}]})
+    assert v["domain_scores"]["lan"] > 0 and v["score"] >= 25, v

@@ -211,7 +211,18 @@ confirmed*), fusing signals across domains:
 | Domain | Signals | Source |
 |--------|---------|--------|
 | **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
-| **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC | asset inventory (`device_classifier.detect_threats`) |
+| **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC. Matched on the Espressif **OUI/vendor**. | asset inventory (`device_classifier.detect_threats`) |
+
+> **No false alarms from ordinary IoT.** ESP32 is one of the most common IoT
+> chips — a home can hold a dozen (smart plugs, bulbs, sensors). So an *unknown*
+> Espressif host (`rogue_espressif`) is treated as **corroboration only**: it adds
+> to the score **only when real, attack-grade behaviour is already seen** in
+> another domain, and multiple quiet ESP32s **never stack**. A shelf full of smart
+> plugs scores **zero** and raises nothing. Only a device that literally advertises
+> an attack-tool name (`halehound_cyd`, `esp32_marauder`, …), or an ESP32 seen
+> *alongside* an actual Wi-Fi/BLE attack, moves the needle. (OUI is also useless on
+> the *attack frames* themselves — those tools randomize their source MAC — which
+> is why the Wi-Fi detectors key on the randomization ratio, not the OUI.)
 | **BLE** | Apple (0x004C) FindMy/AirTag flood or Continuity pairing-popup spam, Microsoft Swift Pair (0x0006) spam, advertisement flood — **manufacturer-data only** | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
 | **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
 

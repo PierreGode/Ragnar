@@ -66,6 +66,12 @@ _PORTAL_WEIGHT = 30
 # A domain cannot contribute more than this on its own.
 _DOMAIN_CAP = {"wifi": 45, "lan": 45, "ble": 34, "portal": 30}
 
+# Minimum attack-grade contribution from a behaviour domain before an UNKNOWN
+# Espressif host (common IoT) is allowed to corroborate. A real flood/rogue/
+# evil-twin/BLE-flood clears this; a few stray deauths ("seen"=3) or a dense
+# airspace ("beacon_warn"=6) does not.
+_CORROBORATION_MIN = 10
+
 # Multi-domain bonus: coincident attacks across RF domains are the tell.
 _MULTI_DOMAIN_BONUS = {2: 10, 3: 18, 4: 24}
 
@@ -273,13 +279,6 @@ def score(signals):
             reasons.append({"domain": "wifi", "signal": det.get("type"),
                             "weight": w, "detail": det.get("detail", "")})
 
-    for tid in signals.get("lan", []) or []:
-        w = _LAN_WEIGHTS.get(tid)
-        if w:
-            domain_raw["lan"] += w
-            reasons.append({"domain": "lan", "signal": tid, "weight": w,
-                            "detail": f"Espressif host flagged '{tid}'"})
-
     for atk in signals.get("ble", []) or []:
         w = _BLE_WEIGHTS.get(atk.get("type"))
         if w:
@@ -296,6 +295,36 @@ def score(signals):
         domain_raw["portal"] += _PORTAL_WEIGHT // 2
         reasons.append({"domain": "portal", "signal": "dns_hijack",
                         "weight": _PORTAL_WEIGHT // 2, "detail": portal.get("detail", "")})
+
+    # LAN scored last so it can see whether any *behaviour* was observed.
+    # Two false-positive guards, because ESP32 is one of the most common IoT
+    # chips (smart plugs, sensors, bulbs — a home can hold a dozen):
+    #  1) DEDUPE — a threat id scores once no matter how many hosts carry it, so
+    #     N quiet ESP32s never stack into a verdict.
+    #  2) rogue_espressif (an UNKNOWN ESP32 — no attack-tool hostname) is pure
+    #     CORROBORATION: it adds weight only when real attack behaviour was seen
+    #     elsewhere (Wi-Fi/BLE/portal) or a *named* tool is present. On its own,
+    #     any number of unknown ESP32s scores zero — no alert.
+    lan_ids = signals.get("lan", []) or []
+    # Corroboration must be ATTACK-GRADE, not ambient: a weak/warn signal (a few
+    # stray deauth frames, a dense-but-not-flooding airspace) shouldn't let a
+    # smart plug tip into a verdict. Require a real flood/rogue-strength hit.
+    behaviour_seen = any(domain_raw[d] >= _CORROBORATION_MIN
+                         for d in ("wifi", "ble", "portal"))
+    named_seen = any(t in _NAMED_TOOL_IDS for t in lan_ids)
+    for tid in dict.fromkeys(lan_ids):          # unique, order-preserving
+        w = _LAN_WEIGHTS.get(tid)
+        if not w:
+            continue
+        if tid == "rogue_espressif" and not (behaviour_seen or named_seen):
+            reasons.append({"domain": "lan", "signal": tid, "weight": 0,
+                            "detail": "unknown Espressif host(s) present — no "
+                                      "attack behaviour, so not scored (ESP32 is "
+                                      "common IoT; corroboration only)"})
+            continue
+        domain_raw["lan"] += w
+        reasons.append({"domain": "lan", "signal": tid, "weight": w,
+                        "detail": f"Espressif host flagged '{tid}'"})
 
     # Apply per-domain caps, then sum.
     capped = {d: min(v, _DOMAIN_CAP[d]) for d, v in domain_raw.items()}
@@ -499,6 +528,26 @@ def selftest():
           json.dumps({"v": multi["verdict"], "s": multi["score"], "d": multi["domains"]}))
     check("multi-domain bonus applied",
           any(r["signal"] == "multi_domain" for r in multi["reasons"]))
+
+    # --- False-positive guards (ESP32 is common IoT) ---
+    # A room full of quiet, unknown ESP32 devices (smart plugs/sensors) must NOT
+    # score at all — no stacking, no verdict, no alert.
+    quiet_esp = score({"lan": ["rogue_espressif"] * 6})
+    check("6 quiet unknown ESP32s => none (no stacking, no alert)",
+          quiet_esp["verdict"] == "none" and quiet_esp["score"] == 0,
+          json.dumps(quiet_esp))
+    # An unknown ESP32 + only an AMBIENT signal (a few stray deauths) must stay a
+    # trace, not tip into an emitting 'possible'.
+    ambient = score({"lan": ["rogue_espressif"],
+                     "wifi": [{"type": "deauth", "severity": "seen"}]})
+    check("unknown ESP32 + ambient deauth => below alert threshold",
+          ambient["score"] < 25, json.dumps(ambient))
+    # But an unknown ESP32 DOES corroborate real attack-grade behaviour.
+    corrob = score({"lan": ["rogue_espressif"],
+                    "wifi": [{"type": "auth_flood", "severity": "flood"}]})
+    check("unknown ESP32 corroborates a real flood",
+          corrob["domain_scores"]["lan"] > 0 and corrob["score"] >= 25,
+          json.dumps(corrob))
 
     # Named HaleHound host on the LAN alone => floored to at least 'likely'.
     named = score({"lan": ["halehound_cyd"]})
