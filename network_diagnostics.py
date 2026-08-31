@@ -19643,6 +19643,67 @@ def register_network_diagnostics(app, logger=None):
         _log("wifidef/halehound/selftest")
         return jsonify(_hh.selftest())
 
+    @app.route('/api/wifidef/halehound/portal-probe', methods=['POST'])
+    def wifidef_halehound_portal_probe():
+        """Actively fetch a captive portal and match it to a GARMR signature.
+
+        HaleHound exposes no management API — the GARMR evil-twin captive portal
+        is the ONLY page it ever serves. Run this while associated with the
+        suspect/rogue SSID: it GETs the portal (read-only — it NEVER submits
+        credentials), extracts title/Server/form-fields/body-hash, and matches
+        the (operator-supplied) GARMR signature table for a HaleHound-specific
+        confirm. Body: {"url": "http://<portal-ip>/"}.
+
+        Safety: this is an ACTIVE probe, so the target is restricted to a
+        private / link-local / loopback IP literal (a captive-portal gateway) —
+        it cannot be pointed at arbitrary internet hosts.
+        """
+        import ipaddress
+        import urllib.request
+        from urllib.parse import urlparse
+        import halehound_watch as _hh
+        data = request.get_json(silent=True) or {}
+        url = (data.get('url') or '').strip()
+        p = urlparse(url)
+        if p.scheme not in ('http', 'https') or not p.hostname:
+            return _bad('Provide an http(s) URL to the captive portal, '
+                        'e.g. http://192.168.4.1/')
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+        except ValueError:
+            return _bad('Target must be an IP literal (the portal/gateway IP) — '
+                        'a hostname would be resolved through the hijacked DNS')
+        if not (ip.is_private or ip.is_link_local or ip.is_loopback):
+            return _bad('Refusing to probe a non-local address — point this at '
+                        'the local captive-portal gateway only')
+        _log(f"wifidef/halehound/portal-probe {url}")
+        try:
+            req = urllib.request.Request(url, method='GET',
+                                         headers={'User-Agent': 'Ragnar-WIDS'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = resp.getcode()
+                headers = {k: v for k, v in resp.headers.items()}
+                body = resp.read(262144).decode('utf-8', 'replace')  # cap 256 KB
+            final_host = urlparse(resp.geturl()).hostname
+        except Exception as exc:                              # noqa: BLE001
+            return jsonify({'error': f'portal fetch failed: {exc}',
+                            'reachable': False})
+        observed = _hh.parse_portal_observation(body, headers, status)
+        sig = _hh.match_portal_signature(observed)
+        # Don't echo the raw HTML back; return the extracted, matchable fields.
+        observed.pop('html', None)
+        return jsonify({
+            'reachable': True, 'url': url, 'final_host': final_host,
+            'observed': observed,
+            'garmr_signature': (sig['name'] if sig else None),
+            'signature_confidence': (sig['confidence'] if sig else None),
+            'matched': bool(sig),
+            'note': ('No GARMR signature is loaded yet — the fields above are '
+                     'what a signature would match on. Add real signatures to '
+                     'halehound_watch._GARMR_SIGNATURES.') if not sig else
+                    'Matched a loaded GARMR signature — HaleHound-specific confirm.',
+        })
+
     @app.route('/api/net/isp', methods=['GET'])
     def net_isp():
         iface = (request.args.get('interface') or '').strip() or None

@@ -193,8 +193,114 @@ def detect_ble_attacks(devices, thresholds=None):
 # GARMR captive-portal fingerprint (#3) — pure over observed DNS/HTTP behaviour
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# GARMR captive-portal SIGNATURE table  (active "ask the portal" confirm)
+# --------------------------------------------------------------------------
+# HaleHound exposes no management API — the ONLY fetchable surface it ever
+# presents is the GARMR evil-twin captive portal, and only while it is actively
+# running that attack. When Ragnar (or the operator) associates with the rogue
+# SSID, it can GET the portal page and match it here for a HIGH-CONFIDENCE,
+# HaleHound-specific confirm — far stronger than the generic DNS-hijack tell.
+#
+# This table is intentionally EMPTY: drop in the real GARMR fingerprints once
+# they are known (e.g. from the tool's author). Each entry is a dict; every
+# present key must match (AND), entries are OR'd. Recognized keys:
+#   name           str   — label shown when it matches (required)
+#   confidence     str   — "confirmed" | "likely" (default "likely")
+#   title_contains str   — case-insensitive substring of the page <title>
+#   server_contains str  — case-insensitive substring of the HTTP Server header
+#   form_fields    [str] — all of these <input name=...> must be present
+#   html_markers   [str] — all of these substrings must appear in the body
+#   html_sha256    str   — exact hex digest of the normalized body (whitespace-
+#                          collapsed, lowercased) — the strongest single match
+#
+# Example (commented — replace with the real values):
+#   {"name": "GARMR default portal", "confidence": "confirmed",
+#    "title_contains": "sign in", "server_contains": "esp",
+#    "form_fields": ["username", "password"],
+#    "html_markers": ["garmr"], "html_sha256": None},
+_GARMR_SIGNATURES = []
+
+
+def _normalize_html(html):
+    """Whitespace-collapsed, lowercased body — stable input for hashing."""
+    import re as _re
+    return _re.sub(r"\s+", " ", (html or "")).strip().lower()
+
+
+def parse_portal_observation(html=None, headers=None, http_status=None):
+    """Extract the matchable fields from a fetched captive-portal response (pure).
+
+    Returns ``{status, server, title, form_fields, html_sha256, html}`` — the
+    shape ``match_portal_signature`` and ``fingerprint_portal(observed=...)``
+    expect. ``headers`` is any mapping of HTTP response headers.
+    """
+    import hashlib
+    import re as _re
+    html = html or ""
+    headers = headers or {}
+    server = ""
+    for k, v in dict(headers).items():
+        if str(k).lower() == "server":
+            server = str(v)
+            break
+    m = _re.search(r"<title[^>]*>(.*?)</title>", html, _re.I | _re.S)
+    title = (m.group(1).strip() if m else "")
+    form_fields = sorted({n.lower() for n in
+                          _re.findall(r"<input[^>]*\bname\s*=\s*[\"']([^\"']+)",
+                                      html, _re.I)})
+    norm = _normalize_html(html)
+    return {
+        "status": http_status,
+        "server": server,
+        "title": title,
+        "form_fields": form_fields,
+        "html_sha256": hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest(),
+        "html": html,
+    }
+
+
+def match_portal_signature(observed, signatures=None):
+    """Return the first GARMR signature matching an observation, or None (pure).
+
+    ``observed`` is a ``parse_portal_observation`` result (or a compatible dict).
+    Every present criterion in a signature must match; a signature with no usable
+    criteria never matches (so an empty table can't false-positive).
+    """
+    if not observed:
+        return None
+    sigs = _GARMR_SIGNATURES if signatures is None else signatures
+    title = (observed.get("title") or "").lower()
+    server = (observed.get("server") or "").lower()
+    fields = {str(f).lower() for f in (observed.get("form_fields") or [])}
+    html = (observed.get("html") or "").lower()
+    digest = (observed.get("html_sha256") or "").lower()
+    for sig in sigs:
+        criteria = 0
+        ok = True
+        if sig.get("title_contains"):
+            criteria += 1
+            ok = ok and sig["title_contains"].lower() in title
+        if sig.get("server_contains"):
+            criteria += 1
+            ok = ok and sig["server_contains"].lower() in server
+        if sig.get("form_fields"):
+            criteria += 1
+            ok = ok and {f.lower() for f in sig["form_fields"]} <= fields
+        if sig.get("html_markers"):
+            criteria += 1
+            ok = ok and all(mk.lower() in html for mk in sig["html_markers"])
+        if sig.get("html_sha256"):
+            criteria += 1
+            ok = ok and sig["html_sha256"].lower() == digest
+        if ok and criteria > 0:
+            return {"name": sig.get("name", "GARMR portal"),
+                    "confidence": sig.get("confidence", "likely")}
+    return None
+
+
 def fingerprint_portal(dns_answers, http_status=None, redirect_host=None,
-                       ap_ip=None):
+                       ap_ip=None, observed=None):
     """Decide whether observed behaviour matches a GARMR-style evil-twin portal.
 
     HaleHound's Captive Portal (GARMR) is a fake AP + DNS hijack + credential
@@ -231,16 +337,27 @@ def fingerprint_portal(dns_answers, http_status=None, redirect_host=None,
         # Portal answering everything with a page is the classic walled garden.
         captive_portal = True
 
-    confirmed = dns_hijack and captive_portal
+    # Active confirm: does the fetched page match a known GARMR signature? A
+    # positive match is HaleHound-specific and definitive — it confirms the
+    # portal regardless of the (behavioural) DNS-hijack heuristics.
+    sig = match_portal_signature(observed) if observed else None
+
+    captive_portal = captive_portal or bool(sig)
+    confirmed = (dns_hijack and captive_portal) or bool(sig)
     bits = []
+    if sig:
+        bits.append(f"matched GARMR signature '{sig['name']}'")
     if dns_hijack:
         bits.append(f"all DNS → {hijack_ip} (hijack)")
-    if captive_portal:
+    if captive_portal and http_status:
         bits.append(f"HTTP {http_status} → captive portal")
     detail = ("GARMR-style evil-twin captive portal — " + ", ".join(bits)
               if bits else "no captive-portal signature")
     return {"dns_hijack": dns_hijack, "captive_portal": captive_portal,
-            "confirmed": confirmed, "hijack_ip": hijack_ip, "detail": detail}
+            "confirmed": confirmed, "hijack_ip": hijack_ip,
+            "garmr_signature": (sig["name"] if sig else None),
+            "signature_confidence": (sig["confidence"] if sig else None),
+            "detail": detail}
 
 
 # --------------------------------------------------------------------------
@@ -287,7 +404,14 @@ def score(signals):
                             "weight": w, "detail": atk.get("detail", "")})
 
     portal = signals.get("portal") or {}
-    if portal.get("confirmed"):
+    if portal.get("garmr_signature"):
+        domain_raw["portal"] += _PORTAL_WEIGHT
+        reasons.append({"domain": "portal", "signal": "garmr_signature",
+                        "weight": _PORTAL_WEIGHT,
+                        "detail": "active portal fetch matched GARMR signature "
+                                  f"'{portal['garmr_signature']}' — "
+                                  "HaleHound-specific confirm"})
+    elif portal.get("confirmed"):
         domain_raw["portal"] += _PORTAL_WEIGHT
         reasons.append({"domain": "portal", "signal": "garmr_portal",
                         "weight": _PORTAL_WEIGHT, "detail": portal.get("detail", "")})
@@ -353,6 +477,17 @@ def score(signals):
                         "detail": "hostname/name match to a known ESP32 attack tool "
                                   f"({', '.join(named)}) — verdict floored to 'likely'"})
 
+    # An active GARMR portal-signature match is a HaleHound-specific ID — floor to
+    # 'confirmed' if the signature itself is high-confidence, else 'likely'.
+    if portal.get("garmr_signature"):
+        floor = 75 if portal.get("signature_confidence") == "confirmed" else 60
+        if total < floor:
+            total = floor
+            reasons.append({"domain": "portal", "signal": "signature_floor",
+                            "weight": 0,
+                            "detail": "GARMR portal signature match — verdict "
+                                      f"floored to '{_tier(floor)[0]}'"})
+
     tier_name, sev, code = _tier(total)
     return {
         "score": total,
@@ -394,7 +529,9 @@ def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
         ble_devices: a list of bt_scanner device dicts (snapshot).
         portal_obs: a dict of observed portal behaviour to pass through
                     ``fingerprint_portal`` (keys: dns_answers, http_status,
-                    redirect_host, ap_ip), or an already-built fingerprint.
+                    redirect_host, ap_ip; plus optional html/headers or a
+                    pre-parsed ``observed`` for GARMR-signature matching), or an
+                    already-built fingerprint.
 
     Returns the ``score`` verdict enriched with ``suspects`` and ``blind_spots``.
     """
@@ -414,9 +551,18 @@ def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
         if "confirmed" in portal_obs or "dns_hijack" in portal_obs:
             portal = portal_obs  # already a fingerprint
         else:
+            # An active fetch may include the page itself (html/headers) or a
+            # pre-parsed observation, for GARMR-signature matching.
+            observed = portal_obs.get("observed")
+            if observed is None and (portal_obs.get("html") is not None
+                                     or portal_obs.get("headers")):
+                observed = parse_portal_observation(
+                    portal_obs.get("html"), portal_obs.get("headers"),
+                    portal_obs.get("http_status"))
             portal = fingerprint_portal(
                 portal_obs.get("dns_answers"), portal_obs.get("http_status"),
-                portal_obs.get("redirect_host"), portal_obs.get("ap_ip"))
+                portal_obs.get("redirect_host"), portal_obs.get("ap_ip"),
+                observed=observed)
 
     verdict = score({"wifi": wifi_dets, "lan": lan_ids,
                      "ble": ble_attacks, "portal": portal})
@@ -505,6 +651,36 @@ def selftest():
                               http_status=200)
     check("real internet (varied DNS) => not a portal",
           not real["confirmed"] and not real["dns_hijack"], json.dumps(real))
+
+    # --- Active GARMR portal-signature machinery (empty table can't FP) ---
+    page = ("<html><head><title>GARMR Sign In</title></head><body>"
+            "<form><input name='username'><input name='password'></form>"
+            "<!-- garmr --></body></html>")
+    obs = parse_portal_observation(page, {"Server": "ESP32-HTTPD"}, 200)
+    check("parse_portal_observation extracts title/fields/server",
+          obs["title"] == "GARMR Sign In" and obs["form_fields"] == ["password", "username"]
+          and obs["server"] == "ESP32-HTTPD" and len(obs["html_sha256"]) == 64,
+          json.dumps({k: obs[k] for k in ("title", "form_fields", "server")}))
+    # Empty production table never matches (no false confirm).
+    check("empty GARMR signature table => no match",
+          match_portal_signature(obs) is None)
+    # A supplied (synthetic) signature matches, and fingerprint_portal confirms
+    # off it even with NO DNS hijack.
+    synth = [{"name": "GARMR test", "confidence": "confirmed",
+              "title_contains": "garmr", "server_contains": "esp",
+              "form_fields": ["username", "password"], "html_markers": ["garmr"]}]
+    check("supplied GARMR signature matches an observation",
+          match_portal_signature(obs, synth)["name"] == "GARMR test")
+    fp_sig = fingerprint_portal([], observed=obs)
+    fp_sig2 = dict(fp_sig)  # behavioural path had no signature (empty table)
+    check("fingerprint_portal(observed) with empty table => not confirmed",
+          not fp_sig2["confirmed"] and fp_sig2["garmr_signature"] is None)
+    # Signature match floors the verdict to 'confirmed' even alone.
+    matched_portal = {"garmr_signature": "GARMR test",
+                      "signature_confidence": "confirmed", "confirmed": True}
+    sv = score({"portal": matched_portal})
+    check("matched GARMR signature alone => confirmed",
+          sv["verdict"] == "confirmed", json.dumps({"v": sv["verdict"], "s": sv["score"]}))
 
     # --- Scoring / correlation ---
     # Single domain (Wi-Fi only, even a strong evil twin) is capped at "possible".

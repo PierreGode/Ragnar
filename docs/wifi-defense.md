@@ -187,6 +187,7 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
 | `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
 | `POST /api/wifidef/halehound` | `{scan?, bt?, portal?}` → fused HaleHound-CYD assessment (see below) |
+| `POST /api/wifidef/halehound/portal-probe` | `{url}` → **actively** fetch a captive portal (read-only) and match the GARMR signature (see below) |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 | `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
 
@@ -234,6 +235,29 @@ Flipper) is floored to at least *likely*. When the score crosses a tier it is
 emitted into the **Watchtower** feed as a `halehound` alert (`HH-CONFIRM` /
 `HH-LIKELY` / `HH-POSSIBLE`) and fused by the **incident engine** into an *ESP32
 attack multitool active* incident.
+
+### Actively confirming a GARMR portal
+
+HaleHound exposes **no management API** — it's a touch-driven device, and OTA is
+from its SD card, so there's nothing on the network to politely query. The **only**
+page it ever serves is the **GARMR evil-twin captive portal**, and only while it's
+actively running that attack. So the one "ask it" move is: associate with the
+rogue SSID and fetch that portal.
+
+`POST /api/wifidef/halehound/portal-probe {"url":"http://<portal-ip>/"}` does
+exactly that — a **read-only GET** (it *never* submits credentials) — then
+extracts the page `<title>`, HTTP `Server` header, `<input>` field names and a
+body hash, and matches them against a **GARMR signature table**
+(`halehound_watch._GARMR_SIGNATURES`). A match is a **HaleHound-specific**
+confirm and floors the verdict to *likely*/*confirmed* on its own — far stronger
+than the generic DNS-hijack tell. Safety: the target is restricted to a
+**private/link-local/loopback IP literal** (the portal gateway), so it can't be
+pointed at arbitrary hosts, and a hostname is refused (it would resolve through
+the hijacked DNS).
+
+The signature table ships **empty** — so it never false-matches — with a
+documented schema (title/Server/form-fields/HTML-markers/SHA-256). Drop in the
+real GARMR fingerprints and the confirm goes live with no code change.
 
 **Blind spots (reported, not faked).** Ragnar has no receiver for these tools'
 NRF24 2.4 GHz (MouseJack, jammers), SubGHz 300–439 MHz (CC1101 replay/brute,

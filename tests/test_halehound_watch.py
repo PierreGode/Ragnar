@@ -128,3 +128,30 @@ def test_unknown_esp32_needs_attack_grade_corroboration():
     v = hh.score({"lan": ["rogue_espressif"],
                   "wifi": [{"type": "auth_flood", "severity": "flood"}]})
     assert v["domain_scores"]["lan"] > 0 and v["score"] >= 25, v
+
+
+def test_portal_observation_parse_and_signature_match():
+    page = ("<html><head><title>GARMR Sign In</title></head><body>"
+            "<form><input name='username'><input name='password'></form>"
+            "<!-- garmr --></body></html>")
+    obs = hh.parse_portal_observation(page, {"Server": "ESP32-HTTPD"}, 200)
+    assert obs["title"] == "GARMR Sign In"
+    assert obs["form_fields"] == ["password", "username"]
+    assert obs["server"] == "ESP32-HTTPD" and len(obs["html_sha256"]) == 64
+    # Empty production table => never matches (no false positive).
+    assert hh.match_portal_signature(obs) is None
+    # A supplied signature matches.
+    synth = [{"name": "GARMR test", "title_contains": "garmr",
+              "form_fields": ["username", "password"], "html_markers": ["garmr"]}]
+    assert hh.match_portal_signature(obs, synth)["name"] == "GARMR test"
+
+
+def test_matched_signature_confirms_without_dns_hijack():
+    # A matched GARMR signature alone floors the verdict to confirmed.
+    matched = {"garmr_signature": "GARMR test", "signature_confidence": "confirmed",
+               "confirmed": True}
+    assert hh.score({"portal": matched})["verdict"] == "confirmed"
+    # Empty table + a benign page => no confirm, no alert.
+    obs = hh.parse_portal_observation("<html><title>Login</title></html>", {}, 200)
+    fp = hh.fingerprint_portal([], observed=obs)
+    assert not fp["confirmed"] and fp["garmr_signature"] is None
