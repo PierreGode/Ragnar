@@ -5293,10 +5293,10 @@ function wifidefRender() {
 // verdict. Backend: POST /api/wifidef/halehound (halehound_watch.assess).
 const _WIFIDEF_HH = {
     confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
-    likely: ['LIKELY', 'bg-red-500/80 text-red-50'],
-    possible: ['POSSIBLE', 'bg-amber-500/80 text-amber-950'],
+    likely: ['LIKELY', 'bg-red-500 text-white'],
+    possible: ['POSSIBLE', 'bg-amber-500 text-slate-900'],
     trace: ['trace', 'bg-slate-600 text-slate-200'],
-    none: ['clear', 'bg-emerald-700/70 text-emerald-100'],
+    none: ['clear', 'bg-emerald-600 text-white'],
 };
 async function wifidefHaleHound() {
     const vb = document.getElementById('wifidef-hh-verdict');
@@ -5327,7 +5327,7 @@ async function wifidefHaleHound() {
         let html = '';
         if (v.domains && v.domains.length) {
             html += '<div class="mb-2 flex flex-wrap gap-1">' + v.domains.map(d =>
-                `<span class="px-2 py-0.5 rounded bg-pink-900/40 border border-pink-700/50 text-pink-200 text-[11px]">${_esc(d)}</span>`).join('') + '</div>';
+                `<span class="px-2 py-0.5 rounded bg-fuchsia-600/20 border border-fuchsia-700/50 text-fuchsia-200 text-[11px]">${_esc(d)}</span>`).join('') + '</div>';
         }
         if (v.suspects && v.suspects.length) {
             html += '<div class="text-[12px] text-gray-300 mb-2">Suspect host' + (v.suspects.length > 1 ? 's' : '') + ': '
@@ -5343,7 +5343,7 @@ async function wifidefHaleHound() {
             html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots (no receiver): ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
         }
         if (v.score >= 25) {
-            html += '<div class="mt-1 text-[10px] text-pink-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+            html += '<div class="mt-1 text-[10px] text-fuchsia-400">Fed into the Watchtower alert feed + incident correlation.</div>';
         }
         body.innerHTML = html;
     } catch (e) {
