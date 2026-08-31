@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260831-halehound-authflood"
+_BUILD = "20260831-halehound-bandsteer"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -621,6 +621,35 @@ def _is_locally_administered(mac):
         return bool(int(mac.split(":")[0], 16) & 0x02)
     except (ValueError, IndexError):
         return False
+
+
+def _oui(mac):
+    """The 24-bit OUI (first three octets, lower-cased) of a MAC, or None."""
+    if not mac:
+        return None
+    parts = mac.split(":")
+    if len(parts) < 3:
+        return None
+    return ":".join(parts[:3]).lower()
+
+
+def _is_band_steering(bssids):
+    """True if a set of BSSIDs advertising one SSID looks like ONE physical AP /
+    vendor mesh rather than an evil twin.
+
+    Band-steering routers and mesh systems put the same SSID on several radios
+    (2.4/5/6 GHz) or nodes, all from the SAME vendor OUI — a tri-band adapter now
+    sees these as 2-3 BSSIDs for one real network. An evil twin, by contrast,
+    clones the SSID from a DIFFERENT (often randomized/locally-administered)
+    radio, so its BSSID won't share the victim AP's global OUI. Require every
+    BSSID to be a global (vendor-assigned) address sharing one OUI."""
+    bssids = [b for b in bssids if b]
+    if len(bssids) < 2:
+        return False
+    if any(_is_locally_administered(b) for b in bssids):
+        return False
+    ouis = {_oui(b) for b in bssids}
+    return len(ouis) == 1 and None not in ouis
 
 
 def _freq_to_channel(freq):
@@ -1804,12 +1833,27 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                               + ", ".join(sorted(rogue)),
                 })
         elif len(bssids) >= 2:
-            detections.append({
-                "type": "rogue_ap", "severity": "duplicate_ssid", "ssid": ssid,
-                "bssids": sorted(bssids),
-                "detail": f"SSID '{ssid}' advertised by {len(bssids)} BSSIDs "
-                          "(possible evil twin — set a baseline to confirm)",
-            })
+            # A tri-band router / vendor mesh legitimately puts one SSID on
+            # several radios from the SAME global OUI. Down-rank that to an
+            # informational 'band_steering' note so it stops reading as a
+            # possible evil twin (and stops feeding the HaleHound trace score).
+            # An evil twin clones from a different / randomized BSSID, so its
+            # OUIs won't cohere — that still surfaces as 'duplicate_ssid'.
+            if _is_band_steering(bssids):
+                detections.append({
+                    "type": "rogue_ap", "severity": "band_steering", "ssid": ssid,
+                    "bssids": sorted(bssids), "oui": _oui(sorted(bssids)[0]),
+                    "detail": f"SSID '{ssid}' on {len(bssids)} BSSIDs sharing one "
+                              f"vendor OUI ({_oui(sorted(bssids)[0])}) — "
+                              "band-steering/mesh, not an evil twin",
+                })
+            else:
+                detections.append({
+                    "type": "rogue_ap", "severity": "duplicate_ssid", "ssid": ssid,
+                    "bssids": sorted(bssids),
+                    "detail": f"SSID '{ssid}' advertised by {len(bssids)} BSSIDs "
+                              "(possible evil twin — set a baseline to confirm)",
+                })
 
     # Access-point inventory (for the UI table + baseline building)
     aps = {}
@@ -1827,7 +1871,8 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
             ap["channel"] = e["channel"]
 
     sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3,
-                "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2, "seen": 1}
+                "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
+                "band_steering": 1, "seen": 1}
     threat = "clear"
     if detections:
         worst = max(sev_rank.get(d["severity"], 1) for d in detections)
@@ -2064,6 +2109,35 @@ def selftest():
           and "99:99:99:99:99:99" in types.get("rogue_ap", {}).get("rogue_bssids", []),
           str(types.get("rogue_ap")))
     check("overall threat = critical", res["threat"] == "critical", res["threat"])
+
+    # --- Band-steering / mesh vs evil twin (tri-band false-positive guard) ---
+    # One SSID on three BSSIDs sharing ONE global vendor OUI = a band-steering
+    # router / mesh seen across 2.4/5/6 GHz. Must down-rank to informational
+    # 'band_steering', NOT a possible evil twin, and NOT raise the threat level.
+    steer = [{"kind": "beacon", "src": "3c:22:fb:11:22:%02x" % (0x30 + i),
+              "ssid": "Proxima B"} for i in range(3) for _ in range(4)]
+    steer_res = analyze(steer, baseline={})
+    steer_d = next((d for d in steer_res["detections"]
+                    if d["type"] == "rogue_ap"), {})
+    check("multi-BSSID same-OUI SSID = band_steering (not evil twin)",
+          steer_d.get("severity") == "band_steering", json.dumps(steer_d))
+    check("band steering does not raise threat above clear/warning",
+          steer_res["threat"] in ("clear", "warning"), steer_res["threat"])
+    # But a clone from a DIFFERENT vendor OUI still surfaces as duplicate_ssid.
+    twin = ([{"kind": "beacon", "src": "3c:22:fb:11:22:30", "ssid": "Proxima B"}] * 4
+            + [{"kind": "beacon", "src": "de:ad:be:ef:00:01", "ssid": "Proxima B"}] * 4)
+    twin_res = analyze(twin, baseline={})
+    twin_d = next((d for d in twin_res["detections"]
+                   if d["type"] == "rogue_ap"), {})
+    check("cross-OUI duplicate SSID still flags duplicate_ssid",
+          twin_d.get("severity") == "duplicate_ssid", json.dumps(twin_d))
+    # A locally-administered (randomized) BSSID among them defeats the guard too.
+    rnd = ([{"kind": "beacon", "src": "3c:22:fb:11:22:30", "ssid": "Proxima B"}] * 4
+           + [{"kind": "beacon", "src": "3e:22:fb:11:22:31", "ssid": "Proxima B"}] * 4)
+    rnd_d = next((d for d in analyze(rnd, baseline={})["detections"]
+                  if d["type"] == "rogue_ap"), {})
+    check("randomized-BSSID clone is NOT treated as band steering",
+          rnd_d.get("severity") == "duplicate_ssid", json.dumps(rnd_d))
 
     # Clean traffic => no detections
     from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt

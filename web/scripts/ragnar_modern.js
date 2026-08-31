@@ -4782,7 +4782,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260831-halehound-authflood';
+const WIFIDEF_BUILD = '20260831-halehound-bandsteer';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -5238,7 +5238,9 @@ function wifidefRender() {
     } else {
         det.innerHTML = d.detections.map(x => {
             const crit = ['flood', 'evil_twin', 'karma'].includes(x.severity);
-            const border = crit ? 'border-l-4 border-red-500' : 'border-l-4 border-amber-500';
+            const info = x.severity === 'band_steering';
+            const border = crit ? 'border-l-4 border-red-500'
+                : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';
             if (x.type === 'deauth') {
                 title = x.severity === 'flood' ? '💥 Deauth/Disassoc FLOOD' : 'Deauth/Disassoc frames seen';
@@ -5253,7 +5255,9 @@ function wifidefRender() {
                 title = '🎣 KARMA / MANA rogue AP';
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
-                title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)' : '⚠ Duplicate SSID';
+                title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
+                    : x.severity === 'band_steering' ? '📶 Band-steering / mesh (benign)'
+                    : '⚠ Duplicate SSID';
                 body = `<div>SSID <b>${x.ssid}</b></div><div class="font-mono text-[11px] text-gray-400">${(x.rogue_bssids || x.bssids || []).map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
             } else if (x.type === 'auth_flood') {
                 title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
