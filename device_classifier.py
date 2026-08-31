@@ -593,7 +593,7 @@ _THREAT_SIGNATURES = [
         'name': 'HaleHound-CYD Attack Multitool',
         'severity': 'critical',
         'category': 'Attack Tool',
-        'description': 'ESP32 "Cheap Yellow Display" HaleHound multitool — WiFi/BLE/'
+        'description': 'ESP32 HaleHound attack multitool — WiFi/BLE/'
                        'SubGHz/NFC attacks, evil-twin (GARMR) captive portal, IoT '
                        'Recon LAN scanner and credential brute-forcer',
         'vendor_keywords': ['espressif'],

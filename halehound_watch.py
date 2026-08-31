@@ -1,7 +1,7 @@
 """halehound_watch.py — HaleHound-CYD detection & multi-domain correlation.
 
-HaleHound-CYD (https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 "Cheap
-Yellow Display" attack multitool: 40+ modules across Wi-Fi (deauth, beacon spam,
+HaleHound-CYD (https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 attack
+multitool: 40+ modules across Wi-Fi (deauth, beacon spam,
 auth flood, evil-twin "GARMR" captive portal, KARMA), BLE (Fast Pair spam,
 FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and NFC.
 

@@ -192,8 +192,8 @@ Detection-only; the only state written is the trusted-AP baseline.
 
 ## HaleHound-CYD correlation
 
-[HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 "Cheap
-Yellow Display" **attack multitool** — 40+ modules across Wi-Fi (deauth, beacon
+[HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is an ESP32
+**attack multitool** — 40+ modules across Wi-Fi (deauth, beacon
 spam, auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair
 spam, FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and
 NFC. The **Check for HaleHound** button on the WiFi Defense panel scores whether

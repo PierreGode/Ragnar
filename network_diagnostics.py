@@ -19560,7 +19560,7 @@ def register_network_diagnostics(app, logger=None):
     def wifidef_halehound():
         """Fused HaleHound-CYD assessment.
 
-        HaleHound is an ESP32 "Cheap Yellow Display" attack multitool. It cannot
+        HaleHound is an ESP32 attack multitool. It cannot
         be uniquely fingerprinted (same silicon/techniques as Marauder/Bruce, and
         it randomizes MACs), so we score how strongly the observed behaviour —
         across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
