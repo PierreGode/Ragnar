@@ -178,6 +178,19 @@ def _sdr_busy():
     return False
 
 
+def _capture_error_reason(stderr):
+    """Turn rtl_433 / libusb stderr into a human reason for why capture failed."""
+    s = (stderr or "").lower()
+    # libusb -6 = LIBUSB_ERROR_BUSY: the dongle interface is claimed elsewhere.
+    if "usb_claim_interface error -6" in s or "error -6" in s or "resource busy" in s:
+        return ("RTL-SDR busy — another process or the kernel DVB-T driver is "
+                "holding it (close ADS-B/ACARS/waterfall and retry)")
+    if "no supported devices" in s or "found 0 device" in s or "-1" in s:
+        return "RTL-SDR not available (no device opened)"
+    tail = (stderr or "").strip().splitlines()[-1:] or [""]
+    return f"rtl_433 could not capture: {tail[0][:120]}"
+
+
 def detect():
     """Report SubGHz-capture readiness: {available, reason, sdr, tool}."""
     sdr = _sdr_present()
@@ -225,10 +238,9 @@ def scan(freqs=None, duration=None, replay_min=None, brute_min=None):
         out = proc.stdout or ""
         # rtl_433 exits non-zero when it can't open a busy/absent device.
         if not out and proc.returncode not in (0, None):
-            err = (proc.stderr or "").strip().splitlines()[-1:] or [""]
+            reason = _capture_error_reason(proc.stderr or "")
             return {"scanned": False, "detections": [], "events": 0,
-                    "freqs": freqs, "duration": duration,
-                    "reason": f"rtl_433 could not capture: {err[0][:120]}"}
+                    "freqs": freqs, "duration": duration, "reason": reason}
     except subprocess.TimeoutExpired as exc:
         out = (exc.stdout or b"")
         out = out.decode("utf-8", "replace") if isinstance(out, bytes) else out

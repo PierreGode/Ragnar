@@ -96,9 +96,16 @@ _TIERS = (
 _APPLE_CID = 0x004C     # Apple — FindMy/AirTag + Continuity proximity-pairing
 _MS_CID = 0x0006        # Microsoft — Swift Pair
 _FASTPAIR_SVC = 0xFE2C  # Google Fast Pair — BLE SERVICE-data UUID (not company id)
-_APPLE_MIN = 6          # distinct Apple 0x004C random advertisers => flood/spam
-_SWIFTPAIR_MIN = 6      # distinct Microsoft 0x0006 advertisers => Swift Pair spam
-_FASTPAIR_MIN = 6       # distinct 0xFE2C random advertisers => Fast Pair spam
+# BLE-spam thresholds are set ABOVE ordinary device density, not at it. A normal
+# room holds a handful of Apple advertisers (iPhone/AirPods/Watch/Mac) — measured
+# 6 here on a quiet home network — so a low bar false-flags. A real Continuity/
+# pairing-popup spam (Flipper/ESP32 "AppleJuice", Swift Pair, Fast Pair) cycles a
+# NEW random MAC per advert, so it produces DOZENS-to-HUNDREDS of distinct
+# advertisers in one scan — far past these bars. The generic advertisement-flood
+# detector (any-vendor, >=25) backstops anything these vendor-specific bars miss.
+_APPLE_MIN = 20         # distinct Apple 0x004C random advertisers => flood/spam
+_SWIFTPAIR_MIN = 15     # distinct Microsoft 0x0006 advertisers => Swift Pair spam
+_FASTPAIR_MIN = 15      # distinct 0xFE2C random advertisers => Fast Pair spam
 _ADVERT_FLOOD_MIN = 25  # distinct random-address advertisers => advertisement flood
 
 # ESP32 attack-tool threat ids we fuse from the LAN (HaleHound + its siblings:
@@ -571,6 +578,11 @@ def _blind_spots(caps=None, subghz=None):
 
     if subghz and subghz.get("scanned"):
         pass                                  # covered — SubGHz is a live domain
+    elif subghz and isinstance(subghz, dict):
+        # Sweep was attempted but failed (busy/error) — say why, don't tell the
+        # operator to "enable" a scan they already ran.
+        spots.append("SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — "
+                     + str(subghz.get("reason") or "capture failed"))
     elif sdr:
         spots.append("SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — RTL-SDR "
                      "present but no SubGHz capture this pass (enable the SubGHz "
@@ -699,12 +711,19 @@ def selftest():
 
     # --- BLE attack detection ---
     apple = [{"mac": "C0:11:22:33:44:%02x" % i, "company_key": 0x004C,
-              "addr_type": "random"} for i in range(8)]
+              "addr_type": "random"} for i in range(24)]
     ble = detect_ble_attacks(apple)
     check("Apple FindMy/pairing flood detected (0x004C random burst)",
           any(a["type"] == "apple_ble_flood" for a in ble), json.dumps(ble))
+    # FP GUARD: a normal Apple-dense room (measured ~6 advertisers) must NOT flag.
+    apple_room = [{"mac": "C0:11:22:33:44:%02x" % i, "company_key": 0x004C,
+                   "addr_type": "random"} for i in range(6)]
+    check("ordinary Apple-dense room (6 advertisers) => NO flood",
+          not any(a["type"] == "apple_ble_flood"
+                  for a in detect_ble_attacks(apple_room)),
+          json.dumps(detect_ble_attacks(apple_room)))
     ms = [{"mac": "AA:BB:CC:00:00:%02x" % i, "company_key": 0x0006,
-           "addr_type": "public"} for i in range(7)]
+           "addr_type": "public"} for i in range(16)]
     check("Microsoft Swift Pair spam detected (0x0006 burst)",
           any(a["type"] == "swiftpair_spam" for a in detect_ble_attacks(ms)))
     # Public-address Apple devices (e.g. a real Mac) must NOT trip the flood.
@@ -723,17 +742,17 @@ def selftest():
           json.dumps(detect_ble_attacks(calm)))
     # Google Fast Pair spam (service-data 0xFE2C) — now visible, was a blind spot.
     fastpair = [{"mac": "5E:00:00:00:00:%02x" % i, "addr_type": "random",
-                 "service_uuids": [0xFE2C]} for i in range(7)]
+                 "service_uuids": [0xFE2C]} for i in range(16)]
     check("Fast Pair (service-data 0xFE2C) spam detected",
           any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(fastpair)),
           json.dumps(detect_ble_attacks(fastpair)))
-    check("a couple of legit Fast Pair devices => no spam",
+    check("a few legit Fast Pair devices => no spam",
           not any(a["type"] == "fastpair_spam"
-                  for a in detect_ble_attacks(fastpair[:2])))
+                  for a in detect_ble_attacks(fastpair[:5])))
     check("public-address Fast Pair (not random) => not counted as spam",
           not any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(
               [{"mac": "3C:22:FB:00:00:%02x" % i, "addr_type": "public",
-                "service_uuids": [0xFE2C]} for i in range(8)])))
+                "service_uuids": [0xFE2C]} for i in range(16)])))
 
     # --- SubGHz domain (RTL-SDR) scoring ---
     sg_replay = score({"subghz": [{"type": "subghz_replay", "severity": "flood"}]})
@@ -861,7 +880,7 @@ def selftest():
     v = assess(wifi=wifi_res, assets=inv,
                ble_devices=[{"mac": "C0:11:22:33:44:%02x" % i,
                              "company_key": 0x004C, "addr_type": "random"}
-                            for i in range(8)],
+                            for i in range(22)],
                portal_obs={"dns_answers": ["10.0.0.1"] * 4, "http_status": 302,
                            "redirect_host": "10.0.0.1", "ap_ip": "10.0.0.1"})
     check("assess() fuses all four domains => confirmed",
