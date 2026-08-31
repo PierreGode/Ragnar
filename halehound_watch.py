@@ -518,8 +518,55 @@ def _lan_threats_from_assets(assets):
     return ids, suspects
 
 
+def _blind_spots(caps=None, subghz=None):
+    """Build the honest 'what this node can't see' list, AWARE of the hardware
+    actually attached.
+
+    ``caps`` is a capability dict from the caller: ``{sdr, bt, nrf24, nfc}``
+    (all bool). A radio that IS present but simply isn't wired into a decoder is
+    reported differently from one that is genuinely absent — "needs an SDR" is a
+    lie when an RTL-SDR is on the bus. ``subghz`` is a SubGHz scan result; when
+    it actually ran, SubGHz stops being a blind spot at all.
+    """
+    caps = caps or {}
+    sdr = bool(caps.get("sdr"))
+    bt = bool(caps.get("bt"))
+    nrf24 = bool(caps.get("nrf24"))
+    nfc = bool(caps.get("nfc"))
+    spots = []
+
+    if not nrf24:
+        spots.append("NRF24 2.4 GHz (MouseJack, WLAN/BLE jammer) — no NRF24 "
+                     "receiver on this node")
+
+    if subghz and subghz.get("scanned"):
+        pass                                  # covered — SubGHz is a live domain
+    elif sdr:
+        spots.append("SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — RTL-SDR "
+                     "present but no SubGHz capture this pass (enable the SubGHz "
+                     "scan)")
+    else:
+        spots.append("SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — needs an "
+                     "SDR (RTL-SDR is fine) or CC1101")
+
+    if not nfc:
+        spots.append("NFC/RFID cloning — no reader on this node")
+
+    # Fast Pair rides BLE service-data UUID 0xFE2C, which the BLE radio CAN see
+    # (bt_scanner now parses it) — so it's only a blind spot with no BLE receiver.
+    if not bt:
+        spots.append("Google Fast Pair (BLE service-data UUID 0xFE2C) — no BLE "
+                     "receiver on this node")
+
+    # GATT-level attacks need an active connection — a method limit of passive
+    # scanning, independent of which radio is attached.
+    spots.append("GATT-level BLE (BLE Predator honeypot, Airoha RACE, "
+                 "SkeletonKey) — passive advertisement scan can't see connections")
+    return spots
+
+
 def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
-           ble_thresholds=None):
+           ble_thresholds=None, capabilities=None, subghz=None):
     """One-shot HaleHound assessment from live subsystem outputs.
 
     Args:
@@ -564,20 +611,19 @@ def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
                 portal_obs.get("redirect_host"), portal_obs.get("ap_ip"),
                 observed=observed)
 
+    # SubGHz (RTL-SDR): fold a scan result into the fusion as its own domain.
+    subghz_dets = subghz.get("detections") if isinstance(subghz, dict) else None
+
     verdict = score({"wifi": wifi_dets, "lan": lan_ids,
-                     "ble": ble_attacks, "portal": portal})
+                     "ble": ble_attacks, "portal": portal,
+                     "subghz": subghz_dets})
     verdict["suspects"] = suspects
 
-    # Honest blind spots — attack surfaces this node cannot observe.
-    verdict["blind_spots"] = [
-        "NRF24 2.4 GHz (MouseJack, WLAN/BLE jammer) — needs an NRF24 receiver",
-        "SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — needs an SDR/CC1101",
-        "NFC/RFID cloning — no reader on this node",
-        "Google Fast Pair (BLE service-data UUID 0xFE2C) — scan reads "
-        "manufacturer data only",
-        "GATT-level BLE (BLE Predator honeypot, Airoha RACE, SkeletonKey) — "
-        "passive advertisement scan can't see connections",
-    ]
+    # Capabilities default: BT is present if we were handed a BLE snapshot; the
+    # rest only when the caller (which can see the USB bus) says so.
+    caps = dict(capabilities or {})
+    caps.setdefault("bt", ble_devices is not None)
+    verdict["blind_spots"] = _blind_spots(caps, subghz)
     return verdict
 
 
@@ -756,6 +802,25 @@ def selftest():
           any(s.get("hostname") == "halehound" for s in v["suspects"]),
           json.dumps(v["suspects"]))
     check("assess() reports RF blind spots honestly", len(v["blind_spots"]) >= 3)
+
+    # Hardware-aware blind spots: wording must track the attached radios.
+    bare = _blind_spots({"sdr": False, "bt": False})
+    check("bare node: SubGHz says 'needs an SDR'",
+          any("needs an SDR" in s for s in bare), json.dumps(bare))
+    check("bare node: Fast Pair is a blind spot (no BLE receiver)",
+          any("Fast Pair" in s for s in bare), json.dumps(bare))
+    withhw = _blind_spots({"sdr": True, "bt": True})
+    check("SDR present: no longer says 'needs an SDR'",
+          not any("needs an SDR" in s for s in withhw)
+          and any("RTL-SDR present" in s for s in withhw), json.dumps(withhw))
+    check("BLE present: Fast Pair is NOT a blind spot (service-data parsed)",
+          not any("Fast Pair" in s for s in withhw), json.dumps(withhw))
+    ran = _blind_spots({"sdr": True, "bt": True},
+                       subghz={"scanned": True, "detections": []})
+    check("SubGHz scan ran: SubGHz drops off the blind-spot list",
+          not any("SubGHz" in s for s in ran), json.dumps(ran))
+    check("GATT stays a blind spot regardless of hardware (passive limit)",
+          any("GATT" in s for s in withhw) and any("GATT" in s for s in ran), "")
 
     alert = to_alert(v)
     check("to_alert emits a halehound Watchtower alert",

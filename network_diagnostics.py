@@ -19607,9 +19607,37 @@ def register_network_diagnostics(app, logger=None):
             _log(f"wifidef/halehound asset enrich skipped: {exc}")
 
         ble_devices = (bt or {}).get('devices') if bt else None
+
+        # Hardware-aware blind spots: probe the USB bus non-intrusively so the
+        # panel stops claiming "needs an SDR" when one is plugged in. We never
+        # OPEN the SDR here (that would knock an active ADS-B/waterfall sweep
+        # offline) — just an lsusb VID:PID match.
+        caps = {'bt': ble_devices is not None, 'nrf24': False, 'nfc': False}
+        try:
+            import rtl_sdr as _rtl
+            usb_id, _desc = _rtl.probe_usb()
+            caps['sdr'] = bool(usb_id)
+        except Exception:
+            caps['sdr'] = False
+        if not caps.get('sdr'):
+            try:                                # HackRF One (1d50:6089) via lsusb
+                import subprocess as _sp
+                _out = _sp.run(['lsusb'], capture_output=True, text=True, timeout=4)
+                caps['sdr'] = '1d50:6089' in (_out.stdout or '').lower()
+            except Exception:
+                pass
+        # SubGHz capture off the RTL-SDR (only when one is present and idle).
+        subghz = None
+        if caps.get('sdr') and data.get('subghz') is not False:
+            try:
+                import subghz_watch as _sg
+                subghz = _sg.scan()
+            except Exception as exc:
+                _log(f"wifidef/halehound subghz scan skipped: {exc}")
+
         _log("wifidef/halehound assess")
         verdict = _hh.assess(wifi=scan, assets=assets, ble_devices=ble_devices,
-                             portal_obs=portal)
+                             portal_obs=portal, capabilities=caps, subghz=subghz)
 
         # Feed the unified alert pane / incident engine when it's more than trace.
         if verdict.get('score', 0) >= 25:
