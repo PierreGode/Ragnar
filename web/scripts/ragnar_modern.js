@@ -4815,6 +4815,9 @@ function _wifidefFillIfaces() {
         _wifidefFillPanelIface('wifidef-at-iface', ifs);
         _wifidefFillPanelIface('wifidef-iso-iface', ifs);
         _wifidefUpdateMonBtn();
+        // Reflect the headless 24/7 watch's current state (it may already be
+        // running from a previous session — the daemon persists "if enabled").
+        wifidefHaleHoundWatchStatus();
     }).catch(() => {});
 }
 
@@ -5364,6 +5367,60 @@ async function wifidefHaleHound() {
     } finally {
         if (btn) btn.disabled = false;
     }
+}
+
+// Headless 24/7 watcher toggle + status. Backend: /api/wifidef/halehound/watch.
+async function wifidefHaleHoundWatch(enable) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (enable) {
+        const iface = _wifidef.monitor || _wifidef.iface;
+        if (!iface) {
+            if (cb) cb.checked = false;
+            if (st) { st.hidden = false; st.innerHTML = '<span class="text-amber-300">Enable monitor mode first — the 24/7 watch needs a monitor interface.</span>'; }
+            return;
+        }
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: true, interface: iface }),
+            });
+            const d = await r.json();
+            if (d.error) { if (cb) cb.checked = false; if (st) { st.hidden = false; st.innerHTML = '<span class="text-red-300">⚠ ' + _esc(d.error) + '</span>'; } return; }
+            _wifidefRenderWatch(d);
+        } catch (e) { if (cb) cb.checked = false; }
+    } else {
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: false }),
+            });
+            _wifidefRenderWatch(await r.json());
+        } catch (e) { /* ignore */ }
+    }
+}
+
+function _wifidefRenderWatch(d) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (!st) return;
+    const on = !!(d && (d.enabled || d.running));
+    if (cb) cb.checked = on;
+    if (!on) { st.hidden = true; st.innerHTML = ''; return; }
+    st.hidden = false;
+    const cfg = d.config || {};
+    let bits = `🟢 24/7 watch active on <span class="font-mono">${_esc(cfg.interface || '?')}</span> · every ~${_esc(String(cfg.interval || 90))}s (BLE every ${_esc(String(cfg.ble_interval || 300))}s) · ${d.cycles || 0} cycles`;
+    const lv = d.last_verdict;
+    if (lv && lv.verdict) bits += ` · last: <span class="text-fuchsia-300">${_esc(lv.verdict)} ${lv.score}%</span>`;
+    if (d.last_error) bits += ` · <span class="text-amber-400">last error: ${_esc(String(d.last_error).slice(0, 80))}</span>`;
+    st.innerHTML = bits;
+}
+
+async function wifidefHaleHoundWatchStatus() {
+    try {
+        const r = await fetch('/api/wifidef/halehound/watch');
+        if (r.ok) _wifidefRenderWatch(await r.json());
+    } catch (e) { /* ignore */ }
 }
 
 // ============================================================================

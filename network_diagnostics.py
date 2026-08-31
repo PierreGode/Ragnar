@@ -19556,33 +19556,16 @@ def register_network_diagnostics(app, logger=None):
         html = report_common.build_defense_report_html(scan, device_name=device, ai=ai)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
-    @app.route('/api/wifidef/halehound', methods=['POST'])
-    def wifidef_halehound():
-        """Fused ESP32 attack-multitool assessment (HaleHound / Marauder / Bruce).
-
-        A general ESP32 attack-tool detector, HaleHound included. These tools
-        cannot be told apart or uniquely fingerprinted (same silicon/techniques,
-        randomized MACs), so we score how strongly the observed behaviour —
-        across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
-        an ESP32 attack multitool of that class, and emit a Watchtower alert when
-        it crosses a confidence tier so it flows into the incident engine and
-        Pushover.
-
-        Body (all optional; reuses whatever the panels already have on screen):
-          scan   : a wifi_defense.do_scan() result (WIDS detections)
-          bt     : a bt_scanner.do_scan() result (BLE devices)
-          portal : observed captive-portal behaviour
-                   {dns_answers, http_status, redirect_host, ap_ip}
-        """
+    def _halehound_assess_emit(scan, ble_devices, portal, want_subghz,
+                               subghz_seconds=20):
+        """Shared fusion core: LAN enrich + hardware caps + optional SubGHz +
+        assess + Watchtower emit. Used by BOTH the one-shot endpoint and the
+        headless daemon so they score identically. Returns the verdict dict."""
         import halehound_watch as _hh
         import device_classifier as _dc
-        data = request.get_json(silent=True) or {}
-        scan = data.get('scan') if isinstance(data.get('scan'), dict) else None
-        bt = data.get('bt') if isinstance(data.get('bt'), dict) else None
-        portal = data.get('portal') if isinstance(data.get('portal'), dict) else None
 
-        # LAN side: enrich the current host table with rogue/threat device ids so
-        # a HaleHound-class Espressif host (IoT Recon joins the LAN) is fused in.
+        # LAN side: enrich the current host table so a HaleHound-class Espressif
+        # host (IoT Recon joins the LAN) is fused in.
         assets = []
         try:
             from init_shared import shared_data as _sd
@@ -19603,15 +19586,10 @@ def register_network_diagnostics(app, logger=None):
                     assets.append({'mac': row.get('mac'), 'ip': row.get('ip'),
                                    'hostname': row.get('hostname'),
                                    'threats': threats})
-        except Exception as exc:                              # never fail the assessment
+        except Exception as exc:
             _log(f"wifidef/halehound asset enrich skipped: {exc}")
 
-        ble_devices = (bt or {}).get('devices') if bt else None
-
-        # Hardware-aware blind spots: probe the USB bus non-intrusively so the
-        # panel stops claiming "needs an SDR" when one is plugged in. We never
-        # OPEN the SDR here (that would knock an active ADS-B/waterfall sweep
-        # offline) — just an lsusb VID:PID match.
+        # Hardware-aware blind spots (non-intrusive USB probe — never opens the SDR).
         caps = {'bt': ble_devices is not None, 'nrf24': False, 'nfc': False}
         try:
             import rtl_sdr as _rtl
@@ -19626,20 +19604,18 @@ def register_network_diagnostics(app, logger=None):
                 caps['sdr'] = '1d50:6089' in (_out.stdout or '').lower()
             except Exception:
                 pass
-        # SubGHz capture off the RTL-SDR — OPT-IN only (data.subghz == True). It
-        # runs a ~20s rtl_433 sweep and briefly claims the radio, so the normal
-        # check stays fast and hands-off; the UI offers it as an explicit toggle.
+
+        # SubGHz — opt-in only; briefly claims the shared SDR.
         subghz = None
-        if caps.get('sdr') and data.get('subghz') is True:
+        if caps.get('sdr') and want_subghz:
             try:
                 import subghz_watch as _sg
-                subghz = _sg.scan(duration=int(data.get('subghz_seconds') or 20))
+                subghz = _sg.scan(duration=int(subghz_seconds or 20))
             except Exception as exc:
                 _log(f"wifidef/halehound subghz scan skipped: {exc}")
                 subghz = {"scanned": False, "detections": [],
                           "reason": f"scan error: {exc}"}
 
-        _log("wifidef/halehound assess")
         verdict = _hh.assess(wifi=scan, assets=assets, ble_devices=ble_devices,
                              portal_obs=portal, capabilities=caps, subghz=subghz)
 
@@ -19666,7 +19642,90 @@ def register_network_diagnostics(app, logger=None):
                 })
             except Exception as exc:
                 _log(f"wifidef/halehound jsonl emit skipped: {exc}")
+        return verdict
 
+    # Headless 24/7 watcher: capture a Wi-Fi window + a slowly-refreshed BLE
+    # snapshot, fuse, emit. A cache keeps BLE off the hot loop (it briefly claims
+    # the controller). SubGHz stays off the auto loop unless explicitly enabled.
+    _hh_ble_cache = {'devices': None, 'ts': 0.0}
+
+    def _halehound_run_once(cfg):
+        import time as _time
+        iface = cfg.get('interface')
+        if not iface or not _valid_iface(iface):
+            raise RuntimeError('no valid monitor interface configured')
+        scan = wifi_defense.do_scan(iface, seconds=int(cfg.get('seconds') or 12),
+                                    channel=cfg.get('channel'))
+        # Refresh the BLE snapshot only every ble_interval seconds.
+        now = _time.time()
+        if (now - _hh_ble_cache['ts']) >= int(cfg.get('ble_interval') or 300):
+            try:
+                bt = bt_scanner.do_scan(duration=8)
+                _hh_ble_cache['devices'] = (bt or {}).get('devices')
+                _hh_ble_cache['ts'] = now
+            except Exception as exc:
+                _log(f"halehound watch BLE refresh skipped: {exc}")
+        return _halehound_assess_emit(scan, _hh_ble_cache['devices'], None,
+                                      bool(cfg.get('subghz')))
+
+    @app.route('/api/wifidef/halehound/watch', methods=['GET', 'POST'])
+    def wifidef_halehound_watch():
+        """Start/stop/status the headless 24/7 ESP32-correlation watcher.
+
+        POST {enable: bool, interface, seconds?, channel?, interval?,
+        ble_interval?, subghz?} toggles it (state persists across restart).
+        GET returns status."""
+        import halehound_daemon as _hd
+        if request.method == 'GET':
+            return jsonify(_hd.status())
+        data = request.get_json(silent=True) or {}
+        if data.get('enable'):
+            iface = (data.get('interface') or '').strip()
+            if not _valid_iface(iface):
+                return _bad('A valid monitor interface is required to start the watch')
+            cfg = {k: data.get(k) for k in
+                   ('interface', 'seconds', 'channel', 'interval',
+                    'ble_interval', 'subghz') if data.get(k) is not None}
+            cfg['interface'] = iface
+            _log(f"wifidef/halehound/watch START {cfg}")
+            return jsonify(_hd.start(_halehound_run_once, cfg))
+        _log("wifidef/halehound/watch STOP")
+        return jsonify(_hd.stop())
+
+    # Relaunch the watcher at startup iff it was left enabled ("if enabled").
+    try:
+        import halehound_daemon as _hd0
+        _hd0.resume_if_enabled(_halehound_run_once)
+    except Exception as _exc:
+        _log(f"halehound watch resume skipped: {_exc}")
+
+    @app.route('/api/wifidef/halehound', methods=['POST'])
+    def wifidef_halehound():
+        """Fused ESP32 attack-multitool assessment (HaleHound / Marauder / Bruce).
+
+        A general ESP32 attack-tool detector, HaleHound included. These tools
+        cannot be told apart or uniquely fingerprinted (same silicon/techniques,
+        randomized MACs), so we score how strongly the observed behaviour —
+        across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
+        an ESP32 attack multitool of that class, and emit a Watchtower alert when
+        it crosses a confidence tier so it flows into the incident engine and
+        Pushover.
+
+        Body (all optional; reuses whatever the panels already have on screen):
+          scan   : a wifi_defense.do_scan() result (WIDS detections)
+          bt     : a bt_scanner.do_scan() result (BLE devices)
+          portal : observed captive-portal behaviour
+                   {dns_answers, http_status, redirect_host, ap_ip}
+        """
+        data = request.get_json(silent=True) or {}
+        scan = data.get('scan') if isinstance(data.get('scan'), dict) else None
+        bt = data.get('bt') if isinstance(data.get('bt'), dict) else None
+        portal = data.get('portal') if isinstance(data.get('portal'), dict) else None
+        ble_devices = (bt or {}).get('devices') if bt else None
+        _log("wifidef/halehound assess")
+        verdict = _halehound_assess_emit(
+            scan, ble_devices, portal, data.get('subghz') is True,
+            subghz_seconds=int(data.get('subghz_seconds') or 20))
         return jsonify(verdict)
 
     @app.route('/api/wifidef/halehound/selftest', methods=['GET'])

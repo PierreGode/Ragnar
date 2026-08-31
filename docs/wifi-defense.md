@@ -187,6 +187,7 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
 | `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
 | `POST /api/wifidef/halehound` | `{scan?, bt?, portal?, subghz?}` → fused ESP32-attack-tool assessment (see below); `subghz:true` adds an opt-in RTL-SDR sweep |
+| `GET/POST /api/wifidef/halehound/watch` | headless 24/7 watcher — `POST {enable, interface, …}` to toggle (persists across restart), `GET` for status (see below) |
 | `POST /api/wifidef/halehound/portal-probe` | `{url}` → **actively** fetch a captive portal (read-only) and match the GARMR signature (see below) |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 | `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
@@ -293,6 +294,27 @@ see.** The list adapts to the attached radios rather than claiming a fixed set:
 
 All of these are *listed* rather than silently missed. Everything here is passive
 analysis — nothing is transmitted (the SubGHz sweep only receives).
+
+### Headless 24/7 watch (continuous)
+
+The **Check for ESP32 attack tool** button is a one-shot spot-check. The **24/7
+watch** checkbox on the same card turns the *same* fusion into a headless
+background monitor: a daemon thread (`halehound_daemon.py`) periodically captures
+a Wi-Fi window, refreshes a **cached** BLE snapshot on a slower cadence, scores it
+through `halehound_watch.assess`, and emits into the **Watchtower** feed /
+incident engine (and thus Pushover) whenever the verdict crosses the alert tier —
+**with no browser open**.
+
+It is deliberately **slow and Pi-Zero-friendly**: a short (~12 s) capture then a
+long idle gap (~90 s), with BLE refreshed only every ~5 min and **SubGHz never
+auto** (it holds the shared SDR). The enabled flag + config are **persisted**
+(`data/halehound_daemon.json`), so "if enabled" survives a restart —
+`resume_if_enabled` relaunches it at startup. It needs **monitor mode enabled**
+(it captures continuously); a failed capture is caught, counted, and backed off,
+never crashing the thread. Toggle via `POST /api/wifidef/halehound/watch
+{"enable":true,"interface":"<mon>"}`; `GET` the same route for live status
+(cycles, last verdict, last error). The one-shot button and the daemon share one
+scoring core, so their verdicts are identical.
 
 ### Field-test playbook (HaleHound / Marauder / Bruce / Ghost ESP)
 
