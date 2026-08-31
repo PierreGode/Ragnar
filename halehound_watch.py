@@ -21,8 +21,9 @@ class (HaleHound, Marauder, Bruce, …), fusing signals across domains:
   * LAN    — an Espressif host flagged as a known attack tool (``halehound_cyd``,
              ``esp32_marauder``, ``esp_deauther``, ``flipper_wifi``) or an unknown
              ESP32 (``rogue_espressif``) — from ``device_classifier.detect_threats``
-  * BLE    — Fast Pair spam / FindMy flood / advertisement flood
-             (from a ``bt_scanner`` device snapshot, via ``detect_ble_attacks``)
+  * BLE    — Apple (0x004C) FindMy/pairing flood, Microsoft Swift Pair spam,
+             advertisement flood (from a ``bt_scanner`` snapshot, manufacturer
+             data only — via ``detect_ble_attacks``)
   * Portal — a GARMR-style DNS-hijack captive portal (``fingerprint_portal``)
 
 The correlation is deliberately multi-domain: a single noisy domain is capped so
@@ -59,13 +60,13 @@ _LAN_WEIGHTS = {"halehound_cyd": 40, "esp32_marauder": 34, "esp_deauther": 34,
                 "flipper_wifi": 34, "rogue_espressif": 12}
 # The named-tool ids — a match to any is high-confidence on its own.
 _NAMED_TOOL_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther", "flipper_wifi")
-_BLE_WEIGHTS = {"findmy_flood": 18, "fastpair_spam": 16, "ble_advert_flood": 12}
+_BLE_WEIGHTS = {"apple_ble_flood": 18, "swiftpair_spam": 14, "ble_advert_flood": 12}
 _PORTAL_WEIGHT = 30
 
 # A domain cannot contribute more than this on its own.
 _DOMAIN_CAP = {"wifi": 45, "lan": 45, "ble": 34, "portal": 30}
 
-# Multi-domain bonus: coincident attacks across RF domains are the CYD signature.
+# Multi-domain bonus: coincident attacks across RF domains are the tell.
 _MULTI_DOMAIN_BONUS = {2: 10, 3: 18, 4: 24}
 
 # Verdict tiers keyed on the final 0-100 score.
@@ -77,9 +78,14 @@ _TIERS = (
     (0, "none", "info", "HH-NONE"),
 )
 
-# BLE-attack detection thresholds (per scan snapshot).
-_FINDMY_MIN = 6        # distinct Apple/FindMy random advertisers => Phantom Flood
-_FASTPAIR_MIN = 6      # distinct Google/Fast Pair advertisers => pairing spam
+# BLE-attack detection thresholds (per scan snapshot). NOTE: bt_scanner parses
+# manufacturer-specific data (the 16-bit company id) only — NOT service-data
+# UUIDs. So we detect the manufacturer-data pairing/tracker spam (Apple 0x004C,
+# Microsoft 0x0006); Google Fast Pair (service-data UUID 0xFE2C) is a blind spot.
+_APPLE_CID = 0x004C     # Apple — FindMy/AirTag + Continuity proximity-pairing
+_MS_CID = 0x0006        # Microsoft — Swift Pair
+_APPLE_MIN = 6          # distinct Apple 0x004C random advertisers => flood/spam
+_SWIFTPAIR_MIN = 6      # distinct Microsoft 0x0006 advertisers => Swift Pair spam
 _ADVERT_FLOOD_MIN = 25  # distinct random-address advertisers => advertisement flood
 
 # ESP32 attack-tool threat ids we fuse from the LAN (HaleHound + its siblings:
@@ -93,37 +99,50 @@ _CYD_THREAT_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther",
 # --------------------------------------------------------------------------
 
 def _is_random_addr(dev):
-    """True if a BLE device advertises from a random/private address."""
+    """True if a BLE device advertises from a random/private address.
+
+    The controller-reported address type (bt_scanner's ``addr_type``) is
+    authoritative and used first. The address bits alone CANNOT distinguish a
+    public address from a non-resolvable-private one, so the fallback is
+    conservative: only the unambiguous random forms (static-random 0b11,
+    resolvable-private 0b01 in the top two bits of the MSB octet) count.
+    """
     at = (dev.get("addr_type") or "").lower()
     if at:
         return "random" in at
     if dev.get("is_random") is not None:
         return bool(dev["is_random"])
-    # Fall back to the LE-random address rule: two MSBs of the first octet.
     mac = (dev.get("mac") or "").replace("-", ":")
     try:
         first = int(mac.split(":")[0], 16)
-        return (first & 0xC0) in (0xC0, 0x00)  # static-random or resolvable/NRPA
+        return (first & 0xC0) in (0xC0, 0x40)  # static-random or resolvable-private
     except (ValueError, IndexError):
         return False
 
 
 def detect_ble_attacks(devices, thresholds=None):
-    """Flag HaleHound-class BLE attacks from a snapshot of advertisers.
+    """Flag ESP32-attack-tool BLE spam from a snapshot of advertisers.
 
     ``devices`` is a list of bt_scanner device dicts: ``{mac, company_key,
     addr_type|is_random, name}``. Pure function. Returns a list of attack dicts
-    ``{type, count, detail}``. The BLE Spoofer / WhisperPair / Lunatic Fringe
-    modules all churn many random-address adverts at once — real rooms hold only
-    a handful of trackers/phones, so a burst is the tell.
+    ``{type, count, detail}``.
+
+    IMPORTANT — what is and isn't observable here: bt_scanner parses only
+    *manufacturer-specific data* (the 16-bit company id), so this sees the
+    Apple-Continuity (0x004C) and Microsoft Swift-Pair (0x0006) pairing/tracker
+    spam that churns many random-address adverts at once. It does NOT see Google
+    Fast Pair (advertised as service-data UUID 0xFE2C) or GATT-level attacks
+    (BLE Predator honeypot, Airoha RACE, SkeletonKey) — those are separate blind
+    spots, reported by ``assess()`` rather than guessed at. Real rooms hold only
+    a handful of trackers/phones, so a burst of many is the tell.
     """
     th = thresholds or {}
-    findmy_min = int(th.get("findmy_min", _FINDMY_MIN))
-    fastpair_min = int(th.get("fastpair_min", _FASTPAIR_MIN))
+    apple_min = int(th.get("apple_min", _APPLE_MIN))
+    swiftpair_min = int(th.get("swiftpair_min", _SWIFTPAIR_MIN))
     flood_min = int(th.get("advert_flood_min", _ADVERT_FLOOD_MIN))
 
     apple_random = set()
-    google = set()
+    microsoft = set()
     random_adv = set()
     for d in devices or []:
         mac = (d.get("mac") or "").upper()
@@ -133,25 +152,27 @@ def detect_ble_attacks(devices, thresholds=None):
         rnd = _is_random_addr(d)
         if rnd:
             random_adv.add(mac)
-        # Apple FindMy/AirTag adverts ride company id 0x004C from random addrs.
-        if ck == 0x004C and rnd:
+        # Apple FindMy/AirTag + Continuity proximity-pairing ride company 0x004C
+        # from random addresses.
+        if ck == _APPLE_CID and rnd:
             apple_random.add(mac)
-        # Google Fast Pair uses company id 0x00E0.
-        if ck == 0x00E0:
-            google.add(mac)
+        # Microsoft Swift Pair rides company 0x0006.
+        elif ck == _MS_CID:
+            microsoft.add(mac)
 
     attacks = []
-    if len(apple_random) >= findmy_min:
+    if len(apple_random) >= apple_min:
         attacks.append({
-            "type": "findmy_flood", "count": len(apple_random),
-            "detail": f"{len(apple_random)} distinct Apple/FindMy random-address "
-                      "advertisers — FindMy/AirTag phantom flood or tracker spoof",
+            "type": "apple_ble_flood", "count": len(apple_random),
+            "detail": f"{len(apple_random)} distinct Apple (0x004C) random-address "
+                      "advertisers — FindMy/AirTag phantom flood or Apple "
+                      "proximity-pairing (Continuity) spam",
         })
-    if len(google) >= fastpair_min:
+    if len(microsoft) >= swiftpair_min:
         attacks.append({
-            "type": "fastpair_spam", "count": len(google),
-            "detail": f"{len(google)} distinct Google/Fast Pair advertisers — "
-                      "BLE pairing-popup spam (Fast Pair)",
+            "type": "swiftpair_spam", "count": len(microsoft),
+            "detail": f"{len(microsoft)} distinct Microsoft (0x0006) advertisers — "
+                      "Swift Pair pairing-popup spam",
         })
     if len(random_adv) >= flood_min:
         attacks.append({
@@ -372,11 +393,15 @@ def assess(wifi=None, assets=None, ble_devices=None, portal_obs=None,
                      "ble": ble_attacks, "portal": portal})
     verdict["suspects"] = suspects
 
-    # Honest blind spots — radios Ragnar cannot receive on.
+    # Honest blind spots — attack surfaces this node cannot observe.
     verdict["blind_spots"] = [
         "NRF24 2.4 GHz (MouseJack, WLAN/BLE jammer) — needs an NRF24 receiver",
         "SubGHz 300-439 MHz (CC1101 replay/brute, Tesla) — needs an SDR/CC1101",
         "NFC/RFID cloning — no reader on this node",
+        "Google Fast Pair (BLE service-data UUID 0xFE2C) — scan reads "
+        "manufacturer data only",
+        "GATT-level BLE (BLE Predator honeypot, Airoha RACE, SkeletonKey) — "
+        "passive advertisement scan can't see connections",
     ]
     return verdict
 
@@ -420,12 +445,18 @@ def selftest():
     apple = [{"mac": "C0:11:22:33:44:%02x" % i, "company_key": 0x004C,
               "addr_type": "random"} for i in range(8)]
     ble = detect_ble_attacks(apple)
-    check("FindMy/AirTag phantom flood detected",
-          any(a["type"] == "findmy_flood" for a in ble), json.dumps(ble))
-    google = [{"mac": "AA:BB:CC:00:00:%02x" % i, "company_key": 0x00E0,
-               "addr_type": "public"} for i in range(7)]
-    check("Fast Pair spam detected",
-          any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(google)))
+    check("Apple FindMy/pairing flood detected (0x004C random burst)",
+          any(a["type"] == "apple_ble_flood" for a in ble), json.dumps(ble))
+    ms = [{"mac": "AA:BB:CC:00:00:%02x" % i, "company_key": 0x0006,
+           "addr_type": "public"} for i in range(7)]
+    check("Microsoft Swift Pair spam detected (0x0006 burst)",
+          any(a["type"] == "swiftpair_spam" for a in detect_ble_attacks(ms)))
+    # Public-address Apple devices (e.g. a real Mac) must NOT trip the flood.
+    apple_public = [{"mac": "3C:22:FB:00:00:%02x" % i, "company_key": 0x004C,
+                     "addr_type": "public"} for i in range(8)]
+    check("public-address Apple devices => no Apple flood",
+          not any(a["type"] == "apple_ble_flood"
+                  for a in detect_ble_attacks(apple_public)))
     flood = [{"mac": "D0:00:00:00:%02x:%02x" % (i // 256, i % 256),
               "company_key": None, "addr_type": "random"} for i in range(30)]
     check("BLE advertisement flood detected",
@@ -461,7 +492,7 @@ def selftest():
         "wifi": [{"type": "auth_flood", "severity": "flood", "detail": "af"},
                  {"type": "karma", "severity": "karma", "detail": "karma"}],
         "lan": ["rogue_espressif"],
-        "ble": [{"type": "fastpair_spam", "count": 7, "detail": "fp"}],
+        "ble": [{"type": "swiftpair_spam", "count": 7, "detail": "sp"}],
     })
     check("multi-domain (wifi+lan+ble) => confirmed/likely",
           multi["verdict"] in ("confirmed", "likely") and len(multi["domains"]) >= 3,

@@ -26,7 +26,7 @@ def test_multi_domain_escalates():
     v = hh.score({
         "wifi": [{"type": "auth_flood", "severity": "flood"}],
         "lan": ["rogue_espressif"],
-        "ble": [{"type": "fastpair_spam"}],
+        "ble": [{"type": "swiftpair_spam"}],
     })
     assert v["verdict"] in ("likely", "confirmed")
     assert len(v["domains"]) >= 3
@@ -44,7 +44,7 @@ def test_clean_signals_none():
 def test_ble_findmy_flood_and_calm_room():
     flood = [{"mac": "C0:00:00:00:00:%02x" % i, "company_key": 0x004C,
               "addr_type": "random"} for i in range(8)]
-    assert any(a["type"] == "findmy_flood" for a in hh.detect_ble_attacks(flood))
+    assert any(a["type"] == "apple_ble_flood" for a in hh.detect_ble_attacks(flood))
     calm = [{"mac": "3C:22:FB:00:00:01", "company_key": 0x004C, "addr_type": "public"}]
     assert hh.detect_ble_attacks(calm) == []
 
@@ -103,7 +103,7 @@ def test_generalizes_to_sibling_esp32_tools():
 
 
 def test_alert_title_names_the_class_not_just_halehound():
-    v = hh.score({"lan": ["esp32_marauder"], "ble": [{"type": "fastpair_spam"}],
+    v = hh.score({"lan": ["esp32_marauder"], "ble": [{"type": "swiftpair_spam"}],
                   "wifi": [{"type": "auth_flood", "severity": "flood"}]})
     title = hh.to_alert(v)["title"]
     assert "ESP32" in title and "Marauder" in title

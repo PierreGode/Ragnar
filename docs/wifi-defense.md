@@ -212,7 +212,7 @@ confirmed*), fusing signals across domains:
 |--------|---------|--------|
 | **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
 | **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC | asset inventory (`device_classifier.detect_threats`) |
-| **BLE** | Fast Pair spam, FindMy/AirTag flood, advertisement flood | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
+| **BLE** | Apple (0x004C) FindMy/AirTag flood or Continuity pairing-popup spam, Microsoft Swift Pair (0x0006) spam, advertisement flood — **manufacturer-data only** | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
 | **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
 
 The correlation is deliberately **multi-domain**: a single noisy domain is capped
@@ -226,8 +226,11 @@ attack multitool active* incident.
 
 **Blind spots (reported, not faked).** Ragnar has no receiver for these tools'
 NRF24 2.4 GHz (MouseJack, jammers), SubGHz 300–439 MHz (CC1101 replay/brute,
-Tesla) or NFC/RFID modules, so those are listed as blind spots rather than
-silently missed. Everything here is passive analysis — nothing is transmitted.
+Tesla) or NFC/RFID modules; and the passive BLE scan reads *manufacturer data*
+only, so **Google Fast Pair** (advertised as service-data UUID `0xFE2C`) and
+**GATT-level** BLE attacks (BLE Predator honeypot, Airoha RACE, SkeletonKey) are
+out of view. All of these are listed as blind spots rather than silently missed.
+Everything here is passive analysis — nothing is transmitted.
 
 ## Airtime & link quality
 
