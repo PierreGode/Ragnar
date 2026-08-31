@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260831-halehound-bandsteer"
+_BUILD = "20260831-halehound-hiddenssid"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -621,6 +621,20 @@ def _is_locally_administered(mac):
         return bool(int(mac.split(":")[0], 16) & 0x02)
     except (ValueError, IndexError):
         return False
+
+
+def _is_blank_ssid(ssid):
+    """True for a hidden/cloaked/wildcard SSID that isn't a real network identity.
+
+    A hidden AP still beacons an SSID element, but it's either absent or
+    length>0 filled with NUL bytes — which decodes to a truthy string that only
+    *looks* empty. Several unrelated hidden APs (different vendors/OUIs) all
+    beacon this way, so grouping them under one blank key and calling it a
+    duplicate/evil twin is meaningless: an evil twin clones a *named* SSID to
+    lure clients, and a blank SSID has no name to impersonate. Exclude it."""
+    if not ssid:
+        return True
+    return ssid.strip("\x00 \t\r\n\x1c\x1d\x1e\x1f") == ""
 
 
 def _oui(mac):
@@ -1819,7 +1833,10 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
     # --- Rogue AP / evil twin: SSID from an unexpected BSSID ---
     seen = {}
     for e in beacons + presp:
-        if e.get("ssid") and e.get("src"):
+        # Skip hidden/cloaked SSIDs (blank or NUL-filled): several unrelated
+        # hidden APs share the same empty name and would false-flag as a
+        # duplicate/evil twin, which is meaningless — nothing to impersonate.
+        if e.get("ssid") and e.get("src") and not _is_blank_ssid(e["ssid"]):
             seen.setdefault(e["ssid"], set()).add(e["src"])
     for ssid, bssids in seen.items():
         trusted = set(baseline.get(ssid, []))
@@ -2138,6 +2155,21 @@ def selftest():
                   if d["type"] == "rogue_ap"), {})
     check("randomized-BSSID clone is NOT treated as band steering",
           rnd_d.get("severity") == "duplicate_ssid", json.dumps(rnd_d))
+
+    # --- Hidden/cloaked SSID must NOT flag as duplicate/evil twin ---
+    # Three unrelated hidden APs (different vendor OUIs) all beacon a NUL-filled
+    # SSID that decodes to a truthy-but-blank string. They share the empty key
+    # but are not one network — must produce no rogue_ap detection at all.
+    hidden = ([{"kind": "beacon", "src": "3c:22:fb:00:00:01", "ssid": "\x00\x00\x00\x00"}] * 4
+              + [{"kind": "beacon", "src": "de:ad:be:00:00:02", "ssid": "\x00\x00\x00\x00"}] * 4
+              + [{"kind": "beacon", "src": "00:11:22:00:00:03", "ssid": ""}] * 4)
+    hidden_res = analyze(hidden, baseline={})
+    check("hidden/blank SSID does not flag as duplicate/evil twin",
+          not any(d["type"] == "rogue_ap" for d in hidden_res["detections"]),
+          json.dumps([d.get("detail") for d in hidden_res["detections"]]))
+    check("_is_blank_ssid: NUL-filled + empty are blank, real name is not",
+          _is_blank_ssid("\x00\x00") and _is_blank_ssid("") and _is_blank_ssid("   ")
+          and not _is_blank_ssid("Proxima B"), "")
 
     # Clean traffic => no detections
     from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt
