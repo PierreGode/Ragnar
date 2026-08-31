@@ -210,8 +210,8 @@ def categorize(alert):
 
 PATTERNS = [
     {'name': 'halehound_multitool',
-     'label': 'HaleHound-class attack multitool active',
-     'technique': 'ESP32 CYD multitool — evil-twin/auth-flood/BLE-spam + LAN recon',
+     'label': 'ESP32 attack multitool active (HaleHound / Marauder / Bruce-class)',
+     'technique': 'ESP32 multitool — evil-twin/auth-flood/BLE-spam + LAN recon',
      'all_of': {'attack_multitool'},
      'severity': 'critical', 'rank': 6},
     {'name': 'evil_twin_handshake_capture',

@@ -19558,14 +19558,15 @@ def register_network_diagnostics(app, logger=None):
 
     @app.route('/api/wifidef/halehound', methods=['POST'])
     def wifidef_halehound():
-        """Fused HaleHound-CYD assessment.
+        """Fused ESP32 attack-multitool assessment (HaleHound / Marauder / Bruce).
 
-        HaleHound is an ESP32 attack multitool. It cannot
-        be uniquely fingerprinted (same silicon/techniques as Marauder/Bruce, and
-        it randomizes MACs), so we score how strongly the observed behaviour —
+        A general ESP32 attack-tool detector, HaleHound included. These tools
+        cannot be told apart or uniquely fingerprinted (same silicon/techniques,
+        randomized MACs), so we score how strongly the observed behaviour —
         across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
-        a HaleHound-class device, and emit a Watchtower alert when it crosses a
-        confidence tier so it flows into the incident engine and Pushover.
+        an ESP32 attack multitool of that class, and emit a Watchtower alert when
+        it crosses a confidence tier so it flows into the incident engine and
+        Pushover.
 
         Body (all optional; reuses whatever the panels already have on screen):
           scan   : a wifi_defense.do_scan() result (WIDS detections)
@@ -19618,7 +19619,8 @@ def register_network_diagnostics(app, logger=None):
                     'interface': (scan or {}).get('interface'),
                     'findings': [{
                         'code': verdict['code'],
-                        'name': 'HaleHound-class attack multitool (%s, %d%%)'
+                        'name': 'ESP32 attack multitool (HaleHound/Marauder/Bruce-'
+                                'class) (%s, %d%%)'
                                 % (verdict['verdict'], verdict['score']),
                         'severity': verdict['severity'],
                         'klass': 'attack-multitool',

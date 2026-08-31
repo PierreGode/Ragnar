@@ -1,22 +1,26 @@
-"""halehound_watch.py — HaleHound-CYD detection & multi-domain correlation.
+"""halehound_watch.py — ESP32 attack-tool detection & multi-domain correlation.
 
-HaleHound-CYD (https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 attack
-multitool: 40+ modules across Wi-Fi (deauth, beacon spam,
-auth flood, evil-twin "GARMR" captive portal, KARMA), BLE (Fast Pair spam,
-FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and NFC.
+This is a general **ESP32 attack-multitool** detector — HaleHound-CYD included,
+but by no means only it. HaleHound-CYD
+(https://github.com/JesseCHale/HaleHound-CYD) is an ESP32 attack multitool: 40+
+modules across Wi-Fi (deauth, beacon spam, auth flood, evil-twin "GARMR" captive
+portal, KARMA), BLE (Fast Pair spam, FindMy/AirTag flood, tracker spoofing),
+2.4 GHz NRF24, SubGHz CC1101 and NFC. ESP32 Marauder, Bruce and Ghost ESP run
+the same silicon and the same techniques.
 
 WHAT THIS CAN AND CANNOT DO
 ---------------------------
-You cannot *uniquely* fingerprint HaleHound. It runs on the same ESP32 silicon
-and uses the same techniques as ESP32 Marauder, Bruce and Ghost ESP, and it
-randomizes its source MACs during floods. So this module does NOT claim "that is
-HaleHound". It scores how strongly the *observed behaviour* matches a HaleHound-
-class CYD multitool, fusing signals across domains:
+You cannot *uniquely* fingerprint HaleHound — nor tell it apart from Marauder /
+Bruce / Ghost ESP: same silicon, same techniques, and it randomizes its source
+MACs during floods. So this module does NOT claim "that is HaleHound". It scores
+how strongly the *observed behaviour* matches an ESP32 attack multitool of that
+class (HaleHound, Marauder, Bruce, …), fusing signals across domains:
 
   * Wi-Fi  — auth flood / evil-twin / beacon flood / KARMA / deauth
-             (from ``wifi_defense.analyze()``)
-  * LAN    — an Espressif host flagged ``halehound_cyd`` / ``rogue_espressif``
-             (from ``device_classifier.detect_threats`` via asset inventory)
+             (from ``wifi_defense.analyze()``) — tool-agnostic behaviour
+  * LAN    — an Espressif host flagged as a known attack tool (``halehound_cyd``,
+             ``esp32_marauder``, ``esp_deauther``, ``flipper_wifi``) or an unknown
+             ESP32 (``rogue_espressif``) — from ``device_classifier.detect_threats``
   * BLE    — Fast Pair spam / FindMy flood / advertisement flood
              (from a ``bt_scanner`` device snapshot, via ``detect_ble_attacks``)
   * Portal — a GARMR-style DNS-hijack captive portal (``fingerprint_portal``)
@@ -49,7 +53,12 @@ _WIFI_WEIGHTS = {
     ("deauth", "flood"): 10,
     ("deauth", "seen"): 3,
 }
-_LAN_WEIGHTS = {"halehound_cyd": 40, "rogue_espressif": 12}
+# Named ESP32 attack tools (hostname-matched signatures) score high; an unknown
+# ESP32 (rogue_espressif) is weaker corroboration.
+_LAN_WEIGHTS = {"halehound_cyd": 40, "esp32_marauder": 34, "esp_deauther": 34,
+                "flipper_wifi": 34, "rogue_espressif": 12}
+# The named-tool ids — a match to any is high-confidence on its own.
+_NAMED_TOOL_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther", "flipper_wifi")
 _BLE_WEIGHTS = {"findmy_flood": 18, "fastpair_spam": 16, "ble_advert_flood": 12}
 _PORTAL_WEIGHT = 30
 
@@ -73,8 +82,10 @@ _FINDMY_MIN = 6        # distinct Apple/FindMy random advertisers => Phantom Flo
 _FASTPAIR_MIN = 6      # distinct Google/Fast Pair advertisers => pairing spam
 _ADVERT_FLOOD_MIN = 25  # distinct random-address advertisers => advertisement flood
 
-# CYD-family threat ids we treat as HaleHound-consistent on the LAN.
-_CYD_THREAT_IDS = ("halehound_cyd", "rogue_espressif")
+# ESP32 attack-tool threat ids we fuse from the LAN (HaleHound + its siblings:
+# Marauder, ESP-deauther, Flipper Wi-Fi board — plus any unknown ESP32).
+_CYD_THREAT_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther",
+                   "flipper_wifi", "rogue_espressif")
 
 
 # --------------------------------------------------------------------------
@@ -275,19 +286,22 @@ def score(signals):
         reasons.append({"domain": "correlation", "signal": "multi_domain",
                         "weight": bonus,
                         "detail": f"coincident activity across {len(active_domains)} "
-                                  f"domains ({', '.join(active_domains)}) — CYD signature"})
+                                  f"domains ({', '.join(active_domains)}) — "
+                                  "ESP32-multitool signature"})
 
     total = min(100, base + bonus)
 
-    # Floor: a hostname-confirmed HaleHound device on the LAN is high-confidence
-    # on its own — never rank a named match below "likely".
+    # Floor: a hostname-confirmed ESP32 attack tool (HaleHound, Marauder,
+    # ESP-deauther, Flipper Wi-Fi board) on the LAN is high-confidence on its own
+    # — never rank a named match below "likely".
     lan = signals.get("lan", []) or []
-    if "halehound_cyd" in lan and total < 60:
+    named = [t for t in _NAMED_TOOL_IDS if t in lan]
+    if named and total < 60:
         total = 60
         reasons.append({"domain": "lan", "signal": "name_match",
                         "weight": 0,
-                        "detail": "hostname/name match to HaleHound/GARMR — verdict "
-                                  "floored to 'likely'"})
+                        "detail": "hostname/name match to a known ESP32 attack tool "
+                                  f"({', '.join(named)}) — verdict floored to 'likely'"})
 
     tier_name, sev, code = _tier(total)
     return {
@@ -371,13 +385,14 @@ def to_alert(verdict, suspects=None):
     """Render a verdict as a Watchtower-style alert dict (source 'halehound')."""
     suspects = suspects if suspects is not None else verdict.get("suspects", [])
     domains = verdict.get("domains", [])
+    _cls = "ESP32 attack multitool (HaleHound / Marauder / Bruce-class)"
     title = {
-        "confirmed": "HaleHound-class attack multitool CONFIRMED",
-        "likely": "HaleHound-class attack multitool likely present",
-        "possible": "Possible HaleHound-class attack multitool",
-        "trace": "Trace of HaleHound-class attack activity",
-        "none": "No HaleHound activity",
-    }.get(verdict.get("verdict"), "HaleHound assessment")
+        "confirmed": _cls + " CONFIRMED",
+        "likely": _cls + " likely present",
+        "possible": "Possible " + _cls,
+        "trace": "Trace of ESP32 attack-tool activity",
+        "none": "No ESP32 attack-tool activity",
+    }.get(verdict.get("verdict"), "ESP32 attack-tool assessment")
     return {
         "source": "halehound",
         "title": title,

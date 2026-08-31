@@ -3133,13 +3133,13 @@
             <!-- HaleHound-CYD multitool correlation -->
             <div class="glass rounded-xl p-4 mt-5 border border-fuchsia-500/50">
                 <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
-                    <h3 class="text-sm font-semibold text-fuchsia-300 flex items-center gap-2">🐕 HaleHound-CYD correlation</h3>
+                    <h3 class="text-sm font-semibold text-fuchsia-300 flex items-center gap-2">🐕 ESP32 attack-tool correlation</h3>
                     <div class="flex items-center gap-2">
                         <span id="wifidef-hh-verdict" class="px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300">— idle —</span>
-                        <button id="wifidef-hh-btn" onclick="wifidefHaleHound()" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-2 rounded text-sm font-semibold">Check for HaleHound</button>
+                        <button id="wifidef-hh-btn" onclick="wifidefHaleHound()" class="bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-3 py-2 rounded text-sm font-semibold">Check for ESP32 attack tool</button>
                     </div>
                 </div>
-                <p class="text-[11px] text-gray-500 mb-2">Fuses this WIDS capture with the LAN asset inventory and the BLE overlay (if loaded) to score whether a HaleHound-class ESP32 attack multitool is present or active. It cannot uniquely fingerprint HaleHound (same silicon/techniques as Marauder/Bruce, randomized MACs) — it scores behavioural consistency and fuses the result into the incident feed.</p>
+                <p class="text-[11px] text-gray-500 mb-2">Fuses this WIDS capture with the LAN asset inventory and the BLE overlay (if loaded) to score whether an <strong>ESP32 attack multitool</strong> — <strong>HaleHound-CYD, ESP32 Marauder, Bruce, Ghost ESP</strong> and the like — is present or active. These tools share the same silicon and techniques and randomize their MACs, so they can't be told apart or uniquely fingerprinted; this scores behavioural consistency across Wi-Fi/BLE/LAN and fuses the result into the incident feed.</p>
                 <div id="wifidef-hh-body" class="text-sm text-gray-300"></div>
             </div>
         </div><!-- /#wifidef-tab -->

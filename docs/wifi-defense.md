@@ -190,38 +190,41 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET /api/wifidef/selftest` | parser + detector self-test |
 | `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
 
-## HaleHound-CYD correlation
+## ESP32 attack-tool correlation (HaleHound / Marauder / Bruce)
 
-[HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is an ESP32
-**attack multitool** — 40+ modules across Wi-Fi (deauth, beacon
-spam, auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair
-spam, FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and
-NFC. The **Check for HaleHound** button on the WiFi Defense panel scores whether
-one is present or attacking.
+This is a general **ESP32 attack-multitool** detector — HaleHound-CYD included,
+but not only it. [HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is
+an ESP32 **attack multitool** — 40+ modules across Wi-Fi (deauth, beacon spam,
+auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair spam,
+FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and NFC.
+**ESP32 Marauder, Bruce and Ghost ESP** run the same silicon and the same
+techniques. The **Check for ESP32 attack tool** button on the WiFi Defense panel
+scores whether one is present or attacking.
 
-**What it can and cannot do.** HaleHound cannot be *uniquely* fingerprinted: it
-runs on the same ESP32 silicon and uses the same techniques as ESP32 Marauder,
-Bruce and Ghost ESP, and it randomizes its source MACs during floods. So this
-does **not** claim "that is HaleHound" — it scores how strongly the observed
-behaviour matches a HaleHound-class device (0–100 → *trace / possible / likely /
+**What it can and cannot do.** None of these tools can be *uniquely*
+fingerprinted, nor told apart from each other: same ESP32 silicon, same
+techniques, and they randomize source MACs during floods. So this does **not**
+claim "that is HaleHound" — it scores how strongly the observed behaviour matches
+an ESP32 attack multitool *of that class* (0–100 → *trace / possible / likely /
 confirmed*), fusing signals across domains:
 
 | Domain | Signals | Source |
 |--------|---------|--------|
-| **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth | this WIDS capture |
-| **LAN** | an Espressif host flagged `halehound_cyd` / `rogue_espressif` — HaleHound's **IoT Recon** module joins your LAN with a real ESP32 MAC | asset inventory (`device_classifier.detect_threats`) |
+| **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
+| **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC | asset inventory (`device_classifier.detect_threats`) |
 | **BLE** | Fast Pair spam, FindMy/AirTag flood, advertisement flood | the Bluetooth 2.4 GHz overlay (`bt_scanner`) |
 | **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
 
 The correlation is deliberately **multi-domain**: a single noisy domain is capped
 so it can only reach *possible* on its own, while behaviour spanning two or three
-RF domains at once — the CYD signature — escalates to *likely* / *confirmed*. A
-named HaleHound/GARMR host on the LAN is floored to at least *likely*. When the
-score crosses a tier it is emitted into the **Watchtower** feed as a
-`halehound` alert (`HH-CONFIRM` / `HH-LIKELY` / `HH-POSSIBLE`) and fused by the
-**incident engine** into a *HaleHound-class attack multitool active* incident.
+RF domains at once — the ESP32-multitool signature — escalates to *likely* /
+*confirmed*. A **named** attack tool on the LAN (HaleHound, Marauder, deauther,
+Flipper) is floored to at least *likely*. When the score crosses a tier it is
+emitted into the **Watchtower** feed as a `halehound` alert (`HH-CONFIRM` /
+`HH-LIKELY` / `HH-POSSIBLE`) and fused by the **incident engine** into an *ESP32
+attack multitool active* incident.
 
-**Blind spots (reported, not faked).** Ragnar has no receiver for HaleHound's
+**Blind spots (reported, not faked).** Ragnar has no receiver for these tools'
 NRF24 2.4 GHz (MouseJack, jammers), SubGHz 300–439 MHz (CC1101 replay/brute,
 Tesla) or NFC/RFID modules, so those are listed as blind spots rather than
 silently missed. Everything here is passive analysis — nothing is transmitted.

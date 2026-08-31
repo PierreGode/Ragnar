@@ -87,3 +87,23 @@ def test_assess_end_to_end_confirmed():
     assert v["verdict"] == "confirmed"
     alert = hh.to_alert(v)
     assert alert["source"] == "halehound" and alert["codes"] == ["HH-CONFIRM"]
+
+
+def test_generalizes_to_sibling_esp32_tools():
+    # A named ESP32 Marauder / deauther / Flipper on the LAN scores like a named
+    # HaleHound — this is a general ESP32 attack-tool detector, not HaleHound-only.
+    for tid in ("esp32_marauder", "esp_deauther", "flipper_wifi"):
+        v = hh.score({"lan": [tid]})
+        assert v["score"] >= 60 and v["verdict"] in ("likely", "confirmed"), (tid, v)
+    # And a Marauder's Wi-Fi behaviour alone (no name) still fuses like any tool.
+    v = hh.score({"wifi": [{"type": "beacon_flood", "severity": "flood"}],
+                  "lan": ["rogue_espressif"],
+                  "ble": [{"type": "ble_advert_flood"}]})
+    assert len(v["domains"]) >= 3
+
+
+def test_alert_title_names_the_class_not_just_halehound():
+    v = hh.score({"lan": ["esp32_marauder"], "ble": [{"type": "fastpair_spam"}],
+                  "wifi": [{"type": "auth_flood", "severity": "flood"}]})
+    title = hh.to_alert(v)["title"]
+    assert "ESP32" in title and "Marauder" in title
