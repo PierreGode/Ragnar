@@ -60,7 +60,8 @@ _LAN_WEIGHTS = {"halehound_cyd": 40, "esp32_marauder": 34, "esp_deauther": 34,
                 "flipper_wifi": 34, "rogue_espressif": 12}
 # The named-tool ids — a match to any is high-confidence on its own.
 _NAMED_TOOL_IDS = ("halehound_cyd", "esp32_marauder", "esp_deauther", "flipper_wifi")
-_BLE_WEIGHTS = {"apple_ble_flood": 18, "swiftpair_spam": 14, "ble_advert_flood": 12}
+_BLE_WEIGHTS = {"apple_ble_flood": 18, "swiftpair_spam": 14,
+                "fastpair_spam": 16, "ble_advert_flood": 12}
 _PORTAL_WEIGHT = 30
 
 # A domain cannot contribute more than this on its own.
@@ -84,14 +85,16 @@ _TIERS = (
     (0, "none", "info", "HH-NONE"),
 )
 
-# BLE-attack detection thresholds (per scan snapshot). NOTE: bt_scanner parses
-# manufacturer-specific data (the 16-bit company id) only — NOT service-data
-# UUIDs. So we detect the manufacturer-data pairing/tracker spam (Apple 0x004C,
-# Microsoft 0x0006); Google Fast Pair (service-data UUID 0xFE2C) is a blind spot.
+# BLE-attack detection thresholds (per scan snapshot). bt_scanner parses both
+# manufacturer-specific data (the 16-bit company id) AND service-data UUIDs, so
+# we detect the manufacturer-data pairing/tracker spam (Apple 0x004C, Microsoft
+# 0x0006) AND Google Fast Pair (service-data UUID 0xFE2C).
 _APPLE_CID = 0x004C     # Apple — FindMy/AirTag + Continuity proximity-pairing
 _MS_CID = 0x0006        # Microsoft — Swift Pair
+_FASTPAIR_SVC = 0xFE2C  # Google Fast Pair — BLE SERVICE-data UUID (not company id)
 _APPLE_MIN = 6          # distinct Apple 0x004C random advertisers => flood/spam
 _SWIFTPAIR_MIN = 6      # distinct Microsoft 0x0006 advertisers => Swift Pair spam
+_FASTPAIR_MIN = 6       # distinct 0xFE2C random advertisers => Fast Pair spam
 _ADVERT_FLOOD_MIN = 25  # distinct random-address advertisers => advertisement flood
 
 # ESP32 attack-tool threat ids we fuse from the LAN (HaleHound + its siblings:
@@ -133,22 +136,26 @@ def detect_ble_attacks(devices, thresholds=None):
     addr_type|is_random, name}``. Pure function. Returns a list of attack dicts
     ``{type, count, detail}``.
 
-    IMPORTANT — what is and isn't observable here: bt_scanner parses only
-    *manufacturer-specific data* (the 16-bit company id), so this sees the
-    Apple-Continuity (0x004C) and Microsoft Swift-Pair (0x0006) pairing/tracker
-    spam that churns many random-address adverts at once. It does NOT see Google
-    Fast Pair (advertised as service-data UUID 0xFE2C) or GATT-level attacks
-    (BLE Predator honeypot, Airoha RACE, SkeletonKey) — those are separate blind
-    spots, reported by ``assess()`` rather than guessed at. Real rooms hold only
-    a handful of trackers/phones, so a burst of many is the tell.
+    IMPORTANT — what is and isn't observable here: bt_scanner parses both
+    *manufacturer-specific data* (the 16-bit company id) AND *service-data*
+    UUIDs, so this sees the Apple-Continuity (0x004C) and Microsoft Swift-Pair
+    (0x0006) manufacturer-data spam AND Google Fast Pair (service-data UUID
+    0xFE2C) pairing/tracker floods that churn many random-address adverts at
+    once. It still does NOT see GATT-level attacks (BLE Predator honeypot,
+    Airoha RACE, SkeletonKey) — those need an active connection and remain a
+    blind spot reported by ``assess()``. Real rooms hold only a handful of
+    trackers/phones, so a burst of many is the tell.
     """
     th = thresholds or {}
     apple_min = int(th.get("apple_min", _APPLE_MIN))
     swiftpair_min = int(th.get("swiftpair_min", _SWIFTPAIR_MIN))
     flood_min = int(th.get("advert_flood_min", _ADVERT_FLOOD_MIN))
 
+    fastpair_min = int(th.get("fastpair_min", _FASTPAIR_MIN))
+
     apple_random = set()
     microsoft = set()
+    fastpair = set()
     random_adv = set()
     for d in devices or []:
         mac = (d.get("mac") or "").upper()
@@ -165,6 +172,11 @@ def detect_ble_attacks(devices, thresholds=None):
         # Microsoft Swift Pair rides company 0x0006.
         elif ck == _MS_CID:
             microsoft.add(mac)
+        # Google Fast Pair rides SERVICE-data UUID 0xFE2C (not manufacturer data),
+        # from random addresses — now that bt_scanner parses service_uuids we can
+        # finally see the WhisperPair/Fast Pair popup spam that was a blind spot.
+        if _FASTPAIR_SVC in (d.get("service_uuids") or []) and rnd:
+            fastpair.add(mac)
 
     attacks = []
     if len(apple_random) >= apple_min:
@@ -179,6 +191,13 @@ def detect_ble_attacks(devices, thresholds=None):
             "type": "swiftpair_spam", "count": len(microsoft),
             "detail": f"{len(microsoft)} distinct Microsoft (0x0006) advertisers — "
                       "Swift Pair pairing-popup spam",
+        })
+    if len(fastpair) >= fastpair_min:
+        attacks.append({
+            "type": "fastpair_spam", "count": len(fastpair),
+            "detail": f"{len(fastpair)} distinct random-address Google Fast Pair "
+                      "(service-data 0xFE2C) advertisers — Fast Pair / WhisperPair "
+                      "pairing-popup spam",
         })
     if len(random_adv) >= flood_min:
         attacks.append({
@@ -686,6 +705,19 @@ def selftest():
             {"mac": "AC:DE:48:00:00:02", "company_key": 0x0075, "addr_type": "public"}]
     check("calm BLE room => no attack", detect_ble_attacks(calm) == [],
           json.dumps(detect_ble_attacks(calm)))
+    # Google Fast Pair spam (service-data 0xFE2C) — now visible, was a blind spot.
+    fastpair = [{"mac": "5E:00:00:00:00:%02x" % i, "addr_type": "random",
+                 "service_uuids": [0xFE2C]} for i in range(7)]
+    check("Fast Pair (service-data 0xFE2C) spam detected",
+          any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(fastpair)),
+          json.dumps(detect_ble_attacks(fastpair)))
+    check("a couple of legit Fast Pair devices => no spam",
+          not any(a["type"] == "fastpair_spam"
+                  for a in detect_ble_attacks(fastpair[:2])))
+    check("public-address Fast Pair (not random) => not counted as spam",
+          not any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(
+              [{"mac": "3C:22:FB:00:00:%02x" % i, "addr_type": "public",
+                "service_uuids": [0xFE2C]} for i in range(8)])))
 
     # --- GARMR captive portal fingerprint ---
     fp = fingerprint_portal(["10.0.0.1", "10.0.0.1", "10.0.0.1", "10.0.0.1"],

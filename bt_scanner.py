@@ -329,6 +329,47 @@ def _vendor_for(mac, company_key, is_random=None):
 _DEV_LINE = re.compile(
     r"\[\s*(NEW|CHG|DEL)\s*\]\s*Device\s+([0-9A-Fa-f:]{17})\s+(.*)$")
 
+# Bluetooth SIG base UUID: a 16-bit UUID XXXX expands to
+# 0000XXXX-0000-1000-8000-00805f9b34fb. Service-data advertised under one of
+# these tells us the *service*, not the maker — Google Fast Pair rides 0xFE2C,
+# which manufacturer-data (company-id) parsing alone never sees.
+_BT_BASE_UUID_RE = re.compile(
+    r"0000([0-9a-fA-F]{4})-0000-1000-8000-00805f9b34fb")
+FASTPAIR_SVC_UUID = 0xFE2C     # Google Fast Pair (a.k.a. Nearby) service data
+
+
+def _short_uuid(uuid_str):
+    """Return the 16-bit short UUID (int) for a SIG base-UUID string, else None.
+
+    Accepts a full 128-bit ``0000fe2c-0000-1000-8000-00805f9b34fb`` or a bare
+    ``0xfe2c`` / ``fe2c`` token. Non-SIG (vendor) 128-bit UUIDs return None."""
+    if uuid_str is None:
+        return None
+    s = str(uuid_str).strip().lower()
+    m = _BT_BASE_UUID_RE.search(s)
+    if m:
+        return int(m.group(1), 16)
+    m = re.fullmatch(r"(?:0x)?([0-9a-f]{1,4})", s)
+    if m:
+        return int(m.group(1), 16)
+    return None
+
+
+def _short_uuid_from_text(text):
+    """Pull a SIG 16-bit service UUID out of a bluetoothctl ServiceData line.
+
+    Prefers a full base-UUID match; falls back to a ``ServiceData Key: 0xNNNN``
+    style token. Returns an int or None."""
+    if not text:
+        return None
+    m = _BT_BASE_UUID_RE.search(text)
+    if m:
+        return int(m.group(1), 16)
+    m = re.search(r"ServiceData(?:\.UUID)?[\s:]+.*?(0x[0-9a-fA-F]{2,4})", text)
+    if m:
+        return int(m.group(1), 16)
+    return None
+
 
 def parse_scan_stream(text):
     """Parse streaming ``bluetoothctl scan on`` output into {mac: {...}}.
@@ -344,7 +385,7 @@ def parse_scan_stream(text):
             continue
         event, mac, rest = m.group(1), m.group(2).upper(), m.group(3).strip()
         d = devices.setdefault(mac, {"mac": mac, "name": None, "rssi": None,
-                                     "company_key": None})
+                                     "company_key": None, "service_uuids": []})
         # `RSSI: 0xffffffc3 (-61)` — take the signed decimal in the parens.
         mr = re.search(r"RSSI:\s*(?:0x[0-9a-fA-F]+\s*)?\((-?\d+)\)", rest)
         if mr:
@@ -353,6 +394,12 @@ def parse_scan_stream(text):
         mk = re.search(r"ManufacturerData\.Key:\s*(0x[0-9a-fA-F]+)", rest)
         if mk:
             d["company_key"] = int(mk.group(1), 16)
+        # `ServiceData.UUID: 0000fe2c-...` (or `ServiceData Key: ...`) — the
+        # service advertised (Fast Pair = 0xFE2C), invisible to company-id parsing.
+        if "ServiceData" in rest:
+            su = _short_uuid_from_text(rest)
+            if su is not None and su not in d["service_uuids"]:
+                d["service_uuids"].append(su)
         # A [NEW] line's trailing token is the name/alias (often the MAC dashed).
         if event == "NEW" and rest and "RSSI" not in rest and ":" not in rest:
             if rest.replace("-", ":").upper() != mac:
@@ -367,7 +414,8 @@ def parse_info(text):
     """Parse ``bluetoothctl info <mac>`` into a dict (pure)."""
     t = _strip_ansi(text)
     info = {"addr_type": None, "name": None, "rssi": None, "cls": None,
-            "icon": None, "company_key": None, "tx_power": None}
+            "icon": None, "company_key": None, "tx_power": None,
+            "service_uuids": []}
     m = re.search(r"Device\s+[0-9A-Fa-f:]{17}\s*\((public|random)\)", t)
     if m:
         info["addr_type"] = m.group(1)
@@ -388,6 +436,11 @@ def parse_info(text):
     m = re.search(r"ManufacturerData\.Key:\s*(0x[0-9a-fA-F]+)", t)
     if m:
         info["company_key"] = int(m.group(1), 16)
+    for ln in t.splitlines():
+        if "ServiceData" in ln:
+            su = _short_uuid_from_text(ln)
+            if su is not None and su not in info["service_uuids"]:
+                info["service_uuids"].append(su)
     m = re.search(r"^\s*TxPower:\s*(?:0x[0-9a-fA-F]+\s*)?\(?(-?\d+)\)?", t, re.M)
     if m:
         info["tx_power"] = int(m.group(1))
@@ -582,6 +635,15 @@ def _discover_dbus(hci, duration):
             keys = [k for k in keys if k is not None]
             if keys:
                 company_key = min(keys)  # stable pick when several are present
+        # ServiceData is a {uuid: bytes} dict — the SERVICE advertised (Fast Pair
+        # rides 0xFE2C), which company-id parsing never surfaces.
+        service_uuids = []
+        sd = d.get("ServiceData")
+        if sd:
+            for k in sd.keys():
+                su = _short_uuid(str(k))
+                if su is not None and su not in service_uuids:
+                    service_uuids.append(su)
         devices.append({
             "mac": str(d.get("Address", "")).upper(),
             "name": str(d["Name"]) if d.get("Name") else None,
@@ -591,6 +653,7 @@ def _discover_dbus(hci, duration):
             "icon": str(d["Icon"]) if d.get("Icon") else None,
             "tx_power": _dbus_int(d.get("TxPower")),
             "company_key": company_key,
+            "service_uuids": service_uuids,
         })
     return devices, None
 
@@ -625,6 +688,10 @@ def _scan_bluetoothctl(hci, duration):
             d["name"] = info["name"]
         if d.get("company_key") is None and info.get("company_key") is not None:
             d["company_key"] = info["company_key"]
+        merged = d.setdefault("service_uuids", [])
+        for su in info.get("service_uuids", []) or []:
+            if su not in merged:
+                merged.append(su)
         devices.append(d)
     return devices
 
@@ -739,6 +806,19 @@ def selftest():
           st.get("FC:70:2E:B6:3E:8A", {}).get("name") == "Tv Hub 2"
           and st.get("40:CB:C0:E4:DE:CF", {}).get("name") is None,
           str(st.get("40:CB:C0:E4:DE:CF", {}).get("name")))
+
+    # --- service-data UUID parsing (Fast Pair 0xFE2C) ---
+    check("uuid: full base UUID -> 16-bit short",
+          _short_uuid("0000fe2c-0000-1000-8000-00805f9b34fb") == 0xFE2C)
+    check("uuid: bare 0xNNNN token parsed", _short_uuid("0xFE2C") == 0xFE2C)
+    check("uuid: vendor (non-SIG) 128-bit => None",
+          _short_uuid("d0611e78-bbb4-4591-a5f8-487910ae4366") is None)
+    fp_line = ("[CHG] Device 5E:AA:BB:CC:DD:01 ServiceData.UUID: "
+               "0000fe2c-0000-1000-8000-00805f9b34fb")
+    check("stream: Fast Pair service UUID captured from ServiceData line",
+          0xFE2C in parse_scan_stream(fp_line)
+          .get("5E:AA:BB:CC:DD:01", {}).get("service_uuids", []),
+          str(parse_scan_stream(fp_line)))
 
     # --- info parser ---
     ic = parse_info(_SAMPLE_INFO_CLASSIC)
