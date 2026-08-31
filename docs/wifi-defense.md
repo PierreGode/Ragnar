@@ -294,6 +294,65 @@ see.** The list adapts to the attached radios rather than claiming a fixed set:
 All of these are *listed* rather than silently missed. Everything here is passive
 analysis — nothing is transmitted (the SubGHz sweep only receives).
 
+### Field-test playbook (HaleHound / Marauder / Bruce / Ghost ESP)
+
+Ragnar does **not** detect a *firmware* — it detects the **attacks** a firmware
+performs. HaleHound-CYD, ESP32 Marauder, Bruce and Ghost ESP run the same ESP32
+silicon and the same techniques, so they trip the **same** detectors. To validate,
+you don't test the firmware, you **run an attack mode and watch the matching
+detector fire**. The mapping is identical whichever tool you flash.
+
+**What to run on the ESP32 tool → what Ragnar detects:**
+
+| Attack mode on the tool | Ragnar detector | Where it shows | Domain |
+|---|---|---|---|
+| Deauth attack | `deauth` flood | WiFi Defense → 💥 Deauth FLOOD | wifi |
+| Beacon spam / fake-AP flood | `beacon_flood` (randomized-MAC ratio) | 📡 Beacon flood | wifi |
+| Auth flood / Auth DoS ("Auth Flood") | `auth_flood` | 🌊 Auth flood | wifi |
+| Evil twin / rogue AP (clone your SSID) | `rogue_ap` evil-twin — **needs a baseline set first** | 👿 Evil twin | wifi |
+| GARMR captive portal (evil-twin + DNS hijack) | portal fingerprint | HaleHound card / `portal-probe` | portal |
+| KARMA / "answer every probe" | `karma` | 🎣 KARMA/MANA | wifi |
+| BLE spam — Sour Apple / AppleJuice / Swift Pair / Fast Pair / AirTag flood | `apple_ble_flood` / `swiftpair_spam` / `fastpair_spam` / `ble_advert_flood` | HaleHound card → ble | ble |
+| SubGHz replay / brute (CC1101, 315/433 MHz) | `subghz_replay` / `subghz_brute` | HaleHound card (tick **SubGHz sweep**) | subghz |
+| Join your Wi-Fi (HaleHound "IoT Recon", or just connect it) | `rogue_espressif` (or `halehound_cyd` if it announces that hostname) | asset inventory / HaleHound suspects | lan |
+
+**The real test is fusion.** Any single attack is capped at *trace / possible* on
+its own, on purpose — it must not cry wolf. The *likely / confirmed* "ESP32 attack
+multitool" verdict comes from running **two or more domains at once**, which is how
+these tools actually operate. The headline demo:
+
+1. Put the ESP32 on your Wi-Fi (→ **lan**: Espressif host), **and**
+2. Run a deauth or auth flood (→ **wifi**), **and**
+3. Start its BLE spam (→ **ble**).
+
+→ Ragnar fuses wifi + lan + ble → **likely/confirmed**, emits a `halehound`
+Watchtower alert, and the incident engine raises an *"ESP32 attack multitool
+active"* incident.
+
+**Ragnar-side prerequisites (or the detector stays dark):**
+
+- **Wi-Fi** detectors need the adapter in **monitor mode** on the attack's channel
+  (WiFi Defense → enable monitor). Deauth / beacon / auth / KARMA / evil-twin all
+  come from that capture.
+- **Evil twin** specifically needs a **baseline** set first — otherwise a legit
+  multi-BSSID SSID (band-steering/mesh) is correctly *not* flagged.
+- **BLE** needs a Bluetooth controller. Thresholds are set **above** ordinary room
+  density (≥20 distinct Apple, ≥15 Swift/Fast Pair advertisers) so a quiet home
+  never false-flags — a single pairing press won't trip it, the tool's *continuous*
+  spam mode will.
+- **SubGHz** needs the RTL-SDR free (no ADS-B/ACARS/waterfall running) and the
+  **SubGHz sweep** box ticked (opt-in, ~20 s).
+- **LAN** detection needs Ragnar to have **scanned the network** (host inventory)
+  so the ESP32 shows up as a host.
+
+**Honest limit — state it plainly.** Ragnar reports *"ESP32 attack multitool of the
+HaleHound / Marauder / Bruce class"*; it **cannot** say *"this is HaleHound
+specifically"*, because the radio evidence is identical across these tools and they
+randomize MACs. The only tool-specific confirms are (1) a **GARMR captive-portal
+signature** match — the table ships empty, so drop in HaleHound's real portal
+`title` / `Server` header / form-field names and it becomes a hard confirm — or
+(2) the device announcing a `halehound` / `garmr` hostname on the LAN.
+
 ## Airtime & link quality
 
 A separate passive diagnostic (the "why is it slow" view). Capture all 802.11
