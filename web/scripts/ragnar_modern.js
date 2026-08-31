@@ -4669,7 +4669,7 @@ function wifiSurveyDelete() {
 // WiFi Defense — 802.11 frame monitor / WIDS (top-level tab)
 // Backend: /api/wifidef/* (wifi_defense.py)
 // ============================================================================
-const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null };
+const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null, btCache: { devices: null, ts: 0 } };
 
 const _WIFIDEF_THREAT = {
     clear: ['CLEAR', 'bg-green-600/20 text-green-300 border border-green-600/50'],
@@ -4950,6 +4950,12 @@ function wifidefScan() {
             st.textContent = `${d.frames} frames · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`
                 + (_wifidef.continuous ? ' · live' : '');
             wifidefRender();
+            // Fold the ESP32 attack-tool correlation into the same scan. SubGHz
+            // only on manual scans (it grabs the shared SDR for ~20s), never in
+            // the continuous loop.
+            const wantSub = !_wifidef.continuous
+                && !!(document.getElementById('wifidef-hh-subghz') || {}).checked;
+            _wifidefFusion({ subghz: wantSub });
         }).catch((e) => {
             prog.done();
             if (e && e.name === 'AbortError') { st.textContent = 'Stopped.'; return; }
@@ -5295,9 +5301,10 @@ function wifidefRender() {
         <td class="py-1 pr-2">${a.beacons}</td></tr>`).join('');
 }
 
-// HaleHound-CYD correlation: fuse the current WIDS capture with a fresh BLE
-// overlay + the LAN asset inventory, score it server-side, and render the
-// verdict. Backend: POST /api/wifidef/halehound (halehound_watch.assess).
+// ESP32 attack-tool correlation, folded inline into the WIDS scan: the fused
+// verdict is computed from the SAME capture the WIDS just rendered (no second
+// Wi-Fi scan) plus a cached BLE overlay + LAN inventory (+ opt-in SubGHz), and
+// shown above the detections. Backend: POST /api/wifidef/halehound.
 const _WIFIDEF_HH = {
     confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
     likely: ['LIKELY', 'bg-red-500 text-white'],
@@ -5305,23 +5312,31 @@ const _WIFIDEF_HH = {
     trace: ['trace', 'bg-slate-600 text-slate-200'],
     none: ['clear', 'bg-emerald-600 text-white'],
 };
-async function wifidefHaleHound() {
+// Fold the ESP32 fusion into the main WIDS scan: reuse the just-captured WIDS
+// data (no second Wi-Fi capture), a cached BLE snapshot (refreshed on a slow
+// timer, not every scan — kind on a Pi Zero and on the continuous loop), and an
+// opt-in SubGHz sweep on manual scans only. Renders inline above the detections.
+async function _wifidefFusion(opts) {
+    opts = opts || {};
+    const box = document.getElementById('wifidef-hh-inline');
     const vb = document.getElementById('wifidef-hh-verdict');
     const body = document.getElementById('wifidef-hh-body');
-    const btn = document.getElementById('wifidef-hh-btn');
-    if (!_wifidef.data) {
-        body.innerHTML = '<span class="text-amber-300">Run a WiFi Defense scan first, then check for HaleHound.</span>';
-        return;
-    }
-    if (btn) btn.disabled = true;
+    if (!box || !_wifidef.data) return;
+    box.hidden = false;
     vb.textContent = '…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300';
-    // Best-effort fresh BLE overlay so the Bluetooth attack domain can score.
+    // BLE overlay: reuse a cached snapshot unless it's older than 60s (an 8s
+    // scan briefly claims the controller, so it must NOT run every WIDS cycle).
     let bt = null;
-    try {
-        const r = await fetch('/api/net/bt/scan?duration=8');
-        if (r.ok) bt = await r.json();
-    } catch (e) { /* BLE optional */ }
-    const subghz = !!(document.getElementById('wifidef-hh-subghz') || {}).checked;
+    const now = Date.now();
+    if (_wifidef.btCache.devices && (now - _wifidef.btCache.ts) < 60000) {
+        bt = { devices: _wifidef.btCache.devices };
+    } else {
+        try {
+            const r = await fetch('/api/net/bt/scan?duration=8');
+            if (r.ok) { bt = await r.json(); _wifidef.btCache = { devices: (bt || {}).devices || null, ts: now }; }
+        } catch (e) { /* BLE optional */ }
+    }
+    const subghz = !!opts.subghz;
     if (subghz) body.innerHTML = '<span class="text-fuchsia-300">Sweeping SubGHz 300–439 MHz off the RTL-SDR (~20s)…</span>';
     try {
         const res = await fetch('/api/wifidef/halehound', {
@@ -5363,9 +5378,7 @@ async function wifidefHaleHound() {
         }
         body.innerHTML = html;
     } catch (e) {
-        body.innerHTML = '<span class="text-red-300">Assessment failed.</span>';
-    } finally {
-        if (btn) btn.disabled = false;
+        body.innerHTML = '<span class="text-red-300">ESP32 correlation failed.</span>';
     }
 }
 

@@ -200,8 +200,11 @@ an ESP32 **attack multitool** — 40+ modules across Wi-Fi (deauth, beacon spam,
 auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair spam,
 FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and NFC.
 **ESP32 Marauder, Bruce and Ghost ESP** run the same silicon and the same
-techniques. The **Check for ESP32 attack tool** button on the WiFi Defense panel
-scores whether one is present or attacking.
+techniques. The correlation is **folded into the main WIDS scan** — every WiFi
+Defense scan also renders a fused ESP32 verdict inline (above the detections),
+reusing that same capture rather than re-scanning. It does **not** re-implement
+the Wi-Fi checks; it consumes the WIDS detections and fuses them with the other
+radios/domains.
 
 **What it can and cannot do.** None of these tools can be *uniquely*
 fingerprinted, nor told apart from each other: same ESP32 silicon, same
@@ -264,7 +267,8 @@ real GARMR fingerprints and the confirm goes live with no code change.
 ### SubGHz sweep (RTL-SDR)
 
 SubGHz is **opt-in** because it briefly claims the RTL-SDR and takes ~20 s: tick
-**SubGHz sweep** on the card (or `POST /api/wifidef/halehound {"subghz": true}`).
+**+SubGHz** in the WIDS controls (or `POST /api/wifidef/halehound {"subghz":
+true}`) — it runs on manual scans only, never in the continuous loop.
 `subghz_watch.scan()` runs `rtl_433` across 433.92 MHz + 315 MHz and flags a
 **replay** (same model+id+payload re-sent ≥ 8× in the window — well above any real
 remote's cadence) or a **brute / rolling-code sweep** (≥ 16 distinct codes from
@@ -297,9 +301,10 @@ analysis — nothing is transmitted (the SubGHz sweep only receives).
 
 ### Headless 24/7 watch (continuous)
 
-The **Check for ESP32 attack tool** button is a one-shot spot-check. The **24/7
-watch** checkbox on the same card turns the *same* fusion into a headless
-background monitor: a daemon thread (`halehound_daemon.py`) periodically captures
+The inline verdict updates with each scan you run (or each cycle of the
+**Continuous** loop). The **24/7 watch** checkbox in the WIDS controls turns the
+*same* fusion into a headless background monitor: a daemon thread
+(`halehound_daemon.py`) periodically captures
 a Wi-Fi window, refreshes a **cached** BLE snapshot on a slower cadence, scores it
 through `halehound_watch.assess`, and emits into the **Watchtower** feed /
 incident engine (and thus Pushover) whenever the verdict crosses the alert tier —
