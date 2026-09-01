@@ -4782,7 +4782,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260831-halehound-hiddenssid';
+const WIFIDEF_BUILD = '20260901-halehound-eviltwin-lure';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -5246,7 +5246,7 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma'].includes(x.severity);
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid'].includes(x.severity);
             const info = x.severity === 'band_steering';
             const border = crit ? 'border-l-4 border-red-500'
                 : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
@@ -5265,9 +5265,17 @@ function wifidefRender() {
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
                 title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
+                    : x.severity === 'spoofed_bssid' ? '🚫 Spoofed BSSID (multicast/group bit set)'
+                    : x.severity === 'rogue_lure' ? '🎣 Open Wi-Fi lure — possible evil-twin portal'
                     : x.severity === 'band_steering' ? '📶 Band-steering / mesh (benign)'
                     : '⚠ Duplicate SSID';
-                body = `<div>SSID <b>${x.ssid}</b></div><div class="font-mono text-[11px] text-gray-400">${(x.rogue_bssids || x.bssids || []).map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                const bssids = (x.rogue_bssids || x.bssids || (x.bssid ? [x.bssid] : []));
+                body = `<div>SSID <b>${x.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</b></div><div class="font-mono text-[11px] text-gray-400">${bssids.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                // A lure / spoofed AP is the shape of a captive-portal evil twin —
+                // offer a one-click active probe (needs an adapter joined to it).
+                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid') {
+                    body += `<button onclick="event.stopPropagation(); wifidefProbePortal('${_esc(x.ssid || '')}')" class="mt-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-2 py-1 rounded text-[11px] font-semibold">Probe captive portal…</button>`;
+                }
             } else if (x.type === 'auth_flood') {
                 title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
                 const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
@@ -5434,6 +5442,46 @@ async function wifidefHaleHoundWatchStatus() {
         const r = await fetch('/api/wifidef/halehound/watch');
         if (r.ok) _wifidefRenderWatch(await r.json());
     } catch (e) { /* ignore */ }
+}
+
+// Active captive-portal probe for a suspected evil-twin lure. Read-only GET; the
+// backend restricts it to a local (private) IP and never submits credentials.
+// Run it with an adapter ASSOCIATED to the rogue SSID; the portal is the gateway.
+async function wifidefProbePortal(ssid) {
+    const box = document.getElementById('wifidef-hh-inline');
+    const body = document.getElementById('wifidef-hh-body');
+    if (box) box.hidden = false;
+    const ip = prompt('Captive-portal / gateway IP to probe'
+        + (ssid ? ' for "' + ssid + '"' : '')
+        + '\n(join an adapter to that SSID first — HaleHound GARMR defaults to 192.168.4.1):',
+        '192.168.4.1');
+    if (!ip) return;
+    const url = 'http://' + ip.trim() + '/';
+    if (body) body.innerHTML = '<span class="text-fuchsia-300">Probing captive portal at ' + _esc(url) + ' …</span>';
+    try {
+        const r = await fetch('/api/wifidef/halehound/portal-probe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url }),
+        });
+        const d = await r.json();
+        if (d.error) { if (body) body.innerHTML = '<span class="text-amber-400">Portal probe: ' + _esc(d.error) + '</span>'; return; }
+        const o = d.observed || {};
+        let html = '<div class="text-[12px] text-gray-300">';
+        html += '<div class="font-semibold text-fuchsia-300 mb-1">Captive portal at ' + _esc(url) + '</div>';
+        html += '<div>Title: <span class="text-gray-100">' + _esc(o.title || '—') + '</span></div>';
+        html += '<div>Server: <span class="font-mono">' + _esc(o.server || '—') + '</span></div>';
+        html += '<div>Form fields: <span class="font-mono">' + _esc((o.form_fields || []).join(', ') || '—') + '</span></div>';
+        if (d.matched) {
+            html += '<div class="mt-1 text-emerald-300">✓ Matched loaded GARMR signature <b>' + _esc(d.garmr_signature) + '</b> (' + _esc(d.signature_confidence) + ') — HaleHound-specific confirm.</div>';
+        } else if (d.suggested_signature) {
+            html += '<div class="mt-2 text-amber-300">No signature loaded. If this IS a known GARMR portal, paste this into <span class="font-mono">halehound_watch._GARMR_SIGNATURES</span>:</div>';
+            html += '<pre class="mt-1 p-2 bg-slate-900 rounded text-[11px] overflow-x-auto text-fuchsia-200">' + _esc(JSON.stringify(d.suggested_signature, null, 2)) + '</pre>';
+        }
+        html += '</div>';
+        if (body) body.innerHTML = html;
+    } catch (e) {
+        if (body) body.innerHTML = '<span class="text-red-300">Portal probe failed.</span>';
+    }
 }
 
 // ============================================================================

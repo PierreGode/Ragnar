@@ -19781,6 +19781,9 @@ def register_network_diagnostics(app, logger=None):
                             'reachable': False})
         observed = _hh.parse_portal_observation(body, headers, status)
         sig = _hh.match_portal_signature(observed)
+        # Auto-build a ready-to-paste signature from what we fetched, so probing a
+        # KNOWN-real GARMR portal once yields a drop-in _GARMR_SIGNATURES entry.
+        suggestion = _hh.build_signature_suggestion(observed)
         # Don't echo the raw HTML back; return the extracted, matchable fields.
         observed.pop('html', None)
         return jsonify({
@@ -19789,9 +19792,11 @@ def register_network_diagnostics(app, logger=None):
             'garmr_signature': (sig['name'] if sig else None),
             'signature_confidence': (sig['confidence'] if sig else None),
             'matched': bool(sig),
-            'note': ('No GARMR signature is loaded yet — the fields above are '
-                     'what a signature would match on. Add real signatures to '
-                     'halehound_watch._GARMR_SIGNATURES.') if not sig else
+            'suggested_signature': suggestion,
+            'note': ('No GARMR signature is loaded yet. If this IS a known GARMR '
+                     'portal, paste "suggested_signature" into '
+                     'halehound_watch._GARMR_SIGNATURES and future probes confirm '
+                     'it.') if not sig else
                     'Matched a loaded GARMR signature — HaleHound-specific confirm.',
         })
 

@@ -47,7 +47,9 @@ _WIFI_WEIGHTS = {
     ("auth_flood", "flood"): 24,
     ("auth_flood", "auth_warn"): 8,
     ("rogue_ap", "evil_twin"): 20,
+    ("rogue_ap", "spoofed_bssid"): 20,   # group/multicast-bit BSSID = spoofed AP
     ("rogue_ap", "duplicate_ssid"): 8,
+    ("rogue_ap", "rogue_lure"): 6,       # open free-Wi-Fi lure name (low-confidence)
     ("karma", "karma"): 18,
     ("beacon_flood", "flood"): 14,
     ("beacon_flood", "beacon_warn"): 6,
@@ -327,6 +329,41 @@ def match_portal_signature(observed, signatures=None):
             return {"name": sig.get("name", "GARMR portal"),
                     "confidence": sig.get("confidence", "likely")}
     return None
+
+
+def build_signature_suggestion(observed, name="GARMR (captured)"):
+    """Turn a captured portal observation into a ready-to-paste _GARMR_SIGNATURES
+    entry (pure). Lets an operator probe a KNOWN-real GARMR portal once and drop
+    the result straight into the signature table — no hand-crafting.
+
+    Uses only the distinctive, stable fields present in the observation. The
+    exact body hash (``html_sha256``) is included as a high-confidence anchor;
+    the softer title/server/form-field criteria let it still match if the page
+    is templated with small per-victim changes. Returns None if there's nothing
+    distinctive enough to match on (so we never suggest a signature that would
+    match everything)."""
+    if not observed:
+        return None
+    title = (observed.get("title") or "").strip()
+    server = (observed.get("server") or "").strip()
+    fields = [str(f).lower() for f in (observed.get("form_fields") or [])]
+    digest = (observed.get("html_sha256") or "").strip()
+    sig = {"name": name}
+    if title:
+        sig["title_contains"] = title
+    if server:
+        sig["server_contains"] = server
+    if fields:
+        sig["form_fields"] = fields
+    if digest:
+        sig["html_sha256"] = digest
+    # Need at least one real criterion beyond the name, else it can't match.
+    if len(sig) <= 1:
+        return None
+    # Exact-hash OR (title + a credential form) is a strong, low-FP anchor.
+    strong = bool(digest) or (title and fields)
+    sig["confidence"] = "confirmed" if strong else "likely"
+    return sig
 
 
 def fingerprint_portal(dns_answers, http_status=None, redirect_host=None,
@@ -753,6 +790,38 @@ def selftest():
           not any(a["type"] == "fastpair_spam" for a in detect_ble_attacks(
               [{"mac": "3C:22:FB:00:00:%02x" % i, "addr_type": "public",
                 "service_uuids": [0xFE2C]} for i in range(16)])))
+
+    # --- Lone evil-twin lure (the HaleHound GARMR case that passive missed) ---
+    # One open AP, new SSID, spoofed (multicast-bit) BSSID + a free-Wi-Fi lure
+    # name — no duplicate, no baseline, no deauth. Should now reach 'possible'.
+    lure = score({"wifi": [
+        {"type": "rogue_ap", "severity": "spoofed_bssid", "detail": "multicast BSSID"},
+        {"type": "rogue_ap", "severity": "rogue_lure", "detail": "open FreeWiFi"},
+    ]})
+    check("spoofed BSSID + open lure => at least 'possible' (was missed)",
+          lure["score"] >= 25 and lure["verdict"] in ("possible", "likely"),
+          json.dumps({"s": lure["score"], "v": lure["verdict"]}))
+    # A lure name ALONE (weak) must stay a trace — no crying wolf on real FreeWiFi.
+    lure_only = score({"wifi": [{"type": "rogue_ap", "severity": "rogue_lure"}]})
+    check("open lure name alone stays a trace (real FreeWiFi is common)",
+          lure_only["score"] < 25, json.dumps(lure_only))
+
+    # --- Auto-captured GARMR signature suggestion ---
+    obs = parse_portal_observation(
+        "<html><head><title>Sign in to WiFi</title></head><body>"
+        "<form><input name='email'><input name='password'></form></body></html>",
+        {"Server": "GARMR/1.0"}, 200)
+    sug = build_signature_suggestion(obs)
+    check("build_signature_suggestion captures title/server/fields/hash",
+          sug and sug["title_contains"] == "Sign in to WiFi"
+          and sug["server_contains"] == "GARMR/1.0"
+          and sug["form_fields"] == ["email", "password"]
+          and len(sug["html_sha256"]) == 64 and sug["confidence"] == "confirmed",
+          json.dumps(sug))
+    check("a captured suggestion round-trips (matches its own observation)",
+          match_portal_signature(obs, [sug]) is not None, json.dumps(sug))
+    check("empty observation => no signature suggested (can't match-all)",
+          build_signature_suggestion({}) is None)
 
     # --- SubGHz domain (RTL-SDR) scoring ---
     sg_replay = score({"subghz": [{"type": "subghz_replay", "severity": "flood"}]})

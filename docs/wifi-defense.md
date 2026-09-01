@@ -215,7 +215,7 @@ confirmed*), fusing signals across domains:
 
 | Domain | Signals | Source |
 |--------|---------|--------|
-| **Wi-Fi** | auth flood, evil-twin, beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
+| **Wi-Fi** | auth flood, evil-twin, **spoofed BSSID** (group/multicast I/G bit set — no real AP does this), **open rogue-lure** (an open AP using a common free-Wi-Fi name — low-confidence), beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
 | **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC. Matched on the Espressif **OUI/vendor**. | asset inventory (`device_classifier.detect_threats`) |
 
 > **No false alarms from ordinary IoT.** ESP32 is one of the most common IoT
@@ -263,6 +263,24 @@ the hijacked DNS).
 The signature table ships **empty** — so it never false-matches — with a
 documented schema (title/Server/form-fields/HTML-markers/SHA-256). Drop in the
 real GARMR fingerprints and the confirm goes live with no code change.
+
+**Auto-signature capture.** You don't hand-craft the signature: probe a
+*known-real* GARMR portal once and the response includes a ready-to-paste
+`suggested_signature` (title + Server + form fields + exact body SHA-256) built
+by `build_signature_suggestion()`. Paste it into `_GARMR_SIGNATURES` and future
+probes confirm. In the UI, a **spoofed BSSID** or **open rogue-lure** detection
+carries a **"Probe captive portal…"** button that runs the probe (you supply the
+gateway IP, default `192.168.4.1`) and shows the observed fields + the suggested
+signature inline.
+
+**The lone-lure case (why a passive scan can miss it).** A GARMR that broadcasts
+a *new* open SSID with no real AP to clone and no deauth ("Real AP not found — no
+deauth" on the device) leaves nothing anomalous on the air for a duplicate- or
+baseline-based check to catch. Two passive tells now cover it: a **spoofed BSSID**
+(a beacon sourced from a group/multicast address — invalid 802.11, strong and
+low-FP) and an **open rogue-lure** name (weak, informational). Together they push
+a lone open evil-twin lure to *possible*, and the **Probe captive portal** button
+turns it into a *confirmed* GARMR once a signature is loaded.
 
 ### SubGHz sweep (RTL-SDR)
 

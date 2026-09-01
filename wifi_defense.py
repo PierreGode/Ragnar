@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260831-halehound-hiddenssid"
+_BUILD = "20260901-halehound-eviltwin-lure"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -635,6 +635,38 @@ def _is_blank_ssid(ssid):
     if not ssid:
         return True
     return ssid.strip("\x00 \t\r\n\x1c\x1d\x1e\x1f") == ""
+
+
+def _is_multicast_bssid(mac):
+    """True if a BSSID has the I/G (group/multicast) bit set — bit 0x01 of the
+    first octet. A real AP's BSSID is ALWAYS an individual (unicast) address, so
+    a beacon sourced from a group address is invalid 802.11 and a strong sign of
+    a spoofed/rogue AP (some evil-twin tools randomize the BSSID without clearing
+    this bit). Low false-positive: legitimate hardware never does this."""
+    if not mac:
+        return False
+    try:
+        return bool(int(mac.split(":")[0], 16) & 0x01)
+    except (ValueError, IndexError):
+        return False
+
+
+# Common "free/open Wi-Fi" names an evil-twin lure impersonates to get victims to
+# associate (HaleHound GARMR, Wifiphisher, etc.). Matching one on an OPEN AP is a
+# LOW-confidence hint only — real venues use these names too — so it never alerts.
+_LURE_SSIDS = {
+    "free wifi", "freewifi", "free_wifi", "free-wifi", "wifi", "public wifi",
+    "guest wifi", "guest", "airport wifi", "airport_free_wifi", "hotel wifi",
+    "starbucks wifi", "attwifi", "xfinitywifi", "google starbucks",
+    "free internet", "free public wifi", "linksys", "netgear", "default",
+}
+
+
+def _is_lure_ssid(ssid):
+    """True if an SSID matches a common open-Wi-Fi lure name (normalized)."""
+    if not ssid:
+        return False
+    return ssid.strip().lower() in _LURE_SSIDS
 
 
 def _oui(mac):
@@ -1872,6 +1904,40 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                               "(possible evil twin — set a baseline to confirm)",
                 })
 
+    # --- Spoofed BSSID: a beacon/probe-resp sourced from a group (multicast)
+    # address is invalid 802.11 — no real AP does it. Catches an evil twin whose
+    # randomized BSSID left the I/G bit set (the lone-lure case a duplicate/
+    # baseline check can't see: one new SSID, no real AP to clone, no deauth). ---
+    _anomaly_seen = set()
+    for e in beacons + presp:
+        src = e.get("src")
+        if src and src not in _anomaly_seen and _is_multicast_bssid(src):
+            _anomaly_seen.add(src)
+            detections.append({
+                "type": "rogue_ap", "severity": "spoofed_bssid",
+                "ssid": e.get("ssid"), "bssid": src,
+                "detail": f"BSSID {src} has the group/multicast (I/G) bit set — "
+                          "invalid for a real AP; spoofed/rogue BSSID"
+                          + (f" advertising '{e.get('ssid')}'" if e.get("ssid") else ""),
+            })
+
+    # --- Open rogue-lure: an OPEN AP using a common free-Wi-Fi name is the shape
+    # of an evil-twin captive-portal lure. LOW confidence (real venues use these
+    # names) — informational, never an alert; a nudge to run a portal probe. ---
+    _open_sec = {"Open", None}
+    _lure_seen = set()
+    for e in beacons:
+        ssid, src = e.get("ssid"), e.get("src")
+        if (ssid and src and src not in _lure_seen and _is_lure_ssid(ssid)
+                and e.get("security") in _open_sec):
+            _lure_seen.add(src)
+            detections.append({
+                "type": "rogue_ap", "severity": "rogue_lure",
+                "ssid": ssid, "bssid": src,
+                "detail": f"open AP '{ssid}' matches a common free-Wi-Fi lure name "
+                          "— possible evil-twin captive portal; probe it to confirm",
+            })
+
     # Access-point inventory (for the UI table + baseline building)
     aps = {}
     for e in beacons:
@@ -1887,9 +1953,9 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
         if e.get("channel") is not None:
             ap["channel"] = e["channel"]
 
-    sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3,
+    sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
                 "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
-                "band_steering": 1, "seen": 1}
+                "band_steering": 1, "rogue_lure": 1, "seen": 1}
     threat = "clear"
     if detections:
         worst = max(sev_rank.get(d["severity"], 1) for d in detections)
@@ -2014,7 +2080,7 @@ def _selftest_pcap(path):
     for s in ["Starbucks", "attwifi", "HomeNet", "xfinitywifi", "TP-LINK", "Netgear"]:
         pkts.append(proberesp("ba:ad:ba:ad:00:01", s))
     # Evil twin: HomeNet also from an untrusted BSSID
-    pkts.append(beacon("99:99:99:99:99:99", "HomeNet"))
+    pkts.append(beacon("98:99:99:99:99:99", "HomeNet"))
     wrpcap(path, pkts)
 
 
@@ -2123,7 +2189,7 @@ def selftest():
           json.dumps([d.get("detail") for d in roam_res["detections"]]))
     check("evil twin detected against baseline",
           types.get("rogue_ap", {}).get("severity") == "evil_twin"
-          and "99:99:99:99:99:99" in types.get("rogue_ap", {}).get("rogue_bssids", []),
+          and "98:99:99:99:99:99" in types.get("rogue_ap", {}).get("rogue_bssids", []),
           str(types.get("rogue_ap")))
     check("overall threat = critical", res["threat"] == "critical", res["threat"])
 
@@ -2170,6 +2236,37 @@ def selftest():
     check("_is_blank_ssid: NUL-filled + empty are blank, real name is not",
           _is_blank_ssid("\x00\x00") and _is_blank_ssid("") and _is_blank_ssid("   ")
           and not _is_blank_ssid("Proxima B"), "")
+
+    # --- Spoofed BSSID (group/multicast I/G bit) — the lone-lure evil twin ---
+    # HaleHound GARMR case: one new open SSID, no real AP, no deauth. BSSID
+    # 99:... has the I/G bit set (0x99 is odd) — invalid for a real AP.
+    lure_ap = [{"kind": "beacon", "src": "99:fa:9b:77:96:ff", "ssid": "FreeWiFi",
+                "security": "Open"}] * 4
+    lure_res = analyze(lure_ap, baseline={})
+    types_l = {d["severity"]: d for d in lure_res["detections"]
+               if d["type"] == "rogue_ap"}
+    check("spoofed BSSID (multicast I/G bit) flagged as rogue",
+          "spoofed_bssid" in types_l, json.dumps(lure_res["detections"]))
+    check("open lure SSID ('FreeWiFi') flagged (low-confidence)",
+          "rogue_lure" in types_l, json.dumps(lure_res["detections"]))
+    check("spoofed BSSID raises threat to critical",
+          lure_res["threat"] == "critical", lure_res["threat"])
+    check("_is_multicast_bssid: 0x99 set, 0x00 clear",
+          _is_multicast_bssid("99:fa:9b:77:96:ff")
+          and not _is_multicast_bssid("00:11:22:33:44:55"))
+    # A normal open AP with an ordinary name and a unicast BSSID => no rogue flag.
+    normal_open = [{"kind": "beacon", "src": "3c:22:fb:00:00:01",
+                    "ssid": "MyHomeAP", "security": "Open"}] * 4
+    n_types = {d["severity"] for d in analyze(normal_open, baseline={})["detections"]
+               if d["type"] == "rogue_ap"}
+    check("ordinary open AP (unicast BSSID, non-lure name) => no rogue flag",
+          not ({"spoofed_bssid", "rogue_lure"} & n_types), str(n_types))
+    # A lure NAME but WPA2-secured (real venue) must not trip the open-lure hint.
+    secured_lure = [{"kind": "beacon", "src": "3c:22:fb:00:00:02",
+                     "ssid": "attwifi", "security": "WPA2"}] * 4
+    check("secured AP with a lure name => no rogue_lure (open-only)",
+          not any(d.get("severity") == "rogue_lure"
+                  for d in analyze(secured_lure, baseline={})["detections"]))
 
     # Clean traffic => no detections
     from scapy.all import RadioTap, Dot11, Dot11Beacon, Dot11Elt
