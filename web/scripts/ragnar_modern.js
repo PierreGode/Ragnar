@@ -1427,7 +1427,7 @@ function showNetworkSubtab(name) {
         hosts: 'net-sub-hosts', archive: 'net-sub-archive', assets: 'net-sub-assets',
         map: 'net-sub-map',
         diagnostics: 'net-sub-diagnostics', switch: 'net-sub-switch', interfaces: 'net-sub-interfaces',
-        wifi: 'net-sub-wifi'
+        wifi: 'net-sub-wifi', worldgrid: 'net-sub-worldgrid'
     };
     Object.keys(views).forEach(key => {
         const el = document.getElementById(views[key]);
@@ -1471,6 +1471,8 @@ function showNetworkSubtab(name) {
         loadInterfaces();
     } else if (name === 'wifi') {
         wifiInit();
+    } else if (name === 'worldgrid') {
+        worldGridInit();
     } else if (name === 'diagnostics') {
         populateMtrSources();
         syncNetDiagDisplayFromServer();
@@ -1483,6 +1485,28 @@ function showNetworkSubtab(name) {
         _tlsFillIfaces();
     }
     // Diagnostics tools run on demand; we only prefill the MTR start-point list.
+}
+
+// ============================================================================
+// World Grid (Network > World Grid sub-tab)
+// Embeds opengridworks.com's global power-plant map. The iframe src is set
+// lazily so the remote page only loads once the sub-tab is opened.
+// ============================================================================
+let _worldGridLoaded = false;
+function worldGridInit() {
+    const f = document.getElementById('worldgrid-frame');
+    if (!f || _worldGridLoaded) return;
+    _worldGridLoaded = true;
+    if (!f.getAttribute('src')) f.src = 'https://opengridworks.com/power-plants';
+}
+
+function worldGridFullscreen() {
+    const wrap = document.getElementById('worldgrid-frame-wrap');
+    if (!wrap) return;
+    const req = wrap.requestFullscreen || wrap.webkitRequestFullscreen;
+    if (req) {
+        Promise.resolve(req.call(wrap)).catch(() => {});
+    }
 }
 
 // ============================================================================

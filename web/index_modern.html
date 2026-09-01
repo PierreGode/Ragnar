@@ -1287,6 +1287,7 @@
                 <button id="net-subtab-switch" onclick="showNetworkSubtab('switch')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Switch &amp; L2/L3</button>
                 <button id="net-subtab-interfaces" onclick="showNetworkSubtab('interfaces')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Interfaces</button>
                 <button id="net-subtab-wifi" onclick="showNetworkSubtab('wifi')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Signal Intelligence</button>
+                <button id="net-subtab-worldgrid" onclick="showNetworkSubtab('worldgrid')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">World Grid</button>
             </div>
 
             <div id="net-sub-hosts" class="net-subview">
@@ -2981,6 +2982,37 @@
                     <div id="wifi-hm-legend" class="flex items-center flex-wrap gap-2 mt-2 text-[11px] text-gray-400"></div>
                 </div>
             </div><!-- /#net-sub-wifi -->
+
+            <style>
+                #worldgrid-frame-wrap:fullscreen { width:100vw; height:100vh; border-radius:0; border:0; }
+                #worldgrid-frame-wrap:fullscreen #worldgrid-frame { height:100vh !important; min-height:0 !important; }
+                #worldgrid-frame-wrap:-webkit-full-screen { width:100vw; height:100vh; }
+                #worldgrid-frame-wrap:-webkit-full-screen #worldgrid-frame { height:100vh !important; min-height:0 !important; }
+            </style>
+            <div id="net-sub-worldgrid" class="net-subview hidden">
+                <div class="glass rounded-xl p-4 mb-4">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div>
+                            <h2 class="text-xl font-semibold">World Grid</h2>
+                            <p class="text-sm text-gray-400">Global power-plant map, embedded live from opengridworks.com</p>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <button onclick="worldGridFullscreen()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors text-sm flex items-center gap-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"></path>
+                                </svg>
+                                Fullscreen
+                            </button>
+                            <a href="https://opengridworks.com/power-plants" target="_blank" rel="noopener noreferrer" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded-lg transition-colors text-sm whitespace-nowrap">Open ↗</a>
+                        </div>
+                    </div>
+                </div>
+                <div id="worldgrid-frame-wrap" class="relative rounded-xl overflow-hidden border border-slate-700 bg-black">
+                    <iframe id="worldgrid-frame" title="World Grid — Power Plants" class="w-full block"
+                        style="height:calc(100vh - 240px); min-height:520px; border:0;"
+                        allow="fullscreen" referrerpolicy="no-referrer"></iframe>
+                </div>
+            </div><!-- /#net-sub-worldgrid -->
         </div><!-- /#network-tab -->
 
         <!-- ============================ WiFi Defense Tab ============================ -->
@@ -8361,7 +8393,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260827-btnfix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260901-worldgrid"></script>
 
 
 

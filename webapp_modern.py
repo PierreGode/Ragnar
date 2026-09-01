@@ -123,7 +123,9 @@ socketio = SocketIO(app,
 # 'self'. 'unsafe-inline' is required because the UI uses hundreds of inline
 # on* handlers and style attributes. img-src allows remote https for the
 # OpenStreetMap map tiles; connect-src allows the same-origin Socket.IO websocket.
-# Override the whole policy with RAGNAR_CSP if a deployment needs different sources.
+# frame-src allows the Network > World Grid sub-tab to embed the opengridworks.com
+# power-plant map. Override the whole policy with RAGNAR_CSP if a deployment needs
+# different sources.
 _DEFAULT_CSP = (
     "default-src 'self'; "
     "script-src 'self' 'unsafe-inline'; "
@@ -131,6 +133,7 @@ _DEFAULT_CSP = (
     "img-src 'self' data: blob: https:; "
     "font-src 'self' data:; "
     "connect-src 'self' ws: wss:; "
+    "frame-src 'self' https://opengridworks.com; "
     "frame-ancestors 'self'; "
     "base-uri 'self'; "
     "form-action 'self'; "
