@@ -14,14 +14,12 @@ NC='\033[0m'
 
 echo -e "${BLUE}Initializing Ragnar data files from templates...${NC}"
 
-# Template files to initialize
+# Template files to initialize.
+# NOTE: the intelligence/ and threat_intelligence/ JSON templates were removed
+# in 8fe612d — that code (e.g. nmap_vuln_scanner.py) self-creates those files
+# via os.makedirs(exist_ok=True), so no seed template is needed. Listing them
+# here only produced spurious "Template missing" warnings on every update.
 TEMPLATES=(
-    "intelligence/active_findings.json"
-    "intelligence/network_profiles.json"
-    "intelligence/resolved_findings.json"
-    "threat_intelligence/enriched_findings.json"
-    "threat_intelligence/sources_config.json"
-    "threat_intelligence/threat_cache.json"
     "network_data/network_unknown_network.csv"
     "input/dictionary/users.txt"
 )

@@ -237,13 +237,18 @@ echo -e "${BLUE}Step 5: Updating Python dependencies...${NC}"
 # one bad/unsatisfiable pin) it installs NOTHING, silently leaving every
 # dependency un-upgraded. Fall back to installing each requirement on its
 # own so a single bad package can not block all the others.
-if ! pip3 install --break-system-packages --upgrade -r requirements.txt; then
+# --upgrade-strategy only-if-needed: upgrade a package ONLY when the installed
+# version no longer satisfies its pin. Without it, eager --upgrade tries to
+# replace apt-managed packages that already satisfy the pin (Flask, psutil,
+# scapy…) and fails noisily with "Cannot uninstall … no RECORD file" every
+# update, and can silently drift unbounded deps (openai) into a breaking major.
+if ! pip3 install --break-system-packages --upgrade --upgrade-strategy only-if-needed -r requirements.txt; then
     echo -e "${YELLOW}Batch dependency install failed - retrying package-by-package so one bad pin can not block the rest...${NC}"
     while IFS= read -r req || [ -n "$req" ]; do
         req="${req%%#*}"                 # strip inline comments
         req="$(echo "$req" | xargs)"     # trim whitespace
         [ -z "$req" ] && continue
-        pip3 install --break-system-packages --upgrade "$req" \
+        pip3 install --break-system-packages --upgrade --upgrade-strategy only-if-needed "$req" \
             || echo -e "  ${YELLOW}!${NC} Failed to install: $req (continuing)"
     done < requirements.txt
 fi
