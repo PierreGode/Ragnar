@@ -1086,10 +1086,63 @@ def _survey_noise(interface):
     return noise
 
 
+def _radio_monitor_conflict(interface):
+    """If ``interface``'s radio is in monitor mode, name the culprit VIF.
+
+    A managed multi-channel passive scan cannot run while any VIF on the same
+    wiphy is in monitor mode (a single radio can only do one at a time) — the
+    scan just blocks until it times out. This catches that up front so we can
+    fail fast with a clear message instead of a ~20 s (×retry) hang. Returns
+    the monitor interface name (e.g. ``ragmon0``, or ``interface`` itself when
+    the target is the monitor VIF), or ``None`` when there is no conflict.
+    """
+    rc, out, _ = _run([_IW, "dev"], timeout=5)
+    if rc != 0:
+        return None
+    ifaces, cur_phy, cur = {}, None, None
+    for line in out.splitlines():
+        m = re.match(r"^(phy#\d+)", line)
+        if m:
+            cur_phy = m.group(1)
+            continue
+        m = re.match(r"^\s*Interface\s+(\S+)", line)
+        if m:
+            cur = {"phy": cur_phy, "type": None}
+            ifaces[m.group(1)] = cur
+            continue
+        if cur:
+            mt = re.match(r"^\s*type\s+(\S+)", line)
+            if mt:
+                cur["type"] = mt.group(1)
+    target = ifaces.get(interface)
+    if not target:
+        return None
+    if target["type"] == "monitor":
+        return interface  # scanning the monitor VIF directly — never works
+    # A sibling monitor VIF on the same radio ties it to one channel.
+    for name, info in ifaces.items():
+        if name != interface and info["phy"] == target["phy"] and info["type"] == "monitor":
+            return name
+    return None
+
+
 def do_scan(interface="wlan0", band="all", passive=True):
     """Run a passive scan and return the full analysed survey."""
     if not _valid_iface(interface):
         return {"error": "invalid interface"}
+    # Fail fast if the radio is held in monitor mode (e.g. the HaleHound 24/7
+    # watch's ragmon0 VIF) — a managed scan there just blocks until timeout.
+    _mon = _radio_monitor_conflict(interface)
+    if _mon:
+        if _mon == interface:
+            msg = ("%s is a monitor interface — a passive survey needs a managed "
+                   "radio. Pick a managed adapter." % interface)
+        else:
+            msg = ("%s's radio is in monitor mode as %s (the WiFi Defense / "
+                   "HaleHound 24/7 watch) — a single radio can't survey and "
+                   "monitor at once. Pause the watch, or survey on another "
+                   "adapter." % (interface, _mon))
+        return {"error": msg, "monitor_conflict": _mon, "interface": interface}
     # A freshly-plugged dongle is usually admin-down; you can't scan a down
     # radio. Bring the link up first (link-up only, never associates).
     if not _iface_is_up(interface):

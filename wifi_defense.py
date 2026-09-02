@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260901-halehound-eviltwin-lure"
+_BUILD = "20260902-halehound-attack-ssid"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -667,6 +667,32 @@ def _is_lure_ssid(ssid):
     if not ssid:
         return False
     return ssid.strip().lower() in _LURE_SSIDS
+
+
+# Default/branded SSIDs shipped by ESP32 & handheld attack multitools and their
+# captive-portal payloads. Unlike _LURE_SSIDS (benign-looking names real venues
+# also use), these names are to all intents never legitimate — seeing one on
+# the air is a HIGH-confidence "an attack tool is running here" signal, secured
+# or open. Matched on the SSID normalized to lowercase with spaces/_/- removed,
+# so "Evil Portal", "evil_portal" and "EvilPortal" all hit "evilportal".
+_ATTACK_TOOL_SSIDS = {
+    "evilportal", "eviltwin", "eviltwins", "pineapple", "wifipineapple",
+    "marauder", "esp32marauder", "ghostesp", "ghost", "bruce", "garmr",
+    "halehound", "deauther", "spacehuhn", "pwnagotchi", "flipperzero",
+    "freewifiportal", "captiveportal", "wifiphisher", "fluxion",
+}
+
+
+def _norm_ssid(ssid):
+    """Lowercase an SSID and strip spaces/underscores/dashes for name matching."""
+    if not ssid:
+        return ""
+    return re.sub(r"[\s_\-]+", "", ssid.strip().lower())
+
+
+def _is_attack_tool_ssid(ssid):
+    """True if an SSID is a known attack-tool / captive-portal default name."""
+    return _norm_ssid(ssid) in _ATTACK_TOOL_SSIDS
 
 
 def _oui(mac):
@@ -1904,6 +1930,24 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                               "(possible evil twin — set a baseline to confirm)",
                 })
 
+    # --- Attack-tool SSID: a beacon whose name is a known ESP32/handheld attack
+    # multitool or captive-portal default (EvilPortal, Marauder, Ghost ESP, GARMR,
+    # …). These names are never legitimate, so this is a HIGH-confidence flag on
+    # its own — the lone-lure captive-portal case the passive WIDS otherwise can't
+    # see without a real AP to clone. Fires open OR secured. ---
+    _attack_seen = set()
+    for e in beacons:
+        ssid, src = e.get("ssid"), e.get("src")
+        if ssid and src and src not in _attack_seen and _is_attack_tool_ssid(ssid):
+            _attack_seen.add(src)
+            detections.append({
+                "type": "rogue_ap", "severity": "attack_tool_ssid",
+                "ssid": ssid, "bssid": src,
+                "detail": f"SSID '{ssid}' is a known attack-tool / captive-portal "
+                          "default name (EvilPortal/Marauder/Ghost ESP/GARMR class)"
+                          " — an ESP32/handheld attack multitool is beaconing here",
+            })
+
     # --- Spoofed BSSID: a beacon/probe-resp sourced from a group (multicast)
     # address is invalid 802.11 — no real AP does it. Catches an evil twin whose
     # randomized BSSID left the I/G bit set (the lone-lure case a duplicate/
@@ -1954,6 +1998,7 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
             ap["channel"] = e["channel"]
 
     sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
+                "attack_tool_ssid": 3,
                 "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
                 "band_steering": 1, "rogue_lure": 1, "seen": 1}
     threat = "clear"

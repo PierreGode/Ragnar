@@ -46,6 +46,7 @@ import time
 _WIFI_WEIGHTS = {
     ("auth_flood", "flood"): 24,
     ("auth_flood", "auth_warn"): 8,
+    ("rogue_ap", "attack_tool_ssid"): 30,  # known attack-tool/captive-portal SSID name
     ("rogue_ap", "evil_twin"): 20,
     ("rogue_ap", "spoofed_bssid"): 20,   # group/multicast-bit BSSID = spoofed AP
     ("rogue_ap", "duplicate_ssid"): 8,

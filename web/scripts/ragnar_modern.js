@@ -4782,7 +4782,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260901-halehound-eviltwin-lure';
+const WIFIDEF_BUILD = '20260902-halehound-attack-ssid';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -5246,7 +5246,7 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid'].includes(x.severity);
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid'].includes(x.severity);
             const info = x.severity === 'band_steering';
             const border = crit ? 'border-l-4 border-red-500'
                 : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
@@ -5264,7 +5264,8 @@ function wifidefRender() {
                 title = '🎣 KARMA / MANA rogue AP';
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
-                title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
+                title = x.severity === 'attack_tool_ssid' ? '☠️ Attack-tool SSID (EvilPortal/Marauder/Ghost ESP class)'
+                    : x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
                     : x.severity === 'spoofed_bssid' ? '🚫 Spoofed BSSID (multicast/group bit set)'
                     : x.severity === 'rogue_lure' ? '🎣 Open Wi-Fi lure — possible evil-twin portal'
                     : x.severity === 'band_steering' ? '📶 Band-steering / mesh (benign)'
@@ -5273,7 +5274,7 @@ function wifidefRender() {
                 body = `<div>SSID <b>${x.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</b></div><div class="font-mono text-[11px] text-gray-400">${bssids.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
                 // A lure / spoofed AP is the shape of a captive-portal evil twin —
                 // offer a one-click active probe (needs an adapter joined to it).
-                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid') {
+                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid' || x.severity === 'attack_tool_ssid') {
                     body += `<button onclick="event.stopPropagation(); wifidefProbePortal('${_esc(x.ssid || '')}')" class="mt-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-2 py-1 rounded text-[11px] font-semibold">Probe captive portal…</button>`;
                 }
             } else if (x.type === 'auth_flood') {
