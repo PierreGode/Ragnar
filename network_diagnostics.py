@@ -39,6 +39,10 @@ import path_asymmetry
 import tls_watch
 import ssh_watch
 import telnet_watch
+try:
+    import icmpwatch as _icmpwatch   # transport-agnostic v2 redirect/ARP detector
+except Exception:                    # partial deploy without the engine file
+    _icmpwatch = None
 import wifi_analyzer
 import wifi_defense
 import report_common
@@ -2487,6 +2491,22 @@ def _iface_gateway(iface):
     res = _run(['ip', '-4', 'route', 'show', 'dev', iface], timeout=5)
     m = re.search(r'\bvia\s+(\d+\.\d+\.\d+\.\d+)', res['out'])
     return m.group(1) if m else None
+
+
+def _iface_ipv4_cidr(iface):
+    """The IPv4 network (as 'a.b.c.0/prefix') this interface sits on, or None.
+    Used to give the ICMP-redirect detector the victim's directly-connected
+    subnet so it can apply the RFC 1122 'new gateway must be on-subnet' rule."""
+    if not _valid_iface(iface or ''):
+        return None
+    res = _run(['ip', '-4', '-o', 'addr', 'show', 'dev', iface], timeout=5)
+    m = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+/\d+)', res['out'])
+    if not m:
+        return None
+    try:
+        return str(ipaddress.ip_network(m.group(1), strict=False))
+    except ValueError:
+        return None
 
 
 def _iface_dns(iface):
@@ -6834,27 +6854,74 @@ _ICMP_EVENTS_CAP = 200
 
 _ICMP_LINE_RE = re.compile(
     r'^\s*(\d+\.\d+\.\d+\.\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+):\s*ICMP\s+(.+)$')
-_ICMP_REDIR_RE = re.compile(r'redirect\s+(\S+)\s+to\s+(?:host|net)\s+([\d.]+)')
+_ICMP_REDIR_RE = re.compile(r'redirect\s+(\S+)\s+to\s+(host|net)(?:-tos)?\s+([\d.]+)')
 _ICMP_LEN_RE = re.compile(r'length\s+(\d+)\s*$')
+# `-e` Ethernet header line: "aa:.. > bb:.., ethertype IPv4 (0x0800), length N: <rest>"
+_ETH_RE = re.compile(
+    r'^([0-9a-fA-F:]{17})\s*>\s*([0-9a-fA-F:]{17}),\s*ethertype\s+(\S+)'
+    r'\s+\(0x[0-9a-fA-F]+\),\s*length\s+\d+:\s*(.*)$')
+# non-`-e` verbose outer IP header line (kept so the self-test's crafted text and
+# any capture taken without -e still yield a TTL): "IP (tos .., ttl 64, .. ICMP .."
+_ICMP_IPHDR_RE = re.compile(r'^IP\s+\(tos\b.*\bttl\s+(\d+)\b.*proto\s+ICMP\b')
+_ETH_TTL_RE = re.compile(r'\bttl\s+(\d+)\b')
+_ARP_REPLY_RE = re.compile(r'\bReply\s+(\d+\.\d+\.\d+\.\d+)\s+is-at\s+([0-9a-fA-F:]{17})')
+_ARP_REQ_RE = re.compile(
+    r'\bRequest\s+who-has\s+(\d+\.\d+\.\d+\.\d+)\s+tell\s+(\d+\.\d+\.\d+\.\d+)')
 
 
 def _parse_icmp_capture(output):
-    """Parse `tcpdump -nn -t -v icmp` text into ICMP events. Each ICMP message
-    prints a `<src> > <dst>: ICMP <detail>, length N` line (a Redirect carries a
-    quoted inner IP packet on following lines, which never matches this pattern
-    because it has no `: ICMP`). Each event is a dict with a 'kind':
-      redirect  : {src, dst, redirected, new_gw, length}
+    """Parse `tcpdump [-e] -nn -t -v (icmp or arp)` text into events. Each ICMP
+    message prints a `<src> > <dst>: ICMP <detail>, length N` line (a Redirect
+    carries a quoted inner IP packet on following lines, which never matches this
+    pattern because it has no `: ICMP`); with `-e` it is preceded by an Ethernet
+    header line carrying the source/dest MAC and outer TTL, which is attached to
+    the event. ARP frames (captured for redirect/ARP correlation) become their
+    own 'arp' events. Each event is a dict with a 'kind':
+      redirect  : {src, dst, redirected, new_gw, length, src_mac, dst_mac, ttl, code}
       echo      : {src, dst, length}
       irdp      : {src, dst}                 (router advertisement, type 9)
       irdp_sol  : {src, dst}                 (router solicitation, type 10)
       recon     : {src, dst, what}           (timestamp / address-mask / information)
       other     : {src, dst, what}           (unreachable / time-exceeded / quench …)
+      arp       : {ip, mac, gratuitous}      (context for the redirect/ARP layer)
     """
     events = []
+    pending = None  # L2/L3 context from the most recent Ethernet/IP header line
     for raw in output.splitlines():
+        eth = _ETH_RE.match(raw)
+        if eth:
+            src_mac, dst_mac, ethertype, rest = eth.groups()
+            if ethertype.upper().startswith('ARP'):
+                pending = None
+                am = _ARP_REPLY_RE.search(rest)
+                if am:
+                    events.append({'kind': 'arp', 'ip': am.group(1),
+                                   'mac': am.group(2).lower(), 'gratuitous': False})
+                else:
+                    am = _ARP_REQ_RE.search(rest)
+                    if am:
+                        pdst, psrc = am.group(1), am.group(2)
+                        events.append({'kind': 'arp', 'ip': psrc,
+                                       'mac': src_mac.lower(),
+                                       'gratuitous': pdst == psrc})
+                continue
+            if ethertype.upper().startswith('IPV4'):
+                tm = _ETH_TTL_RE.search(rest)
+                pending = {'src_mac': src_mac.lower(), 'dst_mac': dst_mac.lower(),
+                           'ttl': int(tm.group(1)) if tm else None}
+            else:
+                pending = None
+            continue
+        iphdr = _ICMP_IPHDR_RE.match(raw)
+        if iphdr:
+            pending = {'src_mac': None, 'dst_mac': None, 'ttl': int(iphdr.group(1))}
+            continue
+
         m = _ICMP_LINE_RE.match(raw)
         if not m:
             continue
+        ctx = pending or {}
+        pending = None
         src, dst, rest = m.group(1), m.group(2), m.group(3).strip()
         low = rest.lower()
         lm = _ICMP_LEN_RE.search(rest)
@@ -6862,9 +6929,15 @@ def _parse_icmp_capture(output):
 
         if low.startswith('redirect'):
             rm = _ICMP_REDIR_RE.search(rest)
+            code = None
+            if rm:
+                code = 1 if rm.group(2) == 'host' else 0
             events.append({'kind': 'redirect', 'src': src, 'dst': dst,
                            'redirected': rm.group(1) if rm else None,
-                           'new_gw': rm.group(2) if rm else None, 'length': length})
+                           'new_gw': rm.group(3) if rm else None, 'length': length,
+                           'src_mac': ctx.get('src_mac'),
+                           'dst_mac': ctx.get('dst_mac'),
+                           'ttl': ctx.get('ttl'), 'code': code})
         elif 'echo' in low:
             events.append({'kind': 'echo', 'src': src, 'dst': dst, 'length': length})
         elif 'router advertisement' in low:
@@ -6920,11 +6993,123 @@ def do_icmp_baseline(action='get'):
         }}
 
 
-def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
+_ICMP_SEV_RANK = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
+# v2 severity -> Watchtower canonical severity (canon_severity maps these on)
+_ICMP_SEV_WT = {'INFO': 'info', 'LOW': 'notice', 'MEDIUM': 'warning',
+                'HIGH': 'high', 'CRITICAL': 'critical'}
+
+
+def _icmp_neigh_macs(ips):
+    """Current IP->MAC bindings for the given gateway IPs from the host neighbour
+    table (`ip neigh`). Gives the v2 redirect layer a ground-truth gateway MAC so
+    `gateway_mac_mismatch` fires even when no legitimate gateway ARP happens to
+    fall inside the short capture window. Only REACHABLE/STALE/… entries with an
+    lladdr are trusted; incomplete/failed ones are skipped."""
+    wanted = {ip for ip in (ips or []) if ip}
+    if not wanted:
+        return {}
+    out = {}
+    res = _run(['ip', '-4', 'neigh', 'show'], timeout=5)
+    for line in res['out'].splitlines():
+        # "192.168.1.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+        m = re.match(r'^(\d+\.\d+\.\d+\.\d+)\b.*\blladdr\s+([0-9a-fA-F:]{17})\b', line)
+        if not m:
+            continue
+        if 'INCOMPLETE' in line or 'FAILED' in line:
+            continue
+        if m.group(1) in wanted:
+            out[m.group(1)] = m.group(2).lower()
+    return out
+
+
+def _icmp_redirect_v2(redirects, arps, known_gw, iface_cidr, sys_gateway,
+                      gw_arp_snapshot=None):
+    """Run the vendored transport-agnostic v2 redirect/ARP detector
+    (icmpwatch.ICMPRedirectDetector) over the tcpdump-parsed redirects and ARP
+    context, and return a flat list of finding dicts. Adds the RFC 1122 acceptance
+    checks (source-not-gateway, new-gw-off-subnet, new-gw-not-router,
+    degenerate targets), L2 identity checks (gateway_mac_mismatch), ARP-poisoning
+    correlation (gateway_arp_conflict / redirect_via_poisoned_gw) and rate/sweep
+    detection on top of the coarse legacy classifier. Best-effort: returns [] if
+    the engine is absent, no redirects were seen, or no segment can be framed."""
+    if _icmpwatch is None or not redirects:
+        return []
+    cidr = iface_cidr
+    if not cidr:
+        # Fall back to a /24 around a trusted gateway so the on-subnet / known-
+        # router checks still have a segment to reason about on a SPAN leg with
+        # no local IP.
+        anchor = sys_gateway or (sorted(known_gw)[0] if known_gw else None)
+        if anchor:
+            try:
+                cidr = str(ipaddress.ip_network(anchor + '/24', strict=False))
+            except ValueError:
+                cidr = None
+    if not cidr:
+        return []
+    cfg = {
+        'segments': [{
+            'cidr': cidr,
+            'gateways': [{'ip': g} for g in sorted(known_gw)],
+            'routers': sorted(known_gw),
+        }],
+        'arp_correlation': {'enabled': True},
+    }
+    try:
+        det = _icmpwatch.ICMPRedirectDetector(cfg)
+    except Exception:
+        return []
+    t = 1000.0
+    # Seed with the host's authoritative gateway MACs, then the wire ARP context.
+    if gw_arp_snapshot:
+        try:
+            det.load_arp_snapshot(gw_arp_snapshot, ts=t)
+        except Exception:
+            pass
+    for a in arps:
+        try:
+            det.observe_arp(a['ip'], a['mac'], ts=t,
+                            gratuitous=a.get('gratuitous', False))
+        except Exception:
+            pass
+    out = []
+    for r in redirects:
+        t += 0.001
+        code = r.get('code')
+        ev = _icmpwatch.RedirectEvent(
+            ts=t, src_ip=r.get('src'), src_mac=r.get('src_mac'),
+            dst_ip=r.get('dst'), dst_mac=r.get('dst_mac'), ip_ttl=r.get('ttl'),
+            icmp_code=code if code is not None else 1,
+            new_gw=r.get('new_gw'),
+            inner_src=r.get('dst'), inner_dst=r.get('redirected'),
+            inner_proto=None, malformed=(r.get('new_gw') is None))
+        try:
+            findings = det.analyze(ev)
+        except Exception:
+            continue
+        for f in findings:
+            out.append({'check': f.check, 'severity': f.severity,
+                        'message': f.message, 'src': r.get('src'),
+                        'victim': r.get('dst'), 'new_gw': r.get('new_gw'),
+                        'details': f.details})
+    return out
+
+
+def _icmp_v2_reason(f):
+    """One human-readable line for a v2 redirect finding."""
+    return (f"ICMP Redirect from {f['src']} → {f.get('new_gw') or '?'} "
+            f"(victim {f.get('victim') or '?'}): {f['check']} ({f['severity']}) — "
+            f"{f['message']}")
+
+
+def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
+                  iface_cidr=None, gw_arp_snapshot=None):
     """Pure classifier over parsed ICMP events. The host's authoritative default
     gateway (sys_gateway) is always trusted, plus any learned gateways. Separated
     from capture so the self-test can drive it with synthetic packets. May
-    mutate+persist `baseline` when learn=True."""
+    mutate+persist `baseline` when learn=True. When the vendored v2 engine is
+    available, a richer redirect/ARP layer (RFC 1122 acceptance + L2 identity +
+    ARP-poison correlation) is folded in on top of the coarse legacy check."""
     seconds = max(1, int(seconds))
 
     # Learn-on-first-run: seed the trusted-gateway baseline from the host's own
@@ -6944,7 +7129,17 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
     echoes = [e for e in events if e['kind'] == 'echo']
     irdp = [e for e in events if e['kind'] == 'irdp']
     recon = [e for e in events if e['kind'] == 'recon']
-    rate = round(len(events) / seconds, 2)
+    arps = [e for e in events if e['kind'] == 'arp']
+    # ARP is captured only as context for the redirect/ARP-poison layer — it must
+    # never count toward the ICMP volume/flood math.
+    icmp_events = [e for e in events if e['kind'] != 'arp']
+    rate = round(len(icmp_events) / seconds, 2)
+
+    # v2 redirect/ARP layer (additive; empty when the engine is absent or no
+    # redirect was seen). Computed once here and folded into the verdict below.
+    v2_findings = _icmp_redirect_v2(redirects, arps, known_gw, iface_cidr,
+                                    sys_gateway, gw_arp_snapshot=gw_arp_snapshot)
+    v2_max = max((_ICMP_SEV_RANK[f['severity']] for f in v2_findings), default=0)
 
     PRIORITY = ['redirect', 'rogue-irdp', 'flood', 'tunnel', 'recon', 'anomaly',
                 'clean']
@@ -6973,25 +7168,43 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
             bump('redirect')
         elif verdict == 'clean':
             verdict = 'anomaly'
-        for r in redir_rows:
-            if r['malicious']:
-                why = []
-                if had_gw and r['src'] not in known_gw:
-                    why.append(f"source {r['src']} is not the gateway (spoofed)")
-                if r['new_gw'] and (not had_gw or r['new_gw'] not in known_gw):
-                    why.append(f"steers traffic for {r['redirected'] or '?'} to "
-                               f"non-gateway {r['new_gw']} (attacker next-hop)")
-                if not had_gw:
-                    why.append("no trusted gateway baseline — treat any redirect as "
-                               "suspect")
+        # A HIGH/CRITICAL v2 finding (e.g. gateway_mac_mismatch on a redirect whose
+        # source IS a known gateway) is malicious even when the coarse legacy check
+        # saw nothing wrong — escalate on it.
+        if v2_max >= _ICMP_SEV_RANK['HIGH']:
+            bump('redirect')
+        if v2_findings:
+            # The richer v2 redirect/ARP layer supersedes the coarse legacy
+            # per-redirect reasons. Surface MEDIUM+ findings (INFO/LOW clean
+            # redirects stay out of the reason list to avoid noise).
+            for f in v2_findings:
+                if _ICMP_SEV_RANK[f['severity']] >= _ICMP_SEV_RANK['MEDIUM']:
+                    reasons.append(_icmp_v2_reason(f))
+            if not any(_ICMP_SEV_RANK[f['severity']] >= _ICMP_SEV_RANK['MEDIUM']
+                       for f in v2_findings):
                 reasons.append(
-                    f"ICMP Redirect from {r['src']} to {r['dst']}: "
-                    f"{'; '.join(why)} — L3 man-in-the-middle (route injection)")
-            else:
-                reasons.append(
-                    f"ICMP Redirect from gateway {r['src']} to {r['dst']} "
-                    f"(→ {r['new_gw']}) — benign-looking but redirects are rare on "
-                    f"switched networks; verify it is expected")
+                    f"{len(redirects)} ICMP Redirect(s) observed — no anomaly "
+                    f"triggered, but redirects are rare on switched networks; verify")
+        else:
+            for r in redir_rows:
+                if r['malicious']:
+                    why = []
+                    if had_gw and r['src'] not in known_gw:
+                        why.append(f"source {r['src']} is not the gateway (spoofed)")
+                    if r['new_gw'] and (not had_gw or r['new_gw'] not in known_gw):
+                        why.append(f"steers traffic for {r['redirected'] or '?'} to "
+                                   f"non-gateway {r['new_gw']} (attacker next-hop)")
+                    if not had_gw:
+                        why.append("no trusted gateway baseline — treat any redirect "
+                                   "as suspect")
+                    reasons.append(
+                        f"ICMP Redirect from {r['src']} to {r['dst']}: "
+                        f"{'; '.join(why)} — L3 man-in-the-middle (route injection)")
+                else:
+                    reasons.append(
+                        f"ICMP Redirect from gateway {r['src']} to {r['dst']} "
+                        f"(→ {r['new_gw']}) — benign-looking but redirects are rare "
+                        f"on switched networks; verify it is expected")
 
     # --- rogue-irdp: type-9 router advertisement injecting a gateway ---
     for e in irdp:
@@ -7007,15 +7220,16 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
                 f"gateway) — injects itself as a default gateway (IRDP spoofing MITM)")
 
     # --- flood: ICMP storm ---
-    if rate >= _ICMP_FLOOD_RATE and len(events) >= _ICMP_FLOOD_RATE * seconds:
+    if rate >= _ICMP_FLOOD_RATE and len(icmp_events) >= _ICMP_FLOOD_RATE * seconds:
         bump('flood')
         talkers = {}
-        for e in events:
+        for e in icmp_events:
             talkers[e['src']] = talkers.get(e['src'], 0) + 1
         top = max(talkers, key=talkers.get)
         reasons.append(
-            f"ICMP flood: {len(events)} packets in {seconds}s ({rate}/s), mostly "
-            f"echo — ping-flood / smurf DoS; top source {top} ({talkers[top]})")
+            f"ICMP flood: {len(icmp_events)} packets in {seconds}s ({rate}/s), "
+            f"mostly echo — ping-flood / smurf DoS; top source {top} "
+            f"({talkers[top]})")
 
     # --- tunnel: oversized echo payloads (covert channel / exfil) ---
     big = [e for e in echoes if (e['length'] or 0) > _ICMP_TUNNEL_LEN]
@@ -7046,12 +7260,12 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
             "address-mask/information types at the network edge.")
 
     counts = {'redirect': len(redirects), 'echo': len(echoes), 'irdp': len(irdp),
-              'recon': len(recon),
+              'recon': len(recon), 'arp': len(arps),
               'other': len([e for e in events if e['kind'] == 'other'])}
 
     if reasons:
         summary = reasons
-    elif not events:
+    elif not icmp_events:
         summary = ['No ICMP traffic seen — segment quiet']
     else:
         summary = ['ICMP traffic seen but no redirects / injections / floods — clean']
@@ -7061,10 +7275,11 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True):
         'verdict': verdict,
         'reasons': summary,
         'learned': learned,
-        'icmp_count': len(events),
+        'icmp_count': len(icmp_events),
         'rate': rate,
         'counts': counts,
         'redirects': redir_rows,
+        'redirect_findings': v2_findings,
         'gateways': sorted(known_gw),
         'advisories': advisories,
     }
@@ -7074,8 +7289,13 @@ def _icmp_capture(interface, seconds):
     """Run one passive tcpdump window over IPv4 ICMP and return (raw_text, error)."""
     if not _have('tcpdump'):
         return '', 'tcpdump is not installed. Click Install to add it.'
+    # -e adds the Ethernet header (source/dest MAC) so the v2 redirect layer can
+    # catch a gateway-IP spoof from a foreign NIC; 'arp' is captured alongside so
+    # ARP-poisoning that precedes a redirect can be correlated. Both are additive:
+    # the flood/tunnel/recon classifiers only ever look at the ICMP subset.
     res = _run(['timeout', str(seconds), 'tcpdump', '-i', interface,
-                '-nn', '-t', '-v', '-s', '128', '-c', '20000', 'icmp'],
+                '-e', '-nn', '-t', '-v', '-s', '256', '-c', '20000',
+                'icmp or arp'],
                timeout=seconds + 8)
     out = res['out']
     if not out and res['err'] and ('permission' in res['err'].lower()
@@ -7086,11 +7306,55 @@ def _icmp_capture(interface, seconds):
     return out, None
 
 
+def _emit_icmp_jsonl(result):
+    """Append HIGH/CRITICAL ICMP-redirect findings as normalized JSON-lines to
+    <log-dir>/icmp_watch.jsonl so Watchtower (which globs *.jsonl) folds redirect
+    MITM / ARP-poison correlation into the unified alert pane and single Pushover
+    path. Time-window deduplicated per (check, src); best-effort, never raises."""
+    findings = [f for f in (result.get('redirect_findings') or [])
+                if _ICMP_SEV_RANK.get(f.get('severity'), 0) >= _ICMP_SEV_RANK['HIGH']]
+    if not findings:
+        return
+    now = time.time()
+    iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lines = []
+    with _guard_jsonl_lock:
+        for f in findings:
+            key = ('icmp_watch', f['check'], f.get('src'))
+            last = _guard_jsonl_seen.get(key)
+            if last is not None and now - last < _GUARD_JSONL_DEDUP_S:
+                continue
+            _guard_jsonl_seen[key] = now
+            lines.append(json.dumps({
+                'module': 'icmp_watch', 'ts': now, 'iso': iso,
+                'iface': result.get('interface'),
+                'severity': _ICMP_SEV_WT.get(f['severity'], 'high'),
+                'code': f['check'], 'codes': [f['check']],
+                'src': f.get('src'), 'target': f.get('victim'),
+                'summary': f['message'],
+                'verdict': result.get('verdict'),
+                'detail': {'new_gw': f.get('new_gw'), **(f.get('details') or {})}}))
+        if len(_guard_jsonl_seen) > 4096:
+            cutoff = now - _GUARD_JSONL_DEDUP_S
+            for k in [k for k, t in _guard_jsonl_seen.items() if t < cutoff]:
+                _guard_jsonl_seen.pop(k, None)
+    if not lines:
+        return
+    try:
+        os.makedirs(_GUARD_JSONL_DIR, exist_ok=True)
+        with open(os.path.join(_GUARD_JSONL_DIR, 'icmp_watch.jsonl'), 'a') as fh:
+            fh.write('\n'.join(lines) + '\n')
+    except OSError:
+        pass
+
+
 def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
     """Passive ICMP L3-security scanner (detection-only). Captures ICMP for a few
     seconds and classifies the segment: redirect / rogue-irdp / flood / tunnel /
     recon / anomaly / clean. Trusts the host's default gateway; learns it on first
-    run."""
+    run. When the vendored v2 engine is present, redirects also get the RFC 1122
+    acceptance checks, gateway-MAC-spoof detection and ARP-poison correlation, and
+    HIGH/CRITICAL findings are streamed to Watchtower."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -7103,12 +7367,20 @@ def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
     events = _parse_icmp_capture(text)
-    sys_gw = _default_gateway()
+    sys_gw = _iface_gateway(iface) or _default_gateway()
+    iface_cidr = _iface_ipv4_cidr(iface)
 
     with _icmp_watch_lock:
         baseline = _icmp_watch_load()
+        # Ground-truth gateway MACs from the neighbour table so gateway_mac_mismatch
+        # works even without a legitimate gateway ARP inside the capture window.
+        trusted_gw = set(baseline.get('gateways') or [])
+        if sys_gw:
+            trusted_gw.add(sys_gw)
+        gw_snapshot = _icmp_neigh_macs(trusted_gw)
         result = _icmp_analyze(events, seconds, baseline, sys_gateway=sys_gw,
-                               learn=learn)
+                               learn=learn, iface_cidr=iface_cidr,
+                               gw_arp_snapshot=gw_snapshot)
         if result.get('learned'):
             _icmp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -7121,6 +7393,8 @@ def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
 
     result['interface'] = iface
     result['seconds'] = seconds
+    # Feed HIGH/CRITICAL redirect findings into Watchtower's unified pane.
+    _emit_icmp_jsonl(result)
     return result
 
 
@@ -7200,6 +7474,66 @@ def _icmp_selftest():
             and pev[0]['new_gw'] == '192.168.1.66')
     scenarios.append({'name': 'redirect-parse', 'expect': 'src+dest+newgw',
                       'got': str(pev[0] if pev else None)[:90], 'pass': p_ok})
+
+    # ---- v2 redirect/ARP layer (tcpdump -e format: MACs + ARP context) --------
+    DMAC = '52:54:00:00:00:50'
+
+    def eredirect(src_ip, src_mac, newgw, dst_ip='192.168.1.50', dest='8.8.8.8'):
+        return (f"{src_mac} > {DMAC}, ethertype IPv4 (0x0800), length 82: "
+                f"(tos 0x0, ttl 64, id 1, offset 0, flags [none], proto ICMP (1), "
+                f"length 68)\n"
+                f"    {src_ip} > {dst_ip}: ICMP redirect {dest} to host {newgw}, "
+                f"length 48")
+
+    def earp_reply(ip, mac):
+        return (f"{mac} > {DMAC}, ethertype ARP (0x0806), length 42: "
+                f"Ethernet (len 6), IPv4 (len 4), Reply {ip} is-at {mac}, length 28")
+
+    def runv2(name, text, expect, baseline, iface_cidr, snapshot, want_check=None):
+        events = _parse_icmp_capture(text)
+        res = _icmp_analyze(events, 12, dict(baseline), sys_gateway=baseline
+                            .get('gateways', [None])[0], learn=False,
+                            iface_cidr=iface_cidr, gw_arp_snapshot=snapshot)
+        checks = {f['check'] for f in res.get('redirect_findings', [])}
+        ok = res['verdict'] == expect and (want_check is None or want_check in checks)
+        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
+                          'events': len(events),
+                          'findings': sorted(checks)[:6], 'pass': ok})
+        return res
+
+    twogw = {'gateways': ['192.168.1.1', '192.168.1.2']}
+    GWMAC = 'aa:aa:aa:aa:aa:01'
+
+    if _icmpwatch is not None:
+        # 9. gateway_mac_mismatch: redirect claims gateway .1's IP but arrives from
+        #    a foreign MAC; new gateway (.2) is a known router so the MAC spoof is
+        #    the sole (CRITICAL) trigger.
+        runv2('v2-gw-mac-mismatch',
+              eredirect('192.168.1.1', '66:66:66:66:66:66', '192.168.1.2'),
+              'redirect', twogw, '192.168.1.0/24', {'192.168.1.1': GWMAC},
+              want_check='gateway_mac_mismatch')
+
+        # 10. gateway_arp_conflict: the gateway's binding is contested on the wire
+        #     (a second live MAC), and a redirect issued by it is the poison-then-
+        #     redirect sequence — CRITICAL.
+        runv2('v2-arp-conflict',
+              earp_reply('192.168.1.1', '66:66:66:66:66:66') + "\n" +
+              eredirect('192.168.1.1', GWMAC, '192.168.1.66'),
+              'redirect', {'gateways': ['192.168.1.1']}, '192.168.1.0/24',
+              {'192.168.1.1': GWMAC}, want_check='gateway_arp_conflict')
+
+        # 11. v2-clean: real gateway MAC, redirecting to another known router — no
+        #     HIGH/CRITICAL, so it stays an anomaly (redirects are rare) not an alert.
+        runv2('v2-clean-known-router',
+              eredirect('192.168.1.1', GWMAC, '192.168.1.2'),
+              'anomaly', twogw, '192.168.1.0/24', {'192.168.1.1': GWMAC})
+
+        # 12. new_gw_not_router: even the real gateway steering a victim to an
+        #     unknown on-subnet host is HIGH (attacker next-hop).
+        runv2('v2-new-gw-not-router',
+              eredirect('192.168.1.1', GWMAC, '192.168.1.66'),
+              'redirect', {'gateways': ['192.168.1.1']}, '192.168.1.0/24',
+              {'192.168.1.1': GWMAC}, want_check='new_gw_not_router')
 
     # Optional Scapy end-to-end: craft a real Redirect -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
@@ -16967,6 +17301,182 @@ def do_path_asymmetry(target, port=path_asymmetry.DEFAULT_PORT, count=20,
     return out
 
 
+# --- BGP Path Watch v2: flow-consistent traceroute + convergence detection ---
+_PATHCONV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              'data', 'path_convergence.json')
+_pathconv_lock = threading.Lock()
+# Watchtower severity for each convergence tier (canon_severity maps these on).
+_PATHCONV_SEV_WT = {'confirmed': 'critical', 'active': 'high',
+                    'suspected': 'high', 'watch': 'low', 'none': 'info'}
+
+
+def _pathconv_load():
+    try:
+        with open(_PATHCONV_PATH) as f:
+            d = json.load(f)
+            return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _pathconv_save(d):
+    try:
+        os.makedirs(os.path.dirname(_PATHCONV_PATH), exist_ok=True)
+        tmp = _PATHCONV_PATH + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(d, f)
+        os.replace(tmp, _PATHCONV_PATH)
+    except OSError:
+        pass
+
+
+def _emit_pathconv_jsonl(result):
+    """Stream a suspected/active/confirmed convergence verdict to Watchtower
+    (<log-dir>/pathwatch.jsonl). Best-effort, deduped per (target, severity)."""
+    sev = result.get('severity')
+    if sev not in ('suspected', 'active', 'confirmed'):
+        return
+    target = result.get('target')
+    now = time.time()
+    with _guard_jsonl_lock:
+        key = ('pathwatch', sev, target)
+        last = _guard_jsonl_seen.get(key)
+        if last is not None and now - last < _GUARD_JSONL_DEDUP_S:
+            return
+        _guard_jsonl_seen[key] = now
+    rec = json.dumps({
+        'module': 'pathwatch', 'ts': now,
+        'iso': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'severity': _PATHCONV_SEV_WT.get(sev, 'high'),
+        'code': 'convergence', 'codes': ['convergence'],
+        'target': target, 'src': None,
+        'summary': 'BGP convergence %s (score %d) on %s: %s' % (
+            sev, result.get('score', 0), target,
+            '; '.join(result.get('reasons', []))[:200]),
+        'verdict': sev, 'detail': {'evidence': result.get('evidence', {}),
+                                   'carriers': result.get('carriers', [])}})
+    try:
+        os.makedirs(_GUARD_JSONL_DIR, exist_ok=True)
+        with open(os.path.join(_GUARD_JSONL_DIR, 'pathwatch.jsonl'), 'a') as fh:
+            fh.write(rec + '\n')
+    except OSError:
+        pass
+
+
+def do_path_convergence(target, flows=3, method='icmp', max_ttl=30,
+                        floor_count=8):
+    """BGP Path Watch v2 (detection-only, on-demand active probe). Runs a
+    flow-consistent (Paris) traceroute per ECMP flow to `target`, diffs each
+    flow's AS-path fingerprint against the persisted baseline to catch a routing
+    change WITHIN a fixed flow (ECMP differences across flows are not counted),
+    scores loop / oscillation / flap / loss-burst / RTT-step into a convergence
+    verdict, and — where the receive-only BGP collector is peered — upgrades it to
+    `confirmed` with the control-plane cause. Never announces a route; the trace
+    is active probing, so it is on-demand only, never in the passive rotation."""
+    try:
+        ipaddress.ip_address(target or '')
+    except (ValueError, TypeError):
+        try:
+            target = socket.gethostbyname(target)
+        except (OSError, TypeError):
+            return {'success': False, 'error': 'invalid or unresolvable target'}
+    try:
+        import scapy  # noqa: F401
+    except Exception:
+        return {'success': False, 'error': 'scapy is required for the traceroute '
+                'path — install it, then retry.', 'missing_tool': 'scapy'}
+    if hasattr(os, 'geteuid') and os.geteuid() != 0:
+        return {'success': False, 'error': 'the traceroute needs raw sockets '
+                '(root / CAP_NET_RAW).'}
+    flows = _clamp_int(flows, 3, 1, 8)
+    method = method if method in ('icmp', 'udp', 'tcp-syn') else 'icmp'
+    max_ttl = _clamp_int(max_ttl, 30, 5, 40)
+    floor_count = _clamp_int(floor_count, 8, 0, 30)
+
+    # --- latency floor: loss burst + RTT samples for the step chart ---------
+    floor_rtts = []
+    loss_burst = cur_loss = 0
+    try:
+        for i in range(floor_count):
+            hop = path_asymmetry.floor_ping(target, flow=0, method=method,
+                                            timeout=1.0)
+            if hop.ip is not None and hop.rtt_ms is not None:
+                floor_rtts.append(hop.rtt_ms)
+                cur_loss = 0
+            else:
+                cur_loss += 1
+                loss_burst = max(loss_burst, cur_loss)
+    except PermissionError:
+        return {'success': False, 'error': 'raw socket denied (need root / '
+                'CAP_NET_RAW).'}
+    except Exception as e:
+        return {'success': False, 'error': 'floor probe failed: %s' % e}
+
+    # --- flow-consistent traces (Paris) ------------------------------------
+    traces = []
+    for flow in range(1, flows + 1):
+        try:
+            tr = path_asymmetry.trace_flow(target, flow, method=method,
+                                           max_ttl=max_ttl, timeout=1.0)
+            traces.append(tr)
+        except Exception as e:
+            return {'success': False, 'error': 'trace failed: %s' % e}
+
+    # --- ASN resolution for AS-path fingerprints (RIB first, then Cymru) ----
+    hop_ips = sorted({h for tr in traces for h in tr.ip_path() if h})
+    named_ribs = {}
+    with _bgp_collector_lock:
+        for name, sp in _bgp_collector['speakers'].items():
+            if sp and sp.state == 'Established':
+                named_ribs[name] = sp.rib
+    rib_asn = {}
+    for ip in hop_ips:
+        for rib in named_ribs.values():
+            route = rib.lookup(ip)
+            if route and route.get('origin_as'):
+                rib_asn[ip] = route['origin_as']
+                break
+    cymru_need = [ip for ip in hop_ips if ip not in rib_asn]
+    enr = _cymru_asn_lookup(ips=cymru_need) if cymru_need else {'ips': {}}
+    asn_names = {}
+
+    def asn_of(ip):
+        if ip in rib_asn:
+            return rib_asn[ip]
+        info = enr.get('ips', {}).get(ip)
+        if info and info.get('asn'):
+            asn_names[info['asn']] = info.get('name')
+            return info['asn']
+        return None
+
+    # --- score against the persisted per-flow baseline ---------------------
+    with _pathconv_lock:
+        store = _pathconv_load()
+        prior = store.get(target)
+        result, new_state = path_asymmetry.assess_convergence(
+            target, traces, prior=prior, asn_of=asn_of, named_ribs=named_ribs,
+            floor_rtts=floor_rtts, loss_burst=loss_burst)
+        store[target] = new_state
+        # bound the state file (keep the most recently seen targets)
+        if len(store) > 64:
+            for k in sorted(store, key=lambda k: store[k].get('last_ts', 0))[:-64]:
+                store.pop(k, None)
+        _pathconv_save(store)
+
+    result['success'] = True
+    result['flows_probed'] = flows
+    result['method'] = method
+    result['floor'] = {'sent': floor_count, 'replies': len(floor_rtts),
+                       'loss_burst': loss_burst}
+    result['rib_correlation'] = bool(named_ribs)
+    result['asn_names'] = {str(k): v for k, v in asn_names.items() if v}
+    if enr.get('filtered'):
+        result['enrich_note'] = ('AS-path names unavailable — needs outbound '
+                                  'TCP/43 to whois.cymru.com; using AS numbers only.')
+    _emit_pathconv_jsonl(result)
+    return result
+
+
 # --------------------------------------------------------------------------
 # PCAP Analyzer: triage an uploaded capture with tshark/capinfos
 # --------------------------------------------------------------------------
@@ -18494,6 +19004,19 @@ def register_network_diagnostics(app, logger=None):
             target, port=data.get('port', path_asymmetry.DEFAULT_PORT),
             count=data.get('count', 20), threshold_ms=data.get('threshold_ms', 5.0),
             clock_synced=bool(data.get('clock_synced', False))))
+
+    @app.route('/api/net/path-convergence', methods=['POST'])
+    def net_path_convergence():
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target') or '').strip()
+        if not target:
+            return _bad('target required')
+        _log(f"net/path-convergence target={target}")
+        return jsonify(do_path_convergence(
+            target, flows=data.get('flows', 3),
+            method=(data.get('method') or 'icmp'),
+            max_ttl=data.get('max_ttl', 30),
+            floor_count=data.get('floor_count', 8)))
 
     @app.route('/api/net/routing-selftest', methods=['GET'])
     def net_routing_selftest():
