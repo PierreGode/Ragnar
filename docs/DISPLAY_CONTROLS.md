@@ -17,6 +17,34 @@ Two HATs have controls:
 
 ---
 
+## Customizing the main screen (Display tab → Edit Mode)
+
+The web UI's **Display** tab shows which physical panel is active (**Display
+Model** + **Orientation**) and a live mirror of the screen. Below the mirror,
+**Customize Main Screen → Edit Mode** turns the default dashboard's elements into
+editable *modules*:
+
+- **Stat boxes** — the main screen has 10 numbered boxes. Each can be pointed at
+  a different live metric: Targets, Ports, Vulns, Creds, Zombies, Data, Coins,
+  Level, Net KB, Attacks, plus Hosts / Offline / New Hosts / At‑Risk. The current
+  value is shown in brackets in the editor so you can see what each box will read.
+- **Text block** — the rolling speech line can be replaced with a fixed **custom
+  message**, the **device IP**, the **Wi‑Fi SSID**, a **clock**, **uptime**, or
+  the **orchestrator status**.
+- **Character** — the Ragnar sprite can be kept, **enlarged**, or **hidden** (a
+  hidden character hands its space to the text block).
+
+Slots are the same across orientations, so a customization shows consistently in
+both portrait and the landscape (lying‑down) layout. **Save layout** applies on
+the display's next refresh — no restart. **Reset to default** clears the
+customization and restores the built‑in dashboard. An un‑customized unit renders
+exactly as before, so the feature is purely additive.
+
+> Customization targets the standard character dashboard. The tiny compact panels
+> (128×128 LCD, OLED, LED‑matrix, 1602) keep their fixed built‑in layouts.
+
+---
+
 ## 2.7" e‑Paper HAT (4 keys)
 
 GPIO pins (BCM), fixed by the HAT: `KEY1=5`, `KEY2=6`, `KEY3=13`, `KEY4=19`.
