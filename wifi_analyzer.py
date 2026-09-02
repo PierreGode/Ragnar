@@ -1117,13 +1117,26 @@ def _radio_monitor_conflict(interface):
     target = ifaces.get(interface)
     if not target:
         return None
+    conflict = None
     if target["type"] == "monitor":
-        return interface  # scanning the monitor VIF directly — never works
-    # A sibling monitor VIF on the same radio ties it to one channel.
+        conflict = interface  # scanning the monitor VIF directly — never works
+    else:
+        # A sibling monitor VIF on the same radio ties it to one channel.
+        for name, info in ifaces.items():
+            if name != interface and info["phy"] == target["phy"] and info["type"] == "monitor":
+                conflict = name
+                break
+    if not conflict:
+        return None
+    # Suggest a managed radio on a DIFFERENT phy the caller could survey on
+    # instead — this box often has the Pi's built-in wlan0 free alongside a
+    # monitor-mode Alfa (or vice-versa), so the watch and a survey can coexist.
+    alt = None
     for name, info in ifaces.items():
-        if name != interface and info["phy"] == target["phy"] and info["type"] == "monitor":
-            return name
-    return None
+        if info["type"] in ("managed", None) and info["phy"] != target["phy"]:
+            alt = name
+            break
+    return {"monitor": conflict, "alt": alt}
 
 
 def do_scan(interface="wlan0", band="all", passive=True):
@@ -1134,15 +1147,18 @@ def do_scan(interface="wlan0", band="all", passive=True):
     # watch's ragmon0 VIF) — a managed scan there just blocks until timeout.
     _mon = _radio_monitor_conflict(interface)
     if _mon:
-        if _mon == interface:
+        culprit, alt = _mon["monitor"], _mon.get("alt")
+        alt_tip = (" Survey on %s instead (a different radio)." % alt if alt
+                   else " Pause the watch, or use a second adapter.")
+        if culprit == interface:
             msg = ("%s is a monitor interface — a passive survey needs a managed "
-                   "radio. Pick a managed adapter." % interface)
+                   "radio.%s" % (interface, alt_tip))
         else:
             msg = ("%s's radio is in monitor mode as %s (the WiFi Defense / "
                    "HaleHound 24/7 watch) — a single radio can't survey and "
-                   "monitor at once. Pause the watch, or survey on another "
-                   "adapter." % (interface, _mon))
-        return {"error": msg, "monitor_conflict": _mon, "interface": interface}
+                   "monitor at once.%s" % (interface, culprit, alt_tip))
+        return {"error": msg, "monitor_conflict": culprit,
+                "alt_iface": alt, "interface": interface}
     # A freshly-plugged dongle is usually admin-down; you can't scan a down
     # radio. Bring the link up first (link-up only, never associates).
     if not _iface_is_up(interface):

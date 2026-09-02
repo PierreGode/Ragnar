@@ -1738,7 +1738,8 @@ function wifiScan() {
     fetch(`/api/net/wifi/scan?interface=${encodeURIComponent(iface)}&band=${_wifiState.band}`)
         .then(r => r.json()).then(d => {
             busy(false);
-            if (d.error) { _wifiSetStatus('⚠ ' + d.error); return; }
+            if (d.error) { _wifiState.scanError = d.error; _wifiSetStatus('⚠ ' + d.error); _wifiFlagBanner(); return; }
+            _wifiState.scanError = null;
             _wifiState.data = d;
             // A fresh scan invalidates any earlier AI read, so it isn't embedded
             // into a report describing different scan data.
@@ -3432,9 +3433,10 @@ function _wifiFlagBanner() {
     const f = _wifiState.flagged;
     if (!f) { el.className = 'hidden'; el.innerHTML = ''; return; }
     const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === f.bssid));
-    const state = !_wifiState.data ? 'surveying…'
-        : found ? 'highlighted in the spectrum below'
-            : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
+    const state = _wifiState.scanError ? ('survey unavailable — ' + _esc(_wifiState.scanError))
+        : !_wifiState.data ? 'surveying…'
+            : found ? 'highlighted in the spectrum below'
+                : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
     el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
     el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>'
         + `<b>${_esc(f.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
