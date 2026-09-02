@@ -715,6 +715,7 @@ _ATTACK_TOOL_SSIDS = {
     "bruce",
     "garmr", "halehound", "halehoundcyd",
     "deauther", "wifideauther", "esp8266deauther", "spacehuhn",
+    "pwned",              # Spacehuhn Deauther default AP SSID (pw "deauther")
     "pwnagotchi", "minigotchi",
     # Iconic handheld attack platforms
     "wifipineapple", "flipperzero",
