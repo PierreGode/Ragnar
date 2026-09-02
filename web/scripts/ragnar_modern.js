@@ -22175,7 +22175,14 @@ async function loadEpaperDisplay() {
             if (data.width && data.height) {
                 updateElement('epaper-resolution', `${data.width} x ${data.height}`);
             }
-            
+
+            // Which physical display is active + its orientation
+            if (data.display_name) updateElement('epaper-model', data.display_name);
+            if (data.rotation !== undefined && data.rotation !== null) {
+                const rotLabels = {0: '0° (portrait)', 90: '90° (landscape)', 180: '180° (portrait, flipped)', 270: '270° (landscape, flipped)'};
+                updateElement('epaper-orientation', rotLabels[data.rotation] || `${data.rotation}°`);
+            }
+
             // Update connection status
             connectionElement.textContent = 'Live';
             connectionElement.className = 'text-green-400 font-medium';
@@ -22210,6 +22217,132 @@ async function loadEpaperDisplay() {
 function refreshEpaperDisplay() {
     addConsoleMessage('Refreshing display...', 'info');
     loadEpaperDisplay();
+}
+
+// ── Main-screen customization ("Edit Mode") ─────────────────────────────
+let _dashboardCatalog = null;   // {stat_slots, stat_modules, text_modes, ...}
+let _dashboardValues = {};      // module id -> live value (for previews)
+
+function toggleDashboardEdit() {
+    const editor = document.getElementById('dashboard-editor');
+    if (!editor) return;
+    const opening = editor.classList.contains('hidden');
+    editor.classList.toggle('hidden');
+    const btn = document.getElementById('dashboard-edit-toggle');
+    if (btn) btn.textContent = opening ? '✖ Close editor' : '✏️ Edit Mode';
+    if (opening && !_dashboardCatalog) loadDashboardCatalog();
+}
+
+async function loadDashboardCatalog() {
+    try {
+        const data = await fetchAPI('/api/dashboard/catalog');
+        if (!data || !data.success) throw new Error((data && data.error) || 'load failed');
+        _dashboardCatalog = data.catalog;
+        _dashboardValues = data.values || {};
+        renderDashboardEditor(data.config);
+    } catch (e) {
+        const s = document.getElementById('dashboard-editor-status');
+        if (s) { s.textContent = 'Failed to load editor: ' + e.message; s.className = 'text-sm text-red-400 self-center'; }
+    }
+}
+
+function renderDashboardEditor(cfg) {
+    const cat = _dashboardCatalog;
+    if (!cat) return;
+    // Effective config: fall back to catalog defaults when unconfigured.
+    const stats = (cfg && cfg.stats) ? cfg.stats.slice() : cat.default_stats.slice();
+    const textMode = (cfg && cfg.text && cfg.text.mode) || cat.default_text_mode;
+    const textValue = (cfg && cfg.text && cfg.text.value) || '';
+    const character = (cfg && cfg.character) || cat.default_character;
+
+    // Stat slot dropdowns
+    const slotsEl = document.getElementById('dashboard-stat-slots');
+    if (slotsEl) {
+        slotsEl.innerHTML = '';
+        for (let i = 0; i < cat.stat_slots; i++) {
+            const chosen = stats[i] || cat.default_stats[i % cat.default_stats.length];
+            const opts = cat.stat_modules.map(m => {
+                const v = (_dashboardValues[m.id] !== undefined) ? ` [${_dashboardValues[m.id]}]` : '';
+                return `<option value="${m.id}" ${m.id === chosen ? 'selected' : ''}>${escapeHtml(m.label)}${v}</option>`;
+            }).join('');
+            const wrap = document.createElement('div');
+            wrap.innerHTML = `<label class="block text-xs text-gray-400 mb-1">Box ${i + 1}</label>
+                <select class="dashboard-slot w-full bg-slate-800 border border-slate-600 text-white rounded-lg px-2 py-1.5 text-sm" data-slot="${i}">${opts}</select>`;
+            slotsEl.appendChild(wrap);
+        }
+    }
+
+    // Text mode select
+    const tmEl = document.getElementById('dashboard-text-mode');
+    if (tmEl) {
+        tmEl.innerHTML = cat.text_modes.map(t =>
+            `<option value="${t.id}" ${t.id === textMode ? 'selected' : ''}>${escapeHtml(t.label)}</option>`).join('');
+    }
+    const tvEl = document.getElementById('dashboard-text-value');
+    if (tvEl) tvEl.value = textValue;
+    onDashboardTextModeChange();
+
+    // Character select
+    const chEl = document.getElementById('dashboard-character');
+    if (chEl) {
+        chEl.innerHTML = cat.character_modes.map(c =>
+            `<option value="${c.id}" ${c.id === character ? 'selected' : ''}>${escapeHtml(c.label)}</option>`).join('');
+    }
+}
+
+function onDashboardTextModeChange() {
+    const mode = document.getElementById('dashboard-text-mode')?.value;
+    const tv = document.getElementById('dashboard-text-value');
+    if (tv) tv.classList.toggle('hidden', mode !== 'custom');
+}
+
+function _collectDashboardConfig() {
+    const stats = Array.from(document.querySelectorAll('.dashboard-slot'))
+        .sort((a, b) => (+a.dataset.slot) - (+b.dataset.slot))
+        .map(s => s.value);
+    return {
+        stats,
+        text: {
+            mode: document.getElementById('dashboard-text-mode')?.value || 'speech',
+            value: document.getElementById('dashboard-text-value')?.value || ''
+        },
+        character: document.getElementById('dashboard-character')?.value || 'viking'
+    };
+}
+
+async function saveDashboardConfig() {
+    const s = document.getElementById('dashboard-editor-status');
+    try {
+        const body = _collectDashboardConfig();
+        const res = await fetch('/api/dashboard/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'save failed');
+        if (s) { s.textContent = 'Saved — the display updates on its next refresh.'; s.className = 'text-sm text-green-400 self-center'; }
+        setTimeout(loadEpaperDisplay, 1500);
+    } catch (e) {
+        if (s) { s.textContent = 'Save failed: ' + e.message; s.className = 'text-sm text-red-400 self-center'; }
+    }
+}
+
+async function resetDashboardConfig() {
+    const s = document.getElementById('dashboard-editor-status');
+    try {
+        const res = await fetch('/api/dashboard/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reset: true })
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'reset failed');
+        _dashboardCatalog = null;              // force fresh reload of defaults
+        await loadDashboardCatalog();
+        if (s) { s.textContent = 'Reset to the built-in dashboard.'; s.className = 'text-sm text-green-400 self-center'; }
+        setTimeout(loadEpaperDisplay, 1500);
+    } catch (e) {
+        if (s) { s.textContent = 'Reset failed: ' + e.message; s.className = 'text-sm text-red-400 self-center'; }
+    }
 }
 
 // E-Paper display size toggle functionality

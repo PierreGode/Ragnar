@@ -952,6 +952,107 @@ class Display:
         self._unit_title_cache = (key, title)
         return title
 
+    # ── Customizable dashboard (Display-tab "edit mode") ─────────────────
+    # These resolve the main screen's slots against a stored dashboard_config.
+    # When there's no config they return the built-in defaults, so an
+    # un-customized unit renders byte-for-byte as it did before the editor.
+    def _dashboard_cfg(self):
+        """Normalized dashboard_config, or None when unconfigured."""
+        try:
+            import dashboard_modules as dm
+            return dm.normalize_config(self.shared_data.config.get('dashboard_config'))
+        except Exception:
+            return None
+
+    def _dashboard_stat_pairs(self, count):
+        """Return `count` (icon_image_or_None, value_str) pairs for the stat
+        slots, honoring dashboard_config or the built-in default order. Slot i is
+        the same on every layout, so a customization shows consistently in
+        portrait and landscape."""
+        import dashboard_modules as dm
+        sd = self.shared_data
+        cfg = self._dashboard_cfg()
+        ids = (cfg or {}).get('stats') or dm.DEFAULT_STAT_ORDER
+        pairs = []
+        for i in range(count):
+            mid = ids[i] if i < len(ids) else dm.DEFAULT_STAT_ORDER[i % len(dm.DEFAULT_STAT_ORDER)]
+            spec = dm.STAT_MODULES.get(mid) or dm.STAT_MODULES[dm.DEFAULT_STAT_ORDER[i % len(dm.DEFAULT_STAT_ORDER)]]
+            _label, icon_attr, sd_attr = spec
+            icon = getattr(sd, icon_attr, None)
+            val = getattr(sd, sd_attr, 0)
+            try:
+                val = int(val)
+            except Exception:
+                pass
+            pairs.append((icon, str(val)))
+        return pairs
+
+    def _dashboard_text(self):
+        """Text-block string. 'speech' mode returns the rolling ragnarsays so its
+        existing wrap/scroll behavior is preserved; other modes return a computed
+        line (custom / IP / SSID / clock / uptime / status)."""
+        sd = self.shared_data
+        cfg = self._dashboard_cfg()
+        if cfg is None:
+            return str(getattr(sd, 'ragnarsays', '') or '')
+        mode = cfg['text']['mode']
+        if mode == 'custom':
+            return cfg['text']['value'] or ''
+        if mode == 'status':
+            return str(getattr(sd, 'ragnarstatustext', '') or getattr(sd, 'ragnarorch_status', '') or '')
+        if mode in ('ip', 'ssid', 'clock', 'uptime'):
+            return self._dashboard_dynamic_text(mode)
+        return str(getattr(sd, 'ragnarsays', '') or '')
+
+    def _dashboard_dynamic_text(self, mode):
+        """IP / SSID / clock / uptime, cached ~10s so the render loop stays cheap."""
+        import time as _t
+        now = _t.time()
+        cache = getattr(self, '_dash_text_cache', None)
+        if cache is None:
+            cache = self._dash_text_cache = {}
+        hit = cache.get(mode)
+        if hit and (now - hit[0]) < 10:
+            return hit[1]
+        val = ''
+        try:
+            if mode == 'clock':
+                val = _t.strftime('%H:%M')
+            elif mode == 'uptime':
+                with open('/proc/uptime') as f:
+                    secs = float(f.read().split()[0])
+                val = f"Up {int(secs // 3600)}h {int((secs % 3600) // 60)}m"
+            elif mode == 'ip':
+                r = subprocess.run(['ip', '-4', 'addr', 'show', self._wifi_iface],
+                                   capture_output=True, text=True, timeout=2)
+                for line in r.stdout.split('\n'):
+                    if 'inet ' in line:
+                        val = line.strip().split()[1].split('/')[0]
+                        break
+                if not val:
+                    val = (self.get_wifi_ip_last_octet() or '')
+            elif mode == 'ssid':
+                r = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=2)
+                val = (r.stdout or '').strip() or 'Wi-Fi'
+        except Exception:
+            val = ''
+        cache[mode] = (now, val)
+        return val
+
+    def _dashboard_character_image(self):
+        """(image_or_None, scale) for the character slot. scale>1 for 'big',
+        'none' → (None, _). Defaults to the normal sprite when unconfigured."""
+        cfg = self._dashboard_cfg()
+        img = getattr(self, 'main_image', None) or getattr(self.shared_data, 'imagegen', None)
+        if cfg is None:
+            return (img, 1.0)
+        mode = cfg.get('character', 'viking')
+        if mode == 'none':
+            return (None, 1.0)
+        if mode == 'big':
+            return (img, 1.35)
+        return (img, 1.0)
+
     def _draw_page_frame(self, draw, title, hint="K1:Home K2:Flip K3:Next K4:Rst"):
         """Draw standard page frame: border, title, divider, footer."""
         w = getattr(self, 'render_w', self.shared_data.width)
@@ -2047,16 +2148,11 @@ class Display:
                     tx = x
                 draw.text((tx, y + 3), str(val), font=font, fill=0)
 
-        _row(21, [(getattr(sd, 'target', None),    sd.targetnbr),
-                  (getattr(sd, 'port', None),      sd.portnbr),
-                  (getattr(sd, 'vuln', None),      sd.vulnnbr),
-                  (getattr(sd, 'cred', None),      sd.crednbr),
-                  (getattr(sd, 'zombie', None),    sd.zombiesnbr)])
-        _row(40, [(getattr(sd, 'data', None),      sd.datanbr),
-                  (getattr(sd, 'money', None),     sd.coinnbr),
-                  (getattr(sd, 'level', None),     sd.levelnbr),
-                  (getattr(sd, 'networkkb', None), sd.networkkbnbr),
-                  (getattr(sd, 'attacks', None),   sd.attacksnbr)])
+        # Slots 0-4 on the top row, 5-9 below — filled from the dashboard config
+        # (or the built-in default order).
+        pairs = self._dashboard_stat_pairs(10)
+        _row(21, pairs[0:5])
+        _row(40, pairs[5:10])
         draw.line((1, 58, W - 1, 58), fill=0)
 
         # --- lower zone: info column on the left, a framed sprite panel right ---
@@ -2070,15 +2166,27 @@ class Display:
         except Exception:
             pass
 
-        panel_x = W - 70                      # vertical split for the sprite panel
         top = 58                              # y of the stats divider above
-        draw.line((panel_x, top, panel_x, H - 1), fill=0)
-
-        vk = getattr(sd, 'imagegen', None)
-        if vk is not None:
+        char_img, char_scale = self._dashboard_character_image()
+        if char_img is None:
+            # Character hidden → give the whole lower band to the info column.
+            panel_x = W - 2
+        else:
+            panel_x = W - 70                  # vertical split for the sprite panel
+            draw.line((panel_x, top, panel_x, H - 1), fill=0)
             try:
-                # ~50% of the native 78px sprite, centred in its panel.
-                vk = vk.resize((max(1, vk.width // 2), max(1, vk.height // 2)), Image.NEAREST)
+                # ~50% of the native sprite (× any 'big' factor), centred and
+                # clamped to fit inside its panel.
+                base = 0.5 * (char_scale or 1.0)
+                cw = max(1, int(char_img.width * base))
+                ch = max(1, int(char_img.height * base))
+                maxw = (W - panel_x) - 4
+                maxh = (H - top) - 4
+                if cw > maxw or ch > maxh:
+                    r = min(maxw / cw, maxh / ch)
+                    cw = max(1, int(cw * r))
+                    ch = max(1, int(ch * r))
+                vk = char_img.resize((cw, ch), Image.NEAREST)
                 px = panel_x + ((W - panel_x) - vk.width) // 2
                 py = top + ((H - top) - vk.height) // 2
                 image.paste(vk, (px, py))
@@ -2111,7 +2219,7 @@ class Display:
 
         # Speech beneath, in the larger 14px font so the column doesn't read empty.
         speech_font = getattr(sd, 'font_arial14', None) or sd.font_arialbold
-        says = str(getattr(sd, 'ragnarsays', '') or '')
+        says = str(self._dashboard_text() or '')
         if says:
             try:
                 lines = sd.wrap_text(says, speech_font, left_w - 4)
@@ -4666,23 +4774,25 @@ class Display:
                     except Exception:
                         pass
 
-                # Stats — positions scaled to fill the physical width/height,
-                # but icon images stay at their original pixel size.
-                stats = [
-                    (self.shared_data.target,    (int(8 * sx),   int(22 * sy)), (int(28 * sx),  int(22 * sy)), str(self.shared_data.targetnbr)),
-                    (self.shared_data.port,      (int(47 * sx),  int(22 * sy)), (int(67 * sx),  int(22 * sy)), str(self.shared_data.portnbr)),
-                    (self.shared_data.vuln,      (int(86 * sx),  int(22 * sy)), (int(106 * sx), int(22 * sy)), str(self.shared_data.vulnnbr)),
-                    (self.shared_data.cred,      (int(8 * sx),   int(41 * sy)), (int(28 * sx),  int(41 * sy)), str(self.shared_data.crednbr)),
-                    (self.shared_data.money,     (int(3 * sx),   int(172 * sy)), (int(3 * sx),  int(192 * sy)), str(self.shared_data.coinnbr)),
-                    (self.shared_data.level,     (int(2 * sx),   int(217 * sy)), (int(4 * sx),  int(237 * sy)), str(self.shared_data.levelnbr)),
-                    (self.shared_data.zombie,    (int(47 * sx),  int(41 * sy)), (int(67 * sx),  int(41 * sy)), str(self.shared_data.zombiesnbr)),
-                    (self.shared_data.networkkb, (int(102 * sx), int(190 * sy)), (int(102 * sx), int(208 * sy)), str(self.shared_data.networkkbnbr)),
-                    (self.shared_data.data,      (int(86 * sx),  int(41 * sy)), (int(106 * sx), int(41 * sy)), str(self.shared_data.datanbr)),
-                    (self.shared_data.attacks,   (int(100 * sx), int(218 * sy)), (int(102 * sx), int(237 * sy)), str(self.shared_data.attacksnbr)),
+                # Stats — fixed slot positions (scaled to fill the panel); which
+                # metric fills each slot comes from the dashboard config (or the
+                # built-in default order, which matches these slots exactly).
+                stat_positions = [
+                    ((int(8 * sx),   int(22 * sy)),  (int(28 * sx),  int(22 * sy))),
+                    ((int(47 * sx),  int(22 * sy)),  (int(67 * sx),  int(22 * sy))),
+                    ((int(86 * sx),  int(22 * sy)),  (int(106 * sx), int(22 * sy))),
+                    ((int(8 * sx),   int(41 * sy)),  (int(28 * sx),  int(41 * sy))),
+                    ((int(3 * sx),   int(172 * sy)), (int(3 * sx),   int(192 * sy))),
+                    ((int(2 * sx),   int(217 * sy)), (int(4 * sx),   int(237 * sy))),
+                    ((int(47 * sx),  int(41 * sy)),  (int(67 * sx),  int(41 * sy))),
+                    ((int(102 * sx), int(190 * sy)), (int(102 * sx), int(208 * sy))),
+                    ((int(86 * sx),  int(41 * sy)),  (int(106 * sx), int(41 * sy))),
+                    ((int(100 * sx), int(218 * sy)), (int(102 * sx), int(237 * sy))),
                 ]
-
-                for img, img_pos, text_pos, text in stats:
-                    image.paste(img, img_pos)
+                stat_pairs = self._dashboard_stat_pairs(len(stat_positions))
+                for (img_pos, text_pos), (icon, text) in zip(stat_positions, stat_pairs):
+                    if icon is not None:
+                        image.paste(icon, img_pos)
                     draw.text(text_pos, text, font=self.shared_data.font_arial9, fill=0)
 
                 self.shared_data.update_ragnarstatus()
@@ -4703,16 +4813,23 @@ class Display:
                 draw.line((1, int(59 * sy), W - 1, int(59 * sy)), fill=0)
                 draw.line((1, int(87 * sy), W - 1, int(87 * sy)), fill=0)
 
-                lines = self.shared_data.wrap_text(self.shared_data.ragnarsays, self.shared_data.font_arialbold, W - 4)
+                lines = self.shared_data.wrap_text(self._dashboard_text(), self.shared_data.font_arialbold, W - 4)
                 y_text = int(90 * sy)
 
-                # Character image — centred on the full canvas
-                if self.main_image is not None:
-                    cx = (W - self.main_image.width) // 2
-                    cy = H - self.main_image.height
-                    image.paste(self.main_image, (cx, cy))
-                else:
-                    logger.error("Main image not found in shared_data.")
+                # Character image — centred on the full canvas (config may enlarge
+                # or hide it).
+                char_img, char_scale = self._dashboard_character_image()
+                if char_img is not None:
+                    try:
+                        if char_scale and char_scale != 1.0:
+                            cw = min(W, max(1, int(char_img.width * char_scale)))
+                            ch = max(1, int(char_img.height * char_scale))
+                            char_img = char_img.resize((cw, ch), Image.NEAREST)
+                    except Exception:
+                        pass
+                    cx = (W - char_img.width) // 2
+                    cy = H - char_img.height
+                    image.paste(char_img, (cx, cy))
 
                 for line in lines:
                     draw.text((int(4 * sx), y_text), line, font=self.shared_data.font_arialbold, fill=0)

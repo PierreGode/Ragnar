@@ -16953,6 +16953,27 @@ def get_wifi_log():
         logger.error(f"Error getting WiFi logs: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Friendly labels for the physical panel drivers, shown in the Display tab so
+# the operator can see which display is active. Falls back to the raw driver id.
+EPD_DISPLAY_NAMES = {
+    'epd2in13': 'Waveshare 2.13"', 'epd2in13_V2': 'Waveshare 2.13" V2',
+    'epd2in13_V3': 'Waveshare 2.13" V3', 'epd2in13_V4': 'Waveshare 2.13" V4',
+    'epd2in13b_V4': 'Waveshare 2.13" B V4',
+    'epd2in7': 'Waveshare 2.7"', 'epd2in7_V2': 'Waveshare 2.7" V2',
+    'epd2in9_V2': 'Waveshare 2.9" V2', 'epd3in7': 'Waveshare 3.7"',
+    'epd4in26': 'Waveshare 4.26"',
+    'st7735s': '1.44" LCD HAT (ST7735S)', 'whisplay': 'Whisplay 1.69" HAT',
+    'ili9486': '3.5" SPI TFT (ILI9486)', 'ili9488': '3.5" SPI TFT (ILI9488)',
+    'gc9a01': '1.28" round LCD (GC9A01)', 'ssd1306': 'OLED (SSD1306)',
+    'lcd1602': 'Character LCD 1602', 'max7219_4panel': 'LED matrix (4×MAX7219)',
+    'max7219_8panel': 'LED matrix (8×MAX7219)',
+}
+
+
+def _epd_friendly_name(epd_type):
+    return EPD_DISPLAY_NAMES.get(epd_type, epd_type or 'Unknown')
+
+
 @app.route('/api/epaper-display')
 def get_epaper_display():
     """Get current e-paper display image as base64"""
@@ -16991,27 +17012,95 @@ def get_epaper_display():
                 # Encode to base64
                 img_base64 = base64.b64encode(img_byte_arr).decode('utf-8')
                 
+                _epd_type = shared_data.config.get('epd_type')
                 return jsonify({
                     'image': f"data:image/png;base64,{img_base64}",
                     'timestamp': int(os.path.getctime(display_image_path)),
                     'width': orig_w,
                     'height': orig_h,
+                    'epd_type': _epd_type,
+                    'display_name': _epd_friendly_name(_epd_type),
+                    'rotation': getattr(shared_data, 'screen_reversed', 0) or 0,
                     'status_text': safe_str(shared_data.ragnarstatustext),
                     'status_text2': safe_str(shared_data.ragnarstatustext2)
                 })
         
         # If no image found, return status only
+        _epd_type = shared_data.config.get('epd_type')
         return jsonify({
             'image': None,
             'message': 'No e-paper display image available',
             'timestamp': int(time.time()),
+            'epd_type': _epd_type,
+            'display_name': _epd_friendly_name(_epd_type),
+            'rotation': getattr(shared_data, 'screen_reversed', 0) or 0,
             'status_text': safe_str(shared_data.ragnarstatustext),
             'status_text2': safe_str(shared_data.ragnarstatustext2)
         })
-        
+
     except Exception as e:
         logger.error(f"Error getting e-paper display: {e}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/catalog', methods=['GET'])
+def get_dashboard_catalog():
+    """Modules the operator can drop into the main-screen slots, plus the
+    current dashboard_config and a snapshot of live values for a preview."""
+    try:
+        import dashboard_modules as dm
+        cat = dm.catalog()
+        current = dm.normalize_config(shared_data.config.get('dashboard_config'))
+        # Live value per stat module so the editor can preview real numbers.
+        values = {}
+        for mid, spec in dm.STAT_MODULES.items():
+            try:
+                values[mid] = int(getattr(shared_data, spec[2], 0) or 0)
+            except Exception:
+                values[mid] = 0
+        _epd_type = shared_data.config.get('epd_type')
+        return jsonify({
+            'success': True,
+            'catalog': cat,
+            'config': current,          # None when using built-in defaults
+            'values': values,
+            'display_name': _epd_friendly_name(_epd_type),
+            'epd_type': _epd_type,
+            'rotation': getattr(shared_data, 'screen_reversed', 0) or 0,
+        })
+    except Exception as e:
+        logger.error(f"Error building dashboard catalog: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/dashboard/config', methods=['POST'])
+def set_dashboard_config():
+    """Persist a customized main-screen layout (or reset to defaults).
+
+    Body: {stats:[id...], text:{mode,value}, character:id}. Posting an empty
+    body / {"reset": true} clears the customization and returns to the built-in
+    dashboard. The change is picked up by the render loop on its next frame — no
+    restart needed."""
+    try:
+        import dashboard_modules as dm
+        data = request.get_json(silent=True) or {}
+        if data.get('reset') or (not data.get('stats') and not data.get('text') and not data.get('character')):
+            shared_data.config.pop('dashboard_config', None)
+            shared_data.save_config()
+            return jsonify({'success': True, 'config': None, 'message': 'Dashboard reset to defaults'})
+        cfg = dm.normalize_config(data)
+        if cfg is None:
+            return jsonify({'success': False, 'error': 'Invalid dashboard config'}), 400
+        shared_data.config['dashboard_config'] = cfg
+        shared_data.save_config()
+        try:
+            socketio.emit('config_updated', shared_data.config)
+        except Exception:
+            pass
+        return jsonify({'success': True, 'config': cfg, 'message': 'Dashboard updated'})
+    except Exception as e:
+        logger.error(f"Error saving dashboard config: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 @app.route('/api/display')

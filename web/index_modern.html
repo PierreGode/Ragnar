@@ -5584,12 +5584,16 @@
                         <h3 class="text-lg font-semibold mb-3 text-Ragnar-400">Display Info</h3>
                         <div class="space-y-2">
                             <div class="flex justify-between">
-                                <span class="text-gray-400">Resolution:</span>
-                                <span id="epaper-resolution" class="text-white font-medium">Unknown</span>
+                                <span class="text-gray-400">Display Model:</span>
+                                <span id="epaper-model" class="text-white font-medium">Unknown</span>
                             </div>
                             <div class="flex justify-between">
-                                <span class="text-gray-400">Auto-refresh:</span>
-                                <span class="text-green-400 font-medium">Active</span>
+                                <span class="text-gray-400">Orientation:</span>
+                                <span id="epaper-orientation" class="text-white font-medium">—</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-400">Resolution:</span>
+                                <span id="epaper-resolution" class="text-white font-medium">Unknown</span>
                             </div>
                             <div class="flex justify-between">
                                 <span class="text-gray-400">Connection:</span>
@@ -5633,6 +5637,49 @@
                         This shows the exact same content as your Ragnar device's physical display<br>
                         <span class="text-Ragnar-400">💡 Click the display image or use the Resize button to cycle through different sizes</span>
                     </p>
+                </div>
+
+                <!-- Customize / Edit Mode -->
+                <div class="glass rounded-xl p-6 mt-6">
+                    <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-2">
+                        <div>
+                            <h3 class="text-lg font-semibold text-Ragnar-400">Customize Main Screen</h3>
+                            <p class="text-gray-400 text-sm">Treat the main screen as modules — swap what each numbered box shows, change the text block, or resize/hide the character. Changes apply live (no restart).</p>
+                        </div>
+                        <div class="flex gap-2">
+                            <button id="dashboard-edit-toggle" onclick="toggleDashboardEdit()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg transition-colors text-sm">✏️ Edit Mode</button>
+                        </div>
+                    </div>
+
+                    <div id="dashboard-editor" class="hidden mt-4 space-y-6">
+                        <!-- Stat module slots -->
+                        <div>
+                            <h4 class="text-sm font-semibold text-gray-300 mb-2">Stat boxes</h4>
+                            <p class="text-gray-500 text-xs mb-3">Each box on the screen can show a different metric. Live value shown in brackets.</p>
+                            <div id="dashboard-stat-slots" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3"></div>
+                        </div>
+
+                        <!-- Text block -->
+                        <div>
+                            <h4 class="text-sm font-semibold text-gray-300 mb-2">Text block</h4>
+                            <div class="flex flex-col sm:flex-row gap-3">
+                                <select id="dashboard-text-mode" onchange="onDashboardTextModeChange()" class="bg-slate-800 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm"></select>
+                                <input id="dashboard-text-value" type="text" maxlength="280" placeholder="Your custom text…" class="hidden flex-1 bg-slate-800 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm">
+                            </div>
+                        </div>
+
+                        <!-- Character -->
+                        <div>
+                            <h4 class="text-sm font-semibold text-gray-300 mb-2">Character</h4>
+                            <select id="dashboard-character" class="bg-slate-800 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm"></select>
+                        </div>
+
+                        <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-700">
+                            <button onclick="saveDashboardConfig()" class="bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors text-sm">💾 Save layout</button>
+                            <button onclick="resetDashboardConfig()" class="bg-slate-600 hover:bg-slate-700 text-white px-4 py-2 rounded-lg transition-colors text-sm">↺ Reset to default</button>
+                            <span id="dashboard-editor-status" class="text-sm text-gray-400 self-center"></span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
