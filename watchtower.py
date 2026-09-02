@@ -109,6 +109,12 @@ DEFAULT_SOURCES = {
                       'paths': ['/var/log/ragnar/ssh_watch.jsonl']},
     'telnet_watch':  {'label': 'Telnet Watch (CVE-2026-24061 / 32746)',
                       'paths': ['/var/log/ragnar/telnet_watch.jsonl']},
+    # In-app L3 redirect/ARP-poison MITM (do_icmp_watch v2) + BGP Path Watch v2
+    # convergence detection (do_path_convergence) stream their alerts here too.
+    'icmp_watch':    {'label': 'ICMP Watch (redirect MITM / ARP-poison)',
+                      'paths': ['/var/log/ragnar/icmp_watch.jsonl']},
+    'pathwatch':     {'label': 'BGP Path Watch (convergence / hijack)',
+                      'paths': ['/var/log/ragnar/pathwatch.jsonl']},
     # Asset inventory change-detection (asset_inventory.py) emits new-device /
     # IP-move / spoof / offline events here so they page + forward like any alert.
     'asset_inventory': {'label': 'Asset Inventory',

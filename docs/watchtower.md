@@ -34,6 +34,16 @@ inventory/posture stays off the pane; a Terrapin exposure lands as **high** and 
 confirmed Telnet argument injection as **critical**. Both also run in the Network
 Integrity Monitor rotation, so their verdicts surface there as chips as well.
 
+Two L3 routing observers feed the pane the same way. [`icmp_watch`](nettools.md#icmp-watch)
+appends its **HIGH/CRITICAL** redirect findings to `/var/log/ragnar/icmp_watch.jsonl`
+(deduplicated per check + source) — a gateway-MAC spoof or ARP-poison-then-redirect
+lands as **critical**, an off-subnet / non-router redirect as **high**.
+[`pathwatch`](nettools.md#bgp-collector--path-asymmetry-control-plane--data-plane)
+(BGP Path Watch v2, the on-demand path-convergence probe) appends a
+**suspected/active/confirmed** convergence verdict to `/var/log/ragnar/pathwatch.jsonl`
+(deduplicated per target + severity) — a RIB-corroborated convergence event lands as
+**critical**, loss-plus-path-change as **high**.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

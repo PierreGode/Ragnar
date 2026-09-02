@@ -28,12 +28,15 @@ Layers, each unit-testable with no network:
   * correlate — ties a data-plane event to control-plane truth from a RIB
 """
 
+import math
 import re
 import socket
 import struct
 import threading
 import time
 from collections import deque
+from dataclasses import dataclass, field
+from typing import Deque, Iterable, Optional, Sequence
 
 _MAGIC = b'RGWD'
 _PKT = struct.Struct('!4sIddd')       # magic, seq, t1, t2, t3
@@ -350,6 +353,506 @@ def correlate_multi(event, named_ribs, window_s=30.0):
     return out
 
 
+# ==========================================================================
+# BGP Path Watch v2 — flow-consistent (Paris) traceroute + convergence scoring
+# ==========================================================================
+# The OWD detector above answers "is the path asymmetric?". This half answers
+# "is the path *changing* — a BGP (re)convergence?". It fingerprints the path
+# per ECMP flow (Paris-consistent: one flow id held constant across a TTL sweep
+# so a change WITHIN a flow is a real routing change, while differences ACROSS
+# flows are just ECMP and are not counted as churn), tracks loops / oscillation
+# / flapping over time, scores a suspected convergence event, and — where a
+# receive-only BGP collector is peered — upgrades the verdict to `confirmed`
+# with the control-plane cause. Ported from the standalone pathwatch v2
+# (analyze.py + probe.py), kept detection-only: the trace is active probing run
+# only on demand, never during passive rotation.
+
+STD_INITIAL_TTLS = (32, 64, 128, 255)
+
+
+def infer_initial_ttl(recv_ttl):
+    """Smallest standard initial TTL >= the received value (None on nonsense)."""
+    if recv_ttl is None or recv_ttl < 1 or recv_ttl > 255:
+        return None
+    for init in STD_INITIAL_TTLS:
+        if recv_ttl <= init:
+            return init
+    return None
+
+
+def reverse_hops(recv_ttl):
+    """Hops the reply took back to us = initial_ttl - recv_ttl (an inference:
+    anycast / TTL-rewriting middleboxes / non-standard initial TTLs can lie)."""
+    init = infer_initial_ttl(recv_ttl)
+    if init is None:
+        return None
+    return init - recv_ttl
+
+
+@dataclass
+class AsymmetryVerdict:
+    forward_hops: Optional[int]
+    reverse_hops: Optional[int]
+    delta: Optional[int]            # reverse - forward (positive => return longer)
+    asymmetric: bool
+    confidence: str                 # none | low | medium | high
+    note: str = ""
+
+
+def assess_asymmetry(forward_hops, reply_ttl, threshold=3):
+    """Compare forward hop count vs TTL-inferred reverse hop count."""
+    rev = reverse_hops(reply_ttl) if reply_ttl is not None else None
+    if forward_hops is None or rev is None:
+        missing = ("target did not complete forward trace" if forward_hops is None
+                   else "no usable reply TTL")
+        return AsymmetryVerdict(forward_hops, rev, None, False, "none",
+                                "undetermined: " + missing)
+    delta = rev - forward_hops
+    mag = abs(delta)
+    asymmetric = mag >= threshold
+    if not asymmetric:
+        conf = "none"
+    elif mag >= threshold * 2:
+        conf = "high"
+    elif mag >= threshold + 1:
+        conf = "medium"
+    else:
+        conf = "low"
+    direction = "return path longer" if delta > 0 else "forward path longer"
+    note = ("%s by %d hop(s)" % (direction, mag) if asymmetric
+            else "paths within %d hops (symmetric enough)" % threshold)
+    return AsymmetryVerdict(forward_hops, rev, delta, asymmetric, conf, note)
+
+
+def _collapse(seq):
+    out = []
+    for x in seq:
+        if not out or out[-1] != x:
+            out.append(x)
+    return out
+
+
+def ip_path_fingerprint(hops):
+    """Fingerprint an ordered list of hop IPs; keep '*' gaps as position-holders
+    but trim leading/trailing gaps."""
+    norm = [h if h else "*" for h in hops]
+    while norm and norm[0] == "*":
+        norm.pop(0)
+    while norm and norm[-1] == "*":
+        norm.pop()
+    return tuple(norm)
+
+
+def as_path_fingerprint(asns):
+    """BGP-meaningful signature: drop unresolved (None) and collapse consecutive
+    duplicates — robust to intra-AS load balancing."""
+    return tuple(_collapse([a for a in asns if a]))
+
+
+def has_loop(hops):
+    """A real IP repeating at two TTLs => forwarding loop (mid-convergence)."""
+    seen = set()
+    for h in hops:
+        if not h or h == "*":
+            continue
+        if h in seen:
+            return True
+        seen.add(h)
+    return False
+
+
+class EwmaChart:
+    """Incremental EWMA/EWMV; flags a sample whose z-score vs the prior estimate
+    exceeds k (after warmup) — an RTT shelf-jump, the convergence signal, not
+    steady jitter."""
+
+    def __init__(self, alpha=0.2, k=4.0, warmup=8, min_std_ms=0.5):
+        self.alpha = alpha
+        self.k = k
+        self.warmup = warmup
+        self.min_std = min_std_ms
+        self.n = 0
+        self.mean = 0.0
+        self.var = 0.0
+
+    def update(self, x):
+        self.n += 1
+        if self.n == 1:
+            self.mean = x
+            self.var = 0.0
+            return (False, 0.0)
+        std = max(math.sqrt(self.var), self.min_std)
+        z = (x - self.mean) / std
+        is_step = self.n > self.warmup and abs(z) >= self.k
+        diff = x - self.mean
+        self.mean += self.alpha * diff
+        self.var = (1 - self.alpha) * (self.var + self.alpha * diff * diff)
+        return (is_step, z)
+
+
+class FlapTracker:
+    """Rolling window of path fingerprints; counts transitions (flapping) and
+    detects A->B->A oscillation."""
+
+    def __init__(self, window=12, flap_transitions=4):
+        self.window = window
+        self.flap_transitions = flap_transitions
+        self.fps = deque(maxlen=window)
+
+    def update(self, fp):
+        prev = self.fps[-1] if self.fps else None
+        changed = prev is not None and fp != prev
+        self.fps.append(fp)
+        transitions = sum(1 for a, b in zip(self.fps, list(self.fps)[1:]) if a != b)
+        distinct = len(set(self.fps))
+        return {"changed": changed, "transitions": transitions, "distinct": distinct,
+                "oscillating": self._oscillates(),
+                "flapping": transitions >= self.flap_transitions}
+
+    def _oscillates(self):
+        seq = list(self.fps)
+        for i in range(2, len(seq)):
+            if seq[i] == seq[i - 2] and seq[i] != seq[i - 1]:
+                return True
+        return False
+
+
+@dataclass
+class ConvergenceEvidence:
+    loss_burst: int = 0
+    rtt_step: bool = False
+    rtt_z: float = 0.0
+    as_path_changed: bool = False
+    ip_path_changed: bool = False
+    loop: bool = False
+    oscillating: bool = False
+    flapping: bool = False
+    rib_confirmed: bool = False
+    rib_cause: str = ""
+
+
+@dataclass
+class ConvergenceVerdict:
+    score: int
+    suspected: bool
+    severity: str                   # none | watch | suspected | active | confirmed
+    reasons: list = field(default_factory=list)
+    evidence: Optional[ConvergenceEvidence] = None
+
+
+_CONV_WEIGHTS = {
+    "rib_confirmed": 6, "as_path_changed": 4, "loop": 4, "oscillating": 3,
+    "flapping": 3, "loss_burst": 2, "rtt_step": 2, "ip_path_changed": 1,
+}
+
+
+def score_convergence(ev, loss_burst_min=3, suspect_at=5):
+    """Combine evidence into a single suspicion score + human reasons."""
+    score = 0
+    reasons = []
+    if ev.rib_confirmed:
+        score += _CONV_WEIGHTS["rib_confirmed"]
+        reasons.append("BGP RIB corroborates: " + (ev.rib_cause or "control-plane event"))
+    if ev.as_path_changed:
+        score += _CONV_WEIGHTS["as_path_changed"]
+        reasons.append("AS-path changed within a fixed flow (real routing change)")
+    if ev.loop:
+        score += _CONV_WEIGHTS["loop"]
+        reasons.append("forwarding loop in trace (transient loop = mid-convergence)")
+    if ev.oscillating:
+        score += _CONV_WEIGHTS["oscillating"]
+        reasons.append("path oscillating A->B->A")
+    if ev.flapping:
+        score += _CONV_WEIGHTS["flapping"]
+        reasons.append("path flapping (many transitions in window)")
+    if ev.loss_burst >= loss_burst_min:
+        score += _CONV_WEIGHTS["loss_burst"]
+        reasons.append("loss burst of %d consecutive probes" % ev.loss_burst)
+    if ev.rtt_step:
+        score += _CONV_WEIGHTS["rtt_step"]
+        reasons.append("RTT step-change (z=%.1f)" % ev.rtt_z)
+    if ev.ip_path_changed and not ev.as_path_changed:
+        score += _CONV_WEIGHTS["ip_path_changed"]
+        reasons.append("intra-AS path change (IP-path only)")
+
+    suspected = score >= suspect_at
+    if ev.rib_confirmed:
+        severity = "confirmed"
+        suspected = True
+    elif score == 0:
+        severity = "none"
+    elif score < suspect_at:
+        severity = "watch"
+    elif ev.loss_burst >= loss_burst_min and (ev.as_path_changed or ev.loop):
+        severity = "active"
+    else:
+        severity = "suspected"
+    return ConvergenceVerdict(score, suspected, severity, reasons, ev)
+
+
+# --- flow-consistent (Paris) traceroute -----------------------------------
+_TRACE_PAYLOAD = b"pathwatch-flow--"
+_ICMP_ECHO_REPLY, _ICMP_DEST_UNREACH, _ICMP_TIME_EXCEEDED = 0, 3, 11
+
+
+@dataclass
+class HopResult:
+    ttl: int
+    ip: Optional[str]
+    rtt_ms: Optional[float]
+    recv_ttl: Optional[int]
+    reached: bool
+    kind: Optional[str]
+
+
+@dataclass
+class TraceResult:
+    target: str
+    flow: int
+    method: str
+    hops: list
+    reached: bool
+    forward_hops: Optional[int]
+    target_reply_ttl: Optional[int]
+
+    def ip_path(self):
+        return [h.ip for h in self.hops]
+
+
+def build_probe(target, ttl, flow, method="icmp"):
+    """Construct a single flow-selected probe. `flow` is the ECMP/path selector,
+    held constant across a TTL sweep (Paris). scapy imported lazily."""
+    from scapy.all import IP, ICMP, UDP, TCP, Raw
+    ip = IP(dst=target, ttl=ttl)
+    if method == "icmp":
+        return ip / ICMP(id=flow & 0xFFFF, seq=1) / Raw(_TRACE_PAYLOAD)
+    if method == "udp":
+        return ip / UDP(sport=(flow & 0x7FFF) | 0x8000, dport=33434) / Raw(_TRACE_PAYLOAD)
+    if method == "tcp-syn":
+        return ip / TCP(sport=(flow & 0x7FFF) | 0x8000, dport=443, flags="S")
+    raise ValueError("unknown method %r" % method)
+
+
+def parse_reply(sent, reply, target):
+    """Interpret a reply against the probe we sent (scapy layers, imported lazily)."""
+    from scapy.all import IP, ICMP, TCP
+    ttl = sent[IP].ttl
+    if reply is None:
+        return HopResult(ttl, None, None, None, False, None)
+    src = reply[IP].src
+    recv_ttl = reply[IP].ttl
+    rtt_ms = None
+    if getattr(sent, "sent_time", None) and getattr(reply, "time", None):
+        rtt_ms = (reply.time - sent.sent_time) * 1000.0
+    reached = (src == target)
+    kind = None
+    if reply.haslayer(ICMP):
+        t = int(reply[ICMP].type)
+        if t == _ICMP_TIME_EXCEEDED:
+            kind = "time-exceeded"
+        elif t == _ICMP_ECHO_REPLY:
+            kind = "echo-reply"
+            reached = True
+        elif t == _ICMP_DEST_UNREACH:
+            kind = "unreachable"
+            reached = reached or (src == target)
+    elif reply.haslayer(TCP):
+        kind = "tcp-reply"
+        reached = (src == target)
+    return HopResult(ttl, src, rtt_ms, recv_ttl, reached, kind)
+
+
+def scapy_sender(pkt, timeout):
+    """Production send_fn (scapy sr1; needs root / CAP_NET_RAW). Lazy import."""
+    from scapy.all import sr1
+    return sr1(pkt, timeout=timeout, verbose=0)
+
+
+def trace_flow(target, flow, send_fn=None, method="icmp", max_ttl=30,
+               timeout=1.0, stop_on_reach=True):
+    """Run one flow-consistent trace and return the ordered path. send_fn is the
+    injectable send/recv (scapy sr1 in prod, a fake in tests)."""
+    send_fn = send_fn or scapy_sender
+    hops = []
+    reached = False
+    forward_hops = None
+    target_reply_ttl = None
+    for ttl in range(1, max_ttl + 1):
+        pkt = build_probe(target, ttl, flow, method)
+        t0 = time.time()
+        reply = send_fn(pkt, timeout)
+        if reply is not None and not getattr(pkt, "sent_time", None):
+            try:
+                pkt.sent_time = t0
+                if not getattr(reply, "time", None):
+                    reply.time = time.time()
+            except Exception:
+                pass
+        hop = parse_reply(pkt, reply, target)
+        hops.append(hop)
+        if hop.reached:
+            reached = True
+            forward_hops = ttl
+            target_reply_ttl = hop.recv_ttl
+            if stop_on_reach:
+                break
+    return TraceResult(target, flow, method, hops, reached, forward_hops,
+                       target_reply_ttl)
+
+
+def floor_ping(target, flow, send_fn=None, method="icmp", ttl=64, timeout=1.0):
+    """A single full-TTL probe: RTT + the target's reply TTL (reverse-hop signal).
+    Used by the latency floor to cheaply detect loss bursts / RTT steps."""
+    send_fn = send_fn or scapy_sender
+    pkt = build_probe(target, ttl, flow, method)
+    t0 = time.time()
+    reply = send_fn(pkt, timeout)
+    if reply is not None and not getattr(pkt, "sent_time", None):
+        try:
+            pkt.sent_time = t0
+            if not getattr(reply, "time", None):
+                reply.time = time.time()
+        except Exception:
+            pass
+    return parse_reply(pkt, reply, target)
+
+
+# --- on-demand convergence orchestrator (fits the in-app snapshot model) ---
+_CONV_FP_HISTORY = 12          # per-flow fingerprint window (FlapTracker)
+_CONV_RTT_HISTORY = 48         # per-flow RTT window (EWMA step chart)
+
+
+def assess_convergence(target, traces, prior=None, asn_of=None, named_ribs=None,
+                       floor_rtts=None, loss_burst=0, loss_burst_min=3,
+                       suspect_at=5, correlate_window_s=30.0):
+    """Score a convergence event from one snapshot of per-flow traces, diffed
+    against the persisted per-flow fingerprint/RTT history so a change WITHIN a
+    fixed flow over successive runs registers as real routing churn.
+
+    traces        : list[TraceResult] (one per ECMP flow)
+    prior         : persisted state for this target (mutated copy returned as new)
+    asn_of        : callable ip -> Optional[int] for AS-path fingerprinting
+    named_ribs    : {carrier_name: bgp_speaker.RIB} for control-plane confirmation
+    floor_rtts    : list[float] latency-floor RTT samples (ms) for the step chart
+    loss_burst    : consecutive floor-probe losses observed
+
+    Returns (result_dict, new_state)."""
+    prior = dict(prior or {})
+    flows_state = dict(prior.get('flows') or {})
+    asn_of = asn_of or (lambda ip: None)
+
+    any_as_change = any_ip_change = any_loop = any_flap = any_osc = False
+    per_flow = []
+    best_fwd = None
+    best_reply_ttl = None
+
+    for tr in traces:
+        ip_list = tr.ip_path()
+        ip_fp = ip_path_fingerprint(ip_list)
+        as_fp = as_path_fingerprint([asn_of(ip) for ip in ip_list])
+        loop = has_loop(ip_list)
+        fkey = str(tr.flow)
+        fs = dict(flows_state.get(fkey) or {})
+        fp_hist = list(fs.get('fp_history') or [])
+        prev_fp = tuple(fp_hist[-1]) if fp_hist else None
+        # AS-path fingerprint is the churn signal when we can resolve it; else the
+        # IP-path fingerprint is the (weaker, intra-AS) fallback.
+        cur_fp = as_fp if as_fp else ip_fp
+        changed = prev_fp is not None and tuple(cur_fp) != prev_fp
+        as_changed = bool(as_fp) and changed
+        ip_changed = (not as_fp) and changed
+
+        ft = FlapTracker(window=_CONV_FP_HISTORY)
+        for h in fp_hist:
+            ft.update(tuple(h))
+        fl = ft.update(tuple(cur_fp))
+
+        fp_hist.append(list(cur_fp))
+        fp_hist = fp_hist[-_CONV_FP_HISTORY:]
+        fs['fp_history'] = fp_hist
+        flows_state[fkey] = fs
+
+        any_as_change = any_as_change or as_changed
+        any_ip_change = any_ip_change or ip_changed
+        any_loop = any_loop or loop
+        any_flap = any_flap or fl['flapping']
+        any_osc = any_osc or fl['oscillating']
+        if tr.reached and (best_fwd is None or tr.forward_hops < best_fwd):
+            best_fwd = tr.forward_hops
+            best_reply_ttl = tr.target_reply_ttl
+
+        per_flow.append({
+            'flow': tr.flow, 'method': tr.method, 'reached': tr.reached,
+            'forward_hops': tr.forward_hops, 'hops': ip_list,
+            'as_path': [a for a in (asn_of(ip) for ip in ip_list) if a],
+            'loop': loop, 'changed': changed, 'as_path_changed': as_changed,
+            'ip_path_changed': ip_changed, 'flapping': fl['flapping'],
+            'oscillating': fl['oscillating'], 'transitions': fl['transitions'],
+        })
+
+    # RTT step-change over the floor samples (prior history + this run's).
+    rtt_hist = list(prior.get('rtt_history') or [])
+    chart = EwmaChart()
+    rtt_step = False
+    rtt_z = 0.0
+    for x in rtt_hist:
+        chart.update(x)
+    for x in (floor_rtts or []):
+        step, z = chart.update(x)
+        if step:
+            rtt_step = True
+            rtt_z = z
+    rtt_hist = (rtt_hist + list(floor_rtts or []))[-_CONV_RTT_HISTORY:]
+
+    # Hop-count asymmetry (independent axis, reported alongside).
+    asym = assess_asymmetry(best_fwd, best_reply_ttl)
+
+    # Control-plane confirmation from the receive-only collector's RIB(s).
+    rib_confirmed = False
+    rib_cause = ""
+    carriers = []
+    if named_ribs:
+        stub = {'kind': 'convergence', 'target': target}
+        mc = correlate_multi(stub, named_ribs, window_s=correlate_window_s)
+        carriers = mc.get('carriers', [])
+        if mc.get('carriers_confirmed'):
+            rib_confirmed = True
+            rib_cause = mc.get('attribution', '')
+
+    ev = ConvergenceEvidence(
+        loss_burst=loss_burst, rtt_step=rtt_step, rtt_z=rtt_z,
+        as_path_changed=any_as_change, ip_path_changed=any_ip_change,
+        loop=any_loop, oscillating=any_osc, flapping=any_flap,
+        rib_confirmed=rib_confirmed, rib_cause=rib_cause)
+    verdict = score_convergence(ev, loss_burst_min=loss_burst_min,
+                                suspect_at=suspect_at)
+
+    new_state = {'flows': flows_state, 'rtt_history': rtt_hist,
+                 'last_ts': time.time()}
+    result = {
+        'target': target,
+        'score': verdict.score,
+        'severity': verdict.severity,
+        'suspected': verdict.suspected,
+        'reasons': verdict.reasons,
+        'evidence': {
+            'loss_burst': ev.loss_burst, 'rtt_step': ev.rtt_step,
+            'rtt_z': round(ev.rtt_z, 2), 'as_path_changed': ev.as_path_changed,
+            'ip_path_changed': ev.ip_path_changed, 'loop': ev.loop,
+            'oscillating': ev.oscillating, 'flapping': ev.flapping,
+            'rib_confirmed': ev.rib_confirmed, 'rib_cause': ev.rib_cause,
+        },
+        'asymmetry': {
+            'forward_hops': asym.forward_hops, 'reverse_hops': asym.reverse_hops,
+            'delta': asym.delta, 'asymmetric': asym.asymmetric,
+            'confidence': asym.confidence, 'note': asym.note,
+        },
+        'flows': per_flow,
+        'carriers': carriers,
+    }
+    return result, new_state
+
+
 # --- self-test (no network for the detector; loopback for the wire) --------
 def selftest():
     scen = []
@@ -453,6 +956,74 @@ def selftest():
     check('multi-carrier-all-stable-no-confirm',
           stable_ev.get('verdict') != 'confirmed' and 'all carriers stable' in stable_ev['attribution'],
           stable_ev.get('attribution'))
+
+    # ---- convergence engine (ported from pathwatch v2) --------------------
+    # 6. hop-count asymmetry: fwd 5 hops, reply TTL 50 => reverse 14 hops.
+    a = assess_asymmetry(5, 50)
+    check('assess-asymmetry-hopcount',
+          a.asymmetric and a.reverse_hops == 14 and a.delta == 9 and a.confidence == 'high',
+          '%s' % (a,))
+
+    # 7. path fingerprints + loop + oscillation primitives.
+    # None is dropped first, so the two 65002 become consecutive and collapse.
+    check('as-path-fingerprint-collapse',
+          as_path_fingerprint([65001, 65001, 65002, None, 65002]) == (65001, 65002),
+          as_path_fingerprint([65001, 65001, 65002, None, 65002]))
+    check('has-loop', has_loop(['10.0.0.1', '10.0.0.2', '10.0.0.1']) and
+          not has_loop(['10.0.0.1', '*', '10.0.0.2']), '')
+    ft = FlapTracker(window=8)
+    for fp in [('A',), ('B',), ('A',), ('B',), ('A',)]:
+        r = ft.update(fp)
+    check('flap-oscillation', r['oscillating'], r)
+
+    # 8. score_convergence tiers: RIB confirmation => 'confirmed'; loss + AS-path
+    #    change happening now => 'active'; jitter alone stays sub-suspect.
+    v_conf = score_convergence(ConvergenceEvidence(rib_confirmed=True,
+                                                   rib_cause='prefix churn'))
+    v_active = score_convergence(ConvergenceEvidence(as_path_changed=True, loss_burst=3))
+    v_watch = score_convergence(ConvergenceEvidence(rtt_step=True, rtt_z=5.0))
+    check('score-convergence-tiers',
+          v_conf.severity == 'confirmed' and v_active.severity == 'active'
+          and v_watch.severity == 'watch',
+          '%s/%s/%s' % (v_conf.severity, v_active.severity, v_watch.severity))
+
+    # 9. assess_convergence over two snapshots of the SAME flow: the AS-path
+    #    changes within the fixed flow between run 1 and run 2 => real churn.
+    def _trace(flow, ips, reply_ttl=50):
+        hops = [HopResult(i + 1, ip, 1.0, reply_ttl if ip == ips[-1] else 250,
+                          ip == ips[-1], 'echo-reply' if ip == ips[-1] else 'time-exceeded')
+                for i, ip in enumerate(ips)]
+        return TraceResult('9.9.9.9', flow, 'icmp', hops, True, len(ips), reply_ttl)
+
+    asn_map = {'10.0.0.1': 65001, '10.0.0.2': 65002, '10.0.0.9': 65009,
+               '9.9.9.9': None}
+    asn_of = lambda ip: asn_map.get(ip)
+    r1, st1 = assess_convergence('9.9.9.9',
+                                 [_trace(1, ['10.0.0.1', '10.0.0.2', '9.9.9.9'])],
+                                 prior=None, asn_of=asn_of)
+    r2, st2 = assess_convergence('9.9.9.9',
+                                 [_trace(1, ['10.0.0.1', '10.0.0.9', '9.9.9.9'])],
+                                 prior=st1, asn_of=asn_of, loss_burst=3)
+    check('assess-convergence-first-run-baseline',
+          not r1['evidence']['as_path_changed'] and r1['severity'] in ('none', 'watch'),
+          r1['severity'])
+    check('assess-convergence-detects-as-path-change',
+          r2['evidence']['as_path_changed'] and r2['severity'] in ('suspected', 'active'),
+          '%s reasons=%s' % (r2['severity'], r2['reasons']))
+
+    # 10. assess_convergence upgraded to 'confirmed' by a flapping RIB route.
+    rib_x = bgp_speaker.RIB(flap_window_s=60, flap_threshold=3)
+    tnow = time.time()
+    for k in range(4):
+        rib_x.apply_update({'announced': ['9.9.9.0/24'], 'withdrawn': [],
+                            'as_path': [65001, 65002 + k], 'next_hop': '10.0.0.2',
+                            'communities': []}, now=tnow + k)
+    r3, _ = assess_convergence('9.9.9.9',
+                               [_trace(1, ['10.0.0.1', '10.0.0.2', '9.9.9.9'])],
+                               prior=None, asn_of=asn_of, named_ribs={'Carrier-A': rib_x})
+    check('assess-convergence-rib-confirmed',
+          r3['severity'] == 'confirmed' and r3['evidence']['rib_confirmed'],
+          '%s cause=%s' % (r3['severity'], r3['evidence']['rib_cause'][:60]))
 
     return {'success': all(s['pass'] for s in scen), 'scenarios': scen}
 

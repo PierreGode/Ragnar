@@ -8405,7 +8405,7 @@ async function runIcmpWatch() {
         const [cls, label] = _ICMP_VERDICT_STYLE[d.verdict] || _ICMP_VERDICT_STYLE.unknown;
         const c = d.counts || {};
         let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
-        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.icmp_count} pkts (${d.rate}/s) · redirect ${c.redirect || 0} · echo ${c.echo || 0} · IRDP ${c.irdp || 0} · recon ${c.recon || 0}${d.learned ? ' · <span class="text-gray-400">gateway baseline learned now</span>' : ''}</p>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.icmp_count} pkts (${d.rate}/s) · redirect ${c.redirect || 0} · echo ${c.echo || 0} · IRDP ${c.irdp || 0} · recon ${c.recon || 0}${c.arp ? ' · ARP ' + c.arp : ''}${d.learned ? ' · <span class="text-gray-400">gateway baseline learned now</span>' : ''}</p>`;
         if ((d.gateways || []).length) {
             html += `<p class="text-xs text-gray-500 mb-2">Trusted gateway(s): <span class="font-mono text-gray-400">${escapeHtml(d.gateways.join(', '))}</span></p>`;
         }
@@ -8425,6 +8425,29 @@ async function runIcmpWatch() {
                         <td class="px-2 py-1">${mal ? '<span class="text-red-300">MITM</span>' : '<span class="text-gray-500">benign</span>'}</td>
                     </tr>`;
                 }).join('') + '</tbody></table>';
+        }
+        const rfindings = d.redirect_findings || [];
+        if (rfindings.length) {
+            const sevChip = {
+                CRITICAL: 'bg-red-950/60 border-red-800 text-red-300',
+                HIGH: 'bg-orange-950/50 border-orange-800 text-orange-300',
+                MEDIUM: 'bg-amber-950/40 border-amber-800 text-amber-300',
+                LOW: 'bg-slate-800 border-slate-700 text-gray-400',
+                INFO: 'bg-slate-800 border-slate-700 text-gray-500',
+            };
+            // The RFC 1122 / gateway-MAC / ARP-poison detail behind the verdict,
+            // most-severe first.
+            const rank = { INFO: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+            const shown = rfindings.slice().sort((a, b) => (rank[b.severity] || 0) - (rank[a.severity] || 0));
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">Redirect analysis (' + rfindings.length + ')</p>' +
+                '<ul class="space-y-1">' + shown.map(f => {
+                    const chip = sevChip[f.severity] || sevChip.INFO;
+                    return '<li class="text-xs text-gray-300 flex flex-wrap items-baseline gap-x-2">' +
+                        '<span class="inline-block px-1.5 py-0.5 rounded border font-mono ' + chip + '">' + escapeHtml(f.severity) + '</span>' +
+                        '<span class="font-mono text-gray-200">' + escapeHtml(f.check) + '</span>' +
+                        '<span class="text-gray-400">' + escapeHtml(f.message || '') + '</span>' +
+                        '</li>';
+                }).join('') + '</ul>';
         }
         if (d.reasons && d.reasons.length) {
             html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
@@ -10012,6 +10035,67 @@ async function runPathAsymmetry() {
                 h += '</div>';
             }
         }
+        out.innerHTML = h;
+    } catch (e) {
+        out.innerHTML = '<span class="text-red-300">' + escapeHtml(e.message) + '</span>';
+    }
+}
+
+const _PC_SEV = {
+    confirmed: ['bg-red-950/60 border-red-800 text-red-300', '🛑 CONFIRMED — BGP RIB corroborates a convergence event'],
+    active:    ['bg-red-950/50 border-red-800 text-red-300', '⚠️ ACTIVE — loss + a real path change happening now'],
+    suspected: ['bg-orange-950/50 border-orange-800 text-orange-300', '⚠️ SUSPECTED — strong convergence evidence'],
+    watch:     ['bg-amber-950/40 border-amber-800 text-amber-300', '👀 WATCH — intra-AS wobble worth logging'],
+    none:      ['bg-green-950/40 border-green-900 text-green-400', '✓ No convergence signal — path stable'],
+};
+async function runPathConvergence() {
+    const out = document.getElementById('pc-results');
+    if (!out) return;
+    const target = (document.getElementById('pc-target').value || '').trim();
+    if (!target) { out.classList.remove('hidden'); out.innerHTML = '<span class="text-amber-300">enter a target</span>'; return; }
+    out.classList.remove('hidden');
+    out.innerHTML = '<span class="text-gray-400">tracing flows…</span>';
+    try {
+        const body = {
+            target,
+            flows: parseInt(document.getElementById('pc-flows').value, 10) || 3,
+            method: document.getElementById('pc-method').value || 'icmp',
+        };
+        const d = await postAPI('/api/net/path-convergence', body);
+        if (!d.success) {
+            let extra = '';
+            if (d.missing_tool === 'scapy') extra = ' <button onclick="installNetTool(\'scapy\', this, runPathConvergence)" class="ml-2 underline text-cyan-400">Install Scapy</button>';
+            out.innerHTML = '<span class="text-red-300">' + escapeHtml(d.error || 'failed') + '</span>' + extra;
+            return;
+        }
+        const [cls, label] = _PC_SEV[d.severity] || _PC_SEV.none;
+        let h = '<div class="mb-2 px-3 py-2 rounded border ' + cls + ' text-sm">' + label + ' <span class="opacity-70">(score ' + d.score + ')</span></div>';
+        const f = d.floor || {};
+        h += '<p class="text-xs text-gray-500 mb-2">' + d.flows_probed + ' flow(s) · method ' + escapeHtml(d.method) + ' · floor ' + (f.replies || 0) + '/' + (f.sent || 0) + ' replies' + (f.loss_burst ? ' · <span class="text-red-300">loss burst ' + f.loss_burst + '</span>' : '') + (d.rib_correlation ? ' · <span class="text-cyan-400">RIB-correlated</span>' : '') + '</p>';
+        if (d.reasons && d.reasons.length) {
+            h += '<ul class="text-xs text-gray-300 list-disc pl-5 mb-2">' + d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        const asy = d.asymmetry || {};
+        if (asy.forward_hops != null || asy.reverse_hops != null) {
+            h += '<p class="text-xs text-gray-400 mb-2">Hop asymmetry: fwd ' + (asy.forward_hops ?? '?') + ' / rev ' + (asy.reverse_hops ?? '?') + (asy.delta != null ? ' (Δ' + asy.delta + ', ' + escapeHtml(asy.confidence) + ')' : '') + ' — ' + escapeHtml(asy.note || '') + '</p>';
+        }
+        const flows = d.flows || [];
+        if (flows.length) {
+            h += '<p class="text-xs uppercase text-gray-400 mt-2 mb-1">Per-flow paths</p><ul class="space-y-1">';
+            for (const fl of flows) {
+                const flags = [];
+                if (fl.as_path_changed) flags.push('<span class="text-red-300">AS-path changed</span>');
+                if (fl.ip_path_changed) flags.push('<span class="text-amber-300">IP-path changed</span>');
+                if (fl.loop) flags.push('<span class="text-red-300">loop</span>');
+                if (fl.oscillating) flags.push('<span class="text-red-300">oscillating</span>');
+                if (fl.flapping) flags.push('<span class="text-red-300">flapping</span>');
+                h += '<li class="text-xs text-gray-300"><span class="font-mono text-gray-400">flow ' + fl.flow + '</span> ' +
+                    (fl.as_path && fl.as_path.length ? 'AS ' + fl.as_path.map(a => 'AS' + a).join(' → ') : (fl.hops || []).filter(Boolean).join(' → ') || '—') +
+                    (flags.length ? ' · ' + flags.join(' · ') : '') + '</li>';
+            }
+            h += '</ul>';
+        }
+        if (d.enrich_note) h += '<p class="text-xs text-amber-300/80 mt-2">' + escapeHtml(d.enrich_note) + '</p>';
         out.innerHTML = h;
     } catch (e) {
         out.innerHTML = '<span class="text-red-300">' + escapeHtml(e.message) + '</span>';

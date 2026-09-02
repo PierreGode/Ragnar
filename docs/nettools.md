@@ -16,7 +16,8 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 > **Co-authored by [Solarflere](https://www.instagram.com/solarflere).** The
 > Authority Verification suite was designed and built in collaboration with Solarflere.
 
-<img width="2160" height="3982" alt="image" src="https://github.com/user-attachments/assets/d33cd1a5-0618-413c-afa6-d01d64d2f6d8" />
+<img width="2160" height="3982" alt="ragnar_osi_visibility_matrix" src="https://github.com/user-attachments/assets/b4c13eb4-522e-45aa-aa2c-ef685faab3eb" />
+
 
 
 
@@ -1303,6 +1304,28 @@ What it flags:
 - **Recon** — ICMP **timestamp / address-mask / information** requests that
   enumerate hosts and leak facts.
 
+**Redirect/ARP-poison layer (v2).** The capture now also carries the Ethernet
+header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v2
+detector ([`icmpwatch.py`](../icmpwatch.py)) for the full **RFC 1122 acceptance
+rules** and **L2 identity** correlation on top of the coarse gateway check:
+
+- **gateway_mac_mismatch** (CRITICAL) — a redirect claims a known gateway's IP but
+  arrives from a **foreign source MAC** (the gateway MAC is taken from the host
+  neighbour table, so this fires even without a legitimate gateway ARP in the
+  window): IP-spoofed impersonation.
+- **gateway_arp_conflict / redirect_via_poisoned_gw** (CRITICAL) — the gateway a
+  redirect is issued *by*, or points the victim *at*, has a **contested ARP
+  binding** (a second live MAC): the poison-then-redirect MITM, corroborated
+  across L2 and L3 independently.
+- **source_not_gateway / new_gw_off_subnet / new_gw_not_router** (HIGH),
+  **new_gw_equals_victim / invalid_code / malformed** (MEDIUM), degenerate targets
+  (LOW), plus **redirect_burst / redirect_dest_sweep** rate checks.
+
+The per-redirect findings are shown under **Redirect analysis** in the card
+(severity-chipped, most-severe first). The ARP frames are context only — they are
+never counted toward the ICMP flood/volume math and icmpwatch is **not** an ARP
+IDS (that stays [`arp_guard`](arp_guard.md)'s job).
+
 The host's default gateway is **always trusted**, plus any gateway learned into
 `data/icmp_watch.json` on the first scan; after a legitimate router change click
 **Trust current** to re-seed. Every result carries a **mitigation advisory**:
@@ -1310,6 +1333,12 @@ ignore redirects on hosts (`net.ipv4.conf.all.accept_redirects=0`) and stop send
 them on the gateway (`send_redirects=0`), disable IRDP, and rate-limit / filter the
 recon ICMP types at the edge. **ICMPv6 Redirects (type 137)** are covered separately
 by [IPv6 First-Hop Watch](#ipv6-first-hop-watch).
+
+> **Watchtower feed.** HIGH/CRITICAL redirect findings are appended as JSON-lines
+> to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check + source), so the
+> [Watchtower](watchtower.md) unified pane and single Pushover path fold in redirect
+> MITM / ARP-poison correlation automatically. The standalone engine ships a 69-test
+> self-test: `python3 icmpwatch_selftest.py`.
 
 Small **CLI** (no web app needed):
 
@@ -2052,18 +2081,43 @@ Otherwise it labels the event **route-churn** (flapping), **recent path shift** 
 fresh but stable change), or **stable / data-plane** (no matching control-plane
 change — the asymmetry is below BGP, e.g. a congested or re-routed transit leg).
 
+**Path convergence (v2) — flow-consistent traceroute + convergence scoring.** The
+OWD probe answers *"is the path asymmetric?"*; this answers *"is the path
+**changing** — a BGP (re)convergence?"*. It runs a **flow-consistent (Paris)**
+traceroute per ECMP flow — the flow id is held constant across a TTL sweep, so a
+change **within** a flow is a genuine routing change while differences **across**
+flows are just ECMP and are **not** counted as churn — and fingerprints each flow's
+path on its **AS-path** (resolved via the collector RIB first, then Team Cymru).
+Each run diffs against a per-flow baseline persisted in `data/path_convergence.json`,
+so an AS-path change between successive runs registers; a short latency **floor**
+(a handful of full-TTL probes) adds **loss-burst** and **RTT-step** signals. The
+evidence is scored into a tiered verdict — **watch** (intra-AS wobble) →
+**suspected** (strong evidence) → **active** (loss **and** a real path change now) →
+**confirmed** (a peered collector's RIB corroborates the covering prefix churning).
+It's **detection-only**, but the traceroute is *active probing*, so it runs
+**on-demand only** — never in the passive Network Integrity rotation. Run it twice
+(baseline, then again) so a same-flow change can be seen.
+
 > **Safety:** the collector never originates routing information, and the OWD probe is
 > a handful of small UDP datagrams — neither injects state into the network. Both are
-> long-lived daemons managed with start/stop/status; nothing is persisted to disk.
+> long-lived daemons managed with start/stop/status; nothing is persisted to disk. The
+> path-convergence traceroute needs raw sockets (root / `CAP_NET_RAW`) and [Scapy](https://scapy.net).
+
+> **Watchtower feed.** A suspected/active/confirmed convergence verdict is appended
+> as JSON-lines to `/var/log/ragnar/pathwatch.jsonl` (deduplicated per target +
+> severity), so [Watchtower](watchtower.md) folds BGP convergence / route-hijack
+> corroboration into the unified pane and single Pushover path.
 
 - Endpoints: `GET/POST /api/net/bgp-collector` `{action: start|stop|status|rib,
   local_as, router_id, port, hold, peer_ip, peer_as` (single) or `peers: [{ip, as,
   name}, …]` (multi-carrier), `peer` (name, for per-session stop/rib)`}`,
   `GET/POST /api/net/owd-reflector` `{action: start|stop|status, port}`,
-  `POST /api/net/path-asymmetry` `{target, count, clock_synced}`
+  `POST /api/net/path-asymmetry` `{target, count, clock_synced}`,
+  `POST /api/net/path-convergence` `{target, flows, method, max_ttl, floor_count}`
 - CLI: `python3 path_asymmetry.py reflector [port]` runs a standalone reflector;
-  `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()`, aggregated into
-  the Detector Self-Test panel (`GET /api/net/routing-selftest`).
+  `bgp_speaker.py` and `path_asymmetry.py` each expose `selftest()` (the latter now
+  covers the convergence engine too), aggregated into the Detector Self-Test panel
+  (`GET /api/net/routing-selftest`).
 
 ### Vendor CVE Guards (Cisco · Juniper · Arista)
 

@@ -2514,6 +2514,25 @@
                             <div id="pa-results" class="hidden mt-2 overflow-x-auto text-sm"></div>
                         </div>
                     </div>
+                    <div class="min-w-0 border border-slate-700 rounded p-3 mt-4">
+                        <h4 class="text-sm font-semibold mb-1 text-gray-200">Path convergence (Paris trace)</h4>
+                        <p class="text-xs text-gray-400 mb-2"><strong>Detection-only, on-demand active probe.</strong> Runs a <strong>flow-consistent (Paris)</strong> traceroute per ECMP flow and diffs each flow's <strong>AS-path fingerprint</strong> against the stored baseline — a change <em>within</em> a fixed flow is real routing churn, while differences <em>across</em> flows are just ECMP and are not counted. Scores loops / oscillation / flapping / loss-bursts / RTT-steps into a convergence verdict, and upgrades it to <span class="font-mono">confirmed</span> with the control-plane cause when the receive-only collector is <span class="font-mono">Established</span>. Run it twice (baseline, then again) so a same-flow change can register. Feeds Watchtower.</p>
+                        <div class="flex flex-col gap-2">
+                            <input id="pc-target" type="text" autocomplete="off" placeholder="target IP / host (e.g. 1.1.1.1)" class="w-full min-w-0 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                            <div class="flex flex-wrap gap-2 items-center">
+                                <label class="text-xs text-gray-400 flex items-center gap-1">flows
+                                    <input id="pc-flows" type="number" min="1" max="8" value="3" title="ECMP flows to enumerate" class="w-16 shrink-0 bg-slate-800 border border-slate-700 rounded px-2 py-2 text-sm"></label>
+                                <label class="text-xs text-gray-400 flex items-center gap-1">method
+                                    <select id="pc-method" title="probe protocol (tcp-syn to 443 slips past ICMP/UDP filters)" class="shrink-0 bg-slate-800 border border-slate-700 rounded px-2 py-2 text-sm">
+                                        <option value="icmp">icmp</option>
+                                        <option value="udp">udp</option>
+                                        <option value="tcp-syn">tcp-syn</option>
+                                    </select></label>
+                                <button onclick="runPathConvergence()" class="w-full sm:w-auto sm:ml-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-2 rounded text-sm">Probe convergence</button>
+                            </div>
+                        </div>
+                        <div id="pc-results" class="hidden mt-2 overflow-x-auto text-sm"></div>
+                    </div>
                 </div>
                 <!-- Routing-scanner self-test + Scapy -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
@@ -8375,7 +8394,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260827-btnfix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260902-icmp-bgp-v2"></script>
 
 
 
