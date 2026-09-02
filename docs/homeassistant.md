@@ -140,20 +140,30 @@ separate box, just use the Ragnar unit's LAN IP or its
 
 Notify a phone on any high/critical Ragnar security alert:
 
+> **`event.ragnar_security_alert` is an event *entity*, not a bus event.** The
+> integration updates the entity's state (a timestamp) and carries the alert's
+> `severity` / `source` / `title` / `key` as **attributes** — it does **not**
+> fire a `ragnar_security_alert` event on the HA event bus. So automations must
+> use a **state trigger** on the entity and read `trigger.to_state.attributes`,
+> as below. (A `platform: event, event_type: ragnar_security_alert` trigger will
+> never fire.)
+
 ```yaml
 automation:
   - alias: Notify on Ragnar critical security alert
     trigger:
-      - platform: event
-        event_type: ragnar_security_alert
+      - platform: state
+        entity_id: event.ragnar_security_alert
     condition:
       - condition: template
-        value_template: "{{ trigger.event.data.severity in ['high','critical'] }}"
+        value_template: "{{ trigger.to_state.attributes.severity in ['high','critical'] }}"
     action:
       - service: notify.mobile_app_myphone
         data:
-          title: "Ragnar: {{ trigger.event.data.severity | upper }}"
-          message: "{{ trigger.event.data.source }}: {{ trigger.event.data.title }}"
+          title: "Ragnar: {{ trigger.to_state.attributes.severity | upper }}"
+          message: >
+            {{ trigger.to_state.attributes.source }}:
+            {{ trigger.to_state.attributes.title }}
 ```
 
 Warn when a mesh node drops or needs attention:
@@ -193,24 +203,32 @@ automation:
 
 Turn an LED strip **red** when a captive-portal / evil-twin attack is detected.
 HaleHound's GARMR fingerprint and WiFi Defense's evil-twin / attack-tool
-detections both flow into Watchtower, so they arrive here as
-`ragnar_security_alert` events — the `condition` below keeps the strip reacting
-to portal-class alerts specifically (drop the `is search(...)` clause to react to
-**any** high/critical alert). Replace `light.led_strip` with your strip's entity:
+detections both flow into Watchtower and surface on the
+`event.ragnar_security_alert` entity — the `condition` below keeps the strip
+reacting to portal-class alerts specifically (drop the `is search(...)` clause to
+react to **any** medium-or-worse alert). Replace `light.led_strip` with your
+strip's entity.
+
+> **Severity note.** A freshly-started captive portal often scores **`medium`**
+> ("possible") from HaleHound, not `high`/`critical` — it only escalates once the
+> GARMR portal is confirmed across multiple signals. So this example triggers on
+> `medium` and above; the keyword filter keeps ordinary `medium` noise (asset /
+> IP-change alerts) from setting it off.
 
 ```yaml
 automation:
   - alias: LED strip red on Ragnar captive-portal attack
     mode: restart
     trigger:
-      - platform: event
-        event_type: ragnar_security_alert
+      - platform: state
+        entity_id: event.ragnar_security_alert
     condition:
       - condition: template
         value_template: >
-          {% set t = (trigger.event.data.title ~ ' ' ~ trigger.event.data.source) | lower %}
-          {{ trigger.event.data.severity in ['high','critical']
-             and (t is search('portal|garmr|evil.?twin|halehound|rogue|attack.?tool')) }}
+          {% set a = trigger.to_state.attributes %}
+          {% set t = ((a.title | default('')) ~ ' ' ~ (a.source | default(''))) | lower %}
+          {{ (a.severity | default('')) in ['medium','high','critical']
+             and (t is search('portal|captive|garmr|evil.?twin|halehound|marauder|ghost.?esp|rogue|multitool|attack.?tool')) }}
     action:
       # Snapshot the strip so we can restore it afterward.
       - service: scene.create
@@ -246,9 +264,11 @@ automation:
           entity_id: scene.ragnar_led_restore
 ```
 
-> Prefer a state trigger? `binary_sensor.ragnar_security_alert` going `on` also
-> works, but it fires for **all** high/critical alerts and can't single out the
-> captive-portal case — the event route above is the better fit here.
+> Prefer to react to **any** high/critical alert instead?
+> `binary_sensor.ragnar_security_alert` turns `on` for those — trigger on it going
+> `on` — but it can't single out the captive-portal case (and, being high/critical
+> only, it misses the `medium` "possible portal" verdict the example above catches),
+> so the event-entity route is the better fit here.
 
 ## Options
 
