@@ -4784,7 +4784,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260902-halehound-attack-ssid';
+const WIFIDEF_BUILD = '20260902-halehound-esp32-oui';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -5267,6 +5267,7 @@ function wifidefRender() {
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
                 title = x.severity === 'attack_tool_ssid' ? '☠️ Attack-tool SSID (EvilPortal/Marauder/Ghost ESP class)'
+                    : x.severity === 'esp32_open_ap' ? '🛰️ ESP32 open soft-AP (Espressif radio — name-independent)'
                     : x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
                     : x.severity === 'spoofed_bssid' ? '🚫 Spoofed BSSID (multicast/group bit set)'
                     : x.severity === 'rogue_lure' ? '🎣 Open Wi-Fi lure — possible evil-twin portal'
@@ -5276,7 +5277,7 @@ function wifidefRender() {
                 body = `<div>SSID <b>${x.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</b></div><div class="font-mono text-[11px] text-gray-400">${bssids.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
                 // A lure / spoofed AP is the shape of a captive-portal evil twin —
                 // offer a one-click active probe (needs an adapter joined to it).
-                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid' || x.severity === 'attack_tool_ssid') {
+                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid' || x.severity === 'attack_tool_ssid' || x.severity === 'esp32_open_ap') {
                     body += `<button onclick="event.stopPropagation(); wifidefProbePortal('${_esc(x.ssid || '')}')" class="mt-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-2 py-1 rounded text-[11px] font-semibold">Probe captive portal…</button>`;
                 }
             } else if (x.type === 'auth_flood') {

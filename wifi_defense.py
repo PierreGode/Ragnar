@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260902-halehound-attack-ssid"
+_BUILD = "20260902-halehound-esp32-oui"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -580,16 +580,45 @@ def _frame_to_event(pkt):
         "protected": bool(int(getattr(d, "FCfield", 0)) & 0x40),
         "ts": float(getattr(pkt, "time", 0) or 0),
     }
-    # SSID from the first SSID element (ID 0). Empty = wildcard/hidden.
+    # SSID from the first SSID element (ID 0); note RSN (48) / WPA (221 vendor)
+    # elements in the same pass so we can label security. Empty SSID = hidden.
     el = pkt.getlayer(Dot11Elt)
+    have_ssid = False
+    has_rsn = has_wpa = False
     while el is not None and isinstance(el, Dot11Elt):
-        if el.ID == 0:
+        if el.ID == 0 and not have_ssid:
             try:
                 ev["ssid"] = el.info.decode(errors="replace")
             except Exception:
                 ev["ssid"] = None
-            break
+            have_ssid = True
+        elif el.ID == 48:
+            has_rsn = True                      # RSN (WPA2/WPA3)
+        elif el.ID == 221 and bytes(el.info)[:4] == b"\x00\x50\xf2\x01":
+            has_wpa = True                      # Microsoft WPA1 vendor IE
         el = el.payload.getlayer(Dot11Elt)
+    # Security label for beacons / probe-resps: an EvilPortal-style open lure has
+    # privacy=0 and no RSN/WPA element. Only "Open" is asserted with confidence;
+    # anything encrypted is left as its coarse label (detail doesn't matter here).
+    if kind in ("beacon", "probe_resp"):
+        cap = 0
+        for lname in ("Dot11Beacon", "Dot11ProbeResp"):
+            lyr = pkt.getlayer(lname)
+            if lyr is not None:
+                try:
+                    cap = int(lyr.cap)
+                except Exception:
+                    cap = 0
+                break
+        privacy = bool(cap & 0x10)              # capability Privacy bit
+        if has_rsn:
+            ev["security"] = "WPA2/3"
+        elif has_wpa:
+            ev["security"] = "WPA"
+        elif privacy:
+            ev["security"] = "WEP"
+        else:
+            ev["security"] = "Open"
     # Reason code for deauth/disassoc
     if kind in ("deauth", "disassoc"):
         for lname in ("Dot11Deauth", "Dot11Disas"):
@@ -693,6 +722,48 @@ def _norm_ssid(ssid):
 def _is_attack_tool_ssid(ssid):
     """True if an SSID is a known attack-tool / captive-portal default name."""
     return _norm_ssid(ssid) in _ATTACK_TOOL_SSIDS
+
+
+# Espressif OUIs — an ESP32/ESP8266 is the radio behind EvilPortal, Marauder,
+# Ghost ESP, Bruce, GARMR, … . Renaming the SSID or hiding it doesn't change the
+# chip's burned-in MAC, so an OPEN AP from an Espressif OUI is a name-independent
+# tell of an ESP32 soft-AP. A curated fallback set covers a minimal install with
+# no IEEE oui.txt; when present we defer to the analyzer's full oui.txt lookup.
+_ESPRESSIF_OUIS = {
+    "24:0a:c4", "24:6f:28", "24:b2:de", "24:d7:eb", "2c:3a:e8", "2c:bc:bb",
+    "30:ae:a4", "30:c6:f7", "34:85:18", "34:94:54", "34:ab:95", "34:b4:72",
+    "3c:61:05", "3c:71:bf", "3c:8a:1f", "40:22:d8", "40:91:51", "44:17:93",
+    "48:31:b7", "48:3f:da", "48:55:19", "4c:11:ae", "4c:75:25", "4c:eb:d6",
+    "50:02:91", "54:32:04", "54:0e:00", "58:bf:25", "5c:cf:7f", "60:01:94",
+    "68:67:25", "68:b6:b3", "6c:b4:57", "70:04:1d", "70:b8:f6",
+    "78:21:84", "78:e3:6d", "7c:9e:bd", "7c:df:a1", "80:64:6f", "80:7d:3a",
+    "84:0d:8e", "84:cc:a8", "84:f3:eb", "84:fc:e6", "88:13:bf", "8c:4b:14",
+    "8c:aa:b5", "90:38:0c", "94:3c:c6", "94:b5:55", "94:b9:7e", "98:cd:ac",
+    "98:f4:ab", "9c:9c:1f", "a0:20:a6", "a0:76:4e", "a0:b7:65", "a4:7b:9d",
+    "a4:cf:12", "a8:03:2a", "ac:0b:fb", "ac:67:b2", "b0:a7:32", "b4:8a:0a",
+    "b4:e6:2d", "b8:d6:1a", "b8:f0:09", "bc:dd:c2", "bc:ff:4d", "c4:4f:33",
+    "c4:5b:be", "c4:dd:57", "c8:2b:96", "c8:c9:a3", "c8:f0:9e", "cc:50:e3",
+    "cc:db:a7", "d8:a0:1d", "d8:bc:38", "d8:f1:5b", "dc:4f:22", "dc:54:75",
+    "e0:5a:1b", "e0:98:06", "e0:e2:e6", "e8:31:cd", "e8:68:e7", "e8:9f:6d",
+    "e8:db:84", "ec:64:c9", "ec:da:3b", "ec:fa:bc", "f0:08:d1", "f4:12:fa",
+    "f4:cf:a2", "f8:b3:b7", "fc:b4:67", "fc:f5:c4",
+}
+
+
+def _is_espressif(mac):
+    """True if a BSSID belongs to Espressif (ESP32/ESP8266)."""
+    oui = _oui(mac)
+    if not oui:
+        return False
+    if oui in _ESPRESSIF_OUIS:
+        return True
+    # Defer to the analyzer's full IEEE oui.txt lookup when it's importable.
+    try:
+        import wifi_analyzer
+        v = wifi_analyzer._oui_lookup(mac) or ""
+        return "espressif" in v.lower()
+    except Exception:
+        return False
 
 
 def _oui(mac):
@@ -1948,6 +2019,28 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                           " — an ESP32/handheld attack multitool is beaconing here",
             })
 
+    # --- ESP32 open soft-AP (NAME-INDEPENDENT): an open AP whose BSSID is an
+    # Espressif radio. EvilPortal/Marauder/Ghost ESP/GARMR all run on an ESP32,
+    # and renaming or hiding the SSID doesn't change the chip's burned-in MAC —
+    # so this catches a captive-portal lure even when it's called "Testt". Only
+    # a WARNING on its own (a benign ESP32 IoT gadget in setup mode is also an
+    # open Espressif AP); it turns critical when it co-occurs with an attack
+    # SSID / spoofed BSSID / duplicate, or an active portal probe confirms. ---
+    _esp_seen = set()
+    for e in beacons:
+        src, ssid = e.get("src"), e.get("ssid")
+        if (src and src not in _esp_seen and e.get("security") == "Open"
+                and _is_espressif(src)):
+            _esp_seen.add(src)
+            detections.append({
+                "type": "rogue_ap", "severity": "esp32_open_ap",
+                "ssid": ssid, "bssid": src,
+                "detail": f"open AP '{ssid or '<hidden>'}' is an Espressif (ESP32) "
+                          "radio — the chip behind EvilPortal/Marauder/Ghost ESP/"
+                          "GARMR. Name-independent; probe the portal to confirm vs. "
+                          "an IoT device in setup mode",
+            })
+
     # --- Spoofed BSSID: a beacon/probe-resp sourced from a group (multicast)
     # address is invalid 802.11 — no real AP does it. Catches an evil twin whose
     # randomized BSSID left the I/G bit set (the lone-lure case a duplicate/
@@ -2000,6 +2093,7 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
     sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
                 "attack_tool_ssid": 3,
                 "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
+                "esp32_open_ap": 2,
                 "band_steering": 1, "rogue_lure": 1, "seen": 1}
     threat = "clear"
     if detections:
