@@ -49,7 +49,7 @@ _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # the web UI (WIFIDEF_BUILD in ragnar_modern.js). The UI compares them and warns
 # if the running (long-lived) webapp still has an OLD wifi_defense module loaded,
 # i.e. the service wasn't restarted after a git pull. Kills stale-service guesswork.
-_BUILD = "20260902-halehound-esp32-oui"
+_BUILD = "20260902-halehound-toolnames"
 
 # Detection thresholds (per capture window)
 _DEAUTH_FLOOD_MIN = 15      # deauth+disassoc frames => flood
@@ -705,10 +705,19 @@ def _is_lure_ssid(ssid):
 # or open. Matched on the SSID normalized to lowercase with spaces/_/- removed,
 # so "Evil Portal", "evil_portal" and "EvilPortal" all hit "evilportal".
 _ATTACK_TOOL_SSIDS = {
-    "evilportal", "eviltwin", "eviltwins", "pineapple", "wifipineapple",
-    "marauder", "esp32marauder", "ghostesp", "ghost", "bruce", "garmr",
-    "halehound", "deauther", "spacehuhn", "pwnagotchi", "flipperzero",
-    "freewifiportal", "captiveportal", "wifiphisher", "fluxion",
+    # Evil-portal / captive-portal phishing firmwares
+    "evilportal", "eviltwin", "eviltwins", "captiveportal", "freewifiportal",
+    "wifiphisher", "fluxion",
+    # ESP32 / ESP8266 attack multitools (tool names + known default soft-AP SSIDs)
+    "marauder", "esp32marauder",
+    "ghostesp", "ghostnet",
+    "mayhem", "wifimayhem",
+    "bruce",
+    "garmr", "halehound", "halehoundcyd",
+    "deauther", "wifideauther", "esp8266deauther", "spacehuhn",
+    "pwnagotchi", "minigotchi",
+    # Iconic handheld attack platforms
+    "wifipineapple", "flipperzero",
 }
 
 
