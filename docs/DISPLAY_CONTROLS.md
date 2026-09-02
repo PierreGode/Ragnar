@@ -25,12 +25,25 @@ Model** + **Orientation**) and a live mirror of the screen. Below the mirror,
 editable *modules*:
 
 - **Stat boxes** — the main screen has 10 numbered boxes. Each can be pointed at
-  a different live metric: Targets, Ports, Vulns, Creds, Zombies, Data, Coins,
-  Level, Net KB, Attacks, plus Hosts / Offline / New Hosts / At‑Risk. The current
-  value is shown in brackets in the editor so you can see what each box will read.
-- **Text block** — the rolling speech line can be replaced with a fixed **custom
-  message**, the **device IP**, the **Wi‑Fi SSID**, a **clock**, **uptime**, or
-  the **orchestrator status**.
+  a different live metric:
+  - *Recon / game:* Targets, Ports, Vulns, Creds, Zombies, Data, Coins, Level,
+    Net KB, Attacks.
+  - *Network:* Hosts, Offline, New Hosts, At‑Risk.
+  - *System health:* CPU °C, CPU %, RAM %, Disk %, Uptime (h).
+  - *Watchtower:* alert count, critical/high count.
+
+  The current value is shown in brackets in the editor so you can see what each
+  box will read.
+- **Box style** — draw the boxes **with icons** (default) or as **text labels**
+  (a short tag like `CPU`/`RAM`/`TGT` instead of the icon), which frees up room
+  and stays readable when a metric's icon isn't obvious.
+- **Text block** — replace the rolling speech with a fixed **custom message**, a
+  single live fact (**IP**, **SSID**, **hostname**, **clock**, **uptime**,
+  **CPU temp**, **orchestrator status**), the **latest Watchtower alert**, or a
+  multi‑fact **bundle**:
+  - *System* — temp / CPU / RAM / uptime
+  - *Network* — IP / SSID / host count
+  - *Security* — vulns / at‑risk / Watchtower
 - **Character** — the Ragnar sprite can be kept, **enlarged**, or **hidden** (a
   hidden character hands its space to the text block).
 

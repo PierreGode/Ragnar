@@ -17043,6 +17043,45 @@ def get_epaper_display():
         return jsonify({'error': str(e)}), 500
 
 
+def _dashboard_live_sources():
+    """(sys_metrics, watchtower_summary) for previewing stat values in the editor.
+    Cheap, best-effort; both degrade to empty on any error."""
+    sysm = {'cpu_temp': 0, 'cpu_pct': 0, 'ram_pct': 0, 'disk_pct': 0, 'uptime_h': 0}
+    try:
+        with open('/sys/class/thermal/thermal_zone0/temp') as f:
+            sysm['cpu_temp'] = round(int(f.read().strip()) / 1000.0)
+    except Exception:
+        pass
+    try:
+        with open('/proc/uptime') as f:
+            sysm['uptime_h'] = int(float(f.read().split()[0]) // 3600)
+    except Exception:
+        pass
+    try:
+        import shutil as _sh
+        du = _sh.disk_usage('/')
+        sysm['disk_pct'] = round(du.used * 100.0 / du.total)
+    except Exception:
+        pass
+    try:
+        import psutil as _ps
+        sysm['ram_pct'] = round(_ps.virtual_memory().percent)
+        sysm['cpu_pct'] = round(_ps.cpu_percent(interval=None))
+    except Exception:
+        pass
+    wt = {'total': 0, 'critical': 0, 'worst': None}
+    try:
+        if _watchtower is not None:
+            summ = _watchtower.summary()
+            wt['total'] = int(summ.get('total', 0) or 0)
+            bysev = summ.get('by_severity', {}) or {}
+            wt['critical'] = int(bysev.get('critical', 0) or 0) + int(bysev.get('high', 0) or 0)
+            wt['worst'] = summ.get('worst')
+    except Exception:
+        pass
+    return sysm, wt
+
+
 @app.route('/api/dashboard/catalog', methods=['GET'])
 def get_dashboard_catalog():
     """Modules the operator can drop into the main-screen slots, plus the
@@ -17052,12 +17091,10 @@ def get_dashboard_catalog():
         cat = dm.catalog()
         current = dm.normalize_config(shared_data.config.get('dashboard_config'))
         # Live value per stat module so the editor can preview real numbers.
+        sysm, wt = _dashboard_live_sources()
         values = {}
-        for mid, spec in dm.STAT_MODULES.items():
-            try:
-                values[mid] = int(getattr(shared_data, spec[2], 0) or 0)
-            except Exception:
-                values[mid] = 0
+        for mid in dm.STAT_MODULES:
+            values[mid] = dm.resolve_stat_value(mid, shared_data, sysm, wt)
         _epd_type = shared_data.config.get('epd_type')
         return jsonify({
             'success': True,

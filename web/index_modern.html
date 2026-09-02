@@ -5654,8 +5654,16 @@
                     <div id="dashboard-editor" class="hidden mt-4 space-y-6">
                         <!-- Stat module slots -->
                         <div>
-                            <h4 class="text-sm font-semibold text-gray-300 mb-2">Stat boxes</h4>
-                            <p class="text-gray-500 text-xs mb-3">Each box on the screen can show a different metric. Live value shown in brackets.</p>
+                            <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-2 mb-2">
+                                <div>
+                                    <h4 class="text-sm font-semibold text-gray-300">Stat boxes</h4>
+                                    <p class="text-gray-500 text-xs">Each box can show a different metric. Live value in brackets.</p>
+                                </div>
+                                <div>
+                                    <label class="block text-xs text-gray-400 mb-1">Box style</label>
+                                    <select id="dashboard-stat-style" class="bg-slate-800 border border-slate-600 text-white rounded-lg px-3 py-2 text-sm"></select>
+                                </div>
+                            </div>
                             <div id="dashboard-stat-slots" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3"></div>
                         </div>
 
