@@ -2059,44 +2059,71 @@ class Display:
                   (getattr(sd, 'attacks', None),   sd.attacksnbr)])
         draw.line((1, 58, W - 1, 58), fill=0)
 
-        # --- half-size character sprite, tucked into the bottom-right corner ---
+        # --- lower zone: info column on the left, a framed sprite panel right ---
+        # The whole point of the landscape rework: don't leave the bottom two
+        # thirds empty with a lone sprite blob in the corner. Split the lower
+        # band into a left info column (mood + speech, using the roomy 14px
+        # font) and a right panel that frames the shrunk character so it reads
+        # as a deliberate element instead of an afterthought.
         try:
             sd.update_ragnarstatus()
         except Exception:
             pass
-        vk_w = 0
+
+        panel_x = W - 70                      # vertical split for the sprite panel
+        top = 58                              # y of the stats divider above
+        draw.line((panel_x, top, panel_x, H - 1), fill=0)
+
         vk = getattr(sd, 'imagegen', None)
         if vk is not None:
             try:
+                # ~50% of the native 78px sprite, centred in its panel.
                 vk = vk.resize((max(1, vk.width // 2), max(1, vk.height // 2)), Image.NEAREST)
-                vk_w = vk.width
-                image.paste(vk, (W - vk_w - 2, H - vk.height - 2))
+                px = panel_x + ((W - panel_x) - vk.width) // 2
+                py = top + ((H - top) - vk.height) // 2
+                image.paste(vk, (px, py))
             except Exception:
-                vk_w = 0
+                pass
 
-        # --- status line + speech, wrapped into the space left of the sprite ---
+        # Left info column.
+        left_w = panel_x - 4
+        # Mood face + status label on the first line.
+        face = getattr(sd, 'ragnarstatusimage', None)
+        label_x = 4
+        face_bottom = top + 4
+        if face is not None:
+            try:
+                f = face
+                if f.height > 16:
+                    r = 16 / f.height
+                    f = f.resize((max(1, int(f.width * r)), 16), Image.NEAREST)
+                image.paste(f, (4, top + 3))
+                label_x = 4 + f.width + 3
+                face_bottom = top + 3 + f.height
+            except Exception:
+                label_x = 4
         status_line = str(getattr(sd, 'ragnarstatustext', '') or '')
-        status_line2 = str(getattr(sd, 'ragnarstatustext2', '') or '')
-        combined = (status_line + (" · " + status_line2 if status_line2 else '')).strip(' ·')
-        avail_w = W - vk_w - 8
-        if combined:
-            while combined and font.getlength(combined) > avail_w:
-                combined = combined[:-1]
-            draw.text((3, 61), combined, font=font, fill=0)
+        if status_line:
+            s = status_line
+            while s and font.getlength(s) > (left_w - label_x):
+                s = s[:-1]
+            draw.text((label_x, top + 6), s, font=font, fill=0)
 
+        # Speech beneath, in the larger 14px font so the column doesn't read empty.
+        speech_font = getattr(sd, 'font_arial14', None) or sd.font_arialbold
         says = str(getattr(sd, 'ragnarsays', '') or '')
         if says:
             try:
-                lines = sd.wrap_text(says, sd.font_arialbold, avail_w)
+                lines = sd.wrap_text(says, speech_font, left_w - 4)
             except Exception:
                 lines = [says]
-            y = 73
+            y = face_bottom + 4
             for line in lines:
-                if y > H - 12:
+                if y > H - 14:
                     break
-                draw.text((3, y), line, font=sd.font_arialbold, fill=0)
-                bb = sd.font_arialbold.getbbox(line)
-                y += (bb[3] - bb[1]) + 2
+                draw.text((4, y), line, font=speech_font, fill=0)
+                bb = speech_font.getbbox(line)
+                y += (bb[3] - bb[1]) + 3
 
     def _fetch_network_data(self):
         """Fetch real host data from database."""
