@@ -964,33 +964,112 @@ class Display:
         except Exception:
             return None
 
+    def _dashboard_stat_style(self):
+        """'icon' (default) or 'label' — how each stat box is drawn."""
+        cfg = self._dashboard_cfg()
+        return (cfg or {}).get('stat_style', 'icon')
+
     def _dashboard_stat_pairs(self, count):
-        """Return `count` (icon_image_or_None, value_str) pairs for the stat
-        slots, honoring dashboard_config or the built-in default order. Slot i is
-        the same on every layout, so a customization shows consistently in
-        portrait and landscape."""
+        """Return `count` dicts {icon, abbr, value} for the stat slots, honoring
+        dashboard_config or the built-in default order. Slot i is the same on
+        every layout, so a customization shows consistently in portrait and
+        landscape. System / Watchtower values are resolved from cached snapshots
+        so the render loop stays cheap."""
         import dashboard_modules as dm
         sd = self.shared_data
         cfg = self._dashboard_cfg()
         ids = (cfg or {}).get('stats') or dm.DEFAULT_STAT_ORDER
-        pairs = []
+        sysm = self._dashboard_sys_metrics()
+        wt = self._dashboard_watchtower()
+        out = []
         for i in range(count):
             mid = ids[i] if i < len(ids) else dm.DEFAULT_STAT_ORDER[i % len(dm.DEFAULT_STAT_ORDER)]
             spec = dm.STAT_MODULES.get(mid) or dm.STAT_MODULES[dm.DEFAULT_STAT_ORDER[i % len(dm.DEFAULT_STAT_ORDER)]]
-            _label, icon_attr, sd_attr = spec
-            icon = getattr(sd, icon_attr, None)
-            val = getattr(sd, sd_attr, 0)
+            icon = getattr(sd, spec['icon'], None)
+            val = dm.resolve_stat_value(mid, sd, sysm, wt)
+            out.append({'icon': icon, 'abbr': spec['abbr'], 'value': str(val)})
+        return out
+
+    def _dashboard_sys_metrics(self):
+        """Cached (~5s) system snapshot: cpu_temp, cpu_pct, ram_pct, disk_pct,
+        uptime_h. Non-blocking; degrades to 0 where a source is unavailable."""
+        import time as _t
+        now = _t.time()
+        hit = getattr(self, '_dash_sys_cache', None)
+        if hit and (now - hit[0]) < 5:
+            return hit[1]
+        m = {'cpu_temp': 0, 'cpu_pct': 0, 'ram_pct': 0, 'disk_pct': 0, 'uptime_h': 0}
+        try:
+            with open('/sys/class/thermal/thermal_zone0/temp') as f:
+                m['cpu_temp'] = round(int(f.read().strip()) / 1000.0)
+        except Exception:
+            pass
+        try:
+            with open('/proc/uptime') as f:
+                m['uptime_h'] = int(float(f.read().split()[0]) // 3600)
+        except Exception:
+            pass
+        try:
+            import shutil
+            du = shutil.disk_usage('/')
+            m['disk_pct'] = round(du.used * 100.0 / du.total)
+        except Exception:
+            pass
+        try:
+            import psutil
+            m['ram_pct'] = round(psutil.virtual_memory().percent)
+            m['cpu_pct'] = round(psutil.cpu_percent(interval=None))  # non-blocking
+        except Exception:
             try:
-                val = int(val)
+                # /proc/meminfo fallback for RAM when psutil is absent
+                info = {}
+                with open('/proc/meminfo') as f:
+                    for line in f:
+                        k, v = line.split(':', 1)
+                        info[k] = int(v.strip().split()[0])
+                total = info.get('MemTotal', 0)
+                avail = info.get('MemAvailable', 0)
+                if total:
+                    m['ram_pct'] = round((total - avail) * 100.0 / total)
             except Exception:
                 pass
-            pairs.append((icon, str(val)))
-        return pairs
+        self._dash_sys_cache = (now, m)
+        return m
+
+    def _dashboard_watchtower(self):
+        """Cached (~10s) Watchtower summary {total, critical, worst, latest}.
+        Reads the in-process feed webapp_modern._watchtower when present (display
+        + web run in one process); empty dict when Watchtower is off."""
+        import time as _t
+        now = _t.time()
+        hit = getattr(self, '_dash_wt_cache', None)
+        if hit and (now - hit[0]) < 10:
+            return hit[1]
+        out = {'total': 0, 'critical': 0, 'worst': None, 'latest': ''}
+        try:
+            import webapp_modern as _wm
+            wt = getattr(_wm, '_watchtower', None)
+            if wt is not None:
+                summ = wt.summary()
+                out['total'] = int(summ.get('total', 0) or 0)
+                bysev = summ.get('by_severity', {}) or {}
+                out['critical'] = int(bysev.get('critical', 0) or 0) + int(bysev.get('high', 0) or 0)
+                out['worst'] = summ.get('worst')
+                recent = wt.recent(limit=1)
+                if recent:
+                    a = recent[0]
+                    sev = str(a.get('severity', '')).upper()[:4]
+                    msg = str(a.get('message', '') or a.get('title', '') or a.get('source', ''))
+                    out['latest'] = (f"[{sev}] {msg}" if sev else msg)
+        except Exception:
+            pass
+        self._dash_wt_cache = (now, out)
+        return out
 
     def _dashboard_text(self):
-        """Text-block string. 'speech' mode returns the rolling ragnarsays so its
-        existing wrap/scroll behavior is preserved; other modes return a computed
-        line (custom / IP / SSID / clock / uptime / status)."""
+        """Text-block string. 'speech' returns the rolling ragnarsays (its wrap/
+        scroll behavior preserved); other modes return a computed line or a
+        multi-fact bundle."""
         sd = self.shared_data
         cfg = self._dashboard_cfg()
         if cfg is None:
@@ -1000,12 +1079,49 @@ class Display:
             return cfg['text']['value'] or ''
         if mode == 'status':
             return str(getattr(sd, 'ragnarstatustext', '') or getattr(sd, 'ragnarorch_status', '') or '')
-        if mode in ('ip', 'ssid', 'clock', 'uptime'):
+        if mode == 'watchtower':
+            wt = self._dashboard_watchtower()
+            if wt.get('latest'):
+                return wt['latest']
+            n = wt.get('total', 0)
+            return (f"Watchtower: {n} alert{'s' if n != 1 else ''}"
+                    + (f", worst {wt['worst']}" if wt.get('worst') else '')) if n else "Watchtower: all clear"
+        if mode in ('sys_bundle', 'net_bundle', 'sec_bundle'):
+            return self._dashboard_bundle_text(mode)
+        if mode in ('ip', 'ssid', 'clock', 'uptime', 'hostname', 'cputemp'):
             return self._dashboard_dynamic_text(mode)
         return str(getattr(sd, 'ragnarsays', '') or '')
 
+    def _dashboard_bundle_text(self, mode):
+        """Multi-fact "bundle" line, assembled from the cached snapshots."""
+        sd = self.shared_data
+        sysm = self._dashboard_sys_metrics()
+        if mode == 'sys_bundle':
+            parts = [f"{sysm['cpu_temp']}°C", f"CPU {sysm['cpu_pct']}%",
+                     f"RAM {sysm['ram_pct']}%", f"Up {sysm['uptime_h']}h"]
+            return "  ".join(parts)
+        if mode == 'net_bundle':
+            ip = self._dashboard_dynamic_text('ip')
+            ssid = self._dashboard_dynamic_text('ssid')
+            hosts = int(getattr(sd, 'total_targetnbr', 0) or getattr(sd, 'targetnbr', 0) or 0)
+            parts = []
+            if ip:
+                parts.append(f"IP {ip}")
+            if ssid:
+                parts.append(ssid)
+            parts.append(f"{hosts} hosts")
+            return "  ".join(parts)
+        if mode == 'sec_bundle':
+            wt = self._dashboard_watchtower()
+            vulns = int(getattr(sd, 'vulnnbr', 0) or 0)
+            risk = int(getattr(sd, 'vulnerable_host_count', 0) or 0)
+            parts = [f"{vulns} vulns", f"{risk} at-risk"]
+            parts.append(f"WT {wt.get('total', 0)}" + (f"/{wt['worst']}" if wt.get('worst') else ''))
+            return "  ".join(parts)
+        return ''
+
     def _dashboard_dynamic_text(self, mode):
-        """IP / SSID / clock / uptime, cached ~10s so the render loop stays cheap."""
+        """Single live facts, cached ~10s so the render loop stays cheap."""
         import time as _t
         now = _t.time()
         cache = getattr(self, '_dash_text_cache', None)
@@ -1022,6 +1138,11 @@ class Display:
                 with open('/proc/uptime') as f:
                     secs = float(f.read().split()[0])
                 val = f"Up {int(secs // 3600)}h {int((secs % 3600) // 60)}m"
+            elif mode == 'cputemp':
+                val = f"CPU {self._dashboard_sys_metrics().get('cpu_temp', 0)}°C"
+            elif mode == 'hostname':
+                import socket as _s
+                val = _s.gethostname()
             elif mode == 'ip':
                 r = subprocess.run(['ip', '-4', 'addr', 'show', self._wifi_iface],
                                    capture_output=True, text=True, timeout=2)
@@ -2133,20 +2254,27 @@ class Display:
                 return icon
             return icon
 
+        stat_style = self._dashboard_stat_style()
+
         def _row(y, items):
             slot = W // len(items)
-            for i, (icon, val) in enumerate(items):
+            for i, item in enumerate(items):
                 x = i * slot + 3
-                icon = _fit_icon(icon)
-                if icon is not None:
-                    try:
-                        image.paste(icon, (x, y))
-                        tx = x + icon.width + 2
-                    except Exception:
-                        tx = x + icon_h + 2
+                if stat_style == 'label':
+                    # Short tag instead of an icon → more room for the number.
+                    draw.text((x, y + 3), item['abbr'], font=font, fill=0)
+                    tx = x + int(font.getlength(item['abbr'])) + 3
                 else:
-                    tx = x
-                draw.text((tx, y + 3), str(val), font=font, fill=0)
+                    icon = _fit_icon(item['icon'])
+                    if icon is not None:
+                        try:
+                            image.paste(icon, (x, y))
+                            tx = x + icon.width + 2
+                        except Exception:
+                            tx = x + icon_h + 2
+                    else:
+                        tx = x
+                draw.text((tx, y + 3), str(item['value']), font=font, fill=0)
 
         # Slots 0-4 on the top row, 5-9 below — filled from the dashboard config
         # (or the built-in default order).
@@ -4789,11 +4917,16 @@ class Display:
                     ((int(86 * sx),  int(41 * sy)),  (int(106 * sx), int(41 * sy))),
                     ((int(100 * sx), int(218 * sy)), (int(102 * sx), int(237 * sy))),
                 ]
+                stat_style = self._dashboard_stat_style()
                 stat_pairs = self._dashboard_stat_pairs(len(stat_positions))
-                for (img_pos, text_pos), (icon, text) in zip(stat_positions, stat_pairs):
-                    if icon is not None:
-                        image.paste(icon, img_pos)
-                    draw.text(text_pos, text, font=self.shared_data.font_arial9, fill=0)
+                for (img_pos, text_pos), item in zip(stat_positions, stat_pairs):
+                    if stat_style == 'label':
+                        # No icon: a short tag in the icon's spot frees room and
+                        # keeps the box readable when the metric isn't obvious.
+                        draw.text(img_pos, item['abbr'], font=self.shared_data.font_arial9, fill=0)
+                    elif item['icon'] is not None:
+                        image.paste(item['icon'], img_pos)
+                    draw.text(text_pos, item['value'], font=self.shared_data.font_arial9, fill=0)
 
                 self.shared_data.update_ragnarstatus()
                 image.paste(self.shared_data.ragnarstatusimage, (int(3 * sx), int(60 * sy)))

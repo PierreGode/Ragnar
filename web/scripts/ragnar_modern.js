@@ -22251,9 +22251,17 @@ function renderDashboardEditor(cfg) {
     if (!cat) return;
     // Effective config: fall back to catalog defaults when unconfigured.
     const stats = (cfg && cfg.stats) ? cfg.stats.slice() : cat.default_stats.slice();
+    const statStyle = (cfg && cfg.stat_style) || cat.default_stat_style;
     const textMode = (cfg && cfg.text && cfg.text.mode) || cat.default_text_mode;
     const textValue = (cfg && cfg.text && cfg.text.value) || '';
     const character = (cfg && cfg.character) || cat.default_character;
+
+    // Box style select
+    const styleEl = document.getElementById('dashboard-stat-style');
+    if (styleEl && cat.stat_styles) {
+        styleEl.innerHTML = cat.stat_styles.map(s =>
+            `<option value="${s.id}" ${s.id === statStyle ? 'selected' : ''}>${escapeHtml(s.label)}</option>`).join('');
+    }
 
     // Stat slot dropdowns
     const slotsEl = document.getElementById('dashboard-stat-slots');
@@ -22302,6 +22310,7 @@ function _collectDashboardConfig() {
         .map(s => s.value);
     return {
         stats,
+        stat_style: document.getElementById('dashboard-stat-style')?.value || 'icon',
         text: {
             mode: document.getElementById('dashboard-text-mode')?.value || 'speech',
             value: document.getElementById('dashboard-text-value')?.value || ''
