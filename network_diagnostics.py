@@ -19751,6 +19751,7 @@ def register_network_diagnostics(app, logger=None):
         """
         import ipaddress
         import urllib.request
+        import urllib.error
         from urllib.parse import urlparse
         import halehound_watch as _hh
         data = request.get_json(silent=True) or {}
@@ -19779,7 +19780,61 @@ def register_network_diagnostics(app, logger=None):
         except Exception as exc:                              # noqa: BLE001
             return jsonify({'error': f'portal fetch failed: {exc}',
                             'reachable': False})
+
+        # --- Active, NAME/IP-INDEPENDENT captive-portal fingerprint ---------
+        # Run while ASSOCIATED with the suspect open AP. Two behavioural tests
+        # that no benign open Wi-Fi fails, whatever the SSID is called:
+        #   (1) DNS hijack — resolve several unrelated domains; an evil twin's
+        #       DNS answers everything with its own gateway IP.
+        #   (2) HTTP interception — the OS captive-portal check endpoints
+        #       (generate_204 / captive.apple / msftconnecttest) MUST return a
+        #       known success; anything else means HTTP is being intercepted.
+        # All targets are fixed, public, read-only connectivity-check URLs; no
+        # credentials are ever submitted.
+        import socket as _socket
+        _dns_canaries = ['www.google.com', 'www.cloudflare.com',
+                         'example.com', 'www.wikipedia.org', 'github.com']
+        dns_answers = []
+        for host in _dns_canaries:
+            try:
+                dns_answers.append(_socket.gethostbyname(host))
+            except Exception:                                 # noqa: BLE001
+                pass
+        # (url, expected_status, expected_body_substr)
+        _http_canaries = [
+            ('http://connectivitycheck.gstatic.com/generate_204', 204, ''),
+            ('http://captive.apple.com/hotspot-detect.html', 200, 'Success'),
+            ('http://www.msftconnecttest.com/connecttest.txt', 200,
+             'Microsoft Connect Test'),
+        ]
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None                                   # surface the 3xx
+        _opener = urllib.request.build_opener(_NoRedirect)
+        canary_intercept = False
+        canary_results = []
+        for curl, exp_status, exp_body in _http_canaries:
+            try:
+                cr = _opener.open(urllib.request.Request(
+                    curl, headers={'User-Agent': 'Ragnar-WIDS'}), timeout=4)
+                cstatus = cr.getcode()
+                cbody = cr.read(4096).decode('utf-8', 'replace')
+                intercepted = (cstatus != exp_status
+                               or (exp_body and exp_body not in cbody))
+            except urllib.error.HTTPError as he:
+                cstatus, intercepted = he.code, (he.code != exp_status)
+            except Exception:                                 # noqa: BLE001
+                # Unreachable canary is inconclusive, not evidence of a portal.
+                cstatus, intercepted = None, False
+            canary_intercept = canary_intercept or intercepted
+            canary_results.append({'url': curl, 'status': cstatus,
+                                   'intercepted': bool(intercepted)})
+
         observed = _hh.parse_portal_observation(body, headers, status)
+        verdict = _hh.fingerprint_portal(
+            dns_answers, http_status=status, ap_ip=p.hostname, observed=observed,
+            canary_intercept=canary_intercept)
         sig = _hh.match_portal_signature(observed)
         # Auto-build a ready-to-paste signature from what we fetched, so probing a
         # KNOWN-real GARMR portal once yields a drop-in _GARMR_SIGNATURES entry.
@@ -19789,15 +19844,19 @@ def register_network_diagnostics(app, logger=None):
         return jsonify({
             'reachable': True, 'url': url, 'final_host': final_host,
             'observed': observed,
+            'verdict': verdict,
+            'dns_answers': dns_answers,
+            'canary_results': canary_results,
             'garmr_signature': (sig['name'] if sig else None),
             'signature_confidence': (sig['confidence'] if sig else None),
             'matched': bool(sig),
             'suggested_signature': suggestion,
-            'note': ('No GARMR signature is loaded yet. If this IS a known GARMR '
-                     'portal, paste "suggested_signature" into '
-                     'halehound_watch._GARMR_SIGNATURES and future probes confirm '
-                     'it.') if not sig else
-                    'Matched a loaded GARMR signature — HaleHound-specific confirm.',
+            'note': (
+                'Evil-twin captive portal CONFIRMED (behavioural).' if verdict['confirmed']
+                else 'Captive-portal behaviour seen — probe while joined to the suspect SSID to confirm.'
+                if verdict['captive_portal']
+                else 'No captive-portal behaviour detected. Run this while ASSOCIATED with '
+                     'the suspect open AP (join it first), or it only sees your normal network.'),
         })
 
     @app.route('/api/net/isp', methods=['GET'])

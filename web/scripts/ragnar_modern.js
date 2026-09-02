@@ -5470,8 +5470,22 @@ async function wifidefProbePortal(ssid) {
         const d = await r.json();
         if (d.error) { if (body) body.innerHTML = '<span class="text-amber-400">Portal probe: ' + _esc(d.error) + '</span>'; return; }
         const o = d.observed || {};
+        const v = d.verdict || {};
         let html = '<div class="text-[12px] text-gray-300">';
-        html += '<div class="font-semibold text-fuchsia-300 mb-1">Captive portal at ' + _esc(url) + '</div>';
+        // Headline verdict from the behavioural fingerprint.
+        if (v.confirmed) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-red-950/60 border border-red-700 text-red-200 font-semibold">☠️ Evil-twin captive portal CONFIRMED</div>';
+        } else if (v.captive_portal) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-amber-950/60 border border-amber-700 text-amber-200 font-semibold">⚠ Captive-portal behaviour detected</div>';
+        } else {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-gray-300">No captive-portal behaviour — join the suspect SSID first, then re-probe</div>';
+        }
+        // The three name/IP-independent tells.
+        const tell = (ok, label) => '<div>' + (ok ? '<span class="text-red-300">●</span> ' : '<span class="text-gray-600">○</span> ') + _esc(label) + '</div>';
+        html += tell(v.dns_hijack, 'DNS hijack' + (v.hijack_ip ? ' — all names → ' + _esc(v.hijack_ip) : ''));
+        html += tell(v.http_intercept, 'HTTP interception (connectivity-check → portal)');
+        html += tell(v.credential_form, 'Credential (password) form served');
+        html += '<div class="mt-2 font-semibold text-fuchsia-300">Portal at ' + _esc(url) + '</div>';
         html += '<div>Title: <span class="text-gray-100">' + _esc(o.title || '—') + '</span></div>';
         html += '<div>Server: <span class="font-mono">' + _esc(o.server || '—') + '</span></div>';
         html += '<div>Form fields: <span class="font-mono">' + _esc((o.form_fields || []).join(', ') || '—') + '</span></div>';

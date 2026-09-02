@@ -252,15 +252,31 @@ actively running that attack. So the one "ask it" move is: associate with the
 rogue SSID and fetch that portal.
 
 `POST /api/wifidef/halehound/portal-probe {"url":"http://<portal-ip>/"}` does
-exactly that — a **read-only GET** (it *never* submits credentials) — then
-extracts the page `<title>`, HTTP `Server` header, `<input>` field names and a
-body hash, and matches them against a **GARMR signature table**
-(`halehound_watch._GARMR_SIGNATURES`). A match is a **HaleHound-specific**
-confirm and floors the verdict to *likely*/*confirmed* on its own — far stronger
-than the generic DNS-hijack tell. Safety: the target is restricted to a
-**private/link-local/loopback IP literal** (the portal gateway), so it can't be
-pointed at arbitrary hosts, and a hostname is refused (it would resolve through
-the hijacked DNS).
+exactly that — all **read-only** (it *never* submits credentials). It runs a
+full **name- AND IP-independent captive-portal fingerprint** — three behavioural
+tests no benign open Wi-Fi fails, whatever the SSID is renamed to:
+
+1. **DNS hijack** — resolves several unrelated domains (`google.com`,
+   `cloudflare.com`, `example.com`, …); an evil twin answers *every* name with
+   its own gateway IP.
+2. **HTTP interception** — fetches the standard OS captive-portal check URLs
+   (`connectivitycheck.gstatic.com/generate_204`, `captive.apple.com`,
+   `msftconnecttest.com`), which *must* return a known success (204 / "Success"
+   / "Microsoft Connect Test"); anything else means HTTP is being intercepted.
+3. **Credential form** — the served gateway page has a real password `<input>`.
+
+The verdict (`fingerprint_portal`): **confirmed evil-twin** when a GARMR
+signature matches, **or** HTTP is intercepted/DNS-hijacked *and* a credential
+form is served (a benign walled garden intercepts but rarely harvests a
+password), **or** the classic DNS-hijack + captive-portal pair. It also still
+extracts the page `<title>`, `Server` header, `<input>` names and body hash and
+matches the **GARMR signature table** (`halehound_watch._GARMR_SIGNATURES`) for
+a **HaleHound-specific** confirm. Safety: the gateway target is restricted to a
+**private/link-local/loopback IP literal**, a hostname is refused (it would
+resolve through the hijacked DNS), and the connectivity-check URLs are a fixed,
+public, read-only allowlist. Run it **while associated with the suspect open
+AP** — off that AP it only sees your normal network and correctly reports no
+portal.
 
 The signature table ships **empty** — so it never false-matches — with a
 documented schema (title/Server/form-fields/HTML-markers/SHA-256). Drop in the

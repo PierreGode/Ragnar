@@ -283,12 +283,20 @@ def parse_portal_observation(html=None, headers=None, http_status=None):
     form_fields = sorted({n.lower() for n in
                           _re.findall(r"<input[^>]*\bname\s*=\s*[\"']([^\"']+)",
                                       html, _re.I)})
+    # Credential-harvest tell: a real password input. type=password is the
+    # reliable marker (the field's name can be anything), with a name-based
+    # fallback for hand-rolled portals that omit the type.
+    has_password = bool(
+        _re.search(r"<input[^>]*type\s*=\s*[\"']?password", html, _re.I)
+        or {f for f in form_fields if f in
+            ("password", "pass", "pwd", "passwd", "pin", "passcode")})
     norm = _normalize_html(html)
     return {
         "status": http_status,
         "server": server,
         "title": title,
         "form_fields": form_fields,
+        "has_password_input": has_password,
         "html_sha256": hashlib.sha256(norm.encode("utf-8", "replace")).hexdigest(),
         "html": html,
     }
@@ -369,7 +377,8 @@ def build_signature_suggestion(observed, name="GARMR (captured)"):
 
 
 def fingerprint_portal(dns_answers, http_status=None, redirect_host=None,
-                       ap_ip=None, observed=None):
+                       ap_ip=None, observed=None, canary_intercept=None,
+                       has_credential_form=None):
     """Decide whether observed behaviour matches a GARMR-style evil-twin portal.
 
     HaleHound's Captive Portal (GARMR) is a fake AP + DNS hijack + credential
@@ -383,46 +392,66 @@ def fingerprint_portal(dns_answers, http_status=None, redirect_host=None,
         http_status: HTTP status seen for a plain request (e.g. 302, 200).
         redirect_host: Location/host a redirect pointed at, if any.
         ap_ip: the AP's/gateway IP, if known.
+        observed: a ``parse_portal_observation`` dict for the served page.
+        canary_intercept: True if a standard connectivity-check endpoint
+            (generate_204 / captive.apple.com / msftconnecttest) returned
+            anything but its expected success — HTTP is being intercepted.
+            This is the strong, name- AND IP-independent captive-portal tell.
+        has_credential_form: True if the served page harvests a password
+            (defaults to observed['has_password_input']).
 
-    Returns ``{dns_hijack, captive_portal, confirmed, detail}``.
+    Returns ``{dns_hijack, captive_portal, http_intercept, credential_form,
+    confirmed, detail, ...}``.
     """
     ips = [a for a in (dns_answers or []) if a]
     uniq = set(ips)
     # DNS hijack: many distinct domains all collapsing to a single IP.
     dns_hijack = len(ips) >= 3 and len(uniq) == 1
     hijack_ip = next(iter(uniq)) if dns_hijack else None
-    if dns_hijack and ap_ip and hijack_ip != ap_ip:
-        # Still a hijack, but note it does not point at the known AP IP.
-        pass
 
-    # Captive portal: a redirect to the hijack/AP IP, or an intercept status.
-    captive_portal = False
+    if has_credential_form is None:
+        has_credential_form = bool(observed and observed.get("has_password_input"))
+    http_intercept = bool(canary_intercept)
+
+    # Captive portal: connectivity-check interception (definitive), a redirect to
+    # the hijack/AP IP, or a page answering everything under a DNS hijack.
+    captive_portal = http_intercept
     if http_status in (301, 302, 303, 307, 308):
         if redirect_host and (redirect_host == hijack_ip or redirect_host == ap_ip):
             captive_portal = True
         elif dns_hijack:
             captive_portal = True
     elif http_status == 200 and dns_hijack:
-        # Portal answering everything with a page is the classic walled garden.
         captive_portal = True
 
     # Active confirm: does the fetched page match a known GARMR signature? A
-    # positive match is HaleHound-specific and definitive — it confirms the
-    # portal regardless of the (behavioural) DNS-hijack heuristics.
+    # positive match is HaleHound-specific and definitive.
     sig = match_portal_signature(observed) if observed else None
 
     captive_portal = captive_portal or bool(sig)
-    confirmed = (dns_hijack and captive_portal) or bool(sig)
+    # Confirmed evil-twin portal: a HaleHound signature match, OR a captive
+    # portal that is BOTH intercepting/hijacking AND harvesting credentials
+    # (a benign walled garden intercepts but rarely asks for a password), OR
+    # the classic DNS-hijack + captive-portal pair.
+    confirmed = (bool(sig)
+                 or ((http_intercept or dns_hijack) and has_credential_form)
+                 or (dns_hijack and captive_portal))
     bits = []
     if sig:
         bits.append(f"matched GARMR signature '{sig['name']}'")
     if dns_hijack:
         bits.append(f"all DNS → {hijack_ip} (hijack)")
-    if captive_portal and http_status:
+    if http_intercept:
+        bits.append("connectivity-check intercepted (generate_204 → portal)")
+    if has_credential_form:
+        bits.append("credential (password) form served")
+    if captive_portal and http_status and not (dns_hijack or http_intercept):
         bits.append(f"HTTP {http_status} → captive portal")
-    detail = ("GARMR-style evil-twin captive portal — " + ", ".join(bits)
+    detail = ("evil-twin captive portal — " + ", ".join(bits)
               if bits else "no captive-portal signature")
     return {"dns_hijack": dns_hijack, "captive_portal": captive_portal,
+            "http_intercept": http_intercept,
+            "credential_form": has_credential_form,
             "confirmed": confirmed, "hijack_ip": hijack_ip,
             "garmr_signature": (sig["name"] if sig else None),
             "signature_confidence": (sig["confidence"] if sig else None),
@@ -856,6 +885,28 @@ def selftest():
                               http_status=200)
     check("real internet (varied DNS) => not a portal",
           not real["confirmed"] and not real["dns_hijack"], json.dumps(real))
+
+    # --- NAME/IP-INDEPENDENT captive-portal tells (connectivity-check intercept
+    #     + credential form) — the definitive confirm regardless of SSID/IP ---
+    cred = parse_portal_observation(
+        "<title>Sign in</title><form><input type='password' name='pw'></form>",
+        {}, 200)
+    check("parse_portal_observation flags a password input",
+          cred["has_password_input"] is True, json.dumps({"pw": cred["has_password_input"]}))
+    ev = fingerprint_portal(["142.250.1.1", "104.16.2.3", "13.107.4.5"],
+                            http_status=200, canary_intercept=True, observed=cred)
+    check("intercept + credential form => confirmed evil-twin (no DNS hijack needed)",
+          ev["confirmed"] and ev["http_intercept"] and ev["credential_form"], json.dumps(ev))
+    intercept_only = fingerprint_portal(["142.250.1.1", "104.16.2.3", "13.107.4.5"],
+                                        http_status=200, canary_intercept=True)
+    check("intercept alone (benign walled garden, no creds) => captive but NOT confirmed",
+          intercept_only["captive_portal"] and not intercept_only["confirmed"],
+          json.dumps(intercept_only))
+    clean = fingerprint_portal(["142.250.1.1", "104.16.2.3", "13.107.4.5"],
+                               http_status=200, canary_intercept=False,
+                               observed=parse_portal_observation("<title>Router</title>", {}, 200))
+    check("no intercept + no hijack + no form => no captive portal (no FP)",
+          not clean["captive_portal"] and not clean["confirmed"], json.dumps(clean))
 
     # --- Active GARMR portal-signature machinery (empty table can't FP) ---
     page = ("<html><head><title>GARMR Sign In</title></head><body>"
