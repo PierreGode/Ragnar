@@ -1947,6 +1947,184 @@ class Display:
                 bb = sd.font_arialbold.getbbox(line)
                 y += (bb[3] - bb[1]) + 2
 
+    def _render_main_horizontal(self, image, draw, W, H):
+        """Landscape PAGE_MAIN layout for a small e-paper rotated 90°/270°
+        (e.g. the 2.13" 122x250 panel lying down → ~250x122).
+
+        The default dashboard is authored for a tall 122x250 portrait canvas;
+        when the panel lies down the canvas becomes wide and short, and the
+        absolute portrait coordinates squash badly (text overlaps, sprite spills
+        off the edge). This re-lays the same elements to fit a landscape strip:
+        a header, two 5-wide icon+count stat rows, the status line, the speech
+        text, and a HALF-SIZE character sprite tucked in the bottom-right.
+        The frise ribbon is dropped — there is no vertical room for it lying down.
+        """
+        sd = self.shared_data
+        font = sd.font_arial9
+
+        draw.rectangle((0, 0, W - 1, H - 1), outline=0)
+
+        # --- header: connection glyph + IP (left), USB/battery (right), title ---
+        left_used = 3
+        try:
+            if getattr(sd, 'ap_mode_active', False):
+                ap_text = "AP"
+                if getattr(sd, 'ap_client_count', 0) > 0:
+                    ap_text = f"AP:{sd.ap_client_count}"
+                draw.text((3, 3), ap_text, font=font, fill=0)
+                left_used = 3 + int(font.getlength(ap_text))
+            elif getattr(sd, 'wifi_connected', False):
+                try:
+                    q = getattr(sd, 'wifi_signal_quality', None)
+                    if q is None:
+                        q = self._dbm_to_quality(getattr(sd, 'wifi_signal_dbm', None))
+                    waves = max(1, min(3, self.get_wifi_wave_count(q)))
+                except Exception:
+                    waves = 3
+                cx, cy = 6, 12
+                for i in range(waves):
+                    r = 3 + i * 3
+                    draw.arc((cx - r, cy - r, cx + r, cy + r), start=225, end=315, fill=0, width=1)
+                left_used = 16
+                try:
+                    ip_octet = self.get_wifi_ip_last_octet()
+                except Exception:
+                    ip_octet = None
+                if ip_octet:
+                    draw.text((17, 4), ip_octet, font=font, fill=0)
+                    left_used = 17 + int(font.getlength(ip_octet))
+        except Exception:
+            pass
+        # Battery %, top-right (PiSugar)
+        bat_w = 0
+        try:
+            _ri = getattr(sd, 'ragnar_instance', None)
+            _ps = getattr(_ri, 'pisugar_listener', None) if _ri else None
+            if _ps and _ps.available:
+                bl = _ps.get_battery_level()
+                if bl is not None:
+                    bt = f"{int(round(bl))}%{'+' if _ps.is_charging() else ''}"
+                    bat_w = int(font.getlength(bt)) + 3
+                    draw.text((W - bat_w + 1, 4), bt, font=font, fill=0)
+        except Exception:
+            pass
+        # Centre the title in the strip between the left glyph and the battery.
+        left_pad = max(20, left_used + 3)
+        right_pad = max(6, bat_w)
+        avail = W - left_pad - right_pad
+        _title = self._unit_display_title()
+        title_font = self._fit_font('Viking.TTF', sd.font_viking, _title, avail)
+        tw = title_font.getlength(_title)
+        draw.text((left_pad + (avail - tw) / 2, 2), _title, font=title_font, fill=0)
+        draw.line((1, 17, W - 1, 17), fill=0)
+
+        # --- two icon+count stat rows, 5 wide so they use the full width ---
+        icon_h = 15  # 18px source icons scaled down a touch
+
+        def _fit_icon(icon):
+            if icon is None:
+                return None
+            try:
+                if icon.height > icon_h:
+                    ratio = icon_h / icon.height
+                    return icon.resize((max(1, int(icon.width * ratio)), icon_h), Image.NEAREST)
+            except Exception:
+                return icon
+            return icon
+
+        def _row(y, items):
+            slot = W // len(items)
+            for i, (icon, val) in enumerate(items):
+                x = i * slot + 3
+                icon = _fit_icon(icon)
+                if icon is not None:
+                    try:
+                        image.paste(icon, (x, y))
+                        tx = x + icon.width + 2
+                    except Exception:
+                        tx = x + icon_h + 2
+                else:
+                    tx = x
+                draw.text((tx, y + 3), str(val), font=font, fill=0)
+
+        _row(21, [(getattr(sd, 'target', None),    sd.targetnbr),
+                  (getattr(sd, 'port', None),      sd.portnbr),
+                  (getattr(sd, 'vuln', None),      sd.vulnnbr),
+                  (getattr(sd, 'cred', None),      sd.crednbr),
+                  (getattr(sd, 'zombie', None),    sd.zombiesnbr)])
+        _row(40, [(getattr(sd, 'data', None),      sd.datanbr),
+                  (getattr(sd, 'money', None),     sd.coinnbr),
+                  (getattr(sd, 'level', None),     sd.levelnbr),
+                  (getattr(sd, 'networkkb', None), sd.networkkbnbr),
+                  (getattr(sd, 'attacks', None),   sd.attacksnbr)])
+        draw.line((1, 58, W - 1, 58), fill=0)
+
+        # --- lower zone: info column on the left, a framed sprite panel right ---
+        # The whole point of the landscape rework: don't leave the bottom two
+        # thirds empty with a lone sprite blob in the corner. Split the lower
+        # band into a left info column (mood + speech, using the roomy 14px
+        # font) and a right panel that frames the shrunk character so it reads
+        # as a deliberate element instead of an afterthought.
+        try:
+            sd.update_ragnarstatus()
+        except Exception:
+            pass
+
+        panel_x = W - 70                      # vertical split for the sprite panel
+        top = 58                              # y of the stats divider above
+        draw.line((panel_x, top, panel_x, H - 1), fill=0)
+
+        vk = getattr(sd, 'imagegen', None)
+        if vk is not None:
+            try:
+                # ~50% of the native 78px sprite, centred in its panel.
+                vk = vk.resize((max(1, vk.width // 2), max(1, vk.height // 2)), Image.NEAREST)
+                px = panel_x + ((W - panel_x) - vk.width) // 2
+                py = top + ((H - top) - vk.height) // 2
+                image.paste(vk, (px, py))
+            except Exception:
+                pass
+
+        # Left info column.
+        left_w = panel_x - 4
+        # Mood face + status label on the first line.
+        face = getattr(sd, 'ragnarstatusimage', None)
+        label_x = 4
+        face_bottom = top + 4
+        if face is not None:
+            try:
+                f = face
+                if f.height > 16:
+                    r = 16 / f.height
+                    f = f.resize((max(1, int(f.width * r)), 16), Image.NEAREST)
+                image.paste(f, (4, top + 3))
+                label_x = 4 + f.width + 3
+                face_bottom = top + 3 + f.height
+            except Exception:
+                label_x = 4
+        status_line = str(getattr(sd, 'ragnarstatustext', '') or '')
+        if status_line:
+            s = status_line
+            while s and font.getlength(s) > (left_w - label_x):
+                s = s[:-1]
+            draw.text((label_x, top + 6), s, font=font, fill=0)
+
+        # Speech beneath, in the larger 14px font so the column doesn't read empty.
+        speech_font = getattr(sd, 'font_arial14', None) or sd.font_arialbold
+        says = str(getattr(sd, 'ragnarsays', '') or '')
+        if says:
+            try:
+                lines = sd.wrap_text(says, speech_font, left_w - 4)
+            except Exception:
+                lines = [says]
+            y = face_bottom + 4
+            for line in lines:
+                if y > H - 14:
+                    break
+                draw.text((4, y), line, font=speech_font, fill=0)
+                bb = speech_font.getbbox(line)
+                y += (bb[3] - bb[1]) + 3
+
     def _fetch_network_data(self):
         """Fetch real host data from database."""
         sd = self.shared_data
@@ -4405,6 +4583,26 @@ class Display:
                         self._render_main_compact(image, draw, W, H)
                     except Exception as e:
                         logger.debug(f"compact main render error: {e}")
+                    epd_img = _apply_epd_rotation(image, self.screen_reversed)
+                    self.epd_helper.display_partial(epd_img)
+                    self.epd_helper.display_partial(epd_img)
+                    web_img = _apply_web_rotation(image, self.web_screen_reversed)
+                    with open(os.path.join(self.shared_data.webdir, "screen.png"), 'wb') as img_file:
+                        web_img.save(img_file)
+                        img_file.flush()
+                        os.fsync(img_file.fileno())
+                    self._sleep_interruptible(PAGE_MAIN)
+                    continue
+                # A small e-paper rotated 90°/270° is now wide-and-short (the
+                # 2.13" 122x250 panel "lying down" → ~250x122). The portrait
+                # dashboard's 122x250 coordinates squash horribly there, so use a
+                # dedicated landscape layout (no frise, half-size sprite).
+                if (self.screen_reversed in (90, 270)
+                        and render_w > render_h and render_h < 170 and render_w < 340):
+                    try:
+                        self._render_main_horizontal(image, draw, W, H)
+                    except Exception as e:
+                        logger.debug(f"horizontal main render error: {e}")
                     epd_img = _apply_epd_rotation(image, self.screen_reversed)
                     self.epd_helper.display_partial(epd_img)
                     self.epd_helper.display_partial(epd_img)
