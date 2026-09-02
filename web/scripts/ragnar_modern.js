@@ -22358,23 +22358,23 @@ async function resetDashboardConfig() {
 let epaperSizeMode = 'large'; // default to large size
 function toggleEpaperSize() {
     const imgElement = document.getElementById('epaper-display-image');
-    
+
+    // Only the height cap changes between sizes. We never set a min-height:
+    // on a landscape (wide, short) panel a min-height stretches the image
+    // vertically and breaks its aspect ratio. Capping height + max-width:100%
+    // keeps the true aspect for both portrait and landscape displays.
+    imgElement.style.minHeight = '';
+    imgElement.style.width = 'auto';
     if (epaperSizeMode === 'large') {
-        // Switch to extra large
         imgElement.style.maxHeight = '1200px';
-        imgElement.style.minHeight = '600px';
         epaperSizeMode = 'xlarge';
         addConsoleMessage('Display size: Extra Large', 'info');
     } else if (epaperSizeMode === 'xlarge') {
-        // Switch to medium
         imgElement.style.maxHeight = '600px';
-        imgElement.style.minHeight = '300px';
         epaperSizeMode = 'medium';
         addConsoleMessage('Display size: Medium', 'info');
     } else {
-        // Switch back to large
         imgElement.style.maxHeight = '800px';
-        imgElement.style.minHeight = '400px';
         epaperSizeMode = 'large';
         addConsoleMessage('Display size: Large', 'info');
     }
