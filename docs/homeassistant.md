@@ -191,6 +191,65 @@ automation:
           entity_id: light.hallway
 ```
 
+Turn an LED strip **red** when a captive-portal / evil-twin attack is detected.
+HaleHound's GARMR fingerprint and WiFi Defense's evil-twin / attack-tool
+detections both flow into Watchtower, so they arrive here as
+`ragnar_security_alert` events — the `condition` below keeps the strip reacting
+to portal-class alerts specifically (drop the `is search(...)` clause to react to
+**any** high/critical alert). Replace `light.led_strip` with your strip's entity:
+
+```yaml
+automation:
+  - alias: LED strip red on Ragnar captive-portal attack
+    mode: restart
+    trigger:
+      - platform: event
+        event_type: ragnar_security_alert
+    condition:
+      - condition: template
+        value_template: >
+          {% set t = (trigger.event.data.title ~ ' ' ~ trigger.event.data.source) | lower %}
+          {{ trigger.event.data.severity in ['high','critical']
+             and (t is search('portal|garmr|evil.?twin|halehound|rogue|attack.?tool')) }}
+    action:
+      # Snapshot the strip so we can restore it afterward.
+      - service: scene.create
+        data:
+          scene_id: ragnar_led_restore
+          snapshot_entities:
+            - light.led_strip
+      # Flash red.
+      - repeat:
+          count: 6
+          sequence:
+            - service: light.turn_on
+              target:
+                entity_id: light.led_strip
+              data:
+                rgb_color: [255, 0, 0]
+                brightness_pct: 100
+            - delay: "00:00:00.6"
+            - service: light.turn_off
+              target:
+                entity_id: light.led_strip
+            - delay: "00:00:00.4"
+      # Hold solid red for a minute, then restore the previous state.
+      - service: light.turn_on
+        target:
+          entity_id: light.led_strip
+        data:
+          rgb_color: [255, 0, 0]
+          brightness_pct: 100
+      - delay: "00:01:00"
+      - service: scene.turn_on
+        target:
+          entity_id: scene.ragnar_led_restore
+```
+
+> Prefer a state trigger? `binary_sensor.ragnar_security_alert` going `on` also
+> works, but it fires for **all** high/critical alerts and can't single out the
+> captive-portal case — the event route above is the better fit here.
+
 ## Options
 
 After setup, **Configure** on the integration lets you change the **poll
