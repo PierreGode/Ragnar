@@ -20,6 +20,9 @@ Wi-Fi attacks a defender cares about.
 | **Beacon flood** | A storm of fake APs (`mdk3`/`mdk4` beacon mode, ESP32 spammers) — bogus SSIDs to drown the air or bait clients. | Two triggers. **(1) Randomized-BSSID burst** — mdk4's beacon mode emits random, **locally-administered** MACs, so a burst of ≥ 18 distinct BSSIDs whose **LA ratio ≥ 50 %** is a fake-AP storm (**critical**) even *below* the absolute count threshold. Ordinary neighbourhood density uses burned-in (global) MACs (~0 % LA) and stays quiet — so this is robust in dense RF without guessing a count. **(2) Absolute count** — distinct SSIDs ≥ a user-tunable threshold (default 100) or BSSIDs ≥ 150; a dense airspace over the threshold but with global MACs is a **warning** (unusually dense), not a critical storm. The capture's live SSID/BSSID counts **and LA ratio** are shown for calibration. |
 | **Rogue AP / evil twin** | A look-alike AP advertising a **known** SSID from a BSSID that isn't yours, set up to harvest clients. | An SSID in the **trusted baseline** appearing from an untrusted BSSID → *evil twin*; or one SSID from ≥ 2 BSSIDs → *duplicate SSID* (set a baseline to confirm). |
 | **KARMA / MANA** | An AP that answers probe requests for **many different SSIDs** — it pretends to be every network a client has ever joined. | A single BSSID that beacons/probe-responds for ≥ 5 distinct SSIDs. |
+| **Attack-tool SSID** *(tripwire)* | An AP beaconing under a **known ESP32/handheld attack-tool or captive-portal default name** — `EvilPortal` (ESP32 Marauder / Flipper EvilPortal), `Marauder`, `Ghost ESP`, `GARMR`, `Bruce`, `WiFi Pineapple`, `Pwnagotchi`, `Deauther`, … | The SSID, normalized (lowercased, spaces/`_`/`-` stripped so `Evil Portal` = `evil_portal` = `EvilPortal`), matches a curated attack-tool name list. **Cheap tripwire only** — an operator can rename the SSID to anything (`test`, `Starbucks`), so this catches lazy defaults, not a determined attacker. Critical when it hits (these names are never legitimate); carries a **"Probe captive portal…"** button. The name-independent catch is the next row. |
+| **ESP32 open soft-AP** *(name-independent)* | The **radio** behind EvilPortal/Marauder/Ghost ESP/GARMR is an **ESP32** — and renaming or hiding the SSID doesn't change the chip's burned-in MAC. | An **open** AP whose BSSID OUI is **Espressif** (curated OUI set + the IEEE `oui.txt` lookup). Fires regardless of SSID — catches a portal renamed to `test`. A **warning** on its own (a benign ESP32 IoT gadget in setup mode is also an open Espressif AP); it escalates to critical when it co-occurs with an attack-tool SSID / spoofed BSSID / duplicate, or an **active portal probe** confirms a credential page. Carries a **"Probe captive portal…"** button. *(Evadable only by spoofing the BSSID to a non-Espressif vendor — which then trips the duplicate/evil-twin checks instead.)* |
+| **Auth flood** | The 802.11 authentication DoS (`mdk4 a`, ESP32 Marauder/Bruce, **HaleHound Auth Flood**): authentication-request frames sprayed from many spoofed/random source MACs at one AP to exhaust its client table. | Auth frames grouped by **target BSSID**; a target hit by ≥ 30 frames from ≥ 12 **distinct** source MACs is flagged. A high **locally-administered** (randomized) source ratio (≥ 50 %) is the spoof signature that separates it from ordinary roaming — real association comes from a handful of burned-in client MACs, never dozens of randomized ones at once. |
 
 A big banner summarises the capture: **CLEAR**, **WARNING**, or **⚠ UNDER
 ATTACK** (critical). Below it, one card per detection with the offending
@@ -185,7 +188,233 @@ Detection-only; the only state written is the trusted-AP baseline.
 | `GET /api/wifidef/isolation?interface=&seconds=&channel=` | passive per-BSS client-isolation audit (+ mesh/ESS rollup) |
 | `POST /api/wifidef/report` | `{scan, ai?}` (the panel's last capture + optional AI read) → printable HTML incident report |
 | `POST /api/ai/wifidef-analyze` | `{wids, airtime?, isolation?}` → one AI read correlated across all three modules |
+| `POST /api/wifidef/halehound` | `{scan?, bt?, portal?, subghz?}` → fused ESP32-attack-tool assessment (see below); `subghz:true` adds an opt-in RTL-SDR sweep |
+| `GET/POST /api/wifidef/halehound/watch` | headless 24/7 watcher — `POST {enable, interface, …}` to toggle (persists across restart), `GET` for status (see below) |
+| `POST /api/wifidef/halehound/portal-probe` | `{url}` → **actively** fetch a captive portal (read-only) and match the GARMR signature (see below) |
 | `GET /api/wifidef/selftest` | parser + detector self-test |
+| `GET /api/wifidef/halehound/selftest` | HaleHound correlation self-test |
+
+## ESP32 attack-tool correlation (HaleHound / Marauder / Bruce)
+
+This is a general **ESP32 attack-multitool** detector — HaleHound-CYD included,
+but not only it. [HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD) is
+an ESP32 **attack multitool** — 40+ modules across Wi-Fi (deauth, beacon spam,
+auth flood, evil-twin **GARMR** captive portal, KARMA), BLE (Fast Pair spam,
+FindMy/AirTag flood, tracker spoofing), 2.4 GHz NRF24, SubGHz CC1101 and NFC.
+**ESP32 Marauder, Bruce and Ghost ESP** run the same silicon and the same
+techniques. The correlation is **folded into the main WIDS scan** — every WiFi
+Defense scan also renders a fused ESP32 verdict inline (above the detections),
+reusing that same capture rather than re-scanning. It does **not** re-implement
+the Wi-Fi checks; it consumes the WIDS detections and fuses them with the other
+radios/domains.
+
+**What it can and cannot do.** None of these tools can be *uniquely*
+fingerprinted, nor told apart from each other: same ESP32 silicon, same
+techniques, and they randomize source MACs during floods. So this does **not**
+claim "that is HaleHound" — it scores how strongly the observed behaviour matches
+an ESP32 attack multitool *of that class* (0–100 → *trace / possible / likely /
+confirmed*), fusing signals across domains:
+
+| Domain | Signals | Source |
+|--------|---------|--------|
+| **Wi-Fi** | **ESP32 open soft-AP** (open AP on an Espressif radio — name-independent), **attack-tool SSID** (a known EvilPortal/Marauder/Ghost ESP/GARMR default name — tripwire), auth flood, evil-twin, **spoofed BSSID** (group/multicast I/G bit set — no real AP does this), **open rogue-lure** (an open AP using a common free-Wi-Fi name — low-confidence), beacon flood, KARMA, deauth — tool-agnostic behaviour | this WIDS capture |
+| **LAN** | an Espressif host flagged as a known attack tool (`halehound_cyd`, `esp32_marauder`, `esp_deauther`, `flipper_wifi`) or an unknown ESP32 (`rogue_espressif`) — e.g. HaleHound's **IoT Recon** joins your LAN with a real ESP32 MAC. Matched on the Espressif **OUI/vendor**. | asset inventory (`device_classifier.detect_threats`) |
+
+> **No false alarms from ordinary IoT.** ESP32 is one of the most common IoT
+> chips — a home can hold a dozen (smart plugs, bulbs, sensors). So an *unknown*
+> Espressif host (`rogue_espressif`) is treated as **corroboration only**: it adds
+> to the score **only when real, attack-grade behaviour is already seen** in
+> another domain, and multiple quiet ESP32s **never stack**. A shelf full of smart
+> plugs scores **zero** and raises nothing. Only a device that literally advertises
+> an attack-tool name (`halehound_cyd`, `esp32_marauder`, …), or an ESP32 seen
+> *alongside* an actual Wi-Fi/BLE attack, moves the needle. (OUI is also useless on
+> the *attack frames* themselves — those tools randomize their source MAC — which
+> is why the Wi-Fi detectors key on the randomization ratio, not the OUI.)
+| **BLE** | Apple (0x004C) FindMy/AirTag flood or Continuity pairing-popup spam, Microsoft Swift Pair (0x0006) spam, **Google Fast Pair** (service-data UUID `0xFE2C`) / WhisperPair spam, advertisement flood | the Bluetooth 2.4 GHz overlay (`bt_scanner` — now parses **both** manufacturer-data company IDs **and** service-data UUIDs) |
+| **SubGHz** | 300–439 MHz **replay** (one captured code re-sent many times) or **brute / rolling-code sweep** (many distinct codes from one protocol) | an **RTL-SDR** via `rtl_433` (`subghz_watch`), opt-in sweep — see below |
+| **Portal** | a GARMR-style **DNS-hijack** captive portal (all DNS → the AP's IP + a credential page) | observed portal behaviour, if collected |
+
+The correlation is deliberately **multi-domain**: a single noisy domain is capped
+so it can only reach *possible* on its own, while behaviour spanning two or three
+RF domains at once — the ESP32-multitool signature — escalates to *likely* /
+*confirmed*. A **named** attack tool on the LAN (HaleHound, Marauder, deauther,
+Flipper) is floored to at least *likely*. When the score crosses a tier it is
+emitted into the **Watchtower** feed as a `halehound` alert (`HH-CONFIRM` /
+`HH-LIKELY` / `HH-POSSIBLE`) and fused by the **incident engine** into an *ESP32
+attack multitool active* incident.
+
+### Actively confirming a GARMR portal
+
+HaleHound exposes **no management API** — it's a touch-driven device, and OTA is
+from its SD card, so there's nothing on the network to politely query. The **only**
+page it ever serves is the **GARMR evil-twin captive portal**, and only while it's
+actively running that attack. So the one "ask it" move is: associate with the
+rogue SSID and fetch that portal.
+
+`POST /api/wifidef/halehound/portal-probe {"url":"http://<portal-ip>/"}` does
+exactly that — all **read-only** (it *never* submits credentials). It runs a
+full **name- AND IP-independent captive-portal fingerprint** — three behavioural
+tests no benign open Wi-Fi fails, whatever the SSID is renamed to:
+
+1. **DNS hijack** — resolves several unrelated domains (`google.com`,
+   `cloudflare.com`, `example.com`, …); an evil twin answers *every* name with
+   its own gateway IP.
+2. **HTTP interception** — fetches the standard OS captive-portal check URLs
+   (`connectivitycheck.gstatic.com/generate_204`, `captive.apple.com`,
+   `msftconnecttest.com`), which *must* return a known success (204 / "Success"
+   / "Microsoft Connect Test"); anything else means HTTP is being intercepted.
+3. **Credential form** — the served gateway page has a real password `<input>`.
+
+The verdict (`fingerprint_portal`): **confirmed evil-twin** when a GARMR
+signature matches, **or** HTTP is intercepted/DNS-hijacked *and* a credential
+form is served (a benign walled garden intercepts but rarely harvests a
+password), **or** the classic DNS-hijack + captive-portal pair. It also still
+extracts the page `<title>`, `Server` header, `<input>` names and body hash and
+matches the **GARMR signature table** (`halehound_watch._GARMR_SIGNATURES`) for
+a **HaleHound-specific** confirm. Safety: the gateway target is restricted to a
+**private/link-local/loopback IP literal**, a hostname is refused (it would
+resolve through the hijacked DNS), and the connectivity-check URLs are a fixed,
+public, read-only allowlist. Run it **while associated with the suspect open
+AP** — off that AP it only sees your normal network and correctly reports no
+portal.
+
+The signature table ships **empty** — so it never false-matches — with a
+documented schema (title/Server/form-fields/HTML-markers/SHA-256). Drop in the
+real GARMR fingerprints and the confirm goes live with no code change.
+
+**Auto-signature capture.** You don't hand-craft the signature: probe a
+*known-real* GARMR portal once and the response includes a ready-to-paste
+`suggested_signature` (title + Server + form fields + exact body SHA-256) built
+by `build_signature_suggestion()`. Paste it into `_GARMR_SIGNATURES` and future
+probes confirm. In the UI, a **spoofed BSSID** or **open rogue-lure** detection
+carries a **"Probe captive portal…"** button that runs the probe (you supply the
+gateway IP, default `192.168.4.1`) and shows the observed fields + the suggested
+signature inline.
+
+**The lone-lure case (why a passive scan can miss it).** A GARMR that broadcasts
+a *new* open SSID with no real AP to clone and no deauth ("Real AP not found — no
+deauth" on the device) leaves nothing anomalous on the air for a duplicate- or
+baseline-based check to catch. Two passive tells now cover it: a **spoofed BSSID**
+(a beacon sourced from a group/multicast address — invalid 802.11, strong and
+low-FP) and an **open rogue-lure** name (weak, informational). Together they push
+a lone open evil-twin lure to *possible*, and the **Probe captive portal** button
+turns it into a *confirmed* GARMR once a signature is loaded.
+
+### SubGHz sweep (RTL-SDR)
+
+SubGHz is **opt-in** because it briefly claims the RTL-SDR and takes ~20 s: tick
+**+SubGHz** in the WIDS controls (or `POST /api/wifidef/halehound {"subghz":
+true}`) — it runs on manual scans only, never in the continuous loop.
+`subghz_watch.scan()` runs `rtl_433` across 433.92 MHz + 315 MHz and flags a
+**replay** (same model+id+payload re-sent ≥ 8× in the window — well above any real
+remote's cadence) or a **brute / rolling-code sweep** (≥ 16 distinct codes from
+one protocol). Thresholds are deliberately conservative so ordinary 433 MHz
+telemetry (weather stations, TPMS, doorbells — which repeat a few frames per
+burst) reads as benign `subghz_active`, not an attack. The sweep is **skipped**
+(with a stated reason) when no SDR is present or another SDR job — ADS-B, ACARS,
+VDL2, the waterfall — already holds the radio; Ragnar never yanks it away. *This
+path is validated end-to-end on real RTL-SDR hardware, but not yet against a live
+CC1101/HaleHound emitter.*
+
+**Blind spots are hardware-aware — the panel reports what THIS node can actually
+see.** The list adapts to the attached radios rather than claiming a fixed set:
+
+- **SubGHz** — with an RTL-SDR on the bus it is a *live domain* (or "present but
+  not swept this pass" until you enable it), **not** "needs an SDR". You do **not**
+  need a CC1101; an RTL-SDR covers 300–439 MHz. Only a bare node (no SDR) shows
+  "needs an SDR".
+- **Google Fast Pair (`0xFE2C`)** — no longer a blind spot when a BLE radio is
+  attached; `bt_scanner` now parses service-data, so Fast Pair spam is a scored
+  BLE signal.
+- **GATT-level** BLE attacks (BLE Predator honeypot, Airoha RACE, SkeletonKey)
+  remain out of view — that's a limit of *passive* scanning (they need an active
+  connection), independent of the radio.
+- **NRF24 2.4 GHz** (MouseJack, jammers) and **NFC/RFID** remain genuine hardware
+  gaps — Ragnar carries no nRF24 receiver or NFC reader.
+
+All of these are *listed* rather than silently missed. Everything here is passive
+analysis — nothing is transmitted (the SubGHz sweep only receives).
+
+### Headless 24/7 watch (continuous)
+
+The inline verdict updates with each scan you run (or each cycle of the
+**Continuous** loop). The **24/7 watch** checkbox in the WIDS controls turns the
+*same* fusion into a headless background monitor: a daemon thread
+(`halehound_daemon.py`) periodically captures
+a Wi-Fi window, refreshes a **cached** BLE snapshot on a slower cadence, scores it
+through `halehound_watch.assess`, and emits into the **Watchtower** feed /
+incident engine (and thus Pushover) whenever the verdict crosses the alert tier —
+**with no browser open**.
+
+It is deliberately **slow and Pi-Zero-friendly**: a short (~12 s) capture then a
+long idle gap (~90 s), with BLE refreshed only every ~5 min and **SubGHz never
+auto** (it holds the shared SDR). The enabled flag + config are **persisted**
+(`data/halehound_daemon.json`), so "if enabled" survives a restart —
+`resume_if_enabled` relaunches it at startup. It needs **monitor mode enabled**
+(it captures continuously); a failed capture is caught, counted, and backed off,
+never crashing the thread. Toggle via `POST /api/wifidef/halehound/watch
+{"enable":true,"interface":"<mon>"}`; `GET` the same route for live status
+(cycles, last verdict, last error). The one-shot button and the daemon share one
+scoring core, so their verdicts are identical.
+
+### Field-test playbook (HaleHound / Marauder / Bruce / Ghost ESP)
+
+Ragnar does **not** detect a *firmware* — it detects the **attacks** a firmware
+performs. HaleHound-CYD, ESP32 Marauder, Bruce and Ghost ESP run the same ESP32
+silicon and the same techniques, so they trip the **same** detectors. To validate,
+you don't test the firmware, you **run an attack mode and watch the matching
+detector fire**. The mapping is identical whichever tool you flash.
+
+**What to run on the ESP32 tool → what Ragnar detects:**
+
+| Attack mode on the tool | Ragnar detector | Where it shows | Domain |
+|---|---|---|---|
+| Deauth attack | `deauth` flood | WiFi Defense → 💥 Deauth FLOOD | wifi |
+| Beacon spam / fake-AP flood | `beacon_flood` (randomized-MAC ratio) | 📡 Beacon flood | wifi |
+| Auth flood / Auth DoS ("Auth Flood") | `auth_flood` | 🌊 Auth flood | wifi |
+| Evil twin / rogue AP (clone your SSID) | `rogue_ap` evil-twin — **needs a baseline set first** | 👿 Evil twin | wifi |
+| GARMR captive portal (evil-twin + DNS hijack) | portal fingerprint | HaleHound card / `portal-probe` | portal |
+| KARMA / "answer every probe" | `karma` | 🎣 KARMA/MANA | wifi |
+| BLE spam — Sour Apple / AppleJuice / Swift Pair / Fast Pair / AirTag flood | `apple_ble_flood` / `swiftpair_spam` / `fastpair_spam` / `ble_advert_flood` | HaleHound card → ble | ble |
+| SubGHz replay / brute (CC1101, 315/433 MHz) | `subghz_replay` / `subghz_brute` | HaleHound card (tick **SubGHz sweep**) | subghz |
+| Join your Wi-Fi (HaleHound "IoT Recon", or just connect it) | `rogue_espressif` (or `halehound_cyd` if it announces that hostname) | asset inventory / HaleHound suspects | lan |
+
+**The real test is fusion.** Any single attack is capped at *trace / possible* on
+its own, on purpose — it must not cry wolf. The *likely / confirmed* "ESP32 attack
+multitool" verdict comes from running **two or more domains at once**, which is how
+these tools actually operate. The headline demo:
+
+1. Put the ESP32 on your Wi-Fi (→ **lan**: Espressif host), **and**
+2. Run a deauth or auth flood (→ **wifi**), **and**
+3. Start its BLE spam (→ **ble**).
+
+→ Ragnar fuses wifi + lan + ble → **likely/confirmed**, emits a `halehound`
+Watchtower alert, and the incident engine raises an *"ESP32 attack multitool
+active"* incident.
+
+**Ragnar-side prerequisites (or the detector stays dark):**
+
+- **Wi-Fi** detectors need the adapter in **monitor mode** on the attack's channel
+  (WiFi Defense → enable monitor). Deauth / beacon / auth / KARMA / evil-twin all
+  come from that capture.
+- **Evil twin** specifically needs a **baseline** set first — otherwise a legit
+  multi-BSSID SSID (band-steering/mesh) is correctly *not* flagged.
+- **BLE** needs a Bluetooth controller. Thresholds are set **above** ordinary room
+  density (≥20 distinct Apple, ≥15 Swift/Fast Pair advertisers) so a quiet home
+  never false-flags — a single pairing press won't trip it, the tool's *continuous*
+  spam mode will.
+- **SubGHz** needs the RTL-SDR free (no ADS-B/ACARS/waterfall running) and the
+  **SubGHz sweep** box ticked (opt-in, ~20 s).
+- **LAN** detection needs Ragnar to have **scanned the network** (host inventory)
+  so the ESP32 shows up as a host.
+
+**Honest limit — state it plainly.** Ragnar reports *"ESP32 attack multitool of the
+HaleHound / Marauder / Bruce class"*; it **cannot** say *"this is HaleHound
+specifically"*, because the radio evidence is identical across these tools and they
+randomize MACs. The only tool-specific confirms are (1) a **GARMR captive-portal
+signature** match — the table ships empty, so drop in HaleHound's real portal
+`title` / `Server` header / form-field names and it becomes a hard confirm — or
+(2) the device announcing a `halehound` / `garmr` hostname on the LAN.
 
 ## Airtime & link quality
 

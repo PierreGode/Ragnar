@@ -19556,6 +19556,309 @@ def register_network_diagnostics(app, logger=None):
         html = report_common.build_defense_report_html(scan, device_name=device, ai=ai)
         return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
+    def _halehound_assess_emit(scan, ble_devices, portal, want_subghz,
+                               subghz_seconds=20):
+        """Shared fusion core: LAN enrich + hardware caps + optional SubGHz +
+        assess + Watchtower emit. Used by BOTH the one-shot endpoint and the
+        headless daemon so they score identically. Returns the verdict dict."""
+        import halehound_watch as _hh
+        import device_classifier as _dc
+
+        # LAN side: enrich the current host table so a HaleHound-class Espressif
+        # host (IoT Recon joins the LAN) is fused in.
+        assets = []
+        try:
+            from init_shared import shared_data as _sd
+            db = getattr(_sd, 'db', None)
+            hosts = db.get_all_hosts() if db is not None else []
+            for r in (hosts or []):
+                row = r if isinstance(r, dict) else dict(r)
+                ports = []
+                for tok in str(row.get('ports') or '').split(','):
+                    tok = tok.strip().split('/')[0]
+                    if tok.isdigit():
+                        ports.append(int(tok))
+                threats = _dc.detect_threats(row.get('vendor') or '',
+                                             row.get('mac') or '',
+                                             hostname=row.get('hostname') or '',
+                                             ports=ports)
+                if threats:
+                    assets.append({'mac': row.get('mac'), 'ip': row.get('ip'),
+                                   'hostname': row.get('hostname'),
+                                   'threats': threats})
+        except Exception as exc:
+            _log(f"wifidef/halehound asset enrich skipped: {exc}")
+
+        # Hardware-aware blind spots (non-intrusive USB probe — never opens the SDR).
+        caps = {'bt': ble_devices is not None, 'nrf24': False, 'nfc': False}
+        try:
+            import rtl_sdr as _rtl
+            usb_id, _desc = _rtl.probe_usb()
+            caps['sdr'] = bool(usb_id)
+        except Exception:
+            caps['sdr'] = False
+        if not caps.get('sdr'):
+            try:                                # HackRF One (1d50:6089) via lsusb
+                import subprocess as _sp
+                _out = _sp.run(['lsusb'], capture_output=True, text=True, timeout=4)
+                caps['sdr'] = '1d50:6089' in (_out.stdout or '').lower()
+            except Exception:
+                pass
+
+        # SubGHz — opt-in only; briefly claims the shared SDR.
+        subghz = None
+        if caps.get('sdr') and want_subghz:
+            try:
+                import subghz_watch as _sg
+                subghz = _sg.scan(duration=int(subghz_seconds or 20))
+            except Exception as exc:
+                _log(f"wifidef/halehound subghz scan skipped: {exc}")
+                subghz = {"scanned": False, "detections": [],
+                          "reason": f"scan error: {exc}"}
+
+        verdict = _hh.assess(wifi=scan, assets=assets, ble_devices=ble_devices,
+                             portal_obs=portal, capabilities=caps, subghz=subghz)
+
+        # Feed the unified alert pane / incident engine when it's more than trace.
+        if verdict.get('score', 0) >= 25:
+            try:
+                sus = verdict.get('suspects') or []
+                _guard_emit_jsonl('halehound', {
+                    'interface': (scan or {}).get('interface'),
+                    'findings': [{
+                        'code': verdict['code'],
+                        'name': 'ESP32 attack multitool (HaleHound/Marauder/Bruce-'
+                                'class) (%s, %d%%)'
+                                % (verdict['verdict'], verdict['score']),
+                        'severity': verdict['severity'],
+                        'klass': 'attack-multitool',
+                        'src': (sus[0].get('mac') if sus else None),
+                        'cves': [],
+                        'detail': {'domains': verdict.get('domains'),
+                                   'suspects': sus,
+                                   'reasons': [r.get('detail')
+                                               for r in verdict.get('reasons', [])]},
+                    }],
+                })
+            except Exception as exc:
+                _log(f"wifidef/halehound jsonl emit skipped: {exc}")
+        return verdict
+
+    # Headless 24/7 watcher: capture a Wi-Fi window + a slowly-refreshed BLE
+    # snapshot, fuse, emit. A cache keeps BLE off the hot loop (it briefly claims
+    # the controller). SubGHz stays off the auto loop unless explicitly enabled.
+    _hh_ble_cache = {'devices': None, 'ts': 0.0}
+
+    def _halehound_run_once(cfg):
+        import time as _time
+        iface = cfg.get('interface')
+        if not iface or not _valid_iface(iface):
+            raise RuntimeError('no valid monitor interface configured')
+        scan = wifi_defense.do_scan(iface, seconds=int(cfg.get('seconds') or 12),
+                                    channel=cfg.get('channel'))
+        # Refresh the BLE snapshot only every ble_interval seconds.
+        now = _time.time()
+        if (now - _hh_ble_cache['ts']) >= int(cfg.get('ble_interval') or 300):
+            try:
+                bt = bt_scanner.do_scan(duration=8)
+                _hh_ble_cache['devices'] = (bt or {}).get('devices')
+                _hh_ble_cache['ts'] = now
+            except Exception as exc:
+                _log(f"halehound watch BLE refresh skipped: {exc}")
+        return _halehound_assess_emit(scan, _hh_ble_cache['devices'], None,
+                                      bool(cfg.get('subghz')))
+
+    @app.route('/api/wifidef/halehound/watch', methods=['GET', 'POST'])
+    def wifidef_halehound_watch():
+        """Start/stop/status the headless 24/7 ESP32-correlation watcher.
+
+        POST {enable: bool, interface, seconds?, channel?, interval?,
+        ble_interval?, subghz?} toggles it (state persists across restart).
+        GET returns status."""
+        import halehound_daemon as _hd
+        if request.method == 'GET':
+            return jsonify(_hd.status())
+        data = request.get_json(silent=True) or {}
+        if data.get('enable'):
+            iface = (data.get('interface') or '').strip()
+            if not _valid_iface(iface):
+                return _bad('A valid monitor interface is required to start the watch')
+            cfg = {k: data.get(k) for k in
+                   ('interface', 'seconds', 'channel', 'interval',
+                    'ble_interval', 'subghz') if data.get(k) is not None}
+            cfg['interface'] = iface
+            _log(f"wifidef/halehound/watch START {cfg}")
+            return jsonify(_hd.start(_halehound_run_once, cfg))
+        _log("wifidef/halehound/watch STOP")
+        return jsonify(_hd.stop())
+
+    # Relaunch the watcher at startup iff it was left enabled ("if enabled").
+    try:
+        import halehound_daemon as _hd0
+        _hd0.resume_if_enabled(_halehound_run_once)
+    except Exception as _exc:
+        _log(f"halehound watch resume skipped: {_exc}")
+
+    @app.route('/api/wifidef/halehound', methods=['POST'])
+    def wifidef_halehound():
+        """Fused ESP32 attack-multitool assessment (HaleHound / Marauder / Bruce).
+
+        A general ESP32 attack-tool detector, HaleHound included. These tools
+        cannot be told apart or uniquely fingerprinted (same silicon/techniques,
+        randomized MACs), so we score how strongly the observed behaviour —
+        across Wi-Fi WIDS, the LAN asset inventory, and the BLE overlay — matches
+        an ESP32 attack multitool of that class, and emit a Watchtower alert when
+        it crosses a confidence tier so it flows into the incident engine and
+        Pushover.
+
+        Body (all optional; reuses whatever the panels already have on screen):
+          scan   : a wifi_defense.do_scan() result (WIDS detections)
+          bt     : a bt_scanner.do_scan() result (BLE devices)
+          portal : observed captive-portal behaviour
+                   {dns_answers, http_status, redirect_host, ap_ip}
+        """
+        data = request.get_json(silent=True) or {}
+        scan = data.get('scan') if isinstance(data.get('scan'), dict) else None
+        bt = data.get('bt') if isinstance(data.get('bt'), dict) else None
+        portal = data.get('portal') if isinstance(data.get('portal'), dict) else None
+        ble_devices = (bt or {}).get('devices') if bt else None
+        _log("wifidef/halehound assess")
+        verdict = _halehound_assess_emit(
+            scan, ble_devices, portal, data.get('subghz') is True,
+            subghz_seconds=int(data.get('subghz_seconds') or 20))
+        return jsonify(verdict)
+
+    @app.route('/api/wifidef/halehound/selftest', methods=['GET'])
+    def wifidef_halehound_selftest():
+        import halehound_watch as _hh
+        _log("wifidef/halehound/selftest")
+        return jsonify(_hh.selftest())
+
+    @app.route('/api/wifidef/halehound/portal-probe', methods=['POST'])
+    def wifidef_halehound_portal_probe():
+        """Actively fetch a captive portal and match it to a GARMR signature.
+
+        HaleHound exposes no management API — the GARMR evil-twin captive portal
+        is the ONLY page it ever serves. Run this while associated with the
+        suspect/rogue SSID: it GETs the portal (read-only — it NEVER submits
+        credentials), extracts title/Server/form-fields/body-hash, and matches
+        the (operator-supplied) GARMR signature table for a HaleHound-specific
+        confirm. Body: {"url": "http://<portal-ip>/"}.
+
+        Safety: this is an ACTIVE probe, so the target is restricted to a
+        private / link-local / loopback IP literal (a captive-portal gateway) —
+        it cannot be pointed at arbitrary internet hosts.
+        """
+        import ipaddress
+        import urllib.request
+        import urllib.error
+        from urllib.parse import urlparse
+        import halehound_watch as _hh
+        data = request.get_json(silent=True) or {}
+        url = (data.get('url') or '').strip()
+        p = urlparse(url)
+        if p.scheme not in ('http', 'https') or not p.hostname:
+            return _bad('Provide an http(s) URL to the captive portal, '
+                        'e.g. http://192.168.4.1/')
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+        except ValueError:
+            return _bad('Target must be an IP literal (the portal/gateway IP) — '
+                        'a hostname would be resolved through the hijacked DNS')
+        if not (ip.is_private or ip.is_link_local or ip.is_loopback):
+            return _bad('Refusing to probe a non-local address — point this at '
+                        'the local captive-portal gateway only')
+        _log(f"wifidef/halehound/portal-probe {url}")
+        try:
+            req = urllib.request.Request(url, method='GET',
+                                         headers={'User-Agent': 'Ragnar-WIDS'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = resp.getcode()
+                headers = {k: v for k, v in resp.headers.items()}
+                body = resp.read(262144).decode('utf-8', 'replace')  # cap 256 KB
+            final_host = urlparse(resp.geturl()).hostname
+        except Exception as exc:                              # noqa: BLE001
+            return jsonify({'error': f'portal fetch failed: {exc}',
+                            'reachable': False})
+
+        # --- Active, NAME/IP-INDEPENDENT captive-portal fingerprint ---------
+        # Run while ASSOCIATED with the suspect open AP. Two behavioural tests
+        # that no benign open Wi-Fi fails, whatever the SSID is called:
+        #   (1) DNS hijack — resolve several unrelated domains; an evil twin's
+        #       DNS answers everything with its own gateway IP.
+        #   (2) HTTP interception — the OS captive-portal check endpoints
+        #       (generate_204 / captive.apple / msftconnecttest) MUST return a
+        #       known success; anything else means HTTP is being intercepted.
+        # All targets are fixed, public, read-only connectivity-check URLs; no
+        # credentials are ever submitted.
+        import socket as _socket
+        _dns_canaries = ['www.google.com', 'www.cloudflare.com',
+                         'example.com', 'www.wikipedia.org', 'github.com']
+        dns_answers = []
+        for host in _dns_canaries:
+            try:
+                dns_answers.append(_socket.gethostbyname(host))
+            except Exception:                                 # noqa: BLE001
+                pass
+        # (url, expected_status, expected_body_substr)
+        _http_canaries = [
+            ('http://connectivitycheck.gstatic.com/generate_204', 204, ''),
+            ('http://captive.apple.com/hotspot-detect.html', 200, 'Success'),
+            ('http://www.msftconnecttest.com/connecttest.txt', 200,
+             'Microsoft Connect Test'),
+        ]
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None                                   # surface the 3xx
+        _opener = urllib.request.build_opener(_NoRedirect)
+        canary_intercept = False
+        canary_results = []
+        for curl, exp_status, exp_body in _http_canaries:
+            try:
+                cr = _opener.open(urllib.request.Request(
+                    curl, headers={'User-Agent': 'Ragnar-WIDS'}), timeout=4)
+                cstatus = cr.getcode()
+                cbody = cr.read(4096).decode('utf-8', 'replace')
+                intercepted = (cstatus != exp_status
+                               or (exp_body and exp_body not in cbody))
+            except urllib.error.HTTPError as he:
+                cstatus, intercepted = he.code, (he.code != exp_status)
+            except Exception:                                 # noqa: BLE001
+                # Unreachable canary is inconclusive, not evidence of a portal.
+                cstatus, intercepted = None, False
+            canary_intercept = canary_intercept or intercepted
+            canary_results.append({'url': curl, 'status': cstatus,
+                                   'intercepted': bool(intercepted)})
+
+        observed = _hh.parse_portal_observation(body, headers, status)
+        verdict = _hh.fingerprint_portal(
+            dns_answers, http_status=status, ap_ip=p.hostname, observed=observed,
+            canary_intercept=canary_intercept)
+        sig = _hh.match_portal_signature(observed)
+        # Auto-build a ready-to-paste signature from what we fetched, so probing a
+        # KNOWN-real GARMR portal once yields a drop-in _GARMR_SIGNATURES entry.
+        suggestion = _hh.build_signature_suggestion(observed)
+        # Don't echo the raw HTML back; return the extracted, matchable fields.
+        observed.pop('html', None)
+        return jsonify({
+            'reachable': True, 'url': url, 'final_host': final_host,
+            'observed': observed,
+            'verdict': verdict,
+            'dns_answers': dns_answers,
+            'canary_results': canary_results,
+            'garmr_signature': (sig['name'] if sig else None),
+            'signature_confidence': (sig['confidence'] if sig else None),
+            'matched': bool(sig),
+            'suggested_signature': suggestion,
+            'note': (
+                'Evil-twin captive portal CONFIRMED (behavioural).' if verdict['confirmed']
+                else 'Captive-portal behaviour seen — probe while joined to the suspect SSID to confirm.'
+                if verdict['captive_portal']
+                else 'No captive-portal behaviour detected. Run this while ASSOCIATED with '
+                     'the suspect open AP (join it first), or it only sees your normal network.'),
+        })
+
     @app.route('/api/net/isp', methods=['GET'])
     def net_isp():
         iface = (request.args.get('interface') or '').strip() or None

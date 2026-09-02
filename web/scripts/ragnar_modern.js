@@ -1738,7 +1738,8 @@ function wifiScan() {
     fetch(`/api/net/wifi/scan?interface=${encodeURIComponent(iface)}&band=${_wifiState.band}`)
         .then(r => r.json()).then(d => {
             busy(false);
-            if (d.error) { _wifiSetStatus('⚠ ' + d.error); return; }
+            if (d.error) { _wifiState.scanError = d.error; _wifiSetStatus('⚠ ' + d.error); _wifiFlagBanner(); return; }
+            _wifiState.scanError = null;
             _wifiState.data = d;
             // A fresh scan invalidates any earlier AI read, so it isn't embedded
             // into a report describing different scan data.
@@ -3432,9 +3433,10 @@ function _wifiFlagBanner() {
     const f = _wifiState.flagged;
     if (!f) { el.className = 'hidden'; el.innerHTML = ''; return; }
     const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === f.bssid));
-    const state = !_wifiState.data ? 'surveying…'
-        : found ? 'highlighted in the spectrum below'
-            : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
+    const state = _wifiState.scanError ? ('survey unavailable — ' + _esc(_wifiState.scanError))
+        : !_wifiState.data ? 'surveying…'
+            : found ? 'highlighted in the spectrum below'
+                : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
     el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
     el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>'
         + `<b>${_esc(f.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
@@ -4669,7 +4671,7 @@ function wifiSurveyDelete() {
 // WiFi Defense — 802.11 frame monitor / WIDS (top-level tab)
 // Backend: /api/wifidef/* (wifi_defense.py)
 // ============================================================================
-const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null };
+const _wifidef = { iface: '', monitor: null, data: null, continuous: false, timer: null, abort: null, btCache: { devices: null, ts: 0 } };
 
 const _WIFIDEF_THREAT = {
     clear: ['CLEAR', 'bg-green-600/20 text-green-300 border border-green-600/50'],
@@ -4782,7 +4784,7 @@ function _wifidefUpdateRunUI() {
 // Must match wifi_defense.py `_BUILD`. If the running service reports something
 // else, the webapp is executing an OLD wifi_defense module (service not restarted
 // after a git pull) — the #1 cause of "the fix didn't work in the web UI".
-const WIFIDEF_BUILD = '20260730-panel-iface2';
+const WIFIDEF_BUILD = '20260902-halehound-toolnames';
 
 function _wifidefFillIfaces() {
     fetch('/api/wifidef/interfaces').then(r => r.json()).then(d => {
@@ -4815,6 +4817,9 @@ function _wifidefFillIfaces() {
         _wifidefFillPanelIface('wifidef-at-iface', ifs);
         _wifidefFillPanelIface('wifidef-iso-iface', ifs);
         _wifidefUpdateMonBtn();
+        // Reflect the headless 24/7 watch's current state (it may already be
+        // running from a previous session — the daemon persists "if enabled").
+        wifidefHaleHoundWatchStatus();
     }).catch(() => {});
 }
 
@@ -4947,6 +4952,12 @@ function wifidefScan() {
             st.textContent = `${d.frames} frames · ${new Date(d.timestamp * 1000).toLocaleTimeString()}`
                 + (_wifidef.continuous ? ' · live' : '');
             wifidefRender();
+            // Fold the ESP32 attack-tool correlation into the same scan. SubGHz
+            // only on manual scans (it grabs the shared SDR for ~20s), never in
+            // the continuous loop.
+            const wantSub = !_wifidef.continuous
+                && !!(document.getElementById('wifidef-hh-subghz') || {}).checked;
+            _wifidefFusion({ subghz: wantSub });
         }).catch((e) => {
             prog.done();
             if (e && e.name === 'AbortError') { st.textContent = 'Stopped.'; return; }
@@ -5237,8 +5248,10 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma'].includes(x.severity);
-            const border = crit ? 'border-l-4 border-red-500' : 'border-l-4 border-amber-500';
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid'].includes(x.severity);
+            const info = x.severity === 'band_steering';
+            const border = crit ? 'border-l-4 border-red-500'
+                : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';
             if (x.type === 'deauth') {
                 title = x.severity === 'flood' ? '💥 Deauth/Disassoc FLOOD' : 'Deauth/Disassoc frames seen';
@@ -5253,15 +5266,31 @@ function wifidefRender() {
                 title = '🎣 KARMA / MANA rogue AP';
                 body = `<div class="font-mono text-[11px] text-gray-400">${_wifidefMacLink(x.bssid)}</div><div>answered ${x.ssid_count} SSIDs: ${(x.ssids || []).join(', ')}</div>`;
             } else if (x.type === 'rogue_ap') {
-                title = x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)' : '⚠ Duplicate SSID';
-                body = `<div>SSID <b>${x.ssid}</b></div><div class="font-mono text-[11px] text-gray-400">${(x.rogue_bssids || x.bssids || []).map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                title = x.severity === 'attack_tool_ssid' ? '☠️ Attack-tool SSID (EvilPortal/Marauder/Ghost ESP class)'
+                    : x.severity === 'esp32_open_ap' ? '🛰️ ESP32 open soft-AP (Espressif radio — name-independent)'
+                    : x.severity === 'evil_twin' ? '👿 Evil twin (untrusted BSSID)'
+                    : x.severity === 'spoofed_bssid' ? '🚫 Spoofed BSSID (multicast/group bit set)'
+                    : x.severity === 'rogue_lure' ? '🎣 Open Wi-Fi lure — possible evil-twin portal'
+                    : x.severity === 'band_steering' ? '📶 Band-steering / mesh (benign)'
+                    : '⚠ Duplicate SSID';
+                const bssids = (x.rogue_bssids || x.bssids || (x.bssid ? [x.bssid] : []));
+                body = `<div>SSID <b>${x.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</b></div><div class="font-mono text-[11px] text-gray-400">${bssids.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</div>`;
+                // A lure / spoofed AP is the shape of a captive-portal evil twin —
+                // offer a one-click active probe (needs an adapter joined to it).
+                if (x.severity === 'rogue_lure' || x.severity === 'spoofed_bssid' || x.severity === 'attack_tool_ssid' || x.severity === 'esp32_open_ap') {
+                    body += `<button onclick="event.stopPropagation(); wifidefProbePortal('${_esc(x.ssid || '')}')" class="mt-2 bg-fuchsia-600 hover:bg-fuchsia-700 text-white px-2 py-1 rounded text-[11px] font-semibold">Probe captive portal…</button>`;
+                }
+            } else if (x.type === 'auth_flood') {
+                title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
+                const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
+                body = `<div>${x.count} auth frames from ${x.sources} MACs${laTag}.</div><div class="font-mono text-[11px] text-gray-400">target ${_wifidefMacLink(x.bssid)}</div>`;
             }
             return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in Signal Intelligence</span>' : ''}</div></div>`;
         }).join('');
     }
     // Counts
     const c = d.counts || {};
-    let chips = [['frames', d.frames], ['deauth', c.deauth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
+    let chips = [['frames', d.frames], ['deauth', c.deauth], ['auth', c.auth], ['beacons', c.beacon], ['probe-req', c.probe_req], ['probe-resp', c.probe_resp]]
         .map(([k, v]) => `<span class="px-3 py-1 rounded bg-slate-800 border border-slate-700"><b>${v || 0}</b> <span class="text-gray-400">${k}</span></span>`).join('');
     // Airspace density vs the flood threshold — lets the user calibrate.
     const a = d.airspace;
@@ -5282,6 +5311,195 @@ function wifidefRender() {
         <td class="py-1 pr-2">${a.channel == null ? '—' : a.channel}</td>
         <td class="py-1 pr-2">${a.rssi == null ? '—' : a.rssi + ' dBm'}</td>
         <td class="py-1 pr-2">${a.beacons}</td></tr>`).join('');
+}
+
+// ESP32 attack-tool correlation, folded inline into the WIDS scan: the fused
+// verdict is computed from the SAME capture the WIDS just rendered (no second
+// Wi-Fi scan) plus a cached BLE overlay + LAN inventory (+ opt-in SubGHz), and
+// shown above the detections. Backend: POST /api/wifidef/halehound.
+const _WIFIDEF_HH = {
+    confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
+    likely: ['LIKELY', 'bg-red-500 text-white'],
+    possible: ['POSSIBLE', 'bg-amber-500 text-slate-900'],
+    trace: ['trace', 'bg-slate-600 text-slate-200'],
+    none: ['clear', 'bg-emerald-600 text-white'],
+};
+// Fold the ESP32 fusion into the main WIDS scan: reuse the just-captured WIDS
+// data (no second Wi-Fi capture), a cached BLE snapshot (refreshed on a slow
+// timer, not every scan — kind on a Pi Zero and on the continuous loop), and an
+// opt-in SubGHz sweep on manual scans only. Renders inline above the detections.
+async function _wifidefFusion(opts) {
+    opts = opts || {};
+    const box = document.getElementById('wifidef-hh-inline');
+    const vb = document.getElementById('wifidef-hh-verdict');
+    const body = document.getElementById('wifidef-hh-body');
+    if (!box || !_wifidef.data) return;
+    box.hidden = false;
+    vb.textContent = '…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300';
+    // BLE overlay: reuse a cached snapshot unless it's older than 60s (an 8s
+    // scan briefly claims the controller, so it must NOT run every WIDS cycle).
+    let bt = null;
+    const now = Date.now();
+    if (_wifidef.btCache.devices && (now - _wifidef.btCache.ts) < 60000) {
+        bt = { devices: _wifidef.btCache.devices };
+    } else {
+        try {
+            const r = await fetch('/api/net/bt/scan?duration=8');
+            if (r.ok) { bt = await r.json(); _wifidef.btCache = { devices: (bt || {}).devices || null, ts: now }; }
+        } catch (e) { /* BLE optional */ }
+    }
+    const subghz = !!opts.subghz;
+    if (subghz) body.innerHTML = '<span class="text-fuchsia-300">Sweeping SubGHz 300–439 MHz off the RTL-SDR (~20s)…</span>';
+    try {
+        const res = await fetch('/api/wifidef/halehound', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scan: _wifidef.data, bt: bt, subghz: subghz }),
+        });
+        const v = await res.json();
+        if (v.error) { body.innerHTML = '<span class="text-red-300">⚠ ' + _esc(v.error) + '</span>'; return; }
+        const [label, cls] = _WIFIDEF_HH[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+        vb.textContent = `${label} · ${v.score}%`;
+        vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls;
+        let html = '';
+        if (v.domains && v.domains.length) {
+            html += '<div class="mb-2 flex flex-wrap gap-1">' + v.domains.map(d =>
+                `<span class="px-2 py-0.5 rounded bg-fuchsia-600/20 border border-fuchsia-700/50 text-fuchsia-200 text-[11px]">${_esc(d)}</span>`).join('') + '</div>';
+        }
+        if (v.suspects && v.suspects.length) {
+            html += '<div class="text-[12px] text-gray-300 mb-2">Suspect host' + (v.suspects.length > 1 ? 's' : '') + ': '
+                + v.suspects.map(s => `<span class="font-mono text-red-300">${_esc(s.hostname || s.ip || s.mac || '?')}</span> <span class="text-gray-500">(${_esc(s.threat || '')})</span>`).join(', ') + '</div>';
+        }
+        if (v.reasons && v.reasons.length) {
+            html += '<ul class="list-disc pl-5 space-y-0.5 text-[12px] text-gray-300">'
+                + v.reasons.filter(r => r.detail).map(r => `<li><span class="text-gray-500">[${_esc(r.domain)}]</span> ${_esc(r.detail)}</li>`).join('') + '</ul>';
+        } else if (v.verdict === 'none') {
+            html += '<div class="text-emerald-300 text-[12px]">✓ No HaleHound-class activity in the fused signals.</div>';
+        }
+        if (v.subghz) {
+            const sg = v.subghz;
+            const sgTxt = sg.scanned
+                ? `📡 SubGHz swept ${_esc((sg.freqs || []).join(', '))} — ${sg.events} frame${sg.events === 1 ? '' : 's'} decoded`
+                : `📡 SubGHz not swept — ${_esc(sg.reason || 'unavailable')}`;
+            html += `<div class="mt-2 text-[10px] ${sg.scanned ? 'text-fuchsia-300' : 'text-amber-400'}">${sgTxt}</div>`;
+        }
+        if (v.blind_spots && v.blind_spots.length) {
+            html += '<div class="mt-2 text-[10px] text-gray-600">Blind spots: ' + v.blind_spots.map(_esc).join(' · ') + '</div>';
+        }
+        if (v.score >= 25) {
+            html += '<div class="mt-1 text-[10px] text-fuchsia-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+        }
+        body.innerHTML = html;
+    } catch (e) {
+        body.innerHTML = '<span class="text-red-300">ESP32 correlation failed.</span>';
+    }
+}
+
+// Headless 24/7 watcher toggle + status. Backend: /api/wifidef/halehound/watch.
+async function wifidefHaleHoundWatch(enable) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (enable) {
+        const iface = _wifidef.monitor || _wifidef.iface;
+        if (!iface) {
+            if (cb) cb.checked = false;
+            if (st) { st.hidden = false; st.innerHTML = '<span class="text-amber-300">Enable monitor mode first — the 24/7 watch needs a monitor interface.</span>'; }
+            return;
+        }
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: true, interface: iface }),
+            });
+            const d = await r.json();
+            if (d.error) { if (cb) cb.checked = false; if (st) { st.hidden = false; st.innerHTML = '<span class="text-red-300">⚠ ' + _esc(d.error) + '</span>'; } return; }
+            _wifidefRenderWatch(d);
+        } catch (e) { if (cb) cb.checked = false; }
+    } else {
+        try {
+            const r = await fetch('/api/wifidef/halehound/watch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: false }),
+            });
+            _wifidefRenderWatch(await r.json());
+        } catch (e) { /* ignore */ }
+    }
+}
+
+function _wifidefRenderWatch(d) {
+    const cb = document.getElementById('wifidef-hh-watch');
+    const st = document.getElementById('wifidef-hh-watch-status');
+    if (!st) return;
+    const on = !!(d && (d.enabled || d.running));
+    if (cb) cb.checked = on;
+    if (!on) { st.hidden = true; st.innerHTML = ''; return; }
+    st.hidden = false;
+    const cfg = d.config || {};
+    let bits = `🟢 24/7 watch active on <span class="font-mono">${_esc(cfg.interface || '?')}</span> · every ~${_esc(String(cfg.interval || 90))}s (BLE every ${_esc(String(cfg.ble_interval || 300))}s) · ${d.cycles || 0} cycles`;
+    const lv = d.last_verdict;
+    if (lv && lv.verdict) bits += ` · last: <span class="text-fuchsia-300">${_esc(lv.verdict)} ${lv.score}%</span>`;
+    if (d.last_error) bits += ` · <span class="text-amber-400">last error: ${_esc(String(d.last_error).slice(0, 80))}</span>`;
+    st.innerHTML = bits;
+}
+
+async function wifidefHaleHoundWatchStatus() {
+    try {
+        const r = await fetch('/api/wifidef/halehound/watch');
+        if (r.ok) _wifidefRenderWatch(await r.json());
+    } catch (e) { /* ignore */ }
+}
+
+// Active captive-portal probe for a suspected evil-twin lure. Read-only GET; the
+// backend restricts it to a local (private) IP and never submits credentials.
+// Run it with an adapter ASSOCIATED to the rogue SSID; the portal is the gateway.
+async function wifidefProbePortal(ssid) {
+    const box = document.getElementById('wifidef-hh-inline');
+    const body = document.getElementById('wifidef-hh-body');
+    if (box) box.hidden = false;
+    const ip = prompt('Captive-portal / gateway IP to probe'
+        + (ssid ? ' for "' + ssid + '"' : '')
+        + '\n(join an adapter to that SSID first — HaleHound GARMR defaults to 192.168.4.1):',
+        '192.168.4.1');
+    if (!ip) return;
+    const url = 'http://' + ip.trim() + '/';
+    if (body) body.innerHTML = '<span class="text-fuchsia-300">Probing captive portal at ' + _esc(url) + ' …</span>';
+    try {
+        const r = await fetch('/api/wifidef/halehound/portal-probe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url }),
+        });
+        const d = await r.json();
+        if (d.error) { if (body) body.innerHTML = '<span class="text-amber-400">Portal probe: ' + _esc(d.error) + '</span>'; return; }
+        const o = d.observed || {};
+        const v = d.verdict || {};
+        let html = '<div class="text-[12px] text-gray-300">';
+        // Headline verdict from the behavioural fingerprint.
+        if (v.confirmed) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-red-950/60 border border-red-700 text-red-200 font-semibold">☠️ Evil-twin captive portal CONFIRMED</div>';
+        } else if (v.captive_portal) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-amber-950/60 border border-amber-700 text-amber-200 font-semibold">⚠ Captive-portal behaviour detected</div>';
+        } else {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-slate-800 border border-slate-700 text-gray-300">No captive-portal behaviour — join the suspect SSID first, then re-probe</div>';
+        }
+        // The three name/IP-independent tells.
+        const tell = (ok, label) => '<div>' + (ok ? '<span class="text-red-300">●</span> ' : '<span class="text-gray-600">○</span> ') + _esc(label) + '</div>';
+        html += tell(v.dns_hijack, 'DNS hijack' + (v.hijack_ip ? ' — all names → ' + _esc(v.hijack_ip) : ''));
+        html += tell(v.http_intercept, 'HTTP interception (connectivity-check → portal)');
+        html += tell(v.credential_form, 'Credential (password) form served');
+        html += '<div class="mt-2 font-semibold text-fuchsia-300">Portal at ' + _esc(url) + '</div>';
+        html += '<div>Title: <span class="text-gray-100">' + _esc(o.title || '—') + '</span></div>';
+        html += '<div>Server: <span class="font-mono">' + _esc(o.server || '—') + '</span></div>';
+        html += '<div>Form fields: <span class="font-mono">' + _esc((o.form_fields || []).join(', ') || '—') + '</span></div>';
+        if (d.matched) {
+            html += '<div class="mt-1 text-emerald-300">✓ Matched loaded GARMR signature <b>' + _esc(d.garmr_signature) + '</b> (' + _esc(d.signature_confidence) + ') — HaleHound-specific confirm.</div>';
+        } else if (d.suggested_signature) {
+            html += '<div class="mt-2 text-amber-300">No signature loaded. If this IS a known GARMR portal, paste this into <span class="font-mono">halehound_watch._GARMR_SIGNATURES</span>:</div>';
+            html += '<pre class="mt-1 p-2 bg-slate-900 rounded text-[11px] overflow-x-auto text-fuchsia-200">' + _esc(JSON.stringify(d.suggested_signature, null, 2)) + '</pre>';
+        }
+        html += '</div>';
+        if (body) body.innerHTML = html;
+    } catch (e) {
+        if (body) body.innerHTML = '<span class="text-red-300">Portal probe failed.</span>';
+    }
 }
 
 // ============================================================================
