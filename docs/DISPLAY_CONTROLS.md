@@ -280,14 +280,15 @@ link's own gateway. The choice resets to Auto when the mode is switched on.
   128×128 LCD the panel realises two visual orientations (upright / 180°), and
   the joystick tracks whichever is shown.
 - **Landscape (lying-down) layout:** the dashboard is authored for a tall
-  portrait canvas (122×250). When a small e-paper such as the 2.13" is rotated
-  **90° or 270°** it lies down into a wide, short strip (~250×122), where the
-  portrait coordinates would squash together. In that orientation the Default
+  portrait canvas (122×250). When **any** e-paper — the 2.13", 2.7", 2.9", 3.7",
+  4.26" — is rotated **90° or 270°** it lies down into a wide, short canvas where
+  the portrait coordinates would squash together. In that orientation the Default
   screen automatically switches to a **dedicated landscape layout** — a centred
-  header, two five-wide stat rows, the status line and speech, and a **half-size
-  character sprite** in the bottom-right corner. The frise ribbon is dropped
-  (there is no vertical room for it lying down). Rotate back to 0°/180° and the
-  normal portrait dashboard returns.
+  header, two five-wide stat rows, the status line and speech, and a shrunk
+  **character sprite** in a framed right-hand panel. The layout is scaled to the
+  real panel resolution (fonts sized to match), so it fills small and large
+  landscape panels alike. The frise ribbon is dropped (no vertical room lying
+  down). Rotate back to 0°/180° and the normal portrait dashboard returns.
 - Headless installs (no display) accept the display toggles but have nothing to
   render on and no buttons to read.
 
