@@ -9182,6 +9182,29 @@ _KRB_AES = {17, 18, 19, 20}
 _KRB_WEAK = _KRB_RC4 | _KRB_DES
 # PA-ENC-TIMESTAMP pre-auth padata type; its absence == "do not require preauth".
 _KRB_PA_ENC_TIMESTAMP = 2
+# Kerberos KRB-ERROR codes that, in bursts toward one requester, mark KDC recon (K7):
+_KRB_ERR_C_PRINCIPAL_UNKNOWN = 6     # the user does not exist -> user enumeration
+_KRB_ERR_PREAUTH_FAILED = 24         # bad password -> password spray / AS-REP-roast probe
+_KRB_ERR_PREAUTH_REQUIRED = 25       # account requires pre-auth (a normal, non-roast reply)
+# >= this many enum/spray errors toward one requester in the window == recon (v2 K7).
+_KRB_ERR_THRESHOLD = 10
+
+# ---- NTLMSSP relay-in-progress tells (v2 N2/N3) ----------------------------------
+# These complement — and deliberately do NOT duplicate — the Relay/Coercion Watch,
+# which already flags N1 (the same NTLM server challenge reused across 2+ servers) and
+# S2 (SMB2 signing-not-required). SMB Watch already parses SESSION_SETUP (SMB2 magic)
+# and holds a passive name-resolution map, so it is the natural home for the two tells
+# Relay Watch can't see:
+#   N3 — the Responder/Inveigh fixed challenge, a rogue-server tell on first sight
+#        (Relay Watch's reuse rule needs the challenge from two servers; this fires on
+#        a single occurrence of the known static value).
+#   N2 — a Type-3 AUTHENTICATE whose stated workstation doesn't match the connecting
+#        host's passively-resolved name — relayed auth carries the victim's workstation
+#        name, not the relay box's. Silent unless the source has a confident name.
+_NTLMSSP_SIG = b'NTLMSSP\x00'
+_NTLM_TYPE_CHALLENGE = 2             # server -> client, carries the 8-byte server challenge
+_NTLM_TYPE_AUTHENTICATE = 3          # client -> server, carries domain/user/workstation
+_NTLM_STATIC_CHALLENGES = {bytes.fromhex('1122334455667788')}
 
 
 def _smb_find_magic(raw):
@@ -9197,6 +9220,66 @@ def _smb_find_magic(raw):
         return ('v1', cmd, bool(flags & 0x80))
     if magic == 0xFE:
         return ('v2', None, None)
+    return None
+
+
+def _smb_ntlm_type3_fields(payload, off):
+    """(domain, user, workstation) from an NTLM Type-3 AUTHENTICATE at offset `off`.
+    Security-buffer descriptors: DomainName@28, UserName@36, Workstation@44 — each
+    Len[2] MaxLen[2] BufferOffset[4]; strings are UTF-16LE (OEM fallback). Never
+    raises; returns None if the message is too short to trust."""
+    import struct
+
+    def field(desc_off):
+        try:
+            ln, _mx, boff = struct.unpack_from('<HHI', payload, off + desc_off)
+            if ln == 0:
+                return ''
+            raw = payload[off + boff:off + boff + ln]
+            if len(raw) != ln:
+                return ''
+            try:
+                return raw.decode('utf-16-le')
+            except Exception:
+                return raw.decode('latin-1', 'replace')
+        except Exception:
+            return None
+
+    if off + 52 > len(payload):
+        return None
+    dom, usr, wks = field(28), field(36), field(44)
+    if dom is None or usr is None or wks is None:
+        return None
+    return (dom, usr, wks)
+
+
+def _smb_ntlm_message(payload):
+    """Locate an NTLMSSP message inside an SMB SESSION_SETUP payload and pull the
+    fields that matter for relay-in-progress detection (v2 N2/N3). Framing-agnostic:
+    the 'NTLMSSP\\0' signature is found directly. Returns a dict or None.
+      type 2 (CHALLENGE, server->client):   {'type': 2, 'challenge': <hex>}
+      type 3 (AUTHENTICATE, client->server):{'type': 3, 'domain','user','workstation'}
+    """
+    off = payload.find(_NTLMSSP_SIG)
+    if off < 0 or off + 12 > len(payload):
+        return None
+    try:
+        mtype = int.from_bytes(payload[off + 8:off + 12], 'little')
+    except Exception:
+        return None
+    if mtype == _NTLM_TYPE_CHALLENGE:
+        if off + 32 > len(payload):
+            return None
+        chal = payload[off + 24:off + 32]
+        if chal == b'\x00' * 8:
+            return None
+        return {'type': 2, 'challenge': chal.hex()}
+    if mtype == _NTLM_TYPE_AUTHENTICATE:
+        f = _smb_ntlm_type3_fields(payload, off)
+        if f is None:
+            return None
+        dom, usr, wks = f
+        return {'type': 3, 'domain': dom, 'user': usr, 'workstation': wks}
     return None
 
 
@@ -9241,17 +9324,33 @@ def _smb_parse_packets(packets):
             continue
         src, dst = ipl.src, ipl.dst
 
-        if pk.haslayer(TCP) and pk.haslayer(Raw):
+        if pk.haslayer(TCP):
             t = pk.getlayer(TCP)
             if t.sport in _SMB_SERVER_PORTS or t.dport in _SMB_SERVER_PORTS:
-                found = _smb_find_magic(bytes(pk.getlayer(Raw).load))
+                # Reserialize the L4 payload rather than reading getlayer(Raw): scapy
+                # auto-dissects SMB2 on 445 and would otherwise hide the \xfeSMB magic
+                # and the embedded NTLMSSP blob (same idiom as Relay Watch).
+                try:
+                    load = bytes(t.payload)
+                except Exception:
+                    load = b''
+                found = _smb_find_magic(load) if load else None
                 if found:
                     ver, cmd, resp = found
                     from_server = t.sport in _SMB_SERVER_PORTS
                     server = src if from_server else dst
-                    smb_events.append({'server': server, 'client': dst if from_server else src,
-                                       'version': ver, 'command': cmd, 'response': resp,
-                                       'from_server': from_server})
+                    ev = {'server': server, 'client': dst if from_server else src,
+                          'version': ver, 'command': cmd, 'response': resp,
+                          'from_server': from_server}
+                    # v2 (N2/N3): pull the NTLMSSP fields out of a SESSION_SETUP so the
+                    # analyzer can flag a static Responder challenge / a relayed
+                    # workstation. ip_src/ip_dst disambiguate the connecting host.
+                    if _NTLMSSP_SIG in load:
+                        nt = _smb_ntlm_message(load)
+                        if nt:
+                            nt['ip_src'], nt['ip_dst'] = src, dst
+                            ev['ntlm'] = nt
+                    smb_events.append(ev)
             continue
 
         if not pk.haslayer(UDP):
@@ -9416,10 +9515,11 @@ def _smb_analyze(smb_events, nameres, seconds, baseline, learn=True):
         known_mdns = set(baseline['mdns_responders'])
         known_v1 = set(baseline['smbv1_hosts'])
 
-    PRIORITY = ['poisoning', 'smbv1-active', 'spoof-conflict', 'smbv1-offered',
-                'name-exposure', 'clean']
+    PRIORITY = ['responder-challenge', 'poisoning', 'smbv1-active', 'spoof-conflict',
+                'ntlm-workstation-mismatch', 'smbv1-offered', 'name-exposure', 'clean']
     verdict = 'clean'
     reasons = []
+    ntlm_findings = []
 
     def bump(v):
         nonlocal verdict
@@ -9469,6 +9569,56 @@ def _smb_analyze(smb_events, nameres, seconds, baseline, learn=True):
                 f"SMBv1 offered by {ip}{tag} in dialect negotiation (may still upgrade "
                 f"to SMB2/3) — disable SMBv1 to remove the downgrade/fallback path")
 
+    # ---- v2 (N2/N3): NTLM relay-in-progress tells from SESSION_SETUP ----
+    # Reverse of the passive name map: which names resolved to a given IP. Built from
+    # every observed answer so a Type-3 workstation can be judged against the connecting
+    # host's known name. (N1 challenge-reuse + S2 signing already live in Relay Watch.)
+    ip_names = {}
+    for name, ips in name_answers.items():
+        for ip in ips:
+            ip_names.setdefault(ip, set()).add(name)
+    for e in smb_events:
+        nt = e.get('ntlm')
+        if not nt:
+            continue
+        if nt['type'] == 2:
+            chal = nt.get('challenge') or ''
+            try:
+                raw = bytes.fromhex(chal)
+            except ValueError:
+                raw = b''
+            if raw in _NTLM_STATIC_CHALLENGES:
+                bump('responder-challenge')
+                srv = nt.get('ip_src') or e.get('server')
+                ntlm_findings.append({'type': 'responder-challenge', 'server': srv,
+                                      'challenge': chal})
+                reasons.append(
+                    f"RESPONDER CHALLENGE: SMB server {srv} issued the fixed NTLM "
+                    f"challenge {chal} — the Responder/Inveigh default. A rogue "
+                    f"authentication server is on the wire harvesting NetNTLM responses. "
+                    f"Hunt the host and pull it off the segment")
+        elif nt['type'] == 3:
+            ws = (nt.get('workstation') or '').rstrip('.').lower()
+            connector = nt.get('ip_src')
+            known = ip_names.get(connector) or set()
+            if ws and known:
+                ws_short = ws.split('.', 1)[0]
+                known_short = {n.split('.', 1)[0].lower() for n in known}
+                if ws_short not in known_short:
+                    bump('ntlm-workstation-mismatch')
+                    who = (f"{nt.get('domain')}\\{nt.get('user')}"
+                           if (nt.get('domain') or nt.get('user')) else '?')
+                    ntlm_findings.append({'type': 'workstation-mismatch',
+                                          'source': connector,
+                                          'workstation': nt.get('workstation'),
+                                          'known': sorted(known), 'account': who})
+                    reasons.append(
+                        f"NTLM workstation mismatch: {connector} (known here as "
+                        f"{', '.join(sorted(known))}) sent an NTLM AUTHENTICATE claiming "
+                        f"workstation '{nt.get('workstation')}' for {who} — relayed auth "
+                        f"carries the victim's workstation, not the relay box's; a relay "
+                        f"tell. Enforce SMB signing + channel binding (EPA)")
+
     # Exposure: LLMNR/NBT-NS queries present but nobody (yet) answering.
     if (q_llmnr or q_nbtns) and verdict in ('clean', 'name-exposure'):
         bump('name-exposure')
@@ -9514,6 +9664,7 @@ def _smb_analyze(smb_events, nameres, seconds, baseline, learn=True):
             'queries': {'llmnr': q_llmnr, 'nbtns': q_nbtns, 'mdns': q_mdns},
             'conflicts': [{'name': n, 'answers': sorted(name_answers[n])}
                           for n in sorted(name_answers) if len(name_answers[n]) > 1]},
+        'ntlm': ntlm_findings,
         'advisories': advisories,
     }
 
@@ -9707,7 +9858,8 @@ def _krb_analyze(krb_events, baseline, learn=True):
     """Pure classifier over parsed Kerberos events (separated from capture for the
     self-test). Flags downgrade / kerberoast / AS-REP roast. May learn known KDC IPs +
     realms into `baseline`, but never suppresses an attack verdict with them."""
-    PRIORITY = ['kerberoast', 'asrep-roast', 'krb-downgrade', 'krb-exposure', 'clean']
+    PRIORITY = ['kerberoast', 'asrep-roast', 'krb-recon', 'krb-downgrade',
+                'krb-exposure', 'clean']
     verdict = 'clean'
     reasons, findings = [], []
 
@@ -9720,6 +9872,7 @@ def _krb_analyze(krb_events, baseline, learn=True):
     counts = {'as-req': 0, 'as-rep': 0, 'tgs-req': 0, 'tgs-rep': 0, 'krb-error': 0}
     nopreauth_clients = set()          # cnames that sent an AS-REQ without pre-auth
     etype_nosupp = 0
+    krb_err_by_client = {}             # requester IP -> [enum/spray error codes] (K7)
 
     for e in krb_events:
         counts[e['kind']] = counts.get(e['kind'], 0) + 1
@@ -9759,6 +9912,17 @@ def _krb_analyze(krb_events, baseline, learn=True):
                     f"Downgrade: AS-REQ for '{cname or '?'}' offers only weak "
                     f"encryption ({', '.join(_krb_etype_names(et))}) with no AES — AES "
                     f"appears stripped/disabled on the client")
+            elif any(x in _KRB_RC4 for x in et) and has_aes:
+                # v2 K2: RC4 still offered alongside AES — a downgrade/roasting surface,
+                # sharper when the client lists RC4 as its top preference.
+                bump('krb-exposure')
+                pref = ' (top preference)' if et and et[0] in _KRB_RC4 else ''
+                findings.append({'type': 'weak-etype', 'principal': cname,
+                                 'etypes': _krb_etype_names(et)})
+                reasons.append(
+                    f"AS-REQ for '{cname or '?'}' still offers RC4{pref} alongside AES "
+                    f"({', '.join(_krb_etype_names(et))}) — RC4 remains a "
+                    f"downgrade/roasting surface; move the client/account to AES-only")
         elif e['kind'] == 'tgs-req':
             is_service = sname and not sname.lower().startswith('krbtgt')
             if is_service and et and any(x in _KRB_RC4 for x in et) and not has_aes:
@@ -9816,6 +9980,33 @@ def _krb_analyze(krb_events, baseline, learn=True):
         elif e['kind'] == 'krb-error':
             if e['error_code'] == 14:                    # KDC_ERR_ETYPE_NOSUPP
                 etype_nosupp += 1
+            # v2 K7: a KRB-ERROR travels KDC -> client, so the requester is the dst.
+            if e['error_code'] in (_KRB_ERR_C_PRINCIPAL_UNKNOWN, _KRB_ERR_PREAUTH_FAILED):
+                requester = e.get('dst')
+                if requester:
+                    krb_err_by_client.setdefault(requester, []).append(e['error_code'])
+
+    # v2 K7: a burst of unknown-principal / preauth-failed errors toward one requester
+    # is user enumeration (mapping which accounts exist) or password-spray / AS-REP-roast
+    # probing — pre-attack reconnaissance against the domain.
+    for requester in sorted(krb_err_by_client):
+        codes = krb_err_by_client[requester]
+        if len(codes) < _KRB_ERR_THRESHOLD:
+            continue
+        bump('krb-recon')
+        unknown = sum(1 for c in codes if c == _KRB_ERR_C_PRINCIPAL_UNKNOWN)
+        failed = sum(1 for c in codes if c == _KRB_ERR_PREAUTH_FAILED)
+        if unknown >= failed:
+            kind, why = ('user enumeration',
+                         'repeated UNKNOWN-principal errors map out which accounts exist')
+        else:
+            kind, why = ('password spray / AS-REP-roast probing',
+                         'repeated PREAUTH-FAILED errors are guesses against known accounts')
+        findings.append({'type': 'krb-recon', 'principal': requester, 'etypes': []})
+        reasons.append(
+            f"Kerberos {kind}: {len(codes)} KDC errors toward {requester} "
+            f"({unknown} unknown-principal, {failed} preauth-failed) — {why}. "
+            f"Characteristic of pre-attack reconnaissance against the domain")
 
     if etype_nosupp:
         reasons.append(
@@ -9860,8 +10051,9 @@ def _krb_analyze(krb_events, baseline, learn=True):
 # combined banner can show the worst finding from either leg.
 _SMB_SEVERITY = {
     'clean': 0, 'name-exposure': 2, 'smbv1-offered': 3, 'krb-exposure': 3,
-    'krb-downgrade': 4, 'spoof-conflict': 5, 'smbv1-active': 6, 'poisoning': 7,
-    'asrep-roast': 7, 'kerberoast': 8,
+    'ntlm-workstation-mismatch': 3, 'krb-downgrade': 4, 'spoof-conflict': 5,
+    'smbv1-active': 6, 'poisoning': 7, 'asrep-roast': 7, 'krb-recon': 7,
+    'kerberoast': 8, 'responder-challenge': 9,
 }
 
 
@@ -9899,11 +10091,58 @@ def _smb_capture(interface, seconds):
     return path, None
 
 
+# Combined verdicts that are HIGH/CRITICAL enough to page + fold into Watchtower.
+_SMB_WT_SEV = {
+    'responder-challenge': 'critical',
+    'poisoning': 'high', 'smbv1-active': 'high', 'spoof-conflict': 'high',
+    'kerberoast': 'high', 'asrep-roast': 'high', 'krb-downgrade': 'high',
+    'krb-recon': 'high',
+}
+
+
+def _emit_smb_jsonl(result):
+    """Append a HIGH/CRITICAL SMB / name-resolution / Kerberos verdict as a normalized
+    JSON-line to <log-dir>/smb_watch.jsonl so Watchtower (which globs *.jsonl) folds
+    Responder poisoning, SMBv1 abuse, Kerberos roasting/downgrade/recon and the v2 NTLM
+    relay tells into the unified alert pane + single Pushover path. Verdict-level
+    deduplicated over the window; best-effort, never raises."""
+    verdict = result.get('verdict')
+    sev = _SMB_WT_SEV.get(verdict)
+    if not sev:
+        return
+    now = time.time()
+    iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    with _guard_jsonl_lock:
+        key = ('smb_watch', verdict, result.get('interface'))
+        last = _guard_jsonl_seen.get(key)
+        if last is not None and now - last < _GUARD_JSONL_DEDUP_S:
+            return
+        _guard_jsonl_seen[key] = now
+        reasons = result.get('reasons') or []
+        line = json.dumps({
+            'module': 'smb_watch', 'ts': now, 'iso': iso,
+            'iface': result.get('interface'), 'severity': sev,
+            'code': verdict, 'codes': [verdict],
+            'summary': reasons[0] if reasons else verdict,
+            'verdict': verdict,
+            'detail': {'smb_verdict': result.get('smb_verdict'),
+                       'kerberos_verdict': (result.get('kerberos') or {}).get('verdict'),
+                       'reasons': reasons[:6]}})
+    try:
+        os.makedirs(_GUARD_JSONL_DIR, exist_ok=True)
+        with open(os.path.join(_GUARD_JSONL_DIR, 'smb_watch.jsonl'), 'a') as fh:
+            fh.write(line + '\n')
+    except OSError:
+        pass
+
+
 def do_smb_watch(interface=None, seconds=20, learn=True):
     """Passive SMBv1 + LLMNR/NBT-NS/mDNS-poisoning + Kerberos-downgrade scanner
     (detection-only). One capture; classifies SMBv1 use, Responder-style name-resolution
-    poisoning, and Kerberos downgrade / kerberoasting / AS-REP roasting. Learns accepted
-    mDNS responders, known SMBv1 hosts, and known KDCs/realms on first run."""
+    poisoning, Kerberos downgrade / kerberoasting / AS-REP roasting / KDC-error recon,
+    and the v2 NTLM relay tells (static Responder challenge, relayed workstation). Learns
+    accepted mDNS responders, known SMBv1 hosts, and known KDCs/realms on first run;
+    streams HIGH/CRITICAL verdicts to Watchtower."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -9964,6 +10203,8 @@ def do_smb_watch(interface=None, seconds=20, learn=True):
     result['seconds'] = seconds
     result['packet_count'] = len(smb_events) + len(nameres) + len(krb_events)
     result['krb_count'] = len(krb_events)
+    # Feed HIGH/CRITICAL verdicts into Watchtower's unified pane + Pushover path.
+    _emit_smb_jsonl(result)
     return result
 
 
@@ -10013,6 +10254,37 @@ def _smb_selftest():
         return (Ether() / IP(src=src, dst='224.0.0.251') / UDP(sport=5353, dport=5353)
                 / DNS(qr=1, qd=DNSQR(qname=name), an=DNSRR(rrname=name, rdata=src)))
 
+    def ntlm_type2(src, challenge_hex):
+        # NTLMSSP CHALLENGE (server->client): sig[8] type[4]=2 target[8] flags[4]
+        # challenge[8] — the 8-byte server challenge sits at NTLMSSP+24.
+        blob = (b'NTLMSSP\x00' + (2).to_bytes(4, 'little') + b'\x00' * 8
+                + b'\x00' * 4 + bytes.fromhex(challenge_hex))
+        body = b'\xfeSMB' + b'\x00' * 20 + blob         # SMB2 SESSION_SETUP response
+        return (Ether() / IP(src=src, dst='10.0.0.9')
+                / TCP(sport=445, dport=50000, flags='PA') / Raw(body))
+
+    def ntlm_type3(src, domain, user, workstation):
+        # NTLMSSP AUTHENTICATE (client->server) with Domain@28/User@36/Workstation@44
+        # security buffers pointing at UTF-16LE strings after a 64-byte header.
+        dom = domain.encode('utf-16-le'); usr = user.encode('utf-16-le')
+        wks = workstation.encode('utf-16-le')
+        start = 64
+        off_dom, off_usr, off_wks = start, start + len(dom), start + len(dom) + len(usr)
+        hdr = bytearray(64)
+        hdr[0:8] = b'NTLMSSP\x00'
+        struct.pack_into('<I', hdr, 8, 3)
+        struct.pack_into('<HHI', hdr, 12, 0, 0, start)   # LmChallengeResponse
+        struct.pack_into('<HHI', hdr, 20, 0, 0, start)   # NtChallengeResponse
+        struct.pack_into('<HHI', hdr, 28, len(dom), len(dom), off_dom)
+        struct.pack_into('<HHI', hdr, 36, len(usr), len(usr), off_usr)
+        struct.pack_into('<HHI', hdr, 44, len(wks), len(wks), off_wks)
+        struct.pack_into('<HHI', hdr, 52, 0, 0, off_wks + len(wks))
+        struct.pack_into('<I', hdr, 60, 0)               # NegotiateFlags
+        blob = bytes(hdr) + dom + usr + wks
+        body = b'\xfeSMB' + b'\x00' * 20 + blob
+        return (Ether() / IP(src=src, dst='10.0.0.9')
+                / TCP(sport=50000, dport=445, flags='PA') / Raw(body))
+
     def run(name, pkts, baseline, expect):
         with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
             path = tf.name
@@ -10053,6 +10325,23 @@ def _smb_selftest():
     # 7. name-exposure: LLMNR queries only, nobody answering.
     run('name-exposure', [llmnr_query('fileserver'), llmnr_query('wpad')], base,
         'name-exposure')
+    # 7b. N3: a server issuing the static Responder challenge (0x1122334455667788).
+    run('ntlm-responder-challenge', [ntlm_type2('10.0.0.66', '1122334455667788')],
+        base, 'responder-challenge')
+    # 7c. N3 negative: a random challenge is not a Responder tell.
+    run('ntlm-random-challenge', [ntlm_type2('10.0.0.5', 'a1b2c3d4e5f60789')],
+        base, 'clean')
+    # 7d. N2: a client whose passively-resolved name (ws50) doesn't match the
+    #     workstation it claims in NTLM AUTHENTICATE (relayed-auth tell).
+    run('ntlm-workstation-mismatch',
+        [mdns_self('10.0.0.50', 'ws50.local'),
+         ntlm_type3('10.0.0.50', 'CORP', 'victim', 'ATTACKER')],
+        base, 'ntlm-workstation-mismatch')
+    # 7e. N2 negative: the claimed workstation matches the resolved name -> clean.
+    run('ntlm-workstation-match',
+        [mdns_self('10.0.0.51', 'ws51.local'),
+         ntlm_type3('10.0.0.51', 'CORP', 'victim', 'WS51')],
+        base, 'clean')
 
     # 8. parse: fields land correctly.
     with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
@@ -10126,6 +10415,10 @@ def _smb_selftest():
             + _ctx(4, _princ(cname)) + _ctx(5, _tlv(0x61, _tlv(0x30, b''))) + ep
         return _tlv(0x6b, _tlv(0x30, inner))
 
+    def krb_error(code, cname='alice'):
+        inner = _ctx(6, _int(code)) + _ctx(8, _princ([cname]))
+        return _tlv(0x7e, _tlv(0x30, inner))
+
     def krun(name, raws, expect):
         evs = [e for e in (_krb_parse_message(r) for r in raws) if e]
         for e in evs:                                    # attach a KDC for realism
@@ -10151,6 +10444,27 @@ def _smb_selftest():
     # exposure: service TGS-REQ still offering RC4 alongside AES.
     krun('krb-exposure', [tgs_req(['HTTP', 'web01.corp'], 'CORP', [18, 23])],
          'krb-exposure')
+    # v2 K2: an AS-REQ that still offers RC4 alongside AES (pre-auth present) -> exposure.
+    krun('krb-rc4-offer', [as_req(['carol'], ['krbtgt', 'CORP'], 'CORP', [23, 18], [2])],
+         'krb-exposure')
+
+    # v2 K7: a burst of KDC errors toward one requester == user-enum / spray recon.
+    def k7run(name, code, n, expect):
+        evs = []
+        for _ in range(n):
+            e = _krb_parse_message(krb_error(code))
+            if e:
+                e['dst'] = '10.0.0.99'                    # requester (KRB-ERROR is KDC->client)
+                e['kdc'] = '10.0.0.1'
+                evs.append(e)
+        res = _krb_analyze(evs, {}, learn=False)
+        ok = res['verdict'] == expect
+        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
+                          'events': len(evs), 'pass': ok})
+
+    k7run('krb-recon-enum', 6, _KRB_ERR_THRESHOLD + 2, 'krb-recon')     # C_PRINCIPAL_UNKNOWN
+    k7run('krb-recon-spray', 24, _KRB_ERR_THRESHOLD + 2, 'krb-recon')   # PREAUTH_FAILED
+    k7run('krb-recon-below', 6, _KRB_ERR_THRESHOLD - 2, 'clean')        # under threshold
 
     # krb-parse: a TGS-REQ whose etype/SPN sit past a 400-byte truncation still yields
     # the message kind, and the full packet yields the SPN + RC4 etype.

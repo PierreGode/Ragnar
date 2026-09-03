@@ -44,6 +44,14 @@ lands as **critical**, an off-subnet / non-router redirect as **high**.
 (deduplicated per target + severity) — a RIB-corroborated convergence event lands as
 **critical**, loss-plus-path-change as **high**.
 
+[`smb_watch`](nettools.md#smb-watch) (SMB & Kerberos Watch v2) appends a **HIGH/CRITICAL**
+verdict to `/var/log/ragnar/smb_watch.jsonl` (deduplicated per verdict + interface) — a
+static Responder challenge lands as **critical**, and Responder poisoning, SMBv1 in
+active use, Kerberos roasting/downgrade, or a KDC-error recon burst as **high**. This is
+the harvest + Kerberos half of the credential-relay chain; the Relay/Coercion Watch owns
+the relay + unsigned-target half, and Watchtower's incident-correlation engine fuses the
+two streams into one named attack chain.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

@@ -115,6 +115,10 @@ DEFAULT_SOURCES = {
                       'paths': ['/var/log/ragnar/icmp_watch.jsonl']},
     'pathwatch':     {'label': 'BGP Path Watch (convergence / hijack)',
                       'paths': ['/var/log/ragnar/pathwatch.jsonl']},
+    # SMB & Kerberos Watch v2: Responder poisoning, SMBv1 abuse, Kerberos
+    # roasting/downgrade/KDC-recon, and the NTLM relay tells (N2/N3).
+    'smb_watch':     {'label': 'SMB / Kerberos Watch (Responder / roast / relay)',
+                      'paths': ['/var/log/ragnar/smb_watch.jsonl']},
     # Asset inventory change-detection (asset_inventory.py) emits new-device /
     # IP-move / spoof / offline events here so they page + forward like any alert.
     'asset_inventory': {'label': 'Asset Inventory',
