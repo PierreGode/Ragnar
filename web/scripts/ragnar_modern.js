@@ -6963,7 +6963,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'attack']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -8998,17 +8998,21 @@ const _SMB_VERDICT_STYLE = {
     'name-exposure':  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ LLMNR/NBT-NS in use — hosts are exposed to Responder poisoning'],
     'smbv1-offered':  ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SMBv1 offered in negotiation — disable the fallback'],
     'krb-exposure':   ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Kerberos: weak (RC4/DES) encryption still enabled alongside AES'],
+    'ntlm-workstation-mismatch': ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ NTLM workstation ≠ source name — a relayed-authentication tell'],
     'krb-downgrade':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS DOWNGRADE — a DES/RC4 ticket issued or AES stripped from a client'],
+    'krb-recon':      ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROS RECON — a burst of KDC errors (user enumeration / password spray)'],
     'spoof-conflict': ['bg-red-950/60 border-red-800 text-red-300', '🛑 Conflicting name answers — a poisoner racing the real owner'],
     'smbv1-active':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 SMBv1 in active use — EternalBlue/WannaCry (MS17-010) vector'],
     poisoning:        ['bg-red-950/60 border-red-800 text-red-300', '🛑 NAME POISONING — a host is answering LLMNR/NBT-NS (Responder/Inveigh)'],
     'asrep-roast':    ['bg-red-950/60 border-red-800 text-red-300', '🛑 AS-REP ROASTING — a Kerberos account with no pre-auth (offline-crackable hash)'],
     kerberoast:       ['bg-red-950/60 border-red-800 text-red-300', '🛑 KERBEROASTING — a TGS-REQ forcing RC4 on a service SPN (crackable service ticket)'],
+    'responder-challenge': ['bg-red-950/60 border-red-800 text-red-300', '🛑 RESPONDER ON THE WIRE — a server issued the fixed NTLM challenge (rogue auth server)'],
     unknown:          ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
 };
 const _KRB_FINDING_STYLE = {
     kerberoast:    'text-red-300',
     'asrep-roast': 'text-red-300',
+    'krb-recon':   'text-red-300',
     downgrade:     'text-red-300',
     'weak-etype':  'text-amber-300',
 };
@@ -9090,6 +9094,16 @@ async function runSmbWatch() {
         (nr.conflicts || []).forEach(c => {
             html += `<div class="mt-2 px-3 py-2 rounded border text-xs text-red-300 border-red-800 bg-red-950/40">Name <span class="font-mono">${escapeHtml(c.name)}</span> answered with conflicting IPs: <span class="font-mono">${escapeHtml((c.answers || []).join(', '))}</span></div>`;
         });
+        if ((d.ntlm || []).length) {
+            html += '<p class="text-xs uppercase text-gray-400 mt-3 mb-1">NTLM relay tells</p>';
+            d.ntlm.forEach(f => {
+                if (f.type === 'responder-challenge') {
+                    html += `<div class="mt-1 px-3 py-2 rounded border text-xs text-red-300 border-red-800 bg-red-950/40">🛑 Static Responder challenge <span class="font-mono">${escapeHtml(f.challenge || '')}</span> from server <span class="font-mono">${escapeHtml(f.server || '?')}</span> — a rogue NTLM server is harvesting NetNTLM responses.</div>`;
+                } else if (f.type === 'workstation-mismatch') {
+                    html += `<div class="mt-1 px-3 py-2 rounded border text-xs text-amber-300 border-amber-800 bg-amber-950/40">⚠ <span class="font-mono">${escapeHtml(f.source || '?')}</span> (known as ${escapeHtml((f.known || []).join(', ') || '—')}) claimed NTLM workstation <span class="font-mono">${escapeHtml(f.workstation || '?')}</span> for ${escapeHtml(f.account || '?')} — a relayed-authentication tell.</div>`;
+                }
+            });
+        }
         const krb = d.kerberos || {};
         const kc = krb.counts || {};
         const krbTotal = Object.values(kc).reduce((a, b) => a + (b || 0), 0);

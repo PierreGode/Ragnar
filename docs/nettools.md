@@ -1438,7 +1438,33 @@ keeps working on packets truncated by the capture snaplen. What it flags:
 - **krb-downgrade** — the KDC actually **issues a DES/RC4 ticket** (weak encryption in
   real use), or a client offers **only** weak etypes (AES stripped/disabled).
 - **krb-exposure** — RC4/DES still **enabled alongside** AES (legacy encryption that a
-  roaster can force).
+  roaster can force). *v2:* an **AS-REQ** that still offers RC4 alongside AES is now
+  flagged here too (sharper when the client lists RC4 as its *top* preference).
+- **krb-recon** *(v2)* — a **burst of KDC errors toward one requester** within the
+  window: many `C_PRINCIPAL_UNKNOWN` replies are **user enumeration** (mapping which
+  accounts exist), many `PREAUTH_FAILED` replies are **password spray / AS-REP-roast
+  probing**. Characteristic of pre-attack reconnaissance against the domain. *Fix:*
+  alert on the spike, lock/deny the source, and enforce lockout + pre-auth.
+
+**NTLM relay tells (v2).** SMB Watch already sees the `SESSION_SETUP` that carries the
+NTLMSSP blob and holds the passive name-resolution map, so it adds two relay tells the
+[Relay/Coercion Watch](#relaycoercion-watch) can't see (that watch owns the
+**challenge-reuse** and **unsigned-SMB-target** halves — this deliberately does not
+duplicate them):
+
+- **responder-challenge** — a server issued the **fixed Responder/Inveigh challenge**
+  (`0x1122334455667788`). A rogue authentication server is on the wire harvesting
+  NetNTLM responses — flagged on a *single* sighting (Relay Watch's reuse rule needs the
+  challenge from two servers). **CRITICAL.**
+- **ntlm-workstation-mismatch** — a Type-3 `AUTHENTICATE` whose stated **workstation**
+  doesn't match the connecting host's passively-resolved name. Relayed auth carries the
+  *victim's* workstation, not the relay box's — a relay tell. Stays silent unless the
+  source has a confident name, so it doesn't false-positive.
+
+Cross-module fusion (a live poisoner **and** an unsigned relay target, or a directed
+Kerberos→SMB edge) is left to [Watchtower](watchtower.md) and the incident-correlation
+engine, which already fuse the separate watchers' alert streams into named attack chains
+— it is **not** re-implemented inline here.
 
 Kerberos attack verdicts are **never** baselined away; the baseline only remembers the
 **known KDC IPs + realms** to annotate output (a *new* KDC is called out).
@@ -1452,7 +1478,11 @@ announcing themselves), any SMBv1 hosts, and the Kerberos KDCs/realms as the bas
 **never** baselined away. The hardening it nudges toward: disable SMBv1, turn off
 LLMNR (GPO) and NBT-NS (per-adapter / DHCP option 001), enforce **SMB signing** so
 captured NTLM can't be relayed, and set accounts/DCs to **AES-only** Kerberos with
-pre-auth required. **API:** `GET /api/net/smb-watch`, `POST /api/net/smb-baseline`.
+pre-auth required. A **HIGH/CRITICAL** verdict (poisoning, SMBv1-active, spoof-conflict,
+kerberoast, AS-REP-roast, krb-downgrade, krb-recon, responder-challenge) is appended to
+`/var/log/ragnar/smb_watch.jsonl` (verdict-deduplicated over the window), so
+[Watchtower](watchtower.md) folds it into the unified pane + single Pushover path.
+**API:** `GET /api/net/smb-watch`, `POST /api/net/smb-baseline`.
 **CLI:** `smb-watch`, `smb-selftest`.
 
 ### Relay/Coercion Watch
