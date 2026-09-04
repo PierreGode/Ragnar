@@ -1854,6 +1854,8 @@ _NI_CRITICAL = {
     'rogue-redirect', 'rogue-ra', 'rogue-irdp',                         # ipv6/icmp
     'cdpwn',                                                            # cdp (Armis CDPwn CVE exploit shape)
     'autokey-exploit',                                                 # ntp (CVE-2014-9295 crypto_recv overflow signature)
+    'lag-hijack',                                                      # lacp (aggregation takeover: identity manip + member disruption)
+    'zerologon', 'dcsync', 'credential-exposure',                     # rpc-netlogon (CVE-2020-1472 chain / DCSync / DPAPI backup-key / WinRM basic)
     'attack',                                                          # vendor guards: an exploitation primitive observed on the wire
 }
 
@@ -1948,6 +1950,8 @@ def _net_integrity_check_once():
         ('ldap', 'LDAP', lambda: watch(nd.do_ldap_watch, interface=cap_iface)),
         ('ssh', 'SSH', lambda: watch(nd.do_ssh_watch, interface=cap_iface)),
         ('telnet', 'Telnet', lambda: watch(nd.do_telnet_watch, interface=cap_iface)),
+        ('lacp', 'LACP', lambda: watch(nd.do_lacp_watch, interface=cap_iface)),
+        ('rpc', 'RPC', lambda: watch(nd.do_rpc_watch, interface=cap_iface)),
     ]
 
     # LAN-only vendor switch/router guards: only auto-run when a genuine wired

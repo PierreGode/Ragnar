@@ -119,6 +119,16 @@ DEFAULT_SOURCES = {
     # roasting/downgrade/KDC-recon, and the NTLM relay tells (N2/N3).
     'smb_watch':     {'label': 'SMB / Kerberos Watch (Responder / roast / relay)',
                       'paths': ['/var/log/ragnar/smb_watch.jsonl']},
+    # LACP / Marker slow-protocol integrity (do_lacp_watch): aggregation hijack,
+    # VLAN-tagged / non-group-MAC LACPDU delivery-path anomalies, sync/timeout
+    # flapping, Marker floods — the HIGH/CRITICAL findings land here.
+    'lacp_watch':    {'label': 'LACP Watch (aggregation hijack / flapping)',
+                      'paths': ['/var/log/ragnar/lacp_watch.jsonl']},
+    # RPC / NetLogon Watch (do_rpc_watch): Zerologon chain, NetLogon secure-channel
+    # posture, DCERPC auth-trailer posture, NTLM weaknesses, DCSync / remote-exec /
+    # backup-key / EPM-sweep, and WinRM/WS-Man posture. Coercion is Relay Watch's.
+    'rpc_watch':     {'label': 'RPC / NetLogon Watch (Zerologon / DCSync / WinRM)',
+                      'paths': ['/var/log/ragnar/rpc_watch.jsonl']},
     # Asset inventory change-detection (asset_inventory.py) emits new-device /
     # IP-move / spoof / offline events here so they page + forward like any alert.
     'asset_inventory': {'label': 'Asset Inventory',
