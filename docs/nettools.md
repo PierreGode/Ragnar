@@ -65,6 +65,8 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [VTP Watch](#vtp-watch) | Switch & L2/L3 | `GET /api/net/vtp-watch`, `POST /api/net/vtp-baseline` |
 | [SMB Watch](#smb-watch) | Switch & L2/L3 | `GET /api/net/smb-watch`, `POST /api/net/smb-baseline` |
 | [Relay/Coercion Watch](#relaycoercion-watch) | Switch & L2/L3 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
+| [RPC / NetLogon Watch](#rpc--netlogon-watch) | Switch & L2/L3 | `GET /api/net/rpc-watch` |
+| [LACP Watch](#lacp-watch) | Switch & L2/L3 | `GET /api/net/lacp-watch` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
 | [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
 | [Telnet Watch](#telnet-watch) | Switch & L2/L3 | `GET /api/net/telnet-watch` |
@@ -115,7 +117,7 @@ capture path.
 
 ### Detector Self-Test (Switch & L2/L3)
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1515,6 +1517,68 @@ disable the Print Spooler on DCs, and patch (or RPC-filter) the coercion vectors
 **API:** `GET /api/net/relay-watch`, `POST /api/net/relay-baseline`. **CLI:**
 `relay-watch`, `relay-selftest`.
 
+### RPC / NetLogon Watch
+A **passive** DCERPC / NetLogon / WinRM authentication-**posture** monitor —
+**detection-only**, it transmits nothing, decrypts nothing and captures no
+credentials. The per-PDU security trailer (`auth_type` / `auth_level`) is cleartext
+at *every* authentication level, including `PKT_PRIVACY`, so the question that matters
+most — *is this call integrity-protected?* — is answerable from a mirror port even
+when the RPC stub itself is sealed. The DCERPC parser is written from scratch against
+DCE 1.1 / [MS-RPCE] (it is **not** BER/ASN.1); named-pipe DCERPC is carved out of
+SMB2 `WRITE` / `READ` / `IOCTL FSCTL_PIPE_TRANSCEIVE` on 445/139, because PetitPotam
+rides `\pipe\lsarpc`, DFSCoerce `\pipe\netdfs` and Zerologon works fine over
+`\pipe\netlogon`. What it flags, across five categories:
+
+- **netlogon / Zerologon** — the **CVE-2020-1472** chain caught at four independent
+  points: an all-zero `ClientChallenge` (`RPC-ZEROLOGON-ZERO-CHALLENGE`), an all-zero
+  `ClientCredential` (`RPC-ZEROLOGON-ZERO-CREDENTIAL`), the ~256-iteration brute-force
+  loop (`RPC-ZEROLOGON-BRUTE-FORCE`), and the machine-account password reset that
+  follows a hit (`RPC-NETLOGON-PASSWORD-RESET-AFTER-BRUTE`). Plus secure-channel
+  posture: Secure RPC / sign+seal cleared (`RPC-NETLOGON-NO-SECURE-RPC`), unsigned
+  bind (`RPC-NETLOGON-UNSIGNED-BIND`), no-AES/weak crypto, a channel to a host outside
+  the configured DC set (`RPC-NETLOGON-UNEXPECTED-SERVER`), and password get/set. The
+  credential is located by a **self-validating NDR forward-walk** — it is *not* at a
+  fixed offset, because NDR inserts 0–3 bytes of alignment padding before the ULONG
+  `NegotiateFlags`; every NetLogon finding records `field_confidence` of `exact` or
+  `tail-anchored`.
+- **auth** — DCERPC auth-trailer posture: bind with no auth trailer on a sensitive
+  interface, association below `PKT_INTEGRITY`, alter-context/rebind **downgrade**, and
+  the NTLM weaknesses (NTLMv1, no extended session security, no SIGN/SEAL, no MIC,
+  anonymous, LM session key). One NTLMSSP analyser serves RPC security trailers, WinRM
+  `Authorization` headers and (opt-in) SMB2 session setup.
+- **interface** — **DCSync** (DRSUAPI `DRSGetNCChanges`, opnum 3), remote-exec
+  primitives (svcctl / atsvc / winreg), DPAPI domain **backup-key** access (MS-BKRP),
+  and endpoint-mapper **sweeps** at an enumeration rate.
+- **protocol** — bind-NAK, fragment-length anomalies, legacy DCERPC major version.
+- **winrm** — WS-Man on tcp/5985 cleartext, HTTP **Basic** auth, unencrypted SOAP
+  body (`AllowUnencrypted`, distinguished from message-level SPNEGO/Kerberos
+  encryption), auth downgrade, CredSSP delegation, and Shell-Create. tcp/5986 (TLS) is
+  observed but **never dissected**.
+
+> **Module boundary.** Authentication **coercion** (PetitPotam / PrinterBug /
+> DFSCoerce / ShadowCoerce) is **owned by [Relay/Coercion Watch](#relaycoercion-watch)**,
+> which matches the same DCE/RPC interface UUIDs. The RPC/NetLogon Watch engine still
+> *recognises* those binds/calls, but its in-app verdict, findings list and Watchtower
+> feed **suppress the two coercion codes** (`RPC-COERCION-INTERFACE-BIND`,
+> `RPC-COERCION-CALL`) so the event is never double-reported; the card shows how many
+> coercion findings were deferred. Cross-module correlation is fused by Watchtower.
+
+The BPF covers epmap (**tcp/135**), SMB named pipes (**445 · 139**) and WS-Man
+(**tcp/5985**), captured at snaplen 1200 so the bind/opnum + NTLMSSP + NetLogon stub
+stay intact; **Scapy** dissects it (the payload is sliced from the raw bytes by the TCP
+data offset, not `bytes(tcp.payload)`, so scapy's epmap dissector can't re-serialise a
+mid-stream segment and zero out `NegotiateFlags`). Optionally pass known **DC IPs/CIDRs**
+so a NetLogon secure channel to a host outside that set is flagged. The verdict is
+`clean` / `posture` / `exposure` / `credential-exposure` / `dcsync` / `zerologon`. The
+hardening it drives: patch DCs and enforce **Secure RPC** to close Zerologon; break
+relay/DCSync with **SMB + LDAP signing**, **channel binding (EPA)** and tiered admin.
+**API:** `GET /api/net/rpc-watch` (query: `interface`, `seconds`, `dcs`).
+
+> **Watchtower feed.** HIGH/CRITICAL RPC/NetLogon/WinRM findings (coercion excluded) are
+> appended as JSON-lines to `/var/log/ragnar/rpc_watch.jsonl`, so the unified alert pane
+> and its single Pushover path fold in the Zerologon / DCSync / WinRM exposures alongside
+> the standalone watchers.
+
 ### LDAP Watch
 A **passive** Active-Directory / LDAP observer — **detection-only, it never
 transmits**. It sniffs LDAP (**tcp/389**, Global Catalog **tcp/3268**), LDAPS /
@@ -1821,6 +1885,49 @@ parse), and — when [Scapy](https://scapy.net) is installed — crafts a real V
 Advertisement into a pcap and parses it back through `tcpdump -e`, exercising the
 capture→parse path end to end. **API:** `GET /api/net/vtp-watch`,
 `POST /api/net/vtp-baseline`.
+
+### LACP Watch
+A **passive** LACP / Marker slow-protocol **integrity** monitor — **detection-only**,
+it never sends an LACPDU. Link aggregation (IEEE 802.1AX, ex-802.3ad; EtherType
+`0x8809`, group MAC `01:80:c2:00:00:02`) bonds several physical links into one logical
+port, and — like STP/DTP/VTP — its control frames carry **no authentication, no key,
+no digest and no sequence number**. This is therefore a **state-integrity** module,
+not a CVE detector: it detects aggregation hijacking, member eviction and
+selection-parameter manipulation — consequences of the protocol's design. The one real
+CVE anchor is **CVE-2024-30388** (a specific malformed LACP packet flaps a Junos LAG),
+whose observable signature is a `LACP-TLV-LENGTH-INVALID` / `LACP-MALFORMED-SHORT`
+followed by `LACP-SYNC-FLAPPING` on the same segment. What it flags (36 codes across
+structural / delivery-path / identity / cross-view / state-machine / marker / posture
+groups), reduced to a single card **verdict**:
+
+- **lag-hijack** (critical — the one that should page you) — fires only when **both**
+  classes appear for the same member inside one correlation window: an
+  identity/selection event (port-identity collision, actor-MAC / System-ID change,
+  system- or port-priority *improved*, partner-view mismatch) **and** a disruption event
+  (sync loss/flapping, distributing loss, aggregation cleared, defaulted partner info,
+  receive expired). Changing aggregation parameters is not by itself an attack; changing
+  them *and* taking the member down is.
+- **takeover** — delivery-path and identity tells on their own: a **VLAN-tagged** or
+  **non-group-MAC** LACPDU (a slow-protocol frame that should never leave the link), a
+  system/port-priority improvement, or an actor-MAC / operational-key change.
+- **instability** — sync/timeout flapping, distributing loss, aggregation cleared,
+  malformed / bad-version / trailing-data PDUs, and Marker floods.
+
+**No baseline learning**: the first sighting of a member records state and emits
+inventory only, so deploying mid-flight never alarms on the state of the world at t=0;
+transition detectors are inert until there is a prior observation. Transmission rate is
+derived from the **partner's** Timeout bit (802.1AX 6.4.13), per member; observation
+gaps beyond a member's own detection time are treated as **resyncs**, not events, so a
+lossy SPAN doesn't manufacture phantom transitions (the resync count is exported in
+`stats`). The engine is pure-Python with its **own libpcap reader** (Scapy is not used
+at all). The capture BPF is the slow-protocols EtherType plus single-VLAN-tagged
+LACPDUs (themselves a finding). **API:** `GET /api/net/lacp-watch` (query: `interface`,
+`seconds`).
+
+> **Watchtower feed.** HIGH/CRITICAL LACP findings (delivery-path anomalies, identity
+> manipulation, sync/timeout flapping, LAG hijack) are appended as JSON-lines to
+> `/var/log/ragnar/lacp_watch.jsonl`, so aggregation-integrity alerts fold into the
+> unified pane + single Pushover path.
 
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**

@@ -52,6 +52,21 @@ the harvest + Kerberos half of the credential-relay chain; the Relay/Coercion Wa
 the relay + unsigned-target half, and Watchtower's incident-correlation engine fuses the
 two streams into one named attack chain.
 
+[`rpc_watch`](nettools.md#rpc--netlogon-watch) (RPC / NetLogon Watch) appends its
+**HIGH/CRITICAL** DCERPC / NetLogon / NTLM / WinRM findings to
+`/var/log/ragnar/rpc_watch.jsonl` (deduplicated per code + subject) — the **Zerologon**
+chain (CVE-2020-1472), an unsigned NetLogon bind, **DCSync**, DPAPI backup-key access
+and WinRM Basic/unencrypted land as **critical**, the rest of the auth-posture set as
+**high**. Authentication **coercion** is excluded from this feed on purpose: the
+Relay/Coercion Watch already streams it (see above), so the RPC/NetLogon feed never
+double-reports the same PetitPotam/PrinterBug/DFSCoerce/ShadowCoerce event.
+
+[`lacp_watch`](nettools.md#lacp-watch) (LACP Watch) appends its **HIGH/CRITICAL**
+slow-protocol integrity findings to `/var/log/ragnar/lacp_watch.jsonl` (deduplicated per
+code + session) — a correlated **LAG hijack** lands as **critical**, and delivery-path
+anomalies (VLAN-tagged / non-group-MAC LACPDUs), identity manipulation and sync/timeout
+flapping as **high**.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

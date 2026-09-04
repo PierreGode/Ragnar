@@ -6963,7 +6963,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'attack']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -8989,6 +8989,151 @@ async function relayTrustBaseline() {
         await runRelayWatch();
     } catch (e) {
         addConsoleMessage('Failed to reset relay baseline: ' + e.message, 'error');
+    }
+}
+
+// ---- LACP Watch (link-aggregation integrity / LAG hijack) ------------------
+const _LACP_VERDICT_STYLE = {
+    clean:         ['bg-green-950/40 border-green-900 text-green-400', '✓ LAG members clean — no delivery, identity, state-machine or Marker anomaly'],
+    instability:   ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Aggregation instability — sync/timeout flapping, distributing loss or malformed PDUs'],
+    takeover:      ['bg-red-950/60 border-red-800 text-red-300', '🛑 Takeover tell — aggregation-selection identity manipulation or an LACPDU off its link'],
+    'lag-hijack':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 LAG HIJACK — identity manipulation correlated with member disruption in one window'],
+    unknown:       ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _LACP_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+function _fillIfaceSel(id) {
+    const sel = document.getElementById(id);
+    if (!sel || sel.dataset.filled === '1') return Promise.resolve();
+    return fetchAPI('/api/net/interfaces').then(x => {
+        (x.interfaces || []).forEach(i => {
+            const o = document.createElement('option');
+            o.value = i.name;
+            const tag = i.type === 'wifi' ? ' (WiFi)' : i.type === 'ethernet' ? ' (LAN)' : (i.type ? ' (' + i.type + ')' : '');
+            o.textContent = i.name + tag;
+            sel.appendChild(o);
+        });
+        sel.dataset.filled = '1';
+    }).catch(() => {});
+}
+async function runLacpWatch() {
+    const out = document.getElementById('lacp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('lacp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('lacp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing slow-protocol (LACP/Marker) frames…</p>';
+    try {
+        _fillIfaceSel('lacp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/lacp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runLacpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _LACP_VERDICT_STYLE[d.verdict] || _LACP_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · members: ${d.members || 0}, LAGs: ${d.lags || 0} · LACPDUs: ${st.lacpdus || 0}, Markers: ${st.markers || 0}${st.resyncs ? ', resyncs: ' + st.resyncs : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Member / source</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_LACP_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_LACP_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^LACP-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.session || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- RPC / NetLogon Watch (Zerologon / DCSync / WinRM posture) --------------
+const _RPC_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No Zerologon, NetLogon-posture, DCERPC-auth, DCSync/EPM or WinRM exposure'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Weak authentication posture (NTLM/WinRM/EPM) observed on the wire'],
+    exposure:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity RPC/NetLogon/NTLM exposure observed'],
+    'credential-exposure': ['bg-red-950/60 border-red-800 text-red-300', '🛑 CREDENTIAL EXPOSURE — DPAPI backup-key / NetLogon password / WinRM Basic'],
+    dcsync:                ['bg-red-950/60 border-red-800 text-red-300', '🛑 DCSYNC — DRSUAPI directory-replication pull (credential theft)'],
+    zerologon:             ['bg-red-950/60 border-red-800 text-red-300', '🛑 ZEROLOGON (CVE-2020-1472) — NetLogon zero-cred / unsigned bind / brute-force'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _RPC_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runRpcWatch() {
+    const out = document.getElementById('rpc-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('rpc-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('rpc-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const dcsEl = document.getElementById('rpc-dcs');
+    const dcs = dcsEl && dcsEl.value ? dcsEl.value.trim() : '';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing DCERPC / NetLogon / WinRM…</p>';
+    try {
+        _fillIfaceSel('rpc-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) +
+            (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            (dcs ? '&dcs=' + encodeURIComponent(dcs) : '');
+        const d = await fetchAPI('/api/net/rpc-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool === 'tcpdump') extra = ' <button onclick="installNetTool(\'tcpdump\', this, runRpcWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            else if (d && d.missing_tool === 'scapy') extra = ' <span class="ml-2 text-amber-400">Install Scapy in Detector Self-Test.</span>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _RPC_VERDICT_STYLE[d.verdict] || _RPC_VERDICT_STYLE.unknown;
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        const deferred = d.coercion_deferred_to_relay || 0;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · findings: ${(d.findings || []).length}${deferred ? ' · <span class="text-gray-400">' + deferred + ' coercion finding' + (deferred === 1 ? '' : 's') + ' deferred to Relay Watch</span>' : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Subject</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_RPC_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_RPC_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^RPC-|^WINRM-/, m => m))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.subject || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
     }
 }
 

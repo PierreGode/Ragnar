@@ -2292,6 +2292,20 @@
                     </div>
                     <div id="vtp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
+                <!-- LACP Watch (link aggregation integrity / LAG hijack) -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">LACP Watch <span class="text-xs font-normal text-gray-500">(802.1AX · LAG hijack / flapping)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive LACP / Marker slow-protocol integrity monitor — <strong>detection-only</strong>, never sends an LACPDU. Link aggregation (IEEE 802.1AX, EtherType <span class="font-mono">0x8809</span>, group MAC <span class="font-mono">01:80:c2:00:00:02</span>) bonds several links into one logical port, and — like STP/DTP/VTP — its control frames carry <strong>no authentication</strong>. It is a <em>state-integrity</em> monitor, not a CVE detector: it catches the consequences of that design. Flags <strong>lag-hijack</strong> (critical — the one that should page you: aggregation-selection <em>identity manipulation</em> — system/port-priority "improved", actor-MAC/System-ID change, port-identity collision — <em>correlated</em> with member <em>disruption</em> — sync loss/flapping, distributing loss, aggregation cleared — on the same member inside one window), <strong>takeover</strong> tells (VLAN-tagged or non-group-MAC LACPDUs = a frame that should never leave the link; priority improvements; MAC/key changes), and <strong>instability</strong> (sync/timeout flapping, malformed PDUs, Marker floods). The one real CVE anchor is <span class="font-mono">CVE-2024-30388</span> (a malformed LACP packet flapping Junos LAGs), whose signature is a length/short-PDU finding followed by sync-flapping on the segment.</p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture on the slow-protocols EtherType (incl. single-VLAN-tagged LACPDUs, which are themselves a finding). No baseline learning — first sighting of a member records state and emits inventory only, so deploying mid-flight never alarms on the state of the world at t=0. Transmission rate is derived from the partner's Timeout bit per 802.1AX, and observation gaps are treated as resyncs, not events, so a lossy SPAN doesn't manufacture phantom transitions.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="lacp-iface" title="Interface for the LACP capture — a bonded/trunk NIC or a SPAN/mirror of one" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="lacp-secs" type="number" min="8" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runLacpWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan LACP</button>
+                    </div>
+                    <div id="lacp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
                 <!-- SMB Watch (SMBv1 + LLMNR/NBT-NS/mDNS poisoning) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">SMB Watch <span class="text-xs font-normal text-gray-500">(SMBv1 · LLMNR/NBT-NS/mDNS poisoning · Kerberos downgrade / roast / recon · NTLM relay tells)</span></h3>
@@ -2321,6 +2335,21 @@
                         <button onclick="relayTrustBaseline()" class="w-full sm:w-auto bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Learn the current unsigned servers as the trusted baseline">Trust current</button>
                     </div>
                     <div id="relay-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
+                <!-- RPC / NetLogon Watch (Zerologon / DCSync / WinRM) -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">RPC / NetLogon Watch <span class="text-xs font-normal text-gray-500">(DCERPC · Zerologon / DCSync / WinRM)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive <strong>DCERPC / NetLogon / WinRM</strong> authentication-posture monitor — <strong>detection-only</strong>, transmits nothing, decrypts nothing, captures no credentials. The per-PDU security trailer (<span class="font-mono">auth_type</span> / <span class="font-mono">auth_level</span>) is cleartext even at <span class="font-mono">PKT_PRIVACY</span>, so "is this call integrity-protected?" is answerable from a mirror port. Flags the <strong>Zerologon</strong> chain (<span class="font-mono">CVE-2020-1472</span>) at four independent points — all-zero <em>ClientChallenge</em>, all-zero <em>ClientCredential</em>, the ~256-iteration <em>brute-force</em> loop, and the machine-account <em>password reset</em> that follows a hit — plus <strong>NetLogon secure-channel posture</strong> (Secure-RPC/sign+seal cleared, unsigned bind, weak crypto/no-AES, unexpected DC, password get/set), <strong>DCERPC auth posture</strong> (bind with no auth, below-integrity, alter-context downgrade, NTLMv1 / no-MIC / no-signing / anonymous / LM-key), <strong>interface abuse</strong> (<strong>DCSync</strong> via DRSUAPI DRSGetNCChanges, remote-exec via svcctl/atsvc/winreg, DPAPI <strong>backup-key</strong> access, and endpoint-mapper <strong>sweeps</strong>), and <strong>WinRM/WS-Man</strong> posture (cleartext HTTP, Basic auth, unencrypted SOAP body, auth downgrade, CredSSP, Shell-Create). Named-pipe DCERPC (over SMB 445/139) is carved out so pipe-borne attacks aren't missed. <em>Authentication <strong>coercion</strong> (PetitPotam / PrinterBug / DFSCoerce / ShadowCoerce) is deliberately <strong>deferred to the Relay/Coercion Watch above</strong>, which already owns it by the same DCE/RPC interface UUIDs — this watcher never double-reports it, and cross-module correlation is fused by Watchtower.</em></p>
+                    <p class="text-sm text-gray-400 mb-3">One short passive capture on the RPC/SMB/WinRM ports (epmap tcp/135, SMB named pipes 445 · 139, WS-Man tcp/5985; 5986 is observed but never dissected). The DCERPC parser is written from scratch against DCE 1.1 / [MS-RPCE] with a self-validating NDR walk (the Zerologon credential is <em>not</em> at a fixed offset — NDR pads before the ULONG flags). <span class="text-amber-400">Needs Scapy</span> (Detector Self-Test → Install Scapy). Fix Zerologon by patching DCs and enforcing Secure RPC; break relay/DCSync with SMB+LDAP signing, channel binding (EPA), and tiered admin.</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="rpc-iface" title="Interface to audit — pick the NIC facing your DCs / member servers" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <input id="rpc-secs" type="number" min="8" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <input id="rpc-dcs" type="text" title="known DC IPs/CIDRs (comma-separated) — a NetLogon secure channel to a host outside this set is flagged" class="w-40 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" placeholder="DC IPs (optional)">
+                        <button onclick="runRpcWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan RPC</button>
+                    </div>
+                    <div id="rpc-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
                 <!-- LDAP Watch (Active Directory / LDAP) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
@@ -2540,7 +2569,7 @@
                         <h3 class="text-lg font-semibold">Detector Self-Test <span class="text-xs font-normal text-gray-500">(IGMP · IPv6 · NDP · RA Guard · NTP · ICMP · SNMP · TLS · Cert · STP · DTP · CDP · VTP · SMB · Relay · EIGRP · IS-IS · FHRP · OSPF · LDAP · ARP · MAC · DHCP · DNS · BGP · speaker · OWD)</span></h3>
                         <div id="scapy-status" class="text-xs text-gray-400"></div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
+                    <p class="text-sm text-gray-400 mb-3 mt-1">Validates every passive detector by running each classifier against crafted attack captures — no root, no live traffic. Covers the routing/L2 scanners (IGMP, IPv6 first-hop, NDP, STP, DTP, CDP incl. <strong>CDPwn</strong> CVE screening, VTP, EIGRP, IS-IS, FHRP, OSPF), the host/AD detectors (SNMP, TLS, Cert, SMB, LDAP, Relay, <strong>RPC/NetLogon</strong> incl. <strong>Zerologon</strong> / DCSync / WinRM), the link-aggregation integrity monitor (<strong>LACP</strong> LAG-hijack / flapping), and the poisoning / rogue-device checks (<strong>ARP</strong> incl. HSRP/VRRP virtual-MAC awareness, <strong>MAC</strong> spoof/vendor-OUI/randomization incl. HSRP/VRRP virtual-MAC awareness, <strong>DHCP</strong> rogue-server/starvation, <strong>DNS</strong> poison parser/anchors). Installing <strong>Scapy</strong> adds an end-to-end leg that builds real packets, writes a pcap and parses it back through <span class="font-mono">tcpdump</span> (and Cert Watch grades a real local handshake), so the whole capture→parse→classify path is exercised. Recommended for a fully-validated security tool.</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <button onclick="runRoutingSelftest()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Run self-test</button>
                         <button id="scapy-install-btn" onclick="installNetTool('scapy', this, runRoutingSelftest)" class="hidden bg-slate-700 hover:bg-slate-600 text-gray-200 px-4 py-2 rounded text-sm whitespace-nowrap" title="Install the Scapy Python module for the end-to-end packet-crafting self-test">Install Scapy</button>
@@ -8394,7 +8423,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260903-smb-krb-v2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260904-lacp-rpc-watch"></script>
 
 
 
