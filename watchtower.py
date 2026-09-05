@@ -129,6 +129,17 @@ DEFAULT_SOURCES = {
     # backup-key / EPM-sweep, and WinRM/WS-Man posture. Coercion is Relay Watch's.
     'rpc_watch':     {'label': 'RPC / NetLogon Watch (Zerologon / DCSync / WinRM)',
                       'paths': ['/var/log/ragnar/rpc_watch.jsonl']},
+    # BFD failover-manipulation (do_bfd_watch): forged teardown / forced AdminDown /
+    # illegal state regression that induces routing reconvergence, malformed/truncated
+    # headers (CVE-2018-0155 iosd crash), auth downgrade/asymmetric, GTSM violations.
+    'bfd_watch':     {'label': 'BFD Watch (forged teardown / failover manipulation)',
+                      'paths': ['/var/log/ragnar/bfd_watch.jsonl']},
+    # MPLS / SR-MPLS / SRv6 label & segment manipulation (do_sr_mpls_watch): a label
+    # or SRH on a customer-facing port (label-injection / VRF-hopping), reserved /
+    # implicit-null labels forwarded, TTL-expired frames forwarded, SRv6 path
+    # disclosure / missing HMAC, and LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR control tells.
+    'sr_mpls_watch': {'label': 'SR-MPLS Watch (label / segment injection)',
+                      'paths': ['/var/log/ragnar/sr_mpls_watch.jsonl']},
     # Asset inventory change-detection (asset_inventory.py) emits new-device /
     # IP-move / spoof / offline events here so they page + forward like any alert.
     'asset_inventory': {'label': 'Asset Inventory',

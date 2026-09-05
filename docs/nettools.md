@@ -67,6 +67,8 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [Relay/Coercion Watch](#relaycoercion-watch) | Switch & L2/L3 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Switch & L2/L3 | `GET /api/net/rpc-watch` |
 | [LACP Watch](#lacp-watch) | Switch & L2/L3 | `GET /api/net/lacp-watch` |
+| [BFD Watch](#bfd-watch) | Switch & L2/L3 | `GET /api/net/bfd-watch` |
+| [SR-MPLS Watch](#sr-mpls-watch) | Switch & L2/L3 | `GET /api/net/srmpls-watch` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
 | [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
 | [Telnet Watch](#telnet-watch) | Switch & L2/L3 | `GET /api/net/telnet-watch` |
@@ -117,7 +119,7 @@ capture path.
 
 ### Detector Self-Test (Switch & L2/L3)
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **SR-MPLS** (label/segment injection), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1046,22 +1048,29 @@ interface.
 - Endpoint: `POST /api/net/l2-health` `{interface?, seconds}` · binary: `tcpdump`
 
 ### IGMP Watch
-A **passive** IGMP-snooping security scanner for the IPv4 multicast control
-plane — **detection-only**: it never joins a group, sends a query, or becomes a
-querier. One short `tcpdump` window is parsed and classified into four things:
+A **passive** IGMP + **MLD** multicast-control security scanner — **detection-only**:
+it never joins a group, sends a query, or becomes a querier. It covers **both** the IPv4
+multicast control plane (**IGMP** v1/v2/v3) and its IPv6 parallel (**MLD** — MLDv1 RFC 2710
+maps onto the v2 model, MLDv2 RFC 3810 onto v3; ICMPv6 types 130/131/132/143 behind a
+Hop-by-Hop Router Alert). One short `tcpdump` window per family (captured concurrently, so
+the scan stays fast; MLD is decoded from raw bytes since tcpdump's MLD text under-parses
+MLDv2 records) is parsed and classified into four things. **Querier election and version
+tracking are per address family** — an IGMP querier and an MLD querier coexisting on a
+dual-stack segment is normal and never reads as "two queriers":
 
 - **Storm / flood** — an IGMP report/query rate far above normal (IGMP is
   intrinsically low-volume), or a single source flooding reports. This is a real
   multicast DoS and a switch-CPU exhaustion vector.
-- **Anomaly** — more than one **querier** on the segment. There must be exactly
-  one; a second, lower-IP querier is the classic *"become the querier to draw
-  all multicast to yourself"* attack. Also flags mixed query versions
-  (a v3→v2/v1 downgrade), a **spoofed querier** (a query sourced from 0.0.0.0), a
-  message that arrived with an **IP TTL other than 1** (IGMP is link-local — a
-  higher TTL means off-link injection / a spoofed source), a report/leave for a
-  **non-multicast** (outside 224.0.0.0/4) address, a **membership report for a
-  reserved group** (224.0.0.1 all-hosts / .2 all-routers — never joined via
-  IGMP), and a **join/leave flap** (a host toggling a group, thrashing the
+- **Anomaly** — more than one **querier** on the segment *of a given family*. There must
+  be exactly one; a second, lower-address querier is the classic *"become the querier to
+  draw all multicast to yourself"* attack. Also flags mixed query versions
+  (a v3→v2/v1 IGMP downgrade, or an MLDv2→MLDv1 downgrade), a **spoofed querier** (a query
+  sourced from `0.0.0.0` for IGMP or `::` for MLD), a message that arrived with an **IP
+  TTL / IPv6 hop-limit other than 1** (both are link-local — a higher value means off-link
+  injection / a spoofed source), a report/leave for a **non-multicast** address (outside
+  224.0.0.0/4 for IGMP or ff00::/8 for MLD), a **membership report for a reserved group**
+  (224.0.0.1 all-hosts / .2 all-routers, or `ff02::1` all-nodes / `ff02::2` all-routers —
+  never joined), and a **join/leave flap** (a host toggling a group, thrashing the
   snooping table). A per-source **leave flood** is flagged as a storm.
 - **Reconnaissance** — one host joining a wide spread of **distinct groups** —
   multicast stream enumeration.
@@ -1928,6 +1937,84 @@ LACPDUs (themselves a finding). **API:** `GET /api/net/lacp-watch` (query: `inte
 > manipulation, sync/timeout flapping, LAG hijack) are appended as JSON-lines to
 > `/var/log/ragnar/lacp_watch.jsonl`, so aggregation-integrity alerts fold into the
 > unified pane + single Pushover path.
+
+### BFD Watch
+A **passive** Bidirectional Forwarding Detection **failover-manipulation** monitor —
+**detection-only**, it never transmits a BFD packet and never participates in a session.
+BFD (RFC 5880 base; 5881 single-hop; 5883 multihop; 7130 micro-BFD on LAG members) is the
+sub-second trigger for routing convergence: a forged BFD packet does **not** compromise a
+router — it *convinces* one that a healthy path is dead, and OSPF/IS-IS/BGP/static then do
+the damage. So the attack this watches for is **induced reconvergence**, and its critical
+verdict is named accordingly. It watches the four RFC-assigned UDP ports — `3784`
+(single-hop control), `3785` (echo), `4784` (multihop control), `6784` (micro-BFD on LAG).
+Reduced to a single card **verdict**:
+
+- **failover-manipulation** (critical — the one that should page you) — a **spoofed
+  teardown** (`BFD-SPOOFED-TEARDOWN`, a Down/AdminDown correlated with a GTSM violation or
+  source migration), a **forced AdminDown** (`BFD-FORCED-ADMINDOWN`), or an **illegal state
+  regression** (`BFD-STATE-REGRESSION`, Up→Init/Down against the RFC 5880 state machine) —
+  the packets that make a live path go dead.
+- **exposure** — high-severity posture visible on the wire: unauthenticated sessions
+  (`BFD-NO-AUTH`), echo enabled, a `TTL≠255` **GTSM** violation on a single-hop/LAG session
+  (RFC 5881 requires 255), and **malformed / truncated headers** — the latter the
+  exploitation signal for **CVE-2018-0155** (Cisco Catalyst 4500/4900 BFD-offload `iosd`
+  crash on an incomplete BFD header, CVSS 8.6), not just protocol hygiene.
+- **instability** — behavioural: session flap, convergence storm (many sessions down at
+  once), and collapsed detection-time.
+
+It also reads **auth posture** off the wire without holding any key: mid-session
+**downgrade**, one-sided (**asymmetric**) authentication, and stalled-sequence **replay
+windows** on keyed-MD5/SHA1. **No baseline learning**: the first sighting of a session
+records its discriminators and state and emits inventory only, and observation gaps are
+treated as **resyncs**, so deploying mid-flight on a lossy SPAN never manufactures a
+phantom teardown. The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the BFD
+parser and the pcap reader are all hand-rolled (Scapy is used only by the upstream CLI's
+live mode, which the in-app path does not use). **API:** `GET /api/net/bfd-watch` (query:
+`interface`, `seconds`).
+
+> **Watchtower feed.** HIGH/CRITICAL BFD findings (spoofed teardown, forced AdminDown,
+> state regression, malformed/truncated header, GTSM violation, auth downgrade, session
+> flap) are appended as JSON-lines to `/var/log/ragnar/bfd_watch.jsonl`, so
+> failover-manipulation alerts fold into the unified pane + single Pushover path.
+
+### SR-MPLS Watch
+A **passive** MPLS / SR-MPLS / SRv6 **label & segment-manipulation** monitor —
+**detection-only**, it has no transmit primitives (the engine's own conformance tier
+walks the AST and greps the source to prove it). MPLS carries **no per-label
+authentication**: a labelled frame is forwarded on the label it carries, so a label or
+SRv6 segment *chosen by whatever sent the frame* — rather than by this network's own
+control plane — is a forwarding-path injection. It parses the full data plane (EtherType
+`0x8847`/`0x8848` through any depth of 802.1Q tags; **SRv6** via the IPv6 Routing-Header
+type 4, RFC 8754, including under an MPLS shim) and the SR control plane from scratch:
+**LDP** (udp/tcp 646, RFC 5036), **RSVP-TE** (ip-proto 46), **BGP-SR** (Prefix-SID
+attribute, RFC 8669; labelled-unicast + VPN SAFIs), **IS-IS-SR** (RFC 8667 sub-TLVs) and
+**OSPFv2-SR** (RFC 7684/8665 opaque LSAs). Reduced to a single card **verdict**:
+
+- **segment-injection** (critical — the one that should page you) — an MPLS-labelled
+  frame (`SRM-MPLS-ON-CE-PORT`) or an **SRH** (`SRM-SRH-ON-CE-PORT`) on an interface
+  declared (or defaulted) as **customer-facing**. The label/segment was chosen by the
+  far end, not by this network — the label-injection / **VRF-hopping** primitive.
+- **label-manipulation** — reserved / **implicit-null** labels forwarded on the wire, a
+  labelled frame forwarded with an **expired TTL** (`SRM-TTL-ZERO-FORWARDED`), a
+  BOS/GAL/ELI placement violation, or a label rebind.
+- **exposure / posture** — excessive label-stack depth, entropy-label anomalies, SRv6
+  **path disclosure** / missing SRH **HMAC**, explicit-null exposed, LDP off-link hellos
+  or mapping-without-withdraw, and adjacency-SID instability.
+
+**Interface `role` is load-bearing** (the vrfwatch precedent): on a **`ce`** tap the
+presence rules are armed at critical; on a **`core`** backbone tap they go quiet and only
+structural rules run; left **`unknown`** it *fails loud toward customer-facing* and emits
+`SRM-ROLE-UNDECLARED` **once** to say so — so leaving it undeclared on a P–P link is noisy
+by design, never silently wrong. The engine is pure-Python (its own parsers); the in-app
+path captures one short snapshot and replays it through the same libpcap reader the BFD
+watcher uses (scapy is never imported). **API:** `GET /api/net/srmpls-watch` (query:
+`interface`, `seconds`, `role` = `ce` | `core` | `unknown`).
+
+> **Watchtower feed.** HIGH/CRITICAL SR-MPLS findings (label/segment injection,
+> reserved-label, TTL-expiry-forwarded, SRv6 path disclosure / missing HMAC, and the
+> LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR control-plane tells) are appended as JSON-lines to
+> `/var/log/ragnar/sr_mpls_watch.jsonl`, so they fold into the unified pane + single
+> Pushover path.
 
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**

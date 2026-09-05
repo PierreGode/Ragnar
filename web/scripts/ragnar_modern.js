@@ -6963,7 +6963,7 @@ const _NETINT_STYLE = {
 // else non-clean — a suspicious finding (amber). Mirrors the server's _ni_rank so the
 // chips colour every scanner's verdicts without enumerating them all.
 const _NETINT_CLEAN = new Set(['clean', 'unknown', 'ok', 'none', 'hardened', 'learned', 'n/a', 'no-traffic', 'disabled', 'not-applicable', 'randomization', 'fhrp', 'observed']);
-const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'attack']);
+const _NETINT_CRITICAL = new Set(['hijacked', 'spoofed', 'rogue', 'starvation', 'compromised', 'root-hijack', 'bpdu-flood', 'vlan-hop', 'hijack', 'injection', 'rogue-router', 'poisoning', 'spoof-conflict', 'smbv1-active', 'responder-challenge', 'krb-recon', 'coercion-attempt', 'relay-suspected', 'rogue-speaker', 'rogue-redirect', 'rogue-ra', 'rogue-irdp', 'cdpwn', 'autokey-exploit', 'lag-hijack', 'zerologon', 'dcsync', 'credential-exposure', 'failover-manipulation', 'segment-injection', 'attack']);
 function _netintRank(verdict) {
     const v = verdict || 'unknown';
     if (_NETINT_CLEAN.has(v)) return 0;
@@ -9122,6 +9122,136 @@ async function runRpcWatch() {
                     <td class="px-2 py-1 ${_RPC_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
                     <td class="px-2 py-1 font-mono ${_RPC_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^RPC-|^WINRM-/, m => m))}</td>
                     <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.subject || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- BFD Watch (forged teardown / failover manipulation) -------------------
+const _BFD_VERDICT_STYLE = {
+    clean:                    ['bg-green-950/40 border-green-900 text-green-400', '✓ BFD clean — no forged teardown, malformed header, auth downgrade, GTSM or instability'],
+    instability:              ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Session instability — flapping, convergence storm or collapsed detect-time'],
+    exposure:                 ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity BFD exposure — no-auth / echo / GTSM / malformed header (CVE-2018-0155)'],
+    'failover-manipulation':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 FAILOVER MANIPULATION — forged teardown / forced AdminDown / illegal state regression inducing reconvergence'],
+    unknown:                  ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _BFD_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runBfdWatch() {
+    const out = document.getElementById('bfd-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('bfd-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('bfd-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing BFD (UDP 3784/3785/4784/6784)…</p>';
+    try {
+        _fillIfaceSel('bfd-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/bfd-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runBfdWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _BFD_VERDICT_STYLE[d.verdict] || _BFD_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · sessions: ${d.sessions || 0} · BFD packets: ${st.bfd_packets || 0} (control: ${st.control || 0}, echo: ${st.echo || 0})</p>`;
+        const findings = (d.findings || []).filter(f => ['CRITICAL', 'HIGH', 'MEDIUM', 'critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Session</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_BFD_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_BFD_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^BFD-/, ''))}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.session || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
+// ---- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -----
+const _SRM_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No label/segment injection, reserved-label, TTL-expiry or SR control-plane anomaly'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ SR posture note — label-depth / entropy / SR control-plane hygiene'],
+    exposure:              ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ Exposure — SRv6 path disclosure / missing SRH HMAC / explicit-null exposed'],
+    'label-manipulation':  ['bg-red-950/60 border-red-800 text-red-300', '🛑 Label manipulation — reserved-label / TTL-expiry-forwarded / label rebind'],
+    'segment-injection':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 SEGMENT INJECTION — an MPLS label or SRH chosen by the far end on a customer-facing port (label-injection / VRF-hopping)'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _SRM_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runSrMplsWatch() {
+    const out = document.getElementById('srmpls-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('srmpls-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('srmpls-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    const roleEl = document.getElementById('srmpls-role');
+    const role = roleEl && roleEl.value ? roleEl.value : 'unknown';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing MPLS / SR-MPLS / SRv6 + SR control plane…</p>';
+    try {
+        _fillIfaceSel('srmpls-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) +
+            (iface ? '&interface=' + encodeURIComponent(iface) : '') +
+            '&role=' + encodeURIComponent(role);
+        const d = await fetchAPI('/api/net/srmpls-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runSrMplsWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _SRM_VERDICT_STYLE[d.verdict] || _SRM_VERDICT_STYLE.unknown;
+        const st = d.stats || {};
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · role: <span class="font-mono">${escapeHtml(d.role || 'unknown')}</span> · frames: ${st.frames || 0}${st.mpls_frames ? ', MPLS: ' + st.mpls_frames : ''}${st.srh_frames ? ', SRH: ' + st.srh_frames : ''}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes(f.severity));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Class</th><th class="px-2 py-1">Key</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_SRM_SEV_STYLE[f.severity] || 'text-gray-400'}">${escapeHtml(f.severity)}</td>
+                    <td class="px-2 py-1 font-mono ${_SRM_SEV_STYLE[f.severity] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^SRM-/, ''))}</td>
+                    <td class="px-2 py-1 text-gray-500">${escapeHtml(f.class || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.key || '-')}</td>
                 </tr>`).join('') +
                 '</tbody></table>';
         }
