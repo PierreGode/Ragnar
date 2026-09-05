@@ -372,10 +372,20 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
 - **Transport race** — sends one query and briefly listens for a *second,
   conflicting* answer — the signature of an off-path spoofer racing the real
   resolver (Kaminsky cache-poisoning). Plain UDP; needs no elevated privileges.
+- **Dual-stack cross-family** (v3) — resolves the **AAAA (IPv6)** family through
+  the same resolvers and applies the bogon-for-a-public-name and DoH checks to it,
+  then compares the two families' *verdicts* — never their raw addresses, since
+  legitimate setups (tunnel brokers, split-CDN edges) announce A and AAAA from
+  different ASNs. When exactly **one** family is flagged it is the
+  **selective single-family hijack** signature: an attacker who poisons only IPv6
+  (the less-monitored path, which RFC 6724 makes dual-stack clients *prefer*) stays
+  invisible to an A-only check. "Both flagged" is not re-alarmed, and a silent
+  AAAA family (single-stack host) is simply not compared.
 
 Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch, anchor mismatch,
-ASN divergence, failed DNSSEC control, transport race) → **hijacked**; soft
-signals (SERVFAIL, raw-IP divergence) → **suspicious**. The verdict is shown as a
+ASN divergence, failed DNSSEC control, transport race, AAAA bogon / cross-family
+divergence) → **hijacked**; soft signals (SERVFAIL, raw-IP divergence) →
+**suspicious**. The verdict is shown as a
 banner in the web panel, is available on the e-Paper **KEY4-long** result page,
 and drives the [Network Integrity Monitor](#-network-integrity-monitor).
 

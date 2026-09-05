@@ -1854,7 +1854,7 @@
                     <!-- DNS Doctor -->
                     <div class="glass rounded-xl p-4 sm:p-6 md:col-span-2">
                         <h3 class="text-lg font-semibold mb-1">DNS Doctor</h3>
-                        <p class="text-xs text-amber-300/90 mb-2">Checks for DNS poisoning / hijacking — NXDOMAIN rewriting, private/bogon answers for a public name, SERVFAIL/DNSSEC-bogus, resolver divergence, and a DoH cross-check. Plus <strong>known-answer anchors</strong> (drift on <span class="font-mono">dns.google</span>), <strong>ASN-level consensus</strong> (Team Cymru — catches a hijack to a different network even behind CDN/anycast), a live <strong>DNSSEC negative control</strong> (<span class="font-mono">dnssec-failed.org</span> must SERVFAIL, else validation is broken here), and a <strong>transport-race</strong> probe (a second, conflicting answer to one query = an off-path spoofer racing the resolver, Kaminsky-style).</p>
+                        <p class="text-xs text-amber-300/90 mb-2">Checks for DNS poisoning / hijacking — NXDOMAIN rewriting, private/bogon answers for a public name, SERVFAIL/DNSSEC-bogus, resolver divergence, and a DoH cross-check. Plus <strong>known-answer anchors</strong> (drift on <span class="font-mono">dns.google</span>), <strong>ASN-level consensus</strong> (Team Cymru — catches a hijack to a different network even behind CDN/anycast), a live <strong>DNSSEC negative control</strong> (<span class="font-mono">dnssec-failed.org</span> must SERVFAIL, else validation is broken here), a <strong>transport-race</strong> probe (a second, conflicting answer to one query = an off-path spoofer racing the resolver, Kaminsky-style), and a <strong>dual-stack</strong> cross-family check that also resolves <strong>AAAA (IPv6)</strong> and flags a <strong>selective single-family hijack</strong> — IPv4 clean but IPv6 poisoned (or vice-versa) — on the family <span class="font-mono">RFC&nbsp;6724</span> makes clients prefer.</p>
                         <p class="text-sm text-gray-400 mb-3">Resolves a name through every system resolver plus public 1.1.1.1 / 8.8.8.8 — per-resolver answers &amp; latency, DNSSEC, and whether they agree (split-DNS / hijack smell). Also checks DoH/DoT reachability.</p>
                         <div class="flex flex-col sm:flex-row gap-2">
                             <input id="dns-target" type="text" inputmode="url" autocomplete="off" placeholder="hostname (e.g. example.com)" class="w-full flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm" onkeydown="if(event.key==='Enter')runDns()">
@@ -8456,7 +8456,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260905-icmpv6-redirect"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260905-ipv6-dualstack-v3"></script>
 
 
 

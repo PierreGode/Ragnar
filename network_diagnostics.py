@@ -3198,9 +3198,9 @@ def _dns_nxdomain_probe(resolver, nonce_name):
 
 def _doh_lookup(name, rtype='A'):
     """Resolve `name` over Cloudflare DNS-over-HTTPS (encrypted, tamper-resistant
-    to on-path :53 spoofing). Returns a set of A-record answers, or None when the
-    check couldn't run (curl missing / offline). An empty set means the encrypted
-    path returned no address (NXDOMAIN / no A record)."""
+    to on-path :53 spoofing). Returns a set of address answers for the requested
+    record type (A or AAAA), or None when the check couldn't run (curl missing /
+    offline). An empty set means the encrypted path returned no matching address."""
     if not _have('curl'):
         return None
     q = urllib.parse.quote((name or '').strip(), safe='')
@@ -3214,8 +3214,9 @@ def _doh_lookup(name, rtype='A'):
         d = json.loads(res['out'])
     except ValueError:
         return None
+    want = 28 if str(rtype).upper() == 'AAAA' else 1   # DNS type: 1=A, 28=AAAA
     return {a['data'] for a in (d.get('Answer') or [])
-            if a.get('type') == 1 and a.get('data')}   # type 1 = A record
+            if a.get('type') == want and a.get('data')}
 
 
 # ---------------------------------------------------------------------------
@@ -3357,6 +3358,77 @@ def _dns_race_probe(resolver, name, window=0.6):
             'answer_sets': [sorted(x) for x in distinct]}
 
 
+def _dns_dualstack_verdict(v4_flagged, v6_flagged, v6_answered):
+    """Pure cross-family reducer (dns_poison_checker v3 dual-stack layer). Compares
+    the two families' VERDICTS -- never their raw addresses: different A/AAAA ASNs
+    are legitimate (tunnel brokers, split-CDN edges), so address/ASN equality is
+    not a property the internet guarantees and would be a false-positive factory.
+    Returns 'no-compare' (a family didn't answer -> normal single-stack host),
+    'divergent' (exactly one family flagged -> selective single-family hijack),
+    'both-flagged', or 'agree-clean'."""
+    if not v6_answered:
+        return 'no-compare'
+    if bool(v4_flagged) != bool(v6_flagged):
+        return 'divergent'
+    return 'both-flagged' if v4_flagged else 'agree-clean'
+
+
+def _dns_dualstack_check(name, tested, public_name, v4_flagged):
+    """dns_poison_checker v3 dual-stack layer. An attacker who hijacks only ONE
+    address family stays invisible to an A-only check -- and IPv6/AAAA is usually
+    the less-monitored path, which RFC 6724 makes dual-stack clients prefer. So
+    resolve the AAAA family through the same resolvers, apply the same
+    bogon-for-a-public-name and DoH cross-checks, and compare the per-family
+    verdicts. Fail-open: contributes nothing if AAAA can't be resolved. Returns
+    (info_dict, reasons_list)."""
+    out = {'checked': False, 'v6_answered': False, 'v6_bogon_hits': [],
+           'doh6_mismatch': None, 'divergence': 'no-compare'}
+    reasons = []
+    if not public_name:
+        return out, reasons
+    v6_public_union = set()
+    v6_bogon_hits = []
+    answered = False
+    for resolver, kind in tested:
+        d6 = _dig(name, resolver, rtype='AAAA')
+        if d6['answers']:
+            answered = True
+            if kind == 'public':
+                v6_public_union |= set(d6['answers'])
+            bogons = [a for a in d6['answers'] if _is_bogon(a)]
+            if bogons:
+                v6_bogon_hits.append({'resolver': resolver, 'kind': kind,
+                                      'ips': bogons})
+    out['checked'] = True
+    out['v6_answered'] = answered
+    out['v6_bogon_hits'] = v6_bogon_hits
+    # DoH (encrypted) AAAA cross-check vs the plaintext public AAAA union.
+    doh6 = _doh_lookup(name, rtype='AAAA')
+    if doh6 is not None and doh6 and v6_public_union:
+        out['doh6_mismatch'] = doh6.isdisjoint(v6_public_union)
+    v6_flagged = bool(v6_bogon_hits) or out['doh6_mismatch'] is True
+
+    # Direct IPv6-path findings (reported on their own merit).
+    if v6_bogon_hits:
+        who = ', '.join(x['resolver'] for x in v6_bogon_hits)
+        reasons.append('private/bogon IPv6 (AAAA) address for a public name from '
+                       '%s — IPv6-path redirect/hijack (often the less-monitored '
+                       'family)' % who)
+    if out['doh6_mismatch']:
+        reasons.append('DoH (encrypted) AAAA answer disjoint from the plaintext '
+                       'IPv6 answer — on-path spoofing of the IPv6 DNS path')
+
+    out['divergence'] = _dns_dualstack_verdict(v4_flagged, v6_flagged, answered)
+    if out['divergence'] == 'divergent':
+        clean_fam, dirty_fam = (('IPv4/A', 'IPv6/AAAA') if v6_flagged
+                                else ('IPv6/AAAA', 'IPv4/A'))
+        reasons.append('%s checks are clean but %s is flagged — selective '
+                       'single-family DNS hijack; a dual-stack client would likely '
+                       'prefer the %s answer (RFC 6724)'
+                       % (clean_fam, dirty_fam, dirty_fam))
+    return out, reasons
+
+
 def do_dns_doctor(name):
     """Resolve `name` through every system resolver plus public 1.1.1.1 / 8.8.8.8,
     reporting per-resolver answers, query latency and the DNSSEC AD flag, whether
@@ -3371,7 +3443,10 @@ def do_dns_doctor(name):
     a live **DNSSEC negative control** (dnssec-failed.org must SERVFAIL, else the
     DNSSEC signals are untrustworthy), and a **transport-race** probe (a second,
     conflicting answer to one query = an off-path spoofer racing the resolver).
-    The combined verdict is in `poison`."""
+    A **dual-stack** layer (v3) also resolves the **AAAA (IPv6)** family and flags
+    a **selective single-family hijack** — IPv4 clean but IPv6 poisoned (or vice
+    versa) — that an A-only check would miss on the family RFC 6724 makes clients
+    prefer. The combined verdict is in `poison`."""
     name = (name or '').strip()
     if not name:
         return {'success': False, 'error': 'hostname required'}
@@ -3515,9 +3590,18 @@ def do_dns_doctor(name):
                        'off-path spoofer is racing the real resolver (cache-'
                        'poisoning attempt in progress)' % race_resolver)
 
+    # 10. Dual-stack cross-family layer: resolve the AAAA (IPv6) family and flag a
+    #     selective single-family hijack that an A-only check would miss.
+    dualstack, ds_reasons = _dns_dualstack_check(name, tested, public_name,
+                                                 bool(bogon_hits or doh['mismatch']))
+    reasons.extend(ds_reasons)
+
     # Strong = confirmed tampering; soft = worth a second look.
     strong = bool(nx_rewriters or bogon_hits or doh['mismatch'] or anchor_hits
                   or asn_disjoint or race.get('conflicting')
+                  or dualstack.get('v6_bogon_hits')
+                  or dualstack.get('doh6_mismatch') is True
+                  or dualstack.get('divergence') == 'divergent'
                   or (negctrl.get('checked') and negctrl.get('trustworthy') is False))
     soft = bool(servfail or sys_disjoint)
     verdict = 'hijacked' if strong else ('suspicious' if soft else 'clean')
@@ -3536,6 +3620,7 @@ def do_dns_doctor(name):
         'asn_disjoint': asn_disjoint,
         'dnssec_negctrl': negctrl,
         'transport_race': race,
+        'dualstack': dualstack,
     }
 
     return {'success': True, 'name': name, 'results': results,
@@ -3584,6 +3669,18 @@ def _dns_selftest():
        got=_asn_set(['203.0.113.7']))
     # Anchor table shape.
     ck('anchors present', bool(_DNS_ANCHORS) and 'dns.google' in _DNS_ANCHORS)
+
+    # Dual-stack cross-family reducer (v3): compares verdicts, not addresses.
+    ck('dualstack no-compare (v6 silent)',
+       _dns_dualstack_verdict(True, False, False) == 'no-compare')
+    ck('dualstack divergent (v6 only flagged)',
+       _dns_dualstack_verdict(False, True, True) == 'divergent')
+    ck('dualstack divergent (v4 only flagged)',
+       _dns_dualstack_verdict(True, False, True) == 'divergent')
+    ck('dualstack agree-clean',
+       _dns_dualstack_verdict(False, False, True) == 'agree-clean')
+    ck('dualstack both-flagged (no double alarm)',
+       _dns_dualstack_verdict(True, True, True) == 'both-flagged')
 
     return {'success': all(s['pass'] for s in scenarios),
             'scenarios': scenarios, 'scapy': scapy_result}
