@@ -1296,10 +1296,11 @@ and tell a victim *"for destination X, use next-hop Y instead"* — steering tha
 traffic **through the attacker**. It needs **no ARP poisoning and no gateway
 compromise**, and historically most hosts honoured redirects by default, so it's an
 easy, quiet insertion. Related L3 ICMP abuses ride the same wire. This scanner is
-**passive and detection-only**: one short `tcpdump` window over IPv4 `icmp`, parsed
-and classified against the host's **authoritative default gateway** (never learned
-from redirect sources — those could be the attacker). It never sends an ICMP packet.
-What it flags:
+**passive and detection-only** and now covers **both stacks**: one short `tcpdump`
+window over IPv4 `icmp` plus a concurrent `icmp6` window for **ICMPv6 Redirects
+(type 137)**, parsed and classified against the host's **authoritative IPv4 and
+IPv6 default gateways** (never learned from redirect sources — those could be the
+attacker). It never sends a packet. What it flags:
 
 - **Redirect** — an ICMP Redirect steering traffic to a **next-hop that isn't a
   known gateway** (attacker insertion), or **from a source that isn't the gateway**
@@ -1315,8 +1316,8 @@ What it flags:
 - **Recon** — ICMP **timestamp / address-mask / information** requests that
   enumerate hosts and leak facts.
 
-**Redirect/ARP-poison layer (v2).** The capture now also carries the Ethernet
-header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v2
+**Redirect/ARP-poison layer (v3).** The capture now also carries the Ethernet
+header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v3
 detector ([`icmpwatch.py`](../icmpwatch.py)) for the full **RFC 1122 acceptance
 rules** and **L2 identity** correlation on top of the coarse gateway check:
 
@@ -1332,6 +1333,28 @@ rules** and **L2 identity** correlation on top of the coarse gateway check:
   **new_gw_equals_victim / invalid_code / malformed** (MEDIUM), degenerate targets
   (LOW), plus **redirect_burst / redirect_dest_sweep** rate checks.
 
+**IPv6 leg — ICMPv6 Redirect (type 137), RFC 4861 §8.1.** IPv6 validates redirects
+far more strictly than IPv4, and — usefully for a passive monitor — the rules are
+exact protocol MUSTs, so these fire **zero-config on any segment**. The type-137
+message is decoded from raw bytes (its `tcpdump` text is terse and version-varying),
+then fed to the same engine as a `family=6` event:
+
+- **nd_hop_limit_invalid** (HIGH) — Hop Limit ≠ 255. No router forwards a packet and
+  leaves it at 255, so 255 is *proof* the sender is on-link; anything else is an
+  off-link spoof. The exact check IPv4 can only approximate with the TTL heuristic.
+- **nd_source_not_link_local** (HIGH) — the source is not a link-local (`fe80::`)
+  address, which RFC 4861 requires of a legitimate router redirect.
+- **nd_target_invalid** (HIGH) — the Target is neither link-local nor equal to the
+  Destination (the IPv6 analog of `new_gw_off_subnet`).
+- **nd_target_lla_mismatch** (CRITICAL) — the redirect's **Target Link-Layer
+  Address** option hands the victim a MAC that isn't among the target's legitimate
+  MACs — the packet itself installs a poisoned mapping (IPv4 redirects carry no MAC,
+  so this is a v6-only tell). Plus **invalid_code** (v6 code must be 0), and the same
+  `source_not_gateway` / `new_gw_not_router` checks against the host's IPv6 router.
+
+The IPv6 capture runs **concurrently** with the IPv4 one, so dual-stack coverage
+costs a single capture window, not two.
+
 The per-redirect findings are shown under **Redirect analysis** in the card
 (severity-chipped, most-severe first). The ARP frames are context only — they are
 never counted toward the ICMP flood/volume math and icmpwatch is **not** an ARP
@@ -1342,14 +1365,16 @@ The host's default gateway is **always trusted**, plus any gateway learned into
 **Trust current** to re-seed. Every result carries a **mitigation advisory**:
 ignore redirects on hosts (`net.ipv4.conf.all.accept_redirects=0`) and stop sending
 them on the gateway (`send_redirects=0`), disable IRDP, and rate-limit / filter the
-recon ICMP types at the edge. **ICMPv6 Redirects (type 137)** are covered separately
-by [IPv6 First-Hop Watch](#ipv6-first-hop-watch).
+recon ICMP types at the edge. On IPv6, ignore redirects with
+`net.ipv6.conf.all.accept_redirects=0` (also audited/hardenable from **IPv6 RA
+Guard**). **IPv6 First-Hop Watch** still covers rogue RA / DHCPv6; the ICMPv6
+**Redirect** now gets its full RFC 4861 §8.1 validation here.
 
-> **Watchtower feed.** HIGH/CRITICAL redirect findings are appended as JSON-lines
-> to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check + source), so the
-> [Watchtower](watchtower.md) unified pane and single Pushover path fold in redirect
-> MITM / ARP-poison correlation automatically. The standalone engine ships a 69-test
-> self-test: `python3 icmpwatch_selftest.py`.
+> **Watchtower feed.** HIGH/CRITICAL redirect findings (IPv4 and IPv6) are appended
+> as JSON-lines to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check +
+> source), so the [Watchtower](watchtower.md) unified pane and single Pushover path
+> fold in redirect MITM / ARP-poison correlation automatically. The standalone engine
+> ships a 121-test self-test: `python3 icmpwatch_selftest.py`.
 
 Small **CLI** (no web app needed):
 

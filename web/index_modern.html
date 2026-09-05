@@ -2159,9 +2159,9 @@
                 </div>
                 <!-- ICMP Watch -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
-                    <h3 class="text-lg font-semibold mb-1">ICMP Watch <span class="text-xs font-normal text-gray-500">(ICMP redirect · L3 route injection)</span></h3>
-                    <p class="text-xs text-amber-300/90 mb-2">The <strong>ICMP Redirect</strong> (type 5) is the classic <strong>Layer-3 man-in-the-middle</strong>: any host on the segment can forge a redirect that looks like it came from the gateway and tell a victim "for destination X, use next-hop Y instead" — steering that traffic <strong>through the attacker</strong>. No ARP poisoning, no gateway compromise needed, and many hosts honour redirects by default. <strong>Detection-only</strong> — it never sends an ICMP packet.</p>
-                    <p class="text-sm text-gray-400 mb-3">Passively captures IPv4 ICMP and flags a <strong>redirect</strong> steering traffic to a non-gateway next-hop (or from a non-gateway source), a rogue <strong>IRDP</strong> router advertisement (type 9 gateway injection), an ICMP <strong>flood</strong> (ping-flood / smurf), <strong>tunnelling</strong> (oversized echo payloads = covert channel / exfil), and <strong>recon</strong> (timestamp / address-mask / information requests). Compares against the host's <strong>default gateway</strong> (learned into <span class="font-mono">data/icmp_watch.json</span>); "Trust current" re-seeds. <span class="text-gray-500">ICMPv6 redirects (type 137) are covered by IPv6 First-Hop Watch.</span></p>
+                    <h3 class="text-lg font-semibold mb-1">ICMP Watch <span class="text-xs font-normal text-gray-500">(ICMPv4/v6 redirect · L3 route injection)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">The <strong>ICMP Redirect</strong> (IPv4 type 5 / <strong>ICMPv6 type 137</strong>) is the classic <strong>Layer-3 man-in-the-middle</strong>: any host on the segment can forge a redirect that looks like it came from the gateway and tell a victim "for destination X, use next-hop Y instead" — steering that traffic <strong>through the attacker</strong>. No ARP poisoning, no gateway compromise needed, and many hosts honour redirects by default. <strong>Detection-only</strong> — it never sends a packet.</p>
+                    <p class="text-sm text-gray-400 mb-3">Passively captures IPv4 ICMP <strong>and ICMPv6 Redirects (type 137)</strong> and flags a <strong>redirect</strong> steering traffic to a non-gateway next-hop (or from a non-gateway source), a rogue <strong>IRDP</strong> router advertisement (type 9 gateway injection), an ICMP <strong>flood</strong> (ping-flood / smurf), <strong>tunnelling</strong> (oversized echo payloads = covert channel / exfil), and <strong>recon</strong> (timestamp / address-mask / information requests). IPv6 redirects get the full <strong>RFC 4861 §8.1</strong> validation — Hop&nbsp;Limit&nbsp;255, link-local source, valid Target/code, and a poisoned <strong>Target Link-Layer Address</strong> — which fires zero-config on any segment. Compares against the host's <strong>IPv4 &amp; IPv6 default gateways</strong> (v4 learned into <span class="font-mono">data/icmp_watch.json</span>); "Trust current" re-seeds.</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="icmp-iface" title="Interface for the ICMP capture — pick the LAN/WiFi NIC for the segment to watch" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                             <option value="">Auto (wired first)</option>
@@ -8456,7 +8456,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260905-bfd-srmpls-watch"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260905-icmpv6-redirect"></script>
 
 
 

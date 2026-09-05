@@ -48,6 +48,23 @@ _SEV_ORDER = {SEV_INFO: 0, SEV_LOW: 1, SEV_MEDIUM: 2, SEV_HIGH: 3, SEV_CRITICAL:
 ICMP_REDIRECT = 5
 VALID_REDIRECT_CODES = {0, 1, 2, 3}  # net, host, ToS+net, ToS+host
 
+# ---- ICMPv6 / Neighbor Discovery (RFC 4861) ----
+ICMPV6_NS = 135          # Neighbor Solicitation
+ICMPV6_NA = 136          # Neighbor Advertisement
+ICMPV6_REDIRECT = 137
+VALID_REDIRECT_CODES_V6 = {0}     # RFC 4861 §4.5 — code is always 0
+ND_REQUIRED_HOP_LIMIT = 255       # RFC 4861 §8.1 — MUST be 255, not a heuristic
+
+_LINK_LOCAL_V6 = ipaddress.ip_network("fe80::/10")
+
+
+def _is_link_local_v6(addr) -> bool:
+    try:
+        a = ipaddress.ip_address(addr)
+    except Exception:
+        return False
+    return a.version == 6 and a in _LINK_LOCAL_V6
+
 
 @dataclass
 class Finding:
@@ -59,19 +76,23 @@ class Finding:
 
 @dataclass
 class RedirectEvent:
-    """Normalized view of one observed ICMP Redirect."""
+    """Normalized view of one observed redirect, IPv4 (ICMP Type 5) or
+    IPv6 (ICMPv6 Type 137). Field names keep the IPv4 vocabulary; for v6,
+    `new_gw` is the ND Target Address and `inner_dst` the Destination Address."""
     ts: float
     src_ip: Optional[str]       # who sent the redirect
     src_mac: Optional[str]
     dst_ip: Optional[str]       # who it was aimed at (the victim host)
     dst_mac: Optional[str]
-    ip_ttl: Optional[int]
+    ip_ttl: Optional[int]       # IPv4 TTL / IPv6 Hop Limit
     icmp_code: Optional[int]
     new_gw: Optional[str]       # gateway the redirect wants installed
     inner_src: Optional[str]    # original datagram source (the affected host)
     inner_dst: Optional[str]    # destination being redirected
     inner_proto: Optional[int]
     malformed: bool = False
+    family: int = 4             # 4 or 6
+    target_lla: Optional[str] = None   # v6 Target Link-Layer Address option
 
 
 @dataclass
@@ -182,6 +203,11 @@ class ICMPRedirectDetector:
         cfg = config or {}
         self.segments = []
         self._gw_expected = {}   # ip -> set of legitimate MACs (config truth)
+        # Global declared-address sets. An IPv6 router is declared by its
+        # link-local address, which sits in fe80::/10 and therefore in no
+        # segment prefix — segment-scoped lookup alone would never match it.
+        self._gw_all = set()
+        self._routers_all = set()
         for seg in cfg.get("segments", []):
             net = ipaddress.ip_network(seg["cidr"], strict=False)
             gws = {}
@@ -202,6 +228,8 @@ class ICMPRedirectDetector:
             routers = {r.lower() if r else r for r in seg.get("routers", [])}
             # every configured gateway is implicitly also a legitimate router
             routers |= set(gws.keys())
+            self._gw_all |= set(gws.keys())
+            self._routers_all |= routers
             self.segments.append({"net": net, "gateways": gws, "routers": routers})
 
         thr = cfg.get("thresholds", {})
@@ -216,7 +244,11 @@ class ICMPRedirectDetector:
         # sliding-window history: (ts, src_ip, inner_dst)
         self._hist = deque()
 
-        # ---- ARP correlation ----
+        # ---- IPv6 / Neighbor Discovery ----
+        v6_cfg = cfg.get("ipv6", {})
+        self.ipv6_enabled = bool(v6_cfg.get("enabled", True))
+
+        # ---- ARP / NDP correlation ----
         arp_cfg = cfg.get("arp_correlation", {})
         self.arp_enabled = bool(arp_cfg.get("enabled", True))
         self.arp_prefer = bool(arp_cfg.get("prefer_arp_over_config", False))
@@ -281,11 +313,17 @@ class ICMPRedirectDetector:
 
     def _is_known_gateway(self, ip):
         seg = self._segment_of(ip)
-        return bool(seg and ip in seg["gateways"])
+        if seg is not None:
+            return ip in seg["gateways"]
+        # No segment contains this address. Normal for an IPv6 router, which is
+        # declared by its link-local address; fall back to the global set.
+        return ip in self._gw_all
 
     def _is_known_router(self, ip):
         seg = self._segment_of(ip)
-        return bool(seg and ip in seg["routers"])
+        if seg is not None:
+            return ip in seg["routers"]
+        return ip in self._routers_all
 
     # ---- core analysis ---------------------------------------------------
 
@@ -302,12 +340,15 @@ class ICMPRedirectDetector:
             self._record(ev)
             return findings
 
-        # 1) valid redirect code
-        if ev.icmp_code not in VALID_REDIRECT_CODES:
+        # 1) valid redirect code (v4: 0-3 per RFC 792; v6: always 0 per RFC 4861)
+        valid_codes = (VALID_REDIRECT_CODES_V6 if ev.family == 6
+                       else VALID_REDIRECT_CODES)
+        if ev.icmp_code not in valid_codes:
             findings.append(Finding(
                 "invalid_code", SEV_MEDIUM,
-                f"ICMP Redirect with reserved/invalid code {ev.icmp_code}",
-                {"src_ip": ev.src_ip, "code": ev.icmp_code},
+                f"Redirect with reserved/invalid code {ev.icmp_code}",
+                {"src_ip": ev.src_ip, "code": ev.icmp_code,
+                 "family": ev.family, "valid": sorted(valid_codes)},
             ))
 
         # The victim host that would honor this is the inner datagram source.
@@ -345,21 +386,79 @@ class ICMPRedirectDetector:
                          "expected_source": exp_src},
                     ))
 
-        # 4) new gateway must be directly connected to the victim's segment
-        vseg = self._segment_of(victim)
-        if vseg is not None:
-            if ipaddress.ip_address(ev.new_gw) not in vseg["net"]:
+        # 3b) IPv6 ND validation (RFC 4861 §8.1). These are protocol MUSTs, not
+        #     heuristics — a receiver is required to discard on any of them.
+        if ev.family == 6:
+            # Hop Limit MUST be 255. Because no router decrements to 255, this
+            # is a hard proof of on-link origin — the definitive off-link spoof
+            # check that IPv4 can only approximate with the TTL heuristic.
+            if ev.ip_ttl is not None and ev.ip_ttl != ND_REQUIRED_HOP_LIMIT:
                 findings.append(Finding(
-                    "new_gw_off_subnet", SEV_HIGH,
-                    "Redirect points to a new gateway outside the victim's "
-                    "subnet — violates RFC 1122 directly-connected rule",
-                    {"victim": victim, "new_gw": ev.new_gw,
-                     "victim_subnet": str(vseg["net"])},
+                    "nd_hop_limit_invalid", SEV_HIGH,
+                    "ICMPv6 Redirect with Hop Limit != 255 — RFC 4861 requires "
+                    "255; the sender is not on-link",
+                    {"src_ip": ev.src_ip, "hop_limit": ev.ip_ttl,
+                     "required": ND_REQUIRED_HOP_LIMIT},
                 ))
+            # Source MUST be the router's link-local address.
+            if ev.src_ip and not _is_link_local_v6(ev.src_ip):
+                findings.append(Finding(
+                    "nd_source_not_link_local", SEV_HIGH,
+                    "ICMPv6 Redirect from a non-link-local source — RFC 4861 "
+                    "requires the router's link-local address",
+                    {"src_ip": ev.src_ip},
+                ))
+            # Target MUST be link-local (redirect to a better router) or equal
+            # to the Destination Address (the destination is itself on-link).
+            if ev.new_gw and not (_is_link_local_v6(ev.new_gw)
+                                  or (ev.inner_dst
+                                      and ev.new_gw == ev.inner_dst)):
+                findings.append(Finding(
+                    "nd_target_invalid", SEV_HIGH,
+                    "ICMPv6 Redirect Target is neither link-local nor equal to "
+                    "the Destination Address — violates RFC 4861 §8.1",
+                    {"new_gw": ev.new_gw, "destination": ev.inner_dst},
+                ))
+            # The Target Link-Layer Address option hands the victim the MAC to
+            # install for the target. IPv4 redirects carry no MAC at all, so
+            # this is a v6-only opportunity: check it against config truth.
+            if ev.target_lla:
+                exp = self._config_expected(ev.new_gw)
+                if exp and ev.target_lla.lower() not in exp:
+                    findings.append(Finding(
+                        "nd_target_lla_mismatch", SEV_CRITICAL,
+                        "ICMPv6 Redirect carries a Target Link-Layer Address "
+                        "that is not among the target's legitimate MACs — the "
+                        "redirect itself installs a poisoned mapping",
+                        {"new_gw": ev.new_gw, "target_lla": ev.target_lla,
+                         "expected_macs": sorted(exp)},
+                    ))
+
+        # 4) new gateway must be directly connected to the victim's segment.
+        #    IPv4 only: an IPv6 Target is legitimately link-local and therefore
+        #    outside the victim's prefix by design. RFC 4861's equivalent rule
+        #    is nd_target_invalid above.
+        if ev.family == 4:
+            vseg = self._segment_of(victim)
+            if vseg is not None:
+                if ipaddress.ip_address(ev.new_gw) not in vseg["net"]:
+                    findings.append(Finding(
+                        "new_gw_off_subnet", SEV_HIGH,
+                        "Redirect points to a new gateway outside the victim's "
+                        "subnet — violates RFC 1122 directly-connected rule",
+                        {"victim": victim, "new_gw": ev.new_gw,
+                         "victim_subnet": str(vseg["net"])},
+                    ))
 
         # 5) new gateway should be a known router, not an arbitrary host.
         #    This is the classic MITM signature: redirect victim -> attacker.
-        if self.segments and not self._is_known_router(ev.new_gw):
+        #    IPv6 exception: RFC 4861 also allows a redirect meaning "that
+        #    destination is on-link", where Target == Destination and is a host
+        #    rather than a router. That form is legitimate, so it is exempt —
+        #    its own risk is covered by nd_target_lla_mismatch and NDP contention.
+        v6_onlink = (ev.family == 6 and ev.inner_dst is not None
+                     and ev.new_gw == ev.inner_dst)
+        if self.segments and not v6_onlink and not self._is_known_router(ev.new_gw):
             sev = SEV_HIGH
             msg = ("Redirect installs a new gateway that is not a known router "
                    "— endpoint being redirected to an unrecognized host")
@@ -426,8 +525,11 @@ class ICMPRedirectDetector:
         # 7) TTL heuristic — a redirect from a directly-connected gateway has
         #    made 0 hops, so its TTL should still be near a known initial value.
         #    Off by more than a hop or two suggests it was relayed/spoofed from
-        #    beyond the segment. Heuristic; OS-dependent; opt-in.
-        if self.enable_ttl_heuristic and ev.ip_ttl is not None:
+        #    beyond the segment. Heuristic; OS-dependent; opt-in. IPv4 only —
+        #    IPv6 replaces it with the mandatory Hop Limit 255 rule, which is
+        #    exact, so applying a heuristic on top would only add noise.
+        if (ev.family == 4 and self.enable_ttl_heuristic
+                and ev.ip_ttl is not None):
             if not self._ttl_plausibly_local(ev.ip_ttl):
                 findings.append(Finding(
                     "ttl_suggests_remote", SEV_LOW,
@@ -503,7 +605,78 @@ class ICMPRedirectDetector:
 
 
 def packet_to_event(pkt, ts: Optional[float] = None) -> Optional[RedirectEvent]:
-    """Convert a Scapy packet to a RedirectEvent. Returns None for non-redirects."""
+    """Convert a Scapy packet to a RedirectEvent (IPv4 ICMP Type 5 or IPv6
+    ICMPv6 Type 137). Returns None for non-redirects."""
+    ev = _v6_packet_to_event(pkt, ts=ts)
+    if ev is not None:
+        return ev
+    return _v4_packet_to_event(pkt, ts=ts)
+
+
+def _v6_packet_to_event(pkt, ts: Optional[float] = None) -> Optional[RedirectEvent]:
+    """Parse an ICMPv6 Redirect (RFC 4861 §4.5)."""
+    try:
+        from scapy.layers.inet6 import (
+            IPv6, ICMPv6ND_Redirect, ICMPv6NDOptDstLLAddr,
+            ICMPv6NDOptRedirectedHdr,
+        )
+        from scapy.all import Ether
+    except Exception:
+        return None
+
+    if ICMPv6ND_Redirect not in pkt:
+        return None
+    nd = pkt[ICMPv6ND_Redirect]
+
+    ts = time.time() if ts is None else ts
+    src_mac = pkt[Ether].src if Ether in pkt else None
+    dst_mac = pkt[Ether].dst if Ether in pkt else None
+    outer = pkt[IPv6] if IPv6 in pkt else None
+
+    # Target Address = the better first hop the victim is told to install.
+    # Destination Address = the destination being redirected.
+    target = getattr(nd, "tgt", None)
+    destination = getattr(nd, "dst", None)
+    malformed = not (target and destination)
+
+    # Target Link-Layer Address option (type 2), if the router included it
+    target_lla = None
+    if ICMPv6NDOptDstLLAddr in pkt:
+        target_lla = getattr(pkt[ICMPv6NDOptDstLLAddr], "lladdr", None)
+
+    # Redirected Header option (type 4) carries as much of the original packet
+    # as fits. RFC 4861 says SHOULD, not MUST — absence is not malformed; the
+    # victim is then taken from the redirect's own L3 destination.
+    inner_src = inner_proto = None
+    if ICMPv6NDOptRedirectedHdr in pkt:
+        try:
+            orig = pkt[ICMPv6NDOptRedirectedHdr].pkt
+            if orig is not None and IPv6 in orig:
+                inner_src = orig[IPv6].src
+                inner_proto = int(orig[IPv6].nh)
+        except Exception:
+            pass
+
+    return RedirectEvent(
+        ts=ts,
+        src_ip=outer.src if outer else None,
+        src_mac=src_mac,
+        dst_ip=outer.dst if outer else None,
+        dst_mac=dst_mac,
+        ip_ttl=int(outer.hlim) if outer else None,
+        icmp_code=int(nd.code),
+        new_gw=str(target) if target else None,
+        inner_src=inner_src,
+        inner_dst=str(destination) if destination else None,
+        inner_proto=inner_proto,
+        malformed=malformed,
+        family=6,
+        target_lla=target_lla.lower() if target_lla else None,
+    )
+
+
+def _v4_packet_to_event(pkt, ts: Optional[float] = None) -> Optional[RedirectEvent]:
+    """Parse an IPv4 ICMP Redirect (RFC 792)."""
     from scapy.all import IP, ICMP, Ether  # local import; keeps import light
 
     if ICMP not in pkt:
@@ -547,6 +720,7 @@ def packet_to_event(pkt, ts: Optional[float] = None) -> Optional[RedirectEvent]:
         inner_dst=inner_dst,
         inner_proto=inner_proto,
         malformed=malformed,
+        family=4,
     )
 
 
@@ -565,6 +739,48 @@ def arp_packet_to_obs(pkt):
     pdst = getattr(arp, "pdst", None)
     gratuitous = bool(pdst) and psrc == pdst   # announcement form
     return (psrc, hwsrc, gratuitous)
+
+
+def ndp_packet_to_obs(pkt):
+    """Extract (ip, mac, is_override) from an NDP Neighbor Solicitation or
+    Advertisement — the IPv6 analogue of arp_packet_to_obs.
+
+    NA carries the Target Address plus a Target Link-Layer Address option; its
+    Override flag is the gratuitous-ARP analogue, asserting that the binding
+    should replace whatever the receiver already holds. NS carries the sender's
+    own address plus a Source Link-Layer Address option.
+
+    Redirect (Type 137) is deliberately NOT a learning source: its Target LLA is
+    the very claim being evaluated, so learning from it would let a forged
+    redirect validate itself.
+    """
+    try:
+        from scapy.layers.inet6 import (
+            IPv6, ICMPv6ND_NS, ICMPv6ND_NA,
+            ICMPv6NDOptSrcLLAddr, ICMPv6NDOptDstLLAddr,
+        )
+    except Exception:
+        return None
+
+    if ICMPv6ND_NA in pkt:
+        na = pkt[ICMPv6ND_NA]
+        tgt = getattr(na, "tgt", None)
+        lla = (getattr(pkt[ICMPv6NDOptDstLLAddr], "lladdr", None)
+               if ICMPv6NDOptDstLLAddr in pkt else None)
+        if not tgt or not lla:
+            return None
+        return (str(tgt), lla, bool(getattr(na, "O", 0)))
+
+    if ICMPv6ND_NS in pkt:
+        lla = (getattr(pkt[ICMPv6NDOptSrcLLAddr], "lladdr", None)
+               if ICMPv6NDOptSrcLLAddr in pkt else None)
+        src = pkt[IPv6].src if IPv6 in pkt else None
+        # unspecified source is Duplicate Address Detection, not a binding
+        if not lla or not src or src == "::":
+            return None
+        return (str(src), lla, False)
+
+    return None
 
 
 # ---- runtime / logging ---------------------------------------------------
@@ -586,7 +802,7 @@ def _emit(findings, ev, logger, json_out):
     }[sev]
     if json_out:
         rec = {
-            "ts": ev.ts, "severity": sev,
+            "ts": ev.ts, "severity": sev, "family": ev.family,
             "src_ip": ev.src_ip, "src_mac": ev.src_mac,
             "victim": ev.inner_src or ev.dst_ip, "new_gw": ev.new_gw,
             "code": ev.icmp_code,
@@ -594,7 +810,7 @@ def _emit(findings, ev, logger, json_out):
         }
         logger.log(level, json.dumps(rec, sort_keys=True))
     else:
-        head = (f"[{sev}] redirect src={ev.src_ip} victim="
+        head = (f"[{sev}] redirect(v{ev.family}) src={ev.src_ip} victim="
                 f"{ev.inner_src or ev.dst_ip} new_gw={ev.new_gw}")
         logger.log(level, head)
         for f in findings:
@@ -607,10 +823,12 @@ def run_live(config, iface, json_out):
     logger = logging.getLogger("icmpwatch")
 
     def _cb(pkt):
-        # ARP frames feed the correlation table and produce no events of
+        # ARP/NDP frames feed the correlation table and produce no events of
         # their own; redirects are analyzed with the table as context.
         if det.arp_enabled:
             obs = arp_packet_to_obs(pkt)
+            if obs is None and det.ipv6_enabled:
+                obs = ndp_packet_to_obs(pkt)
             if obs is not None:
                 ip, mac, gratuitous = obs
                 det.observe_arp(ip, mac, gratuitous=gratuitous)
@@ -621,10 +839,28 @@ def run_live(config, iface, json_out):
         findings = det.analyze(ev)
         _emit(findings, ev, logger, json_out)
 
-    filt = ("icmp[icmptype] == 5 or arp" if det.arp_enabled
-            else "icmp[icmptype] == 5")
+    filt = _build_filter(det)
     logger.info("icmpwatch live on %s (filter: %s)", iface, filt)
     sniff(iface=iface, filter=filt, store=0, prn=_cb)
+
+
+def _build_filter(det) -> str:
+    """Compose the in-kernel BPF prefilter for the enabled families.
+
+    ip6[40] indexes the first octet past a bare IPv6 header, i.e. the ICMPv6
+    type, and assumes no extension headers — true for Neighbor Discovery, which
+    does not carry them in practice.
+    """
+    parts = ["icmp[icmptype] == 5"]
+    if det.arp_enabled:
+        parts.append("arp")
+    if det.ipv6_enabled:
+        nd_types = [ICMPV6_REDIRECT]
+        if det.arp_enabled:
+            nd_types += [ICMPV6_NS, ICMPV6_NA]
+        inner = " or ".join(f"ip6[40] == {t}" for t in sorted(nd_types))
+        parts.append(f"(icmp6 and ({inner}))")
+    return " or ".join(parts)
 
 
 def load_config(path):

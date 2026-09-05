@@ -7226,6 +7226,107 @@ def _parse_icmp_capture(output):
     return events
 
 
+# --- ICMPv6 Redirect (Type 137) -- the IPv6 twin of the ICMP Redirect ------
+# A redirect is the same L3-MITM threat on both stacks, so it lives in the ICMP
+# watcher rather than a separate module. IPv6 carries it as ICMPv6 type 137
+# (RFC 4861 §4.5) and validates it far more strictly than IPv4 (§8.1: Hop Limit
+# MUST be 255, source MUST be link-local, Target MUST be link-local or == the
+# Destination, code MUST be 0). tcpdump's ICMPv6-redirect *text* is terse and
+# version-dependent, so -- exactly like the MLD decoder -- this reads the four
+# load-bearing fields (hop limit, target, destination, Target-LLA option) from
+# raw bytes and hands them to the vendored v3 engine as family=6 RedirectEvents,
+# where the RFC 4861 MUSTs fire zero-config on any network.
+_ICMP6_REDIRECT = 137
+
+
+def _decode_icmp6_redirect_frames(frames):
+    """Decode ICMPv6 Redirect (type 137) out of raw Ethernet frames (iterable of
+    (ts, frame_bytes)) into redirect events shaped like _parse_icmp_capture's, but
+    tagged family=6. Pure bytes in, events out -- no scapy, unit-testable. Walks
+    802.1Q tags and IPv6 extension headers to the ICMPv6 message, then pulls the
+    Target Address (new_gw), Destination Address (inner_dst) and the Target
+    Link-Layer Address option (target_lla) if present."""
+    events = []
+    for _ts, frame in frames:
+        try:
+            if len(frame) < 14:
+                continue
+            dst_mac = ':'.join('%02x' % b for b in frame[0:6])
+            src_mac = ':'.join('%02x' % b for b in frame[6:12])
+            off = 12
+            etype = (frame[off] << 8) | frame[off + 1]
+            off += 2
+            while etype in (0x8100, 0x88a8) and len(frame) >= off + 4:
+                etype = (frame[off + 2] << 8) | frame[off + 3]
+                off += 4
+            if etype != 0x86dd or len(frame) < off + 40:
+                continue
+            ip6 = frame[off:]
+            nxt = ip6[6]
+            hop = ip6[7]
+            src = _v6(ip6[8:24])
+            dst = _v6(ip6[24:40])
+            p = 40
+            hops = 0
+            while nxt in (0, 43, 60) and len(ip6) >= p + 2 and hops < 8:
+                ext_nxt = ip6[p]
+                ext_len = (ip6[p + 1] + 1) * 8
+                nxt = ext_nxt
+                p += ext_len
+                hops += 1
+            # ICMPv6 redirect body: 4-byte hdr + 4 reserved + 16 target + 16 dest
+            if nxt != 58 or len(ip6) < p + 40:     # 58 = ICMPv6
+                continue
+            icmp = ip6[p:]
+            if icmp[0] != _ICMP6_REDIRECT:
+                continue
+            code = icmp[1]
+            target = _v6(icmp[8:24])       # the "better first hop" == new_gw
+            destination = _v6(icmp[24:40])  # the destination being redirected
+            # options follow at offset 40 (each is type/len-in-8-byte-units/…)
+            target_lla = None
+            o = 40
+            while len(icmp) >= o + 2:
+                olen = icmp[o + 1] * 8
+                if olen == 0:
+                    break
+                if icmp[o] == 2 and len(icmp) >= o + 8:   # Target Link-Layer Addr
+                    target_lla = ':'.join('%02x' % b for b in icmp[o + 2:o + 8])
+                o += olen
+            events.append({'kind': 'redirect', 'family': 6, 'src': src, 'dst': dst,
+                           'src_mac': src_mac, 'dst_mac': dst_mac, 'ttl': hop,
+                           'code': code, 'new_gw': target, 'inner_dst': destination,
+                           'redirected': destination, 'target_lla': target_lla})
+        except (IndexError, ValueError, TypeError):
+            continue
+    return events
+
+
+def _icmp6_redirect_capture(interface, seconds):
+    """Capture one ICMPv6-Redirect window to a temp pcap and return the decoded
+    family=6 redirect events. Best-effort: returns [] on any capture/parse failure
+    so an IPv6-less segment never breaks the ICMP scan."""
+    if not _have('tcpdump'):
+        return []
+    import tempfile as _tf
+    fd, path = _tf.mkstemp(suffix='.pcap')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-nn', '-p',
+              '-s', '256', '-c', '20000', '-w', path,
+              'icmp6 and ip6[40] == 137'], timeout=seconds + 8)
+        try:
+            from bfdwatch import read_pcap as _read_pcap
+            return _decode_icmp6_redirect_frames(_read_pcap(path))
+        except Exception:
+            return []
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
 def _icmp_watch_load():
     try:
         with open(_ICMP_WATCH_PATH) as f:
@@ -7290,34 +7391,46 @@ def _icmp_neigh_macs(ips):
 
 
 def _icmp_redirect_v2(redirects, arps, known_gw, iface_cidr, sys_gateway,
-                      gw_arp_snapshot=None):
-    """Run the vendored transport-agnostic v2 redirect/ARP detector
+                      gw_arp_snapshot=None, family=4, gw_macs=None):
+    """Run the vendored transport-agnostic v3 redirect/ARP detector
     (icmpwatch.ICMPRedirectDetector) over the tcpdump-parsed redirects and ARP
-    context, and return a flat list of finding dicts. Adds the RFC 1122 acceptance
-    checks (source-not-gateway, new-gw-off-subnet, new-gw-not-router,
-    degenerate targets), L2 identity checks (gateway_mac_mismatch), ARP-poisoning
-    correlation (gateway_arp_conflict / redirect_via_poisoned_gw) and rate/sweep
-    detection on top of the coarse legacy classifier. Best-effort: returns [] if
-    the engine is absent, no redirects were seen, or no segment can be framed."""
+    context, and return a flat list of finding dicts. For IPv4 (family=4) this adds
+    the RFC 1122 acceptance checks (source-not-gateway, new-gw-off-subnet,
+    new-gw-not-router, degenerate targets), L2 identity checks
+    (gateway_mac_mismatch), ARP-poisoning correlation (gateway_arp_conflict /
+    redirect_via_poisoned_gw) and rate/sweep detection. For IPv6 (family=6) it runs
+    the ICMPv6-Redirect branch: the RFC 4861 §8.1 MUSTs (nd_hop_limit_invalid,
+    nd_source_not_link_local, nd_target_invalid, invalid_code) fire zero-config, and
+    source_not_gateway / new_gw_not_router / nd_target_lla_mismatch use the seeded
+    v6 router set + its MAC. Best-effort: returns [] if the engine is absent, no
+    redirects were seen, or no segment can be framed."""
     if _icmpwatch is None or not redirects:
         return []
-    cidr = iface_cidr
-    if not cidr:
-        # Fall back to a /24 around a trusted gateway so the on-subnet / known-
-        # router checks still have a segment to reason about on a SPAN leg with
-        # no local IP.
-        anchor = sys_gateway or (sorted(known_gw)[0] if known_gw else None)
-        if anchor:
-            try:
-                cidr = str(ipaddress.ip_network(anchor + '/24', strict=False))
-            except ValueError:
-                cidr = None
-    if not cidr:
-        return []
+    if family == 6:
+        # link-local sources/targets live in fe80::/10 and in no site prefix, so a
+        # single /10 segment frames every v6 redirect; the engine falls back to the
+        # global router set for link-local addresses regardless.
+        cidr = iface_cidr or 'fe80::/10'
+    else:
+        cidr = iface_cidr
+        if not cidr:
+            # Fall back to a /24 around a trusted gateway so the on-subnet / known-
+            # router checks still have a segment to reason about on a SPAN leg with
+            # no local IP.
+            anchor = sys_gateway or (sorted(known_gw)[0] if known_gw else None)
+            if anchor:
+                try:
+                    cidr = str(ipaddress.ip_network(anchor + '/24', strict=False))
+                except ValueError:
+                    cidr = None
+        if not cidr:
+            return []
+    gw_macs = gw_macs or {}
     cfg = {
         'segments': [{
             'cidr': cidr,
-            'gateways': [{'ip': g} for g in sorted(known_gw)],
+            'gateways': [({'ip': g, 'mac': gw_macs[g]} if gw_macs.get(g)
+                          else {'ip': g}) for g in sorted(known_gw)],
             'routers': sorted(known_gw),
         }],
         'arp_correlation': {'enabled': True},
@@ -7340,16 +7453,20 @@ def _icmp_redirect_v2(redirects, arps, known_gw, iface_cidr, sys_gateway,
         except Exception:
             pass
     out = []
+    default_code = 0 if family == 6 else 1
     for r in redirects:
         t += 0.001
         code = r.get('code')
+        # v6 carries the redirected destination in inner_dst; v4 in 'redirected'.
+        inner_dst = r.get('inner_dst') if family == 6 else r.get('redirected')
         ev = _icmpwatch.RedirectEvent(
             ts=t, src_ip=r.get('src'), src_mac=r.get('src_mac'),
             dst_ip=r.get('dst'), dst_mac=r.get('dst_mac'), ip_ttl=r.get('ttl'),
-            icmp_code=code if code is not None else 1,
+            icmp_code=code if code is not None else default_code,
             new_gw=r.get('new_gw'),
-            inner_src=r.get('dst'), inner_dst=r.get('redirected'),
-            inner_proto=None, malformed=(r.get('new_gw') is None))
+            inner_src=r.get('dst'), inner_dst=inner_dst,
+            inner_proto=None, malformed=(r.get('new_gw') is None),
+            family=family, target_lla=r.get('target_lla'))
         try:
             findings = det.analyze(ev)
         except Exception:
@@ -7370,7 +7487,8 @@ def _icmp_v2_reason(f):
 
 
 def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
-                  iface_cidr=None, gw_arp_snapshot=None):
+                  iface_cidr=None, gw_arp_snapshot=None, sys_gateway6=None,
+                  gw6_macs=None):
     """Pure classifier over parsed ICMP events. The host's authoritative default
     gateway (sys_gateway) is always trusted, plus any learned gateways. Separated
     from capture so the self-test can drive it with synthetic packets. May
@@ -7393,6 +7511,11 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
     had_gw = bool(known_gw)
 
     redirects = [e for e in events if e['kind'] == 'redirect']
+    # IPv4 and IPv6 (ICMPv6 type 137) redirects are the same threat but validate
+    # differently, so they run through separate detector configs and only the v4
+    # set feeds the coarse legacy classifier below (which reasons about v4 gateways).
+    redirects4 = [e for e in redirects if e.get('family', 4) == 4]
+    redirects6 = [e for e in redirects if e.get('family') == 6]
     echoes = [e for e in events if e['kind'] == 'echo']
     irdp = [e for e in events if e['kind'] == 'irdp']
     recon = [e for e in events if e['kind'] == 'recon']
@@ -7402,10 +7525,17 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
     icmp_events = [e for e in events if e['kind'] != 'arp']
     rate = round(len(icmp_events) / seconds, 2)
 
-    # v2 redirect/ARP layer (additive; empty when the engine is absent or no
+    # v2/v3 redirect/ARP layer (additive; empty when the engine is absent or no
     # redirect was seen). Computed once here and folded into the verdict below.
-    v2_findings = _icmp_redirect_v2(redirects, arps, known_gw, iface_cidr,
+    # The v6 leg trusts the host's IPv6 default router (usually a link-local
+    # fe80:: address) the same way the v4 leg trusts sys_gateway.
+    known_gw6 = set()
+    if sys_gateway6:
+        known_gw6.add(sys_gateway6)
+    v2_findings = _icmp_redirect_v2(redirects4, arps, known_gw, iface_cidr,
                                     sys_gateway, gw_arp_snapshot=gw_arp_snapshot)
+    v2_findings += _icmp_redirect_v2(redirects6, arps, known_gw6, None,
+                                     None, family=6, gw_macs=(gw6_macs or {}))
     v2_max = max((_ICMP_SEV_RANK[f['severity']] for f in v2_findings), default=0)
 
     PRIORITY = ['redirect', 'rogue-irdp', 'flood', 'tunnel', 'recon', 'anomaly',
@@ -7421,7 +7551,7 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
     # --- redirect: the headline L3 MITM ---
     redir_rows = []
     malicious_redir = False
-    for e in redirects:
+    for e in redirects4:
         spoofed = had_gw and e['src'] not in known_gw
         # steering traffic to a next-hop that isn't a known router = attacker insert
         insert = bool(e['new_gw']) and (not had_gw or e['new_gw'] not in known_gw)
@@ -7526,7 +7656,8 @@ def _icmp_analyze(events, seconds, baseline, sys_gateway=None, learn=True,
             "(send_redirects=0); disable IRDP; rate-limit ICMP and block timestamp/"
             "address-mask/information types at the network edge.")
 
-    counts = {'redirect': len(redirects), 'echo': len(echoes), 'irdp': len(irdp),
+    counts = {'redirect': len(redirects), 'redirect6': len(redirects6),
+              'echo': len(echoes), 'irdp': len(irdp),
               'recon': len(recon), 'arp': len(arps),
               'other': len([e for e in events if e['kind'] == 'other'])}
 
@@ -7616,12 +7747,15 @@ def _emit_icmp_jsonl(result):
 
 
 def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
-    """Passive ICMP L3-security scanner (detection-only). Captures ICMP for a few
-    seconds and classifies the segment: redirect / rogue-irdp / flood / tunnel /
-    recon / anomaly / clean. Trusts the host's default gateway; learns it on first
-    run. When the vendored v2 engine is present, redirects also get the RFC 1122
-    acceptance checks, gateway-MAC-spoof detection and ARP-poison correlation, and
-    HIGH/CRITICAL findings are streamed to Watchtower."""
+    """Passive ICMP L3-security scanner (detection-only). Captures ICMP (IPv4) and
+    ICMPv6 Redirects (IPv6, type 137) for a few seconds and classifies the segment:
+    redirect / rogue-irdp / flood / tunnel / recon / anomaly / clean. Trusts the
+    host's IPv4 and IPv6 default gateways; learns the v4 one on first run. When the
+    vendored v3 engine is present, IPv4 redirects get the RFC 1122 acceptance checks,
+    gateway-MAC-spoof detection and ARP-poison correlation, and IPv6 redirects get
+    the RFC 4861 §8.1 MUSTs (Hop Limit 255, link-local source, valid Target/code)
+    plus Target-LLA poisoning detection. HIGH/CRITICAL findings on either stack are
+    streamed to Watchtower."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -7629,13 +7763,34 @@ def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 12, 4, 40)
 
+    # Capture ICMPv6 Redirects (type 137) concurrently in a daemon thread so the
+    # dual-stack scan costs one window, not two -- same pattern as IGMP+MLD.
+    v6_box = {'events': []}
+
+    def _grab_v6():
+        try:
+            v6_box['events'] = _icmp6_redirect_capture(iface, seconds)
+        except Exception:
+            v6_box['events'] = []
+    v6_thread = threading.Thread(target=_grab_v6, daemon=True)
+    v6_thread.start()
+
     text, err = _icmp_capture(iface, seconds)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
-    events = _parse_icmp_capture(text)
+    v6_thread.join(timeout=seconds + 10)
+    events = _parse_icmp_capture(text) + (v6_box['events'] or [])
     sys_gw = _iface_gateway(iface) or _default_gateway()
     iface_cidr = _iface_ipv4_cidr(iface)
+    # IPv6 default router (usually a link-local fe80:: address) + its MAC, so the
+    # v6 redirect leg can trust it and catch a Target-LLA that installs a bad MAC.
+    sys_gw6, _gw6_dev = _default_gateway6()
+    gw6_macs = {}
+    if sys_gw6:
+        _m6 = _neigh6_mac(sys_gw6)
+        if _m6:
+            gw6_macs[sys_gw6] = _m6
 
     with _icmp_watch_lock:
         baseline = _icmp_watch_load()
@@ -7647,7 +7802,8 @@ def do_icmp_watch(interface=None, seconds=12, learn=True, quick=False):
         gw_snapshot = _icmp_neigh_macs(trusted_gw)
         result = _icmp_analyze(events, seconds, baseline, sys_gateway=sys_gw,
                                learn=learn, iface_cidr=iface_cidr,
-                               gw_arp_snapshot=gw_snapshot)
+                               gw_arp_snapshot=gw_snapshot,
+                               sys_gateway6=sys_gw6, gw6_macs=gw6_macs)
         if result.get('learned'):
             _icmp_watch_save(baseline)
         if result['verdict'] != 'clean':
@@ -7801,6 +7957,91 @@ def _icmp_selftest():
               eredirect('192.168.1.1', GWMAC, '192.168.1.66'),
               'redirect', {'gateways': ['192.168.1.1']}, '192.168.1.0/24',
               {'192.168.1.1': GWMAC}, want_check='new_gw_not_router')
+
+    # ---- ICMPv6 Redirect (type 137) — the IPv6 leg (RFC 4861 §8.1) -----------
+    GW6 = 'fe80::1'
+    GW6_MAC = 'aa:aa:aa:aa:aa:06'
+
+    def v6ev(src, new_gw, inner_dst, ttl=255, code=0, src_mac='aa:aa:aa:aa:aa:06',
+             target_lla=None, dst='fe80::50'):
+        return {'kind': 'redirect', 'family': 6, 'src': src, 'dst': dst,
+                'src_mac': src_mac, 'dst_mac': '52:54:00:00:00:50', 'ttl': ttl,
+                'code': code, 'new_gw': new_gw, 'inner_dst': inner_dst,
+                'redirected': inner_dst, 'target_lla': target_lla}
+
+    def runv6(name, evs, expect, want_check=None):
+        res = _icmp_analyze(list(evs), 12, {}, sys_gateway=None, learn=False,
+                            sys_gateway6=GW6, gw6_macs={GW6: GW6_MAC})
+        checks = {f['check'] for f in res.get('redirect_findings', [])}
+        ok = res['verdict'] == expect and (want_check is None or want_check in checks)
+        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
+                          'findings': sorted(checks)[:6], 'pass': ok})
+        return res
+
+    if _icmpwatch is not None:
+        # 13. v6-clean-onlink: a well-formed on-link redirect (Target == Destination)
+        #     from the real router — RFC 4861 valid, so only anomaly (rare), no alert.
+        runv6('v6-clean-onlink',
+              [v6ev(GW6, 'fe80::abcd', 'fe80::abcd')], 'anomaly')
+
+        # 14. nd_hop_limit_invalid: Hop Limit != 255 proves an off-link sender.
+        runv6('v6-hop-limit',
+              [v6ev(GW6, 'fe80::99', 'fe80::99', ttl=64)], 'redirect',
+              want_check='nd_hop_limit_invalid')
+
+        # 15. nd_source_not_link_local: a redirect whose source is a global address.
+        runv6('v6-src-not-lla',
+              [v6ev('2001:db8::1', 'fe80::99', 'fe80::99')], 'redirect',
+              want_check='nd_source_not_link_local')
+
+        # 16. invalid_code: ICMPv6 redirects must carry code 0 (RFC 4861).
+        runv6('v6-invalid-code',
+              [v6ev(GW6, 'fe80::abcd', 'fe80::abcd', code=1)], 'anomaly',
+              want_check='invalid_code')
+
+        # 17. nd_target_invalid: Target neither link-local nor == Destination.
+        runv6('v6-target-invalid',
+              [v6ev(GW6, '2001:db8::66', 'fe80::99')], 'redirect',
+              want_check='nd_target_invalid')
+
+        # 18. source_not_gateway: a link-local but non-router source issuing redirects.
+        runv6('v6-source-not-gateway',
+              [v6ev('fe80::bad', 'fe80::5', 'fe80::5')], 'redirect',
+              want_check='source_not_gateway')
+
+    # 19. v6 raw-frame decode: build an Ethernet/IPv6/ICMPv6-Redirect frame with a
+    #     Target Link-Layer Address option and confirm the byte decoder recovers
+    #     the hop limit, Target, Destination and MAC (no scapy, no capture).
+    def _v6_redirect_frame(src, dst, target, dest, hop=255, code=0,
+                           src_mac='02:00:00:00:00:01', dst_mac='02:00:00:00:00:50',
+                           tlla='02:aa:bb:cc:dd:ee'):
+        def _mac(s):
+            return bytes(int(x, 16) for x in s.split(':'))
+        icmp = bytearray()
+        icmp += bytes([_ICMP6_REDIRECT, code, 0, 0])          # type, code, cksum
+        icmp += bytes(4)                                       # reserved
+        icmp += ipaddress.IPv6Address(target).packed          # Target Address
+        icmp += ipaddress.IPv6Address(dest).packed            # Destination Address
+        if tlla:
+            icmp += bytes([2, 1]) + _mac(tlla)                # opt: Target-LLA
+        ip6 = bytearray()
+        ip6 += bytes([0x60, 0, 0, 0])                         # ver/tc/flow
+        ip6 += len(icmp).to_bytes(2, 'big')                   # payload length
+        ip6 += bytes([58, hop])                               # next=ICMPv6, hop
+        ip6 += ipaddress.IPv6Address(src).packed
+        ip6 += ipaddress.IPv6Address(dst).packed
+        ip6 += icmp
+        return _mac(dst_mac) + _mac(src_mac) + bytes([0x86, 0xdd]) + bytes(ip6)
+
+    frame = _v6_redirect_frame('fe80::1', 'fe80::50', 'fe80::abcd', '2001:db8::1')
+    dec = _decode_icmp6_redirect_frames([(0.0, frame)])
+    d_ok = (len(dec) == 1 and dec[0]['family'] == 6 and dec[0]['ttl'] == 255
+            and dec[0]['new_gw'] == 'fe80::abcd'
+            and dec[0]['inner_dst'] == '2001:db8::1'
+            and dec[0]['src'] == 'fe80::1'
+            and dec[0]['target_lla'] == '02:aa:bb:cc:dd:ee')
+    scenarios.append({'name': 'v6-decode', 'expect': 'target+dest+hop+tlla',
+                      'got': str(dec[0] if dec else None)[:110], 'pass': d_ok})
 
     # Optional Scapy end-to-end: craft a real Redirect -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
