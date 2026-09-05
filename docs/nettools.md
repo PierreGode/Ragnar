@@ -1215,6 +1215,12 @@ ICMPv6 RA/RS/Redirect + DHCPv6 (udp 546/547) is parsed and classified:
   in the baseline. This is **mitm6's signature**: it answers DHCPv6 solicits handing
   out the attacker as **DNS** (no gateway — it pairs with WPAD) to relay and
   NTLM-capture.
+- **Link-local DNS (`DNS6_LINKLOCAL`)** — a DHCPv6 server advertising a
+  **link-local (`fe80::`) DNS resolver**. A resolver is *never* legitimately
+  link-local, so this is the **definitive mitm6 tell** and fires **zero-config** —
+  no baseline, no allowlist, and even for an otherwise-trusted server (mitm6 wins
+  the SOLICIT race and hands the client its own link-local address as the DNS
+  server). It is the one DHCPv6 signature that needs no per-site tuning.
 - **Rogue redirect** — an **ICMPv6 Redirect** (type 137) from a source that isn't a
   known router: the IPv6 twin of the ICMP-redirect MITM, steering your IPv6 traffic
   through an attacker's next-hop. (Harden the host against these with

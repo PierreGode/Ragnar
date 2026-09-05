@@ -5263,6 +5263,16 @@ _IPV6_DHCP6_SERVER_MSGS = ('advertise', 'reply', 'reconfigure', 'relay-reply')
 _IPV6_ADDR_RE = r'([0-9A-Fa-f:]+(?:%\w+)?)'
 
 
+def _is_ipv6_linklocal(addr):
+    """True if `addr` is an IPv6 link-local (fe80::/10) address. Used for the
+    DNS6_LINKLOCAL mitm6 tell: a DNS resolver is never legitimately link-local."""
+    try:
+        a = ipaddress.ip_address((addr or '').split('%', 1)[0])
+    except ValueError:
+        return False
+    return a.version == 6 and a.is_link_local
+
+
 def _parse_ipv6_capture(output):
     """Parse `tcpdump -nn -t -v` text (RA/RS/Redirect + DHCPv6) into events.
 
@@ -5475,6 +5485,23 @@ def _ipv6_analyze(events, seconds, baseline, learn=True):
                            f"({'/'.join(sorted(s['msgtypes']))}){dns} — the mitm6 "
                            f"DNS-takeover / NTLM-relay signature")
 
+    # --- DNS6_LINKLOCAL: a DHCPv6 server advertising a LINK-LOCAL (fe80::) DNS
+    # resolver. A resolver is never legitimately link-local, so this is the
+    # definitive mitm6 tell and fires ZERO-CONFIG — no baseline, no allowlist,
+    # even for a server that would otherwise be trusted (mitm6 wins the SOLICIT
+    # race and hands the client its own link-local address as the DNS server).
+    dns6_linklocal = {src: sorted(a for a in s['dns'] if _is_ipv6_linklocal(a))
+                      for src, s in servers.items()
+                      if any(_is_ipv6_linklocal(a) for a in s['dns'])}
+    if dns6_linklocal:
+        if verdict in ('clean', 'rogue-ra', 'anomaly'):
+            verdict = 'rogue-dhcpv6'
+        for src, addrs in dns6_linklocal.items():
+            reasons.append(f"DHCPv6 server {src} advertising a LINK-LOCAL DNS "
+                           f"resolver ({', '.join(addrs)}) — a resolver is never "
+                           f"legitimately link-local; the definitive mitm6 "
+                           f"DNS-takeover tell (fires zero-config, any segment)")
+
     # --- anomalies (lower severity, don't override a rogue verdict) ---
     if verdict == 'clean':
         # >1 distinct router where the baseline knew <=1 = conflicting RAs.
@@ -5660,6 +5687,22 @@ def _ipv6_selftest():
     run('rogue-redirect',
         "fe80::bad > fe80::a: ICMP6, redirect, length 88", 12, base_one,
         'rogue-redirect')
+
+    # 5c. DNS6_LINKLOCAL (zero-config mitm6 tell): a DHCPv6 server handing out a
+    #     LINK-LOCAL DNS resolver. A resolver is never legitimately link-local.
+    ll_dns = ("fe80::evil > fe80::a: dhcp6 advertise (xid=0x112233 "
+              "(client-ID ...) (server-ID ...) (DNS-server fe80::evil) "
+              "(DNS-search-list ...))")
+    run('dns6-linklocal', ll_dns, 12, base_one, 'rogue-dhcpv6')
+
+    # 5d. DNS6_LINKLOCAL fires ZERO-CONFIG: even a *baselined* DHCPv6 server that
+    #     starts advertising a link-local DNS resolver is flagged (baseline can't
+    #     whitelist the definitive mitm6 signature).
+    ll_dns_trusted = ("fe80::srv > fe80::a: dhcp6 reply (xid=0x1 "
+                      "(server-ID ...) (DNS-server fe80::srv))")
+    base_trusted = {'routers': {}, 'dhcp6_servers': ['fe80::srv']}
+    run('dns6-linklocal-baselined', ll_dns_trusted, 12, base_trusted,
+        'rogue-dhcpv6')
 
     # 6. parse: multi-line RA extracts prefix + RDNSS + MAC.
     pev = _parse_ipv6_capture(ra('fe80::1', rdnss='2001:db8:1::53'))
