@@ -11172,6 +11172,49 @@ _ISIS_LIFETIME_RE = re.compile(r'lifetime:?\s*(\d+)\s*s')
 _ISIS_AREA_RE = re.compile(r'Area address \(length: \d+\):\s*([0-9a-fA-F.]+)')
 _ISIS_HOST_RE = re.compile(r'Hostname:\s*(\S+)')
 _ISIS_PFX_RE = re.compile(r'IP(?:v4|v6) prefix:\s*([0-9a-fA-F:.]+/\d+),.*?Metric:\s*(\d+)')
+# Up/Down (Distribution) bit on an Extended/IPv6 Reachability entry — 'down' at
+# L2 means an L1 prefix was re-advertised down into L2 (a leak / loop tell).
+_ISIS_DIST_RE = re.compile(r'(?:Distribution|up/down bit):\s*(up|down)', re.I)
+
+# IPv6 space that is never a legitimate IGP (IS-IS TLV 236/237) reachability
+# prefix (RFC 5308). ULA (fc00::/7) is deliberately omitted — it can be a valid
+# internal aggregate — so this stays false-positive-free for real networks.
+_ISIS_V6_BOGON = ['::/8', '2001:db8::/32', 'fe80::/10', 'fec0::/10', 'ff00::/8',
+                  '::ffff:0:0/96', '2001::/32', '2002::/16', '100::/64']
+
+
+def _isis_v6_bogon(pfx):
+    """True if an IPv6 IS-IS reachability prefix falls in reserved/non-routable
+    space that should never appear in the IGP."""
+    try:
+        net = ipaddress.ip_network(pfx, strict=False)
+    except ValueError:
+        return False
+    if net.version != 6:
+        return False
+    for b in _ISIS_V6_BOGON:
+        bn = ipaddress.ip_network(b)
+        if net.prefixlen >= bn.prefixlen and net.subnet_of(bn):
+            return True
+    return False
+
+
+def _isis_v6_hostbits(pfx):
+    """True if an IPv6 prefix carries non-zero bits beyond its prefix length —
+    RFC 5308 requires them zero (a broken encoder or a covert channel)."""
+    if ':' not in (pfx or ''):
+        return False
+    try:
+        ipaddress.ip_network(pfx, strict=True)
+        return False
+    except ValueError:
+        # strict failed: either host bits are set, or it's unparseable. Confirm the
+        # loose parse works so a genuinely malformed string isn't reported as host-bits.
+        try:
+            ipaddress.ip_network(pfx, strict=False)
+            return True
+        except ValueError:
+            return False
 
 
 def _isis_sysid_of_lsp(lspid):
@@ -11236,7 +11279,12 @@ def _parse_isis_capture(output):
             cur['hostname'] = hn.group(1)
         pf = _ISIS_PFX_RE.search(line)
         if pf:
-            cur['prefixes'].append({'pfx': pf.group(1), 'metric': int(pf.group(2))})
+            pfx = pf.group(1)
+            dist = _ISIS_DIST_RE.search(line)
+            cur['prefixes'].append({
+                'pfx': pfx, 'metric': int(pf.group(2)),
+                'family': 6 if ':' in pfx else 4,
+                'down': bool(dist and dist.group(1).lower() == 'down')})
     if cur:
         events.append(cur)
     # Attribute a stable system-id to every event (LSPs carry it in the lsp-id).
@@ -11311,7 +11359,9 @@ def _isis_analyze(events, seconds, baseline, learn=True):
         if e['kind'] == 'lsp':
             for p in e['prefixes']:
                 prefixes.setdefault(p['pfx'], {
-                    'pfx': p['pfx'], 'origin': sid, 'metric': p['metric']})
+                    'pfx': p['pfx'], 'origin': sid, 'metric': p['metric'],
+                    'family': p.get('family', 4), 'down': p.get('down', False),
+                    'level': e.get('level')})
 
     known = dict(baseline.get('routers') or {})
     base_prefixes = dict(baseline.get('prefixes') or {})
@@ -11351,16 +11401,44 @@ def _isis_analyze(events, seconds, baseline, learn=True):
             base = base_prefixes.get(p)
             if base is None:
                 bump('injection')
+                dr = (' — and it is a DEFAULT route, so it attracts ALL unmatched '
+                      'traffic') if p in ('::/0', '0.0.0.0/0') else ''
                 reasons.append(
                     f"IS-IS LSP INJECTION: prefix {p} advertised by {_name(d['origin'])} "
                     f"is not in the baseline — a forged LSP that can blackhole or MITM "
-                    f"traffic to it")
+                    f"traffic to it{dr}")
             elif base.get('origin') and d['origin'] != base['origin']:
                 bump('injection')
                 reasons.append(
                     f"IS-IS PREFIX RE-HOMED: {p} is now originated by "
                     f"{_name(d['origin'])} (was {_name(base['origin'])}) — an LSP "
                     f"hijack steering traffic to {p}")
+
+    # IPv6 reachability content (RFC 5308 TLV 236/237). These are malformed or
+    # never-legitimate v6 prefixes, so they fire independently of the baseline —
+    # a bogon or a host-bits prefix is wrong even if it was seen at learn time.
+    for p in sorted(prefixes):
+        d = prefixes[p]
+        if d.get('family') != 6:
+            continue
+        if _isis_v6_bogon(p):
+            bump('anomaly')
+            reasons.append(
+                f"IS-IS IPv6 BOGON: {p} from {_name(d['origin'])} is reserved / "
+                f"non-routable space (link-local / multicast / documentation / 6to4 / "
+                f"Teredo / IPv4-mapped) — never a legitimate IGP prefix (RFC 5308)")
+        if _isis_v6_hostbits(p):
+            bump('anomaly')
+            reasons.append(
+                f"IS-IS IPv6 HOST-BITS: {p} from {_name(d['origin'])} has non-zero "
+                f"bits beyond its prefix length — RFC 5308 requires them zero (a broken "
+                f"encoder or bits used as a covert channel)")
+        if d.get('down') and d.get('level') == 2:
+            bump('anomaly')
+            reasons.append(
+                f"IS-IS IPv6 DOWN-BIT: {p} from {_name(d['origin'])} has the Up/Down "
+                f"bit set at Level 2 — an L1 prefix re-advertised down into L2 (a "
+                f"redistribution leak, and a potential routing loop)")
 
     # Rogue routers (new system-ids sending hellos/LSPs).
     for sid in sorted(routers):
@@ -11478,7 +11556,8 @@ def _isis_analyze(events, seconds, baseline, learn=True):
         if base and base.get('origin') and d['origin'] != base['origin']:
             status = 're-homed'
         return {'pfx': p, 'origin': d['origin'], 'origin_name': _name(d['origin']),
-                'metric': d['metric'], 'status': status}
+                'metric': d['metric'], 'status': status,
+                'family': d.get('family', 4), 'down': d.get('down', False)}
 
     if reasons:
         summary = reasons
@@ -11666,7 +11745,8 @@ def _isis_selftest():
             and iih_ev.get('areas') == ['49.0001']
             and iih_ev.get('auth') == 'cleartext'
             and iih_ev.get('hostname') == 'core-rtr-1'
-            and lsp_ev.get('prefixes') == [{'pfx': '10.66.66.0/24', 'metric': 10}])
+            and lsp_ev.get('prefixes') == [{'pfx': '10.66.66.0/24', 'metric': 10,
+                                            'family': 4, 'down': False}])
     scenarios.append({'name': 'isis-parse', 'expect': 'sysid/area/cleartext/host/pfx',
                       'got': f"auth={iih_ev.get('auth')} host={iih_ev.get('hostname')}",
                       'pass': p_ok})
@@ -11680,6 +11760,80 @@ def _isis_selftest():
                       'expect': 'lifetime=0/overload=True',
                       'got': f"lifetime={lsp2.get('lifetime')} overload={lsp2.get('overload')}",
                       'pass': p2_ok})
+
+    # ---- IPv6 reachability (TLV 236/237, RFC 5308) --------------------------
+    def lsp6(srcmac, sysid, level=2, prefixes=(), auth='hmac', seq=0x10,
+             lifetime=1199):
+        """prefixes: (pfx, metric, distribution) rendered as IPv6 Reachability."""
+        lines = [_hdr(srcmac, level),
+                 f"\tL{level} LSP, hlen: 27, v: 1, pdu-v: 1, sys-id-len: 6 (0), "
+                 f"max-area: 3 (0)",
+                 f"\t  lsp-id: {sysid}.00-00, seq: {seq:#010x}, lifetime:  {lifetime}s",
+                 f"\t  chksum: 0x1771 (correct), PDU length: 60, Flags: [ L{level} IS ]"]
+        lines += _auth(auth)
+        for (pfx, metric, dist) in prefixes:
+            lines += [f"\t    IPv6 Reachability TLV #236, length: 22",
+                      f"\t      IPv6 prefix: {pfx}, Distribution: {dist}, "
+                      f"Metric: {metric}"]
+        return "\n".join(lines)
+
+    # A dual-stack baseline: same router, one clean v4 and one clean v6 aggregate.
+    v6base = {'routers': {'0000.0000.0001': {'areas': ['49.0001'],
+                                             'hostname': 'core-rtr-1', 'levels': [2]}},
+              'prefixes': {'10.1.0.0/24': {'origin': '0000.0000.0001'},
+                           '2001:470:1::/48': {'origin': '0000.0000.0001'},
+                           '2001:470:9:dead::/64': {'origin': '0000.0000.0001'}}}
+
+    # 8. v6-clean: known router re-advertising its known, well-formed v6 aggregate.
+    run('v6-clean', lsp6('00:11:22:33:44:55', '0000.0000.0001', auth='hmac',
+        prefixes=[('2001:470:1::/48', 10, 'up')]), 20, v6base, 'clean')
+    # 9. v6-injection: known router advertises a NEW (non-bogon) v6 prefix.
+    run('v6-injection', lsp6('00:11:22:33:44:55', '0000.0000.0001', auth='hmac',
+        prefixes=[('2001:470:5:5::/64', 10, 'up')]), 20, v6base, 'injection')
+    # 10. v6-default-route: a NEW ::/0 origination — flagged and named as a default.
+    r_dr = run('v6-default-route', lsp6('00:11:22:33:44:55', '0000.0000.0001',
+               auth='hmac', prefixes=[('::/0', 1, 'up')]), 20, v6base, 'injection')
+    scenarios.append({'name': 'v6-default-route-reason', 'expect': 'DEFAULT named',
+                      'got': 'present' if any('DEFAULT route' in x for x in r_dr['reasons'])
+                      else 'absent',
+                      'pass': any('DEFAULT route' in x for x in r_dr['reasons'])})
+    # 11. v6-bogon: a baselined-away prefix in documentation space (2001:db8::/32) —
+    #     fires regardless of baseline because a bogon is never a valid IGP prefix.
+    bbase = {'routers': v6base['routers'],
+             'prefixes': {'2001:db8:beef::/48': {'origin': '0000.0000.0001'}}}
+    r_bog = run('v6-bogon', lsp6('00:11:22:33:44:55', '0000.0000.0001', auth='hmac',
+                prefixes=[('2001:db8:beef::/48', 10, 'up')]), 20, bbase, 'anomaly')
+    scenarios.append({'name': 'v6-bogon-reason', 'expect': 'BOGON flagged',
+                      'got': 'present' if any('BOGON' in x for x in r_bog['reasons'])
+                      else 'absent',
+                      'pass': any('BOGON' in x for x in r_bog['reasons'])})
+    # 12. v6-host-bits: non-zero bits beyond /64 (RFC 5308 violation), baselined so
+    #     the finding is isolated from the injection path.
+    hbase = {'routers': v6base['routers'],
+             'prefixes': {'2001:470:9:dead:beef::/64': {'origin': '0000.0000.0001'}}}
+    r_hb = run('v6-host-bits', lsp6('00:11:22:33:44:55', '0000.0000.0001', auth='hmac',
+               prefixes=[('2001:470:9:dead:beef::/64', 10, 'up')]), 20, hbase, 'anomaly')
+    scenarios.append({'name': 'v6-host-bits-reason', 'expect': 'HOST-BITS flagged',
+                      'got': 'present' if any('HOST-BITS' in x for x in r_hb['reasons'])
+                      else 'absent',
+                      'pass': any('HOST-BITS' in x for x in r_hb['reasons'])})
+    # 13. v6-down-bit: the Up/Down bit set at Level 2 (an L1->L2 leak), baselined.
+    r_db = run('v6-down-bit', lsp6('00:11:22:33:44:55', '0000.0000.0001', level=2,
+               auth='hmac', prefixes=[('2001:470:9:dead::/64', 10, 'down')]), 20,
+               v6base, 'anomaly')
+    scenarios.append({'name': 'v6-down-bit-reason', 'expect': 'DOWN-BIT flagged',
+                      'got': 'present' if any('DOWN-BIT' in x for x in r_db['reasons'])
+                      else 'absent',
+                      'pass': any('DOWN-BIT' in x for x in r_db['reasons'])})
+    # 14. v6-parse: family + down-bit are captured off the IPv6 Reachability TLV.
+    pev6 = _parse_isis_capture(lsp6('00:11:22:33:44:55', '0000.0000.0001',
+                               prefixes=[('2001:470:1::/48', 10, 'down')]))
+    lsp6ev = next((e for e in pev6 if e['kind'] == 'lsp'), {})
+    pfx6 = (lsp6ev.get('prefixes') or [{}])[0]
+    v6p_ok = pfx6.get('family') == 6 and pfx6.get('down') is True
+    scenarios.append({'name': 'v6-parse', 'expect': 'family=6/down=True',
+                      'got': f"family={pfx6.get('family')} down={pfx6.get('down')}",
+                      'pass': v6p_ok})
 
     # Scapy end-to-end: real IIH (no auth) + LSP with a prefix -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
@@ -11714,7 +11868,7 @@ def _isis_selftest():
             hostm = next((e for e in evs if e['kind'] == 'iih'), {})
             lspm = next((e for e in evs if e['kind'] == 'lsp'), {})
             ok = (hostm.get('system_id') == '0000.0000.0009'
-                  and lspm.get('prefixes') == [{'pfx': '10.66.66.0/24', 'metric': 10}]
+                  and (lspm.get('prefixes') or [{}])[0].get('pfx') == '10.66.66.0/24'
                   and cls['verdict'] == 'injection')
             scapy_result = {'ran': True, 'sysid': hostm.get('system_id'),
                             'prefix': (lspm.get('prefixes') or [{}])[0].get('pfx'),

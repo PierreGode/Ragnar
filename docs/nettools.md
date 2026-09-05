@@ -2193,9 +2193,10 @@ metrics to blackhole or MITM traffic (the IS-IS analogue of OSPF LSA injection).
 scanner sees injection directly and can name the routers. What it flags:
 
 - **injection** — an LSP from a system-id **not** in the baseline, a **new /
-  re-homed** reachable prefix (an LSP hijack steering traffic), or an **LSP purge**
-  (Remaining Lifetime 0, deleting a router's LSP from every database in the area — a
-  blackhole). The money findings.
+  re-homed** reachable prefix (an LSP hijack steering traffic — v4 *or* v6), or an
+  **LSP purge** (Remaining Lifetime 0, deleting a router's LSP from every database in
+  the area — a blackhole). A newly-injected **default route** (`::/0` or `0.0.0.0/0`)
+  is named as such, since it attracts *all* unmatched traffic. The money findings.
 - **rogue-router** — a new IS-IS speaker (system-id) sending hellos, not in baseline
   (adjacency spoofing).
 - **storm** — an IIH/LSP flood by rate.
@@ -2206,6 +2207,23 @@ scanner sees injection directly and can name the routers. What it flags:
   one system seen both keyed and un-keyed (a spoofed PDU racing the real router's).
 - **weak-auth** — a PDU with **no Authentication TLV** or a **cleartext** password
   (the injection enabler).
+
+**Dual-stack (IPv6 reachability, TLV 236/237, RFC 5308).** IPv6 prefixes carried in
+the IPv6 Reachability TLVs are parsed and run through the same injection/re-home
+logic as v4 (the map is keyed by prefix string, so it was already family-agnostic).
+On top of that, three **zero-config** IPv6 content tells fire independently of the
+baseline — because a malformed or reserved prefix is wrong even if it was present at
+learn time — surfacing as **anomaly**:
+
+- **IPv6 bogon** — reserved / non-routable space in the IGP (link-local `fe80::/10`,
+  multicast `ff00::/8`, documentation `2001:db8::/32`, 6to4 `2002::/16`, Teredo
+  `2001::/32`, IPv4-mapped, `::/8`, discard `100::/64`). ULA (`fc00::/7`) is
+  deliberately *not* flagged — it can be a valid internal aggregate — keeping this
+  false-positive-free for real networks.
+- **IPv6 host-bits** — non-zero bits beyond the prefix length. RFC 5308 requires them
+  zero, so this is a broken encoder or bits smuggled as a covert channel.
+- **IPv6 down-bit** — the Up/Down bit set on a **Level-2** prefix: an L1 prefix
+  re-advertised down into L2 (a redistribution leak and a potential routing loop).
 
 The BPF is the two IS-IS multicast MACs, captured with `tcpdump -e` for the sender.
 The first scan **learns** the current routers (resolved to hostnames via TLV 137),
