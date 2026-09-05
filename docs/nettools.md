@@ -1048,22 +1048,29 @@ interface.
 - Endpoint: `POST /api/net/l2-health` `{interface?, seconds}` · binary: `tcpdump`
 
 ### IGMP Watch
-A **passive** IGMP-snooping security scanner for the IPv4 multicast control
-plane — **detection-only**: it never joins a group, sends a query, or becomes a
-querier. One short `tcpdump` window is parsed and classified into four things:
+A **passive** IGMP + **MLD** multicast-control security scanner — **detection-only**:
+it never joins a group, sends a query, or becomes a querier. It covers **both** the IPv4
+multicast control plane (**IGMP** v1/v2/v3) and its IPv6 parallel (**MLD** — MLDv1 RFC 2710
+maps onto the v2 model, MLDv2 RFC 3810 onto v3; ICMPv6 types 130/131/132/143 behind a
+Hop-by-Hop Router Alert). One short `tcpdump` window per family (captured concurrently, so
+the scan stays fast; MLD is decoded from raw bytes since tcpdump's MLD text under-parses
+MLDv2 records) is parsed and classified into four things. **Querier election and version
+tracking are per address family** — an IGMP querier and an MLD querier coexisting on a
+dual-stack segment is normal and never reads as "two queriers":
 
 - **Storm / flood** — an IGMP report/query rate far above normal (IGMP is
   intrinsically low-volume), or a single source flooding reports. This is a real
   multicast DoS and a switch-CPU exhaustion vector.
-- **Anomaly** — more than one **querier** on the segment. There must be exactly
-  one; a second, lower-IP querier is the classic *"become the querier to draw
-  all multicast to yourself"* attack. Also flags mixed query versions
-  (a v3→v2/v1 downgrade), a **spoofed querier** (a query sourced from 0.0.0.0), a
-  message that arrived with an **IP TTL other than 1** (IGMP is link-local — a
-  higher TTL means off-link injection / a spoofed source), a report/leave for a
-  **non-multicast** (outside 224.0.0.0/4) address, a **membership report for a
-  reserved group** (224.0.0.1 all-hosts / .2 all-routers — never joined via
-  IGMP), and a **join/leave flap** (a host toggling a group, thrashing the
+- **Anomaly** — more than one **querier** on the segment *of a given family*. There must
+  be exactly one; a second, lower-address querier is the classic *"become the querier to
+  draw all multicast to yourself"* attack. Also flags mixed query versions
+  (a v3→v2/v1 IGMP downgrade, or an MLDv2→MLDv1 downgrade), a **spoofed querier** (a query
+  sourced from `0.0.0.0` for IGMP or `::` for MLD), a message that arrived with an **IP
+  TTL / IPv6 hop-limit other than 1** (both are link-local — a higher value means off-link
+  injection / a spoofed source), a report/leave for a **non-multicast** address (outside
+  224.0.0.0/4 for IGMP or ff00::/8 for MLD), a **membership report for a reserved group**
+  (224.0.0.1 all-hosts / .2 all-routers, or `ff02::1` all-nodes / `ff02::2` all-routers —
+  never joined), and a **join/leave flap** (a host toggling a group, thrashing the
   snooping table). A per-source **leave flood** is flagged as a storm.
 - **Reconnaissance** — one host joining a wide spread of **distinct groups** —
   multicast stream enumeration.

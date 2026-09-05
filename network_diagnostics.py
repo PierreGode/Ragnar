@@ -4379,13 +4379,32 @@ _IGMP_WELL_KNOWN = {
     '224.0.0.102': 'HSRPv2/GLBP', '224.0.0.251': 'mDNS', '224.0.0.252': 'LLMNR',
     '224.0.1.1': 'NTP', '224.0.1.129': 'PTP', '239.255.255.250': 'SSDP/UPnP',
     '239.255.255.253': 'SLP',
+    # MLD / IPv6 well-known groups (readable names; ff02::1/2 are reserved below)
+    'ff02::1': 'all-nodes', 'ff02::2': 'all-routers', 'ff02::16': 'MLDv2-routers',
+    'ff02::fb': 'mDNSv6', 'ff02::1:3': 'LLMNRv6', 'ff02::c': 'SSDPv6',
+    'ff02::1:2': 'DHCPv6-relay', 'ff05::1:3': 'DHCPv6-server',
 }
+
+# Groups that are never *joined* via IGMP/MLD — a membership report for one is a
+# crafted/bogus message (all-hosts/all-nodes and all-routers, v4 and v6).
+_IGMP_RESERVED_GROUPS = frozenset(('224.0.0.1', '224.0.0.2', 'ff02::1', 'ff02::2'))
 
 
 def _igmp_scope(group):
     """Classify a multicast group address into a readable scope. Returns
     (scope, sensitive) — sensitive=True means a join there is worth policing
     (admin/global/SSM), False for link-local control traffic (normal)."""
+    if group and ':' in group:
+        # MLD / IPv6 multicast scope from the 2nd nibble of ff0X:: (RFC 4291 §2.7).
+        g = group.lower()
+        if not g.startswith('ff') or len(g) < 4:
+            return ('invalid', False)
+        sc = g[3]
+        if sc in ('1', '2'):
+            return ('link-local (ff0%s)' % sc, False)   # interface/link-local — normal
+        if g.startswith('ff3'):
+            return ('source-specific (SSM v6)', True)   # ff3x:: — SSM
+        return ('admin/global (v6)', True)
     try:
         octets = [int(x) for x in group.split('.')]
         if len(octets) != 4:
@@ -4408,7 +4427,12 @@ _IGMP_IP_RE = r'(\d{1,3}(?:\.\d{1,3}){3})'
 
 
 def _igmp_is_multicast(ip):
-    """True if `ip` is in the IPv4 multicast range 224.0.0.0/4 (224–239)."""
+    """True if `ip` is a multicast group: IPv4 224.0.0.0/4 (224–239) or, for MLD,
+    IPv6 ff00::/8 (any address that starts 'ff')."""
+    if not ip:
+        return False
+    if ':' in ip:
+        return ip.lower().startswith('ff')
     try:
         return 224 <= int(ip.split('.')[0]) <= 239
     except (ValueError, AttributeError, IndexError):
@@ -4526,7 +4550,15 @@ def _igmp_analyze(events, seconds, baseline, learn=True):
     total = len(events)
     rate = round(total / seconds, 1)
 
-    queriers = sorted({e['src'] for e in events if e['kind'] == 'query' and e['src']})
+    # Querier election is PER address family: an IGMP (IPv4) querier and an MLD
+    # (IPv6) querier coexisting is normal on a dual-stack segment and must never
+    # read as "two queriers". Membership/flood/recon checks key on address strings,
+    # which are naturally disjoint across families, so they stay global.
+    queriers_by_fam = {}
+    for e in events:
+        if e['kind'] == 'query' and e['src']:
+            queriers_by_fam.setdefault(e.get('family', 'ipv4'), set()).add(e['src'])
+    queriers = sorted(set().union(*queriers_by_fam.values())) if queriers_by_fam else []
     per_src = {}
     src_groups = {}
     members = {}
@@ -4577,34 +4609,44 @@ def _igmp_analyze(events, seconds, baseline, learn=True):
         findings.append(('crit', 'storm',
                          f'{s} sent {n} IGMP messages in {seconds}s — single-source flood'))
 
-    # (2) anomaly — rogue / extra querier, version downgrade
-    if len(queriers) > 1:
-        categories.add('anomaly')
-        extra = [q for q in queriers if q not in trusted_q] or queriers[1:]
-        findings.append(('crit', 'anomaly',
-                         f'{len(queriers)} IGMP queriers on the segment '
-                         f'({", ".join(queriers)}) — there must be exactly one; '
-                         f'possible rogue querier ({", ".join(extra)}) drawing multicast'))
-    elif queriers and trusted_q and queriers[0] not in trusted_q:
-        categories.add('anomaly')
-        findings.append(('warn', 'anomaly',
-                         f'querier is {queriers[0]}, not the trusted '
-                         f'{", ".join(sorted(trusted_q))} — querier takeover'))
-    q_versions = sorted({e['version'] for e in events if e['kind'] == 'query'})
-    if len(q_versions) > 1:
-        categories.add('anomaly')
-        findings.append(('warn', 'anomaly',
-                         f'mixed IGMP query versions {q_versions} — possible '
-                         'version-downgrade to force weaker v1/v2'))
+    # (2) anomaly — rogue / extra querier, version downgrade (per address family;
+    # IGMP for IPv4, MLD for IPv6 — a segment must have exactly one querier of each).
+    for fam in sorted(queriers_by_fam):
+        qs = sorted(queriers_by_fam[fam])
+        proto = 'MLD' if fam == 'ipv6' else 'IGMP'
+        fam_trusted = {q for q in trusted_q if (':' in q) == (fam == 'ipv6')}
+        if len(qs) > 1:
+            categories.add('anomaly')
+            extra = [q for q in qs if q not in trusted_q] or qs[1:]
+            findings.append(('crit', 'anomaly',
+                             f'{len(qs)} {proto} queriers on the segment '
+                             f'({", ".join(qs)}) — there must be exactly one; '
+                             f'possible rogue querier ({", ".join(extra)}) drawing multicast'))
+        elif qs and fam_trusted and qs[0] not in fam_trusted:
+            categories.add('anomaly')
+            findings.append(('warn', 'anomaly',
+                             f'{proto} querier is {qs[0]}, not the trusted '
+                             f'{", ".join(sorted(fam_trusted))} — querier takeover'))
+        vs = sorted({e['version'] for e in events
+                     if e['kind'] == 'query' and e.get('family', 'ipv4') == fam})
+        if len(vs) > 1:
+            categories.add('anomaly')
+            findings.append(('warn', 'anomaly',
+                             f'mixed {proto} query versions {vs} — possible '
+                             'version-downgrade to force weaker '
+                             + ('MLDv1' if fam == 'ipv6' else 'v1/v2')))
 
     # (2b) crafted / off-link / bogus-group anomalies. These are signatures of a
     # forged or injected message rather than a policy question, so they fire in
     # both learn and enforce modes.
-    if any(e['kind'] == 'query' and e.get('src') == '0.0.0.0' for e in events):
+    for _sq_src, _sq_fam in sorted({(e.get('src'), e.get('family', 'ipv4'))
+                                    for e in events if e['kind'] == 'query'
+                                    and e.get('src') in ('0.0.0.0', '::')}):
         categories.add('anomaly')
+        _sq_proto = 'MLD' if _sq_fam == 'ipv6' else 'IGMP'
         findings.append(('crit', 'anomaly',
-                         'IGMP query sourced from 0.0.0.0 — a spoofed querier '
-                         '(a real querier sends from its interface IP)'))
+                         f'{_sq_proto} query sourced from {_sq_src} — a spoofed querier '
+                         '(a real querier sends from its interface address)'))
     for (s, t), kind in sorted(bad_ttl.items()):
         categories.add('anomaly')
         findings.append(('crit', 'anomaly',
@@ -4616,13 +4658,14 @@ def _igmp_analyze(events, seconds, baseline, learn=True):
                          f'{s} sent a report/leave for {g}, which is not a multicast '
                          '(224.0.0.0/4) address — crafted/malformed message'))
     for g in sorted(members):
-        if g in ('224.0.0.1', '224.0.0.2'):
+        if g in _IGMP_RESERVED_GROUPS:
+            proto = 'MLD' if ':' in g else 'IGMP'
             for s in sorted(members[g]):
                 categories.add('anomaly')
                 findings.append(('crit', 'anomaly',
                                  f'{s} reported membership in reserved group {g} '
                                  f'({_IGMP_WELL_KNOWN.get(g)}) — bogus/crafted (these '
-                                 'are never joined via IGMP)'))
+                                 f'are never joined via {proto})'))
     for (s, g) in sorted(k for k, v in sg_kinds.items()
                          if k[1] and 'report' in v and 'leave' in v):
         categories.add('anomaly')
@@ -4682,6 +4725,7 @@ def _igmp_analyze(events, seconds, baseline, learn=True):
                    any(s not in known_members.get(g, set()) for s in srcs))
         groups_out.append({'group': g, 'name': _IGMP_WELL_KNOWN.get(g),
                            'scope': scope, 'sensitive': sensitive,
+                           'family': 'ipv6' if ':' in g else 'ipv4',
                            'members': srcs, 'new': new})
 
     top_joiners = sorted(([{'src': s, 'groups': len(g)} for s, g in src_groups.items()]),
@@ -4695,6 +4739,134 @@ def _igmp_analyze(events, seconds, baseline, learn=True):
         'findings': [{'level': l, 'category': c, 'text': t} for l, c, t in findings],
         'reasons': [t for _l, _c, t in findings if _l != 'ok'],
     }
+
+
+# --- MLD (IPv6 multicast) -- the ICMPv6 parallel to IGMP -------------------
+# MLD is IGMP for IPv6: MLDv1 (RFC 2710) maps onto the v2 detection model
+# (report/done/query), MLDv2 (RFC 3810) onto v3 (source-list records). The wire
+# format differs -- ICMPv6 types 130/131/132/143 carried behind a Hop-by-Hop
+# Router Alert -- so this decodes it from raw bytes (tcpdump's MLD *text* varies
+# by version and under-parses MLDv2 records). It yields events in the SAME shape
+# as _parse_igmp_capture so the shared classifier handles both families; every
+# MLD event carries family='ipv6'. Hop-limit is stored in 'ttl' (MLD must be 1,
+# exactly like IGMP), and a query from '::' is the spoofed-querier tell.
+_MLD_QUERY = 130          # Multicast Listener Query (MLDv1 + MLDv2 both use 130)
+_MLD_REPORT_V1 = 131      # MLDv1 Multicast Listener Report
+_MLD_DONE = 132           # MLDv1 Multicast Listener Done (== IGMP leave)
+_MLD_REPORT_V2 = 143      # MLDv2 Multicast Listener Report (source-list records)
+_MLD_TYPES = frozenset((_MLD_QUERY, _MLD_REPORT_V1, _MLD_DONE, _MLD_REPORT_V2))
+# MLDv2 record types that mean "leaving / no interest" when the source list is
+# empty (TO_INCLUDE {} and BLOCK {} are the MLD analog of an IGMP leave).
+_MLD_LEAVE_RECORDS = frozenset((3, 6))     # TO_IN, BLOCK
+_MLD_MAX_RECORDS = 512
+
+
+def _v6(b):
+    """16 bytes -> canonical lowercase IPv6 string ('ff02::1'), or None."""
+    try:
+        return str(ipaddress.IPv6Address(bytes(b)))
+    except (ValueError, TypeError):
+        return None
+
+
+def _decode_mld_frames(frames):
+    """Decode MLD/MLDv2 out of raw Ethernet frames (iterable of (ts, frame_bytes)).
+    Pure bytes in, membership events out -- no scapy, no capture, unit-testable with
+    crafted frames. Walks 802.1Q tags and the IPv6 Hop-by-Hop header to reach the
+    ICMPv6 MLD message, then parses MLDv1 (single group) or MLDv2 (record list)."""
+    events = []
+    for _ts, frame in frames:
+        try:
+            if len(frame) < 14:
+                continue
+            off = 12
+            etype = (frame[off] << 8) | frame[off + 1]
+            off += 2
+            # walk any depth of 802.1Q / 802.1ad tags
+            while etype in (0x8100, 0x88a8) and len(frame) >= off + 4:
+                etype = (frame[off + 2] << 8) | frame[off + 3]
+                off += 4
+            if etype != 0x86dd or len(frame) < off + 40:
+                continue
+            ip6 = frame[off:]
+            nxt = ip6[6]
+            hop = ip6[7]
+            src = _v6(ip6[8:24])
+            p = 40
+            # walk extension headers (Hop-by-Hop / Routing / Dest-Opts) to ICMPv6
+            hops = 0
+            while nxt in (0, 43, 60) and len(ip6) >= p + 2 and hops < 8:
+                ext_nxt = ip6[p]
+                ext_len = (ip6[p + 1] + 1) * 8
+                nxt = ext_nxt
+                p += ext_len
+                hops += 1
+            if nxt != 58 or len(ip6) < p + 4:     # 58 = ICMPv6
+                continue
+            icmp = ip6[p:]
+            mtype = icmp[0]
+            if mtype not in _MLD_TYPES:
+                continue
+            if mtype in (_MLD_QUERY, _MLD_REPORT_V1, _MLD_DONE):
+                # MLDv1: 4-byte ICMP hdr + 2 max-resp + 2 reserved + 16 addr
+                if len(icmp) < 24:
+                    continue
+                grp = _v6(icmp[8:24])
+                if mtype == _MLD_QUERY:
+                    events.append({'src': src, 'group': None, 'kind': 'query',
+                                   'version': 1, 'ttl': hop, 'family': 'ipv6'})
+                else:
+                    kind = 'leave' if mtype == _MLD_DONE else 'report'
+                    events.append({'src': src, 'group': grp, 'kind': kind,
+                                   'version': 1, 'ttl': hop, 'family': 'ipv6'})
+            else:
+                # MLDv2 report (143): 4-byte hdr + 2 reserved + 2 nrecords, records
+                if len(icmp) < 8:
+                    continue
+                nrec = min((icmp[6] << 8) | icmp[7], _MLD_MAX_RECORDS)
+                q = 8
+                for _ in range(nrec):
+                    if len(icmp) < q + 20:
+                        break
+                    rtype = icmp[q]
+                    aux = icmp[q + 1]
+                    nsrc = (icmp[q + 2] << 8) | icmp[q + 3]
+                    grp = _v6(icmp[q + 4:q + 20])
+                    q += 20 + nsrc * 16 + aux * 4
+                    kind = ('leave' if (rtype in _MLD_LEAVE_RECORDS and nsrc == 0)
+                            else 'report')
+                    events.append({'src': src, 'group': grp, 'kind': kind,
+                                   'version': 2, 'ttl': hop, 'family': 'ipv6'})
+        except (IndexError, ValueError, TypeError):
+            continue
+    return events
+
+
+def _mld_capture(interface, seconds):
+    """Capture one MLD (IPv6 multicast) window to a temp pcap and return the decoded
+    events (same shape as _parse_igmp_capture, family='ipv6'). MLD rides ICMPv6 behind
+    a Hop-by-Hop Router Alert, so the BPF catches IPv6-with-Hop-by-Hop plus direct
+    ICMPv6; the byte decoder filters the four MLD types. Best-effort; returns [] on any
+    capture/parse failure so an IPv6-less segment never breaks the IGMP scan."""
+    if not _have('tcpdump'):
+        return []
+    import tempfile as _tf
+    fd, path = _tf.mkstemp(suffix='.pcap')
+    os.close(fd)
+    try:
+        _run(['timeout', str(seconds), 'tcpdump', '-i', interface, '-nn', '-p',
+              '-s', '256', '-c', '20000', '-w', path,
+              '(ip6 and ip6[6] = 0) or icmp6'], timeout=seconds + 8)
+        try:
+            from bfdwatch import read_pcap as _read_pcap
+            return _decode_mld_frames(_read_pcap(path))
+        except Exception:
+            return []
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
 
 def _igmp_capture(interface, seconds):
@@ -4713,9 +4885,11 @@ def _igmp_capture(interface, seconds):
 
 
 def do_igmp_watch(interface=None, seconds=12, learn=True, quick=False):
-    """Passive IGMP-snooping security scanner (detection-only). Captures IGMP for
-    a few seconds and classifies the segment: storm / anomaly / recon /
-    unauthorized / clean. Learns the querier(s) + memberships on first run."""
+    """Passive IGMP + MLD multicast-control security scanner (detection-only). Captures
+    IGMP (IPv4) and MLD (IPv6, the ICMPv6 parallel) for a few seconds and classifies the
+    segment: storm / anomaly / recon / unauthorized / clean. Querier election and
+    version tracking are per address family. Learns the querier(s) + memberships on
+    first run."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -4723,11 +4897,25 @@ def do_igmp_watch(interface=None, seconds=12, learn=True, quick=False):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 12, 4, 30)
 
+    # Capture MLD (IPv6) concurrently with the IGMP text window so the total wall
+    # time stays ~seconds, not 2x. MLD is best-effort: an IPv4-only segment yields
+    # [] and the IGMP scan is unaffected.
+    mld_events = []
+
+    def _mld_worker():
+        try:
+            mld_events.extend(_mld_capture(iface, seconds))
+        except Exception:
+            pass
+    _mld_t = threading.Thread(target=_mld_worker, daemon=True)
+    _mld_t.start()
+
     text, err = _igmp_capture(iface, seconds)
+    _mld_t.join(timeout=seconds + 10)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
-    events = _parse_igmp_capture(text)
+    events = _parse_igmp_capture(text) + mld_events
 
     with _igmp_watch_lock:
         baseline = _igmp_watch_load()
@@ -4829,6 +5017,77 @@ def _igmp_selftest():
     scenarios.append({'name': 'v3-parse', 'expect': 'group 239.9.9.9',
                       'got': str([e.get('group') for e in v3_events]),
                       'pass': v3_ok})
+
+    # --- MLD (IPv6) scenarios: crafted frames -> byte decoder -> shared classifier.
+    import struct as _st
+
+    def _mld_frame(mtype, src6, grp6=None, hop=1, records=None):
+        """Build an Ethernet/IPv6/Hop-by-Hop-RouterAlert/ICMPv6-MLD frame (test-only)."""
+        if mtype == _MLD_REPORT_V2:
+            recs = records or []
+            body = _st.pack('!BBH', mtype, 0, 0) + _st.pack('!HH', 0, len(recs))
+            for rtype, mcast, srcs in recs:
+                body += (_st.pack('!BBH', rtype, 0, len(srcs))
+                         + ipaddress.IPv6Address(mcast).packed)
+                for s in srcs:
+                    body += ipaddress.IPv6Address(s).packed
+        else:
+            g = grp6 or '::'
+            body = (_st.pack('!BBH', mtype, 0, 0) + _st.pack('!HH', 0, 0)
+                    + ipaddress.IPv6Address(g).packed)
+        hbh = _st.pack('!BB', 58, 0) + b'\x05\x02\x00\x00\x01\x00'   # RouterAlert+PadN
+        payload = hbh + body
+        ip6 = (_st.pack('!IHBB', 0x60000000, len(payload), 0, hop)
+               + ipaddress.IPv6Address(src6).packed
+               + ipaddress.IPv6Address(grp6 or 'ff02::1').packed + payload)
+        return b'\x33\x33\x00\x00\x00\x01' + b'\x02\x00\x00\x00\x00\x01' + b'\x86\xdd' + ip6
+
+    def run_ev(name, evlist, seconds, baseline, expect):
+        res = _igmp_analyze(evlist, seconds, dict(baseline), learn=not baseline)
+        ok = res['verdict'] == expect
+        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
+                          'events': len(evlist), 'pass': ok})
+        return res
+
+    # 13. MLD byte decoder: a general query + an MLDv1 report parse correctly.
+    dec = _decode_mld_frames([(1.0, _mld_frame(_MLD_QUERY, 'fe80::1', 'ff02::1')),
+                              (1.1, _mld_frame(_MLD_REPORT_V1, 'fe80::50', 'ff15::abcd'))])
+    dec_ok = (any(e['kind'] == 'query' and e['family'] == 'ipv6' for e in dec)
+              and any(e['kind'] == 'report' and e['group'] == 'ff15::abcd' for e in dec))
+    scenarios.append({'name': 'mld-decode', 'expect': 'query+report ipv6',
+                      'got': str([(e['kind'], e.get('group')) for e in dec]),
+                      'pass': dec_ok})
+
+    # 14. dual-stack coexistence stays CLEAN: an IGMP (v4) querier and an MLD (v6)
+    # querier on one segment must NOT read as two queriers (per-family election).
+    dual = (_parse_igmp_capture("192.168.1.1 > 224.0.0.1: igmp query v2\n"
+                                "192.168.1.50 > 239.255.255.250: igmp v2 report 239.255.255.250")
+            + _decode_mld_frames([(1.0, _mld_frame(_MLD_QUERY, 'fe80::1', 'ff02::1')),
+                                  (1.1, _mld_frame(_MLD_REPORT_V1, 'fe80::50', 'ff15::abcd'))]))
+    run_ev('mld-dualstack-clean', dual, 12, {}, 'clean')
+
+    # 15. spoofed MLD querier: a query sourced from :: (the MLD analog of 0.0.0.0).
+    run_ev('mld-spoofed-querier',
+           _decode_mld_frames([(1.0, _mld_frame(_MLD_QUERY, '::', 'ff02::1'))]),
+           12, {'queriers': ['fe80::1'], 'members': {}}, 'anomaly')
+
+    # 16. reserved-group MLD report (all-nodes ff02::1 is never joined).
+    run_ev('mld-reserved-group',
+           _decode_mld_frames([(1.0, _mld_frame(_MLD_REPORT_V1, 'fe80::9', 'ff02::1'))]),
+           12, {'queriers': ['fe80::1'], 'members': {}}, 'anomaly')
+
+    # 17. bad hop-limit: MLD (like IGMP) must be hop-limit 1 — 64 is off-link injection.
+    run_ev('mld-bad-hoplimit',
+           _decode_mld_frames([(1.0, _mld_frame(_MLD_REPORT_V1, 'fe80::9', 'ff15::7', hop=64))]),
+           12, {'queriers': ['fe80::1'], 'members': {}}, 'anomaly')
+
+    # 18. MLDv2 report record parse (source-list record -> group extracted).
+    d2 = _decode_mld_frames([(1.0, _mld_frame(_MLD_REPORT_V2, 'fe80::50',
+                                              records=[(4, 'ff15::1234', [])]))])
+    scenarios.append({'name': 'mldv2-parse', 'expect': 'group ff15::1234',
+                      'got': str([e.get('group') for e in d2]),
+                      'pass': any(e['group'] == 'ff15::1234' and e['kind'] == 'report'
+                                  for e in d2)})
 
     # Optional Scapy end-to-end: craft real IGMP packets -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
