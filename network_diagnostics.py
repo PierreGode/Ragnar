@@ -15053,7 +15053,13 @@ _OSPF_LSA_TYPES = [
     (re.compile(r'\b(?:Opaque|Grace|TE)\s+LSA\b', re.I), 'opaque'),
 ]
 _OSPF_IPRE = r'(\d{1,3}(?:\.\d{1,3}){3})'
-_OSPF_HDR_RE = re.compile(r'(?:IP6?\s+)?' + _OSPF_IPRE + r'(?:\.\d+)?\s+>\s+\S+:\s+OSPFv(\d),\s*([^,]+)')
+# Header source is IPv4 for OSPFv2 (`IP a.b.c.d > 224.0.0.5: OSPFv2, ...`) but an
+# IPv6 address for OSPFv3 (`IP6 fe80::1 > ff02::5: OSPFv3, ...`). Both ride IP
+# proto 89 and `proto ospf` captures both, so the header line must match either
+# family or every OSPFv3 packet is silently dropped before the detectors see it.
+_OSPF_HDR_RE = re.compile(
+    r'(?:IP6?\s+)?(\d{1,3}(?:\.\d{1,3}){3}|[0-9A-Fa-f:]+)'
+    r'(?:\.\d+)?\s+>\s+\S+:\s+OSPFv(\d),\s*([^,]+)')
 
 
 def _ospf_pkt_type(kw):
@@ -15399,10 +15405,14 @@ def _ospf_capture(interface, seconds):
 
 
 def do_ospf_watch(interface=None, seconds=15, learn=True, quick=False):
-    """Passive OSPF security scanner (detection-only). Captures OSPF for a few
-    seconds and classifies the segment: weak_auth / anomaly / injection / storm /
-    clean, with CVE/OSV advisories for observed exposure conditions. Learns the
-    routers + Type-5 originators on first run; never forms an adjacency."""
+    """Passive OSPF security scanner (detection-only). Captures OSPFv2 (IPv4) and
+    OSPFv3 (IPv6, RFC 5340) — both ride IP proto 89 and `proto ospf` grabs both —
+    for a few seconds and classifies the segment: weak_auth / anomaly / injection /
+    storm / clean, with CVE/OSV advisories for observed exposure conditions. The
+    version-agnostic detectors (Router-ID conflict/spoof, phantom router, DR/priority
+    takeover, mixed-version) apply to both stacks; auth-downgrade is v2-only (v3 has
+    no header auth field). Learns the routers + Type-5 originators on first run;
+    never forms an adjacency."""
     iface = interface if _valid_iface(interface or '') else _capture_iface()
     if not iface:
         return {'success': False, 'error': 'no interface to capture on'}
@@ -15493,6 +15503,30 @@ def _ospf_selftest():
         "\tRouter LSA (1), LSA-ID: 10.0.0.1, Advertising Router: 10.0.0.1, seq 0x7fffffff, age 1",
     ])
     run('injection-maxseq', maxseq, 15, base, 'injection')
+
+    # OSPFv3 (IPv6, RFC 5340): both versions ride IP proto 89 and `proto ospf`
+    # captures both, but the header source is an IPv6 address, so the parser must
+    # accept it or every OSPFv3 packet is dropped before the detectors run. These
+    # exercise the version-agnostic Hello/adjacency-plane detectors on v3 input.
+    v3_dup = "\n".join([
+        "IP6 fe80::1 > ff02::5: OSPFv3, Hello, length 36",
+        "\tRouter-ID 1.1.1.1, Backbone Area, Instance 0",
+        "IP6 fe80::2 > ff02::5: OSPFv3, Hello, length 36",
+        "\tRouter-ID 1.1.1.1, Backbone Area, Instance 0",
+    ])
+    run('ospfv3-dup-routerid', v3_dup, 15, {}, 'anomaly')
+
+    # A v2 speaker and a v3 speaker on one segment => version-mix is now visible
+    # (previously the v3 half was invisible, so the mix could never be flagged).
+    v3_parse = _parse_ospf_capture(v3_dup + "\n" + "\n".join([
+        "IP 10.0.0.1 > 224.0.0.5: OSPFv2, Hello, length 44",
+        "\tRouter-ID 10.0.0.1, Backbone Area, Authentication Type: none (0)",
+    ]))
+    v3_ok = (sorted({x['version'] for x in v3_parse}) == [2, 3]
+             and any(x['src'] == 'fe80::1' for x in v3_parse))
+    scenarios.append({'name': 'ospfv3-parse', 'expect': 'v2+v3, IPv6 src',
+                      'got': 'versions=%s' % sorted({x['version'] for x in v3_parse}),
+                      'pass': v3_ok})
 
     # parser check: a full LS-Update parses out the LSA fields.
     p = _parse_ospf_capture(clean)

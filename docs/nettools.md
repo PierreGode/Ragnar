@@ -2191,15 +2191,21 @@ dedup, baseline learning and a hardened daemon — see
 
 ### OSPF Security Scanner
 A **passive** routing-security scanner for OSPF (the interior routing control
-plane, IP proto 89 / multicast 224.0.0.5–6). **Detection-only** — it never forms
-an adjacency, floods an LSA, or touches the LSDB; it just captures one short
-window and classifies it. OSPF is the classic route-poisoning target: without
+plane, IP proto 89 / multicast 224.0.0.5–6). Covers **OSPFv2 (IPv4)** and
+**OSPFv3 (IPv6, RFC 5340)** — both ride IP proto 89, `proto ospf` captures both,
+and the version-agnostic detectors (Router-ID conflict/spoof, phantom router,
+DR/priority takeover, mixed-version) apply to either stack (the header source is
+IPv6 for v3, so the parser accepts both families — an IPv4-only match would
+silently drop every OSPFv3 packet). **Detection-only** — it never forms an
+adjacency, floods an LSA, or touches the LSDB; it just captures one short window
+and classifies it. OSPF is the classic route-poisoning target: without
 cryptographic auth, any host on the segment can inject LSAs and silently redirect
 traffic. What it flags:
 
 - **Weak / no authentication** — Auth Type 0 (none) or 1 (plaintext). This is the
   enabler for every injection attack and the one thing always visible on the wire;
-  it surfaces a CVE/OSV advisory.
+  it surfaces a CVE/OSV advisory. **OSPFv2 only** — OSPFv3 has no header auth field
+  (it relies on IPsec AH/ESP or the RFC 7166 auth trailer), so it is not faked for v3.
 - **Anomaly** — a new/rogue OSPF router (adjacency spoofing), a **duplicate
   Router-ID** (conflict/spoof), Hello parameter mismatch, or mixed OSPF versions.
 - **Injection** — an LSA whose **Advertising Router** never announced itself (a
