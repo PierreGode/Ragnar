@@ -14314,6 +14314,11 @@ def _glbp_decode(payload):
                 vip = None
                 if v[20] == 1 and len(v) >= 26:               # IPv4 virtual address
                     vip = '.'.join(str(b) for b in v[22:26])
+                elif v[20] == 2 and len(v) >= 38:             # IPv6 virtual address
+                    try:
+                        vip = socket.inet_ntop(socket.AF_INET6, bytes(v[22:38]))
+                    except OSError:
+                        vip = None
                 out['hello'] = {'vg_state': _GLBP_VG_STATE.get(v[1], str(v[1])),
                                 'priority': v[3], 'vip': vip}
             elif t == 2 and len(v) >= 18:                     # VF Request/Response
@@ -14333,29 +14338,135 @@ def _glbp_decode(payload):
 def _fhrp_glbp_from_pkts(pkts):
     """Turn decoded GLBP packets [{src, src_mac, payload}] into (avg_events, vf_events).
     avg_events feed the generic group analyzer (AVG election == a normal FHRP hijack);
-    vf_events feed the dedicated forwarder-plane analyzer."""
+    vf_events feed the dedicated forwarder-plane analyzer. Both families (GLBPv6 rides
+    UDP/3222 to ff02::66) are tagged so dual-stack elections don't merge."""
     avg_events, vf_events = [], []
     for pk in pkts:
         d = _glbp_decode(pk.get('payload') or b'')
         if not d:
             continue
+        src = pk.get('src')
+        fam = 6 if (src and ':' in src) else 4
         weak = (d['auth'] in (None, 'none', 'plaintext'))
         if d['hello']:
             h = d['hello']
             avg_events.append({
-                'proto': 'glbp', 'version': None, 'src': pk.get('src'),
+                'proto': 'glbp', 'version': None, 'src': src,
                 'group': d['group'], 'vip': h['vip'], 'priority': h['priority'],
                 'opcode': 'hello', 'state': h['vg_state'],
-                'authtype': d['auth'] or 'none', 'auth_weak': weak, 'advskew': None})
+                'authtype': d['auth'] or 'none', 'auth_weak': weak, 'advskew': None,
+                'family': fam})
         for f in d['forwarders']:
             if not (1 <= f['forwarder'] <= 4):    # 0 == VF negotiation, not ownership
                 continue
             vf_events.append({
-                'proto': 'glbp', 'group': d['group'], 'src': pk.get('src'),
+                'proto': 'glbp', 'group': d['group'], 'src': src,
                 'src_mac': pk.get('src_mac'), 'forwarder': f['forwarder'],
                 'vf_state': f['vf_state'], 'vf_prio': f['priority'],
-                'weight': f['weight'], 'vmac': f['vmac']})
+                'weight': f['weight'], 'vmac': f['vmac'], 'family': fam})
     return avg_events, vf_events
+
+
+# HSRPv2 Group-State TLV (RFC-less; UDP 1985 to 224.0.0.102 on v4, UDP 2029 to
+# ff02::66 on v6). tcpdump only knows classic HSRPv0/v1 (it mislabels HSRPv2 as
+# "HSRPv1" with no fields, and shows HSRPv6 as opaque UDP), so v2/v6 are decoded
+# by hand here — the same posture as GLBP.
+_HSRP2_STATE = {0: 'init', 1: 'learn', 2: 'listen', 3: 'speak', 4: 'standby', 5: 'active'}
+_HSRP2_OPCODE = {0: 'hello', 1: 'coup', 2: 'resign', 3: 'advertise'}
+
+
+def _hsrp2_decode(payload):
+    """Hand-rolled HSRPv2 decoder. Returns {group, ipver, priority, state, opcode,
+    vip, auth} or None if it isn't an HSRPv2 datagram (classic HSRPv0/v1 return
+    None and stay on the tcpdump text path). Never raises.
+      Group-State TLV (type 1, len>=40): version(1)=2 opcode(1) state(1) ipver(1)
+        group(2) identifier(6) priority(4) hello(4) hold(4) virtualIP(16)
+      Text-Auth TLV (3) / MD5-Auth TLV (4). TLV length covers the value only."""
+    try:
+        if len(payload) < 42 or payload[0] != 1 or payload[1] < 40:
+            return None
+        out = {'group': None, 'ipver': 4, 'priority': None, 'state': None,
+               'opcode': None, 'vip': None, 'auth': None}
+        i, n = 0, len(payload)
+        while i + 2 <= n:
+            if payload[i] == 0 and not any(payload[i:]):   # zero-pad tail, not a TLV
+                break
+            t, ln = payload[i], payload[i + 1]
+            if ln < 1 or i + 2 + ln > n:
+                break
+            v = payload[i + 2:i + 2 + ln]
+            if t == 1 and len(v) >= 40:
+                if v[0] != 2:                              # not HSRPv2
+                    return None
+                ipv = v[3]
+                out['opcode'] = _HSRP2_OPCODE.get(v[1], str(v[1]))
+                out['state'] = _HSRP2_STATE.get(v[2], str(v[2]))
+                out['ipver'] = 6 if ipv == 6 else 4
+                out['group'] = int.from_bytes(v[4:6], 'big')
+                out['priority'] = int.from_bytes(v[12:16], 'big')
+                vb = v[24:40]
+                try:
+                    out['vip'] = (socket.inet_ntop(socket.AF_INET6, vb) if ipv == 6
+                                  else socket.inet_ntoa(vb[:4]))
+                except OSError:
+                    out['vip'] = None
+            elif t == 3:
+                out['auth'] = 'plaintext'
+            elif t == 4:
+                out['auth'] = 'md5'
+            i += 2 + ln
+        return out if out['group'] is not None else None
+    except Exception:
+        return None
+
+
+def _fhrp_hsrp2_extract(pcap_path):
+    """Pull HSRPv2 (UDP 1985 v4 / 2029 v6) packets out of a pcap as
+    [{src, src_mac, payload}] for the hand-rolled decoder. Scapy (lazy); returns []
+    if unavailable so classic HSRPv0/v1 (text path) and the rest keep working."""
+    try:
+        from scapy.all import rdpcap, Ether, IP, IPv6, UDP, Raw
+    except Exception:
+        return []
+    pkts = []
+    try:
+        for p in rdpcap(pcap_path):
+            if not p.haslayer(UDP) or not p.haslayer(Raw):
+                continue
+            u = p[UDP]
+            if u.sport not in (1985, 2029) and u.dport not in (1985, 2029):
+                continue
+            ipl = p.getlayer(IP) or p.getlayer(IPv6)
+            if ipl is None:
+                continue
+            pkts.append({'src': ipl.src,
+                         'src_mac': p[Ether].src if p.haslayer(Ether) else None,
+                         'payload': bytes(p[Raw].load)})
+    except Exception:
+        return pkts
+    return pkts
+
+
+def _fhrp_hsrp_from_pkts(pkts):
+    """Decode HSRPv2 packets into normalized, family-tagged HSRP events. Classic
+    HSRPv0/v1 decode to None and remain on the tcpdump text path. `declared_family`
+    is the advert's own ipver field, kept so the analyzer can flag a family that
+    disagrees with the transport (a crafted-packet tell)."""
+    events = []
+    for pk in pkts:
+        d = _hsrp2_decode(pk.get('payload') or b'')
+        if not d:
+            continue
+        src = pk.get('src')
+        fam = 6 if (src and ':' in src) else 4
+        events.append({
+            'proto': 'hsrp', 'version': 2, 'src': src,
+            'group': d['group'], 'vip': d['vip'], 'priority': d['priority'],
+            'opcode': d['opcode'], 'state': d['state'],
+            'authtype': d['auth'] or 'none',
+            'auth_weak': d['auth'] in (None, 'plaintext'), 'advskew': None,
+            'family': fam, 'declared_family': d['ipver']})
+    return events
 
 
 def _parse_fhrp_capture(output):
@@ -14436,6 +14547,13 @@ def _parse_fhrp_capture(output):
                 'priority': int(pri.group(1)) if pri else None,
                 'opcode': 'hello', 'state': None, 'authtype': None,
                 'auth_weak': False, 'advskew': None})
+
+    # Tag address family from the transport source (v6 addresses contain ':').
+    # FHRP elections are per-family — VRRPv3/IPv6 and GLBPv6 already flow in via
+    # the family-agnostic BPF, and this is what keeps them namespaced apart from
+    # the v4 group of the same number (merging them false-positives forever).
+    for e in events:
+        e.setdefault('family', 6 if (e.get('src') and ':' in e['src']) else 4)
     return [e for e in events if e['src']]
 
 
@@ -14474,7 +14592,11 @@ def do_fhrp_baseline(action='get'):
 
 
 def _fhrp_gkey(e):
-    return f"{e['proto']}/{e['group']}" if e['group'] is not None else f"{e['proto']}/?"
+    # Namespaced by address family — HSRP group 1 on IPv4 and IPv6 are two
+    # independent elections with separate winners; merging them false-positives.
+    fam = e.get('family') or 4
+    g = e['group'] if e.get('group') is not None else '?'
+    return f"{e['proto']}/{g}/v{fam}"
 
 
 def _fhrp_analyze(events, seconds, baseline, learn=True, glbp_vf=None):
@@ -14487,15 +14609,25 @@ def _fhrp_analyze(events, seconds, baseline, learn=True, glbp_vf=None):
     groups = {}
     for e in events:
         gk = _fhrp_gkey(e)
+        fam = e.get('family') or 4
         g = groups.setdefault(gk, {
             'gkey': gk, 'proto': e['proto'], 'group': e['group'], 'vips': set(),
-            'speakers': {}, 'auth_weak': False, 'authtype': e['authtype']})
+            'speakers': {}, 'auth_weak': False, 'authtype': e['authtype'],
+            'family': fam, 'bad_v6_src': set(), 'af_mismatch': False})
         if e['vip']:
             g['vips'].add(e['vip'])
         if e['auth_weak']:
             g['auth_weak'] = True
         if e['authtype']:
             g['authtype'] = e['authtype']
+        # IPv6 FHRP tells (deterministic, essentially no false-positive surface):
+        # a conforming router always sources from its link-local address, and the
+        # advert's declared family must match the transport it rode in on.
+        if fam == 6 and e['src'] and not _is_ipv6_linklocal(e['src']):
+            g['bad_v6_src'].add(e['src'])
+        dfam = e.get('declared_family')
+        if dfam and dfam != fam:
+            g['af_mismatch'] = True
         sp = g['speakers'].setdefault(e['src'], {
             'src': e['src'], 'prio': None, 'states': set(), 'opcodes': set(),
             'count': 0})
@@ -14577,6 +14709,20 @@ def _fhrp_analyze(events, seconds, baseline, learn=True, glbp_vf=None):
                 f"{g['group'] if g['group'] is not None else '?'} uses weak/no "
                 f"authentication ({g['authtype'] or 'none'}) — this is what lets a "
                 f"forged higher-priority hello win the election; enable MD5/HMAC auth")
+        gnum = g['group'] if g['group'] is not None else '?'
+        for bad in sorted(g.get('bad_v6_src') or []):
+            bump('rogue-speaker')
+            reasons.append(
+                f"{g['proto'].upper()} group {gnum}: IPv6 advert from {bad} is "
+                f"not link-local (fe80::/10) — a conforming FHRP router always "
+                f"sources from its link-local address, so this is a crafted or "
+                f"off-segment injection (hop-limit/source-scope tell)")
+        if g.get('af_mismatch'):
+            bump('rogue-speaker')
+            reasons.append(
+                f"{g['proto'].upper()} group {gnum}: the advert's declared address "
+                f"family disagrees with its IPv{g['family']} transport — a malformed "
+                f"or crafted FHRP packet (real routers never mismatch the two)")
 
     # ---- GLBP forwarder (AVF) plane -----------------------------------------
     # A healthy GLBP forwarder has ONE stable Active owner + vMAC. A second speaker
@@ -14584,9 +14730,9 @@ def _fhrp_analyze(events, seconds, baseline, learn=True, glbp_vf=None):
     # is a stealth slice-capture the AVG election never reveals.
     forwarders = {}
     for e in (glbp_vf or []):
-        fk = f"{e['group']}/{e['forwarder']}"
+        fk = f"{e['group']}/{e['forwarder']}/v{e.get('family') or 4}"
         c = forwarders.setdefault(fk, {'group': e['group'], 'forwarder': e['forwarder'],
-                                       'owners': {}})
+                                       'family': e.get('family') or 4, 'owners': {}})
         o = c['owners'].setdefault(e['src'], {
             'src': e['src'], 'src_mac': e.get('src_mac'), 'vf_prio': None,
             'weight': None, 'vmac': e['vmac'], 'states': set(), 'count': 0})
@@ -14680,6 +14826,7 @@ def _fhrp_analyze(events, seconds, baseline, learn=True, glbp_vf=None):
 
     def _pub(g):
         return {'gkey': g['gkey'], 'proto': g['proto'], 'group': g['group'],
+                'family': g.get('family', 4),
                 'vips': sorted(g['vips']), 'authtype': g['authtype'],
                 'auth_weak': g['auth_weak'],
                 'speakers': [{
@@ -14737,12 +14884,16 @@ def _fhrp_glbp_extract(pcap_path):
 
 
 def _fhrp_capture(interface, seconds):
-    """One passive tcpdump window over FHRP hellos, returned as (text, glbp_pkts, err).
-    We capture to a pcap so GLBP can be byte-decoded, then replay it through
-    `tcpdump -r ... -v` to reuse the existing HSRP/VRRP/CARP text parser unchanged."""
+    """One passive tcpdump window over FHRP hellos, returned as
+    (text, glbp_pkts, hsrp2_pkts, frames, err). We capture to a pcap so GLBP and
+    HSRPv2/HSRPv6 can be byte-decoded, then replay it through `tcpdump -r ... -v`
+    to reuse the existing HSRP/VRRP/CARP text parser unchanged. The BPF is
+    dual-stack: HSRP v4 (1985) + HSRPv6 (2029) + GLBP (3222) + VRRP/CARP over both
+    IPv4 and IPv6 proto 112 — an IPv4-only filter would silently miss every IPv6
+    FHRP group while the sensor looked healthy."""
     if not _have('tcpdump'):
-        return '', [], 'tcpdump is not installed. Click Install to add it.'
-    bpf = ('(udp and (port 1985 or port 3222)) or (ip proto 112) or '
+        return '', [], [], [], 'tcpdump is not installed. Click Install to add it.'
+    bpf = ('(udp and (port 1985 or port 2029 or port 3222)) or (ip proto 112) or '
            '(ip6 proto 112)')
     import tempfile
     fd, path = tempfile.mkstemp(suffix='.pcap')
@@ -14756,11 +14907,12 @@ def _fhrp_capture(interface, seconds):
                      or "couldn't" in res['err'].lower()
                      or 'no such device' in res['err'].lower()
                      or 'syntax error' in res['err'].lower())):
-            return '', [], [], res['err'].strip()[:200]
+            return '', [], [], [], res['err'].strip()[:200]
         text = _run(['tcpdump', '-nn', '-t', '-v', '-r', path], timeout=20)['out']
         glbp = _fhrp_glbp_extract(path)
+        hsrp2 = _fhrp_hsrp2_extract(path)
         frames = _read_pcap_frames(path)
-        return text, glbp, frames, None
+        return text, glbp, hsrp2, frames, None
     finally:
         try:
             os.remove(path)
@@ -14780,7 +14932,7 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
         return {'success': False, 'error': f'unknown interface: {iface}'}
     seconds = _clamp_int(seconds, 15, 4, 40)
 
-    text, glbp_pkts, frames, err = _fhrp_capture(iface, seconds)
+    text, glbp_pkts, hsrp2_pkts, frames, err = _fhrp_capture(iface, seconds)
     if err:
         return {'success': False, 'interface': iface, 'error': err,
                 'missing_tool': 'tcpdump' if 'not installed' in err else None}
@@ -14793,6 +14945,16 @@ def do_fhrp_watch(interface=None, seconds=15, learn=True, quick=False):
         if glbp_avg or glbp_vf:           # decoded something -> prefer the rich events
             events = [e for e in events if e['proto'] != 'glbp'] + glbp_avg
         # else: all GLBP packets were undecodable -> keep the text new-speaker fallback
+    # HSRPv2 (v4 group-state, and all of HSRPv6): tcpdump can't dissect it, so
+    # byte-decode and replace the junk text events from the same source (classic
+    # HSRPv0/v1 decode to None and stay on the text path).
+    if hsrp2_pkts:
+        hsrp_decoded = _fhrp_hsrp_from_pkts(hsrp2_pkts)
+        if hsrp_decoded:
+            decoded_srcs = {e['src'] for e in hsrp_decoded}
+            events = [e for e in events
+                      if not (e['proto'] == 'hsrp' and e['src'] in decoded_srcs)] \
+                + hsrp_decoded
 
     with _fhrp_watch_lock:
         baseline = _fhrp_watch_load()
@@ -14841,11 +15003,12 @@ def _fhrp_selftest():
         return res
 
     # Baseline: HSRP group 1 active=192.168.1.2 prio 110; VRRP vrid 1 active .3 prio 100.
+    # Keys are address-family namespaced (…/v4) as of the dual-stack update.
     base = {'groups': {
-        'hsrp/1': {'speakers': {'192.168.1.2': 110}, 'vips': ['192.168.1.1'],
-                   'max_prio': 110},
-        'vrrp/1': {'speakers': {'192.168.1.3': 100}, 'vips': ['192.168.1.1'],
-                   'max_prio': 100}}}
+        'hsrp/1/v4': {'speakers': {'192.168.1.2': 110}, 'vips': ['192.168.1.1'],
+                      'max_prio': 110},
+        'vrrp/1/v4': {'speakers': {'192.168.1.3': 100}, 'vips': ['192.168.1.1'],
+                      'max_prio': 100}}}
 
     # 1. clean: the known active re-advertising at its known priority (MD5 auth so no
     #    weak-auth), + known VRRP with AH auth.
@@ -14910,12 +15073,12 @@ def _fhrp_selftest():
 
     # Baseline: GLBP group 1, AVG=.2 prio 100; forwarder 1 owned by .2 with .3 as a
     # legitimate standby speaker (GLBP redundancy — both know the same vMAC).
-    gbase = {'groups': {'glbp/1': {'speakers': {'192.168.1.2': 100, '192.168.1.3': 100},
-                                   'vips': ['192.168.1.1'], 'max_prio': 100}},
-             'glbp_forwarders': {'1/1': {'speakers': ['192.168.1.2', '192.168.1.3'],
-                                         'owner': '192.168.1.2',
-                                         'vmac': '00:07:b4:00:01:01',
-                                         'vf_prio': 167, 'weight': 100}}}
+    gbase = {'groups': {'glbp/1/v4': {'speakers': {'192.168.1.2': 100, '192.168.1.3': 100},
+                                      'vips': ['192.168.1.1'], 'max_prio': 100}},
+             'glbp_forwarders': {'1/1/v4': {'speakers': ['192.168.1.2', '192.168.1.3'],
+                                            'owner': '192.168.1.2',
+                                            'vmac': '00:07:b4:00:01:01',
+                                            'vf_prio': 167, 'weight': 100}}}
 
     # 8. glbp-clean: the AVG + its forwarder re-advertising, MD5 auth.
     run_glbp('glbp-clean', [glbp_pkt('192.168.1.2', avg_prio=100,
@@ -14969,6 +15132,80 @@ def _fhrp_selftest():
             and hsrp_ev.get('auth_weak') is True)
     scenarios.append({'name': 'fhrp-parse', 'expect': 'hsrp/vrrp/carp/glbp',
                       'got': str(sorted(protos)), 'pass': p_ok})
+
+    # ---- IPv6 / dual-stack (HSRPv6 UDP 2029, VRRPv3/IPv6, GLBPv6) -----------
+    def hsrp2_payload(group=1, prio=100, state=5, opcode=0, ipver=4,
+                      vip='192.168.1.1', auth=None):
+        vipb = (socket.inet_pton(socket.AF_INET6, vip) if ipver == 6
+                else socket.inet_aton(vip) + b'\x00' * 12)
+        gs = (struct.pack('!BBBB', 2, opcode, state, ipver) + struct.pack('!H', group)
+              + b'\x00\x11\x22\x33\x44\x55' + struct.pack('!I', prio)
+              + struct.pack('!I', 3000) + struct.pack('!I', 10000) + vipb)
+        pl = bytes([1, len(gs)]) + gs
+        if auth == 'plain':
+            pl += bytes([3, 8]) + b'cisco\x00\x00\x00'
+        elif auth == 'md5':
+            pl += bytes([4, 16]) + b'\x00' * 16
+        return pl
+
+    def hsrp2_pkt(src, **kw):
+        return {'src': src, 'src_mac': '00:11:22:33:44:55',
+                'payload': hsrp2_payload(**kw)}
+
+    def run_hsrp2(name, pkts, baseline, expect):
+        ev = _fhrp_hsrp_from_pkts(pkts)
+        res = _fhrp_analyze(ev, 15, dict(baseline or {}), learn=not baseline)
+        scenarios.append({'name': name, 'expect': expect, 'got': res['verdict'],
+                          'events': len(ev), 'pass': res['verdict'] == expect})
+        return res
+
+    v6vip = 'fe80::5:73ff:fea0:1'
+    v6base = {'groups': {'hsrp/1/v6': {'speakers': {'fe80::2': 110},
+                                       'vips': [v6vip], 'max_prio': 110}}}
+
+    # 14. hsrpv6-clean: the known v6 active re-advertising (MD5) from its link-local.
+    run_hsrp2('hsrpv6-clean', [hsrp2_pkt('fe80::2', ipver=6, group=1, prio=110,
+              vip=v6vip, auth='md5')], v6base, 'clean')
+
+    # 15. hsrpv6-hijack: a NEW v6 speaker at priority 255 wins the v6 election.
+    run_hsrp2('hsrpv6-hijack', [hsrp2_pkt('fe80::66', ipver=6, group=1, prio=255,
+              vip=v6vip, auth='md5')], v6base, 'hijack')
+
+    # 16. hsrpv6-nonlinklocal: a v6 advert from a global (non-fe80::/10) source — a
+    #     conforming router never does this (crafted / off-segment injection).
+    r16 = run_hsrp2('hsrpv6-nonlinklocal', [hsrp2_pkt('2001:db8::66', ipver=6,
+                    group=1, prio=90, vip=v6vip, auth='md5')], v6base, 'rogue-speaker')
+    scenarios.append({'name': 'hsrpv6-nonlinklocal-reason', 'expect': 'link-local flagged',
+                      'got': 'present' if any('not link-local' in x for x in r16['reasons'])
+                      else 'absent',
+                      'pass': any('not link-local' in x for x in r16['reasons'])})
+
+    # 17. af-mismatch: an HSRPv2 advert declaring IPv6 while riding IPv4 transport.
+    r17 = run_hsrp2('fhrp-af-mismatch', [hsrp2_pkt('192.168.1.9', ipver=6, group=1,
+                    prio=90, vip=v6vip, auth='md5')], base, 'rogue-speaker')
+    scenarios.append({'name': 'fhrp-af-mismatch-reason', 'expect': 'family mismatch flagged',
+                      'got': 'present' if any('declared address family' in x for x in r17['reasons'])
+                      else 'absent',
+                      'pass': any('declared address family' in x for x in r17['reasons'])})
+
+    # 18. dualstack-no-merge: v6 group-1 known-active read against a COMBINED v4+v6
+    #     baseline must stay clean — proving the v4 and v6 elections don't merge
+    #     (a family-less key would judge fe80::2 against the v4 speaker set and flag it).
+    combo = {'groups': {**base['groups'], **v6base['groups']}}
+    run_hsrp2('dualstack-no-merge', [hsrp2_pkt('fe80::2', ipver=6, group=1, prio=110,
+              vip=v6vip, auth='md5')], combo, 'clean')
+
+    # 19. hsrpv6-decode: the byte decoder reads a v6 Group-State TLV; and classic
+    #     HSRPv0 (version byte 0, not a TLV) must decode to None (stays on text path).
+    dh = _hsrp2_decode(hsrp2_payload(group=99, prio=200, state=5, opcode=1, ipver=6,
+                                     vip='fe80::5:73ff:fea0:63'))
+    dh_ok = bool(dh and dh['group'] == 99 and dh['priority'] == 200 and dh['ipver'] == 6
+                 and dh['opcode'] == 'coup' and dh['state'] == 'active'
+                 and dh['vip'] == 'fe80::5:73ff:fea0:63'
+                 and _hsrp2_decode(bytes([0, 0, 5, 10]) + b'\x00' * 16) is None)
+    scenarios.append({'name': 'hsrpv6-decode', 'expect': 'g99/prio200/v6/coup + classic->None',
+                      'got': f"g={dh and dh['group']} v={dh and dh['ipver']} "
+                             f"vip={dh and dh['vip']}", 'pass': dh_ok})
 
     # Optional Scapy end-to-end: craft real HSRP + VRRP -> pcap -> tcpdump -> parse,
     # and a real GLBP packet -> pcap -> the byte extractor -> decoder.

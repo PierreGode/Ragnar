@@ -2059,10 +2059,24 @@ watcher uses (scapy is never imported). **API:** `GET /api/net/srmpls-watch` (qu
 
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**
-(Cisco, UDP 1985), **VRRP** (RFC 5798, IP proto 112), **GLBP** (Cisco, UDP 3222)
-and **CARP** (BSD, IP proto 112). **Detection-only** — it never sends an FHRP
-packet or joins an election; it captures one short window of the multicast hellos
-and classifies them against a learned baseline.
+(Cisco, UDP 1985 v4 / **UDP 2029 v6**), **VRRP** (RFC 5798, IP proto 112, **v4 and
+v6**), **GLBP** (Cisco, UDP 3222, **v4 and v6**) and **CARP** (BSD, IP proto 112).
+**Detection-only** — it never sends an FHRP packet or joins an election; it captures
+one short window of the multicast hellos and classifies them against a learned
+baseline.
+
+**Dual-stack (IPv4 + IPv6).** IPv6 FHRP is *more* constrained than IPv4, which
+favours a detector: sources must be **link-local** (fe80::/10), the HSRPv6 virtual
+IP is derivable from the group, and the virtual-MAC blocks differ by family — so the
+v6 tells are close to false-positive-free. All state is **namespaced by address
+family** (`hsrp/1/v4` vs `hsrp/1/v6` are two independent elections with separate
+winners), the same v2/v3 split `ospfwatch` uses — merging them would false-positive
+forever. **HSRPv6 (UDP 2029) and HSRPv2 (UDP 1985 Group-State TLV) are byte-decoded
+by hand** — `tcpdump` only understands classic HSRPv0/v1 and mislabels or ignores
+the TLV format — while VRRPv3/IPv6 and GLBPv6 flow in through the family-agnostic
+BPF. Dual-stack hosts generally prefer IPv6, so the "unused" v6 gateway is often the
+one nobody hardened and nobody is watching; the IPv6 pivot from a takeover is
+NDP/Neighbour-Advertisement spoofing (the v4 pivot is `arp_guard`).
 
 FHRP is how two or more routers share a single **virtual gateway** (one virtual
 IP + MAC that floats to whichever router is *active*), so hosts keep working when a
@@ -2083,6 +2097,11 @@ off-subnet traffic now flows through them (Yersinia, Loki, `scapy`). What it fla
 - **Weak / no auth** — plaintext HSRP auth or VRRP `authtype none/simple`. This is
   the enabler; the fix is MD5/HMAC (HSRP key-chains, VRRP AH) plus filtering FHRP
   multicast off access ports.
+- **IPv6 tells** (surface as **rogue-speaker**, zero-config) — an IPv6 FHRP advert
+  whose **source isn't link-local** (fe80::/10), which a conforming router never
+  does (crafted / off-segment injection); and an advert whose **declared address
+  family disagrees with its transport** (e.g. an HSRPv2 datagram claiming IPv6 while
+  riding IPv4), a malformed/crafted-packet signature real routers never produce.
 
 **GLBP gets its own decoder and two hijack planes.** Neither `tcpdump` nor Scapy
 dissects GLBP, so it is decoded by a **hand-rolled byte parser** (per the Wireshark
@@ -2105,12 +2124,18 @@ so it has two distinct hijacks:
 The first scan **learns** the current groups, their active speakers/priorities, and
 the **GLBP forwarders** (owner, vMAC, weight per group/forwarder) as the trusted
 baseline (`data/fhrp_watch.json`); after a legitimate router/priority/forwarder
-change, click **Trust current** to re-learn. Capture is done to a pcap (BPF
-`(udp and (port 1985 or port 3222)) or (ip proto 112) or (ip6 proto 112)`), replayed
-through `tcpdump -r … -v` for the HSRP/VRRP/CARP parse and byte-decoded with Scapy
-for GLBP; CARP stays best-effort. Put the Pi on the routed VLAN or a SPAN/mirror to
-see the hellos. **API:** `GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline`.
-**CLI:** `fhrp-watch`, `fhrp-selftest`.
+change, click **Trust current** to re-learn. Capture is done to a pcap (dual-stack
+BPF `(udp and (port 1985 or port 2029 or port 3222)) or (ip proto 112) or (ip6 proto
+112)`), replayed through `tcpdump -r … -v` for the classic HSRP/VRRP/CARP parse and
+byte-decoded with Scapy for **HSRPv2/HSRPv6 and GLBP**; CARP stays best-effort. Put
+the Pi on the routed VLAN or a SPAN/mirror to see the hellos. **API:**
+`GET /api/net/fhrp-watch`, `POST /api/net/fhrp-baseline`. **CLI:** `fhrp-watch`,
+`fhrp-selftest` (22 offline scenarios incl. HSRPv6 clean/hijack, non-link-local
+source, family mismatch, dual-stack no-merge, and a v6 Group-State-TLV decode).
+
+> **Baseline note:** the dual-stack update namespaces baseline keys by address
+> family (`hsrp/1` → `hsrp/1/v4`), so a baseline learned before it re-learns once on
+> the next scan — expected, harmless, and only on first run after the upgrade.
 
 ### EIGRP Watch
 A **passive** routing-security scanner for Cisco's **EIGRP** — its interior gateway
