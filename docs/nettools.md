@@ -68,6 +68,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Switch & L2/L3 | `GET /api/net/rpc-watch` |
 | [LACP Watch](#lacp-watch) | Switch & L2/L3 | `GET /api/net/lacp-watch` |
 | [BFD Watch](#bfd-watch) | Switch & L2/L3 | `GET /api/net/bfd-watch` |
+| [SR-MPLS Watch](#sr-mpls-watch) | Switch & L2/L3 | `GET /api/net/srmpls-watch` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
 | [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
 | [Telnet Watch](#telnet-watch) | Switch & L2/L3 | `GET /api/net/telnet-watch` |
@@ -118,7 +119,7 @@ capture path.
 
 ### Detector Self-Test (Switch & L2/L3)
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **SR-MPLS** (label/segment injection), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1968,6 +1969,45 @@ live mode, which the in-app path does not use). **API:** `GET /api/net/bfd-watch
 > state regression, malformed/truncated header, GTSM violation, auth downgrade, session
 > flap) are appended as JSON-lines to `/var/log/ragnar/bfd_watch.jsonl`, so
 > failover-manipulation alerts fold into the unified pane + single Pushover path.
+
+### SR-MPLS Watch
+A **passive** MPLS / SR-MPLS / SRv6 **label & segment-manipulation** monitor —
+**detection-only**, it has no transmit primitives (the engine's own conformance tier
+walks the AST and greps the source to prove it). MPLS carries **no per-label
+authentication**: a labelled frame is forwarded on the label it carries, so a label or
+SRv6 segment *chosen by whatever sent the frame* — rather than by this network's own
+control plane — is a forwarding-path injection. It parses the full data plane (EtherType
+`0x8847`/`0x8848` through any depth of 802.1Q tags; **SRv6** via the IPv6 Routing-Header
+type 4, RFC 8754, including under an MPLS shim) and the SR control plane from scratch:
+**LDP** (udp/tcp 646, RFC 5036), **RSVP-TE** (ip-proto 46), **BGP-SR** (Prefix-SID
+attribute, RFC 8669; labelled-unicast + VPN SAFIs), **IS-IS-SR** (RFC 8667 sub-TLVs) and
+**OSPFv2-SR** (RFC 7684/8665 opaque LSAs). Reduced to a single card **verdict**:
+
+- **segment-injection** (critical — the one that should page you) — an MPLS-labelled
+  frame (`SRM-MPLS-ON-CE-PORT`) or an **SRH** (`SRM-SRH-ON-CE-PORT`) on an interface
+  declared (or defaulted) as **customer-facing**. The label/segment was chosen by the
+  far end, not by this network — the label-injection / **VRF-hopping** primitive.
+- **label-manipulation** — reserved / **implicit-null** labels forwarded on the wire, a
+  labelled frame forwarded with an **expired TTL** (`SRM-TTL-ZERO-FORWARDED`), a
+  BOS/GAL/ELI placement violation, or a label rebind.
+- **exposure / posture** — excessive label-stack depth, entropy-label anomalies, SRv6
+  **path disclosure** / missing SRH **HMAC**, explicit-null exposed, LDP off-link hellos
+  or mapping-without-withdraw, and adjacency-SID instability.
+
+**Interface `role` is load-bearing** (the vrfwatch precedent): on a **`ce`** tap the
+presence rules are armed at critical; on a **`core`** backbone tap they go quiet and only
+structural rules run; left **`unknown`** it *fails loud toward customer-facing* and emits
+`SRM-ROLE-UNDECLARED` **once** to say so — so leaving it undeclared on a P–P link is noisy
+by design, never silently wrong. The engine is pure-Python (its own parsers); the in-app
+path captures one short snapshot and replays it through the same libpcap reader the BFD
+watcher uses (scapy is never imported). **API:** `GET /api/net/srmpls-watch` (query:
+`interface`, `seconds`, `role` = `ce` | `core` | `unknown`).
+
+> **Watchtower feed.** HIGH/CRITICAL SR-MPLS findings (label/segment injection,
+> reserved-label, TTL-expiry-forwarded, SRv6 path disclosure / missing HMAC, and the
+> LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR control-plane tells) are appended as JSON-lines to
+> `/var/log/ragnar/sr_mpls_watch.jsonl`, so they fold into the unified pane + single
+> Pushover path.
 
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**

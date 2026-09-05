@@ -1857,6 +1857,7 @@ _NI_CRITICAL = {
     'lag-hijack',                                                      # lacp (aggregation takeover: identity manip + member disruption)
     'zerologon', 'dcsync', 'credential-exposure',                     # rpc-netlogon (CVE-2020-1472 chain / DCSync / DPAPI backup-key / WinRM basic)
     'failover-manipulation',                                           # bfd (forged teardown / forced AdminDown / illegal state regression -> induced reconvergence)
+    'segment-injection',                                               # sr-mpls (MPLS/SRH on a customer-facing port = label-injection / VRF-hopping primitive)
     'attack',                                                          # vendor guards: an exploitation primitive observed on the wire
 }
 
@@ -1954,6 +1955,7 @@ def _net_integrity_check_once():
         ('lacp', 'LACP', lambda: watch(nd.do_lacp_watch, interface=cap_iface)),
         ('rpc', 'RPC', lambda: watch(nd.do_rpc_watch, interface=cap_iface)),
         ('bfd', 'BFD', lambda: watch(nd.do_bfd_watch, interface=cap_iface)),
+        ('srmpls', 'SR-MPLS', lambda: watch(nd.do_sr_mpls_watch, interface=cap_iface)),
     ]
 
     # LAN-only vendor switch/router guards: only auto-run when a genuine wired

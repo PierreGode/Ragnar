@@ -42,6 +42,7 @@ import telnet_watch
 import lacpwatch
 import rpcwatch
 import bfdwatch
+import sr_mplswatch
 try:
     import icmpwatch as _icmpwatch   # transport-agnostic v2 redirect/ARP detector
 except Exception:                    # partial deploy without the engine file
@@ -68,6 +69,7 @@ from telnet_watch import do_telnet_watch
 from lacpwatch import do_lacp_watch
 from rpcwatch import do_rpc_watch
 from bfdwatch import do_bfd_watch
+from sr_mplswatch import do_sr_mpls_watch
 
 try:
     from flask import request, jsonify
@@ -15753,6 +15755,16 @@ def _bfd_selftest():
     return {'success': r['success'], 'scenarios': scen}
 
 
+def _srmpls_selftest():
+    """Adapt sr_mplswatch.selftest() to the aggregator's scenarios/scapy shape. The
+    MPLS / SR-MPLS / SRv6 decode+detect path is pure-Python (own parsers; replay via
+    bfdwatch's libpcap reader, scapy unused). Interface role (ce/core/unknown) is
+    load-bearing; an undeclared interface fails loud toward customer-facing."""
+    r = sr_mplswatch.selftest()
+    scen = [{'name': c['name'], 'pass': c['pass']} for c in r['scenarios']]
+    return {'success': r['success'], 'scenarios': scen}
+
+
 # ==========================================================================
 # Vendor CVE Guards — passive Cisco / Juniper / Arista router+switch monitors
 # ==========================================================================
@@ -17451,7 +17463,7 @@ def do_routing_selftest():
               'ldap': _ldap_selftest(),
               'ssh': _ssh_selftest(), 'telnet': _telnet_selftest(),
               'lacp': _lacp_selftest(), 'rpc': _rpc_selftest(),
-              'bfd': _bfd_selftest(),
+              'bfd': _bfd_selftest(), 'srmpls': _srmpls_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
@@ -19136,6 +19148,18 @@ def register_network_diagnostics(app, logger=None):
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
         _log(f"net/bfd-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_bfd_watch(interface=iface, seconds=secs))
+
+    @app.route('/api/net/srmpls-watch', methods=['GET'])
+    def net_srmpls_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
+        role = (request.args.get('role') or 'unknown').strip().lower()
+        if role not in ('ce', 'core', 'unknown'):
+            role = 'unknown'
+        _log(f"net/srmpls-watch iface={iface or 'default-route'} secs={secs} role={role}")
+        return jsonify(do_sr_mpls_watch(interface=iface, seconds=secs, role=role))
 
     @app.route('/api/net/isis-watch', methods=['GET'])
     def net_isis_watch():

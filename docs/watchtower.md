@@ -74,6 +74,13 @@ regression** that induces routing reconvergence lands as **critical**, and no-au
 GTSM violation / malformed-or-truncated header (**CVE-2018-0155**) / auth downgrade /
 session flap as **high**.
 
+[`sr_mpls_watch`](nettools.md#sr-mpls-watch) (SR-MPLS Watch) appends its **HIGH/CRITICAL**
+label & segment-manipulation findings to `/var/log/ragnar/sr_mpls_watch.jsonl`
+(deduplicated per code + key) — a label or **SRH on a customer-facing port**
+(label-injection / VRF-hopping) lands as **critical**, and reserved/implicit-null labels
+forwarded, TTL-expiry-forwarded, SRv6 path disclosure / missing HMAC, and the SR
+control-plane tells (LDP/RSVP/BGP-SR/IS-IS-SR/OSPF-SR) as **high**.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

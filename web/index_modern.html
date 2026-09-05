@@ -2365,6 +2365,25 @@
                     </div>
                     <div id="bfd-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
+                <!-- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -->
+                <div class="glass rounded-xl p-4 sm:p-6 mt-6">
+                    <h3 class="text-lg font-semibold mb-1">SR-MPLS Watch <span class="text-xs font-normal text-gray-500">(MPLS · SR-MPLS · SRv6 · label / segment injection)</span></h3>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive MPLS / SR-MPLS / SRv6 label &amp; segment-manipulation monitor — <strong>detection-only</strong>, it has no transmit primitives (the engine's own conformance greps its source to prove it). The data plane (EtherType <span class="font-mono">0x8847/0x8848</span> through any depth of 802.1Q tags; SRv6 via the IPv6 Routing-Header type 4, RFC 8754) and the SR control plane (<strong>LDP</strong> udp/tcp 646, <strong>RSVP-TE</strong> ip-proto 46, <strong>BGP-SR</strong> Prefix-SID, <strong>IS-IS-SR</strong> and <strong>OSPFv2-SR</strong> opaque LSAs) are all parsed from scratch. Flags <strong>segment-injection</strong> (critical — the one that should page you: an MPLS label or an <strong>SRH on a customer-facing port</strong>, i.e. a label/segment chosen by whatever sent the frame rather than by this network — the label-injection / <strong>VRF-hopping</strong> primitive), <strong>label-manipulation</strong> (reserved / implicit-null labels forwarded, a labelled frame forwarded with an <strong>expired TTL</strong>, label rebind), and <strong>exposure/posture</strong> (excessive label depth, entropy-label anomalies, SRv6 <strong>path disclosure</strong> / missing SRH HMAC, explicit-null exposed, LDP off-link hellos / mapping-without-withdraw, adjacency-SID instability).</p>
+                    <p class="text-sm text-gray-400 mb-3"><strong>Interface role is load-bearing.</strong> On a <span class="font-mono">ce</span> (customer-facing) tap the presence rules are armed at critical; on a <span class="font-mono">core</span> backbone tap they go quiet and only structural rules run; left <span class="font-mono">unknown</span> it <em>fails loud toward customer-facing</em> (and says so once), so leaving it undeclared on a P–P link is noisy by design, not silent. One short passive capture; the engine self-filters. Pure-Python parsers; replay uses the in-app libpcap reader (no scapy).</p>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <select id="srmpls-iface" title="Interface for the capture — a routed/backbone uplink or a SPAN/mirror of one" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="">Auto (wired first)</option>
+                        </select>
+                        <select id="srmpls-role" title="Interface role — declare the tap. Undeclared fails loud toward customer-facing." class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                            <option value="unknown">Role: unknown (fails loud → CE)</option>
+                            <option value="ce">Role: CE (customer-facing)</option>
+                            <option value="core">Role: core (backbone)</option>
+                        </select>
+                        <input id="srmpls-secs" type="number" min="8" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <button onclick="runSrMplsWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan SR-MPLS</button>
+                    </div>
+                    <div id="srmpls-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                </div>
                 <!-- LDAP Watch (Active Directory / LDAP) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">LDAP Watch <span class="text-xs font-normal text-gray-500">(Active Directory / LDAP)</span></h3>
@@ -8437,7 +8456,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260905-bfd-watch"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260905-bfd-srmpls-watch"></script>
 
 
 
