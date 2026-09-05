@@ -6,12 +6,26 @@
 # Mirrors the self-test style used across the Ragnar suite.
 
 import sys
-from scapy.all import Ether, IP, ICMP, UDP, TCP, ARP
+import logging
+
+# Scapy warns about missing IPv6 routes when building link-local test packets.
+# The harness never transmits, so the warnings are noise.
+logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+logging.getLogger("scapy.loading").setLevel(logging.ERROR)
+
+from scapy.all import Ether, IP, ICMP, UDP, TCP, ARP, IPv6, conf
+from scapy.layers.inet6 import (
+    ICMPv6ND_Redirect, ICMPv6ND_NS, ICMPv6ND_NA,
+    ICMPv6NDOptSrcLLAddr, ICMPv6NDOptDstLLAddr, ICMPv6NDOptRedirectedHdr,
+)
 
 from icmpwatch import (
     ICMPRedirectDetector, packet_to_event, arp_packet_to_obs,
+    ndp_packet_to_obs, _build_filter,
     SEV_INFO, SEV_LOW, SEV_MEDIUM, SEV_HIGH, SEV_CRITICAL,
 )
+
+conf.verb = 0
 
 # ---- shared lab config ----------------------------------------------------
 # Segment 192.168.10.0/24 with two legitimate gateways: .1 (GW_MAC) and
@@ -93,6 +107,66 @@ CONFIG_GLBP = {
 VICTIM = "192.168.10.50"
 DEST = "8.8.8.8"
 ATTACKER = "192.168.10.66"
+
+# ---- IPv6 lab -------------------------------------------------------------
+# Routers are declared by link-local address, as IPv6 requires. Note these sit
+# in fe80::/10 and therefore OUTSIDE the segment prefix 2001:db8::/64 — the
+# config model must resolve them anyway.
+GW_LL = "fe80::1"
+R2_LL = "fe80::2"
+V6_VICTIM = "2001:db8::50"
+V6_DEST = "2001:db8::99"
+V6_ATTACKER_LL = "fe80::66"
+
+CONFIG_V6 = {
+    "segments": [
+        {
+            "cidr": "2001:db8::/64",
+            "gateways": [
+                {"ip": GW_LL, "mac": GW_MAC},
+                {"ip": R2_LL, "mac": GW2_MAC},
+            ],
+            "routers": [],
+        }
+    ],
+    "thresholds": CONFIG["thresholds"],
+    "ipv6": {"enabled": True},
+    "arp_correlation": {"enabled": True, "conflict_window_seconds": 300.0},
+}
+
+
+CONFIG_DUAL = {
+    "segments": (CONFIG["segments"] + CONFIG_V6["segments"]),
+    "thresholds": CONFIG["thresholds"],
+    "ipv6": {"enabled": True},
+    "arp_correlation": {"enabled": True, "conflict_window_seconds": 300.0},
+}
+
+
+def _redirect6(src, tgt, dst, *, src_mac=GW_MAC, hlim=255, code=0,
+               tlla=None, victim=V6_VICTIM, drop_inner=False):
+    p = (Ether(src=src_mac)
+         / IPv6(src=src, dst=victim, hlim=hlim)
+         / ICMPv6ND_Redirect(tgt=tgt, dst=dst, code=code))
+    if tlla:
+        p = p / ICMPv6NDOptDstLLAddr(lladdr=tlla)
+    if not drop_inner:
+        p = p / ICMPv6NDOptRedirectedHdr(
+            pkt=IPv6(src=victim, dst=dst) / UDP())
+    return Ether(bytes(p))   # round-trip so options parse as on the wire
+
+
+def _na(tgt, lladdr, *, override=True, src="fe80::66"):
+    return Ether(bytes(
+        Ether(src=lladdr) / IPv6(src=src, dst="ff02::1", hlim=255)
+        / ICMPv6ND_NA(tgt=tgt, O=1 if override else 0)
+        / ICMPv6NDOptDstLLAddr(lladdr=lladdr)))
+
+
+def _ns(src, lladdr, tgt="fe80::50"):
+    return Ether(bytes(
+        Ether(src=lladdr) / IPv6(src=src, dst="ff02::1:ff00:50", hlim=255)
+        / ICMPv6ND_NS(tgt=tgt) / ICMPv6NDOptSrcLLAddr(lladdr=lladdr)))
 
 
 def _redirect(src_ip, new_gw, *, src_mac=GW_MAC, code=1, ttl=64,
@@ -511,6 +585,230 @@ def run_self_test():
     r.check("disabled: no ARP conflict findings",
             "gateway_arp_conflict" not in _checks(f)
             and "redirect_via_poisoned_gw" not in _checks(f))
+
+    # ====================  ICMPv6 / NEIGHBOR DISCOVERY  ==================
+
+    # --- v6 parsing -------------------------------------------------------
+    print("[v6_parse]")
+    ev = packet_to_event(_redirect6(GW_LL, R2_LL, V6_DEST), ts=1000.0)
+    r.check("v6 parse: recognizes redirect", ev is not None)
+    r.check("v6 parse: family is 6", ev.family == 6)
+    r.check("v6 parse: src is router link-local", ev.src_ip == GW_LL)
+    r.check("v6 parse: Target -> new_gw", ev.new_gw == R2_LL)
+    r.check("v6 parse: Destination -> inner_dst", ev.inner_dst == V6_DEST)
+    r.check("v6 parse: victim from Redirected Header",
+            ev.inner_src == V6_VICTIM)
+    r.check("v6 parse: hop limit", ev.ip_ttl == 255)
+    ev2 = packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, tlla=GW2_MAC), ts=1000.0)
+    r.check("v6 parse: Target LLA option", ev2.target_lla == GW2_MAC)
+    # Redirected Header is SHOULD, not MUST — absence is not malformed
+    ev3 = packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, drop_inner=True), ts=1000.0)
+    r.check("v6 parse: missing Redirected Header is not malformed",
+            ev3 is not None and not ev3.malformed)
+    r.check("v6 parse: victim falls back to L3 destination",
+            ev3.inner_src is None and ev3.dst_ip == V6_VICTIM)
+    r.check("v6 parse: v4 redirect still parses as family 4",
+            packet_to_event(_redirect("192.168.10.1", "192.168.10.2"),
+                            ts=1000.0).family == 4)
+
+    # --- legitimate v6 redirect ------------------------------------------
+    print("[v6_legit]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST), ts=1000.0))
+    r.check("v6 legit: no HIGH/CRITICAL", _max(f) in (SEV_INFO, SEV_LOW),
+            extra=str(_checks(f)))
+    # the trap: a link-local Target is outside the victim's GUA prefix by
+    # design, so the IPv4 subnet rule must not be applied to v6
+    r.check("v6 legit: new_gw_off_subnet suppressed for link-local Target",
+            "new_gw_off_subnet" not in _checks(f))
+    r.check("v6 legit: link-local gateway resolves despite prefix mismatch",
+            "source_not_gateway" not in _checks(f))
+    r.check("v6 legit: known link-local router accepted as Target",
+            "new_gw_not_router" not in _checks(f))
+
+    # --- RFC 4861 hop limit 255 ------------------------------------------
+    print("[v6_hop_limit]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, hlim=64), ts=1000.0))
+    r.check("v6 hlim 64: fires nd_hop_limit_invalid",
+            "nd_hop_limit_invalid" in _checks(f))
+    r.check("v6 hlim 64: HIGH", _sev(f, "nd_hop_limit_invalid") == SEV_HIGH)
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, hlim=255), ts=1000.0))
+    r.check("v6 hlim 255: clean",
+            "nd_hop_limit_invalid" not in _checks(f))
+    # the v4 TTL heuristic must not double-fire on v6
+    det = ICMPRedirectDetector({**CONFIG_V6, "enable_ttl_heuristic": True,
+                                "expected_local_ttls": [64]})
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, hlim=255), ts=1000.0))
+    r.check("v6: IPv4 TTL heuristic suppressed",
+            "ttl_suggests_remote" not in _checks(f))
+
+    # --- source must be link-local ---------------------------------------
+    print("[v6_source_link_local]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6("2001:db8::7", R2_LL, V6_DEST), ts=1000.0))
+    r.check("v6 GUA source: fires nd_source_not_link_local",
+            "nd_source_not_link_local" in _checks(f))
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST), ts=1000.0))
+    r.check("v6 link-local source: no finding",
+            "nd_source_not_link_local" not in _checks(f))
+
+    # --- Target address validity (RFC 4861 §8.1) -------------------------
+    print("[v6_target_valid]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, "2001:db8::66", V6_DEST), ts=1000.0))
+    r.check("v6 GUA target != dest: fires nd_target_invalid",
+            "nd_target_invalid" in _checks(f))
+    # on-link form: Target == Destination is legitimate per RFC 4861
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, V6_DEST, V6_DEST), ts=1000.0))
+    r.check("v6 on-link form: nd_target_invalid suppressed",
+            "nd_target_invalid" not in _checks(f))
+    r.check("v6 on-link form: new_gw_not_router suppressed (Target is a host)",
+            "new_gw_not_router" not in _checks(f))
+    r.check("v6 on-link form: no HIGH/CRITICAL", _max(f) in (SEV_INFO, SEV_LOW),
+            extra=str(_checks(f)))
+
+    # --- Target Link-Layer Address correlation ---------------------------
+    print("[v6_target_lla]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, tlla=ATTACKER_MAC), ts=1000.0))
+    r.check("v6 bad TLLA: fires nd_target_lla_mismatch",
+            "nd_target_lla_mismatch" in _checks(f))
+    r.check("v6 bad TLLA: CRITICAL",
+            _sev(f, "nd_target_lla_mismatch") == SEV_CRITICAL)
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, tlla=GW2_MAC), ts=1000.0))
+    r.check("v6 correct TLLA: no mismatch",
+            "nd_target_lla_mismatch" not in _checks(f))
+
+    # --- v6 code must be 0 ------------------------------------------------
+    print("[v6_code]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, code=0), ts=1000.0))
+    r.check("v6 code 0: valid", "invalid_code" not in _checks(f))
+    det = ICMPRedirectDetector(CONFIG_V6)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, code=1), ts=1000.0))
+    r.check("v6 code 1: invalid (valid in v4, not v6)",
+            "invalid_code" in _checks(f))
+
+    # --- NDP binding parsing ---------------------------------------------
+    print("[v6_ndp_parse]")
+    r.check("ndp: NA with Override -> gratuitous binding",
+            ndp_packet_to_obs(_na(GW_LL, ATTACKER_MAC, override=True))
+            == (GW_LL, ATTACKER_MAC, True))
+    r.check("ndp: NA without Override -> non-gratuitous",
+            ndp_packet_to_obs(_na(GW_LL, GW_MAC, override=False))
+            == (GW_LL, GW_MAC, False))
+    r.check("ndp: NS -> sender binding",
+            ndp_packet_to_obs(_ns(GW_LL, GW_MAC)) == (GW_LL, GW_MAC, False))
+    dad = Ether(bytes(Ether(src=GW_MAC) / IPv6(src="::", dst="ff02::1:ff00:50",
+                                               hlim=255)
+                      / ICMPv6ND_NS(tgt="fe80::50")))
+    r.check("ndp: DAD (unspecified source) is not a binding",
+            ndp_packet_to_obs(dad) is None)
+    # a redirect's own Target LLA must never be a learning source, or a forged
+    # redirect would validate itself
+    r.check("ndp: Redirect is not a learning source",
+            ndp_packet_to_obs(
+                _redirect6(GW_LL, R2_LL, V6_DEST, tlla=ATTACKER_MAC)) is None)
+    r.check("ndp: ignores ARP",
+            ndp_packet_to_obs(_arp("192.168.10.1", GW_MAC)) is None)
+
+    # --- v6 NDP correlation ----------------------------------------------
+    print("[v6_ndp_correlation]")
+    det = ICMPRedirectDetector(CONFIG_V6)
+    for pkt in (_na(GW_LL, GW_MAC, override=False),
+                _na(GW_LL, ATTACKER_MAC, override=True)):
+        ip, mac, ov = ndp_packet_to_obs(pkt)
+        det.observe_arp(ip, mac, ts=800.0, gratuitous=ov)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, V6_ATTACKER_LL, V6_DEST, src_mac=ATTACKER_MAC),
+        ts=900.0))
+    r.check("v6 poison-then-redirect: gateway_arp_conflict",
+            "gateway_arp_conflict" in _checks(f))
+    r.check("v6 poison-then-redirect: gateway_mac_mismatch",
+            "gateway_mac_mismatch" in _checks(f))
+    r.check("v6 poison-then-redirect: new_gw_not_router",
+            "new_gw_not_router" in _checks(f))
+    r.check("v6 poison-then-redirect: CRITICAL", _max(f) == SEV_CRITICAL)
+    # clean NDP traffic leaves a legitimate redirect clean
+    det = ICMPRedirectDetector(CONFIG_V6)
+    ip, mac, ov = ndp_packet_to_obs(_na(GW_LL, GW_MAC, override=False))
+    det.observe_arp(ip, mac, ts=800.0, gratuitous=ov)
+    f = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST), ts=900.0))
+    r.check("v6 clean NDP: legitimate redirect stays clean",
+            _max(f) in (SEV_INFO, SEV_LOW), extra=str(_checks(f)))
+
+    # --- ipv6 disabled: capture scope, not comprehension -----------------
+    print("[v6_disabled]")
+    d_off = ICMPRedirectDetector({**CONFIG_DUAL, "ipv6": {"enabled": False}})
+    r.check("v6 disabled: v4 traffic unaffected",
+            "observed_redirect" in _checks(d_off.analyze(packet_to_event(
+                _redirect("192.168.10.1", "192.168.10.2"), ts=1000.0))))
+    # The flag gates what the BPF filter captures, not what analyze()
+    # understands. A v6 event fed in directly is still evaluated — failing
+    # open here would hide an attack rather than merely narrow capture.
+    f = d_off.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST, hlim=64), ts=1001.0))
+    r.check("v6 disabled: a v6 event fed directly is still analyzed",
+            "nd_hop_limit_invalid" in _checks(f))
+
+    # --- dual-stack coexistence ------------------------------------------
+    print("[dual_stack]")
+    det = ICMPRedirectDetector(CONFIG_DUAL)
+    f4 = det.analyze(packet_to_event(
+        _redirect("192.168.10.1", "192.168.10.2"), ts=1000.0))
+    f6 = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST), ts=1001.0))
+    r.check("dual: legitimate v4 redirect clean",
+            _max(f4) in (SEV_INFO, SEV_LOW), extra=str(_checks(f4)))
+    r.check("dual: legitimate v6 redirect clean",
+            _max(f6) in (SEV_INFO, SEV_LOW), extra=str(_checks(f6)))
+    # one binding table serves both families; v4 and v6 keys never collide
+    det = ICMPRedirectDetector(CONFIG_DUAL)
+    det.observe_arp("192.168.10.1", ATTACKER_MAC, ts=800.0)   # v4 poison
+    ip, mac, ov = ndp_packet_to_obs(_na(GW_LL, GW_MAC, override=False))
+    det.observe_arp(ip, mac, ts=800.0, gratuitous=ov)         # v6 clean
+    f4 = det.analyze(packet_to_event(
+        _redirect("192.168.10.1", "192.168.10.2"), ts=900.0))
+    f6 = det.analyze(packet_to_event(
+        _redirect6(GW_LL, R2_LL, V6_DEST), ts=901.0))
+    r.check("dual: v4 poison detected", "gateway_arp_conflict" in _checks(f4))
+    r.check("dual: v6 unaffected by the v4 poison",
+            "gateway_arp_conflict" not in _checks(f6))
+
+    # --- BPF filter composition ------------------------------------------
+    print("[v6_filter]")
+    filt = _build_filter(ICMPRedirectDetector(CONFIG_V6))
+    r.check("filter: includes v4 redirects", "icmp[icmptype] == 5" in filt)
+    r.check("filter: includes ND redirect (137)", "ip6[40] == 137" in filt)
+    r.check("filter: includes NS/NA (135/136) when correlation is on",
+            "ip6[40] == 135" in filt and "ip6[40] == 136" in filt)
+    d_v4 = ICMPRedirectDetector({**CONFIG_V6, "ipv6": {"enabled": False}})
+    r.check("filter: v6 off reproduces the v4-only filter",
+            _build_filter(d_v4) == "icmp[icmptype] == 5 or arp")
+    fn = _build_filter(ICMPRedirectDetector(
+        {**CONFIG_V6, "arp_correlation": {"enabled": False}}))
+    r.check("filter: no NS/NA when correlation is off",
+            "ip6[40] == 137" in fn and "ip6[40] == 135" not in fn)
 
     print("=" * 60)
     total = r.passed + r.failed

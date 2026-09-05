@@ -372,10 +372,20 @@ Alongside the per-resolver table it runs active poisoning probes and returns a
 - **Transport race** — sends one query and briefly listens for a *second,
   conflicting* answer — the signature of an off-path spoofer racing the real
   resolver (Kaminsky cache-poisoning). Plain UDP; needs no elevated privileges.
+- **Dual-stack cross-family** (v3) — resolves the **AAAA (IPv6)** family through
+  the same resolvers and applies the bogon-for-a-public-name and DoH checks to it,
+  then compares the two families' *verdicts* — never their raw addresses, since
+  legitimate setups (tunnel brokers, split-CDN edges) announce A and AAAA from
+  different ASNs. When exactly **one** family is flagged it is the
+  **selective single-family hijack** signature: an attacker who poisons only IPv6
+  (the less-monitored path, which RFC 6724 makes dual-stack clients *prefer*) stays
+  invisible to an A-only check. "Both flagged" is not re-alarmed, and a silent
+  AAAA family (single-stack host) is simply not compared.
 
 Strong signals (NXDOMAIN rewrite, bogon answer, DoH mismatch, anchor mismatch,
-ASN divergence, failed DNSSEC control, transport race) → **hijacked**; soft
-signals (SERVFAIL, raw-IP divergence) → **suspicious**. The verdict is shown as a
+ASN divergence, failed DNSSEC control, transport race, AAAA bogon / cross-family
+divergence) → **hijacked**; soft signals (SERVFAIL, raw-IP divergence) →
+**suspicious**. The verdict is shown as a
 banner in the web panel, is available on the e-Paper **KEY4-long** result page,
 and drives the [Network Integrity Monitor](#-network-integrity-monitor).
 
@@ -1205,6 +1215,12 @@ ICMPv6 RA/RS/Redirect + DHCPv6 (udp 546/547) is parsed and classified:
   in the baseline. This is **mitm6's signature**: it answers DHCPv6 solicits handing
   out the attacker as **DNS** (no gateway — it pairs with WPAD) to relay and
   NTLM-capture.
+- **Link-local DNS (`DNS6_LINKLOCAL`)** — a DHCPv6 server advertising a
+  **link-local (`fe80::`) DNS resolver**. A resolver is *never* legitimately
+  link-local, so this is the **definitive mitm6 tell** and fires **zero-config** —
+  no baseline, no allowlist, and even for an otherwise-trusted server (mitm6 wins
+  the SOLICIT race and hands the client its own link-local address as the DNS
+  server). It is the one DHCPv6 signature that needs no per-site tuning.
 - **Rogue redirect** — an **ICMPv6 Redirect** (type 137) from a source that isn't a
   known router: the IPv6 twin of the ICMP-redirect MITM, steering your IPv6 traffic
   through an attacker's next-hop. (Harden the host against these with
@@ -1296,10 +1312,11 @@ and tell a victim *"for destination X, use next-hop Y instead"* — steering tha
 traffic **through the attacker**. It needs **no ARP poisoning and no gateway
 compromise**, and historically most hosts honoured redirects by default, so it's an
 easy, quiet insertion. Related L3 ICMP abuses ride the same wire. This scanner is
-**passive and detection-only**: one short `tcpdump` window over IPv4 `icmp`, parsed
-and classified against the host's **authoritative default gateway** (never learned
-from redirect sources — those could be the attacker). It never sends an ICMP packet.
-What it flags:
+**passive and detection-only** and now covers **both stacks**: one short `tcpdump`
+window over IPv4 `icmp` plus a concurrent `icmp6` window for **ICMPv6 Redirects
+(type 137)**, parsed and classified against the host's **authoritative IPv4 and
+IPv6 default gateways** (never learned from redirect sources — those could be the
+attacker). It never sends a packet. What it flags:
 
 - **Redirect** — an ICMP Redirect steering traffic to a **next-hop that isn't a
   known gateway** (attacker insertion), or **from a source that isn't the gateway**
@@ -1315,8 +1332,8 @@ What it flags:
 - **Recon** — ICMP **timestamp / address-mask / information** requests that
   enumerate hosts and leak facts.
 
-**Redirect/ARP-poison layer (v2).** The capture now also carries the Ethernet
-header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v2
+**Redirect/ARP-poison layer (v3).** The capture now also carries the Ethernet
+header (`tcpdump -e`) and `arp`, so each redirect is run through the vendored v3
 detector ([`icmpwatch.py`](../icmpwatch.py)) for the full **RFC 1122 acceptance
 rules** and **L2 identity** correlation on top of the coarse gateway check:
 
@@ -1332,6 +1349,28 @@ rules** and **L2 identity** correlation on top of the coarse gateway check:
   **new_gw_equals_victim / invalid_code / malformed** (MEDIUM), degenerate targets
   (LOW), plus **redirect_burst / redirect_dest_sweep** rate checks.
 
+**IPv6 leg — ICMPv6 Redirect (type 137), RFC 4861 §8.1.** IPv6 validates redirects
+far more strictly than IPv4, and — usefully for a passive monitor — the rules are
+exact protocol MUSTs, so these fire **zero-config on any segment**. The type-137
+message is decoded from raw bytes (its `tcpdump` text is terse and version-varying),
+then fed to the same engine as a `family=6` event:
+
+- **nd_hop_limit_invalid** (HIGH) — Hop Limit ≠ 255. No router forwards a packet and
+  leaves it at 255, so 255 is *proof* the sender is on-link; anything else is an
+  off-link spoof. The exact check IPv4 can only approximate with the TTL heuristic.
+- **nd_source_not_link_local** (HIGH) — the source is not a link-local (`fe80::`)
+  address, which RFC 4861 requires of a legitimate router redirect.
+- **nd_target_invalid** (HIGH) — the Target is neither link-local nor equal to the
+  Destination (the IPv6 analog of `new_gw_off_subnet`).
+- **nd_target_lla_mismatch** (CRITICAL) — the redirect's **Target Link-Layer
+  Address** option hands the victim a MAC that isn't among the target's legitimate
+  MACs — the packet itself installs a poisoned mapping (IPv4 redirects carry no MAC,
+  so this is a v6-only tell). Plus **invalid_code** (v6 code must be 0), and the same
+  `source_not_gateway` / `new_gw_not_router` checks against the host's IPv6 router.
+
+The IPv6 capture runs **concurrently** with the IPv4 one, so dual-stack coverage
+costs a single capture window, not two.
+
 The per-redirect findings are shown under **Redirect analysis** in the card
 (severity-chipped, most-severe first). The ARP frames are context only — they are
 never counted toward the ICMP flood/volume math and icmpwatch is **not** an ARP
@@ -1342,14 +1381,16 @@ The host's default gateway is **always trusted**, plus any gateway learned into
 **Trust current** to re-seed. Every result carries a **mitigation advisory**:
 ignore redirects on hosts (`net.ipv4.conf.all.accept_redirects=0`) and stop sending
 them on the gateway (`send_redirects=0`), disable IRDP, and rate-limit / filter the
-recon ICMP types at the edge. **ICMPv6 Redirects (type 137)** are covered separately
-by [IPv6 First-Hop Watch](#ipv6-first-hop-watch).
+recon ICMP types at the edge. On IPv6, ignore redirects with
+`net.ipv6.conf.all.accept_redirects=0` (also audited/hardenable from **IPv6 RA
+Guard**). **IPv6 First-Hop Watch** still covers rogue RA / DHCPv6; the ICMPv6
+**Redirect** now gets its full RFC 4861 §8.1 validation here.
 
-> **Watchtower feed.** HIGH/CRITICAL redirect findings are appended as JSON-lines
-> to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check + source), so the
-> [Watchtower](watchtower.md) unified pane and single Pushover path fold in redirect
-> MITM / ARP-poison correlation automatically. The standalone engine ships a 69-test
-> self-test: `python3 icmpwatch_selftest.py`.
+> **Watchtower feed.** HIGH/CRITICAL redirect findings (IPv4 and IPv6) are appended
+> as JSON-lines to `/var/log/ragnar/icmp_watch.jsonl` (deduplicated per check +
+> source), so the [Watchtower](watchtower.md) unified pane and single Pushover path
+> fold in redirect MITM / ARP-poison correlation automatically. The standalone engine
+> ships a 121-test self-test: `python3 icmpwatch_selftest.py`.
 
 Small **CLI** (no web app needed):
 
@@ -2156,15 +2197,21 @@ dedup, baseline learning and a hardened daemon — see
 
 ### OSPF Security Scanner
 A **passive** routing-security scanner for OSPF (the interior routing control
-plane, IP proto 89 / multicast 224.0.0.5–6). **Detection-only** — it never forms
-an adjacency, floods an LSA, or touches the LSDB; it just captures one short
-window and classifies it. OSPF is the classic route-poisoning target: without
+plane, IP proto 89 / multicast 224.0.0.5–6). Covers **OSPFv2 (IPv4)** and
+**OSPFv3 (IPv6, RFC 5340)** — both ride IP proto 89, `proto ospf` captures both,
+and the version-agnostic detectors (Router-ID conflict/spoof, phantom router,
+DR/priority takeover, mixed-version) apply to either stack (the header source is
+IPv6 for v3, so the parser accepts both families — an IPv4-only match would
+silently drop every OSPFv3 packet). **Detection-only** — it never forms an
+adjacency, floods an LSA, or touches the LSDB; it just captures one short window
+and classifies it. OSPF is the classic route-poisoning target: without
 cryptographic auth, any host on the segment can inject LSAs and silently redirect
 traffic. What it flags:
 
 - **Weak / no authentication** — Auth Type 0 (none) or 1 (plaintext). This is the
   enabler for every injection attack and the one thing always visible on the wire;
-  it surfaces a CVE/OSV advisory.
+  it surfaces a CVE/OSV advisory. **OSPFv2 only** — OSPFv3 has no header auth field
+  (it relies on IPsec AH/ESP or the RFC 7166 auth trailer), so it is not faked for v3.
 - **Anomaly** — a new/rogue OSPF router (adjacency spoofing), a **duplicate
   Router-ID** (conflict/spoof), Hello parameter mismatch, or mixed OSPF versions.
 - **Injection** — an LSA whose **Advertising Router** never announced itself (a
