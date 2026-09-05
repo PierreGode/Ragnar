@@ -6658,7 +6658,7 @@ def _parse_ntp_capture(output):
                'ver': int(sm.group(5)), 'mode': sm.group(6).strip(),
                'ntp_len': int(sm.group(7)),
                'stratum': None, 'sdesc': '', 'refid': '', 'disp': 0.0,
-               'leap': None, 'xmit_unix': None, 'offset': None,
+               'leap': None, 'xmit_unix': None, 'offset': None, 'origin': None,
                'autokey': False, 'autokey_info': None, 'autokey_reasons': []}
 
         # Autokey / extension-field inspection. Prefer the exact wire bytes from the
@@ -6695,6 +6695,15 @@ def _parse_ntp_capture(output):
         li = re.search(r'Leap indicator:\s*[^(]*\((\d+)\)', text)
         if li:
             rec['leap'] = int(li.group(1))
+        # Originator Timestamp = the client's transmit nonce echoed back; used to
+        # spot on-path forgery (two servers echoing the same nonce). Guard against
+        # the "Originator - Receive/Transmit Timestamp" delta lines with '- ?'.
+        om = re.search(r'(?<!- )Originator Timestamp:\s*([\d.]+)', text)
+        if om:
+            try:
+                rec['origin'] = float(om.group(1))
+            except ValueError:
+                pass
         xm = re.search(r'(?<!- )Transmit Timestamp:\s*([\d.]+)', text)
         if xm:
             try:
@@ -6844,6 +6853,25 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
                 f"NTP server {src}'s time is off by {off:+.3f}s from the local clock "
                 f"— possible time injection (only one source seen, cannot cross-check)")
 
+    # --- on-path injection: the same origin nonce echoed by two servers ---
+    # A client's transmit timestamp is a per-request nonce, echoed in the
+    # Originator field by exactly one real server (the one that answered that
+    # query). Two distinct sources carrying the same nonce means one is a forged
+    # or racing reply — the passive analogue of the active anti-spoof echo check.
+    origin_srcs = {}
+    for r in server_recs:
+        ov = r.get('origin')
+        if ov:                                   # present and non-zero
+            origin_srcs.setdefault(round(ov, 6), set()).add(r['src'])
+    for ov, srcs in sorted(origin_srcs.items()):
+        if len(srcs) >= 2:
+            bump('time-injection')
+            reasons.append(
+                f"On-path NTP forgery: one origin nonce was echoed by "
+                f"{len(srcs)} different servers ({', '.join(sorted(srcs))}) — only the "
+                f"real server that answered a given client query holds that nonce, so a "
+                f"second source replaying it is an on-path / racing spoofer")
+
     # --- rogue-server: a source not in the trusted baseline ---
     if had_baseline:
         for src in sorted(servers):
@@ -6944,6 +6972,29 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
             reasons.append(
                 f"NTP server {src} reference-ID equals its own address — reference "
                 f"loop / forged sync chain")
+        if 16 in s['strata']:
+            bump('anomaly')
+            reasons.append(
+                f"NTP server {src} reports Stratum 16 (unsynchronized) — it is not a "
+                f"usable time source (serving time it hasn't validated upstream)")
+        reserved = sorted(n for n in s['strata'] if n > 16)
+        if reserved:
+            bump('anomaly')
+            reasons.append(
+                f"NTP server {src} reports a reserved Stratum {reserved[0]} (>16) — "
+                f"outside the valid 0–16 range; a malformed or crafted reply")
+
+    # --- anomaly: obsolete/invalid protocol version on a server reply ---
+    # NTPv1/v2 are obsolete and v0 is invalid; a real server answers v3/v4. Scoped
+    # to server replies so legitimate old-version ntpq (mode 6) recon isn't flagged
+    # here (it already surfaces under 'recon').
+    for src in sorted({r['src'] for r in server_recs if r.get('ver') not in (3, 4)}):
+        v = next((r['ver'] for r in server_recs
+                  if r['src'] == src and r['ver'] not in (3, 4)), '?')
+        bump('anomaly')
+        reasons.append(
+            f"NTP server {src} answered with version {v} — NTPv1/v2 are obsolete and "
+            f"v0 is invalid; modern servers speak v3/v4, so this is legacy or crafted")
 
     advisories = []
     if servers or control_recs or ak_seen:
@@ -7053,10 +7104,21 @@ def _ntp_selftest():
     BASE = 1780000000.0  # fixed capture epoch for deterministic offsets
 
     def block(src, mode='Server', stratum=2, refid='17.253.14.125', xmit_off=0.0,
-              disp='0.020000', leap=0, ver=4, rx=BASE, dst='192.168.1.50'):
+              disp='0.020000', leap=0, ver=4, rx=BASE, dst='192.168.1.50',
+              origin=None):
         """Craft one tcpdump -tt -v NTP packet block. xmit_off is how far the
-        server's transmit time is from the capture time (the injected skew)."""
+        server's transmit time is from the capture time (the injected skew).
+        origin is the echoed client nonce — by default a per-source value (real
+        servers each echo a different client query), overridable to force the
+        on-path-forgery collision."""
         ntp_secs = rx + xmit_off + _NTP_UNIX_DELTA
+        if origin is None:
+            try:
+                origin_secs = ntp_secs - 1 - (int(src.split('.')[-1]) % 100) * 1e-3
+            except (ValueError, AttributeError):
+                origin_secs = ntp_secs - 1
+        else:
+            origin_secs = origin + _NTP_UNIX_DELTA
         sdesc = {0: 'unspecified', 1: 'primary reference'}.get(
             stratum, 'secondary reference')
         return "\n".join([
@@ -7068,7 +7130,7 @@ def _ntp_selftest():
             f"\tRoot Delay: 0.000000, Root dispersion: {disp}, "
             f"Reference-ID: {refid}",
             f"\t  Reference Timestamp:  {ntp_secs - 60:.9f} (2026-05-28T20:00:00Z)",
-            f"\t  Originator Timestamp: {ntp_secs - 1:.9f} (2026-05-28T20:26:39Z)",
+            f"\t  Originator Timestamp: {origin_secs:.9f} (2026-05-28T20:26:39Z)",
             f"\t  Receive Timestamp:    {ntp_secs:.9f} (2026-05-28T20:26:40Z)",
             f"\t  Transmit Timestamp:   {ntp_secs:.9f} (2026-05-28T20:26:40Z)",
             f"\t    Originator - Receive Timestamp:  +1.000000000",
@@ -7132,6 +7194,36 @@ def _ntp_selftest():
             and abs(pr[0]['offset']) < 0.001)
     scenarios.append({'name': 'ntp-parse', 'expect': 'stratum2+refid+offset~0',
                       'got': str(pr[0] if pr else None)[:90], 'pass': p_ok})
+
+    # 10. on-path-inject: two known servers echo the SAME origin nonce (only the
+    #     real one that answered a given client query legitimately holds it).
+    r_op = run('on-path-inject',
+               "\n".join([block('10.0.0.1', origin=BASE - 5.0),
+                          block('10.0.0.2', origin=BASE - 5.0)]),
+               15, base, 'time-injection')
+    scenarios.append({'name': 'on-path-reason', 'expect': 'origin-nonce flagged',
+                      'got': 'present' if any('origin nonce' in x for x in r_op['reasons'])
+                      else 'absent',
+                      'pass': any('origin nonce' in x for x in r_op['reasons'])})
+    # 11. bad-version: a known server answers with obsolete NTPv2.
+    r_ver = run('bad-version', block('10.0.0.1', ver=2), 15, base, 'anomaly')
+    scenarios.append({'name': 'bad-version-reason', 'expect': 'version flagged',
+                      'got': 'present' if any('version 2' in x for x in r_ver['reasons'])
+                      else 'absent',
+                      'pass': any('version 2' in x for x in r_ver['reasons'])})
+    # 12. stratum-16: a known server reports it is unsynchronized (stratum 16).
+    r_s16 = run('stratum-unsynced', block('10.0.0.1', stratum=16), 15, base, 'anomaly')
+    scenarios.append({'name': 'stratum-16-reason', 'expect': 'stratum-16 flagged',
+                      'got': 'present' if any('Stratum 16' in x for x in r_s16['reasons'])
+                      else 'absent',
+                      'pass': any('Stratum 16' in x for x in r_s16['reasons'])})
+    # 13. origin-parse: the Originator Timestamp is captured (and not confused with
+    #     the "Originator - Receive/Transmit" delta lines).
+    op = _parse_ntp_capture(block('10.0.0.1'))
+    origin_ok = bool(op and op[0].get('origin') is not None)
+    scenarios.append({'name': 'ntp-origin-parse', 'expect': 'origin!=None',
+                      'got': f"origin={op[0].get('origin') if op else None}",
+                      'pass': origin_ok})
 
     # --- Autokey extension-field detector (byte-level, deterministic, no deps) ---
     def _ak_ef(ef_len, vallen, total=28):
@@ -14120,10 +14212,13 @@ def _eigrp_analyze(events, seconds, baseline, learn=True):
             base = base_prefixes.get(p)
             if base is None:
                 bump('injection')
+                dr = (' — and it is a DEFAULT route (candidate-default hijack: it '
+                      'attracts ALL unmatched traffic)') if p in ('::/0', '0.0.0.0/0') \
+                    else ''
                 reasons.append(
                     f"EIGRP ROUTE INJECTION: prefix {p} advertised by {d['origin']} "
                     f"(next-hop {d['nexthop']}) is not in the baseline — a forged "
-                    f"route that can blackhole or MITM traffic to it")
+                    f"route that can blackhole or MITM traffic to it{dr}")
             elif base.get('nexthop') and d['nexthop'] != base['nexthop']:
                 bump('injection')
                 reasons.append(
@@ -14139,6 +14234,17 @@ def _eigrp_analyze(events, seconds, baseline, learn=True):
             reasons.append(
                 f"Rogue EIGRP speaker {src} (AS {asn}) — not in the baseline; a new "
                 f"router forming adjacencies on this segment (adjacency spoofing)")
+
+    # EIGRPv6 must be sourced from a link-local address (RFC 7868 §6.1). An
+    # EIGRPv6 packet from a global / non-fe80::/10 source is off-link or spoofed
+    # — receivers that enforce link-local scope would drop it. Zero-config.
+    for src in sorted(routers):
+        if routers[src]['af'] == 'ipv6' and src and not _is_ipv6_linklocal(src):
+            bump('anomaly')
+            reasons.append(
+                f"EIGRPv6 speaker {src} is not sourced from a link-local (fe80::/10) "
+                f"address — RFC 7868 §6.1 requires it, so this is an off-link or "
+                f"spoofed EIGRPv6 source")
 
     # K-value / AS mismatch across speakers.
     all_as = set()
@@ -14350,6 +14456,66 @@ def _eigrp_selftest():
     scenarios.append({'name': 'eigrp-parse', 'expect': 'int+ext/auth/AS100',
                       'got': f"routes={len(e0.get('routes', []))} auth={e0.get('auth')}",
                       'pass': p_ok})
+
+    # ---- EIGRP for IPv6 (RFC 7868): proto 88 over IPv6, link-local sourced ----
+    def hdr6(src, dst='ff02::a'):
+        return (f"IP6 (flowlabel 0x0, hlim 224, next-header EIGRP (88) payload "
+                f"length: 40) {src} > {dst}: ")
+
+    def eigrp6(src, opcode='Update', opnum=1, asn=100, auth=False,
+               kvals=(1, 0, 1, 0, 0), routes=()):
+        s = hdr6(src) + "\n"
+        s += f"\tEIGRP v2, opcode: {opcode} ({opnum}), chksum: 0x0, Flags: [none]\n"
+        s += f"\tseq: 0x00000000, ack: 0x00000000, VRID: 0, AS: {asn}, length: 20\n"
+        s += (f"\t  General Parameters TLV (0x0001), length: 12\n"
+              f"\t    holdtime: 15s, k1 {kvals[0]}, k2 {kvals[1]}, k3 {kvals[2]}, "
+              f"k4 {kvals[3]}, k5 {kvals[4]}\n")
+        if auth:
+            s += "\t  Authentication TLV (0x0002), length: 40\n"
+        for (pfx, nh) in routes:
+            s += (f"\t  IP Internal routes TLV (0x0402), length: 40\n"
+                  f"\t    IPv6 prefix:      {pfx}, nexthop: {nh}\n"
+                  f"\t      delay 1280 ms, bandwidth 256 Kbps, mtu 1500, hop 0, "
+                  f"reliability 255, load 0\n")
+        return s.rstrip("\n")
+
+    v6base = {'routers': {'fe80::9': {'as': [100], 'kvals': [[1, 0, 1, 0, 0]]}},
+              'prefixes': {'2001:470:1::/64': {'origin': 'fe80::9',
+                                               'nexthop': 'fe80::9'}}}
+
+    # 8. v6-clean: known link-local router re-advertising its known v6 prefix.
+    run('v6-clean', eigrp6('fe80::9', auth=True,
+        routes=[('2001:470:1::/64', 'fe80::9')]), 15, v6base, 'clean')
+    # 9. v6-injection: known router advertises a NEW v6 prefix.
+    run('v6-injection', eigrp6('fe80::9', auth=True,
+        routes=[('2001:470:9::/64', 'fe80::9')]), 15, v6base, 'injection')
+    # 10. v6-nonlinklocal: an EIGRPv6 packet from a global source (RFC 7868 §6.1);
+    #     baselined so the finding isolates from rogue-router.
+    llbase = {'routers': {'2001:db8::66': {'as': [100], 'kvals': [[1, 0, 1, 0, 0]]}},
+              'prefixes': {}}
+    r_ll = run('v6-nonlinklocal', eigrp6('2001:db8::66', opcode='Hello', opnum=5,
+               auth=True), 15, llbase, 'anomaly')
+    scenarios.append({'name': 'v6-nonlinklocal-reason', 'expect': 'link-local flagged',
+                      'got': 'present' if any('link-local' in x for x in r_ll['reasons'])
+                      else 'absent',
+                      'pass': any('link-local' in x for x in r_ll['reasons'])})
+    # 11. v6-default-route: known router injects ::/0 — named as candidate-default.
+    r_dr = run('v6-default-route', eigrp6('fe80::9', auth=True,
+               routes=[('::/0', 'fe80::9')]), 15, v6base, 'injection')
+    scenarios.append({'name': 'v6-default-route-reason', 'expect': 'DEFAULT named',
+                      'got': 'present' if any('DEFAULT route' in x for x in r_dr['reasons'])
+                      else 'absent',
+                      'pass': any('DEFAULT route' in x for x in r_dr['reasons'])})
+    # 12. v6-parse: the IPv6 header + v6 route TLV decode (af=ipv6, v6 prefix).
+    pev6 = _parse_eigrp_capture(eigrp6('fe80::9', auth=True,
+                                routes=[('2001:470:1::/64', 'fe80::9')]))
+    e6 = pev6[0] if pev6 else {}
+    rt6 = (e6.get('routes') or [{}])[0]
+    v6p_ok = (e6.get('af') == 'ipv6' and e6.get('src') == 'fe80::9'
+              and rt6.get('prefix') == '2001:470:1::/64')
+    scenarios.append({'name': 'eigrp-v6-parse', 'expect': 'af=ipv6/src=fe80::9/v6-pfx',
+                      'got': f"af={e6.get('af')} src={e6.get('src')} pfx={rt6.get('prefix')}",
+                      'pass': v6p_ok})
 
     # Scapy end-to-end.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}

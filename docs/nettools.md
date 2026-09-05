@@ -713,6 +713,11 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   sources agree to well under a second passively). This is the core attack: someone
   is serving a skewed clock. If *every* source agrees but all disagree with the
   local clock, that's flagged too (the host clock is wrong, or all sources shifted).
+- **On-path injection** — the same **origin nonce** (the client's transmit timestamp,
+  echoed in the Originator field) carried by **two different servers**. A client's
+  per-request nonce is held by exactly one real server — the one that answered that
+  query — so a second source echoing it is a forged or racing reply. This is the
+  passive analogue of the active anti-spoof echo check, with no probe sent.
 - **Rogue server** — an NTP server answering on the segment that **isn't in the
   learned baseline**. Clients may silently prefer it.
 - **Kiss-o'-Death** — a **stratum-0** reply (RFC 5905 KoD, e.g. `RATE` / `DENY`). A
@@ -725,7 +730,10 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
 - **Recon** — NTP **mode 6/7** (`ntpq` control / `monlist`) traffic: reconnaissance
   or amplification abuse.
 - **Anomaly** — an implausible **root dispersion**, a **leap-alarm** (unsynchronized)
-  source, or a **reference-ID loop** (refid equals the source's own address).
+  source, a **reference-ID loop** (refid equals the source's own address), a server
+  reporting **Stratum 16** (unsynchronized) or a **reserved stratum > 16** (malformed),
+  or a server answering with an **obsolete NTPv1/v2** (v0 is invalid) — modern servers
+  speak v3/v4, so an old version on a reply is legacy or crafted.
 - **Autokey** — an **Autokey** (RFC 5906) **extension field** on the wire. Autokey is
   deprecated and is the network-reachable attack surface for **CVE-2014-9295** (the
   `ntpd` `crypto_recv()` stack-overflow → **RCE** as the ntpd user) and its siblings
@@ -2151,22 +2159,28 @@ unlike OSPF (whose LSA internals `tcpdump` leaves opaque), `tcpdump` **fully dec
 EIGRP's route TLVs** — the advertised prefix, next-hop and metrics are visible — so
 this scanner sees route injection directly. What it flags:
 
-- **injection** — a prefix that isn't in the baseline being advertised, or a known
-  prefix now pointing at a **different next-hop** (route / next-hop hijack). This is
-  the money finding — a forged route steering traffic.
+- **injection** — a prefix that isn't in the baseline being advertised (v4 *or* v6),
+  or a known prefix now pointing at a **different next-hop** (route / next-hop
+  hijack). This is the money finding — a forged route steering traffic. A newly
+  injected **default route** (`::/0` or `0.0.0.0/0`) is named as a *candidate-default
+  hijack*, since it attracts all unmatched traffic.
 - **rogue-router** — a new EIGRP speaker (source / AS) not in the baseline
   (adjacency spoofing).
 - **storm** — an EIGRP flood (hello / query storm) by rate.
 - **anomaly** — a **K-value** or **AS-number** mismatch between speakers (a misconfig
-  that blocks peering, or a crafted hello probing the segment).
+  that blocks peering, or a crafted hello probing the segment); or an **EIGRPv6
+  packet not sourced from a link-local `fe80::/10` address** — RFC 7868 §6.1 requires
+  it, so a global/off-link v6 source is spoofed or off-segment (zero-config, deterministic).
 - **weak-auth** — EIGRP packets with **no Authentication TLV** (the enabler for
   every injection attack).
 
-The BPF is `ip proto 88 or ip6 proto 88`. IPv4 route TLVs (internal + external, with
-next-hop, origin-router/AS and metrics) are fully decoded; **IPv6 EIGRP** yields the
-speaker, AS, auth state and K-values but not per-prefix detail (this `tcpdump` build
-prints the v6 route TLV as `Unknown TLV (0x0402)`). Put the Pi on the routed VLAN or
-a SPAN/mirror to see EIGRP. The first scan **learns** the current routers and the
+**Dual-stack (RFC 7868).** The BPF is `ip proto 88 or ip6 proto 88`, and **both IPv4
+and IPv6 route TLVs** (internal + external, with the prefix, next-hop, origin-router/AS
+and metrics) are decoded — so v6 route/next-hop injection is caught exactly like v4,
+and the map is keyed by prefix string so it was already family-agnostic. EIGRPv4 and
+EIGRPv6 routinely run different AS numbers on the same wire, which is expected and not
+flagged. Put the Pi on the routed VLAN or a SPAN/mirror to see EIGRP. The first scan
+**learns** the current routers and the
 advertised prefix→next-hop map as the baseline (`data/eigrp_watch.json`); after a
 legitimate topology change, click "Trust current". **API:** `GET /api/net/eigrp-watch`,
 `POST /api/net/eigrp-baseline`. **CLI:** `eigrp-watch`, `eigrp-selftest`.
