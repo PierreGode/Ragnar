@@ -2256,11 +2256,23 @@ packet into a pcap and parses it back through `tcpdump` end to end.
 The L3-edge companion to the OSPF scanner — a **passive** BGP routing-security
 scanner (TCP/179). **Detection-only**: it never opens a session or announces /
 withdraws a route. BGP is where traffic gets silently redirected across the
-Internet edge, so where it's visible this is the highest-value watch. It flags:
+Internet edge, so where it's visible this is the highest-value watch.
 
-- **Injection (hijack)** — an announced prefix whose **origin AS changed** vs the
-  learned baseline (prefix/origin hijack), or a **new more-specific** of a
-  baseline prefix (sub-prefix hijack — the most effective real-world BGP attack).
+**Dual-stack (IPv4 + IPv6 / MP-BGP, RFC 4760).** The `tcp port 179` capture is
+family-agnostic, so a session running over **IPv6 transport** is seen (the flow
+parser was IPv4-only before, silently dropping every v6-transported session — the
+same gap the OSPFv3 fix closed), and **IPv6 NLRI carried in `MP_REACH_NLRI` /
+`MP_UNREACH_NLRI`** attributes (rather than the IPv4-only base UPDATE fields) is
+parsed and fed through the same origin-hijack / sub-prefix / bogon / storm logic.
+The bogon table gains the v6 martians that are never a legitimate global-unicast
+origin (`::/8`, `2001:db8::/32` documentation, `fc00::/7` ULA, `fe80::/10`
+link-local, `ff00::/8` multicast, IPv4-mapped, discard-only). It flags:
+
+- **Injection (hijack)** — an announced prefix (v4 or v6) whose **origin AS
+  changed** vs the learned baseline (prefix/origin hijack), or a **new
+  more-specific** of a baseline prefix (sub-prefix hijack — the most effective
+  real-world BGP attack; same-family only, so a v6 more-specific matches a v6
+  covering prefix).
 - **Anomaly** — a new/rogue **peer** (new AS or BGP-ID), a **NOTIFICATION** /
   session reset (teardown/flap), a **bogon/martian** prefix announcement, a
   **reserved/documentation ASN** in a received path, an **AS-path loop**, or a
@@ -2297,10 +2309,13 @@ python3 network_diagnostics.py bgp-watch [--iface eth0] [--seconds 15] [--json]
 python3 network_diagnostics.py bgp-selftest
 ```
 
-`bgp-selftest` drives the parser + classifier with synthetic captures (clean /
-origin-hijack / sub-prefix hijack / session-reset / bogon-prefix / UPDATE parse)
-and, when [Scapy](https://scapy.net) (`scapy.contrib.bgp`) is present, crafts a
-real BGP packet into a pcap and parses it back through `tcpdump`.
+`bgp-selftest` drives the parser + classifier with synthetic captures — v4
+(clean / origin-hijack / sub-prefix hijack / session-reset / bogon-prefix /
+UPDATE parse) **and IPv6 / MP-BGP** (v6 clean over IPv6 transport, v6 origin
+hijack, v6 sub-prefix hijack, v6 bogon, plus `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
+parse checks) — and, when [Scapy](https://scapy.net) (`scapy.contrib.bgp`) is
+present, crafts a real BGP packet into a pcap and parses it back through
+`tcpdump`.
 
 - Endpoint: `GET /api/net/bgp-watch` `{interface, seconds}`,
   `POST /api/net/bgp-baseline` `{action: reset}` · binary: `tcpdump`
@@ -2319,6 +2334,16 @@ per-prefix **churn/flap tracking** (a prefix changing origin/next-hop faster tha
 threshold is marked *flapping*, and the previous AS-path is remembered so a change
 shows as `old → new`) and longest-prefix lookup. Point it at a router
 configured to peer with the Pi's AS (a route-server client / passive peer works well).
+
+**Dual-stack (MP-BGP, RFC 4760).** The OPEN advertises MP-BGP for **IPv4 *and*
+IPv6 unicast**, so a dual-stack peer feeds both families over the one session
+(advertising a receive capability is not originating NLRI — still passive). IPv6
+prefixes arrive in `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attributes (with a v6 or
+RFC 2545 global+link-local next-hop) and land in the **same RIB, churn/flap
+tracking, and longest-prefix correlator** as v4 — a v6 covering prefix churning
+attributes a v6 data-plane symptom exactly like a v4 one. The BGP *session* itself
+runs over whichever transport the `peer_ip` implies (a v6 literal peers over IPv6),
+independent of which AFI it carries.
 
 **Multi-carrier mode** — start **one session per carrier-facing router** (each with
 its own thread + RIB) by passing a `peers` list instead of a single peer. When a

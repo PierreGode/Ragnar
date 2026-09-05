@@ -15693,6 +15693,21 @@ _BGP_BOGON_NETS = [
     ('198.51.100.0', 24), ('203.0.113.0', 24), ('224.0.0.0', 4), ('240.0.0.0', 4),
 ]
 
+# Bogon / martian IPv6 prefixes that should never appear as a received BGP
+# origin (MP-BGP, RFC 4760). Kept deliberately tight — only ranges that are
+# never a legitimate global-unicast NLRI — so v6 dual-stack adds no false
+# positives to the hijack/leak detector.
+_BGP_BOGON_NETS6 = [
+    '::/8',            # unspecified / loopback / v4-compat area (::, ::1)
+    '2001:db8::/32',   # documentation (RFC 3849)
+    'fc00::/7',        # unique-local — never global
+    'fe80::/10',       # link-local
+    'fec0::/10',       # deprecated site-local
+    'ff00::/8',        # multicast — never a unicast NLRI
+    '::ffff:0:0/96',   # IPv4-mapped
+    '100::/64',        # discard-only (RFC 6666)
+]
+
 _BGP_OSV_URL = 'https://osv.dev/list?ecosystem=&q=frr%20bgpd'
 _BGP_ADVISORIES = {
     'no_md5': {
@@ -15738,8 +15753,29 @@ def _ip_to_int(ip):
         return None
 
 
+def _bgp_is_bogon6(prefix):
+    """True if an IPv6 (MP-BGP) CIDR announcement falls inside a bogon/martian
+    net that is never a legitimate global-unicast origin."""
+    try:
+        net = ipaddress.ip_network(prefix, strict=False)
+    except ValueError:
+        return False
+    if net.version != 6:
+        return False
+    if net.prefixlen < 8:            # near-default v6 hijack
+        return True
+    for b in _BGP_BOGON_NETS6:
+        bn = ipaddress.ip_network(b)
+        if net.prefixlen >= bn.prefixlen and net.subnet_of(bn):
+            return True
+    return False
+
+
 def _bgp_is_bogon(prefix):
-    """True if an IPv4 CIDR announcement falls inside a bogon/martian net."""
+    """True if a CIDR announcement falls inside a bogon/martian net. Dual-stack:
+    IPv6 prefixes (from MP-BGP) are checked against the v6 bogon table."""
+    if ':' in (prefix or ''):
+        return _bgp_is_bogon6(prefix)
     try:
         net, length = prefix.split('/')
         length = int(length)
@@ -15760,9 +15796,16 @@ def _bgp_is_bogon(prefix):
     return False
 
 
-_BGP_IPRE = r'(\d{1,3}(?:\.\d{1,3}){3})'
-_BGP_CIDR_RE = re.compile(r'^' + _BGP_IPRE + r'/(\d{1,2})\s*$')
-_BGP_HDR_RE = re.compile(r'(?:IP6?\s+)?' + _BGP_IPRE + r'\.(\d+)\s+>\s+' + _BGP_IPRE + r'\.(\d+):')
+# tcpdump prints BGP running over IPv4 or IPv6 transport, and MP-BGP (RFC 4760)
+# carries IPv6 NLRI, so the flow header, NLRI, and next-hop matchers accept both
+# families. Router-ID (bgp_id) stays IPv4-only on purpose: RFC 4271 fixes it as a
+# dotted-quad 32-bit value regardless of the session's address family.
+_BGP_V4RE = r'\d{1,3}(?:\.\d{1,3}){3}'
+_BGP_V6RE = r'[0-9A-Fa-f:]*:[0-9A-Fa-f:]*'
+_BGP_IPRE = r'(' + _BGP_V4RE + r')'                        # IPv4 only (Router-ID)
+_BGP_ANYRE = r'(' + _BGP_V4RE + r'|' + _BGP_V6RE + r')'    # v4 or v6 transport / NLRI
+_BGP_CIDR_RE = re.compile(r'^' + _BGP_ANYRE + r'/(\d{1,3})\s*$')
+_BGP_HDR_RE = re.compile(r'(?:IP6?\s+)?' + _BGP_ANYRE + r'\.(\d+)\s+>\s+' + _BGP_ANYRE + r'\.(\d+):')
 
 
 def _parse_bgp_capture(output):
@@ -15835,7 +15878,9 @@ def _parse_bgp_capture(output):
             og = re.search(r'\bOrigin\b.*?:\s*(IGP|EGP|Incomplete)', line)
             if og:
                 cur['origin'] = og.group(1)
-            nh = re.search(r'Next Hop\b.*?:\s*' + _BGP_IPRE, line)
+            # base UPDATE prints "Next Hop:"; MP_REACH_NLRI prints "nexthop:" and
+            # can carry an IPv6 (or global+link-local) next-hop.
+            nh = re.search(r'(?:Next Hop\b.*?:|nexthop:)\s*' + _BGP_ANYRE, line)
             if nh:
                 cur['next_hop'] = nh.group(1)
             if re.search(r'\bCommunity\b', line):
@@ -15843,10 +15888,14 @@ def _parse_bgp_capture(output):
                     cur['communities'].append(tok)
             if re.search(r'blackhole', line, re.I):
                 cur['communities'].append('blackhole')
-            if re.search(r'Updated routes|Advertised routes|Prefixes', line, re.I):
-                nlri_mode = 'announced'
-            elif re.search(r'Withdrawn routes', line, re.I):
+            # IPv6 (and any non-v4) NLRI rides in MP_REACH_NLRI / MP_UNREACH_NLRI
+            # attributes (RFC 4760); tcpdump prints them as "Multi-Protocol
+            # (Un)Reach NLRI". Check unreach first — "Unreach" contains "reach".
+            if re.search(r'Withdrawn routes|Multi-Protocol\s+Unreach|MP[-_ ]?Unreach', line, re.I):
                 nlri_mode = 'withdrawn'
+            elif re.search(r'Updated routes|Advertised routes|Prefixes|'
+                           r'Multi-Protocol\s+Reach|MP[-_ ]?Reach', line, re.I):
+                nlri_mode = 'announced'
             cidr = _BGP_CIDR_RE.match(line.strip())
             if cidr and nlri_mode:
                 pfx = f'{cidr.group(1)}/{cidr.group(2)}'
@@ -16055,19 +16104,19 @@ def _bgp_analyze(messages, seconds, baseline, learn=True):
 
 
 def _bgp_prefix_covers(supernet, subnet):
-    """True if CIDR `supernet` strictly contains CIDR `subnet` (more-specific)."""
+    """True if CIDR `supernet` strictly contains CIDR `subnet` (more-specific).
+    Same address family only — a v4 net never covers a v6 prefix, or vice
+    versa (so v6 sub-prefix hijack detection works alongside v4)."""
+    if (':' in supernet) != (':' in subnet):
+        return False
     try:
-        sn, sl = supernet.split('/'); sl = int(sl)
-        tn, tl = subnet.split('/'); tl = int(tl)
+        sup = ipaddress.ip_network(supernet, strict=False)
+        sub = ipaddress.ip_network(subnet, strict=False)
     except ValueError:
         return False
-    if tl <= sl:
+    if sup.version != sub.version or sub.prefixlen <= sup.prefixlen:
         return False
-    a, b = _ip_to_int(sn), _ip_to_int(tn)
-    if a is None or b is None:
-        return False
-    mask = (0xffffffff << (32 - sl)) & 0xffffffff
-    return (a & mask) == (b & mask)
+    return sub.subnet_of(sup)
 
 
 # --- ASN enrichment via Team Cymru IP-to-ASN whois (TCP/43) -----------------
@@ -16274,7 +16323,8 @@ def _bgp_selftest():
         return res
 
     base = {'peers': [65001, 65002],
-            'origins': {'93.184.216.0/24': 65002, '45.33.0.0/16': 65003},
+            'origins': {'93.184.216.0/24': 65002, '45.33.0.0/16': 65003,
+                        '2606:2800:220::/48': 65002, '2001:500:2f::/48': 65003},
             'prefix_count': {'10.0.0.1': 2}}
 
     clean = "\n".join([
@@ -16320,7 +16370,54 @@ def _bgp_selftest():
     ])
     run('anomaly-bogon', bogon, 15, base, 'anomaly')
 
-    # parser check
+    # --- IPv6 / MP-BGP dual-stack (RFC 4760): session over IPv6 transport and
+    # v6 NLRI carried in MP_REACH_NLRI / MP_UNREACH_NLRI attributes. -----------
+    v6_clean = "\n".join([
+        "IP6 2001:db8:a::1.179 > 2001:db8:a::2.50000: Flags [P.], length 90: BGP md5",
+        "\tUpdate Message (2), length: 80",
+        "\t  Origin (1), length: 1, Flags [T]: IGP",
+        "\t  AS Path (2), length: 6, Flags [T]: 65001 65002",
+        "\t  Multi-Protocol Reach NLRI (14), length: 40, Flags [OE]:",
+        "\t    AFI: IPv6 (2), SAFI: Unicast (1)",
+        "\t    nexthop: 2001:db8:a::1, nh-length: 16",
+        "\t      2606:2800:220::/48",
+    ])
+    run('v6-clean', v6_clean, 15, base, 'clean')
+
+    v6_hijack = "\n".join([
+        "IP6 2001:db8:a::1.179 > 2001:db8:a::2.50000: Flags [P.], length 90: BGP md5",
+        "\tUpdate Message (2), length: 80",
+        "\t  AS Path (2), length: 6, Flags [T]: 65001 65666",
+        "\t  Multi-Protocol Reach NLRI (14), length: 40, Flags [OE]:",
+        "\t    AFI: IPv6 (2), SAFI: Unicast (1)",
+        "\t    nexthop: 2001:db8:a::1, nh-length: 16",
+        "\t      2606:2800:220::/48",
+    ])
+    run('v6-injection-hijack', v6_hijack, 15, base, 'injection')
+
+    v6_subprefix = "\n".join([
+        "IP6 2001:db8:a::1.179 > 2001:db8:a::2.50000: Flags [P.], length 90: BGP md5",
+        "\tUpdate Message (2), length: 80",
+        "\t  AS Path (2), length: 6, Flags [T]: 65001 65666",
+        "\t  Multi-Protocol Reach NLRI (14), length: 44, Flags [OE]:",
+        "\t    AFI: IPv6 (2), SAFI: Unicast (1)",
+        "\t    nexthop: 2001:db8:a::1, nh-length: 16",
+        "\t      2001:500:2f:1::/64",
+    ])
+    run('v6-injection-subprefix', v6_subprefix, 15, base, 'injection')
+
+    v6_bogon = "\n".join([
+        "IP6 2001:db8:a::1.179 > 2001:db8:a::2.50000: Flags [P.], length 90: BGP md5",
+        "\tUpdate Message (2), length: 80",
+        "\t  AS Path (2), length: 6, Flags [T]: 65001 65002",
+        "\t  Multi-Protocol Reach NLRI (14), length: 28, Flags [OE]:",
+        "\t    AFI: IPv6 (2), SAFI: Unicast (1)",
+        "\t    nexthop: 2001:db8:a::1, nh-length: 16",
+        "\t      2001:db8::/32",
+    ])
+    run('v6-anomaly-bogon', v6_bogon, 15, base, 'anomaly')
+
+    # parser check (v4)
     msgs = _parse_bgp_capture(clean)
     up = [m for m in msgs if m['type'] == 'update']
     parse_ok = bool(up and up[0]['as_path'] == [65001, 65002] and
@@ -16329,6 +16426,32 @@ def _bgp_selftest():
                       'expect': 'path=[65001,65002] pfx=93.184.216.0/24',
                       'got': str({'as_path': up[0]['as_path'], 'announced': up[0]['announced']} if up else None),
                       'pass': parse_ok})
+
+    # parser check (v6 transport + MP_REACH NLRI captured, not silently dropped)
+    v6msgs = _parse_bgp_capture(v6_clean)
+    v6up = [m for m in v6msgs if m['type'] == 'update']
+    v6_parse_ok = bool(v6up and v6up[0]['src'] == '2001:db8:a::1' and
+                       '2606:2800:220::/48' in v6up[0]['announced'])
+    scenarios.append({'name': 'v6-mp-reach-parse',
+                      'expect': "src=2001:db8:a::1 pfx=2606:2800:220::/48",
+                      'got': str({'src': v6up[0]['src'], 'announced': v6up[0]['announced']} if v6up else None),
+                      'pass': v6_parse_ok})
+
+    # parser check (v6 MP_UNREACH withdrawal captured)
+    v6_withdraw = "\n".join([
+        "IP6 2001:db8:a::1.179 > 2001:db8:a::2.50000: Flags [P.], length 60: BGP md5",
+        "\tUpdate Message (2), length: 50",
+        "\t  Multi-Protocol Unreach NLRI (15), length: 20, Flags [OE]:",
+        "\t    AFI: IPv6 (2), SAFI: Unicast (1)",
+        "\t      2606:2800:220::/48",
+    ])
+    wmsgs = _parse_bgp_capture(v6_withdraw)
+    wup = [m for m in wmsgs if m['type'] == 'update']
+    v6_wd_ok = bool(wup and '2606:2800:220::/48' in wup[0]['withdrawn'])
+    scenarios.append({'name': 'v6-mp-unreach-parse',
+                      'expect': "withdrawn=[2606:2800:220::/48]",
+                      'got': str(wup[0]['withdrawn'] if wup else None),
+                      'pass': v6_wd_ok})
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:

@@ -19,6 +19,7 @@ safe — it can't inject routes — but it does form an adjacency, so the peer r
 must be configured to accept it. Everything is opt-in and start/stop controlled.
 """
 
+import ipaddress
 import socket
 import struct
 import threading
@@ -44,6 +45,12 @@ ATTR_MED, ATTR_LOCALPREF, ATTR_COMMUNITIES = 4, 5, 8
 ATTR_MP_REACH, ATTR_MP_UNREACH = 14, 15
 AS_SET, AS_SEQUENCE = 1, 2
 _ORIGIN_NAME = {0: 'IGP', 1: 'EGP', 2: 'Incomplete'}
+
+# MP-BGP (RFC 4760): IPv6 NLRI rides in MP_REACH_NLRI / MP_UNREACH_NLRI
+# attributes, not the base UPDATE fields. AFI 1 = IPv4, AFI 2 = IPv6; SAFI 1 =
+# unicast. The RIB/correlator key on prefix strings, so once the codec decodes
+# v6 NLRI they flow through unchanged. Receive-only: we still never originate.
+AFI_IPV4, AFI_IPV6, SAFI_UNICAST = 1, 2, 1
 
 
 class BGPError(Exception):
@@ -75,6 +82,26 @@ def unpack_prefixes(data):
     return out
 
 
+def unpack_mp_prefixes(data, afi):
+    """Parse a run of MP-BGP NLRI (length-bits + packed address) for AFI 1
+    (IPv4) or 2 (IPv6) -> ['addr/len']. Receive-side of RFC 4760."""
+    if afi == AFI_IPV6:
+        width, full, fam = 128, 16, socket.AF_INET6
+    else:
+        width, full, fam = 32, 4, socket.AF_INET
+    out, i, n = [], 0, len(data)
+    while i < n:
+        bits = data[i]
+        i += 1
+        nbytes = (bits + 7) // 8
+        if bits > width or i + nbytes > n:
+            raise BGPError('malformed MP NLRI')
+        raw = bytes(data[i:i + nbytes]) + b'\x00' * (full - nbytes)
+        out.append('%s/%d' % (socket.inet_ntop(fam, raw), bits))
+        i += nbytes
+    return out
+
+
 # --- codec: message headers + the messages we SEND -------------------------
 def encode_header(msg_type, body):
     length = _HDR_LEN + len(body)
@@ -94,8 +121,11 @@ def encode_open(my_as, hold_time, bgp_id, four_octet=True, route_refresh=True):
         caps += _encode_capability(CAP_4OCTET_AS, struct.pack('!I', my_as))
     if route_refresh:
         caps += _encode_capability(CAP_ROUTE_REFRESH, b'')
-    # IPv4-unicast MP-BGP capability (AFI 1, reserved, SAFI 1)
-    caps += _encode_capability(CAP_MP_BGP, struct.pack('!HBB', 1, 0, 1))
+    # MP-BGP capability for IPv4-unicast (AFI 1) AND IPv6-unicast (AFI 2), so a
+    # dual-stack peer sends us both families over the one session (RFC 4760).
+    # Advertising a receive capability is not originating NLRI — still passive.
+    caps += _encode_capability(CAP_MP_BGP, struct.pack('!HBB', AFI_IPV4, 0, SAFI_UNICAST))
+    caps += _encode_capability(CAP_MP_BGP, struct.pack('!HBB', AFI_IPV6, 0, SAFI_UNICAST))
     opt = b''
     if caps:
         opt = bytes([2, len(caps)]) + caps          # optional param type 2 = capabilities
@@ -197,7 +227,29 @@ def decode_update(body, four_octet=True):
             for k in range(0, len(aval) - 3, 4):
                 hi, lo = struct.unpack('!HH', aval[k:k + 4])
                 out['communities'].append('%d:%d' % (hi, lo))
-    out['announced'] = unpack_prefixes(body[attrs_end:])
+        elif atype == ATTR_MP_REACH and len(aval) >= 5:
+            # AFI(2) SAFI(1) NHlen(1) NextHop(var) Reserved(1) NLRI(var)
+            afi, _safi, nhlen = struct.unpack('!HBB', aval[:4])
+            nh = aval[4:4 + nhlen]
+            if afi == AFI_IPV6 and len(nh) >= 16:
+                # a v6 next-hop may carry global + link-local (RFC 2545); the
+                # global (first 16 bytes) is what identifies the path.
+                out['next_hop'] = socket.inet_ntop(socket.AF_INET6, nh[:16])
+            elif afi == AFI_IPV4 and len(nh) >= 4:
+                out['next_hop'] = socket.inet_ntoa(nh[:4])
+            try:
+                out['announced'] += unpack_mp_prefixes(aval[4 + nhlen + 1:], afi)
+            except BGPError:
+                pass
+        elif atype == ATTR_MP_UNREACH and len(aval) >= 3:
+            afi, _safi = struct.unpack('!HB', aval[:3])
+            try:
+                out['withdrawn'] += unpack_mp_prefixes(aval[3:], afi)
+            except BGPError:
+                pass
+    # base UPDATE NLRI is IPv4-unicast only (RFC 4271); v6 arrived via MP_REACH
+    # above, so append rather than overwrite.
+    out['announced'] += unpack_prefixes(body[attrs_end:])
     return out
 
 
@@ -299,23 +351,24 @@ class RIB:
             return bool(r and self._flap_rate(r, now) >= self.flap_threshold)
 
     def lookup(self, ip):
-        """Longest-prefix match for an IPv4 address -> the active route record
-        (or None). Used by the correlator to attribute a data-plane event."""
+        """Longest-prefix match for an IPv4 or IPv6 address -> the active route
+        record (or None). Used by the correlator to attribute a data-plane
+        event; same-family only, so a v6 target matches a v6 covering prefix."""
         try:
-            addr = struct.unpack('!I', socket.inet_aton(ip))[0]
-        except OSError:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
             return None
         best, best_len = None, -1
         with self._lock:
             for pfx, r in self._routes.items():
                 if r['state'] != 'active':
                     continue
-                net, length = pfx.split('/')
-                length = int(length)
-                bn = struct.unpack('!I', socket.inet_aton(net))[0]
-                mask = (0xffffffff << (32 - length)) & 0xffffffff if length else 0
-                if (addr & mask) == (bn & mask) and length > best_len:
-                    best, best_len = r, length
+                try:
+                    net = ipaddress.ip_network(pfx, strict=False)
+                except ValueError:
+                    continue
+                if net.version == addr.version and addr in net and net.prefixlen > best_len:
+                    best, best_len = r, net.prefixlen
         return self._public(best) if best else None
 
     def _public(self, r, now=None):
@@ -526,6 +579,35 @@ def selftest():
     _t, nb = BGPFramer().feed(encode_notification(6, 2, b'x'))[0]
     nd = decode_notification(nb)
     check('notification', nd['code'] == 6 and nd['subcode'] == 2 and nd['data'] == b'x')
+
+    # 7. MP-BGP IPv6 (RFC 4760): OPEN advertises AFI 2, and an MP_REACH_NLRI
+    #    UPDATE decodes a v6 prefix + v6 next-hop into the RIB.
+    check('open-mp-afi-v6', (AFI_IPV6, SAFI_UNICAST) in od['caps']['mp'], str(od['caps']['mp']))
+
+    v6nlri = bytes([48]) + socket.inet_pton(socket.AF_INET6, '2606:2800:220::')[:6]
+    nh6 = socket.inet_pton(socket.AF_INET6, '2001:db8:a::1')
+    mpval = struct.pack('!HBB', AFI_IPV6, SAFI_UNICAST, 16) + nh6 + b'\x00' + v6nlri
+    mp = bytes([0x80, ATTR_MP_REACH, len(mpval)]) + mpval
+    attrs6 = origin + aspath + mp
+    ubody6 = struct.pack('!H', 0) + struct.pack('!H', len(attrs6)) + attrs6
+    _t, ub6 = BGPFramer().feed(encode_header(MSG_UPDATE, ubody6))[0]
+    ud6 = decode_update(ub6, four_octet=True)
+    check('update-decode-v6-mp-reach',
+          ud6['announced'] == ['2606:2800:220::/48'] and
+          ud6['next_hop'] == '2001:db8:a::1' and ud6['as_path'] == [65001, 65002], str(ud6))
+
+    rib6 = RIB()
+    rib6.apply_update(ud6, now=now)
+    lp6 = rib6.lookup('2606:2800:220::10')
+    check('rib-v6-lpm', bool(lp6 and lp6['prefix'] == '2606:2800:220::/48'
+          and lp6['origin_as'] == 65002), str(lp6))
+
+    unval = struct.pack('!HB', AFI_IPV6, SAFI_UNICAST) + v6nlri
+    un = bytes([0x80, ATTR_MP_UNREACH, len(unval)]) + unval
+    ubodyU = struct.pack('!H', 0) + struct.pack('!H', len(un)) + un
+    _t, ubU = BGPFramer().feed(encode_header(MSG_UPDATE, ubodyU))[0]
+    udU = decode_update(ubU, four_octet=True)
+    check('update-decode-v6-mp-unreach', udU['withdrawn'] == ['2606:2800:220::/48'], str(udU))
 
     passed = all(s['pass'] for s in scen)
     return {'success': passed, 'scenarios': scen}
