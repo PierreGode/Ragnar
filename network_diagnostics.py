@@ -19800,6 +19800,7 @@ def register_network_diagnostics(app, logger=None):
         iface = (request.args.get('interface') or '').strip() or None
         if iface is not None and not _valid_iface(iface):
             return _bad('Invalid interface')
+        iface = iface or _capture_iface()
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
         _log(f"net/lacp-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_lacp_watch(interface=iface, seconds=secs))
@@ -19809,6 +19810,7 @@ def register_network_diagnostics(app, logger=None):
         iface = (request.args.get('interface') or '').strip() or None
         if iface is not None and not _valid_iface(iface):
             return _bad('Invalid interface')
+        iface = iface or _capture_iface()
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
         dcs = [d.strip() for d in (request.args.get('dcs') or '').split(',') if d.strip()]
         _log(f"net/rpc-watch iface={iface or 'default-route'} secs={secs} dcs={len(dcs)}")
@@ -19819,6 +19821,7 @@ def register_network_diagnostics(app, logger=None):
         iface = (request.args.get('interface') or '').strip() or None
         if iface is not None and not _valid_iface(iface):
             return _bad('Invalid interface')
+        iface = iface or _capture_iface()
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
         _log(f"net/bfd-watch iface={iface or 'default-route'} secs={secs}")
         return jsonify(do_bfd_watch(interface=iface, seconds=secs))
@@ -19828,6 +19831,7 @@ def register_network_diagnostics(app, logger=None):
         iface = (request.args.get('interface') or '').strip() or None
         if iface is not None and not _valid_iface(iface):
             return _bad('Invalid interface')
+        iface = iface or _capture_iface()
         secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
         role = (request.args.get('role') or 'unknown').strip().lower()
         if role not in ('ce', 'core', 'unknown'):
