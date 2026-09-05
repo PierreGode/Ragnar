@@ -67,6 +67,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [Relay/Coercion Watch](#relaycoercion-watch) | Switch & L2/L3 | `GET /api/net/relay-watch`, `POST /api/net/relay-baseline` |
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Switch & L2/L3 | `GET /api/net/rpc-watch` |
 | [LACP Watch](#lacp-watch) | Switch & L2/L3 | `GET /api/net/lacp-watch` |
+| [BFD Watch](#bfd-watch) | Switch & L2/L3 | `GET /api/net/bfd-watch` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
 | [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
 | [Telnet Watch](#telnet-watch) | Switch & L2/L3 | `GET /api/net/telnet-watch` |
@@ -117,7 +118,7 @@ capture path.
 
 ### Detector Self-Test (Switch & L2/L3)
 A one-click **Run self-test** that validates the IGMP, **IPv6 first-hop**, **NDP**, **RA Guard**,
-**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
+**NTP**, **ICMP**, **SNMP**, **TLS-cert**, **STP**, **DTP**, **CDP**, **VTP**, **SMB**, **Relay/Coercion**, **RPC/NetLogon** (Zerologon/DCSync/WinRM), **LACP** (LAG hijack), **BFD** (failover manipulation), **EIGRP**, **IS-IS**, **FHRP**, OSPF and BGP detectors — plus the **BGP speaker** (codec/framer/FSM/RIB) and
 **path-asymmetry / OWD** engine — by running each classifier against crafted attack
 captures (no root, no external network) and reports per-suite pass/fail. With Scapy
 installed it also runs the end-to-end packet-crafting leg for the capture-based
@@ -1928,6 +1929,45 @@ LACPDUs (themselves a finding). **API:** `GET /api/net/lacp-watch` (query: `inte
 > manipulation, sync/timeout flapping, LAG hijack) are appended as JSON-lines to
 > `/var/log/ragnar/lacp_watch.jsonl`, so aggregation-integrity alerts fold into the
 > unified pane + single Pushover path.
+
+### BFD Watch
+A **passive** Bidirectional Forwarding Detection **failover-manipulation** monitor —
+**detection-only**, it never transmits a BFD packet and never participates in a session.
+BFD (RFC 5880 base; 5881 single-hop; 5883 multihop; 7130 micro-BFD on LAG members) is the
+sub-second trigger for routing convergence: a forged BFD packet does **not** compromise a
+router — it *convinces* one that a healthy path is dead, and OSPF/IS-IS/BGP/static then do
+the damage. So the attack this watches for is **induced reconvergence**, and its critical
+verdict is named accordingly. It watches the four RFC-assigned UDP ports — `3784`
+(single-hop control), `3785` (echo), `4784` (multihop control), `6784` (micro-BFD on LAG).
+Reduced to a single card **verdict**:
+
+- **failover-manipulation** (critical — the one that should page you) — a **spoofed
+  teardown** (`BFD-SPOOFED-TEARDOWN`, a Down/AdminDown correlated with a GTSM violation or
+  source migration), a **forced AdminDown** (`BFD-FORCED-ADMINDOWN`), or an **illegal state
+  regression** (`BFD-STATE-REGRESSION`, Up→Init/Down against the RFC 5880 state machine) —
+  the packets that make a live path go dead.
+- **exposure** — high-severity posture visible on the wire: unauthenticated sessions
+  (`BFD-NO-AUTH`), echo enabled, a `TTL≠255` **GTSM** violation on a single-hop/LAG session
+  (RFC 5881 requires 255), and **malformed / truncated headers** — the latter the
+  exploitation signal for **CVE-2018-0155** (Cisco Catalyst 4500/4900 BFD-offload `iosd`
+  crash on an incomplete BFD header, CVSS 8.6), not just protocol hygiene.
+- **instability** — behavioural: session flap, convergence storm (many sessions down at
+  once), and collapsed detection-time.
+
+It also reads **auth posture** off the wire without holding any key: mid-session
+**downgrade**, one-sided (**asymmetric**) authentication, and stalled-sequence **replay
+windows** on keyed-MD5/SHA1. **No baseline learning**: the first sighting of a session
+records its discriminators and state and emits inventory only, and observation gaps are
+treated as **resyncs**, so deploying mid-flight on a lossy SPAN never manufactures a
+phantom teardown. The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the BFD
+parser and the pcap reader are all hand-rolled (Scapy is used only by the upstream CLI's
+live mode, which the in-app path does not use). **API:** `GET /api/net/bfd-watch` (query:
+`interface`, `seconds`).
+
+> **Watchtower feed.** HIGH/CRITICAL BFD findings (spoofed teardown, forced AdminDown,
+> state regression, malformed/truncated header, GTSM violation, auth downgrade, session
+> flap) are appended as JSON-lines to `/var/log/ragnar/bfd_watch.jsonl`, so
+> failover-manipulation alerts fold into the unified pane + single Pushover path.
 
 ### FHRP Watch
 A **passive** hijack scanner for the **First Hop Redundancy Protocols** — **HSRP**

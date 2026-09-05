@@ -67,6 +67,13 @@ code + session) — a correlated **LAG hijack** lands as **critical**, and deliv
 anomalies (VLAN-tagged / non-group-MAC LACPDUs), identity manipulation and sync/timeout
 flapping as **high**.
 
+[`bfd_watch`](nettools.md#bfd-watch) (BFD Watch) appends its **HIGH/CRITICAL**
+failover-manipulation findings to `/var/log/ragnar/bfd_watch.jsonl` (deduplicated per
+code + session) — a **spoofed teardown** / **forced AdminDown** / illegal **state
+regression** that induces routing reconvergence lands as **critical**, and no-auth /
+GTSM violation / malformed-or-truncated header (**CVE-2018-0155**) / auth downgrade /
+session flap as **high**.
+
 These vendor guards are **LAN-only**: their findings only mean anything on a
 wired switch/router uplink or a SPAN/mirror port, so the background rotation
 runs them **only when a genuine wired LAN interface is up** and always over that

@@ -1856,6 +1856,7 @@ _NI_CRITICAL = {
     'autokey-exploit',                                                 # ntp (CVE-2014-9295 crypto_recv overflow signature)
     'lag-hijack',                                                      # lacp (aggregation takeover: identity manip + member disruption)
     'zerologon', 'dcsync', 'credential-exposure',                     # rpc-netlogon (CVE-2020-1472 chain / DCSync / DPAPI backup-key / WinRM basic)
+    'failover-manipulation',                                           # bfd (forged teardown / forced AdminDown / illegal state regression -> induced reconvergence)
     'attack',                                                          # vendor guards: an exploitation primitive observed on the wire
 }
 
@@ -1952,6 +1953,7 @@ def _net_integrity_check_once():
         ('telnet', 'Telnet', lambda: watch(nd.do_telnet_watch, interface=cap_iface)),
         ('lacp', 'LACP', lambda: watch(nd.do_lacp_watch, interface=cap_iface)),
         ('rpc', 'RPC', lambda: watch(nd.do_rpc_watch, interface=cap_iface)),
+        ('bfd', 'BFD', lambda: watch(nd.do_bfd_watch, interface=cap_iface)),
     ]
 
     # LAN-only vendor switch/router guards: only auto-run when a genuine wired

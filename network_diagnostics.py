@@ -41,6 +41,7 @@ import ssh_watch
 import telnet_watch
 import lacpwatch
 import rpcwatch
+import bfdwatch
 try:
     import icmpwatch as _icmpwatch   # transport-agnostic v2 redirect/ARP detector
 except Exception:                    # partial deploy without the engine file
@@ -66,6 +67,7 @@ from ssh_watch import do_ssh_watch
 from telnet_watch import do_telnet_watch
 from lacpwatch import do_lacp_watch
 from rpcwatch import do_rpc_watch
+from bfdwatch import do_bfd_watch
 
 try:
     from flask import request, jsonify
@@ -15742,6 +15744,15 @@ def _rpc_selftest():
     return {'success': r['success'], 'scenarios': scen}
 
 
+def _bfd_selftest():
+    """Adapt bfdwatch.selftest() to the aggregator's scenarios/scapy shape. The BFD
+    decode+detect path is pure-Python (own libpcap reader; scapy only for the CLI's
+    live mode, unused here). Includes the engine's own 39-case Tier-1 suite."""
+    r = bfdwatch.selftest()
+    scen = [{'name': c['name'], 'pass': c['pass']} for c in r['scenarios']]
+    return {'success': r['success'], 'scenarios': scen}
+
+
 # ==========================================================================
 # Vendor CVE Guards — passive Cisco / Juniper / Arista router+switch monitors
 # ==========================================================================
@@ -17440,6 +17451,7 @@ def do_routing_selftest():
               'ldap': _ldap_selftest(),
               'ssh': _ssh_selftest(), 'telnet': _telnet_selftest(),
               'lacp': _lacp_selftest(), 'rpc': _rpc_selftest(),
+              'bfd': _bfd_selftest(),
               'ospf': _ospf_selftest(), 'bgp': _bgp_selftest(),
               'arp': _arp_selftest(), 'dns': _dns_selftest(),
               'mac': _mac_selftest(), 'dhcp': _dhcp_selftest(),
@@ -19115,6 +19127,15 @@ def register_network_diagnostics(app, logger=None):
         dcs = [d.strip() for d in (request.args.get('dcs') or '').split(',') if d.strip()]
         _log(f"net/rpc-watch iface={iface or 'default-route'} secs={secs} dcs={len(dcs)}")
         return jsonify(do_rpc_watch(interface=iface, seconds=secs, dcs=dcs or None))
+
+    @app.route('/api/net/bfd-watch', methods=['GET'])
+    def net_bfd_watch():
+        iface = (request.args.get('interface') or '').strip() or None
+        if iface is not None and not _valid_iface(iface):
+            return _bad('Invalid interface')
+        secs = _clamp_int(request.args.get('seconds'), 20, 8, 60)
+        _log(f"net/bfd-watch iface={iface or 'default-route'} secs={secs}")
+        return jsonify(do_bfd_watch(interface=iface, seconds=secs))
 
     @app.route('/api/net/isis-watch', methods=['GET'])
     def net_isis_watch():
