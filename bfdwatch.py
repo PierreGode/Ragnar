@@ -438,7 +438,9 @@ ETH_P_8021AD = 0x88A8
 IPPROTO_UDP = 17
 
 # Extension headers we will walk past to reach UDP in IPv6.
-V6_SKIPPABLE = {0: True, 43: True, 60: True}  # hop-by-hop, routing, dest-opts
+# Protocol 51 (AH) and 60 (Dest Opts) use different length encodings;
+# see _decode_ipv6 for special handling of AH.
+V6_SKIPPABLE = {0: True, 43: True, 51: True, 60: True}  # hop-by-hop, routing, AH, dest-opts
 
 
 @dataclass
@@ -528,7 +530,12 @@ def _decode_ipv6(buf, off, ts, src_mac, dst_mac, vlan) -> Optional[PacketMeta]:
     while nxt in V6_SKIPPABLE and hops < 6:
         if len(buf) < cur + 2:
             return None
-        ext_len = (buf[cur + 1] + 1) * 8
+        # RFC 2402 (AH, protocol 51) uses (len + 2) * 4 byte units.
+        # RFC 2460 (HopOpt, Routing, DestOpts: 0, 43, 60) use (len + 1) * 8 byte units.
+        if nxt == 51:  # AH
+            ext_len = (buf[cur + 1] + 2) * 4
+        else:  # 0, 43, 60
+            ext_len = (buf[cur + 1] + 1) * 8
         nxt = buf[cur]
         cur += ext_len
         hops += 1

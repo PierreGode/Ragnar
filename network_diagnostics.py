@@ -17327,6 +17327,26 @@ _JUNIPER_GUARD_BPF = (
     'tcp port 8443 or ' + _GUARD_IP6_EXTHDR_BPF)
 
 
+# IPv6 extension headers the chain walkers step over to reach the transport —
+# the same set the capture admits (_GUARD_IP6_EXTHDR_BPF). AH (51) is the tell:
+# it uses a DIFFERENT length encoding than the RFC 8200 headers, so a naive
+# (len+1)*8 walk misaligns and drops the frame (the bfdwatch/ptpwatch AH bug).
+_IPV6_EXT_HDRS = frozenset((0, 43, 44, 51, 60))  # HopOpt, Routing, Frag, AH, DestOpt
+
+
+def _ipv6_ext_len(buf, off, nh):
+    """Byte length of the IPv6 extension header of type `nh` at `off`, or None if
+    truncated. Fragment (44) is a fixed 8 bytes; AH (51) is (len+2)*4 per RFC 2402
+    (4-byte units, bias 2); the rest (0/43/60) are (len+1)*8 per RFC 8200."""
+    if off + 2 > len(buf):
+        return None
+    if nh == 44:
+        return 8
+    if nh == 51:
+        return (buf[off + 1] + 2) * 4
+    return (buf[off + 1] + 1) * 8
+
+
 def _guard_ip_payload(block_lines):
     """Reconstruct the L4 payload bytes from a tcpdump `-x`/`-X` hex-dump block.
     tcpdump prints packet bytes from the IP header on (link layer stripped); we
@@ -17356,15 +17376,15 @@ def _guard_ip_payload(block_lines):
         if len(data) < 40:
             return (None, None, None, b'')
         # Walk the IPv6 extension-header chain to the true upper-layer protocol —
-        # a single Hop-by-Hop/Routing/Dest-Opts header is enough to hide the TCP
-        # header from a naive `data[6]`/`data[40:]` read (and from a `tcp port N`
-        # BPF, which is why the capture admits all IPv6). Fragment (44) is a fixed
-        # 8-byte header; the others are (hdr-ext-len + 1) * 8.
+        # a single Hop-by-Hop/Routing/Dest-Opts/AH header is enough to hide the
+        # TCP header from a naive `data[6]`/`data[40:]` read (and from a `tcp
+        # port N` BPF). _ipv6_ext_len handles AH's RFC 2402 length encoding.
         proto, off, hops = data[6], 40, 0
-        while proto in (0, 43, 44, 60) and off + 2 <= len(data) and hops < 16:
-            nxt = data[off]
-            off += 8 if proto == 44 else (data[off + 1] + 1) * 8
-            proto, hops = nxt, hops + 1
+        while proto in _IPV6_EXT_HDRS and hops < 16:
+            step = _ipv6_ext_len(data, off, proto)
+            if not step:
+                break
+            proto, off, hops = data[off], off + step, hops + 1
         l4 = data[off:] if off <= len(data) else b''
     else:
         return (None, None, None, b'')
@@ -17401,10 +17421,11 @@ def _guard_l3l4_from_raw(data):
             if len(data) < 40:
                 return none5
             proto, off, hops = data[6], 40, 0
-            while proto in (0, 43, 44, 60) and off + 2 <= len(data) and hops < 16:
-                nxt = data[off]
-                off += 8 if proto == 44 else (data[off + 1] + 1) * 8
-                proto, hops = nxt, hops + 1
+            while proto in _IPV6_EXT_HDRS and hops < 16:
+                step = _ipv6_ext_len(data, off, proto)
+                if not step:
+                    break
+                proto, off, hops = data[off], off + step, hops + 1
             src = socket.inet_ntop(socket.AF_INET6, data[8:24])
             dst = socket.inet_ntop(socket.AF_INET6, data[24:40])
         else:
@@ -17822,16 +17843,16 @@ def _ipv6_rh0(ip_raw):
     if len(ip_raw) < 40 or (ip_raw[0] >> 4) != 6:
         return False
     nh, off, hops = ip_raw[6], 40, 0
-    while nh in (0, 43, 60) and off + 2 <= len(ip_raw) and hops < 16:
+    while nh in _IPV6_EXT_HDRS and off + 2 <= len(ip_raw) and hops < 16:
         if nh == 43:                              # Routing Header
             if off + 3 >= len(ip_raw):
                 return False
             if ip_raw[off + 2] == 0:              # routing type 0 == RH0
                 return True
-        nxt = ip_raw[off]
-        off += (ip_raw[off + 1] + 1) * 8
-        nh = nxt
-        hops += 1
+        step = _ipv6_ext_len(ip_raw, off, nh)     # AH-aware length (RFC 2402)
+        if not step:
+            return False
+        nh, off, hops = ip_raw[off], off + step, hops + 1
     return False
 
 
@@ -18803,6 +18824,21 @@ def _cisco_selftest():
                       'got': _cbpf,
                       'pass': ('udp port 546' in _cbpf and 'udp port 547' in _cbpf
                                and 'ip6[6]' in _cbpf and '(ip and' not in _cbpf)})
+
+    # AH (protocol 51) length encoding (RFC 2402): a payload-len field of 4 means
+    # (4 + 2) * 4 = 24 bytes, NOT the (4 + 1) * 8 = 40 of the RFC 8200 headers.
+    scenarios.append({'name': 'cisco-ah-extlen',
+                      'expect': '24', 'got': str(_ipv6_ext_len(b'\x2b\x04' + b'\x00' * 22, 0, 51)),
+                      'pass': _ipv6_ext_len(b'\x2b\x04' + b'\x00' * 22, 0, 51) == 24})
+    # RH0 hidden BEHIND an AH header must still be found — the walker has to skip
+    # AH with the right length or the frame is silently dropped (the AH bug class).
+    _ah = b'\x2b\x04' + b'\x00' * 22                         # next=Routing(43), len=4 -> 24B
+    _rh0 = bytes([59, 0, 0, 0, 0, 0, 0, 0])                  # next=NoNext, type 0 (RH0)
+    _v6ah = (b'\x60\x00\x00\x00' + struct.pack('!H', len(_ah) + len(_rh0))
+             + bytes([51, 64]) + ipaddress.IPv6Address('2001:db8::1').packed
+             + ipaddress.IPv6Address('2001:db8::2').packed + _ah + _rh0)
+    scenarios.append({'name': 'cisco-ipv6-rh0-behind-ah', 'expect': 'RH0 found behind AH',
+                      'got': str(_ipv6_rh0(_v6ah)), 'pass': _ipv6_rh0(_v6ah) is True})
 
     # BER parse: SNMPv2c GetRequest, default community.
     snmp = _snmp_ber_parse(_snmp_v2c_get(b'public'))
