@@ -134,6 +134,12 @@ DEFAULT_SOURCES = {
     # headers (CVE-2018-0155 iosd crash), auth downgrade/asymmetric, GTSM violations.
     'bfd_watch':     {'label': 'BFD Watch (forged teardown / failover manipulation)',
                       'paths': ['/var/log/ragnar/bfd_watch.jsonl']},
+    # PTP / IEEE-1588 / gPTP timing-plane manipulation (do_ptp_watch): grandmaster
+    # takeover / two sources one GM identity, correctionField or origin-timestamp
+    # injection, mid-session currentUtcOffset flip, management SET/WRITE, unicast-cancel
+    # forgery, and gPTP multi-peer-delay-responder denial-of-timing.
+    'ptp_watch':     {'label': 'PTP Watch (grandmaster takeover / time injection)',
+                      'paths': ['/var/log/ragnar/ptp_watch.jsonl']},
     # MPLS / SR-MPLS / SRv6 label & segment manipulation (do_sr_mpls_watch): a label
     # or SRH on a customer-facing port (label-injection / VRF-hopping), reserved /
     # implicit-null labels forwarded, TTL-expired frames forwarded, SRv6 path

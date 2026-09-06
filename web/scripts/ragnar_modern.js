@@ -9199,6 +9199,70 @@ async function runBfdWatch() {
     }
 }
 
+// ---- PTP Watch (IEEE-1588 / PTPv2 / gPTP timing-plane manipulation) --------
+const _PTP_VERDICT_STYLE = {
+    clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No PTP traffic seen on this segment'],
+    posture:               ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PTP posture note — no integrity protection, multiple domains, or version downgrade on the timing plane'],
+    'attack-indicator':    ['bg-amber-950/50 border-amber-800 text-amber-300', '⚠ PTP attack indicator — a self-contradiction or protocol violation (not, on its own, a confirmed grandmaster takeover)'],
+    exposure:              ['bg-red-950/60 border-red-800 text-red-300', '🛑 High-severity PTP exposure — announce/sync flood, sequence regression or identity conflict'],
+    'time-manipulation':   ['bg-red-950/60 border-red-800 text-red-300', '🛑 TIME MANIPULATION — grandmaster takeover / correctionField or timestamp injection / utcOffset flip / management WRITE / peer-delay denial'],
+    unknown:               ['bg-slate-800 border-slate-700 text-slate-400', '— Could not determine'],
+};
+const _PTP_SEV_STYLE = {
+    critical: 'text-red-300', high: 'text-red-300', medium: 'text-amber-300',
+    low: 'text-gray-400', info: 'text-gray-500',
+};
+async function runPtpWatch() {
+    const out = document.getElementById('ptp-results');
+    if (!out) return;
+    const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
+    const ifaceSel = document.getElementById('ptp-iface');
+    const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
+    const secsEl = document.getElementById('ptp-secs');
+    const secs = secsEl && secsEl.value ? secsEl.value : '20';
+    _ndBusy(btn, true, 'Listening…');
+    out.classList.remove('hidden');
+    out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PTP (Annex F 0x88F7 · Annex D+E UDP 319/320)…</p>';
+    try {
+        _fillIfaceSel('ptp-iface');
+        const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
+        const d = await fetchAPI('/api/net/ptp-watch' + qs);
+        if (!d || d.success === false) {
+            const msg = (d && d.error) || 'failed';
+            let extra = '';
+            if (d && d.missing_tool) extra = ' <button onclick="installNetTool(\'tcpdump\', this, runPtpWatch)" class="ml-2 underline text-cyan-400">Install tcpdump</button>';
+            out.innerHTML = '<p class="text-sm text-red-400">Error: ' + escapeHtml(msg) + extra + '</p>';
+            return;
+        }
+        const [cls, label] = _PTP_VERDICT_STYLE[d.verdict] || _PTP_VERDICT_STYLE.unknown;
+        const transports = (d.transports || []).join(', ') || '—';
+        let html = `<div class="mb-2 px-3 py-2 rounded border ${cls} text-sm">${label}</div>`;
+        html += `<p class="text-xs text-gray-500 mb-2">Interface: ${escapeHtml(d.interface || '—')} · ${d.seconds}s · clocks: ${d.clocks || 0} · transports: ${escapeHtml(transports)}</p>`;
+        const findings = (d.findings || []).filter(f => ['critical', 'high', 'medium'].includes((f.severity || '').toLowerCase()));
+        if (findings.length) {
+            html += '<table class="min-w-full text-xs text-gray-300 whitespace-nowrap"><thead>' +
+                '<tr class="text-left text-gray-500"><th class="px-2 py-1">Sev</th><th class="px-2 py-1">Code</th><th class="px-2 py-1">Title</th><th class="px-2 py-1">Clock</th></tr>' +
+                '</thead><tbody>' +
+                findings.slice(0, 40).map(f => `<tr class="border-t border-slate-800">
+                    <td class="px-2 py-1 ${_PTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-400'}">${escapeHtml((f.severity || '').toLowerCase())}</td>
+                    <td class="px-2 py-1 font-mono ${_PTP_SEV_STYLE[(f.severity || '').toLowerCase()] || 'text-gray-300'}">${escapeHtml((f.code || '').replace(/^PTP-/, ''))}</td>
+                    <td class="px-2 py-1 text-gray-300 whitespace-normal">${escapeHtml(f.title || '')}</td>
+                    <td class="px-2 py-1 font-mono text-gray-400">${escapeHtml(f.port_identity || '-')}</td>
+                </tr>`).join('') +
+                '</tbody></table>';
+        }
+        if (d.reasons && d.reasons.length) {
+            html += '<ul class="text-xs text-gray-400 mt-2 list-disc pl-5">' +
+                d.reasons.map(r => '<li>' + escapeHtml(r) + '</li>').join('') + '</ul>';
+        }
+        out.innerHTML = html;
+    } catch (e) {
+        out.innerHTML = '<p class="text-sm text-red-400">Failed: ' + escapeHtml(e.message) + '</p>';
+    } finally {
+        _ndBusy(btn, false);
+    }
+}
+
 // ---- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -----
 const _SRM_VERDICT_STYLE = {
     clean:                 ['bg-green-950/40 border-green-900 text-green-400', '✓ No label/segment injection, reserved-label, TTL-expiry or SR control-plane anomaly'],
