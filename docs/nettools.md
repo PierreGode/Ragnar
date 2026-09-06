@@ -2543,7 +2543,14 @@ unauthenticated file upload, and **`JNPR-014`** the two correlated from one sour
 an **RCE chain** — plus **`JNPR-050`/`JNPR-051`** the **CVE-2026-21902** anomaly-API
 RCE and **`JNPR-030`** Junos-Space stored-XSS (**CVE-2025-59978**) injection attempts.
 Passive version extraction is a known dead end for this vendor, so version postures
-are **not** claimed.
+are **not** claimed. **Dual-stack** — the same attacks are detected over **IPv4 and
+IPv6** with the same codes (the logic keys on port + payload, which are identical
+over either family). The IPv6 gotcha is handled properly: a single IPv6 **extension
+header** defeats a `tcp port 80` BPF (BPF can't chase the header chain), so the
+capture admits **all** IPv6 and filters by port in Python; the extension-header chain
+is walked from the reconstructed packet bytes to recover the true L4 protocol and
+port even when tcpdump splits the address line from the port line. This dual-stack
+flow/protocol parse is shared by all four vendor guards.
 - Endpoint: `GET /api/net/juniper-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py juniper-guard [--iface I] [--seconds N] [--json]`
 

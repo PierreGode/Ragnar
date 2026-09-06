@@ -2490,7 +2490,7 @@
                 <!-- Juniper Switch & Router Guard -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
                     <h3 class="text-lg font-semibold mb-1">Juniper Guard <span class="text-xs font-normal text-gray-500">(J-Web · SSR · Junos Space · Junos-Evolved)</span></h3>
-                    <p class="text-xs text-amber-300/90 mb-2">Passive Juniper CVE guard — <strong>detection-only</strong>, never transmits. Fully dissects cleartext HTTP to <strong>J-Web</strong> and the Junos-Evolved <strong>On-Box Anomaly Detection API</strong>, and reads TLS ClientHello SNI. Flags the byte-exact <strong>CVE-2023-36844..36847</strong> J-Web attack shapes — <strong>PHPRC / LD_PRELOAD environment-variable injection</strong>, <strong>unauthenticated file upload</strong>, and the two correlated together as an <strong>RCE chain</strong> — plus the <strong>CVE-2026-21902</strong> anomaly-API RCE and Junos-Space stored-XSS injection attempts.</p>
+                    <p class="text-xs text-amber-300/90 mb-2">Passive Juniper CVE guard — <strong>detection-only</strong>, never transmits. Fully dissects cleartext HTTP to <strong>J-Web</strong> and the Junos-Evolved <strong>On-Box Anomaly Detection API</strong>, and reads TLS ClientHello SNI. Flags the byte-exact <strong>CVE-2023-36844..36847</strong> J-Web attack shapes — <strong>PHPRC / LD_PRELOAD environment-variable injection</strong>, <strong>unauthenticated file upload</strong>, and the two correlated together as an <strong>RCE chain</strong> — plus the <strong>CVE-2026-21902</strong> anomaly-API RCE and Junos-Space stored-XSS injection attempts. <strong>Dual-stack</strong>: the same attacks are caught over <strong>IPv4 and IPv6</strong> (identical codes — the logic is family-agnostic). The capture admits <em>all</em> IPv6 and filters by port in Python, because a single IPv6 <strong>extension header</strong> defeats a <span class="font-mono">tcp&nbsp;port&nbsp;80</span> BPF — the exact evasion an attacker would use to slip a J-Web exploit past a naive filter; the extension-header chain is then walked from the packet bytes to recover the true port even when tcpdump splits the address and port lines.</p>
                     <p class="text-sm text-gray-400 mb-3">One short passive capture over the Juniper web surface (HTTP 80/8080, anomaly API 8160, TLS 443/8443). No TCP reassembly, so a segmented request is best-effort; passive version extraction is a known dead end for this vendor, so version postures are not claimed.</p>
                     <div class="flex flex-wrap items-center gap-2">
                         <select id="juniper-guard-iface" title="Interface for the capture — LAN-only: pick the LAN/uplink NIC or a SPAN/mirror port (Wi-Fi is ignored)" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
@@ -8456,7 +8456,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260906-vpn-snmp-mac-cisco-v2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260906-juniper-guard-v2-ipv6"></script>
 
 
 
