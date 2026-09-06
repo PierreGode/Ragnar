@@ -781,6 +781,48 @@ def _neigh_entries(iface=None):
     return out
 
 
+def _neigh6_entries(iface=None):
+    """Parse `ip -6 neigh` into [(ip6, mac, state)] for entries with a lladdr —
+    the IPv6/NDP analog of _neigh_entries (link-local included)."""
+    cmd = ['ip', '-6', 'neigh', 'show']
+    if iface:
+        cmd += ['dev', iface]
+    res = _run(cmd, timeout=5)
+    out = []
+    for line in res['out'].splitlines():
+        m = re.match(r'^([0-9a-fA-F:]+)\b.*?\blladdr\s+([0-9a-fA-F:]{17})\s+(\w+)', line)
+        if m and ':' in m.group(1):
+            out.append((m.group(1).lower(), m.group(2).lower(), m.group(3)))
+    return out
+
+
+def _v6_prefix64(ip):
+    """The /64 network address of an IPv6 address (its subnet), for churn-by-subnet."""
+    try:
+        return str(ipaddress.ip_network(ip + '/64', strict=False).network_address)
+    except ValueError:
+        return ip
+
+
+def _eui64_embedded_mac(v6):
+    """If `v6`'s 64-bit interface identifier is in modified-EUI-64 form (…ff:fe…
+    in the middle, RFC 4291), return the embedded MAC with the U/L bit flipped
+    back, else None. A SLAAC EUI-64 address embeds its owner's MAC, so this lets
+    the address be checked against the MAC actually transmitting it."""
+    try:
+        packed = ipaddress.ip_address(v6).packed
+    except (ValueError, TypeError):
+        return None
+    if len(packed) != 16:
+        return None
+    iid = packed[8:]                        # low 64 bits (interface identifier)
+    if iid[3] != 0xff or iid[4] != 0xfe:    # not modified-EUI-64 form
+        return None
+    first = iid[0] ^ 0x02                    # invert the universal/local bit
+    return ':'.join('%02x' % b for b in (first, iid[1], iid[2],
+                                         iid[5], iid[6], iid[7]))
+
+
 def _neigh_mac(ip):
     """Current MAC bound to `ip` in the kernel neighbour table, or None. Sends a
     single ping first if the entry is missing, to populate it."""
@@ -1485,11 +1527,40 @@ def do_mac_watch(scan=True, interface=None):
         'hijacks': fhrp_hijacks,
     }
 
+    # (7) IPv6 / NDP identity. MAC↔IPv6 bindings from the NDP neighbour cache,
+    # kept SEPARATE from the v4 clone/spoof logic above: a healthy IPv6 host holds
+    # a link-local plus several SLAAC/temporary globals on ONE MAC, so "many IPs
+    # per MAC" is normal for v6 and must never read as a clone. The v6-native check
+    # is EUI-64 identity — a SLAAC EUI-64 address embeds its owner's MAC, so a
+    # mismatch against the transmitting MAC is a MAC-identity contradiction (medium:
+    # proxy-NDP can also explain it). True NDP spoofing is ndpwatch's job, not this.
+    v6_bindings, eui64_mismatches, seen6 = [], [], {}
+    for ip6, mac6, _state in _neigh6_entries():
+        m6 = _mac_norm(mac6)
+        if not m6 or m6 in local:
+            continue
+        seen6.setdefault(m6, set()).add(ip6)
+        emb = _eui64_embedded_mac(ip6)
+        if emb and emb != m6 and _classify_mac(emb)['klass'] != 'invalid':
+            eui64_mismatches.append({'ip': ip6, 'mac': m6, 'embedded_mac': emb})
+    for mac6, ips6 in sorted(seen6.items()):
+        info6 = _classify_mac(mac6)
+        v6_bindings.append({'mac': mac6, 'ips': sorted(ips6),
+                            'prefixes': sorted({_v6_prefix64(i) for i in ips6}),
+                            'klass': info6['klass'], 'vendor': info6['vendor']})
+    for e in eui64_mismatches[:8]:
+        reasons.append(
+            f"IPv6 {e['ip']} is a SLAAC EUI-64 address embedding MAC "
+            f"{e['embedded_mac']}, but the NDP cache binds it to {e['mac']} — a "
+            f"MAC-identity contradiction (spoof; proxy-NDP can also explain it)")
+
     if spoofed or clones or hi_events or fhrp_hijacks:
         verdict = 'spoofed'
     elif tracks or randomized or fhrp_virtuals:
         verdict = 'suspicious' if tracks else ('fhrp' if fhrp_virtuals and not randomized
                                                else 'randomization')
+    if eui64_mismatches and verdict in ('clean', 'randomization', 'fhrp'):
+        verdict = 'suspicious'
 
     return {
         'success': True, 'verdict': verdict,
@@ -1503,10 +1574,13 @@ def do_mac_watch(scan=True, interface=None):
             'tracks': len(tracks),
             'fhrp_virtual': len(fhrp_virtuals),
             'fhrp_hijacks': len(fhrp_hijacks),
+            'ipv6_bindings': len(v6_bindings),
+            'eui64_mismatch': len(eui64_mismatches),
         },
         'spoofed': spoofed,
         'clones': clones,
         'fhrp': fhrp,
+        'ipv6': {'bindings': v6_bindings, 'eui64_mismatches': eui64_mismatches},
         # Every MAC seen this pass, worst class first, so the UI can list them.
         'observed_macs': sorted(
             current,
@@ -2674,12 +2748,17 @@ def _vpn_provider_match(*fields):
 # --------------------------------------------------------------------------
 
 _VPN_LIST_URL = 'https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv4.txt'
+# X4BNet ships a separate IPv6 list; a VPN egress can just as easily be v6, so we
+# fetch both and match either family (dual-stack). v6 is best-effort — a missing
+# v6 list never invalidates a good v4 list.
+_VPN_LIST_URL6 = 'https://raw.githubusercontent.com/X4BNet/lists_vpn/main/output/vpn/ipv6.txt'
 _VPN_LIST_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'data', 'vpn_ip_ranges.txt')
 _VPN_LIST_MAX_AGE = 7 * 24 * 3600  # ASN-derived, moves slowly; weekly is plenty
 _VPN_LIST_MIN_BYTES = 10000        # sanity floor -- the real list is ~150 KB
 _vpn_list_lock = threading.Lock()
-_vpn_list_ranges = None            # sorted [(first_int, last_int)], parsed cache
+_vpn_list_ranges = None            # sorted [(first_int, last_int)] IPv4, parsed cache
+_vpn_list_ranges6 = None           # sorted [(first_int, last_int)] IPv6, parsed cache
 _vpn_list_mtime = None             # mtime the cache was parsed from
 
 
@@ -2702,6 +2781,24 @@ def _vpn_list_refresh():
                    timeout=25)
         try:
             if res['rc'] == 0 and os.path.getsize(tmp) >= _VPN_LIST_MIN_BYTES:
+                # Best-effort append the IPv6 list (one combined file, both
+                # families). A failed/short v6 fetch is ignored — never lets a
+                # bad v6 download discard a good v4 list.
+                tmp6 = _VPN_LIST_PATH + '.v6.tmp'
+                r6 = _run(['curl', '-sf', '--max-time', '20', '-o', tmp6,
+                           _VPN_LIST_URL6], timeout=25)
+                try:
+                    if r6['rc'] == 0 and os.path.getsize(tmp6) > 0:
+                        with open(tmp, 'a') as dst, open(tmp6) as src:
+                            dst.write('\n')
+                            dst.write(src.read())
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.unlink(tmp6)
+                    except OSError:
+                        pass
                 os.replace(tmp, _VPN_LIST_PATH)
                 return _VPN_LIST_PATH
             os.unlink(tmp)
@@ -2712,9 +2809,10 @@ def _vpn_list_refresh():
 
 def _vpn_list_load():
     """Sorted (first, last) int ranges from the cached list, reparsed only when
-    the file changes. Returns None when no list is available (never synced and
-    currently offline)."""
-    global _vpn_list_ranges, _vpn_list_mtime
+    the file changes. Returns (ipv4_ranges, ipv6_ranges), or None when no list is
+    available (never synced and currently offline). Both families are parsed so a
+    VPN egress over IPv6 is matched too."""
+    global _vpn_list_ranges, _vpn_list_ranges6, _vpn_list_mtime
     with _vpn_list_lock:
         path = _vpn_list_refresh()
         if not path:
@@ -2722,8 +2820,8 @@ def _vpn_list_load():
         try:
             mtime = os.path.getmtime(path)
             if _vpn_list_ranges is not None and mtime == _vpn_list_mtime:
-                return _vpn_list_ranges
-            ranges = []
+                return _vpn_list_ranges, _vpn_list_ranges6
+            ranges, ranges6 = [], []
             with open(path) as f:
                 for line in f:
                     line = line.strip()
@@ -2733,28 +2831,36 @@ def _vpn_list_load():
                         net = ipaddress.ip_network(line, strict=False)
                     except ValueError:
                         continue
-                    if net.version == 4:
-                        ranges.append((int(net.network_address),
-                                       int(net.broadcast_address)))
+                    pair = (int(net.network_address), int(net.broadcast_address))
+                    (ranges if net.version == 4 else ranges6).append(pair)
         except OSError:
-            return _vpn_list_ranges  # keep whatever was parsed before
+            # keep whatever was parsed before
+            return _vpn_list_ranges, _vpn_list_ranges6
         ranges.sort()
+        ranges6.sort()
         _vpn_list_ranges = ranges
+        _vpn_list_ranges6 = ranges6
         _vpn_list_mtime = mtime
-        return _vpn_list_ranges
+        return _vpn_list_ranges, _vpn_list_ranges6
 
 
 def _vpn_ip_lookup(ip):
-    """Is this public IP inside a known VPN-provider range? True/False, or
-    None when it can't be checked (no list available, or not an IPv4)."""
+    """Is this public IP (IPv4 or IPv6) inside a known VPN-provider range?
+    True/False, or None when it can't be checked (no list, or unparseable IP)."""
     try:
-        n = int(ipaddress.IPv4Address(ip))
+        addr = ipaddress.ip_address(ip)
     except (ValueError, TypeError):
         return None
-    ranges = _vpn_list_load()
+    loaded = _vpn_list_load()
+    if not loaded:
+        return None
+    ranges4, ranges6 = loaded
+    n = int(addr)
+    ranges = ranges6 if addr.version == 6 else ranges4
     if not ranges:
         return None
-    i = bisect.bisect_right(ranges, (n, 0xFFFFFFFF)) - 1
+    hi = (1 << 128) - 1 if addr.version == 6 else 0xFFFFFFFF
+    i = bisect.bisect_right(ranges, (n, hi)) - 1
     return i >= 0 and ranges[i][1] >= n
 
 
@@ -3797,15 +3903,27 @@ def _mac_selftest():
     run('mac-fhrp-vrrpv3', '00:00:5e:00:02:05', 'fhrp_virtual')
     run('mac-fhrp-glbp', '00:07:b4:00:01:02', 'fhrp_virtual')
 
+    # EUI-64 identity (IPv6/NDP): a modified-EUI-64 SLAAC address embeds its MAC.
+    def euic(name, v6, expect):
+        got = _eui64_embedded_mac(v6)
+        scenarios.append({'name': name, 'expect': expect, 'got': str(got),
+                          'pass': got == expect})
+    # fe80::0250:56ff:fec0:0001 -> universal MAC 00:50:56:c0:00:01 (U/L bit flipped)
+    euic('eui64-linklocal', 'fe80::250:56ff:fec0:1', '00:50:56:c0:00:01')
+    euic('eui64-global', '2001:db8::a4b:cff:fe12:3456', '08:4b:0c:12:34:56')
+    # a privacy/temporary (non-EUI-64) address has no embedded MAC.
+    euic('eui64-none-temporary', '2001:db8::dead:beef:cafe:1', None)
+
     # VIP-hijack verdict leg: a learned FHRP VIP now answered by a non-virtual MAC
     # is a redundancy-group hijack (verdict 'spoofed'); the clean case (VIP still
     # owned by its virtual MAC) must stay benign. Monkeypatch the neighbour-table
     # + store seams and restore them, so this needs no wire and no root.
     g = globals()
-    saved = {k: g[k] for k in ('_neigh_entries', '_default_gateway', '_neigh_mac',
-                               '_local_macs', '_mac_watch_load', '_mac_watch_save',
-                               '_have')}
+    saved = {k: g[k] for k in ('_neigh_entries', '_neigh6_entries', '_default_gateway',
+                               '_neigh_mac', '_local_macs', '_mac_watch_load',
+                               '_mac_watch_save', '_have')}
     try:
+        g['_neigh6_entries'] = lambda iface=None: []   # v4-only by default here
         vip = '10.9.9.1'
         state = {'store': {'fhrp_vips': {vip: {'mac': '00:00:5e:00:01:05',
                                                'proto': 'VRRP', 'group': 5}}}}
@@ -3828,6 +3946,25 @@ def _mac_selftest():
                           'got': hij.get('verdict'),
                           'pass': hij.get('verdict') == 'spoofed'
                           and bool(hij.get('fhrp', {}).get('hijacks'))})
+        # eui64-mismatch: a SLAAC EUI-64 address embedding 00:50:56:c0:00:01 bound
+        # in the NDP cache to a different MAC -> 'suspicious' + a recorded mismatch.
+        g['_neigh_entries'] = lambda iface=None: []
+        g['_mac_watch_load'] = lambda: {}
+        g['_mac_watch_save'] = lambda d: None
+        g['_neigh6_entries'] = lambda iface=None: [
+            ('fe80::250:56ff:fec0:1', 'b8:27:eb:aa:bb:cc', 'REACHABLE')]
+        em = do_mac_watch(scan=False)
+        scenarios.append({'name': 'mac-eui64-mismatch', 'expect': 'suspicious+recorded',
+                          'got': f"{em.get('verdict')}/{em.get('summary', {}).get('eui64_mismatch')}",
+                          'pass': em.get('verdict') == 'suspicious'
+                          and em.get('summary', {}).get('eui64_mismatch') == 1})
+        # a matching EUI-64 binding must NOT flag.
+        g['_neigh6_entries'] = lambda iface=None: [
+            ('fe80::250:56ff:fec0:1', '00:50:56:c0:00:01', 'REACHABLE')]
+        ok6 = do_mac_watch(scan=False)
+        scenarios.append({'name': 'mac-eui64-clean', 'expect': 'no mismatch',
+                          'got': str(ok6.get('summary', {}).get('eui64_mismatch')),
+                          'pass': ok6.get('summary', {}).get('eui64_mismatch') == 0})
     finally:
         g.update(saved)
 
@@ -8348,8 +8485,12 @@ _SNMP_DEFAULT_COMMUNITIES = frozenset((
     'default', 'write', 'read', 'monitor', 'netman', 'ilo', 'secret', 'password',
     'security', 'router', 'switch', 'test', 'guest', 'tivoli', 'openview', '0', ''))
 
+# Match SNMP over IPv4 or IPv6 transport. tcpdump prints `<addr>.<port>` for both
+# families; the v1/v2c community-exposure and amplification logic downstream keys on
+# the address string, so it is already family-agnostic once the line parses.
+_SNMP_ADDR = r'(?:\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+)'
 _SNMP_LINE_RE = re.compile(
-    r'^\s*(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+):\s*'
+    r'^\s*(' + _SNMP_ADDR + r')\.(\d+)\s*>\s*(' + _SNMP_ADDR + r')\.(\d+):\s*'
     r'\{\s*SNMP(v1|v2c|v3)\b(.*)$')
 _SNMP_COMMUNITY_RE = re.compile(r'C="([^"]*)"')
 _SNMP_PDU_RE = re.compile(
@@ -8771,6 +8912,19 @@ def _snmp_selftest():
             and pev[2]['version'] == 'v3')
     scenarios.append({'name': 'snmp-parse', 'expect': 'public/secret/v3-none',
                       'got': str([e['community'] for e in pev]), 'pass': p_ok})
+
+    # 6b. IPv6 transport: a v2c SetRequest over IPv6 must parse and classify as
+    #     write-exposed exactly like the IPv4 path (dual-stack).
+    run('v6-write-exposed', line('2001:db8::50', '2001:db8::1', 42000, 161, 'v2c',
+                                 'SetRequest', community='private'), 12, base,
+        'write-exposed')
+    pv6 = _parse_snmp_capture(line('2001:db8::50', '2001:db8::1', 42000, 161, 'v2c',
+                                   'GetRequest', community='netops'))
+    v6_ok = (len(pv6) == 1 and pv6[0]['src'] == '2001:db8::50'
+             and pv6[0]['dst'] == '2001:db8::1' and pv6[0]['community'] == 'netops')
+    scenarios.append({'name': 'snmp-v6-parse',
+                      'expect': 'src/dst=2001:db8::/community',
+                      'got': str(pv6[0] if pv6 else None)[:80], 'pass': v6_ok})
 
     # Optional Scapy end-to-end: craft real SNMP v2c -> pcap -> tcpdump -> parse.
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
@@ -17160,29 +17314,32 @@ def _guard_ip_payload(block_lines):
     except ValueError:
         return (None, None, None)
     if len(data) < 20:
-        return (None, None, None)
+        return (None, None, None, b'')
     ver = data[0] >> 4
     if ver == 4:
         ihl = (data[0] & 0x0F) * 4
         if ihl < 20 or len(data) < ihl:
-            return (None, None, None)
+            return (None, None, None, b'')
         proto = data[9]
         l4 = data[ihl:]
     elif ver == 6:
         if len(data) < 40:
-            return (None, None, None)
+            return (None, None, None, b'')
         proto = data[6]
         l4 = data[40:]
     else:
-        return (None, None, None)
+        return (None, None, None, b'')
+    # `data` (the raw IP bytes from the IP header on) is returned so callers can
+    # inspect the IPv6 extension-header chain (e.g. a deprecated Routing Header
+    # type 0) that this L4 walk otherwise discards.
     if proto == 6:      # TCP
         if len(l4) < 20:
-            return (ver, proto, b'')
+            return (ver, proto, b'', data)
         thl = ((l4[12] >> 4) & 0x0F) * 4
-        return (ver, proto, l4[thl:] if len(l4) >= thl else b'')
+        return (ver, proto, l4[thl:] if len(l4) >= thl else b'', data)
     if proto == 17:     # UDP
-        return (ver, proto, l4[8:] if len(l4) >= 8 else b'')
-    return (ver, proto, l4)
+        return (ver, proto, l4[8:] if len(l4) >= 8 else b'', data)
+    return (ver, proto, l4, data)
 
 
 def _guard_packets(text):
@@ -17213,15 +17370,16 @@ def _guard_packets(text):
         fm = _GUARD_FLOW_RE.search(btext)
         rec = {'ts': ts, 'proto': proto, 'dissect': btext,
                'src': None, 'sport': None, 'dst': None, 'dport': None,
-               'ipver': None, 'payload': b'',
+               'ipver': None, 'payload': b'', 'ip_raw': b'',
                'vlan_tags': len(re.findall(r'\bvlan\s+\d+', btext))}
         if fm:
             rec['src'], rec['sport'] = fm.group(1), int(fm.group(2))
             rec['dst'], rec['dport'] = fm.group(3), int(fm.group(4))
-        ipver, protonum, payload = _guard_ip_payload(block)
+        ipver, protonum, payload, ip_raw = _guard_ip_payload(block)
         rec['ipver'] = ipver
         if payload is not None:
             rec['payload'] = payload
+        rec['ip_raw'] = ip_raw or b''
         records.append(rec)
     return records
 
@@ -17509,6 +17667,77 @@ def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
     return result
 
 
+def _ikev2_malformed(payload, port):
+    """RFC 7296 IKEv2 header sanity. Over UDP/4500 a 4-byte non-ESP marker
+    precedes the IKE header (raw ESP has none). Returns a reason string when the
+    declared message Length is inconsistent with the datagram (the malformed-input
+    shape of CVE-2024-20307 / CVE-2024-20308), else None."""
+    p = payload or b''
+    if port == 4500:
+        if len(p) < 4 or p[:4] != b'\x00\x00\x00\x00':
+            return None                          # ESP / keepalive, not IKE
+        p = p[4:]
+    if len(p) < 28:                              # too short to hold an IKE header
+        return None
+    declared = int.from_bytes(p[24:28], 'big')
+    if declared < 28:
+        return 'declared IKE message length %d is below the 28-byte header' % declared
+    if declared > len(p):
+        return ('declared IKE message length %d exceeds the %d-byte datagram'
+                % (declared, len(p)))
+    return None
+
+
+def _dhcpv6_malformed(payload):
+    """Walk a DHCPv6 message's options; return a reason when an option length
+    overruns the datagram, trailing bytes remain, there are absurdly many options,
+    or a relay message carries an implausible hop-count (the CVE-2024-20259
+    malformed-input shape on the IPv6 side), else None."""
+    p = payload or b''
+    if len(p) < 4:
+        return None
+    if p[0] in (12, 13):                          # RELAY-FORW / RELAY-REPL
+        if len(p) < 34:
+            return 'DHCPv6 relay message truncated (%d bytes)' % len(p)
+        if p[1] > 32:
+            return 'DHCPv6 relay hop-count %d implausibly high' % p[1]
+        off = 34
+    else:
+        off = 4                                   # msg-type(1) + transaction-id(3)
+    n, count = len(p), 0
+    while off + 4 <= n:
+        olen = int.from_bytes(p[off + 2:off + 4], 'big')
+        off += 4 + olen
+        count += 1
+        if count > 256:
+            return 'DHCPv6 option count exceeds 256 (option flood)'
+    if off > n:
+        return 'DHCPv6 option length overruns the message by %d bytes' % (off - n)
+    if off < n:
+        return 'DHCPv6 has %d trailing bytes past the last option' % (n - off)
+    return None
+
+
+def _ipv6_rh0(ip_raw):
+    """True if an IPv6 packet carries a Routing Header of Type 0 — deprecated by
+    RFC 5095 as a source-routing / traffic-amplification vector that should never
+    appear on a modern segment. Walks the extension-header chain."""
+    if len(ip_raw) < 40 or (ip_raw[0] >> 4) != 6:
+        return False
+    nh, off, hops = ip_raw[6], 40, 0
+    while nh in (0, 43, 60) and off + 2 <= len(ip_raw) and hops < 16:
+        if nh == 43:                              # Routing Header
+            if off + 3 >= len(ip_raw):
+                return False
+            if ip_raw[off + 2] == 0:              # routing type 0 == RH0
+                return True
+        nxt = ip_raw[off]
+        off += (ip_raw[off + 1] + 1) * 8
+        nh = nxt
+        hops += 1
+    return False
+
+
 def _cisco_analyze(records):
     """Pure classifier over parsed guard packets → Cisco findings + verdict.
     Separated from capture so the self-test can drive it with synthetic packets."""
@@ -17593,6 +17822,23 @@ def _cisco_analyze(records):
         if r['proto'] == 'UDP' and (r['dport'] in (500, 4500) or r['sport'] in (500, 4500)):
             add('CG-108', 'IKEV2_ENABLED_ON_SEGMENT', 'LOW', 'EXPOSURE', src,
                 ['CVE-2024-20307', 'CVE-2024-20308'], {})
+            ike_port = r['dport'] if r['dport'] in (500, 4500) else r['sport']
+            why = _ikev2_malformed(r['payload'], ike_port)
+            if why:
+                add('CG-250', 'IKEV2_MALFORMED_PAYLOAD', 'HIGH', 'ATTACK', src,
+                    ['CVE-2024-20307', 'CVE-2024-20308'], {'reason': why})
+
+        # --- DHCPv6 malformed option (CVE-2024-20259 shape, IPv6 side) ---
+        if r['proto'] == 'UDP' and (r['dport'] in (546, 547) or r['sport'] in (546, 547)):
+            why = _dhcpv6_malformed(r['payload'])
+            if why:
+                add('CG-231', 'DHCPV6_MALFORMED_OPTION', 'MEDIUM', 'ATTACK', src,
+                    ['CVE-2024-20259'], {'reason': why})
+
+        # --- IPv6 Routing Header type 0 — deprecated source-routing (RFC 5095) ---
+        if r.get('ipver') == 6 and r.get('ip_raw') and _ipv6_rh0(r['ip_raw']):
+            add('CG-281', 'IPV6_ROUTING_HEADER_TYPE0', 'HIGH', 'ATTACK', src or dst, [],
+                {'note': 'deprecated RH0 source-routing header (RFC 5095) on the segment'})
 
         # --- VLAN tag-stack anomaly (Catalyst 9000 control-plane DoS shape) ---
         if r['vlan_tags'] > _CISCO_MAX_VLAN_TAGS:
@@ -18393,11 +18639,12 @@ def _comware_in_prefix(family, addr_int, prefix):
 
 
 def _guard_rec(proto=None, src='10.0.0.9', sport=40000, dst='10.0.0.1',
-               dport=None, payload=b'', dissect='', vlan_tags=0):
+               dport=None, payload=b'', dissect='', vlan_tags=0, ipver=4,
+               ip_raw=b''):
     """Build a synthetic guard packet record for the analyzer self-tests."""
     return {'ts': 1780000000.0, 'proto': proto, 'src': src, 'sport': sport,
-            'dst': dst, 'dport': dport, 'ipver': 4, 'payload': payload,
-            'dissect': dissect, 'vlan_tags': vlan_tags}
+            'dst': dst, 'dport': dport, 'ipver': ipver, 'payload': payload,
+            'ip_raw': ip_raw, 'dissect': dissect, 'vlan_tags': vlan_tags}
 
 
 def _ber_encode_len(n):
@@ -18483,6 +18730,40 @@ def _cisco_selftest():
     # out-of-scope firewall is screened, not misclassified as a router.
     check('cisco-oos', [_guard_rec(dissect='Cisco Adaptive Security Appliance (ASA)')],
           'observed', ['CG-009'])
+
+    # attack: IKEv2 message whose declared Length overruns the datagram
+    # (CVE-2024-20307/20308 malformed-input shape). 28-byte header, Length=9999.
+    ike_bad = (b'\x11' * 16 + b'\x21\x20\x22\x08' + b'\x00\x00\x00\x00'
+               + (9999).to_bytes(4, 'big'))
+    check('cisco-ikev2-malformed',
+          [_guard_rec(proto='UDP', dport=500, payload=ike_bad)],
+          'attack', ['CG-250'])
+    # a well-formed IKE header (Length == datagram) must NOT flag CG-250.
+    ike_ok = (b'\x11' * 16 + b'\x21\x20\x22\x08' + b'\x00\x00\x00\x00'
+              + (28).to_bytes(4, 'big'))
+    r_ike = _cisco_analyze([_guard_rec(proto='UDP', dport=500, payload=ike_ok)])
+    scenarios.append({'name': 'cisco-ikev2-wellformed', 'expect': 'no CG-250',
+                      'got': str(sorted({f['code'] for f in r_ike['findings']})),
+                      'pass': 'CG-250' not in {f['code'] for f in r_ike['findings']}})
+    # attack: DHCPv6 with an option length that overruns the datagram.
+    dhcp6_bad = b'\x0b' + b'\x00\x00\x01' + b'\x00\x01' + b'\xff\xff' + b'\x00\x00'
+    check('cisco-dhcpv6-malformed',
+          [_guard_rec(proto='UDP', dport=547, payload=dhcp6_bad)],
+          'attack', ['CG-231'])
+    # a well-formed DHCPv6 SOLICIT (one option, exact length) must NOT flag.
+    dhcp6_ok = b'\x01' + b'\x00\x00\x01' + b'\x00\x01' + b'\x00\x02' + b'\xab\xcd'
+    r_d6 = _cisco_analyze([_guard_rec(proto='UDP', dport=547, payload=dhcp6_ok)])
+    scenarios.append({'name': 'cisco-dhcpv6-wellformed', 'expect': 'no CG-231',
+                      'got': str(sorted({f['code'] for f in r_d6['findings']})),
+                      'pass': 'CG-231' not in {f['code'] for f in r_d6['findings']}})
+    # attack: an IPv6 packet carrying a deprecated Routing Header type 0 (RFC 5095).
+    # base v6 hdr (nh=43 routing) + RH0 (nh=59 none, hdrlen=0, type=0, segleft=0) pad.
+    rh0 = (bytes([0x60, 0, 0, 0, 0, 8, 43, 64]) + b'\x20\x01\x0d\xb8' + b'\x00' * 12
+           + b'\x20\x01\x0d\xb8' + b'\x00' * 11 + b'\x01'
+           + bytes([59, 0, 0, 0, 0, 0, 0, 0]))
+    check('cisco-ipv6-rh0',
+          [_guard_rec(proto='IP6', ipver=6, ip_raw=rh0, src='2001:db8::9')],
+          'attack', ['CG-281'])
 
     # --- Scapy end-to-end: craft SNMP default-community -> pcap -> tcpdump -X. ---
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
