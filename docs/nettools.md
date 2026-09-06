@@ -2033,8 +2033,12 @@ records its discriminators and state and emits inventory only, and observation g
 treated as **resyncs**, so deploying mid-flight on a lossy SPAN never manufactures a
 phantom teardown. The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the BFD
 parser and the pcap reader are all hand-rolled (Scapy is used only by the upstream CLI's
-live mode, which the in-app path does not use). **API:** `GET /api/net/bfd-watch` (query:
-`interface`, `seconds`).
+live mode, which the in-app path does not use). The IPv6 decoder walks the full
+extension-header chain, **including the Authentication Header (AH, protocol 51)** — which
+uses a different length encoding than the RFC 8200 headers (`(len+2)×4` per RFC 2402, not
+`(len+1)×8`); before this fix a BFD frame behind AH — as seen on IPsec/AH-hardened
+segments — was silently dropped, so no findings fired at all. **API:**
+`GET /api/net/bfd-watch` (query: `interface`, `seconds`).
 
 > **Watchtower feed.** HIGH/CRITICAL BFD findings (spoofed teardown, forced AdminDown,
 > state regression, malformed/truncated header, GTSM violation, auth downgrade, session
