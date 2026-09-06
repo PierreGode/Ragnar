@@ -17302,6 +17302,30 @@ _GUARD_FLOW_RE = re.compile(
 _GUARD_PROTO_RE = re.compile(r'(?:proto|next-header) (\w+) \((\d+)\)')
 _GUARD_HEX_RE = _NTP_HEX_RE  # `\t0x0010:  4500 004c ...` — shared with NTP
 
+# IPv6 capture clause for the vendor guards. libpcap's `port` primitive ALREADY
+# matches IPv4 and IPv6 alike, so plain v6 on a monitored port needs nothing —
+# the only v6 blind spot is a packet behind an extension header, where the
+# next-header byte (`ip6[6]`) is no longer the transport and a `port` clause
+# can't see it. So we admit only v6 packets whose FIRST next-header is an
+# extension header (0 hop-by-hop, 43 routing, 44 fragment, 51 AH, 60 dest-opts)
+# and let the Python parser walk the chain to the real port. A blanket `or ip6`
+# would instead pull the entire IPv6 stream into userspace — most of the traffic
+# on a busy span, which a Pi Zero 2W can't afford. (Matches the standalone
+# ciscoguard BPF.)
+_GUARD_IP6_EXTHDR_BPF = ('(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 '
+                         'or ip6[6] = 51 or ip6[6] = 60))')
+
+# Per-guard capture filters. Bare `port` clauses match v4 AND v6; DHCPv6 (546/547)
+# is added explicitly (it had no port clause); the ext-header clause admits v6
+# hidden behind an extension header.
+_CISCO_GUARD_BPF = (
+    'udp port 161 or udp port 162 or udp port 546 or udp port 547 or '
+    'udp port 500 or udp port 4500 or tcp port 23 or tcp port 80 or '
+    'tcp port 8080 or tcp port 8443 or ' + _GUARD_IP6_EXTHDR_BPF)
+_JUNIPER_GUARD_BPF = (
+    'tcp port 80 or tcp port 8080 or tcp port 8160 or tcp port 443 or '
+    'tcp port 8443 or ' + _GUARD_IP6_EXTHDR_BPF)
+
 
 def _guard_ip_payload(block_lines):
     """Reconstruct the L4 payload bytes from a tcpdump `-x`/`-X` hex-dump block.
@@ -17711,8 +17735,14 @@ def do_cisco_guard(interface=None, seconds=20, learn=True, quick=False):
     if iface_error:
         return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
-    bpf = ('udp port 161 or udp port 162 or tcp port 23 or tcp port 80 or '
-           'tcp port 8080 or tcp port 8443 or udp port 500 or udp port 4500')
+    # The management + attack surface by port — the bare `port` clauses match both
+    # IPv4 and IPv6 (libpcap does this natively), so plain v6 on these ports is
+    # already covered. Two additions close the real gaps: DHCPv6 (546/547) had no
+    # port clause at all, and _GUARD_IP6_EXTHDR_BPF admits v6 behind an extension
+    # header (which a `port` clause can't see through). This is what lets the
+    # DHCPv6 (CG-231), IKEv2 (CG-250) and IPv6 Routing-Header (CG-281) detectors
+    # fire on live IPv6 traffic, without pulling the whole v6 stream into userspace.
+    bpf = _CISCO_GUARD_BPF
     if not _have('tcpdump'):
         return {'success': False, 'interface': iface,
                 'error': 'tcpdump is not installed. Click Install to add it.',
@@ -17988,12 +18018,11 @@ def do_juniper_guard(interface=None, seconds=20, learn=True, quick=False):
     if iface_error:
         return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
-    # IPv4: match the J-Web / anomaly-API / TLS ports directly. IPv6: admit ALL
-    # v6 and filter by port in Python — a single IPv6 extension header defeats a
-    # `tcp port N` BPF (BPF cannot chase the header chain), so port-filtering v6
-    # at the BPF layer would silently miss exactly the crafted case that matters.
-    bpf = ('(ip and (tcp port 80 or tcp port 8080 or tcp port 8160 or '
-           'tcp port 443 or tcp port 8443)) or ip6')
+    # Bare `port` clauses match J-Web / anomaly-API / TLS over both IPv4 and IPv6
+    # (libpcap does this natively); _GUARD_IP6_EXTHDR_BPF additionally admits v6
+    # hidden behind an extension header (which a `port` clause can't see through).
+    # Not a blanket `or ip6` — that would pull the whole v6 stream onto a Pi.
+    bpf = _JUNIPER_GUARD_BPF
     if not _have('tcpdump'):
         return {'success': False, 'interface': iface,
                 'error': 'tcpdump is not installed. Click Install to add it.',
@@ -18765,6 +18794,16 @@ def _cisco_selftest():
                           'got': f"{res['verdict']}/{sorted(codes)}", 'pass': ok})
         return res
 
+    # BPF conformance: DHCPv6 ports present, v6 admitted via a next-header-qualified
+    # ip6[6] clause (not a blanket `or ip6` that floods a Pi), and no `(ip and ...)`
+    # wrapper (which would wrongly exclude plain IPv6 on a monitored port).
+    _cbpf = _CISCO_GUARD_BPF
+    scenarios.append({'name': 'cisco-bpf-dualstack',
+                      'expect': 'dhcpv6 ports + ip6[6], no blanket/ip-wrapper',
+                      'got': _cbpf,
+                      'pass': ('udp port 546' in _cbpf and 'udp port 547' in _cbpf
+                               and 'ip6[6]' in _cbpf and '(ip and' not in _cbpf)})
+
     # BER parse: SNMPv2c GetRequest, default community.
     snmp = _snmp_ber_parse(_snmp_v2c_get(b'public'))
     ber_ok = bool(snmp) and snmp['version'] == 1 and snmp['community'] == b'public'
@@ -18849,6 +18888,19 @@ def _cisco_selftest():
                  / TCP(sport=41000, dport=23, flags='PA')
                  / Raw(b'enable\r\nrun bash; id\r\n')),
             ]
+            # DHCPv6 (UDP 547) over IPv6 with an option length that overruns the
+            # datagram — proves the capture→parse→CG-231 path works on live IPv6
+            # now that the BPF admits it (this is the gap the fix closes).
+            v6_dhcp = False
+            try:
+                from scapy.all import IPv6
+                dhcp6_bad = (b'\x0b' + b'\x00\x00\x01' + b'\x00\x01'
+                             + b'\xff\xff' + b'\x00\x00')
+                pkts.append(Ether() / IPv6(src='2001:db8::5', dst='2001:db8::1')
+                            / UDP(sport=546, dport=547) / Raw(dhcp6_bad))
+                v6_dhcp = True
+            except Exception:
+                pass
             with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
                 pcap_path = tf.name
             wrpcap(pcap_path, pkts)
@@ -18857,9 +18909,11 @@ def _cisco_selftest():
             recs = _guard_packets(res['out'])
             out = _cisco_analyze(recs)
             codes = {f['code'] for f in out['findings']}
-            ok = ('CG-102' in codes and 'CG-270' in codes and out['verdict'] == 'attack')
+            v6_ok = (not v6_dhcp) or 'CG-231' in codes
+            ok = ('CG-102' in codes and 'CG-270' in codes
+                  and out['verdict'] == 'attack' and v6_ok)
             scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
-                            'codes': sorted(codes),
+                            'codes': sorted(codes), 'v6_dhcpv6': v6_dhcp,
                             'packets': len(recs)}
             try:
                 os.remove(pcap_path)
@@ -18888,6 +18942,15 @@ def _juniper_selftest():
 
     def http(port, body):
         return _guard_rec(proto='TCP', dport=port, payload=body)
+
+    # BPF conformance: v6 admitted via a next-header-qualified ip6[6] clause (not a
+    # blanket `or ip6`), and no `(ip and ...)` wrapper that would exclude plain v6.
+    _jbpf = _JUNIPER_GUARD_BPF
+    scenarios.append({'name': 'juniper-bpf-dualstack',
+                      'expect': 'ip6[6] clause, no blanket/ip-wrapper',
+                      'got': _jbpf,
+                      'pass': ('ip6[6]' in _jbpf and '(ip and' not in _jbpf
+                               and 'tcp port 8160' in _jbpf)})
 
     check('juniper-clean', [], 'clean')
     check('juniper-cleartext', [http(80, b'GET /login HTTP/1.1\r\nHost: jweb\r\n\r\n')],

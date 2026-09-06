@@ -2517,7 +2517,14 @@ end-to-end leg) aggregated into the Detector Self-Test panel.
 Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
 (ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
 Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
-(500/4500), DHCPv6 (546/547). Detects, among others: **`CG-101` cleartext SNMP** and
+(500/4500), DHCPv6 (546/547). The port clauses match **both IPv4 and IPv6** (libpcap's
+`port` primitive is family-agnostic, so plain v6 was never blind); the only real v6
+gap is a packet **behind an extension header**, where the next-header byte is no
+longer the transport — admitted by a narrow **`ip6[6]` next-header clause** (hop-by-hop
+/ routing / fragment / AH / dest-opts), *not* a blanket `or ip6` that would pull the
+whole v6 stream onto a Pi. This is what lets the DHCPv6 / IKEv2 / IPv6-Routing-Header
+detectors fire on live v6, including the extension-header case. Detects, among others:
+**`CG-101` cleartext SNMP** and
 **`CG-102` default community** (the credential half of the actively-exploited
 **CVE-2025-20352** SNMP overflow); **`CG-201`/`CG-202`** the SNMP **OID-arc-flood /
 oversized-field** overflow shape (BER-parsed); **`CG-103`** HTTP web-UI cleartext;
@@ -2545,12 +2552,14 @@ RCE and **`JNPR-030`** Junos-Space stored-XSS (**CVE-2025-59978**) injection att
 Passive version extraction is a known dead end for this vendor, so version postures
 are **not** claimed. **Dual-stack** — the same attacks are detected over **IPv4 and
 IPv6** with the same codes (the logic keys on port + payload, which are identical
-over either family). The IPv6 gotcha is handled properly: a single IPv6 **extension
-header** defeats a `tcp port 80` BPF (BPF can't chase the header chain), so the
-capture admits **all** IPv6 and filters by port in Python; the extension-header chain
-is walked from the reconstructed packet bytes to recover the true L4 protocol and
-port even when tcpdump splits the address line from the port line. This dual-stack
-flow/protocol parse is shared by all four vendor guards.
+over either family). libpcap's `port` primitive already matches plain v6, so the
+only real gap is a packet **behind an extension header**, where the next-header byte
+is no longer the transport — admitted by a narrow **`ip6[6]` next-header clause**
+(not a blanket `or ip6`, which would pull the whole v6 stream onto a Pi). The parser
+then walks the extension-header chain from the reconstructed packet bytes to recover
+the true L4 protocol and port, even when tcpdump splits the address line from the port
+line. This dual-stack flow/protocol parse and the `ip6[6]` capture clause are shared
+across the vendor guards (Cisco and Juniper carry it today).
 - Endpoint: `GET /api/net/juniper-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py juniper-guard [--iface I] [--seconds N] [--json]`
 
