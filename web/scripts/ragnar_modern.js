@@ -9213,18 +9213,18 @@ const _PTP_SEV_STYLE = {
     low: 'text-gray-400', info: 'text-gray-500',
 };
 async function runPtpWatch() {
-    const out = document.getElementById('ptp-results');
+    const out = document.getElementById('ptpwatch-results');
     if (!out) return;
     const btn = (typeof event !== 'undefined' && event && event.target) ? event.target : null;
-    const ifaceSel = document.getElementById('ptp-iface');
+    const ifaceSel = document.getElementById('ptpwatch-iface');
     const iface = ifaceSel && ifaceSel.value ? ifaceSel.value : '';
-    const secsEl = document.getElementById('ptp-secs');
+    const secsEl = document.getElementById('ptpwatch-secs');
     const secs = secsEl && secsEl.value ? secsEl.value : '20';
     _ndBusy(btn, true, 'Listening…');
     out.classList.remove('hidden');
     out.innerHTML = '<p class="text-sm text-gray-400">Passively capturing PTP (Annex F 0x88F7 · Annex D+E UDP 319/320)…</p>';
     try {
-        _fillIfaceSel('ptp-iface');
+        _fillIfaceSel('ptpwatch-iface');
         const qs = '?seconds=' + encodeURIComponent(secs) + (iface ? '&interface=' + encodeURIComponent(iface) : '');
         const d = await fetchAPI('/api/net/ptp-watch' + qs);
         if (!d || d.success === false) {

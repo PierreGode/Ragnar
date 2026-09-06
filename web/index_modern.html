@@ -2371,13 +2371,13 @@
                     <p class="text-xs text-amber-300/90 mb-2">Passive IEEE-1588 / PTPv2 timing-plane monitor — <strong>detection-only</strong>, it has no transmit primitives (the engine's own conformance greps its source to prove it). The precision-time plane runs the phase reference for 5G radios, power-grid PMUs, broadcast, finance and industrial control, and it is almost never authenticated: a forged Announce or an injected <span class="font-mono">correctionField</span> doesn't crash anything, it quietly drags the time base and everything slaved to it. Parses all three transports unconditionally — <strong>Annex F</strong> (raw Ethernet <span class="font-mono">0x88F7</span>), <strong>Annex D</strong> (UDP/IPv4 <span class="font-mono">319/320</span>) and <strong>Annex E</strong> (UDP/IPv6, extension-header + <span class="font-mono">AH</span> aware). Every rule is packet-vs-packet or packet-vs-its-own-in-band-claim — <strong>no rule consults the sensor's wall clock</strong> (a timing sensor under attack may itself be slewed). 42 finding codes: flags <strong>time-manipulation</strong> (critical — the one that should page you: a grandmaster <em>takeover</em> / two sources claiming one GM identity, a <span class="font-mono">correctionField</span> or origin-timestamp <em>injection</em>, a mid-session <span class="font-mono">currentUtcOffset</span> flip, a management <em>SET/WRITE</em>, or a unicast-cancel forgery), <strong>exposure</strong> (announce/sync flooding faster than a source's own advertised rate, sequence regression, EUI-64/MAC mismatch), and <strong>posture</strong> (no integrity protection on the timing plane, multiple domains, PTPv1/version downgrade).</p>
                     <p class="text-sm text-gray-400 mb-3"><strong>gPTP / IEEE 802.1AS</strong> (<span class="font-mono">majorSdoId==1</span>) gets eight peer-delay-specific codes on top: the headline is <strong>multiple peer-delay responders on one link</strong> — because 802.1AS mandates point-to-point, a single injected <span class="font-mono">Pdelay_Resp</span> sets <span class="font-mono">asCapable=FALSE</span> and stops timing on that port, a complete denial-of-timing that forges no timestamp at all — plus path-trace TLV checks (missing, length-vs-<span class="font-mono">stepsRemoved</span> contradiction, repeated clockIdentity loop). One short passive capture; the Ethernet/IPv4/IPv6/UDP decode, the PTP parser and the pcap reader are all hand-rolled (no scapy). The capture walks the IPv6 extension-header chain itself so an Annex E frame hidden behind a Hop-by-Hop or Authentication Header — the case a plain <span class="font-mono">udp port 319</span> filter is blind to — is still seen.</p>
                     <div class="flex flex-wrap items-center gap-2">
-                        <select id="ptp-iface" title="Interface for the PTP capture — a timing-plane segment or a SPAN/mirror of one (mirror a VLAN or ACL the mirror; do not mirror a busy trunk wholesale)" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
+                        <select id="ptpwatch-iface" title="Interface for the PTP capture — a timing-plane segment or a SPAN/mirror of one (mirror a VLAN or ACL the mirror; do not mirror a busy trunk wholesale)" class="w-full sm:w-auto bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm text-gray-300">
                             <option value="">Auto (wired first)</option>
                         </select>
-                        <input id="ptp-secs" type="number" min="8" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
+                        <input id="ptpwatch-secs" type="number" min="8" max="60" value="20" title="capture seconds" class="w-20 bg-slate-800 border border-slate-700 rounded px-3 py-2 text-sm">
                         <button onclick="runPtpWatch()" class="w-full sm:w-auto bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm whitespace-nowrap">Scan PTP</button>
                     </div>
-                    <div id="ptp-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
+                    <div id="ptpwatch-results" class="hidden mt-3 overflow-x-auto text-sm"></div>
                 </div>
                 <!-- SR-MPLS Watch (MPLS / SR-MPLS / SRv6 label & segment manipulation) -->
                 <div class="glass rounded-xl p-4 sm:p-6 mt-6">
@@ -8470,7 +8470,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260906-ptp-watch-v2"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260906-ptp-watch-v2-idfix"></script>
 
 
 
