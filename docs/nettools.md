@@ -68,6 +68,7 @@ It is split into three sub-tabs: **Diagnostics**, **Switch & L2/L3**, and
 | [RPC / NetLogon Watch](#rpc--netlogon-watch) | Switch & L2/L3 | `GET /api/net/rpc-watch` |
 | [LACP Watch](#lacp-watch) | Switch & L2/L3 | `GET /api/net/lacp-watch` |
 | [BFD Watch](#bfd-watch) | Switch & L2/L3 | `GET /api/net/bfd-watch` |
+| [PTP Watch](#ptp-watch) | Switch & L2/L3 | `GET /api/net/ptp-watch` |
 | [SR-MPLS Watch](#sr-mpls-watch) | Switch & L2/L3 | `GET /api/net/srmpls-watch` |
 | [LDAP Watch](#ldap-watch) | Switch & L2/L3 | `GET /api/net/ldap-watch` |
 | [SSH Watch](#ssh-watch) | Switch & L2/L3 | `GET /api/net/ssh-watch` |
@@ -2044,6 +2045,67 @@ segments — was silently dropped, so no findings fired at all. **API:**
 > state regression, malformed/truncated header, GTSM violation, auth downgrade, session
 > flap) are appended as JSON-lines to `/var/log/ragnar/bfd_watch.jsonl`, so
 > failover-manipulation alerts fold into the unified pane + single Pushover path.
+
+### PTP Watch
+A **passive** IEEE-1588 / PTPv2 / gPTP **timing-plane manipulation** monitor —
+**detection-only**, it has no transmit primitives (the upstream engine's conformance tier
+greps its own source to prove that, rather than trusting the claim). The precision-time
+plane carries the phase reference for 5G radios, power-grid PMUs, broadcast, finance and
+industrial control, and it is almost never authenticated — a forged Announce or an injected
+`correctionField` does not crash anything, it quietly drags the time base and everything
+slaved to it. All three transports are parsed **unconditionally**: **Annex F** (raw
+Ethernet, EtherType `0x88F7`), **Annex D** (UDP/IPv4, `224.0.1.129` / `224.0.0.107`, ports
+`319` event / `320` general) and **Annex E** (UDP/IPv6, `ff0X::181` / `ff02::6B`). PTP
+advertises no prefixes and correlates with no route family, so dual-stack is packet-layer
+plumbing with **no IPv6-specific finding codes** — the same 42 codes fire regardless of L3.
+
+Two design constraints shape every rule. First, **no rule consults the sensor's wall
+clock** — a sensor monitoring a timing plane under attack may itself be slewed or targeted,
+so every rule is packet-vs-packet or packet-vs-its-own-**in-band claim** (`logSyncInterval`,
+`stepsRemoved`, `clockClass`, `currentUtcOffset`, `sequenceId` are all stated on the wire by
+the sender, which is what makes the high-value rules signature-grade and armed on day one,
+with no baseline learning). Second, the capture **walks the IPv6 extension-header chain
+itself** — including the **Authentication Header (AH, protocol 51)**, which sizes in 4-byte
+units with a different bias (`(len+2)×4`) than the ordinary `(len+1)×8` headers — because a
+plain libpcap `udp port 319` primitive cannot chase that chain and is blind to exactly the
+Annex E frames an attacker would craft behind a Hop-by-Hop or AH header. Reduced to a single
+card **verdict**:
+
+- **time-manipulation** (critical — the one that should page you) — a grandmaster
+  **takeover** or two sources announcing one `grandmasterIdentity` (`PTP-B02`), a
+  `correctionField` beyond physical plausibility (`PTP-A08`) or a non-monotonic origin
+  timestamp (`PTP-A10`) that **injects offset directly**, a mid-session `currentUtcOffset`
+  flip (`PTP-C01`), a management **SET/WRITE** (`PTP-D01`/`D02`), or a unicast-cancel forgery
+  (`PTP-G03`).
+- **exposure** — high-severity: Announce/Sync **flooding** faster than a source's own
+  advertised rate (`PTP-A03`/`A04`), `sequenceId` **regression** (`PTP-A07`), one
+  `sourcePortIdentity` from two MACs (`PTP-B01`).
+- **attack-indicator** — a medium/low self-contradiction or protocol violation that is real
+  but not, on its own, a confirmed takeover.
+- **posture** — no integrity protection on the timing plane (`PTP-E03`), multiple PTP
+  domains, PTPv1 or `minorVersionPTP` **downgrade** (`PTP-E02`).
+
+**gPTP / IEEE 802.1AS** (`majorSdoId == 1`) gets eight peer-delay-specific codes on top of
+the generic set (the two `clockClass`-derived rules are masked for it, since 802.1AS uses
+248 for non-GM-capable and weighs BMCA differently). The headline is **multiple peer-delay
+responders on one link** (`PTP-H02`): because 802.1AS mandates point-to-point, a single
+injected `Pdelay_Resp` sets `asCapable=FALSE` and stops timing on that port — a complete
+**denial-of-timing** that forges no timestamp at all. Path-trace TLV checks round it out
+(missing TLV, a length that contradicts `stepsRemoved`, a repeated `clockIdentity` loop).
+The engine is pure-Python — the Ethernet/IPv4/IPv6/UDP decode, the PTP parser and the pcap
+reader are all hand-rolled (no Scapy; Scapy has no PTP dissector at any shipping version).
+**API:** `GET /api/net/ptp-watch` (query: `interface`, `seconds`).
+
+> **Deployment note.** A full core SPAN into a USB NIC on a Pi Zero 2W will saturate the
+> adapter — mirror a VLAN or apply an ACL to the mirror session; do not mirror a busy trunk
+> wholesale. The snapshot capture is next-header-qualified (Annex F `0x88F7` + UDP `319/320`
+> + an `ip6[6]` extension-header clause), never a blanket `ip6`, so the ext-header'd Annex E
+> evasion case reaches userspace without flooding the Pi.
+
+> **Watchtower feed.** HIGH/CRITICAL PTP findings (grandmaster takeover, time injection,
+> management WRITE, unicast-cancel forgery, gPTP peer-delay denial) are appended as
+> JSON-lines to `/var/log/ragnar/ptp_watch.jsonl`, so time-manipulation alerts fold into the
+> unified pane + single Pushover path.
 
 ### SR-MPLS Watch
 A **passive** MPLS / SR-MPLS / SRv6 **label & segment-manipulation** monitor —
