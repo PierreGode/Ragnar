@@ -463,6 +463,17 @@ verdict:
    an ARP-spoof of the redundancy group. This is the identity-forensics side of
    the `arp_guard` / [FHRP Watch](#fhrp-watch) cross-pivot; reconcile its
    inventory against FHRP Watch findings.
+5. **IPv6 / NDP identity** — MAC↔IPv6 bindings are collected from the NDP
+   neighbour cache (`ip -6 neigh`) and checked with the v6-native identity test:
+   **`eui64_mismatch`**, where a SLAAC modified-EUI-64 address embeds its owner's
+   MAC (RFC 4291) but the cache binds it to a *different* MAC — a MAC-identity
+   contradiction (**suspicious**; proxy-NDP can also explain it, so it is not
+   escalated to spoofed). This is kept deliberately **separate from the IPv4
+   clone logic**: a healthy IPv6 host holds a link-local plus several
+   SLAAC/temporary globals on one MAC, so "many IPs per MAC" is normal for v6 and
+   must never read as a clone. True NDP cache poisoning is
+   [ndpwatch](watchtower.md)'s job — macwatch only consumes NDP to learn
+   bindings.
 
 Every MAC is classified as **Vendor** (universal/burned-in), **FHRP virtual**
 (HSRP/VRRP/GLBP redundancy), **Spoofed**
@@ -785,7 +796,11 @@ a `SetRequest` crosses the wire — lets an attacker who captured it **reconfigu
 device**: change routes, ACLs, SNMP itself, or bounce interfaces. **v3** fixes this
 with the User Security Model (authentication + privacy/encryption). This scanner is
 **passive and detection-only**: one short `tcpdump` window over UDP **161/162**,
-parsed and classified. It never sends an SNMP request. What it flags:
+parsed and classified. It never sends an SNMP request. **Dual-stack** — SNMP running
+over **IPv6** transport is parsed and classified exactly like IPv4 (the community
+exposure, amplification and enumeration logic keys on the address string, so it is
+already family-agnostic once the line parses; an IPv4-only parser would silently miss
+every v6 agent). What it flags:
 
 - **Write-exposed** — a `SetRequest` in v1/v2c: a **write community is on the wire**,
   i.e. sniff it and you own the device. The most severe finding.
@@ -2502,13 +2517,19 @@ end-to-end leg) aggregated into the Detector Self-Test panel.
 Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
 (ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
 Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
-(500/4500). Detects, among others: **`CG-101` cleartext SNMP** and **`CG-102`
-default community** (the credential half of the actively-exploited **CVE-2025-20352**
-SNMP overflow); **`CG-201`/`CG-202`** the SNMP **OID-arc-flood / oversized-field**
-overflow shape (BER-parsed); **`CG-103`** HTTP web-UI cleartext; **`CG-104`** Telnet
-to infrastructure and **`CG-270`** an NX-OS Telnet **shell-escape** (the in-the-wild
-**CVE-2024-20399** Velvet-Ant shape); **`CG-220`** a VLAN tag-stack anomaly
-(**CVE-2024-20434** Catalyst-9000 DoS); plus IOS-XE / NX-OS version-in-range postures.
+(500/4500), DHCPv6 (546/547). Detects, among others: **`CG-101` cleartext SNMP** and
+**`CG-102` default community** (the credential half of the actively-exploited
+**CVE-2025-20352** SNMP overflow); **`CG-201`/`CG-202`** the SNMP **OID-arc-flood /
+oversized-field** overflow shape (BER-parsed); **`CG-103`** HTTP web-UI cleartext;
+**`CG-104`** Telnet to infrastructure and **`CG-270`** an NX-OS Telnet **shell-escape**
+(the in-the-wild **CVE-2024-20399** Velvet-Ant shape); **`CG-220`** a VLAN tag-stack
+anomaly (**CVE-2024-20434** Catalyst-9000 DoS). **IPv6 / IKEv2 attack shapes:**
+**`CG-250`** an **IKEv2 message whose declared length overruns its datagram**
+(**CVE-2024-20307 / CVE-2024-20308**), **`CG-231`** a **malformed DHCPv6 option**
+(overrun / trailing bytes / implausible relay hop-count — the **CVE-2024-20259**
+shape), and **`CG-281`** a deprecated **IPv6 Routing Header type 0** (RFC 5095
+source-routing) walked from the reconstructed extension-header chain. Plus IOS-XE /
+NX-OS version-in-range postures.
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 
@@ -2823,7 +2844,10 @@ carries the default route). Returns **vpn / likely / no / unknown**:
   VPN-provider range** (an ASN-derived list synced locally from
   [X4BNet/lists_vpn](https://github.com/X4BNet/lists_vpn) and checked offline).
   This is the signal that catches a VPN running **on the router**, where
-  Ragnar's own NIC looks like an ordinary LAN port.
+  Ragnar's own NIC looks like an ordinary LAN port. **Dual-stack**: both the
+  IPv4 and IPv6 provider lists are fetched (best-effort on the v6 half) and the
+  egress IP is matched in its own family — so a VPN egress over IPv6 is caught
+  too, not silently dropped as it was when only the IPv4 list was parsed.
 - **Tor exit** — the egress is confirmed a Tor exit node via the Tor Project's
   own checker (again catching Tor/VPN upstream on the router).
 - **Provider ASN name** — the egress ISP/ASN name matches a commercial-VPN
