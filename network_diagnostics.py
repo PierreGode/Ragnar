@@ -17291,9 +17291,15 @@ def _srmpls_selftest():
 # < attack. 'observed' (a vendor device seen, no CVE-relevant finding) and 'clean'
 # rank benign in the Network Integrity Monitor; 'attack' ranks critical.
 _GUARD_SEVERITY_RANK = {'INFO': 0, 'LOW': 1, 'MEDIUM': 2, 'HIGH': 3, 'CRITICAL': 4}
+# Flow / protocol lines are matched for IPv4 AND IPv6 transport. tcpdump prints
+# `<addr>.<port> > <addr>.<port>:` for both families, and labels the L4 protocol
+# `proto TCP (6)` on IPv4 but `next-header TCP (6)` on IPv6 — so both spellings
+# are accepted. (The guard detectors gate on port + payload, which are the same
+# over either family; only the parse had to become dual-stack.)
+_GUARD_ADDR = r'(?:\d+\.\d+\.\d+\.\d+|[0-9a-fA-F:]+)'
 _GUARD_FLOW_RE = re.compile(
-    r'(\d+\.\d+\.\d+\.\d+)\.(\d+)\s*>\s*(\d+\.\d+\.\d+\.\d+)\.(\d+):')
-_GUARD_PROTO_RE = re.compile(r'proto (\w+) \((\d+)\)')
+    r'(' + _GUARD_ADDR + r')\.(\d+)\s*>\s*(' + _GUARD_ADDR + r')\.(\d+):')
+_GUARD_PROTO_RE = re.compile(r'(?:proto|next-header) (\w+) \((\d+)\)')
 _GUARD_HEX_RE = _NTP_HEX_RE  # `\t0x0010:  4500 004c ...` — shared with NTP
 
 
@@ -17325,8 +17331,17 @@ def _guard_ip_payload(block_lines):
     elif ver == 6:
         if len(data) < 40:
             return (None, None, None, b'')
-        proto = data[6]
-        l4 = data[40:]
+        # Walk the IPv6 extension-header chain to the true upper-layer protocol —
+        # a single Hop-by-Hop/Routing/Dest-Opts header is enough to hide the TCP
+        # header from a naive `data[6]`/`data[40:]` read (and from a `tcp port N`
+        # BPF, which is why the capture admits all IPv6). Fragment (44) is a fixed
+        # 8-byte header; the others are (hdr-ext-len + 1) * 8.
+        proto, off, hops = data[6], 40, 0
+        while proto in (0, 43, 44, 60) and off + 2 <= len(data) and hops < 16:
+            nxt = data[off]
+            off += 8 if proto == 44 else (data[off + 1] + 1) * 8
+            proto, hops = nxt, hops + 1
+        l4 = data[off:] if off <= len(data) else b''
     else:
         return (None, None, None, b'')
     # `data` (the raw IP bytes from the IP header on) is returned so callers can
@@ -17340,6 +17355,43 @@ def _guard_ip_payload(block_lines):
     if proto == 17:     # UDP
         return (ver, proto, l4[8:] if len(l4) >= 8 else b'', data)
     return (ver, proto, l4, data)
+
+
+def _guard_l3l4_from_raw(data):
+    """From reconstructed IP bytes, return (src, dst, sport, dport, protonum), or
+    a 5-tuple of None. Walks the IPv6 extension-header chain — needed because
+    tcpdump splits the address line from the port line when an IPv6 packet carries
+    an extension header (it prints `src > dst:` then `HBH (padn) sport > dport:`),
+    so the single-line flow regex finds no ports."""
+    none5 = (None, None, None, None, None)
+    if len(data) < 20:
+        return none5
+    ver = data[0] >> 4
+    try:
+        if ver == 4:
+            proto = data[9]
+            off = (data[0] & 0x0F) * 4
+            src = socket.inet_ntoa(data[12:16])
+            dst = socket.inet_ntoa(data[16:20])
+        elif ver == 6:
+            if len(data) < 40:
+                return none5
+            proto, off, hops = data[6], 40, 0
+            while proto in (0, 43, 44, 60) and off + 2 <= len(data) and hops < 16:
+                nxt = data[off]
+                off += 8 if proto == 44 else (data[off + 1] + 1) * 8
+                proto, hops = nxt, hops + 1
+            src = socket.inet_ntop(socket.AF_INET6, data[8:24])
+            dst = socket.inet_ntop(socket.AF_INET6, data[24:40])
+        else:
+            return none5
+        sport = dport = None
+        if proto in (6, 17) and off + 4 <= len(data):
+            sport = int.from_bytes(data[off:off + 2], 'big')
+            dport = int.from_bytes(data[off + 2:off + 4], 'big')
+        return (src, dst, sport, dport, proto)
+    except (OSError, IndexError, ValueError):
+        return none5
 
 
 def _guard_packets(text):
@@ -17380,6 +17432,21 @@ def _guard_packets(text):
         if payload is not None:
             rec['payload'] = payload
         rec['ip_raw'] = ip_raw or b''
+        # Prefer the L4 protocol resolved from the packet bytes (this walks IPv6
+        # extension headers, which the header-line text can mislabel as the first
+        # ext-header type); fall back to the text-derived proto otherwise.
+        if protonum == 6:
+            rec['proto'] = 'TCP'
+        elif protonum == 17:
+            rec['proto'] = 'UDP'
+        # When the single-line flow regex found no ports (the IPv6 +
+        # extension-header case, where tcpdump splits the address and port lines),
+        # recover src/dst/ports from the reconstructed bytes.
+        if rec['dport'] is None and rec['ip_raw']:
+            s, d, sp, dp, _pn = _guard_l3l4_from_raw(rec['ip_raw'])
+            if dp is not None:
+                rec['src'], rec['sport'] = s, sp
+                rec['dst'], rec['dport'] = d, dp
         records.append(rec)
     return records
 
@@ -17921,8 +17988,12 @@ def do_juniper_guard(interface=None, seconds=20, learn=True, quick=False):
     if iface_error:
         return iface_error
     seconds = _clamp_int(seconds, 20, 5, 40)
-    bpf = ('tcp port 80 or tcp port 8080 or tcp port 8160 or tcp port 443 or '
-           'tcp port 8443')
+    # IPv4: match the J-Web / anomaly-API / TLS ports directly. IPv6: admit ALL
+    # v6 and filter by port in Python — a single IPv6 extension header defeats a
+    # `tcp port N` BPF (BPF cannot chase the header chain), so port-filtering v6
+    # at the BPF layer would silently miss exactly the crafted case that matters.
+    bpf = ('(ip and (tcp port 80 or tcp port 8080 or tcp port 8160 or '
+           'tcp port 443 or tcp port 8443)) or ip6')
     if not _have('tcpdump'):
         return {'success': False, 'interface': iface,
                 'error': 'tcpdump is not installed. Click Install to add it.',
@@ -18838,6 +18909,12 @@ def _juniper_selftest():
         'attack', ['JNPR-014'])
     check('juniper-anomaly-api', [http(8160,
         b'POST /api/command/register HTTP/1.1\r\n\r\n{}')], 'attack', ['JNPR-050', 'JNPR-051'])
+    # dual-stack: the SAME J-Web env-injection over IPv6 transport must classify
+    # identically (no IPv6-specific codes — the detection logic is family-agnostic).
+    check('juniper-v6-phprc', [_guard_rec(proto='TCP', src='2001:db8::7',
+          dst='2001:db8::1', dport=80, ipver=6,
+          payload=b'POST /?PHPRC=/tmp/x HTTP/1.1\r\nHost: jweb\r\n\r\nPHPRC=/tmp/php.ini')],
+          'attack', ['JNPR-011'])
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
@@ -18849,15 +18926,34 @@ def _juniper_selftest():
                     b'boundary=b\r\n\r\nPHPRC=/tmp/php.ini filename="a"')
             pkt = (Ether() / IP(src='10.0.0.7', dst='10.0.0.1')
                    / TCP(sport=42000, dport=80, flags='PA') / Raw(body))
+            pkts = [pkt]
+            v6ran = False
+            try:
+                # The validated v2 case: J-Web attack over IPv6 with a Hop-by-Hop
+                # extension header in front of the TCP header — the shape that a
+                # `tcp port 80` BPF and a naive data[40:] read both miss.
+                from scapy.all import IPv6, IPv6ExtHdrHopByHop
+                pkts.append(Ether() / IPv6(src='2001:db8::7', dst='2001:db8::1')
+                            / IPv6ExtHdrHopByHop() / TCP(sport=42001, dport=80,
+                            flags='PA') / Raw(body))
+                v6ran = True
+            except Exception:
+                pass
             with tempfile.NamedTemporaryFile(suffix='.pcap', delete=False) as tf:
                 pcap_path = tf.name
-            wrpcap(pcap_path, [pkt])
+            wrpcap(pcap_path, pkts)
             res = _run(['tcpdump', '-nn', '-tt', '-v', '-x', '-r', pcap_path], timeout=10)
-            out = _juniper_analyze(_guard_packets(res['out']))
+            recs = _guard_packets(res['out'])
+            out = _juniper_analyze(recs)
             codes = {f['code'] for f in out['findings']}
-            ok = 'JNPR-011' in codes and 'JNPR-010' in codes and out['verdict'] == 'attack'
+            # both the v4 and (when present) the ext-header v6 attack must be seen
+            v6_seen = (not v6ran) or any(r.get('ipver') == 6 and r.get('dport') == 80
+                                         for r in recs)
+            ok = ('JNPR-011' in codes and 'JNPR-010' in codes
+                  and out['verdict'] == 'attack' and v6_seen)
             scapy_result = {'ran': True, 'pass': ok, 'verdict': out['verdict'],
-                            'codes': sorted(codes)}
+                            'codes': sorted(codes), 'v6_extheader': v6ran,
+                            'v6_seen': v6_seen}
             try:
                 os.remove(pcap_path)
             except OSError:
