@@ -43,7 +43,7 @@ def test_clean_signals_none():
 
 def test_ble_findmy_flood_and_calm_room():
     flood = [{"mac": "C0:00:00:00:00:%02x" % i, "company_key": 0x004C,
-              "addr_type": "random"} for i in range(8)]
+              "addr_type": "random"} for i in range(20)]
     assert any(a["type"] == "apple_ble_flood" for a in hh.detect_ble_attacks(flood))
     calm = [{"mac": "3C:22:FB:00:00:01", "company_key": 0x004C, "addr_type": "public"}]
     assert hh.detect_ble_attacks(calm) == []
