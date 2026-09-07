@@ -22239,8 +22239,11 @@ def register_network_diagnostics(app, logger=None):
             ch = int(ch) if ch not in (None, '', 'auto') else None
         except (TypeError, ValueError):
             return _bad('Invalid channel')
-        _log(f"wifidef/scan {iface} {secs}s ch={ch}")
-        return jsonify(wifi_defense.do_scan(iface, seconds=secs, channel=ch))
+        # deep=1 also captures data frames and folds in wifiwatch's client/
+        # handshake-layer detectors (PMKID, handshake-after-deauth, PNL leak).
+        deep = request.args.get('deep') in ('1', 'true', 'yes', 'on')
+        _log(f"wifidef/scan {iface} {secs}s ch={ch} deep={deep}")
+        return jsonify(wifi_defense.do_scan(iface, seconds=secs, channel=ch, deep=deep))
 
     @app.route('/api/wifidef/baseline', methods=['GET', 'POST'])
     def wifidef_baseline():
