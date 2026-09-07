@@ -22424,6 +22424,40 @@ def register_network_diagnostics(app, logger=None):
                 })
             except Exception as exc:
                 _log(f"wifidef/halehound jsonl emit skipped: {exc}")
+
+        # --- PineAP / Wi-Fi Pineapple: score the SAME capture for the rogue-AP
+        # appliance class (Mark VII / Enterprise / Pager). Reuses this scan and
+        # the LAN-enriched assets (device_classifier flags a 'wifi_pineapple'
+        # management host), so it costs nothing extra and raises its own incident
+        # when the verdict is more than trace. Non-fatal: never break halehound.
+        try:
+            import pineap_watch as _pa
+            pa_verdict = _pa.assess(wifi=scan, assets=assets)
+            verdict['pineap'] = {'verdict': pa_verdict['verdict'],
+                                 'score': pa_verdict['score'],
+                                 'code': pa_verdict['code']}
+            if pa_verdict.get('score', 0) >= 25:
+                pa_sus = pa_verdict.get('suspects') or []
+                _guard_emit_jsonl('pineap', {
+                    'interface': (scan or {}).get('interface'),
+                    'findings': [{
+                        'code': pa_verdict['code'],
+                        'name': 'Wi-Fi Pineapple / PineAP-family rogue AP '
+                                '(%s, %d%%)' % (pa_verdict['verdict'],
+                                                pa_verdict['score']),
+                        'severity': pa_verdict['severity'],
+                        'klass': 'rogue-ap',
+                        'src': ((pa_sus[0].get('bssid') or pa_sus[0].get('mac'))
+                                if pa_sus else None),
+                        'cves': [],
+                        'detail': {'domains': pa_verdict.get('domains'),
+                                   'suspects': pa_sus,
+                                   'reasons': [r.get('detail')
+                                               for r in pa_verdict.get('reasons', [])]},
+                    }],
+                })
+        except Exception as exc:
+            _log(f"wifidef/pineap assess/emit skipped: {exc}")
         return verdict
 
     # Headless 24/7 watcher: capture a Wi-Fi window + a slowly-refreshed BLE
@@ -22515,6 +22549,12 @@ def register_network_diagnostics(app, logger=None):
         import halehound_watch as _hh
         _log("wifidef/halehound/selftest")
         return jsonify(_hh.selftest())
+
+    @app.route('/api/wifidef/pineap/selftest', methods=['GET'])
+    def wifidef_pineap_selftest():
+        import pineap_watch as _pa
+        _log("wifidef/pineap/selftest")
+        return jsonify(_pa.selftest())
 
     @app.route('/api/wifidef/halehound/portal-probe', methods=['POST'])
     def wifidef_halehound_portal_probe():
