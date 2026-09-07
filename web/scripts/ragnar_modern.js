@@ -4817,6 +4817,14 @@ function _wifidefFillIfaces() {
         _wifidefFillPanelIface('wifidef-at-iface', ifs);
         _wifidefFillPanelIface('wifidef-iso-iface', ifs);
         _wifidefUpdateMonBtn();
+        // Show the PineAP card on tab open so the Active-probe button is always
+        // reachable; the passive verdict fills in after a WiFi Defense scan.
+        const paBox = document.getElementById('wifidef-pa-inline');
+        const paBody = document.getElementById('wifidef-pa-body');
+        if (paBox) paBox.hidden = false;
+        if (paBody && !paBody.innerHTML.trim()) {
+            paBody.innerHTML = '<div class="text-[12px] text-gray-400">Run a WiFi Defense scan for the passive verdict, or click <b>Active probe</b> for the definitive test.</div>';
+        }
         // Reflect the headless 24/7 watch's current state (it may already be
         // running from a previous session — the daemon persists "if enabled").
         wifidefHaleHoundWatchStatus();
