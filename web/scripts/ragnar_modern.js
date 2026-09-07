@@ -5248,8 +5248,8 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid'].includes(x.severity);
-            const info = x.severity === 'band_steering';
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid', 'wpa3_strip'].includes(x.severity);
+            const info = ['band_steering', 'wpa3_transition', 'wpa3_mixed'].includes(x.severity);
             const border = crit ? 'border-l-4 border-red-500'
                 : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';
@@ -5284,6 +5284,15 @@ function wifidefRender() {
                 title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
                 const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
                 body = `<div>${x.count} auth frames from ${x.sources} MACs${laTag}.</div><div class="font-mono text-[11px] text-gray-400">target ${_wifidefMacLink(x.bssid)}</div>`;
+            } else if (x.type === 'wpa3_downgrade') {
+                title = x.severity === 'wpa3_strip' ? '🔓 WPA3-strip downgrade (evil twin)'
+                    : x.severity === 'wpa3_transition' ? '🔁 WPA3 transition mode (downgradeable)'
+                    : '📶 WPA3/WPA2 mixed-mode (same vendor — benign)';
+                body = `<div>SSID <b>${_esc(x.ssid || '')}</b></div>`;
+                const sae = x.sae_bssids || [];
+                const psk = x.rogue_bssids || (x.bssid ? [x.bssid] : []);
+                if (sae.length) body += `<div class="text-[11px] text-emerald-300">WPA3-SAE: <span class="font-mono">${sae.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
+                if (psk.length) body += `<div class="text-[11px] ${x.severity === 'wpa3_strip' ? 'text-red-300' : 'text-gray-400'}">PSK-only: <span class="font-mono">${psk.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
             }
             return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in Signal Intelligence</span>' : ''}</div></div>`;
         }).join('');
