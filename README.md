@@ -52,7 +52,7 @@ Access Ragnar's dashboard at `http://<ragnar-ip>:8000` — real-time discovery a
 Every feature below has a full guide in [`docs/`](docs). Short version here, details behind the link.
 
 ### Core scanning & offense
-- **Network scanning, vulnerability assessment & attacks** — the autonomous scan-and-act loop : host/port discovery (with a per-host **Ignore** blacklist), Nmap-based vulnerability assessment Every nmap run is logged. See [Scanning & Attacks](docs/scanning-and-attacks.md).
+- **Network scanning, vulnerability assessment & attacks** — the autonomous scan-and-act loop : host/port discovery (with a per-host **Ignore** blacklist), Nmap-based vulnerability assessment Every nmap run is logged. See [Scanning & Actions](docs/scanning-and-attacks.md).
 - **Advanced vulnerability scanning** — the **Adv Scan** tab: Nuclei, Nikto, SQLMap, WhatWeb and Nmap vuln scripts run on any board with `nmap`; OWASP ZAP and parallel scanning need 8GB+ RAM. RAM-gated scanners are **delegated to a capable mesh peer** instead of dead-ending. See [Advanced Vulnerability Scanning](docs/adv-scan.md).
 - **Multi-source threat intelligence** — real-time fusion from CISA KEV, NVD CVE, AlienVault OTX, and MITRE ATT&CK, used to prioritize findings. See [Scanning & Attacks](docs/scanning-and-attacks.md#multi-source-threat-intelligence).
 - **AI-powered analysis** — security summaries, vulnerability prioritization and remediation advice, with support for **self-hosted / OpenAI-compatible** endpoints (Ollama, LocalAI, vLLM, LM Studio) so inference can stay on your hardware. See [AI Integration](docs/AI_INTEGRATION.md).
