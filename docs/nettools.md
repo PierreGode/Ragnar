@@ -663,7 +663,9 @@ general UDP ports and the 802.1AS ethertype and reports whether a grandmaster is
 announcing, the message types, and the domain(s). This is a field "is PTP here?"
 check; precise clock-offset measurement needs a running `ptp4l`. (Standardised
 TWAMP/OWAMP SLA testing is a natural next step but needs a cooperating reflector
-on the far end.)
+on the far end.) For the passive **security** monitor of the same timing plane —
+grandmaster takeover, time injection, gPTP peer-delay attacks — see
+[PTP Watch](#ptp-watch).
 
 - Endpoint: `POST /api/net/ptp` `{interface, seconds}` · binary: `tcpdump`
 
@@ -2050,7 +2052,9 @@ segments — was silently dropped, so no findings fired at all. **API:**
 ### PTP Watch
 A **passive** IEEE-1588 / PTPv2 / gPTP **timing-plane manipulation** monitor —
 **detection-only**, it has no transmit primitives (the upstream engine's conformance tier
-greps its own source to prove that, rather than trusting the claim). The precision-time
+greps its own source to prove that, rather than trusting the claim). This is the **security**
+monitor; for the simpler "is a grandmaster present on this segment?" inventory check see
+[PTP Timing Detection](#ptp-timing-detection). The precision-time
 plane carries the phase reference for 5G radios, power-grid PMUs, broadcast, finance and
 industrial control, and it is almost never authenticated — a forged Announce or an injected
 `correctionField` does not crash anything, it quietly drags the time base and everything
