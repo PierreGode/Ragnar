@@ -1682,9 +1682,14 @@ def _capture_recover(capture_fn, interface, seconds, channel, auto_enable):
     return events
 
 
-def _capture(mon_iface, seconds, channel=None):
+def _capture(mon_iface, seconds, channel=None, watch=None):
     """Sniff management frames on `mon_iface` for `seconds`, hopping channels
-    unless a fixed `channel` is given. Returns a list of event dicts."""
+    unless a fixed `channel` is given. Returns a list of event dicts.
+
+    If `watch` (a wifiwatch WifiWatch) is given, the mgmt-only filter is dropped
+    so DATA frames (EAPOL) are captured too, and every raw frame is fed to it for
+    the client/handshake-layer detectors. Feeding wifiwatch never raises into the
+    capture."""
     from scapy.all import sniff
     events = []
 
@@ -1692,6 +1697,12 @@ def _capture(mon_iface, seconds, channel=None):
         ev = _frame_to_event(pkt)
         if ev:
             events.append(ev)
+        if watch is not None:
+            try:
+                watch.handle(bytes(pkt),
+                             float(getattr(pkt, "time", 0)) or time.time())
+            except Exception:
+                pass
 
     stop = threading.Event()
     if channel:
@@ -1706,10 +1717,12 @@ def _capture(mon_iface, seconds, channel=None):
                 stop.wait(0.35)
         threading.Thread(target=_hopper, daemon=True).start()
 
-    # Only management frames (type 0) — keeps the sniffer cheap.
+    # Mgmt-only keeps the sniffer cheap; a deep scan (watch set) needs data
+    # frames (EAPOL) too, so it captures everything and lets wifiwatch sort it.
+    _flt = None if watch is not None else "type mgt"
     try:
         sniff(iface=mon_iface, prn=_cb, timeout=seconds, store=False,
-              filter="type mgt", monitor=True)
+              filter=_flt, monitor=True)
     except Exception:
         # Some drivers reject the BPF/monitor kwarg; retry unfiltered.
         try:
@@ -1827,6 +1840,24 @@ def do_airtime(interface, seconds=10, channel=None, auto_enable=True):
 # --------------------------------------------------------------------------
 # Analysis
 # --------------------------------------------------------------------------
+
+# Severity → rank (3=critical, 2=warning, 1=info). Shared by analyze() and the
+# deep-scan merge (which appends wifiwatch findings after analyze() has run).
+_SEV_RANK = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
+             "attack_tool_ssid": 3, "wpa3_strip": 3, "pmkid": 3, "handshake": 3,
+             "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
+             "esp32_open_ap": 2, "pnl_leak": 2,
+             "band_steering": 1, "rogue_lure": 1, "seen": 1,
+             "wpa3_transition": 1, "wpa3_mixed": 1}
+
+
+def _threat_level(detections):
+    """clear / warning / critical from a detection list (worst severity wins)."""
+    if not detections:
+        return "clear"
+    worst = max(_SEV_RANK.get(d.get("severity"), 1) for d in detections)
+    return "critical" if worst >= 3 else "warning"
+
 
 def analyze(events, baseline=None, window_secs=None, thresholds=None):
     """Classify a list of frame events into WIDS detections. Pure function."""
@@ -2085,6 +2116,55 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                           "— possible evil-twin captive portal; probe it to confirm",
             })
 
+    # --- WPA3 downgrade / transition-mode exposure (ported from wifiwatch) ---
+    # Read straight from the advertised security suite (_classify_security):
+    #   * transition mode — one BSSID offering SAE + PSK together (WPA2/3). A
+    #     WPA3 client can be forced down to WPA2-PSK; informational (it's a config
+    #     choice a lot of routers ship with, not an attack).
+    #   * active downgrade / WPA3 strip — an SSID seen offering SAE (WPA3 or
+    #     WPA2/3) from one BSSID that ALSO appears PSK-only (no SAE) from another:
+    #     an evil twin stripping WPA3 to make the 4-way handshake crackable.
+    #     Critical — UNLESS every BSSID involved shares one vendor OUI, which is a
+    #     benign mixed-mode deployment (one AP running WPA3 + a WPA2 SSID), not a
+    #     clone; that is down-ranked to an informational note.
+    _SAE_SECS = {"WPA3", "WPA2/3"}
+    _PSK_ONLY_SECS = {"WPA", "WPA2", "WPA/WPA2"}
+    sae_by_ssid, psk_by_ssid = {}, {}
+    _transition_seen = set()
+    for e in beacons + presp:
+        ssid, src, sec = e.get("ssid"), e.get("src"), e.get("security")
+        if not ssid or not src or _is_blank_ssid(ssid):
+            continue
+        if sec == "WPA2/3" and src not in _transition_seen:
+            _transition_seen.add(src)
+            detections.append({
+                "type": "wpa3_downgrade", "severity": "wpa3_transition",
+                "ssid": ssid, "bssid": src,
+                "detail": f"SSID '{ssid}' ({src}) advertises WPA3-SAE and "
+                          "WPA2-PSK together — downgradeable transition mode",
+            })
+        if sec in _SAE_SECS:
+            sae_by_ssid.setdefault(ssid, set()).add(src)
+        elif sec in _PSK_ONLY_SECS:
+            psk_by_ssid.setdefault(ssid, set()).add(src)
+    for ssid in set(sae_by_ssid) & set(psk_by_ssid):
+        sae_b = sae_by_ssid[ssid]
+        strippers = sorted(psk_by_ssid[ssid] - sae_b)
+        if not strippers:
+            continue
+        union = sae_b | psk_by_ssid[ssid]
+        if _is_band_steering(union):
+            sev, kind = "wpa3_mixed", "mixed-mode on one vendor's gear — not an evil twin"
+        else:
+            sev, kind = "wpa3_strip", "WPA3-strip downgrade / evil twin"
+        detections.append({
+            "type": "wpa3_downgrade", "severity": sev, "ssid": ssid,
+            "rogue_bssids": strippers, "sae_bssids": sorted(sae_b),
+            "detail": f"SSID '{ssid}' offers WPA3-SAE from "
+                      f"{', '.join(sorted(sae_b))} but PSK-only (no SAE) from "
+                      f"{', '.join(strippers)} — {kind}",
+        })
+
     # Access-point inventory (for the UI table + baseline building)
     aps = {}
     for e in beacons:
@@ -2100,15 +2180,7 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
         if e.get("channel") is not None:
             ap["channel"] = e["channel"]
 
-    sev_rank = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
-                "attack_tool_ssid": 3,
-                "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
-                "esp32_open_ap": 2,
-                "band_steering": 1, "rogue_lure": 1, "seen": 1}
-    threat = "clear"
-    if detections:
-        worst = max(sev_rank.get(d["severity"], 1) for d in detections)
-        threat = "critical" if worst >= 3 else "warning"
+    threat = _threat_level(detections)
 
     # Live airspace stats so the UI can show where the capture sits relative to
     # the beacon-flood threshold (for calibration).
@@ -2140,17 +2212,84 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
 # Orchestration
 # --------------------------------------------------------------------------
 
-def do_scan(interface, seconds=15, channel=None, auto_enable=True):
-    """Ensure monitor mode, capture a window, and analyze it."""
+# --------------------------------------------------------------------------
+# wifiwatch integration — fold the deep (client/handshake-layer) detectors in
+# --------------------------------------------------------------------------
+# analyze() covers the AP/RF layer (deauth, beacon flood, evil twin, KARMA,
+# spoofed BSSID, WPA3 downgrade). wifiwatch adds the CLIENT/handshake layer —
+# PMKID harvest, deauth-and-capture handshakes, PNL leak — which need EAPOL
+# (data) frames the mgmt-only scan drops. A "deep" scan captures ALL frames and
+# feeds each raw frame to a wifiwatch WifiWatch, then folds in ONLY the detectors
+# analyze() doesn't already produce (no duplicate cards). Every wifiwatch call is
+# wrapped so a failure there never breaks a scan.
+_WIFIWATCH_KEEP = {
+    "pmkid_harvest": ("pmkid_harvest", "pmkid"),
+    "handshake_harvest": ("handshake_harvest", "handshake"),
+    "pnl_leak": ("pnl_leak", "pnl_leak"),
+}
+
+
+def _new_wifiwatch():
+    """A wifiwatch WifiWatch wired to collect its alerts, or None if unavailable."""
+    try:
+        import python.wifiwatch as _ww
+        collected = []
+        watch = _ww.WifiWatch(emit=collected.append)
+        watch._ragnar_alerts = collected
+        return watch
+    except Exception:
+        return None
+
+
+def _wifiwatch_detections(alerts):
+    """Map wifiwatch alerts to wifi_defense detection dicts, keeping only the
+    client/handshake-layer detectors unique to wifiwatch (see _WIFIWATCH_KEEP)."""
+    out = []
+    for a in alerts or []:
+        keep = _WIFIWATCH_KEEP.get(a.get("detector"))
+        if not keep:
+            continue
+        dtype, sev = keep
+        det = a.get("detail") or {}
+        out.append({
+            "type": dtype, "severity": sev,
+            "bssid": a.get("bssid"), "station": a.get("station"),
+            "ssid": a.get("ssid"), "ssids": det.get("ssids"),
+            "detail": a.get("summary") or dtype,
+        })
+    return out
+
+
+def do_scan(interface, seconds=15, channel=None, auto_enable=True, deep=False):
+    """Ensure monitor mode, capture a window, and analyze it.
+
+    ``deep=True`` also captures data frames and runs the capture through
+    wifiwatch, folding its client/handshake-layer findings (PMKID harvest,
+    deauth-and-capture handshakes, PNL leak) into the result — everything
+    wifiwatch can do, in the one scan. Heavier (captures all frames), so it's
+    opt-in."""
     if not _valid_iface(interface):
         return {"error": "invalid interface"}
     seconds = max(3, min(120, int(seconds)))
-    events = _capture_recover(_capture, interface, seconds, channel, auto_enable)
+    watch = _new_wifiwatch() if deep else None
+    capfn = ((lambda m, s, channel=None: _capture(m, s, channel=channel, watch=watch))
+             if watch is not None else _capture)
+    events = _capture_recover(capfn, interface, seconds, channel, auto_enable)
     if isinstance(events, dict) and "error" in events:
         return events
     mon = _load_state().get("mon_iface")
     result = analyze(events, baseline=get_baseline(), window_secs=seconds,
                      thresholds=get_thresholds())
+    result["deep"] = False
+    if watch is not None:
+        try:
+            extra = _wifiwatch_detections(getattr(watch, "_ragnar_alerts", []))
+            if extra:
+                result["detections"].extend(extra)
+                result["threat"] = _threat_level(result["detections"])
+            result["deep"] = True
+        except Exception:
+            pass
     result.update({"interface": interface, "monitor": mon,
                    "seconds": seconds, "channel": channel,
                    "timestamp": int(time.time())})

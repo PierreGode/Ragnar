@@ -4946,7 +4946,11 @@ function wifidefScan() {
     const prog = _wifidefProgress(st, parseInt(secs) || 15,
         (_wifidef.continuous ? 'Continuous — capturing' : 'Capturing') + (chParam !== 'auto' ? ' ch ' + chParam : ''));
     if (btn) btn.disabled = true;
-    return fetch(`/api/wifidef/scan?interface=${encodeURIComponent(iface)}&seconds=${secs}&channel=${chParam}`,
+    // Deep scan (default on): also capture data frames + fold in wifiwatch's
+    // client/handshake-layer detectors (PMKID, handshake-after-deauth, PNL leak).
+    const deepEl = document.getElementById('wifidef-deep');
+    const deep = deepEl ? (deepEl.checked ? 1 : 0) : 1;
+    return fetch(`/api/wifidef/scan?interface=${encodeURIComponent(iface)}&seconds=${secs}&channel=${chParam}&deep=${deep}`,
         { signal: ctrl.signal })
         .then(r => r.json()).then(d => {
             prog.done();
@@ -5256,8 +5260,8 @@ function wifidefRender() {
         det.innerHTML = '<div class="glass rounded-xl p-4 text-sm text-green-300 md:col-span-2">✓ No wireless attacks detected in this capture.</div>';
     } else {
         det.innerHTML = d.detections.map(x => {
-            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid'].includes(x.severity);
-            const info = x.severity === 'band_steering';
+            const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid', 'wpa3_strip', 'pmkid', 'handshake'].includes(x.severity);
+            const info = ['band_steering', 'wpa3_transition', 'wpa3_mixed'].includes(x.severity);
             const border = crit ? 'border-l-4 border-red-500'
                 : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';
@@ -5292,6 +5296,26 @@ function wifidefRender() {
                 title = x.severity === 'flood' ? '🌊 Auth flood (client-table exhaustion)' : '⚠ Auth frames seen';
                 const laTag = (x.la_ratio != null) ? ` · <span class="${x.la_ratio >= 0.5 ? 'text-red-300' : 'text-gray-500'}">${Math.round(x.la_ratio * 100)}% randomized MACs</span>` : '';
                 body = `<div>${x.count} auth frames from ${x.sources} MACs${laTag}.</div><div class="font-mono text-[11px] text-gray-400">target ${_wifidefMacLink(x.bssid)}</div>`;
+            } else if (x.type === 'wpa3_downgrade') {
+                title = x.severity === 'wpa3_strip' ? '🔓 WPA3-strip downgrade (evil twin)'
+                    : x.severity === 'wpa3_transition' ? '🔁 WPA3 transition mode (downgradeable)'
+                    : '📶 WPA3/WPA2 mixed-mode (same vendor — benign)';
+                body = `<div>SSID <b>${_esc(x.ssid || '')}</b></div>`;
+                const sae = x.sae_bssids || [];
+                const psk = x.rogue_bssids || (x.bssid ? [x.bssid] : []);
+                if (sae.length) body += `<div class="text-[11px] text-emerald-300">WPA3-SAE: <span class="font-mono">${sae.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
+                if (psk.length) body += `<div class="text-[11px] ${x.severity === 'wpa3_strip' ? 'text-red-300' : 'text-gray-400'}">PSK-only: <span class="font-mono">${psk.map(b => _wifidefMacLink(b, x.ssid)).join(', ')}</span></div>`;
+            } else if (x.type === 'pmkid_harvest') {
+                title = '🔑 PMKID harvest (offline-crackable)';
+                body = `<div>AP <span class="font-mono">${_wifidefMacLink(x.bssid)}</span> exposed a PMKID in an EAPOL M1${x.station ? ` to <span class="font-mono">${_wifidefMacLink(x.station)}</span>` : ''}.</div>`;
+            } else if (x.type === 'handshake_harvest') {
+                title = '🤝 Handshake capture (deauth-and-capture)';
+                body = `<div>Client <span class="font-mono">${_wifidefMacLink(x.station)}</span> was deauthed then completed a 4-way handshake${x.bssid ? ` with <span class="font-mono">${_wifidefMacLink(x.bssid)}</span>` : ''} — forced-reconnect capture.</div>`;
+            } else if (x.type === 'pnl_leak') {
+                title = '📢 PNL leak (saved-network list)';
+                const ss = (x.ssids || []);
+                body = `<div>Client <span class="font-mono">${_wifidefMacLink(x.station)}</span> is broadcasting its saved networks — evil-twin/KARMA bait.</div>`
+                    + (ss.length ? `<div class="text-[11px] text-gray-400">${ss.slice(0, 8).map(_esc).join(', ')}${ss.length > 8 ? '…' : ''}</div>` : '');
             }
             return `<div class="glass rounded-xl p-4 ${border}"><div class="font-semibold text-sm mb-1">${title}</div><div class="text-sm text-gray-300">${body}</div><div class="text-[11px] text-gray-500 mt-1">${x.detail || ''}${body.indexOf('wifiPivotFromDefense') >= 0 ? ' <span class="text-gray-600">· click a MAC to inspect it in Signal Intelligence</span>' : ''}</div></div>`;
         }).join('');
