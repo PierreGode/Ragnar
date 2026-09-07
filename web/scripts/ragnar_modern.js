@@ -5389,8 +5389,88 @@ async function _wifidefFusion(opts) {
             html += '<div class="mt-1 text-[10px] text-fuchsia-400">Fed into the Watchtower alert feed + incident correlation.</div>';
         }
         body.innerHTML = html;
+        // Fold the passive Wi-Fi Pineapple / PineAP verdict (scored from the same
+        // capture, returned as v.pineap by the halehound endpoint) into its box.
+        _wifidefRenderPineap(v.pineap);
     } catch (e) {
         body.innerHTML = '<span class="text-red-300">ESP32 correlation failed.</span>';
+    }
+}
+
+// Wi-Fi Pineapple / PineAP — the passive verdict folded from the same scan, plus
+// the opt-in ACTIVE probe test (the one action that transmits).
+const _WIFIDEF_PA = {
+    confirmed: ['CONFIRMED', 'bg-red-600 text-white'],
+    likely: ['LIKELY', 'bg-red-500 text-white'],
+    possible: ['POSSIBLE', 'bg-amber-500 text-slate-900'],
+    trace: ['trace', 'bg-slate-600 text-slate-200'],
+    none: ['clear', 'bg-emerald-600 text-white'],
+};
+
+function _wifidefRenderPineap(pa) {
+    const box = document.getElementById('wifidef-pa-inline');
+    const vb = document.getElementById('wifidef-pa-verdict');
+    const body = document.getElementById('wifidef-pa-body');
+    if (!box || !vb || !body) return;
+    box.hidden = false;                 // show it so the Active-probe button is available
+    const v = pa || {};
+    const [label, cls] = _WIFIDEF_PA[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+    vb.textContent = (v.score != null) ? `${label} · ${v.score}%` : label;
+    vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls;
+    if (v.verdict && v.verdict !== 'none') {
+        body.innerHTML = `<div class="text-[12px] text-rose-200">Passive signals suggest a Wi-Fi Pineapple / PineAP-family rogue AP (<b>${_esc(v.verdict)}</b>). Run <b>Active probe</b> for a definitive test.</div>`;
+    } else {
+        body.innerHTML = '<div class="text-[12px] text-emerald-300">✓ No passive PineAP-pool signature in this scan. The <b>Active probe</b> is the strongest check — it asks for a random SSID and sees if anything answers.</div>';
+    }
+}
+
+// ACTIVE PineAP probe — the ONE test that transmits. Sends probes for random,
+// never-advertised SSIDs and listens; anything that answers is impersonating.
+// Backend: POST /api/wifidef/pineap/active-probe. Needs a monitor-mode adapter.
+async function wifidefPineapActiveProbe() {
+    const box = document.getElementById('wifidef-pa-inline');
+    const body = document.getElementById('wifidef-pa-body');
+    const vb = document.getElementById('wifidef-pa-verdict');
+    if (box) box.hidden = false;
+    const iface = _wifidef.iface || _wifidef.monitor;
+    if (!iface) {
+        if (body) body.innerHTML = '<span class="text-amber-300">Select/enable a monitor-capable adapter first — the Pi\'s onboard radio can\'t transmit 802.11 frames.</span>';
+        return;
+    }
+    if (!confirm('The active PineAP test TRANSMITS a handful of probe frames on '
+        + iface + ' (it does not deauth or flood). Run it only on RF you are '
+        + 'authorized to test.\n\nRun the active probe now?')) return;
+    if (vb) { vb.textContent = 'probing…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300'; }
+    if (body) body.innerHTML = '<span class="text-rose-300">📡 Transmitting probes for random SSIDs on ' + _esc(iface) + ' (channels 1/6/11) and listening…</span>';
+    try {
+        const r = await fetch('/api/wifidef/pineap/active-probe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ interface: iface, rounds: 3, listen_seconds: 2, channels: [1, 6, 11] }),
+        });
+        const d = await r.json();
+        const res = d.result || d;
+        if (res.error) {
+            if (vb) { vb.textContent = 'error'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-600 text-slate-200'; }
+            if (body) body.innerHTML = '<span class="text-amber-400">⚠ ' + _esc(res.error) + '</span>'
+                + (res.hint ? '<div class="mt-1 text-[11px] text-gray-500">' + _esc(res.hint) + '</div>' : '');
+            return;
+        }
+        const v = d.verdict || {};
+        const [label, cls] = _WIFIDEF_PA[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
+        if (vb) { vb.textContent = `${label} · ${v.score || 0}%`; vb.className = 'px-3 py-1 rounded text-xs font-bold ' + cls; }
+        let html = '';
+        if ((res.answered || 0) > 0) {
+            html += '<div class="mb-2 px-2 py-1 rounded bg-red-950/60 border border-red-700 text-red-200 font-semibold">☠️ ' + res.answered + ' random SSID' + (res.answered > 1 ? 's were' : ' was') + ' answered — Karma/PineAP impersonation confirmed</div>';
+            html += '<ul class="list-disc pl-5 space-y-0.5 text-[12px] text-gray-300">'
+                + (res.detections || []).map(x => `<li>random <span class="font-mono text-red-300">${_esc(x.ssid)}</span> answered by <span class="font-mono">${_esc((x.bssids || []).join(', ') || x.bssid || '?')}</span></li>`).join('') + '</ul>';
+        } else {
+            html += '<div class="mb-1 px-2 py-1 rounded bg-emerald-950/50 border border-emerald-700 text-emerald-200">✓ Nothing answered ' + (res.sent ? res.sent.length : 0) + ' random SSID probes — no Karma/PineAP responder in range.</div>';
+        }
+        html += '<div class="mt-1 text-[10px] text-gray-500">' + (res.rounds || 0) + ' rounds · ch ' + _esc((res.channels || []).join('/')) + ' · monitor ' + _esc(res.monitor || iface) + '</div>';
+        if ((v.score || 0) >= 25) html += '<div class="mt-1 text-[10px] text-rose-400">Fed into the Watchtower alert feed + incident correlation.</div>';
+        if (body) body.innerHTML = html;
+    } catch (e) {
+        if (body) body.innerHTML = '<span class="text-red-300">Active probe failed.</span>';
     }
 }
 
