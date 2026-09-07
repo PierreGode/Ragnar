@@ -1699,9 +1699,12 @@
             <!-- ===================== Global Cyberthreat Map ===================== -->
             <div id="net-sub-threatmap" class="net-subview hidden">
                 <div class="glass rounded-xl p-4 sm:p-6">
-                    <div class="mb-3">
-                        <h2 class="text-2xl font-bold">🌐 Global Cyberthreat Map</h2>
-                        <p class="text-sm text-gray-400">Live worldwide threat activity from the Kaspersky Cyberthreat Real-Time Map. This is an <strong>external, read-only</strong> widget served from <span class="font-mono">cybermap.kaspersky.com</span> — it shows global detections, not your own network, and needs internet access.</p>
+                    <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-3">
+                        <div>
+                            <h2 class="text-2xl font-bold">🌐 Global Cyberthreat Map</h2>
+                            <p class="text-sm text-gray-400">Live worldwide threat activity from the Kaspersky Cyberthreat Real-Time Map. This is an <strong>external, read-only</strong> widget served from <span class="font-mono">cybermap.kaspersky.com</span> — it shows global detections, not your own network, and needs internet access. The embedded widget has no controls; for the full interactive globe (rotate, zoom, threat-type filters, per-country stats) use the button.</p>
+                        </div>
+                        <a href="https://cybermap.kaspersky.com/en/" target="_blank" rel="noopener noreferrer" class="shrink-0 inline-flex items-center gap-1.5 bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm font-semibold whitespace-nowrap self-start">Open full interactive map <span aria-hidden="true">↗</span></a>
                     </div>
                     <!-- Responsive square container: the widget renders inside and scales to width -->
                     <div class="w-full max-w-[900px] mx-auto rounded-lg overflow-hidden border border-slate-700 bg-black" style="aspect-ratio:1/1;">
