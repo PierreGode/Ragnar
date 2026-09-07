@@ -2116,53 +2116,52 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
                           "— possible evil-twin captive portal; probe it to confirm",
             })
 
-    # --- WPA3 downgrade / transition-mode exposure (ported from wifiwatch) ---
-    # Read straight from the advertised security suite (_classify_security):
-    #   * transition mode — one BSSID offering SAE + PSK together (WPA2/3). A
-    #     WPA3 client can be forced down to WPA2-PSK; informational (it's a config
-    #     choice a lot of routers ship with, not an attack).
-    #   * active downgrade / WPA3 strip — an SSID seen offering SAE (WPA3 or
-    #     WPA2/3) from one BSSID that ALSO appears PSK-only (no SAE) from another:
-    #     an evil twin stripping WPA3 to make the 4-way handshake crackable.
-    #     Critical — UNLESS every BSSID involved shares one vendor OUI, which is a
-    #     benign mixed-mode deployment (one AP running WPA3 + a WPA2 SSID), not a
-    #     clone; that is down-ranked to an informational note.
+    # --- WPA3-strip downgrade (evil twin re-advertising a WPA3 SSID as WPA2) ---
+    # Flags ONLY the attack: an SSID seen offering WPA3-SAE from a real/anchor
+    # BSSID that ALSO appears PSK-only (no SAE) from a DIFFERENT, foreign or
+    # randomized BSSID — an evil twin stripping WPA3 so the 4-way handshake
+    # cracks offline.
+    #
+    # Deliberately NOT flagged, because they are configuration, not attacks, and
+    # flagging them lit up every scan:
+    #   * plain transition mode (one BSSID offering SAE+PSK, "WPA2/3") — the
+    #     default a huge share of routers ship with; downgradeable by design.
+    #   * mixed-mode on ONE operator's gear — the same SSID as WPA3 on one radio
+    #     and WPA2 on another, when the WPA2 BSSID shares a vendor OUI with a
+    #     WPA3 one (band-steering) or is in the trusted baseline. Not a clone.
     _SAE_SECS = {"WPA3", "WPA2/3"}
     _PSK_ONLY_SECS = {"WPA", "WPA2", "WPA/WPA2"}
     sae_by_ssid, psk_by_ssid = {}, {}
-    _transition_seen = set()
     for e in beacons + presp:
         ssid, src, sec = e.get("ssid"), e.get("src"), e.get("security")
         if not ssid or not src or _is_blank_ssid(ssid):
             continue
-        if sec == "WPA2/3" and src not in _transition_seen:
-            _transition_seen.add(src)
-            detections.append({
-                "type": "wpa3_downgrade", "severity": "wpa3_transition",
-                "ssid": ssid, "bssid": src,
-                "detail": f"SSID '{ssid}' ({src}) advertises WPA3-SAE and "
-                          "WPA2-PSK together — downgradeable transition mode",
-            })
         if sec in _SAE_SECS:
             sae_by_ssid.setdefault(ssid, set()).add(src)
         elif sec in _PSK_ONLY_SECS:
             psk_by_ssid.setdefault(ssid, set()).add(src)
     for ssid in set(sae_by_ssid) & set(psk_by_ssid):
         sae_b = sae_by_ssid[ssid]
-        strippers = sorted(psk_by_ssid[ssid] - sae_b)
-        if not strippers:
+        sae_ouis = {_oui(b) for b in sae_b}
+        trusted = set(baseline.get(ssid, []))
+        rogue = []
+        for b in sorted(psk_by_ssid[ssid] - sae_b):
+            # Same-vendor second radio (shared global OUI) = band-steering, and a
+            # trusted-baseline BSSID = a known-good AP — neither is a clone.
+            if not _is_locally_administered(b) and _oui(b) in sae_ouis:
+                continue
+            if trusted and b in trusted:
+                continue
+            rogue.append(b)
+        if not rogue:
             continue
-        union = sae_b | psk_by_ssid[ssid]
-        if _is_band_steering(union):
-            sev, kind = "wpa3_mixed", "mixed-mode on one vendor's gear — not an evil twin"
-        else:
-            sev, kind = "wpa3_strip", "WPA3-strip downgrade / evil twin"
         detections.append({
-            "type": "wpa3_downgrade", "severity": sev, "ssid": ssid,
-            "rogue_bssids": strippers, "sae_bssids": sorted(sae_b),
+            "type": "wpa3_downgrade", "severity": "wpa3_strip", "ssid": ssid,
+            "rogue_bssids": rogue, "sae_bssids": sorted(sae_b),
             "detail": f"SSID '{ssid}' offers WPA3-SAE from "
-                      f"{', '.join(sorted(sae_b))} but PSK-only (no SAE) from "
-                      f"{', '.join(strippers)} — {kind}",
+                      f"{', '.join(sorted(sae_b))} but PSK-only (no SAE) from a "
+                      f"foreign/randomized BSSID {', '.join(rogue)} — WPA3-strip "
+                      "downgrade / evil twin",
         })
 
     # Access-point inventory (for the UI table + baseline building)
