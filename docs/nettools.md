@@ -2980,4 +2980,19 @@ alert.
 
 ---
 
+## Global Cyberthreat Map
+
+A separate **Threat Map** sub-tab on the Network tab embeds the
+[Kaspersky Cyberthreat Real-Time Map](https://cybermap.kaspersky.com) as a
+read-only widget (`cybermap.kaspersky.com/en/widget/dynamic/dark`). It shows
+**global** threat-detection activity worldwide, not your own network, and needs
+internet access — it is context/ambience, not one of the Authority Verification
+tools above, and has no local API. The widget loads only while its sub-tab is
+open (the iframe `src` is set on entry and cleared on leave, so it isn't fetching
+in the background) and is served under a `frame-src` allowance in the app's
+Content-Security-Policy (`RAGNAR_CSP` to override). If the map is blank, the unit
+has no internet route or an upstream firewall is blocking the Kaspersky origin.
+
+---
+
 *Authority Verification suite co-authored by [Solarflere](https://www.instagram.com/solarflere).*

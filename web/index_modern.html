@@ -1283,6 +1283,7 @@
                 <button id="net-subtab-archive" onclick="showNetworkSubtab('archive')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">AP Archive</button>
                 <button id="net-subtab-assets" onclick="showNetworkSubtab('assets')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Assets</button>
                 <button id="net-subtab-map" onclick="showNetworkSubtab('map')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Map</button>
+                <button id="net-subtab-threatmap" onclick="showNetworkSubtab('threatmap')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Threat Map</button>
                 <button id="net-subtab-diagnostics" onclick="showNetworkSubtab('diagnostics')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Diagnostics</button>
                 <button id="net-subtab-switch" onclick="showNetworkSubtab('switch')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Switch &amp; L2/L3</button>
                 <button id="net-subtab-interfaces" onclick="showNetworkSubtab('interfaces')" class="net-subtab px-4 py-2 rounded-lg text-sm font-semibold transition-colors text-slate-400 hover:bg-slate-700 hover:text-white">Interfaces</button>
@@ -1694,6 +1695,22 @@
                 <p class="text-xs text-gray-500 mt-2">Click a node to open host details. Scroll to zoom. Drag to pan.</p>
             </div>
             </div><!-- /#net-sub-map -->
+
+            <!-- ===================== Global Cyberthreat Map ===================== -->
+            <div id="net-sub-threatmap" class="net-subview hidden">
+                <div class="glass rounded-xl p-4 sm:p-6">
+                    <div class="mb-3">
+                        <h2 class="text-2xl font-bold">🌐 Global Cyberthreat Map</h2>
+                        <p class="text-sm text-gray-400">Live worldwide threat activity from the Kaspersky Cyberthreat Real-Time Map. This is an <strong>external, read-only</strong> widget served from <span class="font-mono">cybermap.kaspersky.com</span> — it shows global detections, not your own network, and needs internet access.</p>
+                    </div>
+                    <!-- Responsive square container: the widget renders inside and scales to width -->
+                    <div class="w-full max-w-[900px] mx-auto rounded-lg overflow-hidden border border-slate-700 bg-black" style="aspect-ratio:1/1;">
+                        <!-- src is set lazily by showNetworkSubtab('threatmap') so the external frame only loads while viewed -->
+                        <iframe id="threatmap-iframe" title="Kaspersky Global Cyberthreat Map" class="w-full h-full" style="border:0;display:block;" frameborder="0" loading="lazy" referrerpolicy="no-referrer" data-src="https://cybermap.kaspersky.com/en/widget/dynamic/dark"></iframe>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-2">Map &amp; data © <a href="https://cybermap.kaspersky.com" target="_blank" rel="noopener noreferrer" class="underline hover:text-gray-300">Kaspersky</a>. If the map stays blank, the unit has no internet route or an upstream firewall is blocking <span class="font-mono">cybermap.kaspersky.com</span>.</p>
+                </div>
+            </div><!-- /#net-sub-threatmap -->
 
             <!-- ===================== Diagnostics ===================== -->
             <div id="net-sub-diagnostics" class="net-subview hidden">
@@ -8470,7 +8487,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260906-ptp-watch-v2-idfix"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260907-threatmap"></script>
 
 
 

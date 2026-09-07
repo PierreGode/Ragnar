@@ -1425,7 +1425,7 @@ function _setSubtabActive(btn, active) {
 function showNetworkSubtab(name) {
     const views = {
         hosts: 'net-sub-hosts', archive: 'net-sub-archive', assets: 'net-sub-assets',
-        map: 'net-sub-map',
+        map: 'net-sub-map', threatmap: 'net-sub-threatmap',
         diagnostics: 'net-sub-diagnostics', switch: 'net-sub-switch', interfaces: 'net-sub-interfaces',
         wifi: 'net-sub-wifi'
     };
@@ -1434,12 +1434,25 @@ function showNetworkSubtab(name) {
         if (el) el.classList.toggle('hidden', key !== name);
         _setSubtabActive(document.getElementById('net-subtab-' + key), key === name);
     });
+    if (name !== 'threatmap') {
+        // Unload the external threat-map iframe when navigating away so it isn't
+        // fetching/animating in the background on other sub-tabs.
+        const ifr = document.getElementById('threatmap-iframe');
+        if (ifr && ifr.getAttribute('src')) { ifr.removeAttribute('src'); }
+    }
     if (name === 'archive') {
         loadAllNetworksData();
     } else if (name === 'assets') {
         loadAssetsData();
     } else if (name === 'map') {
         if (!_mapInitialized) { loadNetworkMap(); }
+    } else if (name === 'threatmap') {
+        // Load the external Kaspersky widget only while its sub-tab is viewed;
+        // clear src on leave (below) so the frame stops fetching in the background.
+        const ifr = document.getElementById('threatmap-iframe');
+        if (ifr && ifr.dataset.src && ifr.getAttribute('src') !== ifr.dataset.src) {
+            ifr.setAttribute('src', ifr.dataset.src);
+        }
     } else if (name === 'hosts') {
         loadNetworkData();
     } else if (name === 'switch') {

@@ -131,6 +131,8 @@ _DEFAULT_CSP = (
     "img-src 'self' data: blob: https:; "
     "font-src 'self' data:; "
     "connect-src 'self' ws: wss:; "
+    # Global Cyberthreat Map (Network tab) embeds the Kaspersky cybermap widget.
+    "frame-src 'self' https://cybermap.kaspersky.com; "
     "frame-ancestors 'self'; "
     "base-uri 'self'; "
     "form-action 'self'; "
