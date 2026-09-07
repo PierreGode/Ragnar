@@ -22556,6 +22556,57 @@ def register_network_diagnostics(app, logger=None):
         _log("wifidef/pineap/selftest")
         return jsonify(_pa.selftest())
 
+    @app.route('/api/wifidef/pineap/active-probe', methods=['POST'])
+    def wifidef_pineap_active_probe():
+        """ACTIVE PineAP test — this one TRANSMITS. It sends probe requests for
+        random, never-advertised SSIDs and listens for a response; anything that
+        answers a network it cannot legitimately serve is a Karma/PineAP
+        impersonator. This is the ONLY active wireless test in Ragnar (everything
+        else is receive-only), so it runs solely when this endpoint is called.
+
+        Body: {"interface": "wlan1", "rounds": 3, "listen_seconds": 2,
+        "channels": [1, 6, 11]}. Needs scapy and a monitor-mode adapter — the
+        Pi's onboard radio can neither do monitor mode nor transmit mgmt frames.
+        """
+        import pineap_active as _pa_active
+        import pineap_watch as _pa
+        data = request.get_json(silent=True) or {}
+        iface = (data.get('interface') or '').strip()
+        if not iface or not _valid_iface(iface):
+            return _bad('Provide a monitor-capable interface, '
+                        'e.g. {"interface": "wlan1"}')
+        chans = data.get('channels') if isinstance(data.get('channels'), list) else None
+        _log(f"wifidef/pineap/active-probe {iface}")
+        result = _pa_active.run(iface,
+                                rounds=int(data.get('rounds') or 3),
+                                listen_seconds=int(data.get('listen_seconds') or 2),
+                                channels=chans)
+        if result.get('error'):
+            return jsonify(result)
+        verdict = _pa.assess(wifi={'detections': result.get('detections', [])})
+        if verdict.get('score', 0) >= 25:
+            try:
+                sus = verdict.get('suspects') or []
+                _guard_emit_jsonl('pineap', {
+                    'interface': iface,
+                    'findings': [{
+                        'code': verdict['code'],
+                        'name': 'Wi-Fi Pineapple / PineAP active-probe confirm '
+                                '(%s, %d%%)' % (verdict['verdict'], verdict['score']),
+                        'severity': verdict['severity'],
+                        'klass': 'rogue-ap',
+                        'src': (sus[0].get('bssid') if sus else None),
+                        'cves': [],
+                        'detail': {'answered': result.get('answered'),
+                                   'suspects': sus,
+                                   'reasons': [r.get('detail')
+                                               for r in verdict.get('reasons', [])]},
+                    }],
+                })
+            except Exception as exc:
+                _log(f"wifidef/pineap active-probe emit skipped: {exc}")
+        return jsonify({'result': result, 'verdict': verdict})
+
     @app.route('/api/wifidef/halehound/portal-probe', methods=['POST'])
     def wifidef_halehound_portal_probe():
         """Actively fetch a captive portal and match it to a GARMR signature.

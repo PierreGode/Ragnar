@@ -16,6 +16,12 @@ PineAP is the same rogue-AP engine across Mark VII / Enterprise / Pager (Pager's
 targets *behaviour*, not a fixed hardware fingerprint — exactly how RayHunter
 finds cell-site simulators. The tells, in decreasing strength:
 
+  * **Answers a random, never-advertised SSID probe** — the active-probe test
+    (``pineap_active``): transmit a probe for a random unlikely SSID and see if
+    anything responds. No legitimate AP answers a network it doesn't serve; a
+    PineAP responder (Impersonate-All / allow-associations) does. Near-definitive
+    — but it is the one signal here that *transmits*, so it is opt-in and lives
+    in a separate module; everything else in this file is passive.
   * **SSID pool from one BSSID** — a single BSSID answering many distinct SSIDs
     (Karma/Dogma/"PineAP pool"). This is ``wifi_defense``'s ``karma`` detection.
     The larger the pool, the more PineAP-consistent (a home VAP router tops out
@@ -90,6 +96,8 @@ _PINEAPPLE_MGMT_SSIDS = {"wifipineapple", "pineap", "pineapple"}
 _RF_WEIGHTS = {
     ("karma", "pool_large"): 34,   # >=15 SSIDs from one BSSID — past any VAP
     ("karma", "pool_small"): 25,   # 5-14 SSIDs from one BSSID — KARMA/PineAP shape
+    ("rogue_ap", "answers_random_probe"): 45,  # answered a never-advertised random
+                                               # SSID — active-probe test (pineap_active)
     ("rogue_ap", "pineapple_name"): 40,   # 'WiFi Pineapple' mgmt AP — Hak5-specific
     ("rogue_ap", "attack_tool_ssid"): 10,  # some OTHER attack-tool name (weak for PineAP)
     ("rogue_ap", "xbssid_pool"): 20,      # same pool smeared across many BSSIDs
@@ -284,6 +292,15 @@ def score(signals):
 
     total = min(100, base + bonus)
 
+    # Floor 0: an AP that answered a probe for a random SSID it has never
+    # legitimately advertised is behaving as a Karma/PineAP responder — no real
+    # AP does this. Near-definitive (the active-probe test) — floor to 'confirmed'.
+    if "rogue_ap:answers_random_probe" in fired and total < 75:
+        total = 75
+        reasons.append({"domain": "rf", "signal": "random_probe_floor", "weight": 0,
+                        "detail": "answered a random never-advertised SSID probe — "
+                                  "floored to 'confirmed'"})
+
     # Floor 1: the Wi-Fi Pineapple's own management-AP SSID is a Hak5-specific
     # near-certain tell — never rank it below 'confirmed'.
     if mgmt_name_seen and total < 75:
@@ -452,6 +469,13 @@ def selftest():
                            "ssid": "Marauder", "bssid": "00:00:00:00:00:02"}]})
     check("a non-Pineapple attack-tool name stays a trace",
           other["verdict"] == "trace", json.dumps(other))
+
+    # --- Active-probe test: answering a random never-advertised SSID confirms ---
+    aprobe = score({"rf": [{"type": "rogue_ap", "severity": "answers_random_probe",
+                            "ssid": "Zx9Qk2Vw7Lp1", "bssid": "00:13:37:00:00:09",
+                            "detail": "answered random SSID 'Zx9Qk2Vw7Lp1'"}]})
+    check("answering a random probe alone => confirmed",
+          aprobe["verdict"] == "confirmed", json.dumps(aprobe))
 
     # --- LAN management host floors to 'likely'; pool lifts to 'confirmed' ---
     lan = score({"lan": ["wifi_pineapple"]})
