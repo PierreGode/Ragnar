@@ -74,6 +74,14 @@ regression** that induces routing reconvergence lands as **critical**, and no-au
 GTSM violation / malformed-or-truncated header (**CVE-2018-0155**) / auth downgrade /
 session flap as **high**.
 
+[`ptp_watch`](nettools.md#ptp-watch) (PTP Watch) appends its **HIGH/CRITICAL**
+timing-plane-manipulation findings to `/var/log/ragnar/ptp_watch.jsonl` (deduplicated per
+code + port-identity) — a grandmaster **takeover** / two sources claiming one GM identity,
+a `correctionField` or origin-timestamp **injection**, a mid-session `currentUtcOffset`
+flip, a management **SET/WRITE**, a unicast-cancel forgery, or a gPTP **multi-peer-delay
+responder** (denial-of-timing) lands as **critical**, and Announce/Sync flooding, sequence
+regression and identity-from-two-MACs as **high**.
+
 [`sr_mpls_watch`](nettools.md#sr-mpls-watch) (SR-MPLS Watch) appends its **HIGH/CRITICAL**
 label & segment-manipulation findings to `/var/log/ragnar/sr_mpls_watch.jsonl`
 (deduplicated per code + key) — a label or **SRH on a customer-facing port**
