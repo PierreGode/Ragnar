@@ -21322,25 +21322,60 @@ def register_network_diagnostics(app, logger=None):
             return _bad('Invalid band')
         _log(f"net/wifi/scan {iface} band={band}")
         res = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
-        # A single radio can't survey and run monitor mode at once. If the chosen
-        # radio is busy in monitor (e.g. the Alfa running the WiFi Defense watch),
-        # transparently retry on the free radio the analyzer suggested (e.g. the
-        # onboard wlan0) so the survey works instead of erroring. Note: the
-        # onboard radio is 2.4 GHz-only, so a 5/6 GHz survey there returns nothing.
-        if (isinstance(res, dict) and res.get('monitor_conflict')
-                and res.get('alt_iface') and res['alt_iface'] != iface
-                and _valid_iface(res['alt_iface'])):
-            alt = res['alt_iface']
-            _log(f"net/wifi/scan {iface} in monitor — retrying on {alt}")
-            res2 = wifi_analyzer.do_scan(interface=alt, band=band, passive=True)
-            if isinstance(res2, dict) and not res2.get('error'):
-                res2['auto_switched_from'] = iface
-                res2['auto_switched_to'] = alt
-                res2['note'] = (f"{iface} is in monitor mode (WiFi Defense) — "
-                                f"surveyed on {alt} instead. That radio may be "
-                                "2.4 GHz-only; free the monitor adapter or add a "
-                                "second dual-band adapter for a full 5/6 GHz sweep.")
-                return jsonify(res2)
+        # A single radio can't survey and run monitor mode at once. If the radio
+        # the user PICKED is held by a WiFi Defense monitor vif, prefer to HONOR
+        # that choice: briefly pause the monitor, survey the selected radio (its
+        # full band coverage — 2.4 + 5 GHz on a dual-band adapter), then restore
+        # the monitor. Only fall back to a different radio when we must (the 24/7
+        # watch is actively using the monitor, or freeing+surveying failed) — that
+        # avoids silently returning a weaker radio's (e.g. 2.4-only) results.
+        if isinstance(res, dict) and res.get('monitor_conflict'):
+            culprit = res.get('monitor_conflict')
+            alt = res.get('alt_iface')
+            watch_running = False
+            try:
+                import halehound_daemon as _hd
+                watch_running = bool(_hd.status().get('running'))
+            except Exception:
+                pass
+            try:
+                _mst = wifi_defense.list_monitor_capable()
+            except Exception:
+                _mst = {}
+            if _mst.get('active_monitor') == culprit and not watch_running:
+                base = _mst.get('base_iface') or iface
+                _log(f"net/wifi/scan pausing monitor {culprit} to survey {iface}")
+                res2 = None
+                try:
+                    wifi_defense.disable_monitor()
+                    time.sleep(1.0)   # let the radio settle after the vif teardown
+                    res2 = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
+                    if isinstance(res2, dict) and 'busy' in str(res2.get('error', '')).lower():
+                        time.sleep(1.5)   # still settling — one retry
+                        res2 = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
+                finally:
+                    try:
+                        wifi_defense.enable_monitor(base)
+                    except Exception as exc:
+                        _log(f"net/wifi/scan monitor restore failed: {exc}")
+                if isinstance(res2, dict) and not res2.get('error'):
+                    res2['monitor_paused'] = True
+                    res2['note'] = (f"Paused WiFi Defense monitor to survey on "
+                                    f"{iface} (full band coverage), then restored it.")
+                    return jsonify(res2)
+            # Fall back to the free radio the analyzer suggested (watch running, or
+            # the pause-and-survey failed) — transparently noted.
+            if alt and alt != iface and _valid_iface(alt):
+                _log(f"net/wifi/scan {iface} busy in monitor — surveying {alt}")
+                res3 = wifi_analyzer.do_scan(interface=alt, band=band, passive=True)
+                if isinstance(res3, dict) and not res3.get('error'):
+                    res3['auto_switched_from'] = iface
+                    res3['auto_switched_to'] = alt
+                    res3['note'] = (f"{iface} is in monitor mode and the 24/7 watch "
+                                    f"is using it — surveyed on {alt} instead "
+                                    "(may be 2.4 GHz-only). Disable the watch to "
+                                    f"survey on {iface}.")
+                    return jsonify(res3)
         return jsonify(res)
 
     @app.route('/api/net/wifi/report', methods=['POST'])
