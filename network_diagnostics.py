@@ -22439,7 +22439,10 @@ def register_network_diagnostics(app, logger=None):
             verdict['pineap'] = {'verdict': pa_verdict['verdict'],
                                  'score': pa_verdict['score'],
                                  'code': pa_verdict['code']}
-            if pa_verdict.get('score', 0) >= 25:
+            # Only raise a Watchtower incident at 'likely'+ (>=50). A lone SSID
+            # pool is 'possible' (25-34) and, especially from a randomized BSSID,
+            # is too weak to page on — it still shows in the panel's PineAP card.
+            if pa_verdict.get('score', 0) >= 50:
                 pa_sus = pa_verdict.get('suspects') or []
                 _guard_emit_jsonl('pineap', {
                     'interface': (scan or {}).get('interface'),

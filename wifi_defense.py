@@ -1996,7 +1996,12 @@ def analyze(events, baseline=None, window_secs=None, thresholds=None):
     by_ap = {}
     for e in presp + beacons:
         src = e.get("src")
-        if src and e.get("ssid"):
+        # A group/multicast (I/G bit) src is not a valid AP transmitter address —
+        # no real AP sources frames from it. It's already surfaced as
+        # spoofed_bssid; aggregating a KARMA "pool" from it just turns corrupted /
+        # aggregated frames that happen to share one bogus src into a false
+        # KARMA/PineAP hit. Skip such srcs here.
+        if src and e.get("ssid") and not _is_multicast_bssid(src):
             by_ap.setdefault(src, set()).add(e["ssid"])
     karma = [{"bssid": b, "ssids": sorted(s), "count": len(s)}
              for b, s in by_ap.items() if len(s) >= _KARMA_SSID_MIN]
