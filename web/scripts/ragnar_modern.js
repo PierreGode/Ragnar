@@ -5264,7 +5264,7 @@ function wifidefRender() {
     } else {
         det.innerHTML = d.detections.map(x => {
             const crit = ['flood', 'evil_twin', 'karma', 'spoofed_bssid', 'attack_tool_ssid', 'wpa3_strip', 'pmkid', 'handshake'].includes(x.severity);
-            const info = ['band_steering', 'wpa3_transition', 'wpa3_mixed'].includes(x.severity);
+            const info = ['band_steering', 'wpa3_transition', 'wpa3_mixed', 'duplicate_ssid', 'rogue_lure'].includes(x.severity);
             const border = crit ? 'border-l-4 border-red-500'
                 : info ? 'border-l-4 border-emerald-500' : 'border-l-4 border-amber-500';
             let title = '', body = '';

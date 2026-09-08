@@ -1848,8 +1848,14 @@ def do_airtime(interface, seconds=10, channel=None, auto_enable=True):
 # deep-scan merge (which appends wifiwatch findings after analyze() has run).
 _SEV_RANK = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
              "attack_tool_ssid": 3, "wpa3_strip": 3, "pmkid": 3, "handshake": 3,
-             "duplicate_ssid": 2, "beacon_warn": 2, "auth_warn": 2,
+             "beacon_warn": 2, "auth_warn": 2,
              "esp32_open_ap": 2, "pnl_leak": 2,
+             # duplicate_ssid is INFO, not a warning: without a baseline, any SSID
+             # on 2+ cross-OUI BSSIDs (mesh, repeaters, a phone hotspot sharing a
+             # home SSID, a travel router) trips it — "possible evil twin, set a
+             # baseline to confirm". It shouldn't alarm on legit multi-AP setups;
+             # a confirmed clone against a baseline surfaces as evil_twin (rank 3).
+             "duplicate_ssid": 1,
              "band_steering": 1, "rogue_lure": 1, "seen": 1,
              "wpa3_transition": 1, "wpa3_mixed": 1}
 
