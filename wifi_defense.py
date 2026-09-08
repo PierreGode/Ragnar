@@ -1855,11 +1855,16 @@ _SEV_RANK = {"flood": 3, "evil_twin": 3, "karma": 3, "spoofed_bssid": 3,
 
 
 def _threat_level(detections):
-    """clear / warning / critical from a detection list (worst severity wins)."""
+    """clear / info / warning / critical from a detection list (worst wins).
+
+    Rank 3 (flood/evil-twin/karma/spoofed/attack-tool/WPA3-strip/PMKID/handshake)
+    → critical; rank 2 (duplicate SSID, warn-level floods, ESP32 open AP, PNL
+    leak) → warning; rank 1 (band-steering, open-lure name — informational, never
+    an alert) → info; nothing → clear."""
     if not detections:
         return "clear"
     worst = max(_SEV_RANK.get(d.get("severity"), 1) for d in detections)
-    return "critical" if worst >= 3 else "warning"
+    return {3: "critical", 2: "warning"}.get(worst, "info")
 
 
 def analyze(events, baseline=None, window_secs=None, thresholds=None):
@@ -2494,8 +2499,8 @@ def selftest():
                     if d["type"] == "rogue_ap"), {})
     check("multi-BSSID same-OUI SSID = band_steering (not evil twin)",
           steer_d.get("severity") == "band_steering", json.dumps(steer_d))
-    check("band steering does not raise threat above clear/warning",
-          steer_res["threat"] in ("clear", "warning"), steer_res["threat"])
+    check("band steering is informational, not warning/critical",
+          steer_res["threat"] in ("clear", "info"), steer_res["threat"])
     # But a clone from a DIFFERENT vendor OUI still surfaces as duplicate_ssid.
     twin = ([{"kind": "beacon", "src": "3c:22:fb:11:22:30", "ssid": "Proxima B"}] * 4
             + [{"kind": "beacon", "src": "de:ad:be:ef:00:01", "ssid": "Proxima B"}] * 4)

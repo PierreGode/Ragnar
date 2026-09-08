@@ -4675,6 +4675,7 @@ const _wifidef = { iface: '', monitor: null, data: null, continuous: false, time
 
 const _WIFIDEF_THREAT = {
     clear: ['CLEAR', 'bg-green-600/20 text-green-300 border border-green-600/50'],
+    info: ['INFO', 'bg-sky-600/20 text-sky-300 border border-sky-600/50'],
     warning: ['WARNING', 'bg-amber-600/20 text-amber-300 border border-amber-600/50'],
     critical: ['⚠ UNDER ATTACK', 'bg-red-600/25 text-red-300 border border-red-600/60'],
 };
