@@ -4822,7 +4822,7 @@ function _wifidefFillIfaces() {
         // reachable; the passive verdict fills in after a WiFi Defense scan.
         const paBox = document.getElementById('wifidef-pa-inline');
         const paBody = document.getElementById('wifidef-pa-body');
-        if (paBox) paBox.hidden = false;
+        if (paBox) paBox.classList.remove('hidden');
         if (paBody && !paBody.innerHTML.trim()) {
             paBody.innerHTML = '<div class="text-[12px] text-gray-400">Run a WiFi Defense scan for the passive verdict, or click <b>Active probe</b> for the definitive test.</div>';
         }
@@ -5369,7 +5369,7 @@ async function _wifidefFusion(opts) {
     const vb = document.getElementById('wifidef-hh-verdict');
     const body = document.getElementById('wifidef-hh-body');
     if (!box || !_wifidef.data) return;
-    box.hidden = false;
+    box.classList.remove('hidden');
     vb.textContent = '…'; vb.className = 'px-3 py-1 rounded text-xs font-bold bg-slate-700 text-slate-300';
     // BLE overlay: reuse a cached snapshot unless it's older than 60s (an 8s
     // scan briefly claims the controller, so it must NOT run every WIDS cycle).
@@ -5447,7 +5447,7 @@ function _wifidefRenderPineap(pa) {
     const vb = document.getElementById('wifidef-pa-verdict');
     const body = document.getElementById('wifidef-pa-body');
     if (!box || !vb || !body) return;
-    box.hidden = false;                 // show it so the Active-probe button is available
+    box.classList.remove('hidden');     // show it so the Active-probe button is available
     const v = pa || {};
     const [label, cls] = _WIFIDEF_PA[v.verdict] || ['—', 'bg-slate-700 text-slate-300'];
     vb.textContent = (v.score != null) ? `${label} · ${v.score}%` : label;
@@ -5466,7 +5466,7 @@ async function wifidefPineapActiveProbe() {
     const box = document.getElementById('wifidef-pa-inline');
     const body = document.getElementById('wifidef-pa-body');
     const vb = document.getElementById('wifidef-pa-verdict');
-    if (box) box.hidden = false;
+    if (box) box.classList.remove('hidden');
     const iface = _wifidef.iface || _wifidef.monitor;
     if (!iface) {
         if (body) body.innerHTML = '<span class="text-amber-300">Select/enable a monitor-capable adapter first — the Pi\'s onboard radio can\'t transmit 802.11 frames.</span>';
@@ -5569,7 +5569,7 @@ async function wifidefHaleHoundWatchStatus() {
 async function wifidefProbePortal(ssid) {
     const box = document.getElementById('wifidef-hh-inline');
     const body = document.getElementById('wifidef-hh-body');
-    if (box) box.hidden = false;
+    if (box) box.classList.remove('hidden');
     const ip = prompt('Captive-portal / gateway IP to probe'
         + (ssid ? ' for "' + ssid + '"' : '')
         + '\n(join an adapter to that SSID first — HaleHound GARMR defaults to 192.168.4.1):',
