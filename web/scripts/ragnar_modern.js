@@ -4946,10 +4946,12 @@ function wifidefScan() {
     const prog = _wifidefProgress(st, parseInt(secs) || 15,
         (_wifidef.continuous ? 'Continuous — capturing' : 'Capturing') + (chParam !== 'auto' ? ' ch ' + chParam : ''));
     if (btn) btn.disabled = true;
-    // Deep scan (default on): also capture data frames + fold in wifiwatch's
+    // Deep scan (opt-in): also capture EAPOL frames + fold in wifiwatch's
     // client/handshake-layer detectors (PMKID, handshake-after-deauth, PNL leak).
+    // Off by default — it's heavier, so a normal scan stays light and the AP
+    // survey is never starved.
     const deepEl = document.getElementById('wifidef-deep');
-    const deep = deepEl ? (deepEl.checked ? 1 : 0) : 1;
+    const deep = deepEl && deepEl.checked ? 1 : 0;
     return fetch(`/api/wifidef/scan?interface=${encodeURIComponent(iface)}&seconds=${secs}&channel=${chParam}&deep=${deep}`,
         { signal: ctrl.signal })
         .then(r => r.json()).then(d => {
