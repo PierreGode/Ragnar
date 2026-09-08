@@ -160,9 +160,17 @@ def _rf_tells(detections):
     high-confidence ``pineapple_name`` tell, and a run of ``duplicate_ssid``
     detections becomes the cross-BSSID (randomized-pool) tell.
     """
-    tells = []
+    # Dedupe by tell key: a swarm of the SAME signal (e.g. dozens of duplicate
+    # SSIDs, or many spoofed BSSIDs from a beacon flood) is ONE phenomenon, not N
+    # independent tells — otherwise it stacks into a false verdict. First-seen
+    # detail wins.
+    tells = {}
     dup_ssids = set()          # for the cross-BSSID pool metric
     spoofed_present = False
+
+    def _add(key, w, detail):
+        if key not in tells:
+            tells[key] = (w, detail)
 
     for d in detections or []:
         dtype = d.get("type")
@@ -173,12 +181,10 @@ def _rf_tells(detections):
             if n < _POOL_MIN:
                 continue
             band = "pool_large" if n >= _POOL_LARGE else "pool_small"
-            w = _RF_WEIGHTS[("karma", band)]
-            tells.append(("karma:" + band, w,
-                          f"{d.get('bssid')} answered {n} distinct SSIDs — "
-                          + ("large PineAP-class pool (past any legit multi-SSID AP)"
-                             if band == "pool_large"
-                             else "KARMA/PineAP-class SSID pool")))
+            _add("karma:" + band, _RF_WEIGHTS[("karma", band)],
+                 f"{d.get('bssid')} answered {n} distinct SSIDs — "
+                 + ("large PineAP-class pool (past any legit multi-SSID AP)"
+                    if band == "pool_large" else "KARMA/PineAP-class SSID pool"))
             continue
 
         if dtype == "rogue_ap":
@@ -186,40 +192,48 @@ def _rf_tells(detections):
                 # Split the generic attack-tool name from the Pineapple-specific
                 # management SSID — the latter is a near-certain Hak5 tell.
                 if _norm_ssid(d.get("ssid")) in _PINEAPPLE_MGMT_SSIDS:
-                    tells.append(("rogue_ap:pineapple_name",
-                                  _RF_WEIGHTS[("rogue_ap", "pineapple_name")],
-                                  f"SSID '{d.get('ssid')}' is the Wi-Fi Pineapple's "
-                                  "default management AP name"))
+                    _add("rogue_ap:pineapple_name",
+                         _RF_WEIGHTS[("rogue_ap", "pineapple_name")],
+                         f"SSID '{d.get('ssid')}' is the Wi-Fi Pineapple's "
+                         "default management AP name")
                 else:
-                    tells.append(("rogue_ap:attack_tool_ssid",
-                                  _RF_WEIGHTS[("rogue_ap", "attack_tool_ssid")],
-                                  d.get("detail", "attack-tool SSID name")))
+                    _add("rogue_ap:attack_tool_ssid",
+                         _RF_WEIGHTS[("rogue_ap", "attack_tool_ssid")],
+                         d.get("detail", "attack-tool SSID name"))
                 continue
-            if sev == "duplicate_ssid" and d.get("ssid"):
-                dup_ssids.add(d.get("ssid"))
+            if sev == "duplicate_ssid":
+                # Collected for the pool metric below; NOT scored per detection
+                # (a pile of duplicate SSIDs must not stack — that was the swarm
+                # false positive).
+                if d.get("ssid"):
+                    dup_ssids.add(d.get("ssid"))
+                continue
             if sev == "spoofed_bssid":
                 spoofed_present = True
             w = _RF_WEIGHTS.get(("rogue_ap", sev))
             if w:
-                tells.append(("rogue_ap:" + sev, w, d.get("detail", "")))
+                _add("rogue_ap:" + sev, w, d.get("detail", ""))
             continue
 
         w = _RF_WEIGHTS.get((dtype, sev))
         if w:
-            tells.append((f"{dtype}:{sev}", w, d.get("detail", "")))
+            _add(f"{dtype}:{sev}", w, d.get("detail", ""))
 
-    # Derived: a cross-BSSID pool. Several distinct SSIDs each appearing under
-    # multiple BSSIDs is the shape of a randomized-MAC PineAP pool (Pager) that
-    # the single-BSSID karma test can't catch. Require a spoofed/LA BSSID too, so
-    # a couple of ordinary duplicate SSIDs (mesh a baseline hasn't cleared) don't
-    # trip it.
+    # Derived from the duplicate-SSID set: a cross-BSSID pool. Several distinct
+    # SSIDs each appearing under multiple BSSIDs is the shape of a randomized-MAC
+    # PineAP pool (Pager) that the single-BSSID karma test can't catch. Require a
+    # spoofed/LA BSSID too, so an ordinary messy-SSID environment (many duplicate
+    # SSIDs, no spoofed BSSID) is a single weak duplicate tell, not a pool.
     if len(dup_ssids) >= _XBSSID_POOL_MIN and spoofed_present:
-        tells.append(("rogue_ap:xbssid_pool",
-                      _RF_WEIGHTS[("rogue_ap", "xbssid_pool")],
-                      f"{len(dup_ssids)} SSIDs each advertised by multiple "
-                      "BSSIDs alongside a spoofed BSSID — randomized-MAC PineAP "
-                      "pool (Pager-style)"))
-    return tells
+        _add("rogue_ap:xbssid_pool", _RF_WEIGHTS[("rogue_ap", "xbssid_pool")],
+             f"{len(dup_ssids)} SSIDs each advertised by multiple BSSIDs "
+             "alongside a spoofed BSSID — randomized-MAC PineAP pool (Pager-style)")
+    elif dup_ssids:
+        _add("rogue_ap:duplicate_ssid", _RF_WEIGHTS[("rogue_ap", "duplicate_ssid")],
+             f"{len(dup_ssids)} SSID(s) advertised by multiple BSSIDs "
+             "(possible evil twin — set a baseline to confirm)")
+
+    return [(k, w, det) for k, (w, det) in tells.items()]
 
 
 # --------------------------------------------------------------------------

@@ -50,7 +50,11 @@ _WIFI_WEIGHTS = {
     ("rogue_ap", "esp32_open_ap"): 16,   # open AP on an Espressif radio (name-independent)
     ("rogue_ap", "evil_twin"): 20,
     ("rogue_ap", "spoofed_bssid"): 20,   # group/multicast-bit BSSID = spoofed AP
-    ("rogue_ap", "duplicate_ssid"): 8,
+    # NOTE: duplicate_ssid is intentionally NOT scored here. It's a low-confidence,
+    # baseline-less "same SSID on several BSSIDs" signal (mesh, repeaters, or a
+    # PineAP pool) — not an ESP32-multitool tell — and a swarm of them (e.g. a
+    # Pineapple SSID pool) otherwise maxed the wifi domain into a false "possible".
+    # It belongs to pineap_watch (the cross-BSSID pool metric).
     ("rogue_ap", "rogue_lure"): 6,       # open free-Wi-Fi lure name (low-confidence)
     ("karma", "karma"): 18,
     ("beacon_flood", "flood"): 14,
@@ -487,9 +491,15 @@ def score(signals):
     reasons = []
     domain_raw = {"wifi": 0, "lan": 0, "ble": 0, "portal": 0, "subghz": 0}
 
+    # Dedupe by (type, severity): a swarm of the same signal (a beacon flood's many
+    # spoofed BSSIDs, a pool's many duplicate SSIDs) is one phenomenon, not N — it
+    # must not stack the wifi domain to its cap on its own.
+    _wifi_seen = set()
     for det in signals.get("wifi", []) or []:
-        w = _WIFI_WEIGHTS.get((det.get("type"), det.get("severity")))
-        if w:
+        key = (det.get("type"), det.get("severity"))
+        w = _WIFI_WEIGHTS.get(key)
+        if w and key not in _wifi_seen:
+            _wifi_seen.add(key)
             domain_raw["wifi"] += w
             reasons.append({"domain": "wifi", "signal": det.get("type"),
                             "weight": w, "detail": det.get("detail", "")})
