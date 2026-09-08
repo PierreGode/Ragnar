@@ -1717,9 +1717,12 @@ def _capture(mon_iface, seconds, channel=None, watch=None):
                 stop.wait(0.35)
         threading.Thread(target=_hopper, daemon=True).start()
 
-    # Mgmt-only keeps the sniffer cheap; a deep scan (watch set) needs data
-    # frames (EAPOL) too, so it captures everything and lets wifiwatch sort it.
-    _flt = None if watch is not None else "type mgt"
+    # Mgmt-only keeps the sniffer cheap. A deep scan (watch set) also needs EAPOL
+    # (data) frames for the client/handshake detectors — but capturing ALL data
+    # frames saturates the callback on a Pi and starves beacon capture, so the AP
+    # survey comes back empty. Capture mgmt + EAPOL (ethertype 0x888e) only; if a
+    # driver rejects that BPF the except-retry below falls back to unfiltered.
+    _flt = "type mgt or ether proto 0x888e" if watch is not None else "type mgt"
     try:
         sniff(iface=mon_iface, prn=_cb, timeout=seconds, store=False,
               filter=_flt, monitor=True)

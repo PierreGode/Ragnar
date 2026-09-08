@@ -3110,7 +3110,7 @@
                     <button onclick="wifidefScan()" id="wifidef-scan-btn" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded text-sm font-semibold">Scan</button>
                     <button onclick="wifidefStopContinuous()" id="wifidef-stop-btn" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded text-sm font-semibold hidden">■ Stop</button>
                     <label class="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none"><input type="checkbox" id="wifidef-auto" class="accent-Ragnar-600"> Continuous</label>
-                    <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none" title="Deep scan: also capture data frames and fold in wifiwatch's client/handshake-layer detectors — PMKID harvest, deauth-and-capture handshakes, and PNL leak. Heavier (captures all frames)."><input type="checkbox" id="wifidef-deep" class="accent-rose-500" checked> +handshake/PNL</label>
+                    <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none" title="Deep scan: also capture data frames and fold in wifiwatch's client/handshake-layer detectors — PMKID harvest, deauth-and-capture handshakes, and PNL leak. Heavier (captures all frames)."><input type="checkbox" id="wifidef-deep" class="accent-rose-500"> +handshake/PNL</label>
                     <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none" title="Each scan also sweeps 300-439 MHz off the RTL-SDR for replay/brute (adds ~20s, briefly uses the SDR). Manual scans only, not the continuous loop."><input type="checkbox" id="wifidef-hh-subghz" class="accent-fuchsia-500"> +SubGHz</label>
                     <label class="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none" title="Headless background watch: keeps fusing Wi-Fi + BLE on a slow, Pi-friendly loop with no browser open, and alerts via Watchtower/Pushover. Survives restart. Needs monitor mode enabled."><input type="checkbox" id="wifidef-hh-watch" onchange="wifidefHaleHoundWatch(this.checked)" class="accent-emerald-500"> 24/7 watch</label>
                     <button onclick="wifidefTrust()" class="bg-slate-700 hover:bg-slate-600 text-gray-200 px-3 py-2 rounded text-sm whitespace-nowrap" title="Add the currently-visible APs to the trusted baseline (accumulates) for evil-twin detection. Run a few times / across bands to capture every BSSID of each SSID.">Trust current APs</button>
@@ -8485,7 +8485,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260908-wifiwatch-deep"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260908-deep-optin"></script>
 
 
 
