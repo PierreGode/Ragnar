@@ -21321,7 +21321,27 @@ def register_network_diagnostics(app, logger=None):
         if band not in ('all', '2.4', '5', '6'):
             return _bad('Invalid band')
         _log(f"net/wifi/scan {iface} band={band}")
-        return jsonify(wifi_analyzer.do_scan(interface=iface, band=band, passive=True))
+        res = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
+        # A single radio can't survey and run monitor mode at once. If the chosen
+        # radio is busy in monitor (e.g. the Alfa running the WiFi Defense watch),
+        # transparently retry on the free radio the analyzer suggested (e.g. the
+        # onboard wlan0) so the survey works instead of erroring. Note: the
+        # onboard radio is 2.4 GHz-only, so a 5/6 GHz survey there returns nothing.
+        if (isinstance(res, dict) and res.get('monitor_conflict')
+                and res.get('alt_iface') and res['alt_iface'] != iface
+                and _valid_iface(res['alt_iface'])):
+            alt = res['alt_iface']
+            _log(f"net/wifi/scan {iface} in monitor — retrying on {alt}")
+            res2 = wifi_analyzer.do_scan(interface=alt, band=band, passive=True)
+            if isinstance(res2, dict) and not res2.get('error'):
+                res2['auto_switched_from'] = iface
+                res2['auto_switched_to'] = alt
+                res2['note'] = (f"{iface} is in monitor mode (WiFi Defense) — "
+                                f"surveyed on {alt} instead. That radio may be "
+                                "2.4 GHz-only; free the monitor adapter or add a "
+                                "second dual-band adapter for a full 5/6 GHz sweep.")
+                return jsonify(res2)
+        return jsonify(res)
 
     @app.route('/api/net/wifi/report', methods=['POST'])
     def net_wifi_report():
