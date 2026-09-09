@@ -163,12 +163,21 @@ class EPD:
 
     # display image
     def display(self, imageblack, imagered=None):
-        self.send_command(0x24)
-        self.send_data2(imagered)
+        # 0x24 = B/W RAM, 0x26 = RED RAM. Ragnar renders a single 1-bit image
+        # and calls display(buffer) with no red plane, so send imageblack to the
+        # B/W RAM and a blank (white) red plane — otherwise the black content is
+        # never written and the panel shows stale/garbage red RAM.
+        if self.width % 8 == 0:
+            linewidth = int(self.width / 8)
+        else:
+            linewidth = int(self.width / 8) + 1
+        blank = [0xff] * int(self.height * linewidth)
 
-        if not None==imagered:
-            self.send_command(0x26)
-            self.send_data2(imageblack)
+        self.send_command(0x24)
+        self.send_data2(imageblack)
+
+        self.send_command(0x26)
+        self.send_data2(imagered if imagered is not None else blank)
 
         self.ondisplay()
 
