@@ -126,13 +126,21 @@ You can also run it directly: `python3 wifi_defense.py dedicate --interface wlan
 Every BSSID in a detection card (evil twin / duplicate SSID, KARMA, the source
 MAC of a deauth attacker) and every row of the **Access Points seen**,
 **Airtime & link quality** and **Client isolation observer** tables is
-clickable — it jumps to **Network → WiFi Analyzer**, selects that AP and marks
-it in the spectrum with a red dashed **⚠ WIDS** locator (band filter is widened
-to *All* so it can't be hidden). A red *"Flagged by WiFi Defense"* banner above
-the spectrum shows what you're chasing; the highlight survives re-scans until
-you hit **✕ dismiss**. If the analyzer's last survey doesn't contain the BSSID
-it re-scans once, and the banner says so when the AP still isn't heard (rogue
+clickable — it jumps to **Network → WiFi Analyzer**, selects that AP and widens
+the band filter to *All* so it can't be hidden. The highlight survives re-scans
+until you hit **✕ dismiss**, and if the analyzer's last survey doesn't contain
+the BSSID it re-scans once (the banner says so when the AP still isn't heard —
 gone quiet, out of range of the survey radio, or beaconing intermittently).
+
+**The banner colour tells you why you're there:**
+
+- Clicking a BSSID **inside a detection card** — an actual finding — marks it
+  with a red dashed **⚠ WIDS** locator and a red *"🛡 Flagged by WiFi Defense"*
+  banner. That AP is a genuine threat.
+- Clicking **any plain Access-Point row** (the *seen / airtime / isolation*
+  tables) is just "show me this one" — a blue *"📶 Access Point selected"*
+  banner and the normal blue selection highlight, **no WIDS marker**. A benign
+  neighbour you clicked out of curiosity is never dressed up as a target.
 From there you get the analyzer's full toolkit on the rogue: RSSI history,
 channel + width, vendor OUI, and the **signal-radius rings** to walk it down
 physically.

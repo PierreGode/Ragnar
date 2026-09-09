@@ -169,14 +169,18 @@ or leaving full screen never loses your place. Actions in the inspector can
 **copy the BSSID**, **filter the list to the same SSID**, or send the AP
 straight to the coverage heatmap as its survey target.
 
-**WIDS pivot:** clicking a BSSID in a **WiFi Defense** detection (or a row of
-its AP table) lands here with that AP pre-selected and marked by a red dashed
-**⚠ WIDS** locator line + outline in the spectrum, a red *"Flagged by WiFi
-Defense"* banner above the graph, and a red **⚠ WIDS** badge on its AP-table
-row. The highlight persists across re-scans (auto-refresh keeps tracking the
-rogue's RSSI) until dismissed from the banner; if the flagged BSSID isn't heard
-in the current survey the analyzer re-scans once and the banner reports it as
-not heard.
+**WIDS pivot:** clicking a BSSID that is an actual **WiFi Defense** finding (one
+that appears *inside* a detection card) lands here with that AP pre-selected and
+marked by a red dashed **⚠ WIDS** locator line + outline in the spectrum, a red
+*"🛡 Flagged by WiFi Defense"* banner above the graph, and a red **⚠ WIDS** badge
+on its AP-table row. Clicking a **plain Access-Point row** instead (WiFi
+Defense's *seen / airtime / isolation* tables) is a neutral "inspect this one":
+the AP is selected with the normal blue highlight and a blue *"📶 Access Point
+selected"* banner — **no ⚠ WIDS marker or badge**, so a benign AP is never
+mistaken for a threat. Either way the highlight persists across re-scans
+(auto-refresh keeps tracking RSSI) until dismissed from the banner; if the
+target BSSID isn't heard in the current survey the analyzer re-scans once and
+the banner reports it as not heard.
 
 **On the device (1.44" LCD HAT):** the Bar view is also available head-less as
 the **SPECTRUM** card in on-screen Network Diagnostic mode — a per-channel
