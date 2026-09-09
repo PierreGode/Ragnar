@@ -4712,6 +4712,25 @@ const _WIFIDEF_THREAT = {
     critical: ['⚠ UNDER ATTACK', 'bg-red-600/25 text-red-300 border border-red-600/60'],
 };
 
+// The WiFi Defense scan-option checkboxes are per-viewer UI preferences, so
+// remember them in localStorage — a browser refresh must not silently reset the
+// user's choices. (The 24/7 watch is server state and restores from its own
+// status endpoint, not from here.)
+const _WIFIDEF_OPTS_KEY = 'ragnar.wifidef.opts';
+function _wifidefLoadOpts() {
+    try { return JSON.parse(localStorage.getItem(_WIFIDEF_OPTS_KEY)) || {}; }
+    catch (e) { return {}; }
+}
+function _wifidefSaveOpts() {
+    try {
+        localStorage.setItem(_WIFIDEF_OPTS_KEY, JSON.stringify({
+            auto: !!(document.getElementById('wifidef-auto') || {}).checked,
+            deep: !!(document.getElementById('wifidef-deep') || {}).checked,
+            subghz: !!(document.getElementById('wifidef-hh-subghz') || {}).checked,
+        }));
+    } catch (e) { /* private mode / storage disabled — best effort */ }
+}
+
 function initWifiDefense() {
     _wifidefFillIfaces();
     // Load the persisted beacon-flood threshold into the control.
@@ -4719,6 +4738,14 @@ function initWifiDefense() {
         const el = document.getElementById('wifidef-flood-ssids');
         if (el && t && t.beacon_ssids) el.value = t.beacon_ssids;
     }).catch(() => {});
+    // Restore the remembered scan options and keep them saved on change.
+    const opts = _wifidefLoadOpts();
+    [['wifidef-deep', 'deep'], ['wifidef-hh-subghz', 'subghz']].forEach(([id, key]) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.checked = !!opts[key];
+        if (!el._persist) { el._persist = true; el.addEventListener('change', _wifidefSaveOpts); }
+    });
     const auto = document.getElementById('wifidef-auto');
     if (auto && !auto._wired) {
         auto._wired = true;
@@ -4726,6 +4753,13 @@ function initWifiDefense() {
             if (e.target.checked) _wifidefStartContinuous();
             else wifidefStopContinuous();
         });
+    }
+    // Resume continuous scanning if it was left running before the refresh
+    // (wifidefScan() no-ops until the adapter list resolves, then the loop
+    // picks up on its own).
+    if (auto && opts.auto && !_wifidef.continuous) {
+        auto.checked = true;
+        _wifidefStartContinuous();
     }
     _wifidefUpdateRunUI();
 }
@@ -4736,6 +4770,8 @@ function initWifiDefense() {
 function _wifidefStartContinuous() {
     if (_wifidef.continuous) return;
     _wifidef.continuous = true;
+    const cb = document.getElementById('wifidef-auto'); if (cb) cb.checked = true;
+    _wifidefSaveOpts();
     _wifidefUpdateRunUI();
     _wifidefLoop();
 }
@@ -4802,6 +4838,7 @@ function wifidefStopContinuous() {
     if (_wifidef.timer) { clearTimeout(_wifidef.timer); _wifidef.timer = null; }
     if (_wifidef.abort) { try { _wifidef.abort.abort(); } catch (e) {} _wifidef.abort = null; }
     const cb = document.getElementById('wifidef-auto'); if (cb) cb.checked = false;
+    _wifidefSaveOpts();
     _wifidefUpdateRunUI();
     const st = document.getElementById('wifidef-status');
     if (st) st.textContent = 'Continuous scan stopped';
