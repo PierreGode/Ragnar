@@ -1107,65 +1107,61 @@ class DatabaseManager:
                     logger.debug(f"IP {ip} has {len(entries)} entries:")
                     
                     real_mac_entry = None
+                    extra_real_entries = []
                     pseudo_mac_entries = []
-                    
+
                     for entry in entries:
                         mac = entry['mac'] if isinstance(entry, sqlite3.Row) else entry[0]
                         logger.debug(f"  - MAC: {mac}, Status: {entry['status'] if isinstance(entry, sqlite3.Row) else entry[9]}")
-                        
+
                         if self._is_pseudo_mac(mac):
                             pseudo_mac_entries.append(entry)
+                        elif real_mac_entry is None:
+                            # entries are ordered by last_seen DESC, so the first
+                            # real MAC is the most recent — the one we keep.
+                            real_mac_entry = entry
                         else:
-                            if real_mac_entry is None:
-                                real_mac_entry = entry
-                            else:
-                                # Multiple real MACs - keep the most recently seen
-                                logger.warning(f"  Multiple real MACs for {ip}, keeping most recent")
-                    
-                    # Delete pseudo-MAC entries if we have a real MAC
-                    if real_mac_entry and pseudo_mac_entries:
+                            # Older real MAC on the same IP: an IP reassignment or a
+                            # spoof left a stale row behind (upsert keeps it to age
+                            # out). Collapse it onto the most-recent real MAC.
+                            extra_real_entries.append(entry)
+
+                    # Collapse every other row for this IP onto the kept entry —
+                    # older real-MAC rows plus any pseudo-MAC rows — merging ports
+                    # so discovered services survive.
+                    if real_mac_entry and (pseudo_mac_entries or extra_real_entries):
                         real_mac = real_mac_entry['mac'] if isinstance(real_mac_entry, sqlite3.Row) else real_mac_entry[0]
-                        logger.info(f"  → Keeping real MAC: {real_mac}")
-                        
-                        # Merge ports from pseudo-MAC entries into real MAC
+                        if extra_real_entries:
+                            logger.info(f"  → {ip}: {len(extra_real_entries) + 1} real MACs, keeping most recent {real_mac}")
+                        else:
+                            logger.info(f"  → Keeping real MAC: {real_mac}")
+
                         real_ports = set(real_mac_entry['ports'].split(',')) if real_mac_entry['ports'] else set()
-                        for pseudo_entry in pseudo_mac_entries:
-                            pseudo_mac = pseudo_entry['mac'] if isinstance(pseudo_entry, sqlite3.Row) else pseudo_entry[0]
-                            pseudo_ports = set(pseudo_entry['ports'].split(',')) if pseudo_entry['ports'] else set()
-                            real_ports.update(pseudo_ports)
-                            
-                            cursor.execute("DELETE FROM hosts WHERE mac = ?", (pseudo_mac,))
+                        for dup_entry in extra_real_entries + pseudo_mac_entries:
+                            dup_mac = dup_entry['mac'] if isinstance(dup_entry, sqlite3.Row) else dup_entry[0]
+                            dup_ports = set(dup_entry['ports'].split(',')) if dup_entry['ports'] else set()
+                            real_ports.update(dup_ports)
+
+                            cursor.execute("DELETE FROM hosts WHERE mac = ?", (dup_mac,))
                             deleted_count += 1
-                            logger.info(f"  → Deleted pseudo-MAC: {pseudo_mac}")
-                        
+                            logger.debug(f"  → Deleted duplicate for {ip}: {dup_mac}")
+
                         # Update real MAC with merged ports
                         if real_ports:
                             merged_ports = ','.join(sorted([p for p in real_ports if p], key=lambda x: int(x) if x.isdigit() else 0))
                             cursor.execute("UPDATE hosts SET ports = ? WHERE mac = ?", (merged_ports, real_mac))
-                    
+
                     elif len(pseudo_mac_entries) > 1:
                         # Multiple pseudo-MACs but no real MAC - keep newest, delete rest
                         keep_entry = pseudo_mac_entries[0]
                         keep_mac = keep_entry['mac'] if isinstance(keep_entry, sqlite3.Row) else keep_entry[0]
                         logger.info(f"  → No real MAC found, keeping newest pseudo-MAC: {keep_mac}")
-                        
+
                         for pseudo_entry in pseudo_mac_entries[1:]:
                             pseudo_mac = pseudo_entry['mac'] if isinstance(pseudo_entry, sqlite3.Row) else pseudo_entry[0]
                             cursor.execute("DELETE FROM hosts WHERE mac = ?", (pseudo_mac,))
                             deleted_count += 1
-                            logger.info(f"  → Deleted older pseudo-MAC: {pseudo_mac}")
-                    
-                    elif len(entries) > 1 and not real_mac_entry and not pseudo_mac_entries:
-                        # Multiple real MACs - keep most recently seen
-                        keep_entry = entries[0]
-                        keep_mac = keep_entry['mac'] if isinstance(keep_entry, sqlite3.Row) else keep_entry[0]
-                        logger.warning(f"  → Multiple real MACs, keeping most recent: {keep_mac}")
-                        
-                        for entry in entries[1:]:
-                            old_mac = entry['mac'] if isinstance(entry, sqlite3.Row) else entry[0]
-                            cursor.execute("DELETE FROM hosts WHERE mac = ?", (old_mac,))
-                            deleted_count += 1
-                            logger.info(f"  → Deleted older entry: {old_mac}")
+                            logger.debug(f"  → Deleted older pseudo-MAC: {pseudo_mac}")
                 
                 conn.commit()
                 
