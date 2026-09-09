@@ -1546,7 +1546,7 @@
                         <button onclick="loadAssetsData()" class="refresh-btn bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-3 py-1.5 rounded-lg text-sm">Refresh</button>
                     </div>
                 </div>
-                <div id="assets-summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-4"></div>
+                <div id="assets-summary" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3 mb-4"></div>
                 <div class="overflow-x-auto">
                     <table class="w-full text-sm asset-table">
                         <thead class="text-left text-gray-400 border-b border-slate-700">
@@ -1559,10 +1559,11 @@
                                 <th class="py-2 pr-3">Status</th>
                                 <th class="py-2 pr-3">Authorized</th>
                                 <th class="py-2 pr-3">Criticality</th>
+                                <th class="py-2 pr-3">Ignore</th>
                             </tr>
                         </thead>
                         <tbody id="assets-table-body">
-                            <tr><td colspan="8" class="py-6 text-center text-gray-500">Loading…</td></tr>
+                            <tr><td colspan="9" class="py-6 text-center text-gray-500">Loading…</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -8485,7 +8486,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260909-dup-info"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260909-asset-ignore"></script>
 
 
 

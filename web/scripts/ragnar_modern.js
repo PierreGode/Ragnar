@@ -35637,7 +35637,7 @@ async function loadAssetInventory() {
         renderAssetsRecent(d.recent_events || []);
     } catch (e) {
         const b = document.getElementById('assets-table-body');
-        if (b) b.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-red-400">Failed to load inventory</td></tr>';
+        if (b) b.innerHTML = '<tr><td colspan="9" class="py-6 text-center text-red-400">Failed to load inventory</td></tr>';
     }
 }
 
@@ -35656,7 +35656,8 @@ function renderAssetsSummary(s) {
         _assetTile('Unauthorized', s.unauthorized || 0, 'text-red-400'),
         _assetTile('Unclassified', s.unclassified || 0, 'text-amber-400'),
         _assetTile('With threats', s.with_threats || 0, 'text-red-400'),
-        _assetTile('Offline', s.offline || 0, 'text-gray-400')
+        _assetTile('Offline', s.offline || 0, 'text-gray-400'),
+        _assetTile('Ignored', s.muted || 0, 'text-slate-400')
     ].join('');
 }
 
@@ -35664,15 +35665,23 @@ function renderAssetsTable(assets) {
     const b = document.getElementById('assets-table-body');
     if (!b) return;
     if (!assets.length) {
-        b.innerHTML = '<tr><td colspan="8" class="py-6 text-center text-gray-500">No assets yet. Run a network scan first.</td></tr>';
+        b.innerHTML = '<tr><td colspan="9" class="py-6 text-center text-gray-500">No assets yet. Run a network scan first.</td></tr>';
         return;
     }
     b.innerHTML = assets.map(function (a) {
         const mac = a.mac;
         const thr = (a.threats || []);
         const threats = thr.length
-            ? '<span title="' + escapeHtml(thr.map(function (t) { return t.name; }).join(', ')) + '" class="ml-1 text-red-400">&#9888;' + thr.length + '</span>'
+            ? '<span title="' + escapeHtml(thr.map(function (t) { return t.name; }).join(', ')) + (a.muted ? ' (ignored)' : '') + '" class="ml-1 ' + (a.muted ? 'text-slate-500 line-through' : 'text-red-400') + '">&#9888;' + thr.length + '</span>'
             : '';
+        const muteBtn = '<button onclick="assetSetMuted(\'' + mac + '\', ' + (a.muted ? 'false' : 'true') + ')" ' +
+            'class="px-2 py-0.5 rounded text-xs border ' + (a.muted
+                ? 'border-amber-500 text-amber-300 bg-amber-500/10'
+                : 'border-slate-600 text-slate-300 hover:bg-slate-700') + '" ' +
+            'title="' + (a.muted
+                ? 'Warnings from this device are ignored — click to re-enable alerts'
+                : 'Permanently ignore all warnings from this device') + '">' +
+            (a.muted ? '&#128277; Ignored' : '&#128276; Ignore') + '</button>';
         const authSel = '<select onchange="assetSetAuth(\'' + mac + '\', this.value)" class="bg-slate-800 border border-slate-600 rounded px-1 py-0.5 text-xs">' +
             '<option value=""' + (a.authorized === null ? ' selected' : '') + '>&mdash;</option>' +
             '<option value="yes"' + (a.authorized === true ? ' selected' : '') + '>yes</option>' +
@@ -35684,7 +35693,7 @@ function renderAssetsTable(assets) {
         const name = escapeHtml(a.label || a.hostname || '(unknown)');
         const statusCls = (a.status === 'alive') ? 'text-green-400' : (a.status === 'lost' ? 'text-red-400' : 'text-amber-400');
         const ports = (a.ports || []);
-        return '<tr class="border-b border-slate-800 hover:bg-slate-800/40">' +
+        return '<tr class="border-b border-slate-800 hover:bg-slate-800/40' + (a.muted ? ' opacity-60' : '') + '">' +
             '<td class="py-2 pr-3 asset-cell-device">' + name + threats + '<div class="text-xs text-gray-500">' + escapeHtml(mac) + (a.pseudo_mac ? '<span title="MAC inferred from IP (no observed hardware address)" class="ml-1 text-slate-600">~</span>' : '') + '</div></td>' +
             '<td class="py-2 pr-3" data-label="IP">' + escapeHtml(a.ip || '') + '</td>' +
             '<td class="py-2 pr-3" data-label="Type">' + escapeHtml(a.device_label || a.device_type || '') + '</td>' +
@@ -35692,7 +35701,8 @@ function renderAssetsTable(assets) {
             '<td class="py-2 pr-3 text-xs" data-label="Ports">' + ports.slice(0, 8).join(', ') + (ports.length > 8 ? '&hellip;' : '') + '</td>' +
             '<td class="py-2 pr-3 ' + statusCls + '" data-label="Status">' + escapeHtml(a.status || '') + '</td>' +
             '<td class="py-2 pr-3" data-label="Authorized">' + authSel + '</td>' +
-            '<td class="py-2 pr-3" data-label="Criticality">' + critSel + '</td></tr>';
+            '<td class="py-2 pr-3" data-label="Criticality">' + critSel + '</td>' +
+            '<td class="py-2 pr-3" data-label="Ignore">' + muteBtn + '</td></tr>';
     }).join('');
 }
 
@@ -35714,16 +35724,24 @@ function renderAssetsRecent(events) {
     }).join('');
 }
 
-async function assetSetMeta(mac, fields) {
+async function assetSetMeta(mac, fields, msg) {
     try {
         await postAPI('/api/inventory/meta', Object.assign({ mac: mac }, fields));
-        addConsoleMessage('Asset ' + mac + ' updated', 'success');
+        addConsoleMessage(msg || ('Asset ' + mac + ' updated'), 'success');
+        return true;
     } catch (e) {
         addConsoleMessage('Failed to update ' + mac, 'error');
+        return false;
     }
 }
 function assetSetAuth(mac, v) { assetSetMeta(mac, { authorized: v === '' ? null : (v === 'yes') }); }
 function assetSetCrit(mac, v) { assetSetMeta(mac, { criticality: v }); }
+async function assetSetMuted(mac, on) {
+    const ok = await assetSetMeta(mac, { muted: !!on }, on
+        ? 'Warnings from ' + mac + ' are now ignored'
+        : 'Warnings from ' + mac + ' re-enabled');
+    if (ok) await loadAssetInventory();   // reflect dimming + summary counts immediately
+}
 
 async function assetsToggleEnabled(on) {
     try {
@@ -35918,6 +35936,7 @@ if (typeof window !== 'undefined') {
     window.assetsScanNow = assetsScanNow;
     window.assetSetAuth = assetSetAuth;
     window.assetSetCrit = assetSetCrit;
+    window.assetSetMuted = assetSetMuted;
     window.siemToggleEnabled = siemToggleEnabled;
     window.siemSetMinSeverity = siemSetMinSeverity;
     window.siemRenderNewFields = siemRenderNewFields;

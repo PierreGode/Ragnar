@@ -205,9 +205,14 @@ class AssetInventory:
         return self._load_json(self.meta_path, {})
 
     def set_meta(self, mac, owner=None, criticality=None, authorized=None,
-                 tags=None, notes=None, label=None):
+                 tags=None, notes=None, label=None, muted=None):
         """Annotate one asset. Only provided fields are changed. Returns the
-        stored record."""
+        stored record.
+
+        ``muted`` permanently ignores a device: while set, ``snapshot()`` keeps
+        tracking the device's state (so unmuting is clean) but emits no change
+        events for it, so nothing from that device pages Watchtower / Pushover /
+        the SIEM, and its rogue-device threats stop counting toward the summary."""
         mac = _norm_mac(mac)
         if not mac:
             raise ValueError('mac required')
@@ -220,6 +225,8 @@ class AssetInventory:
             rec['criticality'] = c if c in VALID_CRITICALITY else 'none'
         if authorized is not None:
             rec['authorized'] = bool(authorized)
+        if muted is not None:
+            rec['muted'] = bool(muted)
         if tags is not None:
             rec['tags'] = [str(t) for t in tags] if isinstance(tags, (list, tuple)) \
                 else [t.strip() for t in str(tags).split(',') if t.strip()]
@@ -297,6 +304,7 @@ class AssetInventory:
                 'tags': m.get('tags', []),
                 'notes': m.get('notes'),
                 'label': m.get('label'),
+                'muted': bool(m.get('muted', False)),
             })
         assets.sort(key=lambda a: (CRITICALITY_RANK.get(a['criticality'], 0),
                                    len(a['threats'])), reverse=True)
@@ -305,7 +313,11 @@ class AssetInventory:
             'authorized': sum(1 for a in assets if a['authorized'] is True),
             'unauthorized': sum(1 for a in assets if a['authorized'] is False),
             'unclassified': sum(1 for a in assets if a['authorized'] is None),
-            'with_threats': sum(1 for a in assets if a['threats']),
+            # muted devices are being deliberately ignored, so their threats no
+            # longer count as active warnings in the headline tile.
+            'with_threats': sum(1 for a in assets
+                                if a['threats'] and not a['muted']),
+            'muted': sum(1 for a in assets if a['muted']),
             'offline': sum(1 for a in assets
                            if (a['status'] or 'alive') not in ('alive',)),
             'by_type': _count_by(assets, 'device_type'),
@@ -367,6 +379,13 @@ class AssetInventory:
             current[mac] = fp
             old = prior.get(mac)
             m = meta.get(mac, {})
+            if m.get('muted'):
+                # Device is permanently ignored by the operator: its state is
+                # still tracked above (so unmuting later diffs cleanly) but no
+                # events are emitted, so nothing from it pages Watchtower /
+                # Pushover / the SIEM. This is the "permanently ignore warnings
+                # from this device" control in the Assets tab.
+                continue
             if old is None:
                 if not baseline or alert_on_baseline:
                     events.extend(self._new_device_events(mac, row, fp, m))
@@ -706,6 +725,35 @@ def _self_test():
         ck('critical asset sorts first-ish',
            any(a['criticality'] == 'high' for a in view['assets'][:3]))
         ck('recent events populated', len(view['recent_events']) > 0)
+
+        # --- muting a device permanently ignores its warnings -----------
+        esp = 'de:ad:be:ef:00:02'          # the Espressif node (has threats)
+        before = inv.inventory()['summary']
+        ck('espressif has threats to ignore',
+           any(a['mac'] == esp and a['threats']
+               for a in inv.inventory()['assets']))
+        esprow = next(x for x in rows if _norm_mac(x['mac']) == esp)
+        inv.set_meta(esp, muted=True)
+        esprow['ports'] = '80,23'          # telnet (sensitive) on muted device
+        rows[0]['ports'] = '445,5000'      # nas: closes its earlier RDP port
+        r = inv.snapshot()
+        ck('muted device emits no events',
+           [e for e in r['events'] if e['mac'] == esp] == [])
+        ck('unmuted device still emits',
+           any(e['mac'] == _norm_mac(rows[0]['mac']) for e in r['events']))
+        after = inv.inventory()
+        arow = next(a for a in after['assets'] if a['mac'] == esp)
+        ck('muted flag on inventory row', arow['muted'] is True)
+        ck('muted row keeps its threats listed', bool(arow['threats']))
+        ck('summary counts muted', after['summary']['muted'] >= 1)
+        ck('muted device drops out of with_threats',
+           after['summary']['with_threats'] == before['with_threats'] - 1)
+        inv.set_meta(esp, muted=False)
+        esprow['ports'] = '80,23,3306'     # open mysql after unmuting
+        r = inv.snapshot()
+        ck('unmuting restores event emission',
+           any(e['mac'] == esp and e['code'] == 'ASSET-PORT-OPENED'
+               for e in r['events']))
 
         # --- meta validation --------------------------------------------
         rec = inv.set_meta('aa:aa:aa:aa:aa:aa', criticality='bogus',
