@@ -21,6 +21,10 @@ sends no packets of its own.
 - **Ownership & criticality.** Annotate any asset with an **owner**, a
   **criticality** (`none`→`critical`), an **authorized** flag (yes/no/—), free-form
   **tags**, and **notes**. Stored in `data/asset_meta.json`, keyed by MAC.
+- **Ignore / mute.** Permanently silence a device you don't want to hear about
+  (a noisy IoT gadget, a known-good bring-your-own device, your own test rig).
+  Ragnar keeps tracking it, but it raises no more change or threat events — see
+  [Ignoring a device](#ignoring-a-device).
 - **Change detection.** Every snapshot diffs the current hosts against the previous
   one and emits typed events (below).
 - **One exit.** Events are written as JSON-lines to
@@ -68,12 +72,31 @@ would be pure noise.
 Open **Assets** in the web UI:
 
 - **Summary tiles** — total / authorized / unauthorized / unclassified / with-threats
-  / offline.
-- **Asset table** — every device with type, vendor, ports, status, and inline
-  **Authorized** and **Criticality** dropdowns (changes save immediately).
+  / offline / ignored.
+- **Asset table** — every device with type, vendor, ports, status, inline
+  **Authorized** and **Criticality** dropdowns (changes save immediately), and an
+  **Ignore** button to mute/un-mute the device.
 - **Recent changes** — the rolling event log.
 - **Auto-monitor** — toggle the background snapshotter; **Scan now** runs one
   immediately.
+
+### Ignoring a device
+
+Some devices are just noisy — a smart plug that flaps offline, a phone that
+opens and closes ports, a lab box you keep re-imaging — and every blip pages you.
+Click **Ignore** on that device's row to permanently silence it:
+
+- It **stays in the inventory** and Ragnar keeps tracking its state, so the moment
+  you un-ignore it, change detection resumes cleanly (no stale-state false alarms).
+- While ignored it emits **no change events and no threat events**, so nothing from
+  it reaches Watchtower, Pushover, the incident engine, or your SIEM.
+- Its rogue-device threats stop counting toward the **With threats** tile, the row
+  is dimmed, and any threat marker is struck through. It's tallied under **Ignored**.
+- Click the button again (**Ignored → Ignore**) to re-enable alerts.
+
+The flag lives in `data/asset_meta.json` as `"muted": true` on that MAC, so it
+survives restarts. It is independent of the *authorized* flag — you can ignore an
+authorized device or an unauthorized one alike.
 
 ### First run is quiet by design
 
@@ -105,7 +128,7 @@ Flat keys in `config/shared_config.json` (defaults shown):
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/inventory` | enriched asset list + summary + recent events |
-| `POST` | `/api/inventory/meta` | annotate one asset (`{mac, owner, criticality, authorized, tags, notes, label}`) |
+| `POST` | `/api/inventory/meta` | annotate one asset (`{mac, owner, criticality, authorized, tags, notes, label, muted}`) — `muted: true` permanently ignores warnings from the device |
 | `POST` | `/api/inventory/scan` | run one snapshot now (`{alert_on_baseline?}`) |
 | `POST` | `/api/inventory/config` | `{enabled, interval_s}` |
 

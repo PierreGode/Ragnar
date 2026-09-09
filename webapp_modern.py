@@ -2636,7 +2636,8 @@ def inventory_status():
 @app.route('/api/inventory/meta', methods=['POST'])
 def inventory_set_meta():
     """Annotate one asset (by MAC): owner, criticality, authorized, tags, notes,
-    label. Only supplied fields change."""
+    label, muted. Only supplied fields change. ``muted`` permanently ignores the
+    device — it stays tracked but raises no more change/threat alerts."""
     body = request.get_json(silent=True) or {}
     mac = body.get('mac')
     if not mac:
@@ -2645,7 +2646,8 @@ def inventory_set_meta():
         rec = _asset_inv_get().set_meta(
             mac, owner=body.get('owner'), criticality=body.get('criticality'),
             authorized=body.get('authorized'), tags=body.get('tags'),
-            notes=body.get('notes'), label=body.get('label'))
+            notes=body.get('notes'), label=body.get('label'),
+            muted=body.get('muted'))
         return jsonify({'success': True, 'mac': mac.lower(), 'meta': rec})
     except Exception as exc:                                # noqa: BLE001
         return jsonify({'success': False, 'error': str(exc)}), 400
