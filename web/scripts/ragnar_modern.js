@@ -21460,27 +21460,39 @@ function determineConsoleLogType(logLine) {
     return 'info';
 }
 
-const LOG_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+// A server log line already carries its own time — either "YYYY-MM-DD HH:MM:SS"
+// from the Python loggers or "[HH:MM:SS]" from the activity feed. Pull that time
+// out and strip it from the message so the panel renders exactly ONE timestamp,
+// instead of stamping a second, render-time one in front of the line (which is
+// what produced entries like "[22:36:33] [22:36:32] [STATS] …").
+const LOG_TS_ISO_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s*(?:-\s*)?([\s\S]*)$/;
+const LOG_TS_BRACKET_RE = /^\[(\d{2}:\d{2}:\d{2})\]\s*([\s\S]*)$/;
 
-function extractLogTimestamp(logLine) {
-    if (!logLine || logLine.length < 19) {
-        return new Date().toLocaleTimeString();
+function parseLogLine(logLine) {
+    if (typeof logLine !== 'string') {
+        return { timestamp: new Date().toLocaleTimeString(), message: String(logLine || '') };
     }
-    const timestampCandidate = logLine.slice(0, 19);
-    if (LOG_TIMESTAMP_PATTERN.test(timestampCandidate)) {
-        const parsed = new Date(timestampCandidate.replace(' ', 'T'));
-        if (!Number.isNaN(parsed.getTime())) {
-            return parsed.toLocaleTimeString();
-        }
+    let m = logLine.match(LOG_TS_ISO_RE);
+    if (m) {
+        const parsed = new Date(m[1].replace(' ', 'T'));
+        return {
+            timestamp: Number.isNaN(parsed.getTime()) ? m[1].slice(11) : parsed.toLocaleTimeString(),
+            message: m[2]
+        };
     }
-    return new Date().toLocaleTimeString();
+    m = logLine.match(LOG_TS_BRACKET_RE);
+    if (m) {
+        return { timestamp: m[1], message: m[2] };
+    }
+    return { timestamp: new Date().toLocaleTimeString(), message: logLine };
 }
 
 function createConsoleEntryFromLog(logLine) {
     const type = determineConsoleLogType(logLine);
+    const { timestamp, message } = parseLogLine(logLine);
     return {
-        timestamp: extractLogTimestamp(logLine),
-        message: logLine,
+        timestamp,
+        message,
         type,
         colorClass: HISTORY_LOG_TYPE_COLORS[type] || HISTORY_LOG_TYPE_COLORS['info']
     };
@@ -21564,7 +21576,7 @@ function clearConsole() {
     consoleBuffer = [];
     const console = document.getElementById('console-output');
     if (console) {
-        console.innerHTML = '<div class="text-green-400">Console cleared</div>';
+        console.innerHTML = '<div class="text-green-400">Activity log cleared</div>';
     }
 }
 
