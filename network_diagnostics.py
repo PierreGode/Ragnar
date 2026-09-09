@@ -21312,6 +21312,64 @@ def register_network_diagnostics(app, logger=None):
         _log("net/wifi/interfaces")
         return jsonify({"interfaces": wifi_analyzer.list_wifi_interfaces()})
 
+    def _survey_pausing_monitor(iface, band, culprit):
+        """Timeshare one radio: the selected adapter is held by a WiFi Defense
+        monitor vif, so stop the monitor, survey the adapter across ALL its bands,
+        then restore the monitor. Returns the survey dict, or None to fall through
+        to do_scan's plain monitor_conflict message (24/7 watch running, not our
+        vif, or freeing failed).
+
+        The crucial step is telling NetworkManager to leave the freed radio alone
+        (`nmcli dev set <base> managed no`): otherwise NM re-scans it the instant
+        it comes up and every survey fails with "resource busy — radio mid-scan".
+        Validated on a Pi Zero 2 W + Alfa AWUS036AXM: returns 2.4+5 GHz and WiFi
+        Defense keeps working afterwards.
+        """
+        try:
+            import halehound_daemon as _hd
+            if _hd.status().get('running'):
+                return None            # don't disrupt the headless 24/7 watch
+        except Exception:
+            pass
+        try:
+            mst = wifi_defense.list_monitor_capable()
+        except Exception:
+            return None
+        if mst.get('active_monitor') != culprit:
+            return None                # not a WiFi Defense vif we own
+        base = mst.get('base_iface') or iface
+
+        def _quiet(cmd):
+            # nmcli/ip may be absent (no NetworkManager) — never let that raise.
+            try:
+                subprocess.run(cmd, capture_output=True, timeout=6)
+            except Exception:
+                pass
+
+        _log(f"net/wifi/scan pausing monitor {culprit} to survey {iface} (all bands)")
+        res = None
+        try:
+            wifi_defense.disable_monitor()
+            _quiet(['nmcli', 'dev', 'set', base, 'managed', 'no'])
+            _quiet(['ip', 'link', 'set', base, 'up'])
+            for _ in range(6):         # settle out NM's post-up scan, then survey
+                time.sleep(1.5)
+                res = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
+                if not (isinstance(res, dict) and 'busy' in str(res.get('error', '')).lower()):
+                    break
+        finally:
+            _quiet(['nmcli', 'dev', 'set', base, 'managed', 'yes'])
+            try:
+                wifi_defense.enable_monitor(base)
+            except Exception as exc:
+                _log(f"net/wifi/scan monitor restore failed: {exc}")
+        if isinstance(res, dict) and not res.get('error'):
+            res['monitor_paused'] = True
+            res['note'] = (f"Briefly stopped WiFi Defense monitor to survey {iface} "
+                           "on all bands, then restored it.")
+            return res
+        return None
+
     @app.route('/api/net/wifi/scan', methods=['GET'])
     def net_wifi_scan():
         iface = (request.args.get('interface') or 'wlan0').strip()
@@ -21321,15 +21379,16 @@ def register_network_diagnostics(app, logger=None):
         if band not in ('all', '2.4', '5', '6'):
             return _bad('Invalid band')
         _log(f"net/wifi/scan {iface} band={band}")
-        # One radio can't run a passive survey AND monitor mode at the same time.
-        # We deliberately do NOT auto-switch radios or pause/restore monitor here:
-        # that silently returned a weaker radio's (2.4-only) results, left the
-        # adapter admin-down, and produced -95/-100 scan errors. do_scan already
-        # returns a clear, actionable monitor_conflict message ("<iface>'s radio is
-        # in monitor mode as <vif> — survey on <alt> instead"), which the UI shows.
-        # To survey the selected adapter across ALL its bands, disable WiFi Defense
-        # monitor first (or use a second adapter).
-        return jsonify(wifi_analyzer.do_scan(interface=iface, band=band, passive=True))
+        res = wifi_analyzer.do_scan(interface=iface, band=band, passive=True)
+        # If the picked radio is held by a WiFi Defense monitor vif, timeshare it
+        # (stop monitor → survey all bands → restore) rather than failing or
+        # silently using a weaker 2.4-only radio. Falls back to the plain conflict
+        # message if the watch is running or freeing fails.
+        if isinstance(res, dict) and res.get('monitor_conflict'):
+            fixed = _survey_pausing_monitor(iface, band, res.get('monitor_conflict'))
+            if fixed is not None:
+                return jsonify(fixed)
+        return jsonify(res)
 
     @app.route('/api/net/wifi/report', methods=['POST'])
     def net_wifi_report():
