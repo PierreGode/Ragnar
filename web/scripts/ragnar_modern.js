@@ -1717,10 +1717,19 @@ function _wifiFillIfaces() {
         const sel = document.getElementById('wifi-iface');
         const ifs = (d && d.interfaces) || [];
         if (!ifs.length) { sel.innerHTML = '<option value="">No wireless interface</option>'; return; }
-        // Prefer the radio that supports the most bands (the Alfa 6E dongle)
-        ifs.sort((a, b) => (b.bands || []).length - (a.bands || []).length);
+        // Order the survey radios. A passive survey needs a MANAGED radio, so a
+        // monitor VIF (e.g. ragmon0, held by WiFi Defense) must never be the
+        // default — it sinks to the bottom. Among managed radios: wlan1 is the
+        // preferred primary, then wlan0, then any other radio by band count
+        // (keeps the Alfa 6E auto-pick), then name.
+        const _ifaceRank = i => (i.type === 'monitor') ? 900
+            : i.iface === 'wlan1' ? 0
+                : i.iface === 'wlan0' ? 1 : 10;
+        ifs.sort((a, b) => _ifaceRank(a) - _ifaceRank(b)
+            || (b.bands || []).length - (a.bands || []).length
+            || String(a.iface).localeCompare(String(b.iface)));
         sel.innerHTML = ifs.map(i =>
-            `<option value="${i.iface}">${i.iface} (${(i.bands || []).join('/') || '?'} GHz)</option>`).join('');
+            `<option value="${i.iface}">${i.iface} (${(i.bands || []).join('/') || '?'} GHz)${i.type === 'monitor' ? ' — monitor' : ''}</option>`).join('');
         if (!_wifiState.iface || !ifs.some(i => i.iface === _wifiState.iface)) _wifiState.iface = ifs[0].iface;
         sel.value = _wifiState.iface;
         sel.onchange = () => { _wifiState.iface = sel.value; wifiScan(); };
