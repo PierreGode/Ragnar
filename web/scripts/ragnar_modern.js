@@ -2699,10 +2699,11 @@ function wifiRender() {
     _wifiDrawSpectrum();
     _wifiFsRender();
     if (_wifiHm.mesh) wifiHeatmapPopulateSsids(); else wifiHeatmapPopulateAps();
-    // WIDS pivot: once the flagged BSSID shows up in a survey, select it
-    // (applied guards recursion — wifiSelectAp() re-enters wifiRender()).
+    // WIDS/inspect pivot: once the flagged or just-selected BSSID shows up in a
+    // survey, select it (applied guards recursion — wifiSelectAp() re-enters
+    // wifiRender()).
     _wifiFlagBanner();
-    const f = _wifiState.flagged;
+    const f = _wifiState.flagged || _wifiState.pivotSelect;
     if (f && !f.applied && d.aps.some(a => a.bssid === f.bssid)) {
         f.applied = true;
         wifiSelectAp(f.bssid);
@@ -3398,9 +3399,19 @@ function wifiFsSurveyAp(bssid) {
 // ---- WiFi Defense → Analyzer pivot -----------------------------------------
 // WIDS detections link here: jump to the Spectrum Analyzer, select the
 // offending BSSID and keep it highlighted (red, ⚠ WIDS) until dismissed.
-function wifiPivotFromDefense(bssid, ssidEnc) {
-    _wifiState.flagged = { bssid: (bssid || '').toLowerCase(),
+// `flagged` true  → this BSSID is an actual WiFi Defense finding: red "🛡 Flagged
+//                   by WiFi Defense" banner + ⚠ WIDS highlight, kept until dismissed.
+// `flagged` false → the user just clicked an AP to inspect it: it's selected and
+//                   shown in blue ("📶 Access Point selected"), with no threat
+//                   styling, so a benign AP is never mistaken for a WIDS hit.
+// Defaults to true so any un-updated caller keeps the safe (flagged) behaviour.
+function wifiPivotFromDefense(bssid, ssidEnc, flagged) {
+    flagged = (flagged === undefined) ? true : !!flagged;
+    const target = { bssid: (bssid || '').toLowerCase(),
         ssid: ssidEnc ? decodeURIComponent(ssidEnc) : '', applied: false };
+    if (flagged) { _wifiState.flagged = target; _wifiState.pivotSelect = null; }
+    else { _wifiState.pivotSelect = target; _wifiState.flagged = null; }
+    const pick = _wifiState.flagged || _wifiState.pivotSelect;
     // Widen to all bands so the band filter can't hide the target.
     _wifiState.band = 'all';
     document.querySelectorAll('#wifi-band-group .wifi-band').forEach(b => {
@@ -3412,18 +3423,19 @@ function wifiPivotFromDefense(bssid, ssidEnc) {
     showNetworkSubtab('wifi');      // wifiInit() — auto-scans when there's no survey yet
     _wifiFlagBanner();
     if (_wifiState.data) {
-        if (_wifiState.data.aps.some(a => a.bssid === _wifiState.flagged.bssid)) {
-            _wifiState.flagged.applied = true;
-            wifiSelectAp(_wifiState.flagged.bssid);
+        if (_wifiState.data.aps.some(a => a.bssid === pick.bssid)) {
+            pick.applied = true;
+            wifiSelectAp(pick.bssid);
             _wifiFlagBanner();
         } else {
-            wifiScan();             // stale survey — the rogue may only just have appeared
+            wifiScan();             // stale survey — the target may only just have appeared
         }
     }
 }
 
 function wifiClearFlag() {
     _wifiState.flagged = null;
+    _wifiState.pivotSelect = null;
     _wifiFlagBanner();
     if (_wifiState.data) wifiRender();
 }
@@ -3431,18 +3443,29 @@ function wifiClearFlag() {
 function _wifiFlagBanner() {
     const el = document.getElementById('wifi-flag-banner'); if (!el) return;
     const f = _wifiState.flagged;
-    if (!f) { el.className = 'hidden'; el.innerHTML = ''; return; }
-    const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === f.bssid));
+    const s = _wifiState.pivotSelect;
+    const t = f || s;
+    if (!t) { el.className = 'hidden'; el.innerHTML = ''; return; }
+    const found = !!(_wifiState.data && _wifiState.data.aps.some(a => a.bssid === t.bssid));
     const state = _wifiState.scanError ? ('survey unavailable — ' + _esc(_wifiState.scanError))
         : !_wifiState.data ? 'surveying…'
             : found ? 'highlighted in the spectrum below'
                 : 'not heard in the latest survey — it may be down, out of range, or beaconing intermittently';
-    el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
-    el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>'
-        + `<b>${_esc(f.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
-        + `<span class="font-mono">${_esc(f.bssid)}</span>`
-        + `<span style="color:rgba(252,165,165,.8)">· ${state}</span>`
-        + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-red-100" title="Clear the WIDS highlight">✕ dismiss</button>';
+    const name = `<b>${_esc(t.ssid) || '<span class="italic">hidden SSID</span>'}</b>`
+        + `<span class="font-mono">${_esc(t.bssid)}</span>`;
+    if (f) {
+        // Genuine WiFi Defense finding — red WIDS treatment.
+        el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-red-950/50 border border-red-800 text-red-200';
+        el.innerHTML = '<span>🛡 Flagged by WiFi Defense:</span>' + name
+            + `<span style="color:rgba(252,165,165,.8)">· ${state}</span>`
+            + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-red-900/60 hover:bg-red-800 text-red-100" title="Clear the WIDS highlight">✕ dismiss</button>';
+    } else {
+        // Plain inspection — blue "selected", no threat implication.
+        el.className = 'flex flex-wrap items-center gap-2 mb-3 text-xs px-3 py-2 rounded-lg bg-blue-900/50 border border-blue-700 text-blue-200';
+        el.innerHTML = '<span>📶 Access Point selected:</span>' + name
+            + `<span style="color:rgba(147,197,253,.85)">· ${state}</span>`
+            + '<button onclick="wifiClearFlag()" class="ml-auto px-2 py-0.5 rounded bg-blue-900/50 border border-blue-700 text-blue-100" title="Clear the selection highlight">✕ dismiss</button>';
+    }
 }
 
 function wifiSelectAp(bssid) {
@@ -5094,7 +5117,7 @@ function wifidefRenderAirtime(d) {
             ? ` <span class="text-[10px] ${a.group_cipher === 'TKIP' ? 'text-rose-400' : 'text-gray-500'}">${a.group_cipher}</span>` : '';
         const htMix = a.ht_protection === 3
             ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="HT Protection = Non-HT Mixed: a pre-11n station is associated">MIXED</span>' : '';
-        return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
+        return `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}', false)">
             <td class="py-1 pr-2" data-label="SSID">${a.ssid ? _esc(a.ssid) : '<span class="text-gray-600">—</span>'}${a.erp_protection ? ' <span class="text-[9px] px-1 rounded bg-fuchsia-600/20 text-fuchsia-300 border border-fuchsia-700/50" title="ERP protection ON — a legacy 802.11b client is taxing this BSS">ERP</span>' : ''}${wpsBadge}</td>
             <td class="py-1 pr-2 font-mono text-[11px]" data-label="BSSID">${a.bssid}</td>
             <td class="py-1 pr-2 text-xs ${secCol}" data-label="Security">${a.security || '—'}${cipher}</td>
@@ -5226,7 +5249,7 @@ function wifidefRenderIsolation(d) {
     const bss = d.bss || [];
     if (!bss.length) {
         tb.innerHTML = '<tr><td colspan="7" class="py-4 text-center text-gray-500">No data frames captured — wrong channel, or the air is idle.</td></tr>';
-    } else tb.innerHTML = bss.map(b => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${b.bssid}','${encodeURIComponent(b.ssid || '').replace(/'/g, '%27')}')">
+    } else tb.innerHTML = bss.map(b => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${b.bssid}','${encodeURIComponent(b.ssid || '').replace(/'/g, '%27')}', false)">
             <td class="py-1 pr-2">${b.ssid ? _esc(b.ssid) : '<span class="text-gray-600">—</span>'}</td>
             <td class="py-1 pr-2 font-mono text-[11px]">${b.bssid}</td>
             <td class="py-1 pr-2">${b.clients}</td>
@@ -5248,7 +5271,7 @@ function wifidefRenderIsolation(d) {
 function _wifidefMacLink(mac, ssid) {
     if (!mac) return '';
     const s = encodeURIComponent(ssid || '').replace(/'/g, '%27');
-    return `<a href="javascript:void(0)" onclick="event.stopPropagation();wifiPivotFromDefense('${mac}','${s}')"`
+    return `<a href="javascript:void(0)" onclick="event.stopPropagation();wifiPivotFromDefense('${mac}','${s}', true)"`
         + ` class="underline decoration-dotted hover:text-white" title="Open in Signal Intelligence">${mac}</a>`;
 }
 
@@ -5340,7 +5363,7 @@ function wifidefRender() {
     const body = document.getElementById('wifidef-ap-tbody');
     const trusted = null;
     if (!d.aps || !d.aps.length) body.innerHTML = '<tr><td colspan="5" class="py-4 text-center text-gray-500">No beacons captured (wrong channel? try “hop”).</td></tr>';
-    else body.innerHTML = d.aps.map(a => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}')">
+    else body.innerHTML = d.aps.map(a => `<tr class="border-b border-slate-800/50 cursor-pointer hover:bg-slate-800/40" title="Open in Signal Intelligence" onclick="wifiPivotFromDefense('${a.bssid}','${encodeURIComponent(a.ssid || '').replace(/'/g, '%27')}', false)">
         <td class="py-1 pr-2">${a.ssid || '<span class=\'text-gray-500 italic\'>hidden</span>'}</td>
         <td class="py-1 pr-2 font-mono text-[11px]">${a.bssid}</td>
         <td class="py-1 pr-2">${a.channel == null ? '—' : a.channel}</td>
