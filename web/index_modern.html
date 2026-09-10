@@ -1260,7 +1260,10 @@
                         </svg>
                         Activity Log
                     </span>
-                    <div class="flex space-x-2">
+                    <div class="flex items-center space-x-2">
+                        <select id="log-source-filter" title="Filter the log by source" class="text-sm bg-slate-800 border border-slate-600 text-gray-200 rounded px-2 py-1 focus:outline-none focus:border-Ragnar-500">
+                            <option value="all">All sources</option>
+                        </select>
                         <button onclick="loadConsoleLogs()" class="text-sm text-white bg-Ragnar-600 hover:bg-Ragnar-700 px-3 py-1 rounded transition-colors">
                             Refresh
                         </button>
@@ -8486,7 +8489,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260910-activity-log"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260910-log-filters"></script>
 
 
 
