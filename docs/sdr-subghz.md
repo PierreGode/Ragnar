@@ -14,7 +14,7 @@ Everything here is **receive-only** — nothing ever transmits.
 | Tool | Backed by | What it does |
 |---|---|---|
 | **📡 ISM Devices** | `rtl_433 -F json` | A live table of every device it decodes — TPMS tyre-pressure sensors, weather stations, door/window & PIR contacts, remotes/keyfobs, utility meters, doorbells — with model, id, RSSI, hit count, last-seen, and the decoded fields. |
-| **📈 Sub-GHz Waterfall** | `rtl_power` | A scrolling power-vs-frequency heatmap (same look as the HackRF Waterfall) over 433 / 868 / 915 MHz or a wide **300–960 MHz** sweep. Raw energy only — no decode — for spotting activity, carriers and jammers below 1.7 GHz. |
+| **📈 Sub-GHz Waterfall** | `rtl_sdr` IQ FFT (+ `rtl_power` fallback) | A scrolling power-vs-frequency heatmap (same look as the HackRF Waterfall) over 433 / 868 / 915 MHz or a wide **300–960 MHz** sweep. Raw energy only — no decode — for spotting activity, carriers and jammers below 1.7 GHz. Narrow spans (zoom / manual tune / mesh overlays, ≤~2.8 MHz) stream raw IQ and FFT continuously for a **real-time ~16 rows/s** waterfall like SDR++; wide full-band scans fall back to the slower `rtl_power` sweep. See [RF Waterfall page](rf-waterfall.md#sub-ghz-engine-real-time-iq-fft-vs-rtl_power-sweep). |
 
 ## One dongle, one claim
 

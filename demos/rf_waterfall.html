@@ -537,7 +537,8 @@
       if(!d||!d.ok||!d.frames.length){ self.recStat.innerHTML='<span style="color:#fb7185">recording empty</span>'; return; }
       var h=d.header||{}, lo=(h.lo_hz||430e6)/1e6, hi=(h.hi_hz||930e6)/1e6, floor=(typeof h.floor==='number')?h.floor:-120;
       var wasLive=(self.mode==='live'); if(wasLive) self.stopLive();
-      self.replaying=true; self.replay={name:name,frames:d.frames,idx:0,playing:true,lo:lo,hi:hi,floor:floor,wasLive:wasLive};
+      self.replaying=true; self._fpsEma=null; self._lastRowT=0;
+      self.replay={name:name,frames:d.frames,idx:0,playing:true,lo:lo,hi:hi,floor:floor,wasLive:wasLive};
       self.lo=lo; self.hi=hi; self.floor=floor; self.zoom=null; self.resetBtn.disabled=true; self.resetCanvas(); self.drawRuler();
       self.transport.style.display='inline-flex'; self.seekEl.max=d.frames.length-1; self.seekEl.value=0;
       self.ppEl.innerHTML='&#10074;&#10074;'; self.recStat.innerHTML='<span style="color:var(--cyan)">▷ replay</span>';
@@ -741,7 +742,7 @@
 
   // ---- live sweep ----
   Scope.prototype.startLive=function(){
-    var self=this; this.seq=0; this.liveErr=null;
+    var self=this; this.seq=0; this.liveErr=null; this._fpsEma=null; this._lastRowT=0;
     var body={band:this.liveBand};
     if(this.zwave){ body.lo_hz=this.zwave.lo_hz; body.hi_hz=this.zwave.hi_hz; body.label=this.zwave.sweepLabel; }
     else if(this.zoom){ body.lo_hz=Math.round(this.zoom[0]*1e6); body.hi_hz=Math.round(this.zoom[1]*1e6); }
@@ -752,7 +753,7 @@
         self._poll=setInterval(function(){ self.livePoll(); },200);
       }).catch(function(){ self.liveErr='Failed to start '+self.cfg.short; self.showVeil('Could not start '+self.cfg.short,self.liveErr); });
   };
-  Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
+  Scope.prototype.stopLive=function(){ if(this._poll){clearInterval(this._poll);this._poll=null;} if(this.devEl) this.devEl.textContent=this.cfg.dev; fetch(this.cfg.api.stop,{method:'POST'}).catch(function(){}); };
   Scope.prototype.livePoll=function(){
     if(!running || this.mode!=='live' || this.decoding || this.replaying) return;
     var self=this;
@@ -763,6 +764,10 @@
       else{lo=self.lo;hi=self.hi;}
       var floor=(typeof d.floor_dbm==='number')?d.floor_dbm:-110;
       var frames=d.frames||[];
+      // Name the active engine so the panel says whether it's the real-time IQ
+      // FFT (SDR++-style) or the slower rtl_power sweep fallback.
+      if(d.engine && self.devEl){ self.devEl.textContent = (d.engine==='iq')
+        ? 'RTL-SDR · IQ FFT · real-time' : 'RTL-SDR · rtl_power sweep'; }
       if(frames.length){
         if(!self._rangeKnown||lo!==self.lo||hi!==self.hi){ self.lo=lo;self.hi=hi;self.floor=floor;self._rangeKnown=true;self.drawRuler();self.placeMarker(); }
         self.hideVeil();
@@ -811,6 +816,11 @@
 
   // ---- paint one row ----
   Scope.prototype.pushRow=function(power,lo,hi,floor){
+    // Measure the true row cadence (EMA) so the Rows/s readout reflects the
+    // data rate actually arriving — not the scroll-speed setting.
+    var _t=performance.now();
+    if(this._lastRowT){ var _inst=1000/Math.max(1,_t-this._lastRowT); this._fpsEma=this._fpsEma?this._fpsEma*0.8+_inst*0.2:_inst; }
+    this._lastRowT=_t;
     this.lo=lo;this.hi=hi;this.floor=(typeof floor==='number')?floor:-110;
     if(!this.zoom){ this.homeLo=lo; this.homeHi=hi; }
     var N=power.length,f=this.fctx;
@@ -857,7 +867,18 @@
     this.spanEl.textContent=fmtF(this.lo)+"–"+fmtF(this.hi)+(this.zoom?" ⤢":"");
     this.nowEl.textContent="t="+((performance.now()-this.t0)/1000).toFixed(1)+"s";
   };
-  Scope.prototype.setRate=function(hz){ this.rateEl.textContent=(this.mode==='idle'||this.decoding)?'—':hz.toFixed(0); };
+  Scope.prototype.setRate=function(hz){
+    if(this.mode==='idle'||this.decoding){ this.rateEl.textContent='—'; return; }
+    // Live/replay: show the measured cadence (decaying toward 0 if it stalls);
+    // synthetic demo: show the chosen scroll rate.
+    if(this.mode==='live'||this.replaying){
+      var since=this._lastRowT?(performance.now()-this._lastRowT):9e9;
+      var eff=(since>1500)?(1000/since):(this._fpsEma||0);
+      this.rateEl.textContent=eff>=1?eff.toFixed(0):(eff>0?eff.toFixed(1):'…');
+      return;
+    }
+    this.rateEl.textContent=hz.toFixed(0);
+  };
 
   Scope.prototype.drawRuler=function(){
     var lo=this.lo,hi=this.hi,span=hi-lo,r=this.ruler; r.innerHTML=""; if(!(span>0))return;

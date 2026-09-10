@@ -11,9 +11,17 @@ plug-in RTL-SDR into two receive-only tools:
 
   1. **ISM device scanner** — shells out to ``rtl_433 -F json`` and keeps a live
      table of every device it decodes (model, id, RSSI, and the decoded fields).
-  2. **Sub-GHz waterfall** — shells out to ``rtl_power`` sweeps and assembles a
-     scrolling power-per-frequency heatmap, the same shape the HackRF Waterfall
-     uses, but for the bands the HackRF view doesn't target.
+  2. **Sub-GHz waterfall** — a scrolling power-per-frequency heatmap, the same
+     shape the HackRF Waterfall uses, for the bands the HackRF view doesn't
+     target. Two engines feed it (chosen automatically, same frame shape):
+
+       * **IQ FFT (real-time)** — for any span that fits a single RTL-SDR tune
+         (<= ``_IQ_MAX_SPAN_HZ``) we stream raw IQ from ``rtl_sdr`` and FFT it
+         continuously with numpy, exactly how SDR++/GQRX draw a waterfall. No
+         retuning, so rows scroll smoothly at ``_IQ_DISPLAY_HZ``.
+       * **rtl_power sweep** — the fallback for wide bands (868/915/sub-GHz full
+         scans need retuning) and for hosts without ``rtl_sdr`` or numpy. It's an
+         integrating sweeper, so it advances at best ~1 row/s.
 
 Both are **receive-only** — nothing here ever transmits.
 
@@ -55,6 +63,7 @@ def _which(name):
 _RTL_TEST = _which("rtl_test")
 _RTL_433 = _which("rtl_433")
 _RTL_POWER = _which("rtl_power")
+_RTL_SDR = _which("rtl_sdr")     # raw-IQ streamer for the real-time FFT waterfall
 
 # Power-sweep ranges (Hz). Kept inside the RTL-SDR's reach (~24 MHz–1.7 GHz).
 RTL_BANDS = {
@@ -208,6 +217,27 @@ _RING_FRAMES = 300         # rolling history of sweep frames kept in memory
 _FLOOR_DBM = -120          # sentinel for a display column no sweep bin filled
 _SWEEP_INTERVAL_S = 1      # rtl_power -i (seconds per full sweep)
 _ISM_MAX_DEVICES = 500     # cap the live device table
+
+# --- Real-time IQ waterfall (the SDR++-style fast path) -------------------
+# rtl_power is an *integrating sweeper*: it retunes across the band and dwells
+# `-i` seconds per sweep, so a waterfall built from it advances at best ~1
+# row/s — it lurches, and lags reality by a second. That's fine for a wide
+# "what's out there" scan, but painfully slow for a narrow zoom / mesh overlay.
+#
+# For any span that fits a SINGLE RTL-SDR tune we instead stream raw IQ from
+# ``rtl_sdr`` and FFT it continuously with numpy — exactly how SDR++/GQRX draw
+# their waterfalls — with no retuning at all. That yields a smooth, low-latency
+# scroll at _IQ_DISPLAY_HZ rows/s. Wider spans (full 868/915/sub-GHz scans) can't
+# fit one tune, so they fall back to rtl_power; so does any host missing rtl_sdr
+# or numpy. Both engines emit the same frame shape, so nothing downstream (the
+# web routes, the recorder, the page) changes.
+_IQ_MAX_SPAN_HZ = 2_800_000   # widest span coverable in one tune (else rtl_power)
+_IQ_FFT = 1024                # FFT size — freq resolution = sample_rate / _IQ_FFT
+_IQ_DISPLAY_HZ = 16           # waterfall rows emitted per second (steady scroll)
+_IQ_AVG_MAX = 24              # FFT windows averaged per row (Welch smoothing; caps CPU)
+_IQ_SR_MIN = 1_000_000        # RTL-SDR minimum practical sample rate (Hz)
+_IQ_SR_MAX = 3_200_000        # RTL-SDR maximum sample rate (Hz)
+_IQ_EDGE_MARGIN = 1.15        # oversample the span this much so band edges stay clean
 
 # Tuner corrections shared by both captures (one dongle). PPM trims the RTL-SDR's
 # crystal offset (matters on the narrow Z-Wave/LoRa channels); gain is tuner gain
@@ -395,7 +425,7 @@ def detect():
     and exits). Mirrors the HackRF gate.
     """
     tools = {"rtl_433": _have(_RTL_433), "rtl_power": _have(_RTL_POWER),
-             "rtl_test": _have(_RTL_TEST)}
+             "rtl_test": _have(_RTL_TEST), "rtl_sdr": _have(_RTL_SDR)}
     # Cheap USB-bus probe first, so we can tell "no dongle plugged in" apart from
     # "dongle present but tools missing / DVB driver holding it" (RaspyJack does
     # the same). It never opens the radio, so it's safe alongside rtl_test.
@@ -770,6 +800,77 @@ class _PowerFrameBuilder:
 
 
 # --------------------------------------------------------------------------
+# Real-time IQ waterfall helpers (pure — the selftest drives them, no hardware)
+# --------------------------------------------------------------------------
+
+def _iq_available():
+    """True when the fast IQ path can run: ``rtl_sdr`` present and numpy import-able.
+
+    Kept cheap and side-effect-free (never opens the dongle) so it can gate the
+    engine choice on every start. numpy is a declared dependency, but a minimal
+    board may lack it — in which case we simply fall back to rtl_power.
+    """
+    if not _have(_RTL_SDR):
+        return False
+    try:
+        import numpy  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _iq_plan(lo_hz, hi_hz):
+    """Pick a single-tune (center, sample_rate) covering [lo,hi] Hz, or None (pure).
+
+    Returns None when the span is wider than one RTL-SDR tune can hold
+    (``_IQ_MAX_SPAN_HZ``) — the caller then falls back to the rtl_power sweep.
+    The sample rate oversamples the span by ``_IQ_EDGE_MARGIN`` so the display
+    window sits in the tuner's clean centre (its band edges roll off), clamped to
+    the RTL-SDR's usable [_IQ_SR_MIN, _IQ_SR_MAX] range.
+    """
+    try:
+        lo_hz, hi_hz = int(lo_hz), int(hi_hz)
+    except (TypeError, ValueError):
+        return None
+    span = hi_hz - lo_hz
+    if span <= 0 or span > _IQ_MAX_SPAN_HZ:
+        return None
+    center = (lo_hz + hi_hz) // 2
+    sr = int(min(_IQ_SR_MAX, max(_IQ_SR_MIN, round(span * _IQ_EDGE_MARGIN))))
+    return center, sr
+
+
+def _iq_to_grid(psd_db, center_hz, sr_hz, lo_hz, hi_hz,
+                bins=_POWER_BINS, floor=_FLOOR_DBM):
+    """Fold an fftshifted PSD (dB, low→high freq) onto ``bins`` display columns.
+
+    ``psd_db[i]`` is the power of FFT bin ``i`` of a capture centred at
+    ``center_hz`` sampled at ``sr_hz`` (so bin 0 sits at ``center - sr/2``). Each
+    bin is dropped into the display column its centre frequency lands in over
+    [lo,hi], keeping the per-column max — the same peak-hold the rtl_power frame
+    builder uses. Bins outside [lo,hi] (the oversampled edges) are ignored;
+    columns no bin reached stay at ``floor``. Pure list math — no numpy — so the
+    selftest verifies it and it also serves as the loop's binning step.
+    """
+    grid = [floor] * bins
+    n = len(psd_db)
+    span = hi_hz - lo_hz
+    if n == 0 or span <= 0 or sr_hz <= 0:
+        return grid
+    bin_w = sr_hz / float(n)
+    f0 = center_hz - sr_hz / 2.0        # centre frequency of the first (lowest) bin
+    for i in range(n):
+        fc = f0 + i * bin_w
+        col = int((fc - lo_hz) / span * bins)
+        if col < 0 or col >= bins:
+            continue
+        v = psd_db[i]
+        if v > grid[col]:
+            grid[col] = v
+    return grid
+
+
+# --------------------------------------------------------------------------
 # ISM device scanner (rtl_433)
 # --------------------------------------------------------------------------
 
@@ -914,6 +1015,8 @@ class PowerSweep:
         self._sig = None           # (label, lo, hi) — restart only on a real change
         self._lo = None            # active sweep range in Hz (band OR zoom span)
         self._hi = None
+        self._engine = None        # "iq" (real-time FFT) or "rtl_power" (sweep)
+        self._floor_dyn = None     # IQ path: adaptive noise floor for the colour scale
 
     def start(self, band="433", lo_hz=None, hi_hz=None, label=None):
         # A custom [lo_hz, hi_hz] span (the page's zoom, or a Z-Wave region)
@@ -945,6 +1048,8 @@ class PowerSweep:
             self._band = label
             self._sig = sig
             self._lo, self._hi = lo, hi
+            self._engine = None
+            self._floor_dyn = None
             self._error = None
             self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
                                             daemon=True, name="rtlpower-sweep")
@@ -970,6 +1075,8 @@ class PowerSweep:
             self._band = label
             self._sig = sig
             self._lo, self._hi = lo, hi
+            self._engine = None
+            self._floor_dyn = None
             self._error = None
             self._thread = threading.Thread(target=self._run_loop, args=(lo, hi),
                                             daemon=True, name="rtlpower-sweep")
@@ -982,6 +1089,112 @@ class PowerSweep:
         self._band = None
 
     def _run_loop(self, lo, hi):
+        # Prefer the real-time IQ FFT engine (SDR++-style) whenever the span fits
+        # a single tune and the tools are present; fall back to the rtl_power
+        # sweep otherwise (wide bands) or if the IQ capture can't get going.
+        plan = _iq_plan(lo, hi) if _iq_available() else None
+        if plan and self._run_iq(lo, hi, plan[0], plan[1]):
+            return
+        self._engine = "rtl_power"
+        self._floor_dyn = None
+        self._run_rtl_power(lo, hi)
+
+    def _run_iq(self, lo, hi, center, sr):
+        """Stream raw IQ from ``rtl_sdr`` and FFT it into waterfall rows.
+
+        Returns True if the capture ran (or was stopped cleanly), False if it
+        never got going — the launcher/decoder died before producing a frame —
+        so :meth:`_run_loop` can fall back to the rtl_power sweep. No retuning
+        happens here: one tune covers the whole [lo,hi] window, so rows scroll at
+        ``_IQ_DISPLAY_HZ`` with none of rtl_power's ~1 Hz sweep latency.
+        """
+        try:
+            import numpy as np
+        except Exception:
+            return False
+        self._engine = "iq"
+        self._floor_dyn = None
+        N = _IQ_FFT
+        win = np.hanning(N).astype(np.float32)
+        win_norm = float(np.sum(win ** 2)) * N   # PSD normaliser (window + FFT gain)
+        # Read a whole display row of samples per iteration, rounded to full FFT
+        # windows. We must drain the entire stream (not just what we FFT) or the
+        # dongle's USB buffers overflow and rtl_sdr starts dropping samples.
+        row_samples = max(N, int(sr / _IQ_DISPLAY_HZ))
+        row_samples -= row_samples % N
+        row_bytes = row_samples * 2               # unsigned 8-bit I + Q interleaved
+        cmd = [_RTL_SDR, "-f", str(int(center)), "-s", str(int(sr))]
+        if _ppm:
+            cmd += ["-p", str(_ppm)]
+        if _gain is not None:
+            cmd += ["-g", str(_gain)]             # else rtl_sdr uses tuner AGC (auto)
+        cmd += ["-"]                              # stream raw IQ to stdout
+        self._stderr_tail = None
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, bufsize=0)
+        except Exception as exc:
+            self._error = "failed to launch rtl_sdr: %s" % exc
+            return False
+        serr = _drain(_text_lines(self._proc.stderr), self)
+        floor_ema = None
+        produced = 0
+        try:
+            while not self._stop.is_set():
+                buf = _read_exact(self._proc.stdout, row_bytes)
+                if not buf:
+                    break
+                # rtl_sdr emits unsigned 8-bit I/Q; recentre (127.5 = 0) and
+                # scale to +-1.0 full scale so the PSD reads in dBFS (roughly
+                # -80 noise .. 0 full-scale), which sits under the page's -20
+                # colour ceiling.
+                raw = (np.frombuffer(buf, dtype=np.uint8).astype(np.float32) - 127.5) / 127.5
+                nwin = (raw.shape[0] // 2) // N
+                if nwin <= 0:
+                    continue
+                use = min(nwin, _IQ_AVG_MAX)
+                iq = raw[:use * N * 2].reshape(use, N, 2)
+                cwin = (iq[:, :, 0] + 1j * iq[:, :, 1]) * win  # window each row
+                spec = np.fft.fftshift(np.fft.fft(cwin, axis=1), axes=1)
+                psd = (spec.real ** 2 + spec.imag ** 2).mean(axis=0) / win_norm
+                db = 10.0 * np.log10(psd + 1e-12)
+                grid = _iq_to_grid(db.tolist(), center, sr, lo, hi)
+                floor_ema = self._update_iq_floor(grid, floor_ema)
+                self._push_frame(grid)
+                produced += 1
+        except Exception as exc:  # pragma: no cover - defensive
+            self._error = str(exc)
+        finally:
+            serr.join(timeout=1)
+            if (self._proc and self._proc.poll() not in (None, 0)
+                    and not self._error and self._stderr_tail):
+                self._error = self._stderr_tail
+        # Nothing produced and we didn't ask it to stop -> let rtl_power try.
+        if produced == 0 and not self._stop.is_set():
+            _terminate(self._proc)
+            self._proc = None
+            self._error = None
+            return False
+        return True
+
+    def _update_iq_floor(self, grid, floor_ema):
+        """Track a smoothed noise floor from the row's low percentile.
+
+        The IQ path reports uncalibrated relative dB whose absolute level rides
+        with tuner gain, so a fixed colour floor would wash out or crush the
+        display. Instead we follow the 20th-percentile of each row (a robust
+        noise estimate) with a slow EMA and publish that as ``floor_dbm``, so the
+        waterfall's colour scale self-calibrates and stays stable.
+        """
+        vals = sorted(v for v in grid if v > _FLOOR_DBM)
+        if not vals:
+            return floor_ema
+        nf = vals[int(len(vals) * 0.20)]
+        floor_ema = nf if floor_ema is None else floor_ema * 0.9 + nf * 0.1
+        self._floor_dyn = int(round(floor_ema - 6))
+        return floor_ema
+
+    def _run_rtl_power(self, lo, hi):
         step = max(1000, (hi - lo) // _POWER_BINS)   # Hz per rtl_power bin
         builder = _PowerFrameBuilder(lo, hi)
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
@@ -1026,9 +1239,16 @@ class PowerSweep:
             else:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
             meta = {"band": self._band, "lo_hz": self._lo, "hi_hz": self._hi,
-                    "bins": _POWER_BINS, "floor": _FLOOR_DBM}
+                    "bins": _POWER_BINS, "floor": self._active_floor()}
         # Feed the session recorder outside our lock (it has its own).
         _recorder.write(self._seq, ts, ints, meta)
+
+    def _active_floor(self):
+        """Colour-scale floor for the current engine: the IQ path's adaptive
+        estimate, or the fixed sentinel for the rtl_power sweep."""
+        if self._engine == "iq" and self._floor_dyn is not None:
+            return self._floor_dyn
+        return _FLOOR_DBM
 
     def status(self):
         with self._lock:
@@ -1036,7 +1256,8 @@ class PowerSweep:
                     "band": self._band, "bins": _POWER_BINS,
                     "band_hz": [self._lo, self._hi] if self._lo else None,
                     "frames_buffered": len(self._frames), "seq": self._seq,
-                    "floor_dbm": _FLOOR_DBM, "error": self._error}
+                    "floor_dbm": self._active_floor(), "engine": self._engine,
+                    "error": self._error}
 
     def get_frames(self, since=0):
         try:
@@ -1047,7 +1268,8 @@ class PowerSweep:
             new = [f for f in self._frames if f["seq"] > since]
             return {"frames": new, "seq": self._seq, "band": self._band,
                     "band_hz": [self._lo, self._hi] if self._lo else None,
-                    "bins": _POWER_BINS, "floor_dbm": _FLOOR_DBM,
+                    "bins": _POWER_BINS, "floor_dbm": self._active_floor(),
+                    "engine": self._engine,
                     "max_hold": list(self._maxhold) if self._maxhold else None,
                     "running": bool(self._thread and self._thread.is_alive()),
                     "error": self._error}
@@ -1087,6 +1309,33 @@ def _drain(pipe, owner):
     t = threading.Thread(target=run, daemon=True, name="rtl-stderr")
     t.start()
     return t
+
+
+def _text_lines(pipe):
+    """Yield UTF-8 text lines from a *binary* pipe.
+
+    The IQ capture opens rtl_sdr with a raw-bytes stdout (Popen bufsize=0, no
+    text mode), which makes stderr bytes too. This lets :func:`_drain` reuse its
+    text logic to keep the last human-readable stderr line for diagnostics.
+    """
+    for line in iter(pipe.readline, b""):
+        yield line.decode("utf-8", "replace")
+
+
+def _read_exact(pipe, n):
+    """Read exactly ``n`` bytes from a binary pipe (fewer only at EOF).
+
+    A raw pipe read can return short, so loop until we have a full display row
+    of IQ or the stream ends (``b""`` -> rtl_sdr exited)."""
+    chunks = []
+    got = 0
+    while got < n:
+        b = pipe.read(n - got)
+        if not b:
+            break
+        chunks.append(b)
+        got += len(b)
+    return b"".join(chunks)
 
 
 # Module-level singletons the web routes drive. One dongle, so the two capture
@@ -1437,6 +1686,53 @@ def selftest():
     nframes = sum(1 for _ in range(4)
                   if fbn.add(*parse_power_row(one_row)) is not None)
     check("power: single-row (433) sweeps finalize frames", nframes == 3, str(nframes))
+
+    # --- IQ waterfall plan: fits one tune vs. falls back to rtl_power ---
+    _plan = _iq_plan(867_000_000, 869_700_000)     # LoRaWAN EU868 overlay (2.7 MHz)
+    check("iq: 2.7 MHz span gets a single-tune plan",
+          _plan is not None and _plan[0] == 868_350_000
+          and _IQ_SR_MIN <= _plan[1] <= _IQ_SR_MAX and _plan[1] >= 2_700_000,
+          str(_plan))
+    check("iq: wide 915 band (26 MHz) has no IQ plan -> rtl_power",
+          _iq_plan(902_000_000, 928_000_000) is None)
+    check("iq: sample rate oversamples the span for clean edges",
+          _iq_plan(433_050_000, 434_790_000)[1] >= int(1_740_000 * _IQ_EDGE_MARGIN) - 1)
+    check("iq: sub-min span still tunes (clamped to _IQ_SR_MIN)",
+          _iq_plan(868_100_000, 868_300_000)[1] == _IQ_SR_MIN)
+
+    # --- IQ PSD -> display grid: a tone lands in the right column, edges dropped ---
+    _N, _ctr, _sr = 1024, 868_350_000, 3_000_000
+    _lo, _hi = 867_000_000, 869_700_000
+    _psd = [-100.0] * _N
+    # Put a strong bin at the display centre (~868.35 MHz): fftshift bin N/2 = DC.
+    _psd[_N // 2] = -30.0
+    _g = _iq_to_grid(_psd, _ctr, _sr, _lo, _hi)
+    check("iq: grid width = display bins", len(_g) == _POWER_BINS)
+    _pk = max(range(len(_g)), key=lambda i: _g[i])
+    check("iq: centre tone lands mid-grid", abs(_pk - _POWER_BINS // 2) <= 2, str(_pk))
+    check("iq: tone column strong, rest near floor",
+          _g[_pk] >= -31 and sum(1 for v in _g if v <= -95) > _POWER_BINS * 0.5)
+    check("iq: oversampled edge bins fall outside [lo,hi] (dropped)",
+          _iq_to_grid([-40.0] * _N, _ctr, _sr, _lo, _hi).count(_FLOOR_DBM) == 0
+          and all(v >= -95 for v in _iq_to_grid([-40.0] * _N, _ctr, _sr, _lo, _hi)))
+
+    # numpy IQ math matches the pure grid (only when numpy is importable) ---
+    try:
+        import numpy as _np
+        _win = _np.hanning(_N).astype(_np.float32)
+        _wn = float(_np.sum(_win ** 2)) * _N
+        # a pure complex tone at +sr/4 from centre -> a single fftshifted bin high
+        _t = _np.arange(_N)
+        _sig = _np.exp(2j * _np.pi * (_sr / 4.0) / _sr * _t).astype(_np.complex64)
+        _spec = _np.fft.fftshift(_np.fft.fft(_sig * _win))
+        _dbn = 10.0 * _np.log10((_spec.real ** 2 + _spec.imag ** 2) / _wn + 1e-12)
+        _gn = _iq_to_grid(_dbn.tolist(), _ctr, _sr, _lo, _hi)
+        _pkn = max(range(len(_gn)), key=lambda i: _gn[i])
+        # +sr/4 of 3 MHz = +750 kHz from 868.35 -> 869.1 MHz -> right of centre
+        check("iq: numpy tone at +sr/4 lands right-of-centre",
+              _pkn > _POWER_BINS // 2, "%d vs %d" % (_pkn, _POWER_BINS // 2))
+    except Exception as _exc:      # numpy absent on a minimal board -> IQ path off
+        check("iq: numpy check skipped (numpy unavailable)", True, str(_exc))
 
     # --- rtl_433 JSON parser + device keying ---
     ev = parse_rtl433_event('{"time":"2024-01-01 12:00:00","model":"Toyota-TPMS",'
