@@ -84,6 +84,19 @@ the scroll-speed setting.
 Both engines emit the same frame shape, feed the same ring buffer, recorder and
 `/api/net/rtl/power/frames`, so nothing else on the page changes.
 
+## Colour palettes
+
+The top toolbar has a **Palette** selector for the waterfall colour map. Five are
+built in — **Aurora** (default: cool navy→teal→lavender), **Inferno** (hot
+black→red→orange), **Viridis** (perceptually-uniform, colour-blind friendly),
+**Classic** (the traditional SDR#/GQRX blue→green→red rainbow) and **Mono**
+(grayscale). The choice is remembered per-browser (`localStorage`
+`ragnar_rf_palette`) and the legend gradient tracks it. Switching recolours new
+rows going forward and applies to both panels; rows already painted keep their
+colours until they scroll off (the page paints incrementally and keeps no
+per-row dB history). Add one by dropping an entry into `PALETTES` +
+`PALETTE_ORDER` in the page — the selector builds itself from that list.
+
 ## The button and the toggle (WiFi Spectrum Analyzer)
 
 - **"RF Waterfall page" button** — appears in the analyzer's controls once a
