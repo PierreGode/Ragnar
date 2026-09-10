@@ -34,7 +34,15 @@ def _which(name):
 
 
 _RTL_FM = _which("rtl_fm")
+_FFMPEG = _which("ffmpeg")   # transcodes the PCM to MP3 for broad browser support
 _AUDIO_RATE = 48000          # output sample rate (mono, s16le)
+_MP3_BITRATE = "128k"        # MP3 bitrate when transcoding
+
+# iOS Safari (and most mobile browsers) will NOT play an open-ended streaming
+# WAV — its media loader wants a range-able/finite resource. A chunked MP3
+# (audio/mpeg) is what web-radio streams use and it plays everywhere, desktop
+# and phone. So when ffmpeg is present we transcode rtl_fm's PCM to live MP3;
+# without it we fall back to the raw streaming WAV (desktop-only).
 
 # Band presets (label -> (freq_hz, mode)). Broadcast FM stations are local, so
 # these are representative anchors; the UI also takes any frequency.
@@ -85,7 +93,8 @@ def detect():
                 "error": "no RTL-SDR on the USB bus — plug a dongle in"}
     return {"available": True, "tools_installed": True, "device_present": True,
             "usb_id": usb, "presets": RADIO_PRESETS, "modes": list(_MODES),
-            "rate": _AUDIO_RATE}
+            "rate": _AUDIO_RATE, "format": ("mp3" if transcodes() else "wav"),
+            "mimetype": media_mimetype()}
 
 
 def wav_header(rate=_AUDIO_RATE, channels=1, bits=16):
@@ -129,10 +138,33 @@ def rtl_fm_cmd(freq_hz, mode, ppm=0, gain=None):
     return cmd
 
 
+def ffmpeg_mp3_cmd(rate=_AUDIO_RATE, bitrate=_MP3_BITRATE):
+    """ffmpeg argv: read mono s16le PCM on stdin, stream live MP3 to stdout (pure).
+
+    ``-flush_packets 1`` keeps latency low for live listening; ``pipe:0``/``pipe:1``
+    are stdin/stdout so it slots straight onto rtl_fm's output.
+    """
+    return [_FFMPEG, "-hide_banner", "-loglevel", "error",
+            "-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", "pipe:0",
+            "-c:a", "libmp3lame", "-b:a", str(bitrate),
+            "-flush_packets", "1", "-f", "mp3", "pipe:1"]
+
+
+def transcodes():
+    """True when ffmpeg is available to serve MP3 (phone-friendly) vs raw WAV."""
+    return _have(_FFMPEG)
+
+
+def media_mimetype():
+    """Content-Type for the stream: audio/mpeg when transcoding, else audio/wav."""
+    return "audio/mpeg" if transcodes() else "audio/wav"
+
+
 class RadioTuner:
     def __init__(self):
         self._lock = threading.Lock()
-        self._proc = None
+        self._proc = None        # rtl_fm
+        self._enc = None         # ffmpeg (MP3), when transcoding
         self._freq = None
         self._mode = None
         self._started = None
@@ -150,16 +182,18 @@ class RadioTuner:
         return {"ok": True}
 
     def _stop_locked(self):
-        if self._proc:
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=2)
-            except Exception:
+        for attr in ("_enc", "_proc"):        # encoder first, then rtl_fm
+            p = getattr(self, attr, None)
+            if p:
                 try:
-                    self._proc.kill()
+                    p.terminate()
+                    p.wait(timeout=2)
                 except Exception:
-                    pass
-            self._proc = None
+                    try:
+                        p.kill()
+                    except Exception:
+                        pass
+            setattr(self, attr, None)
         self._freq = None
         self._mode = None
 
@@ -193,14 +227,27 @@ class RadioTuner:
             except Exception:
                 self._proc = None
                 return
+            # With ffmpeg, transcode the PCM to live MP3 (phone-friendly). rtl_fm's
+            # stdout feeds ffmpeg's stdin; we read MP3 off ffmpeg's stdout. Without
+            # ffmpeg, stream the raw WAV (desktop-only) as before.
+            src = self._proc
+            if transcodes():
+                try:
+                    self._enc = subprocess.Popen(ffmpeg_mp3_cmd(), stdin=self._proc.stdout,
+                                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                    self._proc.stdout.close()   # parent drops its copy -> EOF reaches ffmpeg if rtl_fm dies
+                    src = self._enc
+                except Exception:
+                    self._enc = None            # fall back to WAV passthrough
             self._freq = freq_hz
             self._mode = (mode or "wfm").lower()
             self._started = time.time()
-            proc = self._proc
-        yield wav_header()
+            proc, enc, pipe = self._proc, self._enc, src.stdout
+        if enc is None:
+            yield wav_header()                  # raw WAV path needs the RIFF header
         try:
             while True:
-                chunk = proc.stdout.read(4096)
+                chunk = pipe.read(4096)
                 if not chunk:
                     break
                 yield chunk
@@ -279,6 +326,14 @@ def selftest():
     check("presets: FM + airband present + all valid modes",
           any(v[1] == "wfm" for v in RADIO_PRESETS.values())
           and all(v[1] in _MODES for v in RADIO_PRESETS.values()))
+
+    # MP3 transcode (the iOS fix): correct ffmpeg pipe command + matching mimetype
+    fc = ffmpeg_mp3_cmd()
+    check("mp3: ffmpeg reads s16le pipe:0 -> libmp3lame mp3 pipe:1",
+          "s16le" in fc and "libmp3lame" in fc and "pipe:0" in fc and "pipe:1" in fc
+          and "48000" in fc, str(fc))
+    check("mp3: mimetype matches transcode availability",
+          media_mimetype() == ("audio/mpeg" if transcodes() else "audio/wav"))
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

@@ -836,6 +836,14 @@ EOF
             || log "INFO" "multimon-ng not installed - Pager Decode stays disabled (apt install multimon-ng to enable)"
     fi
 
+    # ffmpeg lets Local Radio stream MP3 (audio/mpeg), which plays on iOS/mobile;
+    # without it the audio falls back to streaming WAV (desktop browsers only).
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1 \
+            && log "SUCCESS" "Installed ffmpeg (Local Radio MP3 for phones)" \
+            || log "INFO" "ffmpeg not installed - Local Radio uses WAV (desktop only; apt install ffmpeg for phone audio)"
+    fi
+
     # Configure lldpd for switch discovery (Network > Switch & L2 tab).
     # Enable decoding of CDP (Cisco), EDP (Extreme), FDP (Foundry) and SONMP
     # (Nortel) in addition to LLDP so non-LLDP switches are discovered too.

@@ -22467,7 +22467,7 @@ def register_network_diagnostics(app, logger=None):
             rtl_sdr.power_stop(); rtl_sdr.ism_stop(); adsb.stop(); pager.stop(); acars.stop(); vdl2.stop();vor.stop(); aprs.stop()
         except Exception:
             pass
-        resp = Response(radio.stream(freq, mode), mimetype="audio/wav")
+        resp = Response(radio.stream(freq, mode), mimetype=radio.media_mimetype())
         resp.headers["Cache-Control"] = "no-store"
         return resp
 

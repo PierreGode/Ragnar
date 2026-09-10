@@ -367,6 +367,11 @@ EOF
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends multimon-ng >/dev/null 2>&1 \
             && echo -e "  ${GREEN}✓${NC} Installed multimon-ng (Pager Decode)"
     fi
+    # ffmpeg lets Local Radio stream MP3 so it plays on iOS/mobile (else WAV, desktop-only).
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg >/dev/null 2>&1 \
+            && echo -e "  ${GREEN}✓${NC} Installed ffmpeg (Local Radio MP3 for phones)"
+    fi
 fi
 
 # Firefox backs the ZAP AJAX-spider browser crawl (advanced_vuln_scanner looks up
