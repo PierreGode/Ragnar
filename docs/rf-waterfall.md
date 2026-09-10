@@ -84,6 +84,28 @@ the scroll-speed setting.
 Both engines emit the same frame shape, feed the same ring buffer, recorder and
 `/api/net/rtl/power/frames`, so nothing else on the page changes.
 
+## Measurement layer
+
+The waterfall is also an instrument, not just a display. Every panel measures the
+live spectrum client-side from the incoming frames:
+
+- **Readout tiles** — Peak f, Peak level, **SNR** and **Noise** (a robust
+  low-percentile noise-floor estimate), plus Busy% (fraction of the span above
+  noise) and Span.
+- **Click to measure** — click any signal and the marker snaps to the nearest
+  peak and reports centre frequency, level, **SNR**, **−20 dB bandwidth**, **99%
+  occupied bandwidth** and relative **channel power**. (Values are relative dB —
+  the RTL front end isn't absolute-calibrated — so treat them as consistent, not
+  survey-grade.)
+- **Trace math (Hold)** — the spectrum trace overlays user-toggled **Avg**
+  (digs weak carriers out of the noise), **Max-hold** (catches intermittent
+  bursts, on by default) and **Min-hold** (reveals the true noise floor), with a
+  dashed line marking the measured noise floor.
+- **Signal list (CFAR)** — the panel lists every emitter above `noise + 8 dB`
+  with centre frequency, bandwidth, SNR and a **duty-cycle** estimate (so a
+  bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
+  actually on the band" answer.
+
 ## Colour palettes
 
 The top toolbar has a **Palette** selector for the waterfall colour map. Five are
