@@ -253,6 +253,7 @@ data/pcaps/
 # raw CSI recordings (can be tens of MB+)
 data/recordings/
 data/rf_recordings/
+data/iq_captures/
 # locally-trained adaptive sensing model
 data/adaptive_model.json
 # locally-trained / downloaded sensing models

@@ -106,6 +106,27 @@ live spectrum client-side from the incoming frames:
   bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
   actually on the band" answer.
 
+## Raw-IQ capture (SigMF)
+
+The RTL panel's record bar has an **⤓ SigMF** button that captures raw baseband
+IQ to a [SigMF](https://sigmf.org) recording — a `.sigmf-data` file (the RTL's
+native `cu8` complex-uint8 samples) plus a `.sigmf-meta` JSON sidecar with the
+tune frequency, sample rate, UTC datetime, a sha512 of the data and the band
+label. SigMF is the open interoperability standard, so a capture opens directly
+in **GNU Radio, inspectrum, Universal Radio Hacker**, or any SigMF-aware tool —
+turning Ragnar into a real capture instrument rather than a closed viewer.
+
+- Centres on the marker (if one is dropped) else the span centre, at a
+  single-tune sample rate (≤ 2.4 MS/s); length is the seconds box (capped at
+  `rtl_sdr._IQ_CAP_MAX_SECONDS`, 30 s).
+- One dongle: capturing pauses the live sweep and every other RTL consumer, then
+  the sweep resumes automatically when the capture finishes. `status()` reports
+  the capture as `streaming` so the 15 s status poll never re-probes the device
+  mid-capture (the same contention guard the sweep uses).
+- Files live under `data/iq_captures/` (gitignored); the finished capture offers
+  `.sigmf-data` + `.sigmf-meta` download links. Backend: `rtl_sdr.iq_capture_*`
+  + `sigmf_meta()`; routes `/api/net/rtl/iq/{start,status,stop,list,delete,file}`.
+
 ## Colour palettes
 
 The top toolbar has a **Palette** selector for the waterfall colour map. Five are

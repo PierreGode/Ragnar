@@ -1552,11 +1552,251 @@ def record_delete(name):
         return {"ok": False, "error": str(exc)}
 
 
+# --------------------------------------------------------------------------
+# SigMF raw-IQ capture — record the dongle's raw baseband to a SigMF recording
+# (.sigmf-data + .sigmf-meta) so a capture opens directly in GNU Radio,
+# inspectrum, Universal Radio Hacker, or any SigMF-aware tool. SigMF is the open
+# interoperability standard the wider SDR/DSP research community uses, so this
+# turns Ragnar into a real capture instrument rather than a closed viewer.
+#
+# rtl_sdr emits interleaved unsigned-8-bit I/Q, which is SigMF datatype "cu8".
+# We capture a bounded number of samples (rtl_sdr -n) so files stay finite.
+# --------------------------------------------------------------------------
+
+_IQ_CAP_MAX_SECONDS = 30       # hard cap on a single capture (file-size guard)
+_SIGMF_VERSION = "1.0.0"
+
+
+def _iq_cap_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "iq_captures")
+
+
+def sigmf_meta(center_hz, sr_hz, datatype="cu8", hw="RTL-SDR",
+               sha512=None, dt_iso=None, label=None, ppm=0, gain=None):
+    """Build a SigMF metadata dict (SigMF v1.0.0). Pure — the selftest checks it.
+
+    ``core:datatype`` "cu8" is complex unsigned-8-bit, exactly rtl_sdr's native
+    output. ``captures`` carries the tune frequency + UTC datetime; an optional
+    band ``label`` becomes a single full-length annotation.
+    """
+    glob = {
+        "core:datatype": datatype,
+        "core:sample_rate": float(sr_hz),
+        "core:version": _SIGMF_VERSION,
+        "core:recorder": "Ragnar rtl_sdr.py",
+        "core:hw": hw,
+    }
+    if sha512:
+        glob["core:sha512"] = sha512
+    if ppm:
+        glob["core:freq_correction_ppm"] = int(ppm)      # extension namespace-free hint
+    if gain is not None:
+        glob["core:gain_db"] = float(gain)
+    cap = {"core:sample_start": 0, "core:frequency": float(center_hz)}
+    if dt_iso:
+        cap["core:datetime"] = dt_iso
+    meta = {"global": glob, "captures": [cap], "annotations": []}
+    if label:
+        meta["annotations"].append({"core:sample_start": 0, "core:label": str(label)})
+    return meta
+
+
+class IqCapture:
+    """One-shot bounded raw-IQ capture to a SigMF recording (background thread)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._name = None
+        self._center = None
+        self._sr = None
+        self._want_bytes = 0
+        self._seconds = 0
+        self._started = None
+        self._done = False
+        self._error = None
+        self._path = None          # .sigmf-data path
+
+    def start(self, center_hz, sr_hz, seconds, name=None, label=None):
+        try:
+            center_hz = int(float(center_hz)); sr_hz = int(float(sr_hz))
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "center_hz / sr_hz / seconds must be numeric"}
+        if not (24_000_000 <= center_hz <= 1_766_000_000):
+            return {"ok": False, "error": "center frequency out of RTL-SDR reach (24-1766 MHz)"}
+        if not (_IQ_SR_MIN <= sr_hz <= _IQ_SR_MAX):
+            return {"ok": False, "error": "sample rate out of range (1.0-3.2 MS/s)"}
+        seconds = max(0.1, min(_IQ_CAP_MAX_SECONDS, seconds))
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return {"ok": False, "error": "a capture is already running"}
+            try:
+                os.makedirs(_iq_cap_dir(), exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": "cannot create captures dir: %s" % exc}
+            base = _rec_safe(name) or ("iq-%d-%s" % (round(center_hz / 1e6),
+                                                     time.strftime("%Y%m%d-%H%M%S")))
+            self._name = base
+            self._center, self._sr, self._seconds = center_hz, sr_hz, seconds
+            self._want_bytes = int(sr_hz * seconds) * 2      # cu8: 2 bytes/sample
+            self._label = label
+            self._started = time.time()
+            self._done = False
+            self._error = None
+            self._path = os.path.join(_iq_cap_dir(), base + ".sigmf-data")
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True,
+                                            name="rtl-iqcap")
+            self._thread.start()
+        return {"ok": True, "name": base, "center_hz": center_hz, "sr_hz": sr_hz,
+                "seconds": seconds, "want_bytes": self._want_bytes}
+
+    def _run_loop(self):
+        nsamp = int(self._sr * self._seconds)
+        cmd = [_RTL_SDR, "-f", str(self._center), "-s", str(self._sr), "-n", str(nsamp)]
+        if _ppm:
+            cmd += ["-p", str(_ppm)]
+        if _gain is not None:
+            cmd += ["-g", str(_gain)]
+        cmd += [self._path]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE)
+        except Exception as exc:
+            self._error = "failed to launch rtl_sdr: %s" % exc
+            return
+        _, err = b"", b""
+        try:
+            _, err = self._proc.communicate()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._error = str(exc)
+        if self._stop.is_set():
+            self._error = self._error or "capture cancelled"
+            return
+        rc = self._proc.poll()
+        if rc not in (0, None) and not os.path.exists(self._path):
+            tail = (err or b"").decode("utf-8", "replace").strip().splitlines()
+            self._error = tail[-1][:200] if tail else ("rtl_sdr exited rc=%s" % rc)
+            return
+        # Write the SigMF sidecar (with a data hash) next to the captured samples.
+        try:
+            import hashlib
+            h = hashlib.sha512()
+            with open(self._path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            meta = sigmf_meta(self._center, self._sr, sha512=h.hexdigest(),
+                              hw="RTL-SDR (%s)" % (_capture_hw_name()),
+                              dt_iso=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._started)),
+                              label=self._label, ppm=_ppm, gain=_gain)
+            with open(self._path[:-len(".sigmf-data")] + ".sigmf-meta", "w") as fh:
+                json.dump(meta, fh, indent=2)
+            self._done = True
+        except OSError as exc:
+            self._error = "capture saved but metadata write failed: %s" % exc
+
+    def stop(self):
+        with self._lock:
+            self._stop.set()
+            _terminate(self._proc)
+            self._proc = None
+        return {"ok": True}
+
+    def status(self):
+        with self._lock:
+            running = bool(self._thread and self._thread.is_alive())
+            have = 0
+            try:
+                if self._path and os.path.exists(self._path):
+                    have = os.path.getsize(self._path)
+            except OSError:
+                have = 0
+            pct = int(min(100, have * 100 / self._want_bytes)) if self._want_bytes else 0
+            return {"capturing": running, "name": self._name, "done": self._done,
+                    "error": self._error, "center_hz": self._center, "sr_hz": self._sr,
+                    "seconds": self._seconds, "bytes": have, "want_bytes": self._want_bytes,
+                    "progress": pct}
+
+
+def _capture_hw_name():
+    d = _detect_cache or {}
+    return d.get("model_name") or d.get("device") or "RTL2832U"
+
+
+def iq_capture_list():
+    import glob
+    d = _iq_cap_dir()
+    out = []
+    for meta_path in sorted(glob.glob(os.path.join(d, "*.sigmf-meta")), reverse=True):
+        base = os.path.basename(meta_path)[:-len(".sigmf-meta")]
+        data_path = meta_path[:-len(".sigmf-meta")] + ".sigmf-data"
+        try:
+            with open(meta_path) as fh:
+                m = json.load(fh)
+            g = m.get("global", {}); c = (m.get("captures") or [{}])[0]
+            out.append({"name": base,
+                        "sr_hz": g.get("core:sample_rate"),
+                        "center_hz": c.get("core:frequency"),
+                        "datetime": c.get("core:datetime"),
+                        "bytes": os.path.getsize(data_path) if os.path.exists(data_path) else 0})
+        except (OSError, ValueError):
+            continue
+    return {"captures": out}
+
+
+def iq_capture_path(name):
+    """Absolute (.sigmf-data, .sigmf-meta) paths for a capture, or (None, None)."""
+    base = _rec_safe(name)
+    data = os.path.join(_iq_cap_dir(), base + ".sigmf-data")
+    meta = os.path.join(_iq_cap_dir(), base + ".sigmf-meta")
+    return (data if os.path.exists(data) else None,
+            meta if os.path.exists(meta) else None)
+
+
+def iq_capture_delete(name):
+    ok = False
+    for suffix in (".sigmf-data", ".sigmf-meta"):
+        p = os.path.join(_iq_cap_dir(), _rec_safe(name) + suffix)
+        try:
+            os.remove(p); ok = True
+        except OSError:
+            pass
+    return {"ok": ok}
+
+
+_iqcap = IqCapture()
+
+
+def iq_capture_start(center_hz, sr_hz, seconds=2.0, name=None, label=None):
+    """Begin a SigMF raw-IQ capture. Stops the sweep/scanner first (one dongle)."""
+    global _detect_cache
+    if _power.status()["running"]:
+        _power.stop()
+    if _ism.status()["running"]:
+        _ism.stop()
+    d = detect()
+    if not d.get("available"):
+        return {"ok": False, "error": d.get("error", "no RTL-SDR")}
+    _detect_cache = d
+    return _iqcap.start(center_hz, sr_hz, seconds, name=name, label=label)
+
+
+def iq_capture_status():
+    return _iqcap.status()
+
+
+def iq_capture_stop():
+    return _iqcap.stop()
+
+
 def status():
-    ism, pwr = _ism.status(), _power.status()
-    st = {"ism": ism, "power": pwr, "bands": sorted(RTL_BANDS.keys()),
+    ism, pwr, iq = _ism.status(), _power.status(), _iqcap.status()
+    st = {"ism": ism, "power": pwr, "iq": iq, "bands": sorted(RTL_BANDS.keys()),
           "ism_bands": sorted(ISM_FREQS.keys())}
-    if ism["running"] or pwr["running"]:
+    if ism["running"] or pwr["running"] or iq.get("capturing"):
         # Something already holds the dongle over USB. Re-probing with rtl_test
         # here would open the same device and kill the capture — the HackRF
         # lesson. Report availability from the cached probe instead.
@@ -1873,6 +2113,27 @@ def selftest():
         globals()["_rec_dir"] = _saved_rec_dir
         import shutil as _sh
         _sh.rmtree(_tmpdir, ignore_errors=True)
+
+    # --- SigMF metadata (pure, no hardware): shape + required core fields ---
+    _sm = sigmf_meta(868_300_000, 2_400_000, sha512="ab"*64,
+                     dt_iso="2026-09-10T12:00:00Z", label="lorawan-eu868", ppm=12, gain=28.0)
+    check("sigmf: cu8 datatype + sample_rate + v1.0.0 global",
+          _sm["global"]["core:datatype"] == "cu8"
+          and _sm["global"]["core:sample_rate"] == 2_400_000.0
+          and _sm["global"]["core:version"] == "1.0.0", str(_sm["global"].get("core:version")))
+    check("sigmf: capture carries tune freq + datetime",
+          _sm["captures"][0]["core:frequency"] == 868_300_000.0
+          and _sm["captures"][0]["core:datetime"] == "2026-09-10T12:00:00Z")
+    check("sigmf: label -> full-length annotation + sha512/ppm/gain recorded",
+          _sm["annotations"][0]["core:label"] == "lorawan-eu868"
+          and _sm["global"]["core:sha512"] == "ab"*64
+          and _sm["global"]["core:freq_correction_ppm"] == 12
+          and _sm["global"]["core:gain_db"] == 28.0)
+    import json as _json
+    check("sigmf: metadata is JSON-serializable", isinstance(_json.dumps(_sm), str))
+    check("sigmf: capture rejects out-of-reach centre / bad rate",
+          IqCapture().start(50_000_000_000, 2_400_000, 1).get("ok") is False
+          and IqCapture().start(868_000_000, 99_000_000, 1).get("ok") is False)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

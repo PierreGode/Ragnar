@@ -543,7 +543,13 @@
         +'<button class="rew" title="Restart">&#9198;</button><button class="pp" title="Play/Pause">&#10074;&#10074;</button>'
         +'<input type="range" class="seek" min="0" max="0" value="0">'
         +'<span class="rpos rsp"></span><button class="rdel" title="Delete this recording">&#128465;</button>'
-        +'<button class="rexit">&#10005;&nbsp;Exit</button></span>';
+        +'<button class="rexit">&#10005;&nbsp;Exit</button></span>'
+      +'<span class="rsp">·</span><span class="rsp">IQ</span>'
+      +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
+      +'<button class="iqbtn" title="Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH">&#8681;&nbsp;SigMF</button>'
+      +'<span class="iqstat rsp"></span>';
+    this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
+    this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
     this.recBtn=g.querySelector('.rec'); this.recStat=g.querySelector('.recstat');
     this.recList=g.querySelector('.reclist'); this.transport=g.querySelector('.transport');
     this.seekEl=g.querySelector('.seek'); this.ppEl=g.querySelector('.pp'); this.rposEl=g.querySelector('.rpos');
@@ -556,6 +562,37 @@
     g.querySelector('.rdel').addEventListener('click',function(){ self.deleteRecording(); });
     g.querySelector('.rexit').addEventListener('click',function(){ self.exitReplay(); });
     this.refreshRecordings();
+  };
+  // Raw-IQ capture to a SigMF recording. Centres on the marker (else the span
+  // centre) at a single-tune sample rate; steals the dongle, so the live sweep
+  // pauses and resumes when the capture finishes.
+  Scope.prototype.iqCapture=function(){
+    var self=this; if(this._iqPoll) return;
+    var cMHz=(this.marker!=null)?this.marker:(this.lo+this.hi)/2;
+    var spanHz=(this.hi-this.lo)*1e6;
+    var sr=Math.min(2400000,Math.max(1000000,Math.round(Math.min(spanHz,2800000)*1.15)));
+    var body={center_hz:Math.round(cMHz*1e6),sr_hz:sr,seconds:parseFloat(this.iqSec.value)||2,
+              label:(this.zwave?this.zwave.sweepLabel:(this.liveBand||''))};
+    this.iqStat.textContent='starting…';
+    fetch('/api/net/rtl/iq/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||res.error){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc((res&&res.error)||'failed')+'</span>'; return; }
+        self._iqWasLive=(self.mode==='live'); if(self._iqWasLive) self.stopLive();  // the capture holds the dongle
+        self._iqPoll=setInterval(function(){ self.iqPoll(); },400); self.iqPoll();
+      }).catch(function(){ self.iqStat.textContent='start failed'; });
+  };
+  Scope.prototype.iqPoll=function(){ var self=this;
+    fetch('/api/net/rtl/iq/status').then(function(r){return r.json();}).then(function(st){
+      if(st.capturing){ self.iqStat.innerHTML='<span class="recdot">&#9679;</span> capturing '+(st.progress||0)+'%'; return; }
+      if(self._iqPoll){ clearInterval(self._iqPoll); self._iqPoll=null; }
+      if(st.error){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc(st.error)+'</span>'; }
+      else if(st.done && st.name){ var n=encodeURIComponent(st.name), mb=(st.bytes/1e6).toFixed(1);
+        self.iqStat.innerHTML='<span style="color:var(--live)">&#10003; '+mb+' MB</span> '
+          +'<a href="/api/net/rtl/iq/file?name='+n+'" download style="color:var(--cyan);margin:0 6px">.sigmf-data</a>'
+          +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'; }
+      // resume the sweep the capture interrupted
+      if(self._iqWasLive && self.available){ self._iqWasLive=false; self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
+    }).catch(function(){ if(self._iqPoll){clearInterval(self._iqPoll);self._iqPoll=null;} });
   };
   Scope.prototype.toggleRecord=function(){
     var self=this;
@@ -785,7 +822,7 @@
     }).catch(function(){});
   };
   Scope.prototype.applyDesired=function(){
-    if(this.decoding) return;   // decode owns the dongle; leave it be
+    if(this.decoding || this._iqPoll) return;   // decode / IQ capture own the dongle
     this.setMode(this.available?'live':(DEMO_ON?'synth':'idle'));
   };
   Scope.prototype.setMode=function(mode){
