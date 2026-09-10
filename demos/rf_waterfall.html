@@ -23,7 +23,7 @@
   body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;
     -webkit-font-smoothing:antialiased;padding:clamp(14px,3vw,34px);min-height:100vh;
     background-image:radial-gradient(120% 80% at 50% -10%, rgba(56,189,201,.06), transparent 60%), linear-gradient(var(--ground),var(--ground));}
-  .wrap{max-width:none;margin:0 auto}
+  .wrap{max-width:none;margin:0 auto;overflow-x:hidden}
   header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;
     gap:16px 24px;margin-bottom:22px;border-bottom:1px solid var(--line);padding-bottom:18px}
   .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;
@@ -60,7 +60,7 @@
   a.ctl{display:inline-flex;align-items:center;text-decoration:none}
   a.back{border-color:rgba(56,189,201,.4);color:var(--cyan)}
   a.back:hover{border-color:var(--cyan);background:rgba(56,189,201,.10);color:#fff}
-  .seg{display:inline-flex;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:7px;overflow:hidden}
   .seg button{font-family:var(--mono);font-size:12px;color:var(--ink-dim);background:transparent;border:0;padding:7px 12px;cursor:pointer;transition:background .15s,color .15s}
   .seg button:hover{color:var(--ink)}
   .seg button[aria-pressed="true"]{background:rgba(56,189,201,.14);color:var(--cyan)}
@@ -158,7 +158,32 @@
   footer{margin-top:24px;padding-top:16px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11.5px;color:var(--muted);line-height:1.7}
   footer b{color:var(--ink-dim);font-weight:600}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  @media (max-width:640px){.rigs{align-items:flex-start}header{align-items:flex-start}.readout{gap:12px}}
+  @media (max-width:640px){
+    .rigs{align-items:flex-start}
+    header{align-items:flex-start;gap:10px 16px}
+    h1{font-size:30px}
+    .sub{font-size:13px}
+    /* toolbars: comfortable wrap + finger-sized tap targets */
+    .bar,.radiobar{gap:8px 10px;padding:10px 12px}
+    .scope-head{gap:8px 12px;padding:12px 12px}
+    .toolbar,.recbar{gap:8px 10px;padding:9px 12px}
+    .seg button{padding:9px 13px;font-size:12px}
+    button.ctl,a.ctl{padding:9px 13px}
+    button.mini{padding:8px 12px}
+    .scope-head .fsbtn{padding:8px 12px}
+    /* inline-flex control groups must wrap, not overflow the screen edge */
+    .tunergrp,.tunesel,.holdgrp,.zwavesel,.recbar .transport{flex-wrap:wrap}
+    /* readout: even tiles across the full width, no fixed min that forces overflow */
+    .readout{gap:10px 14px;width:100%;order:5}
+    .stat{min-width:0;flex:1 0 27%}
+    /* a taller waterfall — the point of the page — and a roomier signal list */
+    canvas.fall{height:min(46vh,340px)}
+    .loglist{max-height:200px}
+    /* slightly bigger number inputs for touch */
+    .tunergrp .tin,.tunesel .tin,.radiobar input.rf,.iqsec,.calf{padding:6px 6px;font-size:12px}
+    /* legend + clock drop below the control rows instead of crowding them */
+    .bar .legend{order:8} .bar .clock{order:9}
+  }
   @media (prefers-reduced-motion:reduce){.eyebrow .dot{animation:none}}
 </style>
 </head>

@@ -214,4 +214,9 @@ Env `RAGNAR_SDR_DEMO=1` forces the demo on without touching config.
 - The page uses Google Fonts with system fallbacks, so it still renders on an
   offline field unit.
 - Honours `prefers-reduced-motion`: starts paused with a Play control.
+- **Phone-friendly.** Segmented controls (scroll/palette/band/view) wrap instead
+  of clipping, the readout tiles reflow to a 3-across grid, control groups
+  (tuner/hold/mesh) wrap, tap targets grow, and the waterfall canvas gets taller
+  (`min(46vh,340px)`) — all under a `≤640px` media query, so the desktop layout
+  is unchanged. No horizontal scroll at 360px.
 - Receive-only. The sweeps measure on-air energy; nothing is transmitted.
