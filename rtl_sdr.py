@@ -1041,7 +1041,10 @@ class PowerSweep:
                 if sig == self._sig:
                     return {"ok": True, "already": True, "band": label}
                 self._stop_locked()
-            self._stop.clear()
+            # A fresh Event (not .clear()) so any still-exiting previous sweep
+            # thread keeps its own now-set event and stops cleanly, instead of
+            # racing this new run on a shared, just-cleared one.
+            self._stop = threading.Event()
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _POWER_BINS
@@ -1068,7 +1071,7 @@ class PowerSweep:
                 return
             lo, hi, label, sig = self._lo, self._hi, self._band, self._sig
             self._stop_locked()
-            self._stop.clear()
+            self._stop = threading.Event()   # fresh event; see start() for why
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _POWER_BINS
@@ -1130,18 +1133,25 @@ class PowerSweep:
             cmd += ["-g", str(_gain)]             # else rtl_sdr uses tuner AGC (auto)
         cmd += ["-"]                              # stream raw IQ to stdout
         self._stderr_tail = None
+        # Capture our own stop event + proc handle locally. A restart (band change
+        # / PPM calibrate) installs a *new* self._stop and nulls self._proc, so
+        # touching those through self here would race the new run; the locals keep
+        # this thread reading its own pipe until EOF and exiting cleanly.
+        stop = self._stop
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, bufsize=0)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, bufsize=0)
+            self._proc = proc
         except Exception as exc:
             self._error = "failed to launch rtl_sdr: %s" % exc
             return False
-        serr = _drain(_text_lines(self._proc.stderr), self)
+        pipe = proc.stdout
+        serr = _drain(_text_lines(proc.stderr), self)
         floor_ema = None
         produced = 0
         try:
-            while not self._stop.is_set():
-                buf = _read_exact(self._proc.stdout, row_bytes)
+            while not stop.is_set():
+                buf = _read_exact(pipe, row_bytes)
                 if not buf:
                     break
                 # rtl_sdr emits unsigned 8-bit I/Q; recentre (127.5 = 0) and
@@ -1163,15 +1173,18 @@ class PowerSweep:
                 self._push_frame(grid)
                 produced += 1
         except Exception as exc:  # pragma: no cover - defensive
-            self._error = str(exc)
+            if not stop.is_set():
+                self._error = str(exc)
         finally:
             serr.join(timeout=1)
-            if (self._proc and self._proc.poll() not in (None, 0)
+            # Only surface a device error if the process died on its own — a
+            # deliberate stop/restart (stop set) is not an error to report.
+            if (not stop.is_set() and proc.poll() not in (None, 0)
                     and not self._error and self._stderr_tail):
                 self._error = self._stderr_tail
         # Nothing produced and we didn't ask it to stop -> let rtl_power try.
-        if produced == 0 and not self._stop.is_set():
-            _terminate(self._proc)
+        if produced == 0 and not stop.is_set():
+            _terminate(proc)
             self._proc = None
             self._error = None
             return False
@@ -1200,17 +1213,19 @@ class PowerSweep:
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
                "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"] + _tuner_args()
         self._stderr_tail = None
+        stop = self._stop          # our own event; a restart swaps self._stop
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True,
-                                          bufsize=1)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    bufsize=1)
+            self._proc = proc
         except Exception as exc:
             self._error = "failed to launch rtl_power: %s" % exc
             return
-        serr = _drain(self._proc.stderr, self)
+        serr = _drain(proc.stderr, self)
         try:
-            for line in self._proc.stdout:
-                if self._stop.is_set():
+            for line in proc.stdout:
+                if stop.is_set():
                     break
                 parsed = parse_power_row(line)
                 if not parsed:
@@ -1219,10 +1234,11 @@ class PowerSweep:
                 if frame is not None:
                     self._push_frame(frame)
         except Exception as exc:  # pragma: no cover - defensive
-            self._error = str(exc)
+            if not stop.is_set():
+                self._error = str(exc)
         finally:
             serr.join(timeout=1)
-            if (self._proc and self._proc.poll() not in (None, 0)
+            if (not stop.is_set() and proc.poll() not in (None, 0)
                     and not self._error and self._stderr_tail):
                 self._error = self._stderr_tail
 
