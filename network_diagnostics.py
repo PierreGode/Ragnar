@@ -22087,6 +22087,22 @@ def register_network_diagnostics(app, logger=None):
                          download_name=path.rsplit('/', 1)[-1],
                          mimetype='application/octet-stream')
 
+    # Spectrum baseline + anomaly detection (learn a normal spectrum, then flag
+    # new / vanished carriers + broadband jamming into the Watchtower feed).
+    @app.route('/api/net/rtl/baseline/arm', methods=['POST'])
+    def net_rtl_baseline_arm():
+        _log("net/rtl/baseline/arm")
+        return jsonify(rtl_sdr.baseline_arm())
+
+    @app.route('/api/net/rtl/baseline/clear', methods=['POST'])
+    def net_rtl_baseline_clear():
+        _log("net/rtl/baseline/clear")
+        return jsonify(rtl_sdr.baseline_clear())
+
+    @app.route('/api/net/rtl/baseline/status', methods=['GET'])
+    def net_rtl_baseline_status():
+        return jsonify(rtl_sdr.baseline_status())
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.

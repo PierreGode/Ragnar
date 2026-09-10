@@ -553,9 +553,15 @@
       +'<span class="rsp">·</span><span class="rsp">IQ</span>'
       +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
       +'<button class="iqbtn" title="Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH">&#8681;&nbsp;SigMF</button>'
-      +'<span class="iqstat rsp"></span>';
+      +'<span class="iqstat rsp"></span>'
+      +'<span class="rsp">·</span>'
+      +'<button class="basebtn" aria-pressed="false" title="Learn a baseline spectrum, then alert on new / vanished carriers + broadband jamming (into the Watchtower feed)">&#9737;&nbsp;Baseline</button>'
+      +'<span class="basestat rsp"></span>';
     this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
     this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
+    this.baseBtn=g.querySelector('.basebtn'); this.baseStat=g.querySelector('.basestat');
+    this.baseBtn.addEventListener('click',function(){ self.baselineToggle(); });
+    this.baselinePoll();   // reflect any baseline already running server-side
     this.recBtn=g.querySelector('.rec'); this.recStat=g.querySelector('.recstat');
     this.recList=g.querySelector('.reclist'); this.transport=g.querySelector('.transport');
     this.seekEl=g.querySelector('.seek'); this.ppEl=g.querySelector('.pp'); this.rposEl=g.querySelector('.rpos');
@@ -599,6 +605,39 @@
       // resume the sweep the capture interrupted
       if(self._iqWasLive && self.available){ self._iqWasLive=false; self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
     }).catch(function(){ if(self._iqPoll){clearInterval(self._iqPoll);self._iqPoll=null;} });
+  };
+  // ---- spectrum baseline / anomaly watch ----
+  // Arm learns a "normal" spectrum from the running sweep, then flags new /
+  // vanished carriers + broadband jamming into the Watchtower feed. The backend
+  // (rtl_sdr.SpectrumBaseline) does the work; the page just arms/clears + polls.
+  Scope.prototype.baselineToggle=function(){
+    var self=this, on=(this.baseBtn.getAttribute('aria-pressed')==='true');
+    fetch('/api/net/rtl/baseline/'+(on?'clear':'arm'),{method:'POST'})
+      .then(function(r){return r.json();}).then(function(st){ self._renderBaseline(st);
+        if(!on){ if(self._basePoll) clearInterval(self._basePoll); self._basePoll=setInterval(function(){self.baselinePoll();},1500); }
+        else if(self._basePoll){ clearInterval(self._basePoll); self._basePoll=null; }
+      }).catch(function(){});
+  };
+  Scope.prototype.baselinePoll=function(){ var self=this;
+    fetch('/api/net/rtl/baseline/status').then(function(r){return r.json();}).then(function(st){ self._renderBaseline(st);
+      if(st.state==='idle' && self._basePoll){ clearInterval(self._basePoll); self._basePoll=null; }
+      else if(st.state!=='idle' && !self._basePoll){ self._basePoll=setInterval(function(){self.baselinePoll();},1500); }
+    }).catch(function(){});
+  };
+  Scope.prototype._renderBaseline=function(st){
+    if(!this.baseBtn||!st) return;
+    var on=(st.state && st.state!=='idle');
+    this.baseBtn.setAttribute('aria-pressed', on?'true':'false');
+    if(st.state==='learning') this.baseStat.innerHTML='<span style="color:var(--accent)">learning '+(st.progress||0)+'%</span>';
+    else if(st.state==='watching') this.baseStat.innerHTML='<span style="color:var(--live)">&#9737; watching</span>'
+        +(st.count?(' · <span style="color:#fb7185">'+st.count+' anomal'+(st.count===1?'y':'ies')+'</span>'):'');
+    else this.baseStat.textContent='';
+    // surface the newest anomaly on the marker line so it's noticed at a glance
+    if(st.events && st.events.length && st.count!==this._baseSeen){
+      this._baseSeen=st.count; var e=st.events[0];
+      var col=e.severity==='critical'?'#fb7185':(e.severity==='high'?'var(--accent)':'var(--cyan)');
+      this.markTxt.innerHTML='<span style="color:'+col+'">&#9888; '+esc(e.summary)+'</span> <span class="zi">→ Watchtower</span>';
+    }
   };
   Scope.prototype.toggleRecord=function(){
     var self=this;

@@ -1240,8 +1240,10 @@ class PowerSweep:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
             meta = {"band": self._band, "lo_hz": self._lo, "hi_hz": self._hi,
                     "bins": _POWER_BINS, "floor": self._active_floor()}
-        # Feed the session recorder outside our lock (it has its own).
+        # Feed the session recorder + the spectrum-baseline watcher outside our
+        # lock (each has its own). floor from meta so both engines stay consistent.
         _recorder.write(self._seq, ts, ints, meta)
+        _baseline.feed(ints, meta["lo_hz"], meta["hi_hz"], meta["floor"])
 
     def _active_floor(self):
         """Colour-scale floor for the current engine: the IQ path's adaptive
@@ -1792,6 +1794,198 @@ def iq_capture_stop():
     return _iqcap.stop()
 
 
+# --------------------------------------------------------------------------
+# Spectrum baseline + anomaly detection — learn a "known-normal" spectrum, then
+# flag what changed: NEW carriers (energy where the baseline was quiet), GONE
+# carriers (a baseline signal that disappeared) and broadband JAMMING (a large
+# fraction of the span rising at once). Anomalies are surfaced in the UI and
+# written to the Watchtower JSON-lines feed (auto-discovered as source
+# "rfwatch"), so they ride the existing unified-alert + Pushover pipeline —
+# spectrum monitoring / interference-hunting the way regulators + SIGINT do it.
+# --------------------------------------------------------------------------
+
+_RF_WT_DIR = os.environ.get("RAGNAR_WATCH_LOG_DIR", "/var/log/ragnar")
+_RF_WT_FILE = "rfwatch.jsonl"
+
+
+def _regionize(bins_idx):
+    """Group a sorted list of bin indices into [start,end] contiguous runs (pure)."""
+    out = []
+    for i in bins_idx:
+        if out and i == out[-1][1] + 1:
+            out[-1][1] = i
+        else:
+            out.append([i, i])
+    return out
+
+
+def detect_spectrum_anomalies(baseline, grid, floor, new_margin=8, gone_margin=12,
+                              jam_margin=6, jam_frac=0.35, quiet_over_floor=10,
+                              carrier_over_floor=14):
+    """Compare a live power grid to a learned per-bin baseline (pure).
+
+    Returns ``{"new":[(s,e,peak)], "gone":[(s,e)], "jammer":bool, "up_frac":f}``:
+
+    * **new**   — bins that were quiet in the baseline (<= floor+quiet_over_floor)
+      but are now new_margin dB above both the baseline and the floor.
+    * **gone**  — bins that were a carrier in the baseline (>= floor+carrier_over_floor)
+      but have dropped gone_margin dB below that baseline.
+    * **jammer**— a broadband rise: >= jam_frac of bins are jam_margin dB over baseline.
+    """
+    n = min(len(baseline), len(grid))
+    new_idx, gone_idx, up = [], [], 0
+    for i in range(n):
+        b, g = baseline[i], grid[i]
+        if g > b + jam_margin:
+            up += 1
+        if b <= floor + quiet_over_floor and g > b + new_margin and g > floor + new_margin:
+            new_idx.append(i)
+        elif b >= floor + carrier_over_floor and g < b - gone_margin:
+            gone_idx.append(i)
+    new = [(s, e, max(grid[s:e + 1])) for s, e in _regionize(new_idx)]
+    gone = [(s, e) for s, e in _regionize(gone_idx)]
+    up_frac = (up / n) if n else 0.0
+    return {"new": new, "gone": gone, "jammer": up_frac >= jam_frac, "up_frac": up_frac}
+
+
+class SpectrumBaseline:
+    """Learn a per-bin baseline from the sweep, then watch for anomalies."""
+
+    LEARN_FRAMES = 80          # ~5 s of IQ frames (or a few rtl_power sweeps)
+    CONFIRM = 4                # a region must persist this many frames before alerting
+    COOLDOWN_S = 30            # min seconds between alerts for the same region
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "idle"    # idle | learning | watching
+        self._base = None
+        self._learn_n = 0
+        self._lo = self._hi = None
+        self._floor = _FLOOR_DBM
+        self._pending = {}      # region-key -> consecutive-frame count
+        self._last_alert = {}   # region-key -> epoch of last alert
+        self._events = []       # rolling UI list of recent anomalies
+        self._count = 0
+
+    def arm(self):
+        with self._lock:
+            self._state = "learning"
+            self._base = None
+            self._learn_n = 0
+            self._pending = {}
+            self._events = []
+        return self.status()
+
+    def clear(self):
+        with self._lock:
+            self._state = "idle"; self._base = None; self._learn_n = 0
+            self._pending = {}
+        return self.status()
+
+    def feed(self, grid, lo_hz, hi_hz, floor):
+        """Called per frame by the sweep. Learns, then detects + emits anomalies."""
+        with self._lock:
+            state = self._state
+            if state == "idle":
+                return
+            n = len(grid)
+            if self._base is None or len(self._base) != n or (lo_hz, hi_hz) != (self._lo, self._hi):
+                # span changed (band/zoom) -> relearn from scratch
+                self._base = list(grid); self._learn_n = 1
+                self._lo, self._hi, self._floor = lo_hz, hi_hz, floor
+                self._state = "learning"; self._pending = {}
+                return
+            self._floor = floor
+            if state == "learning":
+                for i, v in enumerate(grid):        # baseline = max envelope seen while learning
+                    if v > self._base[i]:
+                        self._base[i] = v
+                self._learn_n += 1
+                if self._learn_n >= self.LEARN_FRAMES:
+                    self._state = "watching"
+                return
+            base, lo, hi = self._base, self._lo, self._hi
+        # ---- watching: detect outside the lock-held learning path ----
+        res = detect_spectrum_anomalies(base, grid, floor)
+        now = time.time()
+        fresh = []
+        for s, e, peak in res["new"]:
+            fresh.append(("new", s, e, peak))
+        for s, e in res["gone"]:
+            fresh.append(("gone", s, e, None))
+        if res["jammer"]:
+            fresh.append(("jammer", 0, len(grid) - 1, None))
+        seen_keys = set()
+        with self._lock:
+            for kind, s, e, peak in fresh:
+                key = "%s:%d" % (kind, (s + e) // 2 // 4) if kind != "jammer" else "jammer"
+                seen_keys.add(key)
+                self._pending[key] = self._pending.get(key, 0) + 1
+                if self._pending[key] < self.CONFIRM:
+                    continue
+                if now - self._last_alert.get(key, 0) < self.COOLDOWN_S:
+                    continue
+                self._last_alert[key] = now
+                self._emit(kind, s, e, peak, lo, hi, len(grid), res.get("up_frac", 0))
+            # decay pending counters for regions not seen this frame
+            for k in list(self._pending):
+                if k not in seen_keys:
+                    self._pending[k] -= 1
+                    if self._pending[k] <= 0:
+                        del self._pending[k]
+
+    def _emit(self, kind, s, e, peak, lo_hz, hi_hz, n, up_frac):
+        fc = (lo_hz + (s + e + 1) / 2.0 * (hi_hz - lo_hz) / n) / 1e6
+        bw = (e - s + 1) * (hi_hz - lo_hz) / n / 1e3
+        if kind == "new":
+            sev = "high"; code = "RF_NEW_EMITTER"
+            summ = "New emitter %.3f MHz (~%.0f kHz, +%.0f dB over baseline)" % (
+                fc, bw, (peak - self._base[(s + e) // 2]))
+        elif kind == "gone":
+            sev = "medium"; code = "RF_CARRIER_LOST"
+            summ = "Baseline carrier gone at %.3f MHz (~%.0f kHz)" % (fc, bw)
+        else:
+            sev = "critical"; code = "RF_BROADBAND_JAMMING"
+            summ = "Broadband interference — %.0f%% of the span risen over baseline" % (up_frac * 100)
+        ev = {"ts": time.time(), "severity": sev, "code": code, "summary": summ,
+              "src": "%.3fMHz" % fc, "freq_mhz": round(fc, 3), "bw_khz": round(bw, 1)}
+        self._events.insert(0, ev)
+        del self._events[60:]
+        self._count += 1
+        self._write_wt(ev)
+
+    def _write_wt(self, ev):
+        try:
+            os.makedirs(_RF_WT_DIR, exist_ok=True)
+            with open(os.path.join(_RF_WT_DIR, _RF_WT_FILE), "a") as fh:
+                fh.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        except OSError:
+            pass                                   # best-effort; UI still shows it
+
+    def status(self):
+        with self._lock:
+            prog = 0
+            if self._state == "learning":
+                prog = int(min(100, self._learn_n * 100 / self.LEARN_FRAMES))
+            return {"state": self._state, "progress": prog, "count": self._count,
+                    "events": list(self._events[:40]), "bins": len(self._base) if self._base else 0}
+
+
+_baseline = SpectrumBaseline()
+
+
+def baseline_arm():
+    return _baseline.arm()
+
+
+def baseline_clear():
+    return _baseline.clear()
+
+
+def baseline_status():
+    return _baseline.status()
+
+
 def status():
     ism, pwr, iq = _ism.status(), _power.status(), _iqcap.status()
     st = {"ism": ism, "power": pwr, "iq": iq, "bands": sorted(RTL_BANDS.keys()),
@@ -2134,6 +2328,28 @@ def selftest():
     check("sigmf: capture rejects out-of-reach centre / bad rate",
           IqCapture().start(50_000_000_000, 2_400_000, 1).get("ok") is False
           and IqCapture().start(868_000_000, 99_000_000, 1).get("ok") is False)
+
+    # --- spectrum baseline + anomaly detection (pure) ---
+    check("rfwatch: _regionize groups contiguous runs",
+          _regionize([2, 3, 4, 9, 10, 20]) == [[2, 4], [9, 10], [20, 20]])
+    _fl = -110
+    _base = [_fl] * 100
+    _base[50] = _base[51] = -40           # a known carrier in the baseline
+    _g = list(_base)
+    _g[10] = _g[11] = -60                 # NEW emitter where baseline was quiet
+    _g[50] = _g[51] = -105                # the known carrier VANISHED
+    _an = detect_spectrum_anomalies(_base, _g, _fl)
+    check("rfwatch: new emitter over a quiet baseline detected",
+          any(s <= 10 <= e for s, e, pk in _an["new"]), str(_an["new"]))
+    check("rfwatch: vanished baseline carrier detected",
+          any(s <= 50 <= e for s, e in _an["gone"]), str(_an["gone"]))
+    check("rfwatch: quiet band is not a jammer", _an["jammer"] is False)
+    _jam = detect_spectrum_anomalies(_base, [_fl + 20] * 100, _fl)
+    check("rfwatch: broadband rise flagged as jamming",
+          _jam["jammer"] is True and _jam["up_frac"] >= 0.9, str(_jam["up_frac"]))
+    _sb = SpectrumBaseline()
+    check("rfwatch: arm -> learning, clear -> idle",
+          _sb.arm()["state"] == "learning" and _sb.clear()["state"] == "idle")
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

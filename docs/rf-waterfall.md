@@ -106,6 +106,27 @@ live spectrum client-side from the incoming frames:
   bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
   actually on the band" answer.
 
+## Baseline + anomaly detection (Watchtower)
+
+The RTL record bar has a **☙ Baseline** toggle. Arm it and the running sweep
+learns a "known-normal" per-bin spectrum (~80 frames), then watches for what
+changed and raises alerts:
+
+- **RF_NEW_EMITTER** (high) — energy where the baseline was quiet (a new
+  transmitter / rogue device).
+- **RF_CARRIER_LOST** (medium) — a baseline carrier that vanished.
+- **RF_BROADBAND_JAMMING** (critical) — a large fraction of the span rising at
+  once (a jammer / broadband interference).
+
+Regions must persist a few frames before alerting, with a per-region cooldown, so
+it doesn't chatter. Alerts are written to `rfwatch.jsonl` in
+`$RAGNAR_WATCH_LOG_DIR` (default `/var/log/ragnar`), which **Watchtower**
+auto-discovers as the *RF Spectrum Watch (sub-GHz)* source — so they fold into
+the one unified alert pane and the Pushover path like every other watcher. This
+is spectrum monitoring / interference-hunting the way regulators and SIGINT
+teams do it. Backend: `rtl_sdr.SpectrumBaseline` + pure
+`detect_spectrum_anomalies()`; routes `/api/net/rtl/baseline/{arm,clear,status}`.
+
 ## Persistence + click-to-decode
 
 - **Persist** (toolbar toggle) turns the spectrum trace into a **digital-phosphor
