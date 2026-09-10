@@ -2607,8 +2607,17 @@ anomaly (**CVE-2024-20434** Catalyst-9000 DoS). **IPv6 / IKEv2 attack shapes:**
 (**CVE-2024-20307 / CVE-2024-20308**), **`CG-231`** a **malformed DHCPv6 option**
 (overrun / trailing bytes / implausible relay hop-count — the **CVE-2024-20259**
 shape), and **`CG-281`** a deprecated **IPv6 Routing Header type 0** (RFC 5095
-source-routing) walked from the reconstructed extension-header chain. Plus IOS-XE /
-NX-OS version-in-range postures.
+source-routing) walked from the reconstructed extension-header chain. **VXLAN / NGOAM
+(CVE-2021-1587):** **`CG-110`** a VXLAN fabric on the segment (the precondition — NGOAM
+is off by default) and, the attack shape, **`CG-111`/`CG-290`** a **TRILL-OAM / 802.1ag
+CFM frame tunnelled inside VXLAN** (ordinary CFM is hop-by-hop link OAM and is not
+tunnelled, so inside VXLAN it is the NGOAM delivery path), with **`CG-291`** a malformed
+CFM header. The capture admits a `:4789` datagram **only when its inner ethertype is
+`0x8902`** (`ether[62:2]`/`ether[82:2]` for a v4/v6 underlay), so a whole VXLAN tenant
+stream never lands on a Pi — the same resource-aware discipline as the `ip6[6]` clause.
+The **native** (non-IP) `0x8902` EtherType is L2-only and not reconstructable from
+tcpdump's IP-onward hex, so only the VXLAN-encapsulated path (which is the CVE path) is
+detected in-app. Plus IOS-XE / NX-OS version-in-range postures.
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 
@@ -2621,8 +2630,19 @@ byte-exact **CVE-2023-36844..36847** J-Web attack shapes — **`JNPR-011` PHPRC*
 unauthenticated file upload, and **`JNPR-014`** the two correlated from one source as
 an **RCE chain** — plus **`JNPR-050`/`JNPR-051`** the **CVE-2026-21902** anomaly-API
 RCE and **`JNPR-030`** Junos-Space stored-XSS (**CVE-2025-59978**) injection attempts.
-Passive version extraction is a known dead end for this vendor, so version postures
-are **not** claimed. **Dual-stack** — the same attacks are detected over **IPv4 and
+**VXLAN overlayd (CVE-2021-0254):** **`JNPR-061`** a **structurally anomalous datagram
+on UDP/4789** toward a VTEP — VNI I-flag clear, dirty reserved bytes (honouring the
+VXLAN-GBP/GPE flag profiles), a truncated/absent inner frame, or an oversized datagram
+— the shape that reaches `overlayd` (root, no size validation on a read of up to
+0x10000 bytes). Dual-stack across the IPv4/IPv6 underlay; on a v6 underlay the finding
+carries a *weak cve-linkage* caveat because the vulnerable releases (≤20.3) predate
+IPv6-underlay support. The OAM TLV grammar is unpublished, so the signature is
+structural/experimental. The three sibling VXLAN codes are deliberately **not** ported
+in-app: **`JNPR-060`** (version posture) has no Junos version banner on this capture —
+passive version extraction is a known dead end for this vendor, so version postures are
+**not** claimed; **`JNPR-062`** (VSTP BPDU on an L2PT UNI) is a non-IP LLC/SNAP frame
+not reconstructable from IP-onward hex (and is lab-deferred even in the standalone); and
+**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for. **Dual-stack** — the same attacks are detected over **IPv4 and
 IPv6** with the same codes (the logic keys on port + payload, which are identical
 over either family). libpcap's `port` primitive already matches plain v6, so the
 only real gap is a packet **behind an extension header**, where the next-header byte

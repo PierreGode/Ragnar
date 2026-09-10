@@ -17331,13 +17331,25 @@ _GUARD_IP6_EXTHDR_BPF = ('(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 '
 # Per-guard capture filters. Bare `port` clauses match v4 AND v6; DHCPv6 (546/547)
 # is added explicitly (it had no port clause); the ext-header clause admits v6
 # hidden behind an extension header.
+# VXLAN clause: admit a :4789 datagram ONLY when its INNER ethertype is 0x8902
+# (TRILL-OAM / NGOAM, CVE-2021-1587) — offset 62 for a v4 underlay, 82 for v6
+# (Eth14 + IP20/40 + UDP8 + VXLAN8 + inner dst6+src6 = 62/82). This keeps a whole
+# VXLAN tenant stream off a Pi while still catching the NGOAM attack shape.
+_CISCO_VXLAN_TRILL_BPF = ('(udp port 4789 and '
+                          '(ether[62:2] = 0x8902 or ether[82:2] = 0x8902))')
 _CISCO_GUARD_BPF = (
     'udp port 161 or udp port 162 or udp port 546 or udp port 547 or '
     'udp port 500 or udp port 4500 or tcp port 23 or tcp port 80 or '
-    'tcp port 8080 or tcp port 8443 or ' + _GUARD_IP6_EXTHDR_BPF)
+    'tcp port 8080 or tcp port 8443 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
+    + _GUARD_IP6_EXTHDR_BPF)
+# `udp port 4789` admits VXLAN (v4 and v6 underlay) so JNPR-061 can inspect the
+# VXLAN/overlayd header for the CVE-2021-0254 structural anomaly. Unlike the Cisco
+# guard (which pre-filters on inner ethertype), JNPR-061's signature is in the
+# VXLAN header itself, so the datagram must be seen — bounded here by the on-demand
+# capture's `-c 20000` + duration cap. Mirror a VLAN, not a busy fabric trunk.
 _JUNIPER_GUARD_BPF = (
     'tcp port 80 or tcp port 8080 or tcp port 8160 or tcp port 443 or '
-    'tcp port 8443 or ' + _GUARD_IP6_EXTHDR_BPF)
+    'tcp port 8443 or udp port 4789 or ' + _GUARD_IP6_EXTHDR_BPF)
 
 
 # IPv6 extension headers the chain walkers step over to reach the transport —
@@ -17869,6 +17881,96 @@ def _ipv6_rh0(ip_raw):
     return False
 
 
+# --- VXLAN / NGOAM-TRILL-OAM (Cisco CVE-2021-1587; Juniper overlayd CVE-2021-0254) ---
+# VXLAN header (RFC 7348): flags(1) reserved(3) VNI(3) reserved(1); the I flag
+# (0x08) marks the VNI valid, and the payload is a COMPLETE inner Ethernet frame —
+# where an encapsulated TRILL-OAM (NGOAM) trigger rides. Ported from the standalone
+# ciscoguard v4 / juniperwatch-vxlan v2. The native (non-IP) 0x8902 EtherType path
+# is L2-only and NOT reconstructable from tcpdump's IP-onward hex, so only the
+# VXLAN-encapsulated path is detected in-app (that is also the NGOAM CVE path).
+_VXLAN_PORTS = (4789, 8472)                # 8472 = pre-IANA / Linux VXLAN
+_VXLAN_HDR_LEN = 8
+_MIN_INNER_ETH = 14
+_TRILL_OAM_ETHERTYPE = 0x8902              # 802.1ag CFM / Y.1731 / NX-OS NGOAM
+_VXLAN_FLAG_I = 0x08
+_VXLAN_FLAG_GBP = 0x80
+_VXLAN_FLAG_GPE = 0x04
+_VXLAN_MAX_DATAGRAM = 9000                 # structural bound (admits jumbo frames)
+# OpCodes defined by 802.1ag / Y.1731; anything outside this set carried on a
+# VXLAN segment is the NGOAM-shaped input (CVE-2021-1587).
+_CFM_OPCODES = frozenset({1, 2, 3, 4, 5, 33, 35, 37, 39, 40, 41, 42,
+                          43, 45, 46, 47, 49, 51, 53, 54})
+
+
+def _vxlan_inner_ethertype(inner):
+    """Return (ethertype, bytes_after_ethertype) for an inner Ethernet frame,
+    walking any 802.1Q/802.1ad VLAN tags, or (None, b'') when too short."""
+    if len(inner) < _MIN_INNER_ETH:
+        return (None, b'')
+    off = 12
+    et = int.from_bytes(inner[off:off + 2], 'big')
+    hops = 0
+    while et in (0x8100, 0x88a8) and hops < 3 and off + 6 <= len(inner):
+        off += 4
+        et = int.from_bytes(inner[off:off + 2], 'big')
+        hops += 1
+    return (et, inner[off + 2:])
+
+
+def _parse_cfm_anomalies(body):
+    """802.1ag/Y.1731 CFM (TRILL-OAM) header sanity → list of anomaly strings
+    (empty = well-formed). Header: byte0 = md_level(3b)|version(5b),
+    byte1 = opcode, byte2 = flags, byte3 = first-TLV-offset."""
+    if len(body) < 4:
+        return ['TRILL-OAM ethertype on a frame too short to carry a CFM header']
+    ver = body[0] & 0x1F
+    op = body[1]
+    tlv_off = body[3]
+    anom = []
+    if ver != 0:
+        anom.append('CFM version %d is not 0 (802.1ag/Y.1731 define only 0)' % ver)
+    if op not in _CFM_OPCODES:
+        anom.append('CFM OpCode %d is not a defined 802.1ag/Y.1731 opcode' % op)
+    if 4 + tlv_off > len(body):
+        anom.append('CFM first-TLV-offset %d points past the %d-byte frame'
+                    % (tlv_off, len(body)))
+    return anom
+
+
+def _vxlan_structural_anomalies(payload):
+    """Structural sanity of a UDP/4789 datagram's VXLAN header (Juniper overlayd
+    CVE-2021-0254). STAR Labs documented missing size validation, not the Overlay-
+    OAM TLV grammar, so these are structural/experimental. Returns a list of tags;
+    empty = well-formed. Reserved-byte checks honour VXLAN-GBP (flag 0x80) and
+    VXLAN-GPE (flag 0x04), which repurpose the reserved bytes (else every GBP
+    group-policy packet on a fabric would false-positive)."""
+    out = []
+    n = len(payload)
+    if n < _VXLAN_HDR_LEN:
+        return ['truncated_header']
+    flags = payload[0]
+    rsvd24 = int.from_bytes(payload[1:4], 'big')
+    rsvd8 = payload[7]
+    if flags & _VXLAN_FLAG_GBP:
+        reserved_dirty = (rsvd8 != 0)
+    elif flags & _VXLAN_FLAG_GPE:
+        reserved_dirty = ((rsvd24 & 0xFFFF00) != 0 or rsvd8 != 0)
+    else:
+        reserved_dirty = (rsvd24 != 0 or rsvd8 != 0)
+    if not (flags & _VXLAN_FLAG_I):
+        out.append('vni_flag_clear')
+    if reserved_dirty:
+        out.append('reserved_nonzero')
+    inner = n - _VXLAN_HDR_LEN
+    if 0 < inner < _MIN_INNER_ETH:
+        out.append('inner_truncated')
+    if inner == 0:
+        out.append('inner_absent')
+    if n > _VXLAN_MAX_DATAGRAM:
+        out.append('oversized_datagram')
+    return out
+
+
 def _cisco_analyze(records):
     """Pure classifier over parsed guard packets → Cisco findings + verdict.
     Separated from capture so the self-test can drive it with synthetic packets."""
@@ -17965,6 +18067,38 @@ def _cisco_analyze(records):
             if why:
                 add('CG-231', 'DHCPV6_MALFORMED_OPTION', 'MEDIUM', 'ATTACK', src,
                     ['CVE-2024-20259'], {'reason': why})
+
+        # --- VXLAN fabric + encapsulated NGOAM/TRILL-OAM (CVE-2021-1587) ---
+        # The capture BPF only admits :4789 datagrams whose INNER ethertype is
+        # 0x8902 (see _CISCO_GUARD_BPF), so this never pulls a whole VXLAN tenant
+        # stream onto a Pi — it fires on the NGOAM attack shape specifically.
+        if r['proto'] == 'UDP' and (r['dport'] in _VXLAN_PORTS
+                                    or r['sport'] in _VXLAN_PORTS):
+            pl = r['payload']
+            if len(pl) >= _VXLAN_HDR_LEN:
+                vni = int.from_bytes(pl[4:7], 'big')
+                add('CG-110', 'VXLAN_FABRIC_ON_SEGMENT', 'LOW', 'EXPOSURE',
+                    dst or src, ['CVE-2021-1587'],
+                    {'dst': dst, 'vni': vni,
+                     'note': 'VXLAN on this segment is the precondition for the '
+                             'NGOAM CVE-2021-1587; NGOAM is off by default'})
+                et, cfm = _vxlan_inner_ethertype(pl[_VXLAN_HDR_LEN:])
+                if et == _TRILL_OAM_ETHERTYPE:
+                    add('CG-111', 'TRILL_OAM_ETHERTYPE_PRESENT', 'MEDIUM', 'EXPOSURE',
+                        src or dst, ['CVE-2021-1587'],
+                        {'vni': vni, 'encap': 'vxlan', 'ethertype': '0x8902'})
+                    # Ordinary 802.1ag CFM is hop-by-hop link OAM and is not
+                    # tunnelled; inside VXLAN it is the NGOAM delivery path.
+                    add('CG-290', 'NGOAM_TRILL_OAM_IN_VXLAN', 'HIGH', 'ATTACK',
+                        src or dst, ['CVE-2021-1587'],
+                        {'vni': vni, 'note': 'TRILL-OAM ethertype tunnelled inside '
+                                             'VXLAN — the NGOAM path for CVE-2021-1587'})
+                    anom = _parse_cfm_anomalies(cfm)
+                    if anom:
+                        add('CG-291', 'TRILL_OAM_MALFORMED', 'HIGH', 'ATTACK',
+                            src or dst, ['CVE-2021-1587'],
+                            {'vni': vni, 'reason': '; '.join(anom),
+                             'confidence': 'experimental'})
 
         # --- IPv6 Routing Header type 0 — deprecated source-routing (RFC 5095) ---
         if r.get('ipver') == 6 and r.get('ip_raw') and _ipv6_rh0(r['ip_raw']):
@@ -18134,6 +18268,31 @@ def _juniper_analyze(records):
             if re.search(rb'command|register|exec|/api/', pl, re.I):
                 add('JNPR-051', 'ANOMALY_API_DANGEROUS_COMMAND_REGISTERED', 'HIGH',
                     'ATTACK', src, ['CVE-2026-21902'], {'dst': dst})
+
+        # --- VXLAN overlayd Overlay-OAM structural anomaly (CVE-2021-0254) ---
+        # overlayd runs as root by default on MX/ACX/QFX and reads up to 0x10000
+        # bytes off UDP/4789 without size validation. The on-wire OAM TLV grammar
+        # is unpublished, so this is a STRUCTURAL/experimental VXLAN-header check
+        # (VNI I-flag clear, dirty reserved bytes, truncated/absent inner frame,
+        # oversized datagram), dual-stack via the v4/v6 underlay. (JNPR-060 needs a
+        # Junos version banner this capture never sees; JNPR-062 is an LLC/SNAP
+        # BPDU not reconstructable from IP-onward hex — both deliberately skipped.)
+        if r['proto'] == 'UDP' and (r['dport'] == 4789 or r['sport'] == 4789):
+            anomalies = _vxlan_structural_anomalies(pl)
+            if anomalies:
+                detail = {'dst': dst, 'family': 'ipv6' if r.get('ipver') == 6 else 'ipv4',
+                          'datagram_len': len(pl), 'anomalies': anomalies,
+                          'signature_confidence': 'experimental',
+                          'basis': 'structural; overlayd OAM TLV grammar unpublished'}
+                if r.get('ipver') == 6:
+                    # CVE-2021-0254 is fixed by 20.3R1-S1; IPv6 underlay support
+                    # starts at 21.2R2-S1/21.4R1 — the windows don't overlap, so on
+                    # a supported v6 underlay this anomaly cannot be that CVE. A
+                    # triage caveat, NOT a suppression.
+                    detail['cve_linkage'] = ('weak: vulnerable releases (<=20.3) '
+                                             'predate IPv6 underlay support')
+                add('JNPR-061', 'OVERLAY_OAM_LENGTH_ANOMALY', 'CRITICAL', 'ATTACK',
+                    src or dst, ['CVE-2021-0254'], detail)
 
     # Correlated RCE chains within the capture window.
     for s in upload_srcs & envinj_srcs:
@@ -18924,6 +19083,39 @@ def _cisco_selftest():
           [_guard_rec(proto='IP6', ipver=6, ip_raw=rh0, src='2001:db8::9')],
           'attack', ['CG-281'])
 
+    # VXLAN carrying an inner TRILL-OAM/CFM frame (NGOAM CVE-2021-1587). VXLAN
+    # header (I flag set, VNI 5000) + inner Ethernet (ethertype 0x8902) + a
+    # well-formed CFM header (ver 0, opcode 1/CCM) -> CG-110/111/290, no CG-291.
+    _vxh = b'\x08\x00\x00\x00' + (5000).to_bytes(3, 'big') + b'\x00'
+    _inner_eth = b'\x00\x11\x22\x33\x44\x55' + b'\x66\x77\x88\x99\xaa\xbb' + b'\x89\x02'
+    _cfm_ok = b'\x00\x01\x00\x00'                    # level0 ver0, opcode 1 (CCM)
+    check('cisco-vxlan-ngoam',
+          [_guard_rec(proto='UDP', dport=4789, payload=_vxh + _inner_eth + _cfm_ok)],
+          'attack', ['CG-110', 'CG-111', 'CG-290'])
+    # A malformed CFM (bad version 5, undefined opcode 99) additionally raises CG-291.
+    _cfm_bad = b'\x05\x63\x00\x00'
+    check('cisco-vxlan-trill-malformed',
+          [_guard_rec(proto='UDP', dport=4789, payload=_vxh + _inner_eth + _cfm_bad)],
+          'attack', ['CG-110', 'CG-111', 'CG-290', 'CG-291'])
+    # Plain VXLAN with a non-TRILL inner ethertype (0x0800 IPv4) is only the
+    # fabric-present exposure (CG-110); it must NOT raise the NGOAM attack codes.
+    _inner_ip = b'\x00\x11\x22\x33\x44\x55' + b'\x66\x77\x88\x99\xaa\xbb' + b'\x08\x00'
+    r_vx = _cisco_analyze([_guard_rec(proto='UDP', dport=4789,
+                                      payload=_vxh + _inner_ip + b'\x45\x00\x00\x14')])
+    _vx_codes = {f['code'] for f in r_vx['findings']}
+    scenarios.append({'name': 'cisco-vxlan-plain-no-ngoam',
+                      'expect': 'CG-110 only, no CG-290/291',
+                      'got': str(sorted(_vx_codes)),
+                      'pass': ('CG-110' in _vx_codes and 'CG-290' not in _vx_codes
+                               and 'CG-291' not in _vx_codes)})
+    # BPF conformance: the VXLAN clause is inner-ethertype-qualified (0x8902), not
+    # a blanket `udp port 4789` that would pull a whole tenant stream onto a Pi.
+    scenarios.append({'name': 'cisco-bpf-vxlan-qualified',
+                      'expect': 'udp 4789 gated on inner ether 0x8902',
+                      'got': _CISCO_VXLAN_TRILL_BPF,
+                      'pass': ('udp port 4789 and' in _CISCO_VXLAN_TRILL_BPF
+                               and '0x8902' in _CISCO_VXLAN_TRILL_BPF)})
+
     # --- Scapy end-to-end: craft SNMP default-community -> pcap -> tcpdump -X. ---
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
@@ -19027,6 +19219,30 @@ def _juniper_selftest():
           dst='2001:db8::1', dport=80, ipver=6,
           payload=b'POST /?PHPRC=/tmp/x HTTP/1.1\r\nHost: jweb\r\n\r\nPHPRC=/tmp/php.ini')],
           'attack', ['JNPR-011'])
+
+    # VXLAN overlayd structural anomaly on UDP/4789 (CVE-2021-0254 / JNPR-061).
+    # A VXLAN datagram with the I flag CLEAR (VNI invalid yet still delivered to
+    # overlayd) is the malformed-header shape -> JNPR-061.
+    _vx_bad = b'\x00\x00\x00\x00' + (5000).to_bytes(3, 'big') + b'\x00' + b'\x00' * 18
+    check('juniper-vxlan-anomaly',
+          [_guard_rec(proto='UDP', dport=4789, payload=_vx_bad)], 'attack', ['JNPR-061'])
+    # Dual-stack: the same anomaly over an IPv6 underlay still fires, and the
+    # finding carries the weak-cve-linkage triage caveat.
+    r_v6vx = _juniper_analyze([_guard_rec(proto='UDP', dport=4789, ipver=6,
+             src='2001:db8::7', dst='2001:db8::1', payload=_vx_bad)])
+    _v6vx = [f for f in r_v6vx['findings'] if f['code'] == 'JNPR-061']
+    scenarios.append({'name': 'juniper-vxlan-anomaly-v6',
+                      'expect': 'JNPR-061 + ipv6 + cve_linkage',
+                      'got': str(_v6vx[0]['detail'] if _v6vx else None),
+                      'pass': bool(_v6vx) and _v6vx[0]['detail'].get('family') == 'ipv6'
+                              and 'cve_linkage' in _v6vx[0]['detail']})
+    # A well-formed VXLAN datagram (I flag set, clean reserved, full inner frame)
+    # must NOT fire JNPR-061.
+    _vx_ok = b'\x08\x00\x00\x00' + (5000).to_bytes(3, 'big') + b'\x00' + b'\x00' * 18
+    r_vxok = _juniper_analyze([_guard_rec(proto='UDP', dport=4789, payload=_vx_ok)])
+    scenarios.append({'name': 'juniper-vxlan-wellformed', 'expect': 'no JNPR-061',
+                      'got': str(sorted({f['code'] for f in r_vxok['findings']})),
+                      'pass': 'JNPR-061' not in {f['code'] for f in r_vxok['findings']}})
 
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
     try:
