@@ -8,7 +8,8 @@ free-frequency manual tune.
 - Page: `demos/rf_waterfall.html`
 - Route: `GET /rf-waterfall` (alias `GET /demo/rf-waterfall`), login required
 - Backends: `sdr_spectrum.py` (HackRF, `hackrf_sweep`) and `rtl_sdr.py`
-  (RTL-SDR, `rtl_power`), exposed at `/api/net/sdr/*` and `/api/net/rtl/*`.
+  (RTL-SDR, real-time `rtl_sdr` IQ FFT with an `rtl_power` fallback), exposed at
+  `/api/net/sdr/*` and `/api/net/rtl/*`.
 
 ## Live vs synthetic — per panel, automatic
 
@@ -56,6 +57,32 @@ Each panel has a row of **band-scope presets** and a **Manual tune** box:
   overlay spans are narrow (e.g. Meshtastic-EU868 is 0.45 MHz), so the HackRF
   custom-span gate accepts ≥0.1 MHz and `_widen_span()` grows it to the ~2 MHz
   resolution floor (see Manual tune above) before the sweep.
+
+## Sub-GHz engine: real-time IQ FFT vs `rtl_power` sweep
+
+The RTL-SDR panel picks its capture engine automatically per span — the page and
+the frames look identical either way; only the speed differs. The active engine
+is named under the panel title (`RTL-SDR · IQ FFT · real-time` vs
+`RTL-SDR · rtl_power sweep`), and **Rows/s** shows the *measured* frame rate, not
+the scroll-speed setting.
+
+- **IQ FFT (real-time)** — for any span that fits a **single RTL-SDR tune**
+  (≤ `rtl_sdr._IQ_MAX_SPAN_HZ`, ~2.8 MHz: zooms, manual tunes, Z-Wave regions,
+  most mesh/LoRa overlays), Ragnar streams raw IQ from `rtl_sdr` and FFTs it
+  continuously with numpy — the way SDR++/GQRX draw a waterfall. No retuning, so
+  rows scroll smoothly at `_IQ_DISPLAY_HZ` (~16/s) with sub-100 ms latency. The
+  colour floor self-calibrates to the measured noise level (`floor_dbm` tracks a
+  smoothed low-percentile), since the IQ power scale is relative dBFS, not
+  absolute dBm.
+- **`rtl_power` sweep** — the fallback for **wide bands** that can't fit one tune
+  (the full `868`/`915`/`subghz` scans need the dongle to retune across the
+  range) and for any host missing `rtl_sdr` or numpy. `rtl_power` integrates
+  `-i 1 s` per sweep, so it advances at best ~1 row/s — fine for a broad "what's
+  out there" scan, slow for a narrow zoom (which is exactly why the IQ engine
+  exists).
+
+Both engines emit the same frame shape, feed the same ring buffer, recorder and
+`/api/net/rtl/power/frames`, so nothing else on the page changes.
 
 ## The button and the toggle (WiFi Spectrum Analyzer)
 
