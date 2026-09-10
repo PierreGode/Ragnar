@@ -106,6 +106,22 @@ live spectrum client-side from the incoming frames:
   bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
   actually on the band" answer.
 
+## Persistence + click-to-decode
+
+- **Persist** (toolbar toggle) turns the spectrum trace into a **digital-phosphor
+  persistence display**: each sweep is accumulated into a fading offscreen buffer
+  (additive, ~9%/frame decay), so continuously-occupied frequencies glow bright
+  and rare bursts leave a decaying trail. It's the RTSA-style view that surfaces
+  intermittent signals and modulation shape a scrolling waterfall hides. Per
+  panel, resets on a band/zoom change.
+- **Click-to-decode** — clicking a signal also **classifies** it from the measured
+  bandwidth + frequency (narrowband OOK/FSK ISM remote/TPMS/sensor · wideband
+  LoRa/mesh chirp, energy-only · POCSAG/FLEX pager · ACARS · VHF airband/VOR · FM
+  broadcast) and offers a one-click hand-off to the decoder that can name it: a
+  **▶ Decode (band)** button switches the RTL panel to rtl_433 on the nearest ISM
+  band, and the pager / ACARS / VOR classes link to their decode pages. LoRa is
+  labelled energy-only (chirp spread-spectrum can't be demodulated here).
+
 ## Raw-IQ capture (SigMF)
 
 The RTL panel's record bar has an **⤓ SigMF** button that captures raw baseband
