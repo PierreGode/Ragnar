@@ -22103,6 +22103,15 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_baseline_status():
         return jsonify(rtl_sdr.baseline_status())
 
+    # Reference-carrier frequency (PPM) calibration: measure a known carrier's
+    # observed vs true frequency on the running sweep and apply the correction.
+    @app.route('/api/net/rtl/calibrate', methods=['POST'])
+    def net_rtl_calibrate():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/calibrate true=%s near=%s" % (data.get('true_mhz'), data.get('near_mhz')))
+        return jsonify(rtl_sdr.calibrate_from_reference(
+            data.get('true_mhz'), near_mhz=data.get('near_mhz')))
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.

@@ -1986,6 +1986,95 @@ def baseline_status():
     return _baseline.status()
 
 
+# --------------------------------------------------------------------------
+# Frequency calibration — trim the dongle's crystal offset (PPM) so the readouts
+# are trustworthy. A cheap RTL-SDR crystal is typically tens of ppm off, which at
+# 900 MHz is tens of kHz — enough to mis-name a narrow channel. The standard fix
+# (what kalibrate-rtl does) is a *reference-carrier* calibration: point at a
+# signal whose true frequency you know, measure where it actually lands, and
+# solve for the ppm error. (A true GPSDO disciplines the oscillator off a 1PPS
+# input, which this NESDR-class dongle doesn't have — so GPS here is position/
+# time truth, not a crystal reference; this reference-carrier method is the
+# right tool for an RTL-SDR.)
+# --------------------------------------------------------------------------
+
+def ppm_from_reference(current_ppm, f_obs_hz, f_true_hz):
+    """New PPM correction from an observed vs known-true carrier frequency (pure).
+
+    The observed frequency already includes ``current_ppm`` of correction, so the
+    *residual* fractional error (f_obs-f_true)/f_true is added to it. Result is
+    clamped to the +-1000 ppm that :func:`set_tuning` accepts.
+    """
+    try:
+        f_true_hz = float(f_true_hz); f_obs_hz = float(f_obs_hz)
+        cur = float(current_ppm or 0)
+    except (TypeError, ValueError):
+        return current_ppm
+    if f_true_hz <= 0:
+        return current_ppm
+    residual = (f_obs_hz - f_true_hz) / f_true_hz * 1e6
+    return int(round(max(-1000, min(1000, cur + residual))))
+
+
+def _peak_freq_hz(frame, lo_hz, hi_hz, near_hz=None, window_hz=None):
+    """Frequency (Hz) of the strongest bin in ``frame`` (pure).
+
+    With ``near_hz``+``window_hz`` the search is limited to that window, so a
+    calibration can lock onto the marked reference rather than the band's loudest
+    signal. Returns None if the frame is empty or the window has no bins.
+    """
+    n = len(frame)
+    if not n or hi_hz <= lo_hz:
+        return None
+    binw = (hi_hz - lo_hz) / n
+    s, e = 0, n - 1
+    if near_hz is not None and window_hz:
+        s = max(0, int((near_hz - window_hz / 2.0 - lo_hz) / binw))
+        e = min(n - 1, int((near_hz + window_hz / 2.0 - lo_hz) / binw))
+        if e < s:
+            return None
+    best, bi = -1e9, s
+    for i in range(s, e + 1):
+        if frame[i] > best:
+            best, bi = frame[i], i
+    return lo_hz + (bi + 0.5) * binw
+
+
+def calibrate_from_reference(true_mhz, near_mhz=None):
+    """Measure the live peak near a known reference and apply the PPM correction.
+
+    ``true_mhz`` is the reference carrier's real frequency; ``near_mhz`` (usually
+    the marker) limits the peak search so it locks onto that signal. Returns the
+    before/after ppm, the measured offset, and the applied result.
+    """
+    try:
+        true_hz = float(true_mhz) * 1e6
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "true_mhz must be numeric"}
+    fr = _power.get_frames(since=0)
+    frames = fr.get("frames") or []
+    band = fr.get("band_hz")
+    if not frames or not band:
+        return {"ok": False, "error": "no live sweep — start the sweep on the reference first"}
+    lo, hi = band
+    if not (lo <= true_hz <= hi):
+        return {"ok": False, "error": "reference %.3f MHz is outside the current sweep %.3f-%.3f MHz"
+                % (true_hz / 1e6, lo / 1e6, hi / 1e6)}
+    grid = frames[-1]["power"]
+    near_hz = (float(near_mhz) * 1e6) if near_mhz is not None else true_hz
+    window = max(50_000.0, (hi - lo) * 0.05)          # +-2.5% of span, >=50 kHz
+    f_obs = _peak_freq_hz(grid, lo, hi, near_hz=near_hz, window_hz=window)
+    if f_obs is None:
+        return {"ok": False, "error": "could not find a peak near the reference"}
+    old_ppm = _ppm
+    new_ppm = ppm_from_reference(old_ppm, f_obs, true_hz)
+    set_tuning(ppm=new_ppm)                            # applies + restarts the sweep
+    return {"ok": True, "old_ppm": old_ppm, "new_ppm": new_ppm,
+            "observed_mhz": round(f_obs / 1e6, 4), "true_mhz": round(true_hz / 1e6, 4),
+            "offset_khz": round((f_obs - true_hz) / 1e3, 2),
+            "delta_ppm": new_ppm - old_ppm}
+
+
 def status():
     ism, pwr, iq = _ism.status(), _power.status(), _iqcap.status()
     st = {"ism": ism, "power": pwr, "iq": iq, "bands": sorted(RTL_BANDS.keys()),
@@ -2350,6 +2439,26 @@ def selftest():
     _sb = SpectrumBaseline()
     check("rfwatch: arm -> learning, clear -> idle",
           _sb.arm()["state"] == "learning" and _sb.clear()["state"] == "idle")
+
+    # --- frequency calibration (pure) ---
+    # A carrier truly at 433.900 MHz observed at 433.910 (+10 kHz) => +23 ppm to add.
+    _np2 = ppm_from_reference(0, 433_910_000, 433_900_000)
+    check("cal: +10 kHz high at 433.9 MHz -> ~+23 ppm",
+          22 <= _np2 <= 24, str(_np2))
+    check("cal: correction adds to the current ppm",
+          ppm_from_reference(10, 433_910_000, 433_900_000) == _np2 + 10)
+    check("cal: result clamped to +-1000 ppm",
+          ppm_from_reference(0, 470_000_000, 433_900_000) == 1000)
+    check("cal: bad/zero true freq is a no-op",
+          ppm_from_reference(7, 433_900_000, 0) == 7)
+    # peak-in-window: a tone in bin 300 of a 480-bin 433.05-434.79 grid
+    _pk = [-110] * 480; _pk[300] = -20
+    _pf = _peak_freq_hz(_pk, 433_050_000, 434_790_000,
+                        near_hz=433_050_000 + 300.5 / 480 * 1_740_000, window_hz=100_000)
+    check("cal: peak-in-window finds the tone bin",
+          _pf is not None and abs(_pf - (433_050_000 + 300.5 / 480 * 1_740_000)) < 4000, str(_pf))
+    check("cal: window excluding the tone -> different (nearest-in-window) bin",
+          _peak_freq_hz(_pk, 433_050_000, 434_790_000, near_hz=433_100_000, window_hz=50_000) is not None)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,

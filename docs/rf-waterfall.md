@@ -84,6 +84,26 @@ the scroll-speed setting.
 Both engines emit the same frame shape, feed the same ring buffer, recorder and
 `/api/net/rtl/power/frames`, so nothing else on the page changes.
 
+## Frequency calibration (PPM)
+
+A cheap RTL-SDR crystal is typically tens of ppm off — tens of kHz at 900 MHz,
+enough to mis-name a narrow channel. The tuner bar has a **Calibrate** control
+that does the standard *reference-carrier* calibration (what kalibrate-rtl does):
+
+1. Point the sweep at a signal whose true frequency you know (a broadcast pilot,
+   a signal generator, any known carrier), click it to drop the marker.
+2. Type its true frequency in the **Cal @ ___ MHz** box and hit **Calibrate**.
+
+Ragnar measures where that carrier actually lands, solves for the ppm error
+(`ppm_from_reference()`, added to the current ppm and clamped to ±1000), applies
+it via the existing tuning path and re-tunes the sweep. The status shows the
+measured offset and the ppm before→after. Route `/api/net/rtl/calibrate`
+`{true_mhz, near_mhz?}`.
+
+A true GPSDO disciplines the oscillator off a 1PPS input, which an NESDR-class
+dongle doesn't have — so GPS on Ragnar is position/time truth, not a crystal
+reference. Reference-carrier calibration is the correct method for an RTL-SDR.
+
 ## Measurement layer
 
 The waterfall is also an instrument, not just a display. Every panel measures the

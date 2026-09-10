@@ -521,9 +521,15 @@
       +'<input class="tin ppm" type="number" step="1" min="-1000" max="1000" value="0" title="Frequency correction (ppm) — trims the dongle crystal offset">'
       +'<span class="tlbl">Gain</span>'
       +'<input class="tin gain" type="text" value="auto" title="Tuner gain in dB, or auto" size="4">'
-      +'<button class="mini tapply">Apply</button>';
+      +'<button class="mini tapply">Apply</button>'
+      +'<span class="tlbl">Cal&nbsp;@</span>'
+      +'<input class="tin calf" type="number" step="any" placeholder="MHz" title="True frequency of a known reference carrier (MHz) — click it on the waterfall first, then Calibrate">'
+      +'<button class="mini tcal" title="Auto-trim PPM: measure the marked reference vs its true frequency and correct the crystal offset">Calibrate</button>'
+      +'<span class="calstat rsp"></span>';
     this.ppmIn=g.querySelector('.ppm'); this.gainIn=g.querySelector('.gain');
+    this.calIn=g.querySelector('.calf'); this.calStat=g.querySelector('.calstat');
     g.querySelector('.tapply').addEventListener('click',function(){ self.applyTuner(); });
+    g.querySelector('.tcal').addEventListener('click',function(){ self.calibrate(); });
     // load current
     fetch('/api/net/rtl/tuning').then(function(r){return r.json();}).then(function(t){
       if(!t) return; self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain;
@@ -537,6 +543,23 @@
         if(t){ self.ppmIn.value=t.ppm; self.gainIn.value=t.gain_is_auto?'auto':t.gain; }
         if(b){b.textContent='Apply';}
       }).catch(function(){ if(b){b.textContent='Apply';} });
+  };
+  // Reference-carrier PPM calibration: prefill the true freq from the marker, then
+  // measure where that carrier actually lands and apply the crystal correction.
+  Scope.prototype.calibrate=function(){
+    var self=this;
+    var trueMHz=parseFloat(this.calIn.value);
+    if(!isFinite(trueMHz)){ if(this.marker!=null){ trueMHz=Math.round(this.marker*1000)/1000; this.calIn.value=trueMHz; }
+      else { this.calStat.innerHTML='<span style="color:#fb7185">click the reference, then enter its true MHz</span>'; return; } }
+    this.calStat.textContent='measuring…';
+    fetch('/api/net/rtl/calibrate',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({true_mhz:trueMHz, near_mhz:(this.marker!=null?this.marker:trueMHz)})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ self.calStat.innerHTML='<span style="color:#fb7185">'+esc((res&&res.error)||'failed')+'</span>'; return; }
+        if(self.ppmIn) self.ppmIn.value=res.new_ppm;
+        self.calStat.innerHTML='<span style="color:var(--live)">&#10003; '+res.offset_khz+' kHz off → ppm '
+          +res.old_ppm+'→<b>'+res.new_ppm+'</b></span>';
+      }).catch(function(){ self.calStat.textContent='calibrate failed'; });
   };
   // ---- session record + replay (RTL only) ----
   Scope.prototype.buildRecorder=function(){
