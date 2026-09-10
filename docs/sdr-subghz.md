@@ -320,12 +320,19 @@ recording is cheap; capped at a few thousand frames. Routes:
 
 The RF Waterfall page has a **📻 Local Radio** bar: type a frequency, pick a mode
 (**FM** broadcast, **NFM** narrowband, **AM**), and press **Listen**. `radio.py`
-runs `rtl_fm` to demodulate and streams the audio to the browser as a live WAV
+runs `rtl_fm` to demodulate and streams the audio to the browser
 (`/api/net/radio/stream?freq_hz=…&mode=…`) that an `<audio>` element plays, with a
 volume slider and band presets (FM broadcast, airband AM, marine/PMR NFM, MW).
 Frequencies below 24 MHz use the dongle's direct-sampling mode (MW/SW AM,
 best-effort). One dongle, so listening pauses the sub-GHz sweep. `rtl_fm` ships
 in the already-installed `rtl-sdr` package. Receive-only.
+
+**Format — phone-friendly:** when `ffmpeg` is present the PCM is transcoded to a
+live **MP3** stream (`audio/mpeg`), which plays in every browser including **iOS
+Safari** / mobile — an open-ended streaming WAV does not play on iOS (its media
+loader needs a range-able/finite resource), so WAV is only the desktop fallback
+when `ffmpeg` is missing. `radio.detect()` reports the active `format` and
+`mimetype`. `ffmpeg` is a standard package (add with `apt install ffmpeg`).
 
 ## Pager Decode (POCSAG / FLEX)
 
