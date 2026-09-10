@@ -93,6 +93,10 @@ DEFAULT_SOURCES = {
     'wpswatch':  {'label': 'WPS Watch',
                   'paths': ['/var/log/ragnar/wpswatch.jsonl',
                             '/var/log/wpswatch/alerts.jsonl']},
+    # Sub-GHz RF spectrum baseline/anomaly watch (rtl_sdr.py SpectrumBaseline):
+    # new/vanished carriers + broadband jamming vs a learned baseline.
+    'rfwatch':   {'label': 'RF Spectrum Watch (sub-GHz)',
+                  'paths': ['/var/log/ragnar/rfwatch.jsonl']},
     # In-app vendor CVE guards (network_diagnostics do_*_guard) emit JSON-lines
     # findings here so Watchtower folds them into the one pane and Pushover path.
     'cisco_guard':   {'label': 'Cisco Guard (IOS/IOS-XE/NX-OS)',

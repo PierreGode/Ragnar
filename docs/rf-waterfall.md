@@ -84,6 +84,106 @@ the scroll-speed setting.
 Both engines emit the same frame shape, feed the same ring buffer, recorder and
 `/api/net/rtl/power/frames`, so nothing else on the page changes.
 
+## Frequency calibration (PPM)
+
+A cheap RTL-SDR crystal is typically tens of ppm off — tens of kHz at 900 MHz,
+enough to mis-name a narrow channel. The tuner bar has a **Calibrate** control
+that does the standard *reference-carrier* calibration (what kalibrate-rtl does):
+
+1. Point the sweep at a signal whose true frequency you know (a broadcast pilot,
+   a signal generator, any known carrier), click it to drop the marker.
+2. Type its true frequency in the **Cal @ ___ MHz** box and hit **Calibrate**.
+
+Ragnar measures where that carrier actually lands, solves for the ppm error
+(`ppm_from_reference()`, added to the current ppm and clamped to ±1000), applies
+it via the existing tuning path and re-tunes the sweep. The status shows the
+measured offset and the ppm before→after. Route `/api/net/rtl/calibrate`
+`{true_mhz, near_mhz?}`.
+
+A true GPSDO disciplines the oscillator off a 1PPS input, which an NESDR-class
+dongle doesn't have — so GPS on Ragnar is position/time truth, not a crystal
+reference. Reference-carrier calibration is the correct method for an RTL-SDR.
+
+## Measurement layer
+
+The waterfall is also an instrument, not just a display. Every panel measures the
+live spectrum client-side from the incoming frames:
+
+- **Readout tiles** — Peak f, Peak level, **SNR** and **Noise** (a robust
+  low-percentile noise-floor estimate), plus Busy% (fraction of the span above
+  noise) and Span.
+- **Click to measure** — click any signal and the marker snaps to the nearest
+  peak and reports centre frequency, level, **SNR**, **−20 dB bandwidth**, **99%
+  occupied bandwidth** and relative **channel power**. (Values are relative dB —
+  the RTL front end isn't absolute-calibrated — so treat them as consistent, not
+  survey-grade.)
+- **Trace math (Hold)** — the spectrum trace overlays user-toggled **Avg**
+  (digs weak carriers out of the noise), **Max-hold** (catches intermittent
+  bursts, on by default) and **Min-hold** (reveals the true noise floor), with a
+  dashed line marking the measured noise floor.
+- **Signal list (CFAR)** — the panel lists every emitter above `noise + 8 dB`
+  with centre frequency, bandwidth, SNR and a **duty-cycle** estimate (so a
+  bursty remote reads ~5% and a continuous carrier ~100%). This is the "what's
+  actually on the band" answer.
+
+## Baseline + anomaly detection (Watchtower)
+
+The RTL record bar has a **☙ Baseline** toggle. Arm it and the running sweep
+learns a "known-normal" per-bin spectrum (~80 frames), then watches for what
+changed and raises alerts:
+
+- **RF_NEW_EMITTER** (high) — energy where the baseline was quiet (a new
+  transmitter / rogue device).
+- **RF_CARRIER_LOST** (medium) — a baseline carrier that vanished.
+- **RF_BROADBAND_JAMMING** (critical) — a large fraction of the span rising at
+  once (a jammer / broadband interference).
+
+Regions must persist a few frames before alerting, with a per-region cooldown, so
+it doesn't chatter. Alerts are written to `rfwatch.jsonl` in
+`$RAGNAR_WATCH_LOG_DIR` (default `/var/log/ragnar`), which **Watchtower**
+auto-discovers as the *RF Spectrum Watch (sub-GHz)* source — so they fold into
+the one unified alert pane and the Pushover path like every other watcher. This
+is spectrum monitoring / interference-hunting the way regulators and SIGINT
+teams do it. Backend: `rtl_sdr.SpectrumBaseline` + pure
+`detect_spectrum_anomalies()`; routes `/api/net/rtl/baseline/{arm,clear,status}`.
+
+## Persistence + click-to-decode
+
+- **Persist** (toolbar toggle) turns the spectrum trace into a **digital-phosphor
+  persistence display**: each sweep is accumulated into a fading offscreen buffer
+  (additive, ~9%/frame decay), so continuously-occupied frequencies glow bright
+  and rare bursts leave a decaying trail. It's the RTSA-style view that surfaces
+  intermittent signals and modulation shape a scrolling waterfall hides. Per
+  panel, resets on a band/zoom change.
+- **Click-to-decode** — clicking a signal also **classifies** it from the measured
+  bandwidth + frequency (narrowband OOK/FSK ISM remote/TPMS/sensor · wideband
+  LoRa/mesh chirp, energy-only · POCSAG/FLEX pager · ACARS · VHF airband/VOR · FM
+  broadcast) and offers a one-click hand-off to the decoder that can name it: a
+  **▶ Decode (band)** button switches the RTL panel to rtl_433 on the nearest ISM
+  band, and the pager / ACARS / VOR classes link to their decode pages. LoRa is
+  labelled energy-only (chirp spread-spectrum can't be demodulated here).
+
+## Raw-IQ capture (SigMF)
+
+The RTL panel's record bar has an **⤓ SigMF** button that captures raw baseband
+IQ to a [SigMF](https://sigmf.org) recording — a `.sigmf-data` file (the RTL's
+native `cu8` complex-uint8 samples) plus a `.sigmf-meta` JSON sidecar with the
+tune frequency, sample rate, UTC datetime, a sha512 of the data and the band
+label. SigMF is the open interoperability standard, so a capture opens directly
+in **GNU Radio, inspectrum, Universal Radio Hacker**, or any SigMF-aware tool —
+turning Ragnar into a real capture instrument rather than a closed viewer.
+
+- Centres on the marker (if one is dropped) else the span centre, at a
+  single-tune sample rate (≤ 2.4 MS/s); length is the seconds box (capped at
+  `rtl_sdr._IQ_CAP_MAX_SECONDS`, 30 s).
+- One dongle: capturing pauses the live sweep and every other RTL consumer, then
+  the sweep resumes automatically when the capture finishes. `status()` reports
+  the capture as `streaming` so the 15 s status poll never re-probes the device
+  mid-capture (the same contention guard the sweep uses).
+- Files live under `data/iq_captures/` (gitignored); the finished capture offers
+  `.sigmf-data` + `.sigmf-meta` download links. Backend: `rtl_sdr.iq_capture_*`
+  + `sigmf_meta()`; routes `/api/net/rtl/iq/{start,status,stop,list,delete,file}`.
+
 ## Colour palettes
 
 The top toolbar has a **Palette** selector for the waterfall colour map. Five are
@@ -114,4 +214,9 @@ Env `RAGNAR_SDR_DEMO=1` forces the demo on without touching config.
 - The page uses Google Fonts with system fallbacks, so it still renders on an
   offline field unit.
 - Honours `prefers-reduced-motion`: starts paused with a Play control.
+- **Phone-friendly.** Segmented controls (scroll/palette/band/view) wrap instead
+  of clipping, the readout tiles reflow to a 3-across grid, control groups
+  (tuner/hold/mesh) wrap, tap targets grow, and the waterfall canvas gets taller
+  (`min(46vh,340px)`) — all under a `≤640px` media query, so the desktop layout
+  is unchanged. No horizontal scroll at 360px.
 - Receive-only. The sweeps measure on-air energy; nothing is transmitted.

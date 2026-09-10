@@ -22044,6 +22044,74 @@ def register_network_diagnostics(app, logger=None):
         _log("net/rtl/record/delete")
         return jsonify(rtl_sdr.record_delete(data.get('name', '')))
 
+    # Raw-IQ capture to a SigMF recording (opens in GNU Radio / inspectrum / URH).
+    # Uses the whole dongle, so it stops every other RTL consumer first.
+    @app.route('/api/net/rtl/iq/start', methods=['POST'])
+    def net_rtl_iq_start():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/iq/start f=%s sr=%s s=%s" %
+             (data.get('center_hz'), data.get('sr_hz'), data.get('seconds')))
+        try: pager.stop(); acars.stop(); vdl2.stop(); radio.stop(); vor.stop(); aprs.stop(); adsb.stop()
+        except Exception: pass
+        return jsonify(rtl_sdr.iq_capture_start(
+            data.get('center_hz'), data.get('sr_hz'),
+            seconds=data.get('seconds', 2.0), name=data.get('name'), label=data.get('label')))
+
+    @app.route('/api/net/rtl/iq/status', methods=['GET'])
+    def net_rtl_iq_status():
+        return jsonify(rtl_sdr.iq_capture_status())
+
+    @app.route('/api/net/rtl/iq/stop', methods=['POST'])
+    def net_rtl_iq_stop():
+        _log("net/rtl/iq/stop")
+        return jsonify(rtl_sdr.iq_capture_stop())
+
+    @app.route('/api/net/rtl/iq/list', methods=['GET'])
+    def net_rtl_iq_list():
+        return jsonify(rtl_sdr.iq_capture_list())
+
+    @app.route('/api/net/rtl/iq/delete', methods=['POST'])
+    def net_rtl_iq_delete():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/iq/delete")
+        return jsonify(rtl_sdr.iq_capture_delete(data.get('name', '')))
+
+    @app.route('/api/net/rtl/iq/file', methods=['GET'])
+    def net_rtl_iq_file():
+        from flask import send_file
+        data_p, meta_p = rtl_sdr.iq_capture_path(request.args.get('name', ''))
+        path = meta_p if request.args.get('kind') == 'meta' else data_p
+        if not path:
+            return jsonify({"error": "capture not found"}), 404
+        return send_file(path, as_attachment=True,
+                         download_name=path.rsplit('/', 1)[-1],
+                         mimetype='application/octet-stream')
+
+    # Spectrum baseline + anomaly detection (learn a normal spectrum, then flag
+    # new / vanished carriers + broadband jamming into the Watchtower feed).
+    @app.route('/api/net/rtl/baseline/arm', methods=['POST'])
+    def net_rtl_baseline_arm():
+        _log("net/rtl/baseline/arm")
+        return jsonify(rtl_sdr.baseline_arm())
+
+    @app.route('/api/net/rtl/baseline/clear', methods=['POST'])
+    def net_rtl_baseline_clear():
+        _log("net/rtl/baseline/clear")
+        return jsonify(rtl_sdr.baseline_clear())
+
+    @app.route('/api/net/rtl/baseline/status', methods=['GET'])
+    def net_rtl_baseline_status():
+        return jsonify(rtl_sdr.baseline_status())
+
+    # Reference-carrier frequency (PPM) calibration: measure a known carrier's
+    # observed vs true frequency on the running sweep and apply the correction.
+    @app.route('/api/net/rtl/calibrate', methods=['POST'])
+    def net_rtl_calibrate():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/calibrate true=%s near=%s" % (data.get('true_mhz'), data.get('near_mhz')))
+        return jsonify(rtl_sdr.calibrate_from_reference(
+            data.get('true_mhz'), near_mhz=data.get('near_mhz')))
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.

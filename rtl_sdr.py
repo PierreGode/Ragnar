@@ -1041,7 +1041,10 @@ class PowerSweep:
                 if sig == self._sig:
                     return {"ok": True, "already": True, "band": label}
                 self._stop_locked()
-            self._stop.clear()
+            # A fresh Event (not .clear()) so any still-exiting previous sweep
+            # thread keeps its own now-set event and stops cleanly, instead of
+            # racing this new run on a shared, just-cleared one.
+            self._stop = threading.Event()
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _POWER_BINS
@@ -1068,7 +1071,7 @@ class PowerSweep:
                 return
             lo, hi, label, sig = self._lo, self._hi, self._band, self._sig
             self._stop_locked()
-            self._stop.clear()
+            self._stop = threading.Event()   # fresh event; see start() for why
             self._frames = []
             self._seq = 0
             self._maxhold = [_FLOOR_DBM] * _POWER_BINS
@@ -1130,18 +1133,25 @@ class PowerSweep:
             cmd += ["-g", str(_gain)]             # else rtl_sdr uses tuner AGC (auto)
         cmd += ["-"]                              # stream raw IQ to stdout
         self._stderr_tail = None
+        # Capture our own stop event + proc handle locally. A restart (band change
+        # / PPM calibrate) installs a *new* self._stop and nulls self._proc, so
+        # touching those through self here would race the new run; the locals keep
+        # this thread reading its own pipe until EOF and exiting cleanly.
+        stop = self._stop
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, bufsize=0)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, bufsize=0)
+            self._proc = proc
         except Exception as exc:
             self._error = "failed to launch rtl_sdr: %s" % exc
             return False
-        serr = _drain(_text_lines(self._proc.stderr), self)
+        pipe = proc.stdout
+        serr = _drain(_text_lines(proc.stderr), self)
         floor_ema = None
         produced = 0
         try:
-            while not self._stop.is_set():
-                buf = _read_exact(self._proc.stdout, row_bytes)
+            while not stop.is_set():
+                buf = _read_exact(pipe, row_bytes)
                 if not buf:
                     break
                 # rtl_sdr emits unsigned 8-bit I/Q; recentre (127.5 = 0) and
@@ -1163,15 +1173,18 @@ class PowerSweep:
                 self._push_frame(grid)
                 produced += 1
         except Exception as exc:  # pragma: no cover - defensive
-            self._error = str(exc)
+            if not stop.is_set():
+                self._error = str(exc)
         finally:
             serr.join(timeout=1)
-            if (self._proc and self._proc.poll() not in (None, 0)
+            # Only surface a device error if the process died on its own — a
+            # deliberate stop/restart (stop set) is not an error to report.
+            if (not stop.is_set() and proc.poll() not in (None, 0)
                     and not self._error and self._stderr_tail):
                 self._error = self._stderr_tail
         # Nothing produced and we didn't ask it to stop -> let rtl_power try.
-        if produced == 0 and not self._stop.is_set():
-            _terminate(self._proc)
+        if produced == 0 and not stop.is_set():
+            _terminate(proc)
             self._proc = None
             self._error = None
             return False
@@ -1200,17 +1213,19 @@ class PowerSweep:
         cmd = [_RTL_POWER, "-f", "%d:%d:%d" % (lo, hi, step),
                "-i", str(_SWEEP_INTERVAL_S), "-c", "20%"] + _tuner_args()
         self._stderr_tail = None
+        stop = self._stop          # our own event; a restart swaps self._stop
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE, text=True,
-                                          bufsize=1)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True,
+                                    bufsize=1)
+            self._proc = proc
         except Exception as exc:
             self._error = "failed to launch rtl_power: %s" % exc
             return
-        serr = _drain(self._proc.stderr, self)
+        serr = _drain(proc.stderr, self)
         try:
-            for line in self._proc.stdout:
-                if self._stop.is_set():
+            for line in proc.stdout:
+                if stop.is_set():
                     break
                 parsed = parse_power_row(line)
                 if not parsed:
@@ -1219,10 +1234,11 @@ class PowerSweep:
                 if frame is not None:
                     self._push_frame(frame)
         except Exception as exc:  # pragma: no cover - defensive
-            self._error = str(exc)
+            if not stop.is_set():
+                self._error = str(exc)
         finally:
             serr.join(timeout=1)
-            if (self._proc and self._proc.poll() not in (None, 0)
+            if (not stop.is_set() and proc.poll() not in (None, 0)
                     and not self._error and self._stderr_tail):
                 self._error = self._stderr_tail
 
@@ -1240,8 +1256,10 @@ class PowerSweep:
                 self._maxhold = [max(a, b) for a, b in zip(self._maxhold, ints)]
             meta = {"band": self._band, "lo_hz": self._lo, "hi_hz": self._hi,
                     "bins": _POWER_BINS, "floor": self._active_floor()}
-        # Feed the session recorder outside our lock (it has its own).
+        # Feed the session recorder + the spectrum-baseline watcher outside our
+        # lock (each has its own). floor from meta so both engines stay consistent.
         _recorder.write(self._seq, ts, ints, meta)
+        _baseline.feed(ints, meta["lo_hz"], meta["hi_hz"], meta["floor"])
 
     def _active_floor(self):
         """Colour-scale floor for the current engine: the IQ path's adaptive
@@ -1552,11 +1570,532 @@ def record_delete(name):
         return {"ok": False, "error": str(exc)}
 
 
+# --------------------------------------------------------------------------
+# SigMF raw-IQ capture — record the dongle's raw baseband to a SigMF recording
+# (.sigmf-data + .sigmf-meta) so a capture opens directly in GNU Radio,
+# inspectrum, Universal Radio Hacker, or any SigMF-aware tool. SigMF is the open
+# interoperability standard the wider SDR/DSP research community uses, so this
+# turns Ragnar into a real capture instrument rather than a closed viewer.
+#
+# rtl_sdr emits interleaved unsigned-8-bit I/Q, which is SigMF datatype "cu8".
+# We capture a bounded number of samples (rtl_sdr -n) so files stay finite.
+# --------------------------------------------------------------------------
+
+_IQ_CAP_MAX_SECONDS = 30       # hard cap on a single capture (file-size guard)
+_SIGMF_VERSION = "1.0.0"
+
+
+def _iq_cap_dir():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "iq_captures")
+
+
+def sigmf_meta(center_hz, sr_hz, datatype="cu8", hw="RTL-SDR",
+               sha512=None, dt_iso=None, label=None, ppm=0, gain=None):
+    """Build a SigMF metadata dict (SigMF v1.0.0). Pure — the selftest checks it.
+
+    ``core:datatype`` "cu8" is complex unsigned-8-bit, exactly rtl_sdr's native
+    output. ``captures`` carries the tune frequency + UTC datetime; an optional
+    band ``label`` becomes a single full-length annotation.
+    """
+    glob = {
+        "core:datatype": datatype,
+        "core:sample_rate": float(sr_hz),
+        "core:version": _SIGMF_VERSION,
+        "core:recorder": "Ragnar rtl_sdr.py",
+        "core:hw": hw,
+    }
+    if sha512:
+        glob["core:sha512"] = sha512
+    if ppm:
+        glob["core:freq_correction_ppm"] = int(ppm)      # extension namespace-free hint
+    if gain is not None:
+        glob["core:gain_db"] = float(gain)
+    cap = {"core:sample_start": 0, "core:frequency": float(center_hz)}
+    if dt_iso:
+        cap["core:datetime"] = dt_iso
+    meta = {"global": glob, "captures": [cap], "annotations": []}
+    if label:
+        meta["annotations"].append({"core:sample_start": 0, "core:label": str(label)})
+    return meta
+
+
+class IqCapture:
+    """One-shot bounded raw-IQ capture to a SigMF recording (background thread)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._proc = None
+        self._thread = None
+        self._stop = threading.Event()
+        self._name = None
+        self._center = None
+        self._sr = None
+        self._want_bytes = 0
+        self._seconds = 0
+        self._started = None
+        self._done = False
+        self._error = None
+        self._path = None          # .sigmf-data path
+
+    def start(self, center_hz, sr_hz, seconds, name=None, label=None):
+        try:
+            center_hz = int(float(center_hz)); sr_hz = int(float(sr_hz))
+            seconds = float(seconds)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "center_hz / sr_hz / seconds must be numeric"}
+        if not (24_000_000 <= center_hz <= 1_766_000_000):
+            return {"ok": False, "error": "center frequency out of RTL-SDR reach (24-1766 MHz)"}
+        if not (_IQ_SR_MIN <= sr_hz <= _IQ_SR_MAX):
+            return {"ok": False, "error": "sample rate out of range (1.0-3.2 MS/s)"}
+        seconds = max(0.1, min(_IQ_CAP_MAX_SECONDS, seconds))
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return {"ok": False, "error": "a capture is already running"}
+            try:
+                os.makedirs(_iq_cap_dir(), exist_ok=True)
+            except OSError as exc:
+                return {"ok": False, "error": "cannot create captures dir: %s" % exc}
+            base = _rec_safe(name) or ("iq-%d-%s" % (round(center_hz / 1e6),
+                                                     time.strftime("%Y%m%d-%H%M%S")))
+            self._name = base
+            self._center, self._sr, self._seconds = center_hz, sr_hz, seconds
+            self._want_bytes = int(sr_hz * seconds) * 2      # cu8: 2 bytes/sample
+            self._label = label
+            self._started = time.time()
+            self._done = False
+            self._error = None
+            self._path = os.path.join(_iq_cap_dir(), base + ".sigmf-data")
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True,
+                                            name="rtl-iqcap")
+            self._thread.start()
+        return {"ok": True, "name": base, "center_hz": center_hz, "sr_hz": sr_hz,
+                "seconds": seconds, "want_bytes": self._want_bytes}
+
+    def _run_loop(self):
+        nsamp = int(self._sr * self._seconds)
+        cmd = [_RTL_SDR, "-f", str(self._center), "-s", str(self._sr), "-n", str(nsamp)]
+        if _ppm:
+            cmd += ["-p", str(_ppm)]
+        if _gain is not None:
+            cmd += ["-g", str(_gain)]
+        cmd += [self._path]
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE)
+        except Exception as exc:
+            self._error = "failed to launch rtl_sdr: %s" % exc
+            return
+        _, err = b"", b""
+        try:
+            _, err = self._proc.communicate()
+        except Exception as exc:  # pragma: no cover - defensive
+            self._error = str(exc)
+        if self._stop.is_set():
+            self._error = self._error or "capture cancelled"
+            return
+        rc = self._proc.poll()
+        if rc not in (0, None) and not os.path.exists(self._path):
+            tail = (err or b"").decode("utf-8", "replace").strip().splitlines()
+            self._error = tail[-1][:200] if tail else ("rtl_sdr exited rc=%s" % rc)
+            return
+        # Write the SigMF sidecar (with a data hash) next to the captured samples.
+        try:
+            import hashlib
+            h = hashlib.sha512()
+            with open(self._path, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            meta = sigmf_meta(self._center, self._sr, sha512=h.hexdigest(),
+                              hw="RTL-SDR (%s)" % (_capture_hw_name()),
+                              dt_iso=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._started)),
+                              label=self._label, ppm=_ppm, gain=_gain)
+            with open(self._path[:-len(".sigmf-data")] + ".sigmf-meta", "w") as fh:
+                json.dump(meta, fh, indent=2)
+            self._done = True
+        except OSError as exc:
+            self._error = "capture saved but metadata write failed: %s" % exc
+
+    def stop(self):
+        with self._lock:
+            self._stop.set()
+            _terminate(self._proc)
+            self._proc = None
+        return {"ok": True}
+
+    def status(self):
+        with self._lock:
+            running = bool(self._thread and self._thread.is_alive())
+            have = 0
+            try:
+                if self._path and os.path.exists(self._path):
+                    have = os.path.getsize(self._path)
+            except OSError:
+                have = 0
+            pct = int(min(100, have * 100 / self._want_bytes)) if self._want_bytes else 0
+            return {"capturing": running, "name": self._name, "done": self._done,
+                    "error": self._error, "center_hz": self._center, "sr_hz": self._sr,
+                    "seconds": self._seconds, "bytes": have, "want_bytes": self._want_bytes,
+                    "progress": pct}
+
+
+def _capture_hw_name():
+    d = _detect_cache or {}
+    return d.get("model_name") or d.get("device") or "RTL2832U"
+
+
+def iq_capture_list():
+    import glob
+    d = _iq_cap_dir()
+    out = []
+    for meta_path in sorted(glob.glob(os.path.join(d, "*.sigmf-meta")), reverse=True):
+        base = os.path.basename(meta_path)[:-len(".sigmf-meta")]
+        data_path = meta_path[:-len(".sigmf-meta")] + ".sigmf-data"
+        try:
+            with open(meta_path) as fh:
+                m = json.load(fh)
+            g = m.get("global", {}); c = (m.get("captures") or [{}])[0]
+            out.append({"name": base,
+                        "sr_hz": g.get("core:sample_rate"),
+                        "center_hz": c.get("core:frequency"),
+                        "datetime": c.get("core:datetime"),
+                        "bytes": os.path.getsize(data_path) if os.path.exists(data_path) else 0})
+        except (OSError, ValueError):
+            continue
+    return {"captures": out}
+
+
+def iq_capture_path(name):
+    """Absolute (.sigmf-data, .sigmf-meta) paths for a capture, or (None, None)."""
+    base = _rec_safe(name)
+    data = os.path.join(_iq_cap_dir(), base + ".sigmf-data")
+    meta = os.path.join(_iq_cap_dir(), base + ".sigmf-meta")
+    return (data if os.path.exists(data) else None,
+            meta if os.path.exists(meta) else None)
+
+
+def iq_capture_delete(name):
+    ok = False
+    for suffix in (".sigmf-data", ".sigmf-meta"):
+        p = os.path.join(_iq_cap_dir(), _rec_safe(name) + suffix)
+        try:
+            os.remove(p); ok = True
+        except OSError:
+            pass
+    return {"ok": ok}
+
+
+_iqcap = IqCapture()
+
+
+def iq_capture_start(center_hz, sr_hz, seconds=2.0, name=None, label=None):
+    """Begin a SigMF raw-IQ capture. Stops the sweep/scanner first (one dongle)."""
+    global _detect_cache
+    if _power.status()["running"]:
+        _power.stop()
+    if _ism.status()["running"]:
+        _ism.stop()
+    d = detect()
+    if not d.get("available"):
+        return {"ok": False, "error": d.get("error", "no RTL-SDR")}
+    _detect_cache = d
+    return _iqcap.start(center_hz, sr_hz, seconds, name=name, label=label)
+
+
+def iq_capture_status():
+    return _iqcap.status()
+
+
+def iq_capture_stop():
+    return _iqcap.stop()
+
+
+# --------------------------------------------------------------------------
+# Spectrum baseline + anomaly detection — learn a "known-normal" spectrum, then
+# flag what changed: NEW carriers (energy where the baseline was quiet), GONE
+# carriers (a baseline signal that disappeared) and broadband JAMMING (a large
+# fraction of the span rising at once). Anomalies are surfaced in the UI and
+# written to the Watchtower JSON-lines feed (auto-discovered as source
+# "rfwatch"), so they ride the existing unified-alert + Pushover pipeline —
+# spectrum monitoring / interference-hunting the way regulators + SIGINT do it.
+# --------------------------------------------------------------------------
+
+_RF_WT_DIR = os.environ.get("RAGNAR_WATCH_LOG_DIR", "/var/log/ragnar")
+_RF_WT_FILE = "rfwatch.jsonl"
+
+
+def _regionize(bins_idx):
+    """Group a sorted list of bin indices into [start,end] contiguous runs (pure)."""
+    out = []
+    for i in bins_idx:
+        if out and i == out[-1][1] + 1:
+            out[-1][1] = i
+        else:
+            out.append([i, i])
+    return out
+
+
+def detect_spectrum_anomalies(baseline, grid, floor, new_margin=8, gone_margin=12,
+                              jam_margin=6, jam_frac=0.35, quiet_over_floor=10,
+                              carrier_over_floor=14):
+    """Compare a live power grid to a learned per-bin baseline (pure).
+
+    Returns ``{"new":[(s,e,peak)], "gone":[(s,e)], "jammer":bool, "up_frac":f}``:
+
+    * **new**   — bins that were quiet in the baseline (<= floor+quiet_over_floor)
+      but are now new_margin dB above both the baseline and the floor.
+    * **gone**  — bins that were a carrier in the baseline (>= floor+carrier_over_floor)
+      but have dropped gone_margin dB below that baseline.
+    * **jammer**— a broadband rise: >= jam_frac of bins are jam_margin dB over baseline.
+    """
+    n = min(len(baseline), len(grid))
+    new_idx, gone_idx, up = [], [], 0
+    for i in range(n):
+        b, g = baseline[i], grid[i]
+        if g > b + jam_margin:
+            up += 1
+        if b <= floor + quiet_over_floor and g > b + new_margin and g > floor + new_margin:
+            new_idx.append(i)
+        elif b >= floor + carrier_over_floor and g < b - gone_margin:
+            gone_idx.append(i)
+    new = [(s, e, max(grid[s:e + 1])) for s, e in _regionize(new_idx)]
+    gone = [(s, e) for s, e in _regionize(gone_idx)]
+    up_frac = (up / n) if n else 0.0
+    return {"new": new, "gone": gone, "jammer": up_frac >= jam_frac, "up_frac": up_frac}
+
+
+class SpectrumBaseline:
+    """Learn a per-bin baseline from the sweep, then watch for anomalies."""
+
+    LEARN_FRAMES = 80          # ~5 s of IQ frames (or a few rtl_power sweeps)
+    CONFIRM = 4                # a region must persist this many frames before alerting
+    COOLDOWN_S = 30            # min seconds between alerts for the same region
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._state = "idle"    # idle | learning | watching
+        self._base = None
+        self._learn_n = 0
+        self._lo = self._hi = None
+        self._floor = _FLOOR_DBM
+        self._pending = {}      # region-key -> consecutive-frame count
+        self._last_alert = {}   # region-key -> epoch of last alert
+        self._events = []       # rolling UI list of recent anomalies
+        self._count = 0
+
+    def arm(self):
+        with self._lock:
+            self._state = "learning"
+            self._base = None
+            self._learn_n = 0
+            self._pending = {}
+            self._events = []
+        return self.status()
+
+    def clear(self):
+        with self._lock:
+            self._state = "idle"; self._base = None; self._learn_n = 0
+            self._pending = {}
+        return self.status()
+
+    def feed(self, grid, lo_hz, hi_hz, floor):
+        """Called per frame by the sweep. Learns, then detects + emits anomalies."""
+        with self._lock:
+            state = self._state
+            if state == "idle":
+                return
+            n = len(grid)
+            if self._base is None or len(self._base) != n or (lo_hz, hi_hz) != (self._lo, self._hi):
+                # span changed (band/zoom) -> relearn from scratch
+                self._base = list(grid); self._learn_n = 1
+                self._lo, self._hi, self._floor = lo_hz, hi_hz, floor
+                self._state = "learning"; self._pending = {}
+                return
+            self._floor = floor
+            if state == "learning":
+                for i, v in enumerate(grid):        # baseline = max envelope seen while learning
+                    if v > self._base[i]:
+                        self._base[i] = v
+                self._learn_n += 1
+                if self._learn_n >= self.LEARN_FRAMES:
+                    self._state = "watching"
+                return
+            base, lo, hi = self._base, self._lo, self._hi
+        # ---- watching: detect outside the lock-held learning path ----
+        res = detect_spectrum_anomalies(base, grid, floor)
+        now = time.time()
+        fresh = []
+        for s, e, peak in res["new"]:
+            fresh.append(("new", s, e, peak))
+        for s, e in res["gone"]:
+            fresh.append(("gone", s, e, None))
+        if res["jammer"]:
+            fresh.append(("jammer", 0, len(grid) - 1, None))
+        seen_keys = set()
+        with self._lock:
+            for kind, s, e, peak in fresh:
+                key = "%s:%d" % (kind, (s + e) // 2 // 4) if kind != "jammer" else "jammer"
+                seen_keys.add(key)
+                self._pending[key] = self._pending.get(key, 0) + 1
+                if self._pending[key] < self.CONFIRM:
+                    continue
+                if now - self._last_alert.get(key, 0) < self.COOLDOWN_S:
+                    continue
+                self._last_alert[key] = now
+                self._emit(kind, s, e, peak, lo, hi, len(grid), res.get("up_frac", 0))
+            # decay pending counters for regions not seen this frame
+            for k in list(self._pending):
+                if k not in seen_keys:
+                    self._pending[k] -= 1
+                    if self._pending[k] <= 0:
+                        del self._pending[k]
+
+    def _emit(self, kind, s, e, peak, lo_hz, hi_hz, n, up_frac):
+        fc = (lo_hz + (s + e + 1) / 2.0 * (hi_hz - lo_hz) / n) / 1e6
+        bw = (e - s + 1) * (hi_hz - lo_hz) / n / 1e3
+        if kind == "new":
+            sev = "high"; code = "RF_NEW_EMITTER"
+            summ = "New emitter %.3f MHz (~%.0f kHz, +%.0f dB over baseline)" % (
+                fc, bw, (peak - self._base[(s + e) // 2]))
+        elif kind == "gone":
+            sev = "medium"; code = "RF_CARRIER_LOST"
+            summ = "Baseline carrier gone at %.3f MHz (~%.0f kHz)" % (fc, bw)
+        else:
+            sev = "critical"; code = "RF_BROADBAND_JAMMING"
+            summ = "Broadband interference — %.0f%% of the span risen over baseline" % (up_frac * 100)
+        ev = {"ts": time.time(), "severity": sev, "code": code, "summary": summ,
+              "src": "%.3fMHz" % fc, "freq_mhz": round(fc, 3), "bw_khz": round(bw, 1)}
+        self._events.insert(0, ev)
+        del self._events[60:]
+        self._count += 1
+        self._write_wt(ev)
+
+    def _write_wt(self, ev):
+        try:
+            os.makedirs(_RF_WT_DIR, exist_ok=True)
+            with open(os.path.join(_RF_WT_DIR, _RF_WT_FILE), "a") as fh:
+                fh.write(json.dumps(ev, separators=(",", ":")) + "\n")
+        except OSError:
+            pass                                   # best-effort; UI still shows it
+
+    def status(self):
+        with self._lock:
+            prog = 0
+            if self._state == "learning":
+                prog = int(min(100, self._learn_n * 100 / self.LEARN_FRAMES))
+            return {"state": self._state, "progress": prog, "count": self._count,
+                    "events": list(self._events[:40]), "bins": len(self._base) if self._base else 0}
+
+
+_baseline = SpectrumBaseline()
+
+
+def baseline_arm():
+    return _baseline.arm()
+
+
+def baseline_clear():
+    return _baseline.clear()
+
+
+def baseline_status():
+    return _baseline.status()
+
+
+# --------------------------------------------------------------------------
+# Frequency calibration — trim the dongle's crystal offset (PPM) so the readouts
+# are trustworthy. A cheap RTL-SDR crystal is typically tens of ppm off, which at
+# 900 MHz is tens of kHz — enough to mis-name a narrow channel. The standard fix
+# (what kalibrate-rtl does) is a *reference-carrier* calibration: point at a
+# signal whose true frequency you know, measure where it actually lands, and
+# solve for the ppm error. (A true GPSDO disciplines the oscillator off a 1PPS
+# input, which this NESDR-class dongle doesn't have — so GPS here is position/
+# time truth, not a crystal reference; this reference-carrier method is the
+# right tool for an RTL-SDR.)
+# --------------------------------------------------------------------------
+
+def ppm_from_reference(current_ppm, f_obs_hz, f_true_hz):
+    """New PPM correction from an observed vs known-true carrier frequency (pure).
+
+    The observed frequency already includes ``current_ppm`` of correction, so the
+    *residual* fractional error (f_obs-f_true)/f_true is added to it. Result is
+    clamped to the +-1000 ppm that :func:`set_tuning` accepts.
+    """
+    try:
+        f_true_hz = float(f_true_hz); f_obs_hz = float(f_obs_hz)
+        cur = float(current_ppm or 0)
+    except (TypeError, ValueError):
+        return current_ppm
+    if f_true_hz <= 0:
+        return current_ppm
+    residual = (f_obs_hz - f_true_hz) / f_true_hz * 1e6
+    return int(round(max(-1000, min(1000, cur + residual))))
+
+
+def _peak_freq_hz(frame, lo_hz, hi_hz, near_hz=None, window_hz=None):
+    """Frequency (Hz) of the strongest bin in ``frame`` (pure).
+
+    With ``near_hz``+``window_hz`` the search is limited to that window, so a
+    calibration can lock onto the marked reference rather than the band's loudest
+    signal. Returns None if the frame is empty or the window has no bins.
+    """
+    n = len(frame)
+    if not n or hi_hz <= lo_hz:
+        return None
+    binw = (hi_hz - lo_hz) / n
+    s, e = 0, n - 1
+    if near_hz is not None and window_hz:
+        s = max(0, int((near_hz - window_hz / 2.0 - lo_hz) / binw))
+        e = min(n - 1, int((near_hz + window_hz / 2.0 - lo_hz) / binw))
+        if e < s:
+            return None
+    best, bi = -1e9, s
+    for i in range(s, e + 1):
+        if frame[i] > best:
+            best, bi = frame[i], i
+    return lo_hz + (bi + 0.5) * binw
+
+
+def calibrate_from_reference(true_mhz, near_mhz=None):
+    """Measure the live peak near a known reference and apply the PPM correction.
+
+    ``true_mhz`` is the reference carrier's real frequency; ``near_mhz`` (usually
+    the marker) limits the peak search so it locks onto that signal. Returns the
+    before/after ppm, the measured offset, and the applied result.
+    """
+    try:
+        true_hz = float(true_mhz) * 1e6
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "true_mhz must be numeric"}
+    fr = _power.get_frames(since=0)
+    frames = fr.get("frames") or []
+    band = fr.get("band_hz")
+    if not frames or not band:
+        return {"ok": False, "error": "no live sweep — start the sweep on the reference first"}
+    lo, hi = band
+    if not (lo <= true_hz <= hi):
+        return {"ok": False, "error": "reference %.3f MHz is outside the current sweep %.3f-%.3f MHz"
+                % (true_hz / 1e6, lo / 1e6, hi / 1e6)}
+    grid = frames[-1]["power"]
+    near_hz = (float(near_mhz) * 1e6) if near_mhz is not None else true_hz
+    window = max(50_000.0, (hi - lo) * 0.05)          # +-2.5% of span, >=50 kHz
+    f_obs = _peak_freq_hz(grid, lo, hi, near_hz=near_hz, window_hz=window)
+    if f_obs is None:
+        return {"ok": False, "error": "could not find a peak near the reference"}
+    old_ppm = _ppm
+    new_ppm = ppm_from_reference(old_ppm, f_obs, true_hz)
+    set_tuning(ppm=new_ppm)                            # applies + restarts the sweep
+    return {"ok": True, "old_ppm": old_ppm, "new_ppm": new_ppm,
+            "observed_mhz": round(f_obs / 1e6, 4), "true_mhz": round(true_hz / 1e6, 4),
+            "offset_khz": round((f_obs - true_hz) / 1e3, 2),
+            "delta_ppm": new_ppm - old_ppm}
+
+
 def status():
-    ism, pwr = _ism.status(), _power.status()
-    st = {"ism": ism, "power": pwr, "bands": sorted(RTL_BANDS.keys()),
+    ism, pwr, iq = _ism.status(), _power.status(), _iqcap.status()
+    st = {"ism": ism, "power": pwr, "iq": iq, "bands": sorted(RTL_BANDS.keys()),
           "ism_bands": sorted(ISM_FREQS.keys())}
-    if ism["running"] or pwr["running"]:
+    if ism["running"] or pwr["running"] or iq.get("capturing"):
         # Something already holds the dongle over USB. Re-probing with rtl_test
         # here would open the same device and kill the capture — the HackRF
         # lesson. Report availability from the cached probe instead.
@@ -1873,6 +2412,69 @@ def selftest():
         globals()["_rec_dir"] = _saved_rec_dir
         import shutil as _sh
         _sh.rmtree(_tmpdir, ignore_errors=True)
+
+    # --- SigMF metadata (pure, no hardware): shape + required core fields ---
+    _sm = sigmf_meta(868_300_000, 2_400_000, sha512="ab"*64,
+                     dt_iso="2026-09-10T12:00:00Z", label="lorawan-eu868", ppm=12, gain=28.0)
+    check("sigmf: cu8 datatype + sample_rate + v1.0.0 global",
+          _sm["global"]["core:datatype"] == "cu8"
+          and _sm["global"]["core:sample_rate"] == 2_400_000.0
+          and _sm["global"]["core:version"] == "1.0.0", str(_sm["global"].get("core:version")))
+    check("sigmf: capture carries tune freq + datetime",
+          _sm["captures"][0]["core:frequency"] == 868_300_000.0
+          and _sm["captures"][0]["core:datetime"] == "2026-09-10T12:00:00Z")
+    check("sigmf: label -> full-length annotation + sha512/ppm/gain recorded",
+          _sm["annotations"][0]["core:label"] == "lorawan-eu868"
+          and _sm["global"]["core:sha512"] == "ab"*64
+          and _sm["global"]["core:freq_correction_ppm"] == 12
+          and _sm["global"]["core:gain_db"] == 28.0)
+    import json as _json
+    check("sigmf: metadata is JSON-serializable", isinstance(_json.dumps(_sm), str))
+    check("sigmf: capture rejects out-of-reach centre / bad rate",
+          IqCapture().start(50_000_000_000, 2_400_000, 1).get("ok") is False
+          and IqCapture().start(868_000_000, 99_000_000, 1).get("ok") is False)
+
+    # --- spectrum baseline + anomaly detection (pure) ---
+    check("rfwatch: _regionize groups contiguous runs",
+          _regionize([2, 3, 4, 9, 10, 20]) == [[2, 4], [9, 10], [20, 20]])
+    _fl = -110
+    _base = [_fl] * 100
+    _base[50] = _base[51] = -40           # a known carrier in the baseline
+    _g = list(_base)
+    _g[10] = _g[11] = -60                 # NEW emitter where baseline was quiet
+    _g[50] = _g[51] = -105                # the known carrier VANISHED
+    _an = detect_spectrum_anomalies(_base, _g, _fl)
+    check("rfwatch: new emitter over a quiet baseline detected",
+          any(s <= 10 <= e for s, e, pk in _an["new"]), str(_an["new"]))
+    check("rfwatch: vanished baseline carrier detected",
+          any(s <= 50 <= e for s, e in _an["gone"]), str(_an["gone"]))
+    check("rfwatch: quiet band is not a jammer", _an["jammer"] is False)
+    _jam = detect_spectrum_anomalies(_base, [_fl + 20] * 100, _fl)
+    check("rfwatch: broadband rise flagged as jamming",
+          _jam["jammer"] is True and _jam["up_frac"] >= 0.9, str(_jam["up_frac"]))
+    _sb = SpectrumBaseline()
+    check("rfwatch: arm -> learning, clear -> idle",
+          _sb.arm()["state"] == "learning" and _sb.clear()["state"] == "idle")
+
+    # --- frequency calibration (pure) ---
+    # A carrier truly at 433.900 MHz observed at 433.910 (+10 kHz) => +23 ppm to add.
+    _np2 = ppm_from_reference(0, 433_910_000, 433_900_000)
+    check("cal: +10 kHz high at 433.9 MHz -> ~+23 ppm",
+          22 <= _np2 <= 24, str(_np2))
+    check("cal: correction adds to the current ppm",
+          ppm_from_reference(10, 433_910_000, 433_900_000) == _np2 + 10)
+    check("cal: result clamped to +-1000 ppm",
+          ppm_from_reference(0, 470_000_000, 433_900_000) == 1000)
+    check("cal: bad/zero true freq is a no-op",
+          ppm_from_reference(7, 433_900_000, 0) == 7)
+    # peak-in-window: a tone in bin 300 of a 480-bin 433.05-434.79 grid
+    _pk = [-110] * 480; _pk[300] = -20
+    _pf = _peak_freq_hz(_pk, 433_050_000, 434_790_000,
+                        near_hz=433_050_000 + 300.5 / 480 * 1_740_000, window_hz=100_000)
+    check("cal: peak-in-window finds the tone bin",
+          _pf is not None and abs(_pf - (433_050_000 + 300.5 / 480 * 1_740_000)) < 4000, str(_pf))
+    check("cal: window excluding the tone -> different (nearest-in-window) bin",
+          _peak_freq_hz(_pk, 433_050_000, 434_790_000, near_hz=433_100_000, window_hz=50_000) is not None)
 
     passed = sum(1 for r in results if r["pass"])
     return {"pass": passed == len(results), "passed": passed,
