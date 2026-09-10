@@ -30,7 +30,7 @@ browse than search.
 - [WiFi Defense (WIDS)](wifi-defense.md) — passive 802.11 intrusion detection
 - [Wardriving](wardriving.md) — WiFi/BLE/cell logging with GPS recovery
 - [Diagnostics panel](diagnostics.md) — radios / power / GPS sky view + Starview observatory
-- [Cellular modem](cell.md) · [SDR / Sub-GHz](sdr-subghz.md) · [RF Waterfall](rf-waterfall.md) · [AirSnitch](airsnitch.md)
+- [Cellular modem](cell.md) · [SDR / Sub-GHz](sdr-subghz.md) · [RF Waterfall](rf-waterfall.md) · [RF Waterfall — capability guide](rf-waterfall-guide.md) · [AirSnitch](airsnitch.md)
 
 ## Sensing & smart home
 - [RuSense](rusense.md) — camera-free WiFi-CSI presence / motion / vitals sensing
