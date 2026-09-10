@@ -18802,17 +18802,27 @@ async function connectToWifiNetwork() {
     }
 }
 
+let _logPollTimer = null;
+function _ensureLogPolling() {
+    if (_logPollTimer) return;
+    // Keep the rich per-module logs (orchestrator, scanning, GPS, WiFi, …) flowing
+    // so the source filters stay live — but only while the panel is on screen.
+    _logPollTimer = setInterval(() => {
+        const out = document.getElementById('console-output');
+        if (!out || out.offsetParent === null || document.hidden) return;
+        loadConsoleLogs();
+    }, 5000);
+}
+
 async function loadConsoleLogs() {
+    _ensureLogPolling();
     try {
         const data = await fetchAPI('/api/logs');
-        if (data && data.logs) {
+        if (data && Array.isArray(data.logs)) {
             updateConsole(data.logs);
         }
     } catch (error) {
-        console.error('Error loading console logs:', error);
-        // Add fallback console messages if log loading fails
-        addConsoleMessage('Unable to load historical logs from server', 'warning');
-        addConsoleMessage('Console will show new messages as they occur', 'info');
+        console.error('Error loading logs:', error);   // quiet: don't spam the feed each poll
     }
 }
 
@@ -21406,45 +21416,65 @@ function updatePrimaryConnectionCard(data) {
 // CONSOLE
 // ============================================================================
 
-const MAX_CONSOLE_LINES = 200;
+const MAX_CONSOLE_LINES = 400;
 const CONSOLE_NOISE_PATTERNS = [
     'comment.py - INFO - Comments loaded successfully from cache'
 ];
-const HISTORY_LOG_TYPE_COLORS = {
+const LOG_TYPE_COLORS = {
     'success': 'text-green-400',
     'error': 'text-red-400',
     'warning': 'text-yellow-400',
     'info': 'text-gray-300'
 };
+const HISTORY_LOG_TYPE_COLORS = LOG_TYPE_COLORS;   // back-compat alias
 
-let consoleBuffer = [];
-let lastConsoleLogLine = null;
+// One coherent, de-duplicated feed. Every source — the Python file loggers, the
+// real-time activity push, and client-side action messages — is normalized into
+// the same shape and merged here. The panel used to flip between two different
+// formats because two feeds wrote to it with reset-on-mismatch logic; a single
+// append-with-dedup store removes that "jumping between modes".
+let _logEntries = [];       // {tsLabel, source, level, colorClass, message, key}
+let _logKeys = new Set();   // de-dup server lines across overlapping fetches
+let _logFilter = 'all';     // selected source bucket, or 'all'
+let _logSeq = 0;
+let _logFilterSig = '';
 
-function addConsoleMessage(message, type = 'info') {
-    const timestamp = new Date().toLocaleTimeString();
-    const colors = {
-        'success': 'text-green-400',
-        'error': 'text-red-400',
-        'warning': 'text-yellow-400',
-        'info': 'text-blue-400'
-    };
-    
-    const colorClass = colors[type] || colors['info'];
-    const logEntry = {
-        timestamp,
-        message,
-        type,
-        colorClass
-    };
-    
-    consoleBuffer.push(logEntry);
-    
-    // Keep only the last MAX_CONSOLE_LINES
-    if (consoleBuffer.length > MAX_CONSOLE_LINES) {
-        consoleBuffer = consoleBuffer.slice(-MAX_CONSOLE_LINES);
-    }
-    
-    updateConsoleDisplay();
+// Source buckets, in the order they appear in the dropdown. A line is bucketed
+// by the logger/module that emitted it; generic modules fall back to the topic
+// mentioned in the line, so GPS / WiFi / Bluetooth activity still surfaces even
+// though those subsystems have no dedicated log file.
+const LOG_SOURCE_ORDER = ['Orchestrator', 'Scanning', 'Vulnerabilities', 'Attacks',
+    'WiFi', 'GPS', 'Bluetooth', 'Mesh', 'Network', 'Watchtower', 'Assets', 'AI',
+    'Database', 'System', 'Actions', 'Other'];
+
+function _logSourceFor(moduleToken, fullLine) {
+    const mod = String(moduleToken || '').toLowerCase().replace(/\.py$/, '');
+    const byMod =
+        /orchestrat/.test(mod) ? 'Orchestrator' :
+        /scanning|recon/.test(mod) ? 'Scanning' :
+        /vuln|nuclei|nikto|sqlmap|zap/.test(mod) ? 'Vulnerabilities' :
+        /connector|steal|bruteforce|attack|lynis/.test(mod) ? 'Attacks' :
+        /db_manager|database/.test(mod) ? 'Database' :
+        /aiservice|ai_service/.test(mod) ? 'AI' :
+        /wifi|wlan|halehound|pineap/.test(mod) ? 'WiFi' :
+        /gps|nmea|ublox/.test(mod) ? 'GPS' :
+        /bluetooth|bluez|bt_/.test(mod) ? 'Bluetooth' :
+        /mesh|tailscale|meshtastic/.test(mod) ? 'Mesh' :
+        /watchtower|incident/.test(mod) ? 'Watchtower' :
+        /asset/.test(mod) ? 'Assets' :
+        /threatintelligence|networkintelligence|multi_interface|traffic|^nmap$/.test(mod) ? 'Network' :
+        null;
+    if (byMod) return byMod;
+    // Generic module: bucket by the topic named in the line.
+    const s = String(fullLine || '').toLowerCase();
+    if (/\bgps\b|gpsd|nmea|u-?blox|satellite/.test(s)) return 'GPS';
+    if (/wifi|wlan|802\.?11|deauth|\bbeacon\b|monitor mode|hostapd/.test(s)) return 'WiFi';
+    if (/bluetooth|\bble\b|bluez/.test(s)) return 'Bluetooth';
+    if (/\bmesh\b|tailscale/.test(s)) return 'Mesh';
+    if (/nmap|\bscan\b|port scan|host discovery/.test(s)) return 'Scanning';
+    if (/vuln|cve-|exploit/.test(s)) return 'Vulnerabilities';
+    if (/env_manager|shared|hbp0|utils|display|resource_monitor|auth_manager|server_capabilit|compliance|provision|post_update/.test(mod)) return 'System';
+    return 'Other';
 }
 
 function shouldHideConsoleLog(logLine) {
@@ -21454,118 +21484,163 @@ function shouldHideConsoleLog(logLine) {
 function determineConsoleLogType(logLine) {
     if (!logLine) return 'info';
     const normalized = logLine.toLowerCase();
-    if (normalized.includes('error')) return 'error';
+    if (normalized.includes('error') || normalized.includes('critical') || normalized.includes(' fail')) return 'error';
     if (normalized.includes('warn')) return 'warning';
     if (normalized.includes('success')) return 'success';
     return 'info';
 }
 
-const LOG_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+// A server log line already carries its own time — either "YYYY-MM-DD HH:MM:SS"
+// from the Python loggers or "[HH:MM:SS]" from the activity feed. Pull that time
+// out and strip it from the message so the panel renders exactly ONE timestamp,
+// instead of stamping a second, render-time one in front of the line (which is
+// what produced entries like "[22:36:33] [22:36:32] [STATS] …").
+const LOG_TS_ISO_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s*(?:-\s*)?([\s\S]*)$/;
+const LOG_TS_BRACKET_RE = /^\[(\d{2}:\d{2}:\d{2})\]\s*([\s\S]*)$/;
 
-function extractLogTimestamp(logLine) {
-    if (!logLine || logLine.length < 19) {
-        return new Date().toLocaleTimeString();
+function parseLogLine(logLine) {
+    if (typeof logLine !== 'string') {
+        return { timestamp: new Date().toLocaleTimeString(), message: String(logLine || '') };
     }
-    const timestampCandidate = logLine.slice(0, 19);
-    if (LOG_TIMESTAMP_PATTERN.test(timestampCandidate)) {
-        const parsed = new Date(timestampCandidate.replace(' ', 'T'));
-        if (!Number.isNaN(parsed.getTime())) {
-            return parsed.toLocaleTimeString();
-        }
+    let m = logLine.match(LOG_TS_ISO_RE);
+    if (m) {
+        const parsed = new Date(m[1].replace(' ', 'T'));
+        return {
+            timestamp: Number.isNaN(parsed.getTime()) ? m[1].slice(11) : parsed.toLocaleTimeString(),
+            message: m[2]
+        };
     }
-    return new Date().toLocaleTimeString();
+    m = logLine.match(LOG_TS_BRACKET_RE);
+    if (m) {
+        return { timestamp: m[1], message: m[2] };
+    }
+    return { timestamp: new Date().toLocaleTimeString(), message: logLine };
 }
 
-function createConsoleEntryFromLog(logLine) {
-    const type = determineConsoleLogType(logLine);
+// Turn one raw log line into a normalized panel entry: single timestamp, clean
+// message, and a source bucket. Handles "TIME - module - LEVEL - msg" and the
+// activity "[HH:MM:SS] [TAG] msg" / "[WEB] msg" shapes.
+function _normalizeLogLine(rawLine) {
+    const line = String(rawLine == null ? '' : rawLine);
+    const level = determineConsoleLogType(line);
+    const { timestamp, message } = parseLogLine(line);
+    let msg = message, source;
+    let m = msg.match(/^([\w.\-]+)\s*-\s*(?:DEBUG|INFO|WARNING|ERROR|CRITICAL)\s*-\s*([\s\S]*)$/);
+    if (m) { source = _logSourceFor(m[1], line); msg = m[2]; }
+    else {
+        const t = msg.match(/^\[([A-Za-z]+)\]\s*([\s\S]*)$/);
+        if (t) { source = _logSourceFor(t[1], line); msg = t[2]; }
+        else source = _logSourceFor('', line);
+    }
     return {
-        timestamp: extractLogTimestamp(logLine),
-        message: logLine,
-        type,
-        colorClass: HISTORY_LOG_TYPE_COLORS[type] || HISTORY_LOG_TYPE_COLORS['info']
+        tsLabel: timestamp,
+        source,
+        level,
+        colorClass: LOG_TYPE_COLORS[level] || LOG_TYPE_COLORS.info,
+        message: msg,
+        key: 'srv:' + line
     };
 }
 
-function updateConsole(logs) {
-    if (!logs || !Array.isArray(logs)) {
-        // If no logs available, add informational messages
-        if (consoleBuffer.length === 0) {
-            addConsoleMessage('No historical logs available', 'warning');
-            addConsoleMessage('New activity will appear here as it occurs', 'info');
-        }
-        return;
+function _pushLogEntry(entry) {
+    if (entry.key && _logKeys.has(entry.key)) return false;
+    if (entry.key) _logKeys.add(entry.key);
+    _logEntries.push(entry);
+    if (_logEntries.length > MAX_CONSOLE_LINES) {
+        _logEntries = _logEntries.slice(-MAX_CONSOLE_LINES);
+        _logKeys = new Set(_logEntries.map(e => e.key).filter(Boolean));
     }
-    
-    // If logs are empty array, provide user feedback
-    if (logs.length === 0) {
-        if (consoleBuffer.length === 0) {
-            addConsoleMessage('No recent activity logged', 'info');
-            addConsoleMessage('Waiting for new events...', 'info');
-        }
-        return;
-    }
-    
-    const cleanedLogs = logs
-        .map(log => typeof log === 'string' ? log.trim() : '')
-        .filter(log => log && !shouldHideConsoleLog(log));
+    return true;
+}
 
-    if (cleanedLogs.length === 0) {
-        return;
-    }
-
-    let newLogLines = [];
-    if (!lastConsoleLogLine) {
-        consoleBuffer = [];
-        newLogLines = cleanedLogs.slice(-MAX_CONSOLE_LINES);
-    } else {
-        const lastIndex = cleanedLogs.lastIndexOf(lastConsoleLogLine);
-        if (lastIndex === cleanedLogs.length - 1) {
-            lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-            return;
-        }
-        if (lastIndex !== -1) {
-            newLogLines = cleanedLogs.slice(lastIndex + 1);
-        } else {
-            consoleBuffer = [];
-            newLogLines = cleanedLogs.slice(-MAX_CONSOLE_LINES);
-        }
-    }
-
-    if (newLogLines.length === 0) {
-        lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-        return;
-    }
-    
-    newLogLines.forEach(logLine => {
-        consoleBuffer.push(createConsoleEntryFromLog(logLine));
+// Client-side action feedback (used in hundreds of places). Stays a first-class
+// part of the same feed under the "Actions" source, so it filters and renders
+// exactly like every other line.
+function addConsoleMessage(message, type = 'info') {
+    _pushLogEntry({
+        tsLabel: new Date().toLocaleTimeString(),
+        source: 'Actions',
+        level: type,
+        colorClass: LOG_TYPE_COLORS[type] || LOG_TYPE_COLORS.info,
+        message: String(message == null ? '' : message),
+        key: 'ui:' + (++_logSeq)
     });
-    
-    if (consoleBuffer.length > MAX_CONSOLE_LINES) {
-        consoleBuffer = consoleBuffer.slice(-MAX_CONSOLE_LINES);
-    }
-    
-    lastConsoleLogLine = cleanedLogs[cleanedLogs.length - 1];
-    updateConsoleDisplay();
+    renderLogPanel();
 }
 
-function updateConsoleDisplay() {
-    const console = document.getElementById('console-output');
-    if (!console) return;
-    
-    console.innerHTML = consoleBuffer.map(entry => 
-        `<div class="${entry.colorClass}">[${entry.timestamp}] ${escapeHtml(entry.message)}</div>`
-    ).join('');
-    
-    // Auto-scroll to bottom
-    console.scrollTop = console.scrollHeight;
+// Merge a batch of raw log lines (from /api/logs or the socket push) into the
+// unified feed. De-dupes so overlapping fetches don't stack the same lines, and
+// never wipes the buffer.
+function updateConsole(logs) {
+    if (!Array.isArray(logs)) return;
+    let added = false;
+    logs.forEach(raw => {
+        const line = typeof raw === 'string' ? raw.trim() : '';
+        if (!line || shouldHideConsoleLog(line)) return;
+        if (_pushLogEntry(_normalizeLogLine(line))) added = true;
+    });
+    if (added) renderLogPanel();
 }
+
+function _logSourcesPresent() {
+    const seen = new Set(_logEntries.map(e => e.source));
+    return LOG_SOURCE_ORDER.filter(s => seen.has(s));
+}
+
+// Rebuild the filter dropdown only when the set of present sources changes, so
+// it never flickers or steals focus mid-render.
+function populateLogFilter() {
+    const sel = document.getElementById('log-source-filter');
+    if (!sel) return;
+    if (!sel._wired) {
+        sel._wired = true;
+        try { const saved = localStorage.getItem('ragnar.log.filter'); if (saved) _logFilter = saved; } catch (e) {}
+        sel.addEventListener('change', () => {
+            _logFilter = sel.value || 'all';
+            try { localStorage.setItem('ragnar.log.filter', _logFilter); } catch (e) {}
+            renderLogPanel();
+        });
+    }
+    const present = _logSourcesPresent();
+    // Keep the active filter selectable even if it momentarily has no lines.
+    if (_logFilter !== 'all' && !present.includes(_logFilter)) present.push(_logFilter);
+    const sig = present.join('|');
+    if (sig !== _logFilterSig) {
+        _logFilterSig = sig;
+        sel.innerHTML = ['<option value="all">All sources</option>']
+            .concat(present.map(s => `<option value="${s}">${s}</option>`)).join('');
+    }
+    sel.value = _logFilter;
+}
+
+function renderLogPanel() {
+    const out = document.getElementById('console-output');
+    if (!out) return;
+    populateLogFilter();
+    const rows = _logFilter === 'all' ? _logEntries : _logEntries.filter(e => e.source === _logFilter);
+    if (!rows.length) {
+        out.innerHTML = '<div class="text-gray-500">' +
+            (_logEntries.length ? 'No entries for this filter yet.' : 'Waiting for activity…') + '</div>';
+        return;
+    }
+    // Only auto-scroll if the user is already at the bottom, so scrolling up to
+    // read isn't interrupted by new lines.
+    const atBottom = out.scrollHeight - out.scrollTop - out.clientHeight < 40;
+    out.innerHTML = rows.map(e =>
+        `<div class="${e.colorClass}"><span class="text-gray-600">[${e.tsLabel}]</span> ` +
+        `<span class="text-Ragnar-400">${escapeHtml(e.source)}</span> ${escapeHtml(e.message)}</div>`
+    ).join('');
+    if (atBottom) out.scrollTop = out.scrollHeight;
+}
+
+// Back-compat alias (older callers).
+function updateConsoleDisplay() { renderLogPanel(); }
 
 function clearConsole() {
-    consoleBuffer = [];
-    const console = document.getElementById('console-output');
-    if (console) {
-        console.innerHTML = '<div class="text-green-400">Console cleared</div>';
-    }
+    _logEntries = [];
+    _logKeys = new Set();
+    const out = document.getElementById('console-output');
+    if (out) out.innerHTML = '<div class="text-green-400">Activity log cleared</div>';
 }
 
 function escapeHtml(text) {

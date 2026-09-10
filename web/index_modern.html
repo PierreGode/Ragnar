@@ -1258,9 +1258,12 @@
                         <svg class="w-6 h-6 mr-2 text-Ragnar-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path>
                         </svg>
-                        Console
+                        Activity Log
                     </span>
-                    <div class="flex space-x-2">
+                    <div class="flex items-center space-x-2">
+                        <select id="log-source-filter" title="Filter the log by source" class="text-sm bg-slate-800 border border-slate-600 text-gray-200 rounded px-2 py-1 focus:outline-none focus:border-Ragnar-500">
+                            <option value="all">All sources</option>
+                        </select>
                         <button onclick="loadConsoleLogs()" class="text-sm text-white bg-Ragnar-600 hover:bg-Ragnar-700 px-3 py-1 rounded transition-colors">
                             Refresh
                         </button>
@@ -1269,8 +1272,8 @@
                         </button>
                     </div>
                 </h2>
-                <div id="console-output" class="bg-black bg-opacity-50 rounded-lg p-4 h-64 overflow-y-auto font-mono text-sm scrollbar-thin">
-                    <div class="text-green-400">Ragnar console loading...</div>
+                <div id="console-output" style="height:32rem" class="bg-black bg-opacity-50 rounded-lg p-4 overflow-y-auto font-mono text-sm scrollbar-thin">
+                    <div class="text-green-400">Loading activity log…</div>
                 </div>
             </div>
         </div>
@@ -8486,7 +8489,7 @@
     <!-- JavaScript -->
     <script src="/web/scripts/skyview.js?v=20260822-mobile-opacity"></script>
     <script src="/web/scripts/skyview_vr.js?v=20260822-rich-info-panel"></script>
-    <script src="/web/scripts/ragnar_modern.js?v=20260909-wifidef-persist"></script>
+    <script src="/web/scripts/ragnar_modern.js?v=20260910-log-filters"></script>
 
 
 
