@@ -696,6 +696,228 @@ def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
 
 
 # --------------------------------------------------------------------------
+# Segment 4 — protocol framework: line coding, preamble/sync detection,
+# repeated-frame alignment (fixed code vs rolling bits) and a CRC/checksum
+# scanner. All pure string/int math — the demodulator recovers the bits, this
+# gives them structure. Selftested on synthetic bitstreams, no hardware.
+# --------------------------------------------------------------------------
+
+def line_decode(bits, scheme):
+    """Decode a raw bitstream by its line coding (pure).
+
+    ``manchester``  — 01->1, 10->0 (IEEE; the common ISM convention);
+    ``manchester_ieee`` alias. ``diff_manchester`` — a transition at the start of
+    a bit period = 0, none = 1. ``nrzi`` — a transition = 1, none = 0.
+    Unknown/``raw`` returns the bits unchanged. Returns the decoded bit string.
+    """
+    b = bits or ""
+    s = (scheme or "raw").lower()
+    if s in ("manchester", "manchester_ieee"):
+        out = []
+        for i in range(0, len(b) - 1, 2):
+            p = b[i:i + 2]
+            out.append("1" if p == "01" else ("0" if p == "10" else "?"))
+        return "".join(out)
+    if s in ("nrzi", "diff_manchester"):
+        out = []
+        prev = b[0] if b else "0"
+        for i in range(1, len(b)):
+            trans = b[i] != prev
+            out.append("1" if trans else "0")
+            prev = b[i]
+        return "".join(out)
+    return b
+
+
+def _preamble(bits):
+    """Length of a leading alternating (0101…/1010…) run — the classic preamble."""
+    n = 1
+    while n < len(bits) and bits[n] != bits[n - 1]:
+        n += 1
+    return n if n >= 4 else 0
+
+
+def _repeat_period(bits, min_p=8):
+    """Best repeated-frame period in a bitstream, or 0 (pure, numpy).
+
+    A remote/sensor usually sends the same frame back-to-back; the period is the
+    lag (>= min_p) at which the ±1-mapped bit sequence best autocorrelates. Only
+    accepts a period with a strong, clear peak so noise-like data returns 0.
+    """
+    import numpy as np
+    n = len(bits)
+    if n < min_p * 2:
+        return 0
+    s = np.frombuffer(bits.encode(), dtype=np.uint8).astype(np.float32)
+    s = np.where(s == ord("1"), 1.0, -1.0)
+    s -= s.mean()
+    if s.std() < 1e-6:
+        return 0
+    energy = float(np.dot(s, s)) / n + 1e-9
+    hi = n // 2
+    corr = {}
+    best = 0.0
+    for lag in range(min_p, hi + 1):
+        a, b = s[:-lag], s[lag:]
+        c = float(np.dot(a, b) / len(a)) / energy       # normalised [~ -1..1]
+        corr[lag] = c
+        if c > best:
+            best = c
+    if best <= 0.5:
+        return 0
+    # Autocorrelation also peaks at multiples of the true period; take the
+    # SMALLEST lag whose correlation is within 90% of the best (the fundamental).
+    for lag in range(min_p, hi + 1):
+        if corr[lag] >= 0.9 * best:
+            return lag
+    return 0
+
+
+def _to_hex(bits):
+    """Group a bit string into hex bytes (MSB first); trailing <8 bits appended."""
+    out = []
+    for i in range(0, len(bits) - 7, 8):
+        out.append("%02x" % int(bits[i:i + 8], 2))
+    rem = len(bits) % 8
+    s = " ".join(out)
+    if rem:
+        s += (" " if s else "") + "+" + bits[len(bits) - rem:]
+    return s
+
+
+def frame_analysis(bits):
+    """Structure a recovered bitstream: preamble, repeated-frame period, and a
+    per-bit stability map across repeats (constant code vs rolling bits) (pure).
+
+    Aligning the repeated frames a remote transmits is *the* reverse-engineering
+    move: bits that never change across repeats are the fixed code / address;
+    bits that flip are a rolling code, counter or checksum.
+    """
+    import numpy as np
+    bits = "".join(c for c in (bits or "") if c in "01")
+    if len(bits) < 8:
+        return {"ok": False, "error": "need at least 8 bits"}
+    pre = _preamble(bits)
+    period = _repeat_period(bits)
+    result = {"ok": True, "n_bits": len(bits), "preamble_bits": pre,
+              "period_bits": period}
+    if period >= 8:
+        nrep = len(bits) // period
+        frames = [bits[i * period:(i + 1) * period] for i in range(nrep)]
+        arr = np.array([[1 if ch == "1" else 0 for ch in f] for f in frames])
+        agree = arr.mean(axis=0)                       # fraction that are '1'
+        consensus = "".join("1" if a >= 0.5 else "0" for a in agree)
+        stable = np.array([1.0 - 2 * min(a, 1 - a) for a in agree])  # 1=constant,0=50/50
+        varying = [i for i, s in enumerate(stable) if s < 0.85]
+        result.update({"repeats": nrep, "consensus_bits": consensus,
+                       "consensus_hex": _to_hex(consensus),
+                       "varying_positions": varying[:200],
+                       "stable_fraction": round(float((stable >= 0.85).mean()), 3),
+                       "identical": len(varying) == 0})
+    else:
+        result.update({"repeats": 1, "consensus_bits": bits,
+                       "consensus_hex": _to_hex(bits), "varying_positions": [],
+                       "stable_fraction": 1.0, "identical": True})
+    result["crc"] = crc_scan(result["consensus_bits"])
+    return result
+
+
+# --- CRC / checksum library (common ISM/embedded polynomials) ---
+
+def _crc8(data, poly, init=0, xorout=0):
+    c = init
+    for b in data:
+        c ^= b
+        for _ in range(8):
+            c = ((c << 1) ^ poly) & 0xFF if (c & 0x80) else (c << 1) & 0xFF
+    return c ^ xorout
+
+
+def _crc16(data, poly, init, xorout=0, refin=False, refout=False):
+    def rev(x, n):
+        r = 0
+        for _ in range(n):
+            r = (r << 1) | (x & 1); x >>= 1
+        return r
+    c = init
+    for b in data:
+        if refin:
+            b = rev(b, 8)
+        c ^= b << 8
+        for _ in range(8):
+            c = ((c << 1) ^ poly) & 0xFFFF if (c & 0x8000) else (c << 1) & 0xFFFF
+    if refout:
+        c = rev(c, 16)
+    return c ^ xorout
+
+
+def crc_scan(bits):
+    """Try common CRC/checksum algorithms over a frame's bytes; report matches.
+
+    Assumes the trailing 1 (8-bit) or 2 (16-bit) bytes are the check value over
+    the bytes before them — the usual ISM/embedded layout — and reports any
+    algorithm whose computed value matches. Pure; the selftest appends a known
+    CRC-8 and asserts it's found.
+    """
+    bits = "".join(c for c in (bits or "") if c in "01")
+    nbytes = len(bits) // 8
+    if nbytes < 2:
+        return {"checked": True, "matches": []}
+    data = [int(bits[i * 8:i * 8 + 8], 2) for i in range(nbytes)]
+    matches = []
+    algos8 = [("CRC-8", 0x07, 0x00, 0x00),
+              ("CRC-8/MAXIM-DOW", 0x31, 0x00, 0x00),
+              ("CRC-8/CCITT", 0x07, 0x00, 0x00)]
+    # 8-bit check over all preceding bytes
+    payload8, chk8 = data[:-1], data[-1]
+    for name, poly, init, xor in algos8:
+        if _crc8(payload8, poly, init, xor) == chk8:
+            matches.append({"algo": name, "width": 8, "over_bytes": len(payload8)})
+    if _sum8(payload8) == chk8:
+        matches.append({"algo": "checksum-8 (sum)", "width": 8, "over_bytes": len(payload8)})
+    if _xor8(payload8) == chk8:
+        matches.append({"algo": "XOR-8", "width": 8, "over_bytes": len(payload8)})
+    # 16-bit check over all preceding bytes (big-endian trailer)
+    if nbytes >= 3:
+        payload16 = data[:-2]
+        chk16 = (data[-2] << 8) | data[-1]
+        algos16 = [("CRC-16/CCITT-FALSE", 0x1021, 0xFFFF, 0x0000, False, False),
+                   ("CRC-16/XMODEM", 0x1021, 0x0000, 0x0000, False, False),
+                   ("CRC-16/ARC (IBM)", 0x8005, 0x0000, 0x0000, True, True),
+                   ("CRC-16/MODBUS", 0x8005, 0xFFFF, 0x0000, True, True)]
+        for name, poly, init, xor, ri, ro in algos16:
+            if _crc16(payload16, poly, init, xor, ri, ro) == chk16:
+                matches.append({"algo": name, "width": 16, "over_bytes": len(payload16)})
+    return {"checked": True, "matches": matches}
+
+
+def _sum8(data):
+    return sum(data) & 0xFF
+
+
+def _xor8(data):
+    x = 0
+    for b in data:
+        x ^= b
+    return x
+
+
+def frames(name=None, bits=None, line=None):
+    """Web entry: analyse a bitstream (raw or line-decoded) into frame structure.
+
+    Pass ``bits`` directly (the demod output the page holds); ``line`` optionally
+    line-decodes first (manchester / nrzi / diff_manchester).
+    """
+    if not bits:
+        return {"ok": False, "error": "no bits — demodulate a signal first"}
+    b = line_decode(bits, line) if line and line != "raw" else bits
+    r = frame_analysis(b)
+    r["line"] = (line or "raw")
+    r["decoded_bits"] = b
+    return r
+
+
+# --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
 
@@ -793,6 +1015,35 @@ def selftest():
         check("classify: OOK symbol rate ~1000 baud",
               abs(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"] - 1000) < 200,
               str(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"]))
+        # --- Segment 4: line coding, frame analysis, CRC scan (pure) ---
+        check("line: Manchester 01/10 -> 1/0",
+              line_decode("0110", "manchester") == "10")
+        check("line: NRZI transition=1",
+              line_decode("0" + "0110", "nrzi") == "0101")
+        # a fixed frame repeated 5x with a preamble, plus a rolling last byte
+        fixed = "10101010" + "11000011" + "01011010"   # preamble + code
+        _roll = ["00000001", "01000010", "10000011", "11000100", "00100101"]
+        fr_frames = "".join(fixed + _roll[i] for i in range(5))
+        fa = frame_analysis(fr_frames)
+        check("frame: repeated-frame period detected (=frame length)",
+              fa["ok"] and fa["period_bits"] == len(fixed) + 8, str(fa.get("period_bits")))
+        check("frame: fixed bits stable, rolling byte flagged varying",
+              fa["repeats"] == 5 and any(p >= len(fixed) for p in fa["varying_positions"])
+              and fa["stable_fraction"] < 1.0, str(fa.get("varying_positions"))[:60])
+        # CRC-8 appended over a known payload is recovered
+        payload = [0xDE, 0xAD, 0xBE, 0xEF]
+        crcv = _crc8(payload, 0x07)
+        pbits = "".join(format(b, "08b") for b in payload + [crcv])
+        cs = crc_scan(pbits)
+        check("crc: appended CRC-8 is detected",
+              any(m["algo"] == "CRC-8" and m["width"] == 8 for m in cs["matches"]), str(cs))
+        # a checksum-8 (sum) trailer is recovered too
+        pay2 = [0x10, 0x20, 0x33]
+        cbits = "".join(format(b, "08b") for b in pay2 + [_sum8(pay2)])
+        check("crc: checksum-8 (sum) detected",
+              any("sum" in m["algo"] for m in crc_scan(cbits)["matches"]))
+        check("frames: web wrapper line-decodes + analyses",
+              frames(bits="0110" * 8, line="manchester").get("ok") is True)
         p = psd("synth", n=256)
         check("psd: freqs+db aligned, noise below peak",
               len(p["freqs_mhz"]) == len(p["db"]) and max(p["db"]) - p["noise_db"] > 15)
