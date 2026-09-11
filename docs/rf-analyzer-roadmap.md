@@ -214,6 +214,37 @@ WAV-IQ, decoded (protocol) `.sub` re-synthesis, `.sigmf` tar archives.
 - *Done when:* a 30 s / 120 MB capture is analysable on a 512 MB board and several
   simultaneous carriers are individually selectable.
 
+## Segment 11 — Device fingerprint & bit workbench ✅ shipped
+Close the loop from *"what kind of signal"* to *"what device, saying what"* — the
+two moves that turn a mystery emitter into a cracked one.
+- **Device fingerprinting** — measured features (modulation, frame length,
+  CRC family, centre frequency) are scored against a catalog of ISM device
+  *families* (EV1527/PT2262 fixed-code remotes, KeeLoq rolling-code, TPMS,
+  weather/environmental, security sensors, LoRa). Returns **ranked candidates**
+  with a confidence and a per-feature rationale — honest family guesses, never a
+  single certainty. rtl_433 stays the heavyweight decoder for supported devices;
+  this classifies the ones it can't, and the unknowns. Auto-runs after *Frames*.
+- **Bit workbench** — transforms on the recovered bitstream *before* framing:
+  **invert** (complement), **reflect** (MSB↔LSB per byte), and a **bit offset**
+  to slide the byte grid — on top of the existing Manchester/NRZI/diff line codes.
+- **CRC brute-force** (`crc_brute`) — finds a check trailer that validates even
+  when a leading header byte isn't covered, in either 16-bit endianness; surfaced
+  alongside the per-candidate CRC scan.
+- **Cross-capture field diff** (`field_diff`) — the "press the button twice"
+  move: add ≥2 captures of the same emitter to a compare set, and it aligns their
+  frames and separates **fixed** bits (device ID / type) from **varying** ones,
+  classing each varying field as a monotonic **counter**, a high-entropy
+  **rolling** code, or plain varying. This is how you reverse a protocol no
+  library knows.
+- Pure cores selftested (90/90): bit transforms, `crc_brute` (CRC-8 after a
+  skipped length byte), `field_diff` (fixed ID + counter + rolling separated),
+  and `fingerprint` (EV1527 / TPMS / LoRa families). Routes: `GET
+  /analyze/fingerprint`, `POST /analyze/diff`, and transform params on `GET
+  /analyze/frames`.
+- *Next here:* a **PWM/PPM symbol decoder** (many OOK remotes are pulse-width
+  coded, not raw levels) so the fingerprint's frame-length claim lines up with a
+  clean symbol stream; a bigger signature catalog.
+
 ---
 
 *Scope honesty:* this will be a genuinely strong, on-device analyzer — not a
