@@ -202,7 +202,14 @@ that requests windows:
   click a row to zoom to it and pre-fill the demodulator.
 - **Demodulate** — shift to the marked signal, low-pass to a chosen bandwidth,
   and demodulate **OOK/AM** (envelope) or **FSK/FM** (instantaneous frequency),
-  estimate the symbol rate and **recover a bitstream**.
+  estimate the symbol rate and **recover a bitstream** (view as binary or **hex**,
+  optional **Manchester** decode, copy to clipboard).
+- **Decoded devices** — runs **rtl_433** over the whole capture (`-r`) to *name*
+  known ISM devices (TPMS / weather / remotes / doorbells…) straight from the
+  recording, with their decoded fields.
+
+Roadmap for where this is going (built in segments): see
+[rf-analyzer-roadmap.md](rf-analyzer-roadmap.md).
 
 Routes (read-only over `data/iq_captures/`, so no dongle needed):
 `/api/net/rtl/analyze/{list,summary,spectrogram,psd,envelope,bursts,demod}` and

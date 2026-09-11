@@ -405,6 +405,83 @@ def demod(name, mode="ook", f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
             "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff}
 
 
+def _parse_rtl433_lines(text):
+    """Parse rtl_433 -F json output into deduped device records (pure)."""
+    _meta = ("time", "mod", "freq", "freq1", "freq2", "rssi", "snr", "noise",
+             "model", "id", "channel")
+    agg = {}
+    events = 0
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or "model" not in obj:
+            continue
+        events += 1
+        key = "%s/%s/%s" % (obj.get("model"), obj.get("id"), obj.get("channel"))
+        fields = {k: v for k, v in obj.items() if k not in _meta}
+        rec = agg.get(key)
+        if rec:
+            rec["count"] += 1; rec["fields"] = fields
+            if obj.get("rssi") is not None:
+                rec["rssi"] = obj.get("rssi")
+        else:
+            agg[key] = {"model": str(obj.get("model")), "id": obj.get("id"),
+                        "channel": obj.get("channel"), "rssi": obj.get("rssi"),
+                        "fields": fields, "count": 1}
+    return list(agg.values()), events
+
+
+def decode433(name):
+    """Offline-decode a capture with rtl_433 to *name* known ISM devices.
+
+    rtl_433 reads the raw file directly (``-r`` + ``-s`` sample rate), so this
+    names TPMS / weather / remotes / doorbells straight from a recording. The
+    ``.sigmf-data`` is symlinked to a ``.cu8`` name so rtl_433 detects the format.
+    """
+    import subprocess
+    import tempfile
+    data_p, meta_p = _paths(name)
+    if not os.path.exists(data_p):
+        raise ValueError("capture not found")
+    meta = {}
+    if os.path.exists(meta_p):
+        try:
+            meta = json.load(open(meta_p))
+        except ValueError:
+            meta = {}
+    g = meta.get("global", {}); c = (meta.get("captures") or [{}])[0]
+    sr = int(g.get("core:sample_rate") or 0)
+    fc = int(c.get("core:frequency") or 0)
+    rtl433 = "/usr/bin/rtl_433" if os.path.exists("/usr/bin/rtl_433") else "rtl_433"
+    dur = (os.path.getsize(data_p) / 2 / sr) if sr else 2.0
+    tmpd = tempfile.mkdtemp(prefix="rtl433-")
+    link = os.path.join(tmpd, "capture.cu8")
+    try:
+        os.symlink(os.path.abspath(data_p), link)
+        cmd = [rtl433, "-r", link, "-F", "json", "-M", "level"]
+        if sr:
+            cmd += ["-s", str(sr)]
+        if fc:
+            cmd += ["-f", str(fc)]
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=max(30, int(dur * 15)))
+        devices, events = _parse_rtl433_lines(p.stdout)
+        return {"ok": True, "tool": "rtl_433", "devices": devices, "events": events,
+                "sr_hz": sr, "center_hz": fc}
+    except FileNotFoundError:
+        return {"ok": False, "error": "rtl_433 not installed (apt install rtl-433)"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "rtl_433 timed out on this capture"}
+    finally:
+        import shutil
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
@@ -485,6 +562,20 @@ def selftest():
         sq = (np.arange(1000) // 10) % 2
         baud, bits = _slice_bits(sq.astype(bool), 10000.0)
         check("bits: clean 10-sample square -> ~1000 baud", abs(baud - 1000) < 120, str(baud))
+        # rtl_433 JSON parser: dedupe by model/id, keep fields + count
+        devs, ev = _parse_rtl433_lines(
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.5,"rssi":-8}\n'
+            'noise line\n'
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.7,"rssi":-7}\n'
+            '{"model":"Nexus-TH","id":9,"channel":1,"humidity":55}')
+        check("rtl433: parses + dedupes device events",
+              ev == 3 and len(devs) == 2
+              and any(d["model"] == "Acurite-Tower" and d["count"] == 2
+                      and d["fields"].get("temperature_C") == 21.7 for d in devs)
+              and any(d["model"] == "Nexus-TH" and d["channel"] == 1 for d in devs), str(devs))
+        d433 = decode433("synth")     # a tone+OOK synth won't match a real protocol
+        check("rtl433: runs on a capture, returns a clean (empty) device list",
+              d433.get("ok") is True and isinstance(d433.get("devices"), list), str(d433)[:120])
     finally:
         globals()["_cap_dir"] = saved
         import shutil
