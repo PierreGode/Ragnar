@@ -22210,7 +22210,8 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_analyze_frames():
         a = request.args
         bits = (a.get('bits', '') or '')[:8192]     # cap: a frame bitstream, not a file
-        return _analyze(sigmf_analyzer.frames, bits=bits, line=a.get('line', 'raw'))
+        return _analyze(sigmf_analyzer.frames, bits=bits, line=a.get('line', 'raw'),
+                        period=_fl(a.get('period')))
 
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
