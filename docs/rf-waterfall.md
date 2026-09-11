@@ -230,6 +230,19 @@ that requests windows:
   read and a scatter plot, plus rotation-invariant differential bits. PSK only,
   no QAM — see the [roadmap](rf-analyzer-roadmap.md) (Segment 9) for the honest
   scope.
+- **Upload / import** — an **⤴ Upload** button brings recordings from other
+  tools into the capture list so every analyzer tool works on them:
+  - **Flipper Zero `.sub` (RAW)** — a `.sub` isn't IQ, it's an OOK pulse-timing
+    list, so Ragnar **synthesises a baseband IQ waveform** from it (carrier
+    on/off at the file's frequency, +40 kHz off DC). It then opens as a real
+    burst — spectrogram, demod, frames/CRC all work. (Decoded *protocol* `.sub`
+    files have no RAW data; re-record as **Read RAW** on the Flipper.)
+  - **Raw IQ** (`.cu8`/`.cs8`/`.cs16`/`.cf32`) — you supply the datatype, sample
+    rate and centre frequency, and a SigMF `.sigmf-meta` wrapper is written.
+  - **SigMF** (`.sigmf-meta` + `.sigmf-data`) recorded on another SDR/box —
+    stored as-is (any datatype the loader understands: cu8/cs8/cs16/cu16/cf32).
+  Untrusted input is sanitised, size-capped (keep under ~50 MB on a 512 MB Pi),
+  and read only as data. Route `POST /analyze/upload`.
 
 - **Ask the RF analyst (AI)** — when Ragnar's AI service is enabled (Settings ›
   AI), the analyzer shows an assistant card that reuses that service

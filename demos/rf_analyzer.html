@@ -129,6 +129,7 @@
     <span class="lbl">Capture</span>
     <select id="cap"><option value="">— loading… —</option></select>
     <button id="reload" title="Refresh the capture list">&#8635;</button>
+    <button id="uploadbtn" title="Import a recording — Flipper .sub, raw IQ, or a SigMF pair">⤴ Upload</button>
     <span class="lbl">Palette</span>
     <div class="seg" id="palette"></div>
     <span class="spacer"></span>
@@ -139,6 +140,19 @@
   <div id="kbdpop" class="kbdpop" hidden>
     <b>Keyboard shortcuts</b>
     <div><kbd>R</kbd> reset zoom · <kbd>B</kbd> back · <kbd>[</kbd>/<kbd>]</kbd> palette · <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd> zoom/measure/annotate · <kbd>D</kbd> demodulate · <kbd>L</kbd> copy link · <kbd>?</kbd> this help</div>
+  </div>
+  <div id="uploadpop" class="kbdpop" hidden>
+    <b>Import a recording</b>
+    <div style="margin-top:6px"><input type="file" id="upfile" multiple></div>
+    <div id="uprawopts" class="symbar" style="margin-top:8px" hidden>
+      <span class="lbl">Raw IQ</span>
+      <span class="lbl">datatype</span>
+      <select id="updtype"><option>cu8</option><option>cs8</option><option>cs16</option><option>cf32</option></select>
+      <span class="lbl">sample rate</span><input id="uprate" size="9" placeholder="Hz e.g. 2000000">
+      <span class="lbl">centre</span><input id="upfreq" size="7" placeholder="MHz">
+    </div>
+    <div style="margin-top:8px"><button id="updo" class="go">Import</button> <span id="upstat" class="symout"></span></div>
+    <div style="margin-top:6px;color:var(--muted)"><b>Flipper .sub</b> (RAW → synthesised OOK) · <b>SigMF</b> (select both the .sigmf-meta and .sigmf-data) · <b>raw IQ</b> (.cu8/.cs8/.cs16/.cf32 — set datatype + sample rate + centre). Keep files under ~50&nbsp;MB on a 512&nbsp;MB Pi.</div>
   </div>
 
   <div class="stats" id="stats"></div>
@@ -1008,6 +1022,40 @@
     else { try{ var ta=document.createElement('textarea'); ta.value=url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(true); }catch(e){ done(false); } }
   });
   $('kbdhelp').addEventListener('click',function(){ $('kbdpop').hidden=!$('kbdpop').hidden; });
+
+  // ---- upload / import (Flipper .sub · raw IQ · SigMF pair) ----
+  $('uploadbtn').addEventListener('click',function(){ $('uploadpop').hidden=!$('uploadpop').hidden; });
+  $('upfile').addEventListener('change',function(){
+    var fs=Array.prototype.slice.call($('upfile').files||[]);
+    // raw-IQ params only matter when a file isn't a .sub or SigMF sidecar
+    var needsRaw=fs.some(function(f){ return !/\.(sub|sigmf-meta|sigmf-data)$/i.test(f.name); });
+    $('uprawopts').hidden=!needsRaw;
+  });
+  $('updo').addEventListener('click',function(){
+    var fs=Array.prototype.slice.call($('upfile').files||[]);
+    if(!fs.length){ $('upstat').textContent='pick a file first'; return; }
+    var subs=fs.filter(function(f){return /\.sub$/i.test(f.name);});
+    var metas=fs.filter(function(f){return /\.sigmf-meta$/i.test(f.name);});
+    var datas=fs.filter(function(f){return /\.sigmf-data$/i.test(f.name);});
+    var others=fs.filter(function(f){return !/\.(sub|sigmf-meta|sigmf-data)$/i.test(f.name);});
+    var jobs=[];
+    subs.forEach(function(f){ var fd=new FormData(); fd.append('file',f); jobs.push(fd); });
+    if(metas.length&&datas.length){ var fd=new FormData(); fd.append('file',datas[0]); fd.append('meta',metas[0]); jobs.push(fd); }
+    else if(metas.length||datas.length){ $('upstat').textContent='SigMF needs BOTH the .sigmf-meta and .sigmf-data'; return; }
+    others.forEach(function(f){ var fd=new FormData(); fd.append('file',f);
+      fd.append('datatype',$('updtype').value); fd.append('sample_rate',($('uprate').value||'').trim());
+      fd.append('frequency',String((parseFloat($('upfreq').value)||0)*1e6)); jobs.push(fd); });
+    if(!jobs.length){ $('upstat').textContent='nothing to import'; return; }
+    $('upstat').textContent='importing…';
+    var last=null, msgs=[];
+    jobs.reduce(function(p,fd){ return p.then(function(){
+      return fetch('/api/net/rtl/analyze/upload',{method:'POST',body:fd}).then(function(r){return r.json();}).then(function(r){
+        if(r&&r.ok){ last=r.name; msgs.push('✓ '+esc(r.name)); } else { msgs.push('⚠ '+esc((r&&r.error)||'failed')); } });
+    }); }, Promise.resolve()).then(function(){
+      $('upstat').innerHTML=msgs.join(' · ');
+      if(last){ loadList(last); setTimeout(function(){ $('uploadpop').hidden=true; $('upfile').value=''; },1200); }
+    }).catch(function(){ $('upstat').textContent='upload request failed'; });
+  });
 
   // ---- keyboard shortcuts (ignored while typing in a field) ----
   function palStep(dir){ var i=ORDER.indexOf(pal); if(i<0)i=0; var next=ORDER[(i+dir+ORDER.length)%ORDER.length];

@@ -191,6 +191,20 @@ Turn "here are bits" into "here is what it says."
   filter), absolute-phase ambiguity resolved only by the differential decode; it's
   a constellation demod, not a full frame decoder — pair it with Frames / CRC.
 
+## Upload / import ✅ shipped (out-of-band, user-requested)
+Bring recordings from other tools into the capture list (an **⤴ Upload** button):
+- **Flipper Zero `.sub` (RAW)** → not IQ but an OOK pulse-timing list, so a
+  baseband IQ waveform is **synthesised** (carrier on/off at the file's frequency)
+  and it opens as a real burst — spectrogram/demod/frames/CRC all work.
+- **Raw IQ** (`.cu8/.cs8/.cs16/.cf32`) → a SigMF meta wrapper is written from the
+  datatype / sample-rate / centre-freq you give.
+- **SigMF** (meta + data) recorded elsewhere → stored as-is.
+`load()` was extended to decode cf32/cs16/cu16 alongside cu8/cs8. Pure helpers
+(`parse_flipper_sub` / `flipper_raw_to_cu8` / `import_*`) selftested (77/77 incl.
+a Flipper .sub → loadable OOK capture → bursts); route `POST /analyze/upload`
+(size-capped, names sanitised, bytes read as data only). *Left for later:*
+WAV-IQ, decoded (protocol) `.sub` re-synthesis, `.sigmf` tar archives.
+
 ## Segment 10 — Multi-signal & long captures  (next)
 - **Tiled / decimated spectrogram overview** for long or large captures — pan/zoom
   without loading the whole file (Pi-Zero-safe; overlaps the skipped Segment 5).

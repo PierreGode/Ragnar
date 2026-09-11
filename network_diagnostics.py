@@ -22236,6 +22236,52 @@ def register_network_diagnostics(app, logger=None):
                         baud_hz=_fl(a.get('baud')),
                         order=int(_order) if _order else None)
 
+    @app.route('/api/net/rtl/analyze/upload', methods=['POST'])
+    def net_rtl_analyze_upload():
+        # Import a recording from another tool as a capture: Flipper .sub RAW,
+        # raw IQ (+ datatype/rate/freq), or a SigMF pair. Untrusted bytes — read
+        # as data only, size-capped so a small board can't OOM.
+        _MAX = 80 * 1024 * 1024
+        files = request.files
+        main = files.get('file')
+        if not main or not main.filename:
+            return jsonify({"ok": False, "error": "no file uploaded"})
+        fname = main.filename
+        data = main.read()
+        if len(data) > _MAX:
+            return jsonify({"ok": False, "error": "file too large (%d MB) — keep uploads under 80 MB for on-box analysis"
+                            % (len(data) // (1024 * 1024))})
+        low = fname.lower()
+        try:
+            if low.endswith('.sub'):
+                r = sigmf_analyzer.import_flipper_sub(data.decode('utf-8', 'replace'), fname)
+            elif (low.endswith('.sigmf-meta') or low.endswith('.sigmf-data')
+                  or files.get('meta') or files.get('data')):
+                metaf, dataf = files.get('meta'), files.get('data')
+                if low.endswith('.sigmf-meta'):
+                    meta_text = data.decode('utf-8', 'replace')
+                    db = dataf.read() if dataf else b''
+                    dn = dataf.filename if dataf else fname
+                elif low.endswith('.sigmf-data'):
+                    db, dn = data, fname
+                    meta_text = metaf.read().decode('utf-8', 'replace') if metaf else ''
+                else:
+                    meta_text = metaf.read().decode('utf-8', 'replace') if metaf else ''
+                    db = dataf.read() if dataf else b''
+                    dn = dataf.filename if dataf else fname
+                if not meta_text or not db:
+                    return jsonify({"ok": False, "error": "SigMF needs both the .sigmf-meta and .sigmf-data files"})
+                if len(db) > _MAX:
+                    return jsonify({"ok": False, "error": "the .sigmf-data is too large — keep under 80 MB"})
+                r = sigmf_analyzer.import_sigmf(meta_text, db, dn)
+            else:
+                r = sigmf_analyzer.import_raw_iq(data, fname, request.form.get('datatype', 'cu8'),
+                                                 _fl(request.form.get('sample_rate')),
+                                                 _fl(request.form.get('frequency')))
+        except Exception as exc:                     # never leak a stack to the page
+            return jsonify({"ok": False, "error": "import failed: " + str(exc)})
+        return jsonify(r)
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args

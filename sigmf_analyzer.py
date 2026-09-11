@@ -72,12 +72,25 @@ def load(name):
     fs = float(g.get("core:sample_rate") or 0) or 1.0
     fc = float(cap0.get("core:frequency") or 0)
     dtype = (g.get("core:datatype") or "cu8").lower()
-    raw = np.fromfile(data_p, dtype=np.uint8)
-    raw = raw[: (raw.size // 2) * 2]                 # whole I/Q pairs only
-    if dtype.startswith("cs8"):                       # signed 8-bit
+    # Decode the common SigMF/SDR interleaved-IQ datatypes to normalised complex64.
+    if dtype.startswith("cf64"):                      # complex float64
+        a = np.fromfile(data_p, dtype="<f8"); a = a[: (a.size // 2) * 2].astype(np.float32)
+        iq = a[0::2] + 1j * a[1::2]
+    elif dtype.startswith("cf32"):                    # complex float32 (GNU Radio, IQEngine)
+        a = np.fromfile(data_p, dtype="<f4"); a = a[: (a.size // 2) * 2]
+        iq = a[0::2] + 1j * a[1::2]
+    elif dtype.startswith("ci16") or dtype.startswith("cs16"):   # signed 16-bit
+        a = np.fromfile(data_p, dtype="<i2").astype(np.float32); a = a[: (a.size // 2) * 2]
+        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+    elif dtype.startswith("cu16"):                    # unsigned 16-bit
+        a = np.fromfile(data_p, dtype="<u2").astype(np.float32) - 32768.0; a = a[: (a.size // 2) * 2]
+        iq = (a[0::2] + 1j * a[1::2]) / 32768.0
+    elif dtype.startswith("cs8") or dtype.startswith("ci8"):     # signed 8-bit
+        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
         s = raw.astype(np.int8).astype(np.float32)
         iq = (s[0::2] + 1j * s[1::2]) / 128.0
     else:                                             # cu8 (default): unsigned 8-bit
+        raw = np.fromfile(data_p, dtype=np.uint8); raw = raw[: (raw.size // 2) * 2]
         f = raw.astype(np.float32) - 127.5
         iq = (f[0::2] + 1j * f[1::2]) / 127.5
     iq = iq.astype(np.complex64)
@@ -1607,6 +1620,203 @@ def parse_ai_actions(text):
 
 
 # --------------------------------------------------------------------------
+# Upload / import — bring recordings from OTHER tools into the capture list so
+# every analyzer tool works on them. Three kinds:
+#   * SigMF (.sigmf-meta + .sigmf-data)  -> stored as-is (any datatype load()
+#     understands).
+#   * Raw IQ (.cu8/.cs8/.cs16/.cf32/…)   -> a .sigmf-meta wrapper is written from
+#     the sample-rate / centre-freq / datatype the user supplies.
+#   * Flipper Zero .sub RAW              -> it isn't IQ, it's an OOK pulse-timing
+#     list, so a baseband IQ waveform is SYNTHESISED from it (carrier on/off) and
+#     it opens as a real burst (spectrogram + demod + frames/CRC all work).
+# Untrusted input: names are sanitised, size is capped by the caller, and the
+# bytes are only ever read as data (numpy), never executed. Pure parse/synth
+# helpers are selftested.
+# --------------------------------------------------------------------------
+
+# datatypes load() can decode (so an uploaded raw file / SigMF actually opens)
+_IMPORT_DTYPES = ("cu8", "cs8", "ci8", "cs16", "ci16", "ci16_le", "cu16",
+                  "cu16_le", "cf32", "cf32_le", "cf64", "cf64_le")
+
+
+def _unique_name(stem):
+    """A capture name (sanitised) that doesn't clash with an existing capture."""
+    base = _safe(stem) or "upload"
+    d = _cap_dir()
+    name, i = base, 1
+    while os.path.exists(os.path.join(d, name + ".sigmf-meta")):
+        name = base + "-" + str(i); i += 1
+    return name
+
+
+def _write_capture(name, data_bytes, fs, fc, datatype, description=None):
+    """Write a .sigmf-data + .sigmf-meta pair into the capture dir. Returns name."""
+    from datetime import datetime, timezone
+    os.makedirs(_cap_dir(), exist_ok=True)
+    data_p, meta_p = _paths(name)
+    with open(data_p, "wb") as fh:
+        fh.write(data_bytes)
+    g = {"core:datatype": datatype, "core:sample_rate": float(fs), "core:version": "1.0.0"}
+    if description:
+        g["core:description"] = description
+    meta = {"global": g,
+            "captures": [{"core:sample_start": 0, "core:frequency": float(fc or 0),
+                          "core:datetime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}],
+            "annotations": []}
+    with open(meta_p, "w") as fh:
+        json.dump(meta, fh)
+    return name
+
+
+def parse_flipper_sub(text):
+    """Parse a Flipper Zero Sub-GHz .sub file (pure).
+
+    RAW captures carry ``RAW_Data:`` lines of signed µs durations (+ = carrier
+    on, − = off). Returns {ok, kind:'raw', freq_hz, preset, modulation, pulses,
+    n_pulses, total_us}. Decoded (protocol) .sub files have no RAW_Data — those
+    return {ok:False, kind:'protocol', …} with a helpful message.
+    """
+    freq = None; preset = None; proto = None; pulses = []; kv = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or ":" not in line:
+            continue
+        k, v = line.split(":", 1); k = k.strip(); v = v.strip()
+        if k == "Frequency":
+            try: freq = int(float(v))
+            except ValueError: pass
+        elif k == "Preset":
+            preset = v
+        elif k == "Protocol":
+            proto = v
+        elif k == "RAW_Data":
+            for tok in v.split():
+                try: pulses.append(int(tok))
+                except ValueError: pass
+        else:
+            kv[k] = v
+    mod = "OOK" if (preset and "ook" in preset.lower()) else \
+          ("FSK" if (preset and "fsk" in preset.lower()) else "OOK")
+    if pulses:
+        return {"ok": True, "kind": "raw", "freq_hz": freq, "preset": preset,
+                "protocol": proto, "modulation": mod, "pulses": pulses,
+                "n_pulses": len(pulses), "total_us": sum(abs(p) for p in pulses)}
+    return {"ok": False, "kind": "protocol", "freq_hz": freq, "preset": preset,
+            "protocol": proto, "fields": kv,
+            "error": "This is a decoded (protocol) .sub, not a RAW capture. On the "
+                     "Flipper use Read RAW (or Sub-GHz → Read RAW) and import that .sub."}
+
+
+def flipper_raw_to_cu8(pulses, fs=250000.0, off_hz=40000.0, amp=0.6, noise=0.02,
+                       max_samples=12_000_000):
+    """Synthesise a baseband cu8 IQ waveform from Flipper RAW pulses (pure).
+
+    OOK: +duration → carrier on, −duration → off. The carrier sits at +off_hz so
+    it isn't glued to DC. Returns (interleaved-cu8 bytes, actual fs) — fs is
+    reduced if the run would exceed max_samples so a small board can't OOM.
+    """
+    import numpy as np
+    total_us = sum(abs(int(p)) for p in pulses)
+    if total_us <= 0:
+        return b"", fs
+    n = int(total_us * 1e-6 * fs)
+    if n > max_samples:                    # keep it Pi-safe: stretch the sample period to fit
+        fs = fs * max_samples / n; n = max_samples
+    env = np.zeros(n, dtype=np.float32); idx = 0
+    for p in pulses:
+        ns = int(round(abs(int(p)) * 1e-6 * fs))
+        if ns <= 0:
+            continue
+        end = idx + ns
+        if end > n: end = n
+        if int(p) > 0:
+            env[idx:end] = 1.0
+        idx = end
+        if idx >= n:
+            break
+    t = np.arange(n)
+    iq = (env * amp) * np.exp(2j * np.pi * (off_hz / fs) * t)
+    iq = iq + (np.random.randn(n) + 1j * np.random.randn(n)).astype(np.complex64) * noise
+    I = np.clip(np.round(iq.real * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    Q = np.clip(np.round(iq.imag * 127.5 + 127.5), 0, 255).astype(np.uint8)
+    inter = np.empty(2 * n, dtype=np.uint8); inter[0::2] = I; inter[1::2] = Q
+    return inter.tobytes(), fs
+
+
+def import_flipper_sub(text, filename="flipper.sub"):
+    """Import a Flipper .sub RAW capture: synthesise IQ, write it, return {ok,name,…}."""
+    p = parse_flipper_sub(text)
+    if not p.get("ok"):
+        return p
+    freq = p.get("freq_hz") or 433_920_000
+    off = 40000.0
+    data, fs = flipper_raw_to_cu8(p["pulses"], off_hz=off)
+    if not data:
+        return {"ok": False, "error": "no usable pulses in the .sub RAW data"}
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    name = _unique_name("flipper-" + stem)
+    desc = ("Imported from Flipper .sub RAW"
+            + (" (" + p["preset"] + ")" if p.get("preset") else "")
+            + " — " + (p.get("modulation") or "OOK") + " envelope synthesised at +"
+            + str(int(off / 1000)) + " kHz")
+    _write_capture(name, data, fs, freq - off, "cu8", desc)   # centre offset so the signal sits at the .sub frequency
+    return {"ok": True, "name": name, "kind": "flipper", "freq_hz": freq,
+            "preset": p.get("preset"), "modulation": p.get("modulation"),
+            "n_pulses": p["n_pulses"], "sample_rate_hz": round(fs, 1),
+            "samples": len(data) // 2}
+
+
+def import_raw_iq(data_bytes, filename, datatype="cu8", sample_rate=0, frequency=0):
+    """Import a raw interleaved-IQ file by writing a SigMF meta wrapper for it."""
+    dt = (datatype or "cu8").lower()
+    if dt not in _IMPORT_DTYPES:
+        return {"ok": False, "error": "unsupported datatype '" + dt + "'"}
+    try:
+        fs = float(sample_rate or 0)
+    except (TypeError, ValueError):
+        fs = 0.0
+    if fs <= 0:
+        return {"ok": False, "error": "a sample rate is required for raw IQ"}
+    if not data_bytes:
+        return {"ok": False, "error": "empty file"}
+    stem = os.path.splitext(os.path.basename(filename or "rawiq"))[0]
+    name = _unique_name(stem)
+    _write_capture(name, data_bytes, fs, frequency or 0, dt, "Imported raw IQ (" + dt + ")")
+    return {"ok": True, "name": name, "kind": "raw_iq", "datatype": dt,
+            "sample_rate_hz": fs, "bytes": len(data_bytes)}
+
+
+def import_sigmf(meta_text, data_bytes, filename="capture"):
+    """Import a SigMF pair (meta JSON text + data bytes), stored as-is."""
+    try:
+        meta = json.loads(meta_text)
+    except (ValueError, TypeError):
+        return {"ok": False, "error": "invalid .sigmf-meta JSON"}
+    g = meta.get("global", {}) if isinstance(meta, dict) else {}
+    dt = (g.get("core:datatype") or "").lower()
+    if not dt:
+        return {"ok": False, "error": ".sigmf-meta is missing core:datatype"}
+    if not any(dt.startswith(x) for x in ("cu8", "cs8", "ci8", "cs16", "ci16",
+                                          "cu16", "cf32", "cf64")):
+        return {"ok": False, "error": "unsupported SigMF datatype '" + dt + "'"}
+    if not data_bytes:
+        return {"ok": False, "error": "empty .sigmf-data"}
+    stem = os.path.basename(filename or "capture")
+    for suf in (".sigmf-data", ".sigmf-meta", ".sigmf"):
+        if stem.endswith(suf):
+            stem = stem[:-len(suf)]; break
+    stem = os.path.splitext(stem)[0]
+    name = _unique_name(stem or "sigmf")
+    os.makedirs(_cap_dir(), exist_ok=True)
+    data_p, meta_p = _paths(name)
+    with open(data_p, "wb") as fh:
+        fh.write(data_bytes)
+    with open(meta_p, "w") as fh:
+        json.dump(meta, fh)
+    return {"ok": True, "name": name, "kind": "sigmf", "datatype": dt}
+
+
+# --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
 
@@ -1917,6 +2127,54 @@ def selftest():
         d433 = decode433("synth")     # a tone+OOK synth won't match a real protocol
         check("rtl433: runs on a capture, returns a clean (empty) device list",
               d433.get("ok") is True and isinstance(d433.get("devices"), list), str(d433)[:120])
+        # --- Upload / import: Flipper .sub RAW, raw IQ, SigMF, extended datatypes ---
+        import numpy as np
+        # a Flipper RAW .sub: repeated OOK bursts (500us on / 500us off) at 433.92 MHz
+        _pulses = " ".join((["500 -500"] * 20 + ["-4000"]) * 3)
+        _sub = ("Filetype: Flipper SubGhz RAW File\nVersion: 1\nFrequency: 433920000\n"
+                "Preset: FuriHalSubGhzPresetOok650Async\nProtocol: RAW\nRAW_Data: " + _pulses + "\n")
+        _pf = parse_flipper_sub(_sub)
+        check("import: Flipper .sub RAW parsed (freq + pulses)",
+              _pf["ok"] and _pf["freq_hz"] == 433_920_000 and _pf["n_pulses"] > 100
+              and _pf["modulation"] == "OOK", str({k: _pf.get(k) for k in ("ok", "freq_hz", "n_pulses")}))
+        _fr = import_flipper_sub(_sub, "garage.sub")
+        check("import: Flipper .sub -> a loadable OOK capture at the right freq",
+              _fr["ok"] and abs(load(_fr["name"])[2] - (433_920_000 - 40000)) < 1, str(_fr)[:120])
+        _fb = bursts(_fr["name"])
+        check("import: synthesised Flipper capture shows OOK bursts",
+              _fb["ok"] and _fb["count"] >= 1, str(_fb.get("count")))
+        _fp = parse_flipper_sub("Filetype: Flipper SubGhz RAW File\nFrequency: 433920000\n"
+                                "Protocol: Princeton\nKey: 00 00 00 00 12 34 56\nBit: 24\nTE: 400\n")
+        check("import: decoded (protocol) .sub is rejected with guidance",
+              _fp["ok"] is False and _fp["kind"] == "protocol" and "RAW" in _fp["error"])
+        # raw IQ (cf32) round-trips: write a tone, import, load it back
+        _n = 20000; _tt = np.arange(_n) / 1_000_000.0
+        _tone = np.exp(2j * np.pi * 120000 * _tt).astype(np.complex64)
+        _cf32 = np.empty(_n * 2, dtype=np.float32); _cf32[0::2] = _tone.real; _cf32[1::2] = _tone.imag
+        _ri = import_raw_iq(_cf32.tobytes(), "tone.cf32", "cf32", 1_000_000, 433_000_000)
+        check("import: raw cf32 IQ imported + wrapped as SigMF", _ri["ok"], str(_ri)[:120])
+        _sm = summary(_ri["name"])
+        check("import: cf32 capture loads + peak near +120 kHz",
+              _sm["ok"] and abs(_sm["peak_offset_hz"] - 120000) < 6000, str(_sm.get("peak_offset_hz")))
+        check("import: raw IQ needs a sample rate",
+              import_raw_iq(b"\x00\x01", "x.cu8", "cu8", 0, 0).get("ok") is False)
+        check("import: unknown datatype rejected",
+              import_raw_iq(b"\x00", "x.zzz", "zzz", 1e6, 0).get("ok") is False)
+        # cs16 datatype decodes through the extended load()
+        _i16 = np.empty(_n * 2, dtype="<i2")
+        _i16[0::2] = (_tone.real * 20000).astype("<i2"); _i16[1::2] = (_tone.imag * 20000).astype("<i2")
+        _r16 = import_raw_iq(_i16.tobytes(), "tone16.cs16", "cs16", 1_000_000, 433_000_000)
+        check("import: cs16 raw IQ loads (extended datatypes)",
+              _r16["ok"] and summary(_r16["name"])["ok"], str(_r16)[:80])
+        # SigMF pair passthrough
+        _sd = (np.random.randint(0, 256, 4000, dtype=np.uint8)).tobytes()
+        _meta = json.dumps({"global": {"core:datatype": "cu8", "core:sample_rate": 1_000_000, "core:version": "1.0.0"},
+                            "captures": [{"core:sample_start": 0, "core:frequency": 868_000_000}], "annotations": []})
+        _si = import_sigmf(_meta, _sd, "elsewhere.sigmf-meta")
+        check("import: SigMF pair stored + listed",
+              _si["ok"] and any(c["name"] == _si["name"] for c in list_captures()["captures"]), str(_si)[:80])
+        check("import: SigMF meta without datatype rejected",
+              import_sigmf('{"global":{}}', b"\x00", "x").get("ok") is False)
     finally:
         globals()["_cap_dir"] = saved
         import shutil
