@@ -148,9 +148,11 @@
           </div>
           <button id="manch" aria-pressed="false" title="Manchester decode (01→1, 10→0)">Manchester</button>
           <button id="copybits" title="Copy the bits to the clipboard">Copy</button>
+          <button id="frames" title="Find preamble, repeated frames (fixed vs rolling bits) and scan for a CRC/checksum">⌗ Frames</button>
         </div>
         <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
         <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
+        <div id="framesout" class="msg" hidden></div>
       </div>
       <div class="card" style="margin-top:16px">
         <h3>Modulation <span class="hint">classify + constellation + instantaneous — uses the marker &amp; BW</span>
@@ -394,6 +396,25 @@
     Array.prototype.forEach.call($('bitview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-v')===bitview?'true':'false');}); renderBits();});
   $('manch').addEventListener('click',function(){ manch=!manch; $('manch').setAttribute('aria-pressed',manch?'true':'false'); renderBits();});
   $('copybits').addEventListener('click',function(){ var t=S._bitsShown||''; if(navigator.clipboard)navigator.clipboard.writeText(t).catch(function(){}); });
+  $('frames').addEventListener('click',function(){
+    var d=S.demod; if(!d||!d.bits){ return; }
+    var fo=$('framesout'); fo.hidden=false; fo.textContent='analysing frames…';
+    api('/api/net/rtl/analyze/frames',{bits:d.bits, line:(manch?'manchester':'raw')}).then(function(r){
+      if(!r||!r.ok){ fo.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'no structure')+'</span>'; return; }
+      var lines=[];
+      lines.push('preamble '+r.preamble_bits+' bits · '
+        +(r.period_bits?('frame period <b>'+r.period_bits+' bits</b> · '+r.repeats+' repeats · '
+          +Math.round(r.stable_fraction*100)+'% bits stable'+(r.identical?' (identical)':'')):'<span style="color:var(--muted)">no repeated frame found (jitter or single frame)</span>'));
+      lines.push('consensus: <span style="color:var(--live)">'+esc(r.consensus_hex)+'</span>');
+      if(r.period_bits && r.varying_positions && r.varying_positions.length)
+        lines.push('<span style="color:var(--accent)">rolling/varying bit positions:</span> '+r.varying_positions.join(', '));
+      var cm=(r.crc&&r.crc.matches)||[];
+      lines.push(cm.length
+        ? '<span style="color:var(--live)">✓ CRC match:</span> '+cm.map(function(m){return esc(m.algo)+' ('+m.width+'-bit over '+m.over_bytes+' bytes)';}).join(' · ')
+        : '<span style="color:var(--muted)">no common CRC/checksum matched the trailer</span>');
+      fo.innerHTML=lines.join('<br>');
+    }).catch(function(){ fo.textContent='frame request failed'; });
+  });
   function toHex(b){var h=[];for(var i=0;i+8<=b.length;i+=8)h.push(('0'+parseInt(b.substr(i,8),2).toString(16)).slice(-2));
     var r=b.length%8; var s=h.join(' '); if(r)s+=' +'+b.substr(b.length-r); return s;}
   function manchester(b){var o='';for(var i=0;i+2<=b.length;i+=2){var p=b.substr(i,2);o+=(p==='01'?'1':(p==='10'?'0':'?'));}return o;}

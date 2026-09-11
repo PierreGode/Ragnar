@@ -59,12 +59,24 @@ Turn "here are bits" into "here is what it says."
 - *Left for later:* robust cyclostationary symbol-rate; PSK order (BPSK/QPSK)
   from constellation clustering; OFDM detection.
 
-## Segment 4 — Protocol framework
-- A pluggable **frame decoder** stage over recovered bits (preamble/sync search,
-  field layouts, bit/byte order).
-- A **CRC/checksum** library (common ISM polynomials) to validate frames.
-- Deeper rtl_433 hooks (per-protocol enable, confidence, raw pulse view).
-- *Done when:* a user can define a simple frame layout and read decoded fields.
+## Segment 4 — Protocol framework ✅ shipped
+- **Line coding** decode: Manchester (01→1/10→0), NRZI, differential-Manchester
+  (`line_decode`).
+- **Frame structure** (`frame_analysis`): leading-preamble detection, repeated-
+  frame **period** via normalised autocorrelation (picks the fundamental, not a
+  harmonic), aligns the repeats and marks a **per-bit stability map** — the fixed
+  code/address vs the rolling/counter/checksum bits — plus a consensus hex.
+- **CRC/checksum scanner** (`crc_scan`): tries CRC-8 (× variants), CRC-16
+  (CCITT/XMODEM/ARC/MODBUS), sum-8 and XOR-8 over the trailing byte(s) and reports
+  matches — a ⌗ Frames button on the demod card.
+- *Validated:* 8 new selftests (30/30) — line decode, period=fundamental, fixed-
+  vs-rolling map, and an appended CRC-8 / sum-8 recovered. **Honest limit:** on
+  real run-length-recovered bits, timing jitter can defeat autocorrelation period
+  detection (real garage capture peaked at 0.43, below the 0.5 confidence gate) —
+  it then degrades to one frame + hex + CRC scan. Clean/clock-recovered bitstreams
+  align well. (Clock recovery is a later-segment improvement.)
+- *Left for later:* deeper rtl_433 hooks (per-protocol enable, raw pulse view),
+  user-defined field layouts.
 
 ## Segment 5 — Scale & Pi-safety
 - **Memory-budgeted loading** — refuse or auto-window captures larger than a
