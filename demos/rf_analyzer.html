@@ -65,6 +65,9 @@
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .symbar{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .symbar input{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+  .symbar .symout{color:var(--cyan)}
   .annbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 14px;border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;color:var(--muted)}
   .annbar .ann{display:inline-flex;align-items:center;gap:6px;background:rgba(63,181,107,.12);border:1px solid rgba(63,181,107,.4);border-radius:14px;padding:3px 6px 3px 10px;color:var(--live)}
   .annbar .ann b{color:var(--ink);font-weight:600}
@@ -196,7 +199,13 @@
           </div>
           <div style="flex:1 1 220px;min-width:180px">
             <div class="seg" id="instview" style="margin:2px 0 6px"><button data-iv="iq">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
-            <canvas class="rowcanvas" id="inst" style="height:150px"></canvas>
+            <canvas class="rowcanvas" id="inst" style="height:150px;cursor:col-resize"></canvas>
+            <div class="symbar">
+              <button id="symtog" aria-pressed="false" title="Overlay symbol-period boundaries — drag across one symbol on the plot to set the rate">⌗ Symbols</button>
+              <span class="lbl">baud</span><input id="symbaud" type="number" step="any" style="width:74px" title="Symbol rate (Hz). Drag one symbol width on the plot, or pull from the demod.">
+              <button id="symfrom" title="Use the demodulator's estimated symbol rate">⟳ demod</button>
+              <span id="symout" class="symout"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -554,7 +563,43 @@
     else if(instView==='phase') plot('inst',d.t,d.phase_deg,'rgb(129,140,248)',false);
     else if(instView==='iq') plot2('inst',d.i,d.q,'rgb(245,185,66)','rgb(56,189,201)');  // sample plot: I & Q
     else plot('inst',d.t,d.freq_hz,'rgb(245,185,66)',false);
+    drawSymbols(d);        // overlay symbol-period boundaries if enabled
   }
+  // ---- symbol-period cursor (inspectrum-style): overlay symbol boundaries on
+  // the derived plots; set the rate by dragging one symbol width or typing baud.
+  var symState={on:false, baud:0, off:0};
+  function drawSymbols(d){
+    if(!symState.on || !(symState.baud>0) || !d||!d.t||!d.t.length) return;
+    var c=$('inst'),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    var g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    var tL=d.t[d.t.length-1]||0; if(tL<=0) return;
+    var per=1/symState.baud; if(per>=tL) return;         // <2 symbols: nothing useful
+    var off=symState.off-Math.floor(symState.off/per)*per;
+    var xOf=function(t){return 6+(t/tL)*(W-12);};
+    g.strokeStyle='rgba(245,185,66,0.55)'; g.lineWidth=1; g.setLineDash([2,3]);
+    var cnt=0; for(var t=off;t<=tL+1e-12 && cnt<500;t+=per,cnt++){var x=xOf(t);g.beginPath();g.moveTo(x,0);g.lineTo(x,H);g.stroke();}
+    g.setLineDash([]);
+  }
+  function updateSymOut(){ var o=$('symout'),d=S._inst; if(!o)return;
+    if(!symState.on||!(symState.baud>0)){ o.textContent=''; return; }
+    var tL=(d&&d.t&&d.t.length)?d.t[d.t.length-1]:0, nsym=tL>0?Math.floor(tL*symState.baud):0;
+    o.textContent='period '+(1e3/symState.baud).toFixed(3)+' ms · '+nsym+' symbols'; }
+  function setBaud(b){ symState.baud=(b>0?b:0); if($('symbaud')) $('symbaud').value=(b>0?Math.round(b):''); updateSymOut(); if(S._inst) drawInst(S._inst); }
+  $('symtog').addEventListener('click',function(){ symState.on=!symState.on; $('symtog').setAttribute('aria-pressed',symState.on?'true':'false'); updateSymOut(); if(S._inst) drawInst(S._inst); });
+  $('symbaud').addEventListener('change',function(){ if(!symState.on){symState.on=true;$('symtog').setAttribute('aria-pressed','true');} setBaud(parseFloat($('symbaud').value)||0); });
+  $('symfrom').addEventListener('click',function(){ var b=(S.demod&&S.demod.baud)||(S.classifyData&&S.classifyData.symbol_rate_hz)||0;
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); } });
+  (function(){var c=$('inst'),down=null;
+    function tAt(ev){var r=c.getBoundingClientRect(),W=r.width,d=S._inst; if(!d||!d.t||!d.t.length)return null;
+      var tL=d.t[d.t.length-1]||0, x=(ev.clientX-r.left-6)/(W-12); x=Math.max(0,Math.min(1,x)); return x*tL;}
+    c.addEventListener('mousedown',function(e){ var t=tAt(e); if(t!=null) down={t:t}; });
+    window.addEventListener('mouseup',function(e){ if(!down)return; var t=tAt(e),d=down; down=null; if(t==null||!S._inst)return;
+      var tL=S._inst.t[S._inst.t.length-1]||1, dt=Math.abs(t-d.t);
+      symState.on=true; $('symtog').setAttribute('aria-pressed','true');
+      if(dt>tL/500){ symState.off=Math.min(t,d.t); setBaud(1/dt); }   // drag = one symbol width -> baud
+      else { symState.off=d.t; updateSymOut(); if(S._inst) drawInst(S._inst); }  // click = shift the grid
+    });
+  })();
   // two overlaid traces (raw I and Q), symmetric about 0 — the "sample plot".
   function plot2(id,a,b,ca,cb){
     var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
