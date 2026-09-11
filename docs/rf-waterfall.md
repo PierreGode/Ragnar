@@ -210,6 +210,11 @@ that requests windows:
 - **Decoded devices** — runs **rtl_433** over the whole capture (`-r`) to *name*
   known ISM devices (TPMS / weather / remotes / doorbells…) straight from the
   recording, with their decoded fields.
+- **Constellation demod (PSK)** — on one clean burst, recover symbol timing +
+  carrier and classify the constellation (BPSK / QPSK / 8PSK) with an EVM/SNR
+  read and a scatter plot, plus rotation-invariant differential bits. PSK only,
+  no QAM — see the [roadmap](rf-analyzer-roadmap.md) (Segment 9) for the honest
+  scope.
 
 - **Ask the RF analyst (AI)** — when Ragnar's AI service is enabled (Settings ›
   AI), the analyzer shows an assistant card that reuses that service

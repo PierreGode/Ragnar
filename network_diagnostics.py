@@ -22228,6 +22228,14 @@ def register_network_diagnostics(app, logger=None):
                         f_offset_hz=_fl(a.get('f_offset')) or 0.0,
                         t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), amax_hz=_fl(a.get('amax')))
 
+    @app.route('/api/net/rtl/analyze/constellation_demod', methods=['GET'])
+    def net_rtl_analyze_constellation_demod():
+        a = request.args
+        _order = _fl(a.get('order'))
+        return _analyze(sigmf_analyzer.constellation_demod, **_sel(a),
+                        baud_hz=_fl(a.get('baud')),
+                        order=int(_order) if _order else None)
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args
