@@ -39,6 +39,8 @@
   .stat .v.cy{color:var(--cyan)} .stat .v.pk{color:var(--accent)}
   .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start}
   @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  /* three advanced-DSP cards side by side, full width; wraps to 2/1 when narrow */
+  .dsprow{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-top:16px;align-items:start}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .card h3{font-family:var(--head);font-weight:600;font-size:13px;margin:0;padding:10px 14px;border-bottom:1px solid var(--line-soft);
     background:var(--panel-2);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
@@ -249,14 +251,19 @@
         <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
         <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
       </div>
-      <div class="card" style="margin-top:16px">
+    </div>
+  </div>
+
+  <!-- advanced DSP: three cards side by side, full width -->
+  <div class="dsprow">
+      <div class="card">
         <h3>Cyclostationary <span class="hint">finds the symbol rate even in random data — a cyclic feature the PSD can't show</span>
           <button class="go" id="runcyc" style="margin-left:auto">Detect</button></h3>
         <div id="cycout" class="msg">Centre on a signal (marker), then Detect — peaks mark candidate symbol rates.</div>
         <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="cyccanvas" style="height:140px"></canvas></div>
         <div id="cycpeaks" class="symbar" style="padding:0 14px 10px"></div>
       </div>
-      <div class="card" style="margin-top:16px">
+      <div class="card">
         <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
           <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
         <div class="symbar" style="padding:6px 14px 8px">
@@ -269,7 +276,7 @@
         <div style="padding:0 14px 12px"><canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas></div>
         <div id="lorasyms" class="msg" style="font-size:11px"></div>
       </div>
-      <div class="card" style="margin-top:16px">
+      <div class="card">
         <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
           <button class="go" id="runpsk" style="margin-left:auto">Demod</button></h3>
         <div class="symbar" style="padding:6px 14px 8px">
@@ -283,7 +290,6 @@
         <div id="pskbits" class="bits" hidden></div>
         <div class="msg" style="font-size:11px;padding:2px 14px 12px">PSK only (BPSK / QPSK / 8PSK). Bits are shown <b>differentially</b> (rotation-invariant): PSK has an absolute-phase ambiguity, so the absolute bits may be rotated by a constant. Not a full frame decoder — pair with the Frames / CRC tools.</div>
       </div>
-    </div>
   </div>
 
   <div class="card aicard" id="aicard" style="margin-top:16px" hidden>
