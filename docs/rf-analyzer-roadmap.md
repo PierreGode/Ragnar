@@ -47,6 +47,7 @@ Turn "here are bits" into "here is what it says."
 - *Left for later:* on-spectrogram persistence, prettier ruler tick steps.
 
 ## Segment 3 — Modulation analysis ✅ shipped
+- **Derived plots** (added 2026-09-11): the instantaneous toggle now includes an **I/Q sample plot** alongside Freq/Amp/Phase — inspectrum's full derived-plot set.
 - **IQ constellation** for a selection (scatter) + **instantaneous** amplitude /
   frequency / phase (toggle) — a Modulation card driven by the marker + BW.
 - **Automatic modulation classification** — a feature decision tree (envelope
