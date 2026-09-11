@@ -297,38 +297,69 @@ def envelope(name, t0=None, t1=None, n=1200):
             "db": [round(x, 1) for x in db.tolist()]}
 
 
-def bursts(name, thresh_db=8.0, min_ms=0.2):
-    """Detect on/off bursts from the amplitude envelope (energy above noise)."""
+def _merge_runs(on, gap, min_len):
+    """Boolean 'on' -> list of (start,end) sample runs, bridging gaps < ``gap``
+    samples and dropping runs shorter than ``min_len``. Pure (numpy).
+
+    Gap-bridging is what turns a *pulse train* (an OOK/FSK packet is many short
+    pulses) into one burst per transmission, and a held/continuous carrier into a
+    single long burst — instead of hundreds of per-pulse fragments or nothing.
+    """
+    import numpy as np
+    if not on.any():
+        return []
+    d = np.diff(on.astype(np.int8))
+    starts = list(np.where(d == 1)[0] + 1)
+    ends = list(np.where(d == -1)[0] + 1)
+    if on[0]:
+        starts = [0] + starts
+    if on[-1]:
+        ends = ends + [len(on)]
+    runs = list(zip(starts, ends))
+    merged = []
+    for s, e in runs:
+        if merged and s - merged[-1][1] < gap:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return [(s, e) for s, e in merged if e - s >= min_len]
+
+
+def bursts(name, thresh_db=8.0, min_ms=1.0, gap_ms=25.0):
+    """Detect transmissions (bursts/packets) from the amplitude envelope.
+
+    A press of an OOK/FSK remote is a *train* of short pulses; ``gap_ms`` bridges
+    the inter-pulse gaps so each transmission is one burst (not one per pulse),
+    while ``min_ms`` rejects lone noise spikes. A near-100%-duty carrier collapses
+    to a single long burst. The noise floor is a low percentile so a busy band
+    still yields a sane threshold.
+    """
     import numpy as np
     iq, fs, fc, _ = load(name)
     mag = np.abs(iq)
-    # coarse envelope to keep it cheap on long captures
-    step = max(1, len(mag) // 200000)
+    step = max(1, len(mag) // 200000)          # coarse envelope; cheap on long files
     env = mag[::step]
     env_fs = fs / step
     edb = 20.0 * np.log10(env + 1e-6)
-    nf = float(np.percentile(edb, 30))
+    nf = float(np.percentile(edb, 20))
     on = edb > (nf + thresh_db)
+    gap = int(gap_ms / 1000.0 * env_fs)
+    min_len = max(1, int(min_ms / 1000.0 * env_fs))
     out = []
-    i, N = 0, len(on)
-    min_samp = int(min_ms / 1000.0 * env_fs)
-    while i < N:
-        if on[i]:
-            j = i
-            while j < N and on[j]:
-                j += 1
-            if j - i >= max(1, min_samp):
-                seg = iq[i * step: j * step]
-                fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
-                pk = int(np.argmax(db))
-                out.append({"t0": round(i / env_fs, 5), "t1": round(j / env_fs, 5),
-                            "dur_ms": round((j - i) / env_fs * 1000, 3),
-                            "f_mhz": round((fc + float(fr[pk])) / 1e6, 4),
-                            "bw_khz": round(occupied_bw(fr, db) / 1e3, 1),
-                            "peak_db": round(float(db[pk]), 1)})
-            i = j
-        else:
-            i += 1
+    for s, e in _merge_runs(on, gap, min_len):
+        seg = iq[s * step: e * step]
+        if len(seg) < 8:
+            continue
+        fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
+        pk = int(np.argmax(db))
+        # duty: fraction of the merged span actually above threshold (packet vs CW)
+        duty = float(on[s:e].mean()) if e > s else 1.0
+        out.append({"t0": round(s / env_fs, 5), "t1": round(e / env_fs, 5),
+                    "dur_ms": round((e - s) / env_fs * 1000, 2),
+                    "f_mhz": round((fc + float(fr[pk])) / 1e6, 4),
+                    "bw_khz": round(occupied_bw(fr, db) / 1e3, 1),
+                    "duty": round(duty, 2),
+                    "peak_db": round(float(db[pk]), 1)})
     return {"ok": True, "bursts": out[:200], "count": len(out)}
 
 
@@ -405,6 +436,83 @@ def demod(name, mode="ook", f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
             "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff}
 
 
+def _parse_rtl433_lines(text):
+    """Parse rtl_433 -F json output into deduped device records (pure)."""
+    _meta = ("time", "mod", "freq", "freq1", "freq2", "rssi", "snr", "noise",
+             "model", "id", "channel")
+    agg = {}
+    events = 0
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line[0] != "{":
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or "model" not in obj:
+            continue
+        events += 1
+        key = "%s/%s/%s" % (obj.get("model"), obj.get("id"), obj.get("channel"))
+        fields = {k: v for k, v in obj.items() if k not in _meta}
+        rec = agg.get(key)
+        if rec:
+            rec["count"] += 1; rec["fields"] = fields
+            if obj.get("rssi") is not None:
+                rec["rssi"] = obj.get("rssi")
+        else:
+            agg[key] = {"model": str(obj.get("model")), "id": obj.get("id"),
+                        "channel": obj.get("channel"), "rssi": obj.get("rssi"),
+                        "fields": fields, "count": 1}
+    return list(agg.values()), events
+
+
+def decode433(name):
+    """Offline-decode a capture with rtl_433 to *name* known ISM devices.
+
+    rtl_433 reads the raw file directly (``-r`` + ``-s`` sample rate), so this
+    names TPMS / weather / remotes / doorbells straight from a recording. The
+    ``.sigmf-data`` is symlinked to a ``.cu8`` name so rtl_433 detects the format.
+    """
+    import subprocess
+    import tempfile
+    data_p, meta_p = _paths(name)
+    if not os.path.exists(data_p):
+        raise ValueError("capture not found")
+    meta = {}
+    if os.path.exists(meta_p):
+        try:
+            meta = json.load(open(meta_p))
+        except ValueError:
+            meta = {}
+    g = meta.get("global", {}); c = (meta.get("captures") or [{}])[0]
+    sr = int(g.get("core:sample_rate") or 0)
+    fc = int(c.get("core:frequency") or 0)
+    rtl433 = "/usr/bin/rtl_433" if os.path.exists("/usr/bin/rtl_433") else "rtl_433"
+    dur = (os.path.getsize(data_p) / 2 / sr) if sr else 2.0
+    tmpd = tempfile.mkdtemp(prefix="rtl433-")
+    link = os.path.join(tmpd, "capture.cu8")
+    try:
+        os.symlink(os.path.abspath(data_p), link)
+        cmd = [rtl433, "-r", link, "-F", "json", "-M", "level"]
+        if sr:
+            cmd += ["-s", str(sr)]
+        if fc:
+            cmd += ["-f", str(fc)]
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=max(30, int(dur * 15)))
+        devices, events = _parse_rtl433_lines(p.stdout)
+        return {"ok": True, "tool": "rtl_433", "devices": devices, "events": events,
+                "sr_hz": sr, "center_hz": fc}
+    except FileNotFoundError:
+        return {"ok": False, "error": "rtl_433 not installed (apt install rtl-433)"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "rtl_433 timed out on this capture"}
+    finally:
+        import shutil
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+
 # --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
@@ -466,8 +574,15 @@ def selftest():
               len(raw) == sp["w"] * sp["h"] and sp["w"] == 200 and sp["h"] == 120, str((sp["w"], sp["h"], len(raw))))
         check("spectrogram: dynamic range present (floor<ceil)", sp["ceil_db"] > sp["floor_db"])
         b = bursts("synth")
-        check("bursts: the mid-record OOK burst is detected",
-              b["count"] >= 1 and any(0.07 < x["t0"] < 0.12 for x in b["bursts"]), str(b["count"]))
+        check("bursts: the OOK train merges into one burst (not per-pulse)",
+              1 <= b["count"] <= 3 and any(0.07 < x["t0"] < 0.12 for x in b["bursts"]), str(b["count"]))
+        check("bursts: burst carries a duty-cycle", b["bursts"] and "duty" in b["bursts"][0])
+        # _merge_runs: bridge small gaps into one run, drop short spikes
+        import numpy as np
+        onarr = np.array([1,1,0,1,1,0,0,0,0,0,0,0,0,0,0,1] + [0]*20, dtype=bool)
+        mr = _merge_runs(onarr, gap=3, min_len=2)     # first two runs merge (gap 1), lone tail spike dropped
+        check("merge: bridges small gaps, drops short spikes",
+              len(mr) == 1 and mr[0][0] == 0 and mr[0][1] == 5, str(mr))
         d = demod("synth", mode="ook", f_offset_hz=150_000, bw_hz=60_000, t0=0.08, t1=0.12)
         check("demod: OOK recovers ~2000 baud",
               d["ok"] and abs(d["baud"] - 2000) < 400, str(d.get("baud")))
@@ -485,6 +600,20 @@ def selftest():
         sq = (np.arange(1000) // 10) % 2
         baud, bits = _slice_bits(sq.astype(bool), 10000.0)
         check("bits: clean 10-sample square -> ~1000 baud", abs(baud - 1000) < 120, str(baud))
+        # rtl_433 JSON parser: dedupe by model/id, keep fields + count
+        devs, ev = _parse_rtl433_lines(
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.5,"rssi":-8}\n'
+            'noise line\n'
+            '{"time":"..","model":"Acurite-Tower","id":42,"temperature_C":21.7,"rssi":-7}\n'
+            '{"model":"Nexus-TH","id":9,"channel":1,"humidity":55}')
+        check("rtl433: parses + dedupes device events",
+              ev == 3 and len(devs) == 2
+              and any(d["model"] == "Acurite-Tower" and d["count"] == 2
+                      and d["fields"].get("temperature_C") == 21.7 for d in devs)
+              and any(d["model"] == "Nexus-TH" and d["channel"] == 1 for d in devs), str(devs))
+        d433 = decode433("synth")     # a tone+OOK synth won't match a real protocol
+        check("rtl433: runs on a capture, returns a clean (empty) device list",
+              d433.get("ok") is True and isinstance(d433.get("devices"), list), str(d433)[:120])
     finally:
         globals()["_cap_dir"] = saved
         import shutil

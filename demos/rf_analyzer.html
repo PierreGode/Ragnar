@@ -111,10 +111,15 @@
         <canvas class="rowcanvas" id="psd"></canvas>
       </div>
       <div class="card" style="margin-top:16px">
+        <h3>Decoded devices <span class="hint">rtl_433 — names known ISM devices in the capture</span>
+          <button class="go" id="rundec" style="margin-left:auto">Decode</button></h3>
+        <div id="decout" class="msg">Hit Decode to run rtl_433 over the whole capture (TPMS · weather · remotes · doorbells…).</div>
+      </div>
+      <div class="card" style="margin-top:16px">
         <h3>Bursts / packets <span class="hint" id="bcount"></span></h3>
         <div style="max-height:220px;overflow:auto">
-          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>dB</th></tr></thead>
-            <tbody id="btbody"><tr><td class="empty" colspan="5">—</td></tr></tbody></table>
+          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>duty</th><th>dB</th></tr></thead>
+            <tbody id="btbody"><tr><td class="empty" colspan="6">—</td></tr></tbody></table>
         </div>
       </div>
       <div class="card" style="margin-top:16px">
@@ -126,6 +131,13 @@
           </div>
           <span class="lbl">BW kHz</span><input id="bw" type="number" value="60" step="any">
           <button class="go" id="run">Demodulate</button>
+          <span class="spacer"></span>
+          <div class="seg" id="bitview">
+            <button data-v="bin" aria-pressed="true">Bin</button>
+            <button data-v="hex">Hex</button>
+          </div>
+          <button id="manch" aria-pressed="false" title="Manchester decode (01→1, 10→0)">Manchester</button>
+          <button id="copybits" title="Copy the bits to the clipboard">Copy</button>
         </div>
         <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
         <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
@@ -295,25 +307,55 @@
   function loadBursts(){ api('/api/net/rtl/analyze/bursts',{name:S.name}).then(function(d){
     var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
     if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="5">No bursts above the noise floor.</td></tr>'; return; }
-    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
+    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+(x.duty!=null?Math.round(x.duty*100)+'%':'—')+'</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
     tb.querySelectorAll('tr').forEach(function(tr){tr.addEventListener('click',function(){var x=b[+tr.getAttribute('data-i')];
       var pad=(x.t1-x.t0)*0.5+0.002; S.view={t0:Math.max(0,x.t0-pad),t1:Math.min(S.dur,x.t1+pad),
         f0:x.f_mhz*1e6-Math.max(x.bw_khz*1e3*3,30e3), f1:x.f_mhz*1e6+Math.max(x.bw_khz*1e3*3,30e3)};
       S.marker={t:(x.t0+x.t1)/2, f:x.f_mhz*1e6}; if(x.bw_khz)$('bw').value=Math.max(10,Math.round(x.bw_khz*1.5)); refreshWindow(); setAx();});});
   });}
 
-  // ---- demod ----
-  var mode='ook';
+  // ---- decode (rtl_433 over the whole capture) ----
+  function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  $('rundec').addEventListener('click',function(){
+    if(!S.name)return; $('decout').innerHTML='running rtl_433 over the capture…';
+    api('/api/net/rtl/analyze/decode433',{name:S.name}).then(function(d){
+      if(!d||!d.ok){ $('decout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'decode failed')+'</span>'; return; }
+      var dv=d.devices||[];
+      if(!dv.length){ $('decout').innerHTML='<span style="color:var(--muted)">No known devices decoded ('+(d.events||0)+' candidate events). This capture may be a plain carrier or a protocol rtl_433 doesn\'t know — try the demodulator below.</span>'; return; }
+      $('decout').innerHTML='<table class="btable"><thead><tr><th>Model</th><th>ID</th><th>×</th><th>Fields</th></tr></thead><tbody>'
+        +dv.map(function(x){var f=Object.keys(x.fields||{}).map(function(k){return esc(k)+'='+esc(String(x.fields[k]));}).join(', ');
+          var id=(x.id!=null)?x.id:(x.channel!=null?('ch'+x.channel):'—');
+          return '<tr><td style="color:var(--cyan)">'+esc(x.model)+'</td><td>'+esc(String(id))+'</td><td>'+(x.count||1)+'</td><td class="meta" style="color:var(--ink-dim);font-size:11px">'+f+'</td></tr>';}).join('')
+        +'</tbody></table>';
+    }).catch(function(){ $('decout').textContent='decode request failed'; });
+  });
+
+  // ---- demod + bit views ----
+  var mode='ook', bitview='bin', manch=false;
   $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; mode=b.getAttribute('data-m');
     Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});});
+  $('bitview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; bitview=b.getAttribute('data-v');
+    Array.prototype.forEach.call($('bitview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-v')===bitview?'true':'false');}); renderBits();});
+  $('manch').addEventListener('click',function(){ manch=!manch; $('manch').setAttribute('aria-pressed',manch?'true':'false'); renderBits();});
+  $('copybits').addEventListener('click',function(){ var t=S._bitsShown||''; if(navigator.clipboard)navigator.clipboard.writeText(t).catch(function(){}); });
+  function toHex(b){var h=[];for(var i=0;i+8<=b.length;i+=8)h.push(('0'+parseInt(b.substr(i,8),2).toString(16)).slice(-2));
+    var r=b.length%8; var s=h.join(' '); if(r)s+=' +'+b.substr(b.length-r); return s;}
+  function manchester(b){var o='';for(var i=0;i+2<=b.length;i+=2){var p=b.substr(i,2);o+=(p==='01'?'1':(p==='10'?'0':'?'));}return o;}
+  function renderBits(){
+    var d=S.demod; if(!d){ return; }
+    var bits=manch?manchester(d.bits||''):(d.bits||'');
+    var body=(bitview==='hex')?toHex(bits):(bits.replace(/(.{8})/g,'$1 ').trim());
+    S._bitsShown=body;
+    $('bits').textContent='baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+(manch?' (Manchester)':'')
+      +'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
+  }
   $('run').addEventListener('click',function(){
     if(!S.name){return;}
     var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
     $('bits').textContent='demodulating…';
     api('/api/net/rtl/analyze/demod',{name:S.name,mode:mode,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1}).then(function(d){
-      if(!d||!d.ok){ $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
-      plot('wave',d.wave,d.wave,'rgb(245,185,66)',false);
-      $('bits').textContent='baud ≈ '+d.baud+'   ('+d.n_bits+' bits @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz offset, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz)\n'+(d.bits||'(no bits recovered)');
+      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
+      S.demod=d; plot('wave',d.wave,d.wave,'rgb(245,185,66)',false); renderBits();
     }).catch(function(){ $('bits').textContent='demod request failed'; });
   });
 
