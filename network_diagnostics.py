@@ -22154,7 +22154,14 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_analyze_psd():
         a = request.args
         return _analyze(sigmf_analyzer.psd, name=a.get('name', ''),
-                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), mode=a.get('mode', 'avg'))
+
+    @app.route('/api/net/rtl/analyze/measure', methods=['GET'])
+    def net_rtl_analyze_measure():
+        a = request.args
+        return _analyze(sigmf_analyzer.measure, name=a.get('name', ''),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')),
+                        f0=_fl(a.get('f0')), f1=_fl(a.get('f1')))
 
     @app.route('/api/net/rtl/analyze/envelope', methods=['GET'])
     def net_rtl_analyze_envelope():
@@ -22164,7 +22171,13 @@ def register_network_diagnostics(app, logger=None):
 
     @app.route('/api/net/rtl/analyze/bursts', methods=['GET'])
     def net_rtl_analyze_bursts():
-        return _analyze(sigmf_analyzer.bursts, name=request.args.get('name', ''))
+        a = request.args
+        kw = {"name": a.get('name', '')}
+        if _fl(a.get('gap_ms')) is not None:
+            kw["gap_ms"] = _fl(a.get('gap_ms'))
+        if _fl(a.get('thresh_db')) is not None:
+            kw["thresh_db"] = _fl(a.get('thresh_db'))
+        return _analyze(sigmf_analyzer.bursts, **kw)
 
     @app.route('/api/net/rtl/analyze/demod', methods=['GET'])
     def net_rtl_analyze_demod():

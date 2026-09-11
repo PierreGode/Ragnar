@@ -88,10 +88,10 @@ def load(name):
 
 
 def list_captures():
-    """Every capture in the dir with both sidecars, newest first."""
+    """Every capture in the dir with both sidecars, **newest first** (by mtime)."""
     import glob
-    out = []
-    for meta_p in sorted(glob.glob(os.path.join(_cap_dir(), "*.sigmf-meta")), reverse=True):
+    rows = []
+    for meta_p in glob.glob(os.path.join(_cap_dir(), "*.sigmf-meta")):
         base = os.path.basename(meta_p)[:-len(".sigmf-meta")]
         data_p = meta_p[:-len(".sigmf-meta")] + ".sigmf-data"
         if not os.path.exists(data_p):
@@ -101,14 +101,16 @@ def list_captures():
             g, c = m.get("global", {}), (m.get("captures") or [{}])[0]
             fs = float(g.get("core:sample_rate") or 0)
             nbytes = os.path.getsize(data_p)
-            out.append({"name": base, "sr_hz": fs,
-                        "center_hz": c.get("core:frequency"),
-                        "datetime": c.get("core:datetime"),
-                        "bytes": nbytes,
-                        "duration_s": round(nbytes / 2 / fs, 3) if fs else None})
+            mtime = os.path.getmtime(data_p)
+            rows.append((mtime, {"name": base, "sr_hz": fs,
+                                 "center_hz": c.get("core:frequency"),
+                                 "datetime": c.get("core:datetime"),
+                                 "bytes": nbytes, "mtime": mtime,
+                                 "duration_s": round(nbytes / 2 / fs, 3) if fs else None}))
         except (OSError, ValueError):
             continue
-    return {"captures": out}
+    rows.sort(key=lambda r: r[0], reverse=True)      # newest capture first
+    return {"captures": [r[1] for r in rows]}
 
 
 # --------------------------------------------------------------------------
@@ -120,8 +122,10 @@ def _noise_floor_db(psd_db):
     return float(np.percentile(psd_db, 30))
 
 
-def welch_psd(iq, fs, nfft=4096):
-    """Averaged power spectrum (fftshifted), returns (freqs_hz, db). Pure-ish."""
+def welch_psd(iq, fs, nfft=4096, reduce="mean"):
+    """Power spectrum (fftshifted), returns (freqs_hz, db). ``reduce`` is
+    ``"mean"`` (averaged / Welch) or ``"max"`` (max-hold across time — reveals
+    intermittent carriers a mean would bury). Pure-ish."""
     import numpy as np
     n = len(iq)
     if n < nfft:
@@ -130,12 +134,19 @@ def welch_psd(iq, fs, nfft=4096):
     ncol = max(1, (n - nfft) // (nfft // 2) + 1)
     ncol = min(ncol, 400)
     starts = np.linspace(0, max(0, n - nfft), ncol).astype(int)
-    acc = np.zeros(nfft, dtype=np.float64)
+    acc = None
     for s in starts:
         seg = iq[s:s + nfft] * win
         S = np.fft.fftshift(np.fft.fft(seg))
-        acc += (S.real ** 2 + S.imag ** 2)
-    acc /= len(starts)
+        p = (S.real ** 2 + S.imag ** 2)
+        if acc is None:
+            acc = p.astype(np.float64)
+        elif reduce == "max":
+            np.maximum(acc, p, out=acc)
+        else:
+            acc += p
+    if reduce != "max":
+        acc /= len(starts)
     db = 10.0 * np.log10(acc / (nfft * float(np.sum(win ** 2))) + 1e-12)
     freqs = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs))
     return freqs, db
@@ -261,21 +272,54 @@ def spectrogram(name, t0=None, t1=None, f0=None, f1=None, w=900, h=360, nfft=102
             "data": base64.b64encode(grid.tobytes()).decode("ascii")}
 
 
-def psd(name, t0=None, t1=None, n=900):
+def psd(name, t0=None, t1=None, n=900, mode="avg"):
+    """Power spectrum over [t0,t1]. ``mode`` = "avg" (Welch) or "max" (max-hold)."""
     import numpy as np
     iq, fs, fc, _ = load(name)
-    dur = len(iq) / fs
     i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
     i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
-    freqs, db = welch_psd(iq[i0:i1] if i1 > i0 else iq, fs)
+    reduce = "max" if str(mode).lower().startswith("max") else "mean"
+    freqs, db = welch_psd(iq[i0:i1] if i1 > i0 else iq, fs, reduce=reduce)
     n = int(max(64, min(1600, n)))
     fr = (freqs + fc) / 1e6
     if len(db) > n:
         db = _pool_max(db, n)
         fr = fr[np.linspace(0, len(fr) - 1, n).astype(int)]
-    return {"ok": True, "freqs_mhz": [round(x, 4) for x in fr.tolist()],
+    return {"ok": True, "mode": reduce, "freqs_mhz": [round(x, 4) for x in fr.tolist()],
             "db": [round(x, 1) for x in db.tolist()],
             "noise_db": round(_noise_floor_db(db), 1)}
+
+
+def measure(name, t0, t1, f0, f1):
+    """Measure a time×frequency box: channel power, peak (freq+level), mean, span.
+
+    Integrates the Welch PSD of the [t0,t1] slice over [f0,f1] (absolute Hz).
+    Relative dB (consistent, not absolute dBm), matching the rest of the tool.
+    """
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    t0 = max(0.0, float(t0)); t1 = min(dur, float(t1))
+    i0, i1 = int(t0 * fs), int(t1 * fs)
+    if i1 - i0 < 16:
+        return {"ok": False, "error": "time selection too short"}
+    freqs, db = welch_psd(iq[i0:i1], fs)
+    absf = freqs + fc
+    f0, f1 = float(min(f0, f1)), float(max(f0, f1))
+    mask = (absf >= f0) & (absf <= f1)
+    if not mask.any():
+        return {"ok": False, "error": "frequency selection outside the capture"}
+    lin = 10.0 ** (db[mask] / 10.0)
+    sub = db[mask]; subf = absf[mask]
+    pk = int(np.argmax(sub))
+    return {"ok": True, "t0": round(t0, 5), "t1": round(t1, 5),
+            "f0": round(f0, 1), "f1": round(f1, 1),
+            "dt_ms": round((t1 - t0) * 1000, 3), "span_khz": round((f1 - f0) / 1e3, 2),
+            "channel_power_db": round(float(10.0 * np.log10(lin.sum() + 1e-12)), 1),
+            "peak_db": round(float(sub[pk]), 1),
+            "peak_hz": round(float(subf[pk]), 1),
+            "mean_db": round(float(10.0 * np.log10(lin.mean() + 1e-12)), 1),
+            "bins": int(mask.sum())}
 
 
 def envelope(name, t0=None, t1=None, n=1200):
@@ -593,6 +637,14 @@ def selftest():
         p = psd("synth", n=256)
         check("psd: freqs+db aligned, noise below peak",
               len(p["freqs_mhz"]) == len(p["db"]) and max(p["db"]) - p["noise_db"] > 15)
+        pm = psd("synth", n=256, mode="max")
+        check("psd: max-hold >= average at the peak and is labelled",
+              pm["mode"] == "max" and max(pm["db"]) >= max(p["db"]) - 0.5)
+        # measure a box around the +150 kHz tone
+        mb = measure("synth", 0.0, 0.2, 433_900_000 + 130_000, 433_900_000 + 170_000)
+        check("measure: box power + peak near +150 kHz tone",
+              mb["ok"] and abs(mb["peak_hz"] - (433_900_000 + 150_000)) < 8000
+              and mb["channel_power_db"] > mb["mean_db"], str(mb.get("peak_hz")))
         check("list: the synth capture is listed",
               any(c["name"] == "synth" for c in list_captures()["captures"]))
         # pure bit slicer on a clean square wave

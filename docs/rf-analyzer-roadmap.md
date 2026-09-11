@@ -34,14 +34,17 @@ Turn "here are bits" into "here is what it says."
 - *Done when:* a real doorbell/TPMS capture names the device via rtl_433, and an
   unknown OOK signal yields clean per-packet hex.
 
-## Segment 2 — Measurement (inspectrum-grade)
-- Draggable **dual cursors** (time + frequency) with **Δt / Δf** readouts and the
-  implied **symbol rate** (1/Δt).
-- **Box power** measurement over a selection (channel power, peak, mean).
-- **Persistence / max-hold** on the spectrogram; **zoom history** (back).
-- Cleaner rulers (nice tick steps, absolute + relative axes).
-- *Done when:* you can measure a burst's timing and a channel's power to a number
-  without leaving the page.
+## Segment 2 — Measurement (inspectrum-grade) ✅ shipped
+- **Dual A/B cursors** (time + frequency) with **Δt / Δf** and the implied
+  **symbol rate** (1/Δt) — click for A, click again for B.
+- **Box power** measurement (Zoom↔Measure mode; drag a box → channel power, peak
+  freq+level, mean).
+- **Zoom history** (Back button) + Reset.
+- **Max-hold vs Avg** on the Spectrum panel (max-hold reveals intermittent
+  carriers a mean buries).
+- Follow-ups shipped alongside: burst **merge-gap** control (split repeated
+  frames vs one transmission) and **newest-first** capture ordering.
+- *Left for later:* on-spectrogram persistence, prettier ruler tick steps.
 
 ## Segment 3 — Modulation analysis
 - **IQ constellation** for a selection (PSK/QAM); **instantaneous** amplitude /

@@ -90,7 +90,11 @@
   <div class="grid">
     <div>
       <div class="card">
-        <h3>Spectrogram <span class="hint">drag a box to zoom · click to place a marker</span>
+        <h3>Spectrogram
+          <div class="seg" id="dragmode"><button data-dm="zoom" aria-pressed="true">Zoom</button><button data-dm="measure">Measure</button></div>
+          <button id="back" title="Back to the previous zoom">&#8592;&nbsp;Back</button>
+          <button id="clrcur" title="Clear the A/B cursors">Clear cursors</button>
+          <span class="hint">drag = zoom/measure · click = cursor A, then B (Δ)</span>
           <span class="legend"><span id="lfloor">—</span><span class="grad" id="grad"></span><span id="lceil">—</span></span>
         </h3>
         <div class="specwrap">
@@ -107,7 +111,9 @@
 
     <div>
       <div class="card">
-        <h3>Spectrum <span class="hint">avg power over the window</span></h3>
+        <h3>Spectrum <span class="hint">power over the window</span>
+          <div class="seg" id="psdmode" style="margin-left:auto"><button data-pm="avg" aria-pressed="true">Avg</button><button data-pm="max">Max-hold</button></div>
+        </h3>
         <canvas class="rowcanvas" id="psd"></canvas>
       </div>
       <div class="card" style="margin-top:16px">
@@ -116,7 +122,11 @@
         <div id="decout" class="msg">Hit Decode to run rtl_433 over the whole capture (TPMS · weather · remotes · doorbells…).</div>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3>Bursts / packets <span class="hint" id="bcount"></span></h3>
+        <h3>Bursts / packets <span class="hint" id="bcount"></span>
+          <span class="lbl" style="margin-left:auto">merge gap</span>
+          <input id="gapms" type="number" value="25" min="1" step="1" style="width:58px" title="Bridge pulses closer than this (ms) into one burst — lower it to split repeated frames">
+          <span class="lbl">ms</span>
+        </h3>
         <div style="max-height:220px;overflow:auto">
           <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>duty</th><th>dB</th></tr></thead>
             <tbody id="btbody"><tr><td class="empty" colspan="6">—</td></tr></tbody></table>
@@ -175,7 +185,8 @@
   var LUT=buildLUT(PALETTES[pal].stops);
 
   var $=function(id){return document.getElementById(id);};
-  var S={name:null, view:null, spec:null, marker:null, dur:0, fs:0, fc:0};
+  var S={name:null, view:null, spec:null, marker:null, markerB:null, hist:[],
+         dragMode:'zoom', psdMode:'avg', dur:0, fs:0, fc:0};
 
   function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
       .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
@@ -203,7 +214,7 @@
   });}
 
   function loadCapture(name){
-    S.name=name; S.view=null; S.marker=null;
+    S.name=name; S.view=null; S.marker=null; S.markerB=null; S.hist=[];
     api('/api/net/rtl/analyze/summary',{name:name}).then(function(s){
       if(!s||!s.ok){ $('stats').innerHTML='<span class="msg">⚠ '+((s&&s.error)||'load failed')+'</span>'; return; }
       S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz;
@@ -227,7 +238,7 @@
     var v=S.view, c=$('spec'), W=Math.max(320,Math.round(c.clientWidth||900));
     api('/api/net/rtl/analyze/spectrogram',{name:S.name,t0:v.t0,t1:v.t1,f0:v.f0,f1:v.f1,w:W,h:360}).then(function(d){
       if(!d||!d.ok)return; S.spec=d; drawSpec(d); });
-    api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1}).then(drawPsd);
+    api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode||'avg'}).then(drawPsd);
     api('/api/net/rtl/analyze/envelope',{name:S.name,t0:v.t0,t1:v.t1}).then(drawEnv);
   }
   var PAD={l:52,r:10,t:8,b:20};
@@ -255,18 +266,25 @@
     for(var xt=0;xt<=5;xt++){var tx=PAD.l+plotW*xt/5, tv=d.t0+(d.t1-d.t0)*xt/5;
       g.fillText(tv.toFixed(3)+'s',tx,PAD.t+plotH+4);}
     S._geom={plotW:plotW,plotH:plotH};
-    // marker
-    if(S.marker){var mx=PAD.l+(S.marker.t-d.t0)/(d.t1-d.t0)*plotW, my=PAD.t+(d.f1-S.marker.f)/(d.f1-d.f0)*plotH;
-      g.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--accent')||'#f5b942';g.lineWidth=1;
-      g.beginPath();g.moveTo(mx,PAD.t);g.lineTo(mx,PAD.t+plotH);g.moveTo(PAD.l,my);g.lineTo(PAD.l+plotW,my);g.stroke();}
+    // A/B cursors (crosshairs); A=accent, B=cyan
+    function cross(m,color,label){ if(!m)return;
+      var mx=PAD.l+(m.t-d.t0)/(d.t1-d.t0)*plotW, my=PAD.t+(d.f1-m.f)/(d.f1-d.f0)*plotH;
+      if(mx<PAD.l-1||mx>PAD.l+plotW+1)mx=Math.max(PAD.l,Math.min(PAD.l+plotW,mx));
+      g.strokeStyle=color;g.lineWidth=1;g.beginPath();g.moveTo(mx,PAD.t);g.lineTo(mx,PAD.t+plotH);g.moveTo(PAD.l,my);g.lineTo(PAD.l+plotW,my);g.stroke();
+      g.fillStyle=color;g.font='bold 10px monospace';g.textAlign='left';g.textBaseline='top';g.fillText(label,mx+3,PAD.t+2);}
+    cross(S.marker,getComputedStyle(document.documentElement).getPropertyValue('--accent')||'#f5b942','A');
+    cross(S.markerB,getComputedStyle(document.documentElement).getPropertyValue('--cyan')||'#38bdc9','B');
     $('grad').style.background=gradCss(PALETTES[pal].stops);
     $('lfloor').textContent=Math.round(d.floor_db)+' dB'; $('lceil').textContent=Math.round(d.ceil_db)+' dB';
     setAx();
   }
-  function setAx(){var m=S.marker;
-    $('axinfo').innerHTML = m
-      ? 'Marker: <b>'+(m.f/1e6).toFixed(4)+' MHz</b> ('+fmtHz(m.f-S.fc)+' offset) · t=<b>'+m.t.toFixed(4)+' s</b>'
-      : 'Window: '+S.view.t0.toFixed(3)+'–'+S.view.t1.toFixed(3)+' s · '+(S.view.f0/1e6).toFixed(3)+'–'+(S.view.f1/1e6).toFixed(3)+' MHz';
+  function setAx(){var a=S.marker,b=S.markerB;
+    if(a&&b){ var dt=Math.abs(b.t-a.t), df=Math.abs(b.f-a.f);
+      $('axinfo').innerHTML='Δ  <b>Δt='+(dt*1000).toFixed(3)+' ms</b>  ·  <b>Δf='+fmtHz(df)+'</b>'
+        +(dt>0?'  ·  1/Δt=<b>'+(1/dt>=1000?(1/dt/1000).toFixed(2)+' kHz':(1/dt).toFixed(0)+' Hz')+'</b> (symbol rate)':'')
+        +'   ·   A '+(a.f/1e6).toFixed(4)+' MHz · B '+(b.f/1e6).toFixed(4)+' MHz'; return; }
+    if(a){ $('axinfo').innerHTML='Cursor A: <b>'+(a.f/1e6).toFixed(4)+' MHz</b> ('+fmtHz(a.f-S.fc)+' offset) · t=<b>'+a.t.toFixed(4)+' s</b>  ·  click again for B (Δ)'; return; }
+    $('axinfo').innerHTML='Window: '+S.view.t0.toFixed(3)+'–'+S.view.t1.toFixed(3)+' s · '+(S.view.f0/1e6).toFixed(3)+'–'+(S.view.f1/1e6).toFixed(3)+' MHz';
   }
   // ---- line plots (psd + envelope + demod wave) ----
   function plot(id,xs,ys,color,fill){
@@ -295,18 +313,41 @@
       box.style.left=x0+'px';box.style.top=y0+'px';box.style.width=Math.abs(e.clientX-drag.startX)+'px';box.style.height=Math.abs(e.clientY-drag.startY)+'px';});
     window.addEventListener('mouseup',function(e){ if(!drag)return; box.style.display='none';
       var moved=Math.abs(e.clientX-drag.startX)+Math.abs(e.clientY-drag.startY);
-      var b=toData(e);
-      if(moved<6){ S.marker={t:b.t,f:b.f}; $('bw').focus&&0; drawSpec(S.spec); setAx(); drag=null; return; }
+      var b=toData(e), sp=S.spec;
+      if(moved<6){ // click -> place/move A/B cursors
+        var p={t:b.t,f:b.f};
+        if(!S.marker){ S.marker=p; }
+        else if(!S.markerB){ S.markerB=p; }
+        else { var da=Math.hypot((S.marker.t-b.t)/(sp.t1-sp.t0),(S.marker.f-b.f)/(sp.f1-sp.f0));
+               var dbb=Math.hypot((S.markerB.t-b.t)/(sp.t1-sp.t0),(S.markerB.f-b.f)/(sp.f1-sp.f0));
+               if(da<=dbb) S.marker=p; else S.markerB=p; }
+        drawSpec(sp); setAx(); drag=null; return; }
       var t0=Math.min(drag.a.t,b.t),t1=Math.max(drag.a.t,b.t),f0=Math.min(drag.a.f,b.f),f1=Math.max(drag.a.f,b.f);
-      if(t1-t0>1e-4 && f1-f0>100){ S.view={t0:t0,t1:t1,f0:f0,f1:f1}; refreshWindow(); }
+      if(S.dragMode==='measure'){   // measure the boxed time×freq region, don't zoom
+        if(t1-t0>1e-5 && f1-f0>10){ $('axinfo').innerHTML='measuring…';
+          api('/api/net/rtl/analyze/measure',{name:S.name,t0:t0,t1:t1,f0:f0,f1:f1}).then(function(m){
+            if(!m||!m.ok){ $('axinfo').innerHTML='⚠ '+((m&&m.error)||'measure failed'); return; }
+            $('axinfo').innerHTML='Box '+(m.f0/1e6).toFixed(4)+'–'+(m.f1/1e6).toFixed(4)+' MHz · '+m.dt_ms+' ms  →  '
+              +'ch.power <b>'+m.channel_power_db+' dB</b> · peak <b>'+m.peak_db+' dB</b> @ '+(m.peak_hz/1e6).toFixed(4)+' MHz · mean '+m.mean_db+' dB'; }); }
+        drag=null; return; }
+      if(t1-t0>1e-4 && f1-f0>100){ S.hist.push(S.view); S.view={t0:t0,t1:t1,f0:f0,f1:f1}; refreshWindow(); }
       drag=null;});
   })();
-  $('reset').addEventListener('click',function(){ if(!S.name)return; S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2}; S.marker=null; refreshWindow(); });
+  $('reset').addEventListener('click',function(){ if(!S.name)return; S.hist=[]; S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2}; S.marker=null; S.markerB=null; refreshWindow(); });
+  $('back').addEventListener('click',function(){ if(S.hist.length){ S.view=S.hist.pop(); refreshWindow(); } });
+  $('clrcur').addEventListener('click',function(){ S.marker=null; S.markerB=null; if(S.spec){drawSpec(S.spec);} setAx(); });
+  $('dragmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.dragMode=b.getAttribute('data-dm');
+    Array.prototype.forEach.call($('dragmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-dm')===S.dragMode?'true':'false');});});
+  $('psdmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.psdMode=b.getAttribute('data-pm');
+    Array.prototype.forEach.call($('psdmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-pm')===S.psdMode?'true':'false');});
+    if(S.name){var v=S.view; api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode}).then(drawPsd);}});
+  $('gapms').addEventListener('change',function(){ if(S.name) loadBursts(); });
 
   // ---- bursts ----
-  function loadBursts(){ api('/api/net/rtl/analyze/bursts',{name:S.name}).then(function(d){
+  function loadBursts(){ var gap=parseFloat($('gapms').value)||25;
+    api('/api/net/rtl/analyze/bursts',{name:S.name,gap_ms:gap}).then(function(d){
     var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
-    if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="5">No bursts above the noise floor.</td></tr>'; return; }
+    if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="6">No bursts above the noise floor.</td></tr>'; return; }
     tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+(x.duty!=null?Math.round(x.duty*100)+'%':'—')+'</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
     tb.querySelectorAll('tr').forEach(function(tr){tr.addEventListener('click',function(){var x=b[+tr.getAttribute('data-i')];
       var pad=(x.t1-x.t0)*0.5+0.002; S.view={t0:Math.max(0,x.t0-pad),t1:Math.min(S.dur,x.t1+pad),
