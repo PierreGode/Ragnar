@@ -65,6 +65,8 @@
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .kbdpop{margin:-8px 0 16px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:12px;color:var(--ink-dim)}
+  .kbdpop b{color:var(--ink)} .kbdpop kbd{background:var(--panel-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--cyan);font-size:11px}
   #stackplots{display:flex;flex-direction:column;gap:6px}
   .dplot{position:relative}
   .dplot .dpl{position:absolute;top:3px;left:6px;z-index:2;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);pointer-events:none}
@@ -117,7 +119,13 @@
     <span class="lbl">Palette</span>
     <div class="seg" id="palette"></div>
     <span class="spacer"></span>
-    <button id="reset" title="Reset zoom to the whole capture">Reset zoom</button>
+    <button id="copylink" title="Copy a shareable link to this exact view (capture · zoom · marker · palette)">🔗 Copy link</button>
+    <button id="kbdhelp" title="Keyboard shortcuts">⌨</button>
+    <button id="reset" title="Reset zoom to the whole capture (R)">Reset zoom</button>
+  </div>
+  <div id="kbdpop" class="kbdpop" hidden>
+    <b>Keyboard shortcuts</b>
+    <div><kbd>R</kbd> reset zoom · <kbd>B</kbd> back · <kbd>[</kbd>/<kbd>]</kbd> palette · <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd> zoom/measure/annotate · <kbd>D</kbd> demodulate · <kbd>L</kbd> copy link · <kbd>?</kbd> this help</div>
   </div>
 
   <div class="stats" id="stats"></div>
@@ -296,6 +304,13 @@
     return lut;}
   function gradCss(stops){return "linear-gradient(90deg,"+stops.map(function(s){return "rgb("+s[1].join(",")+") "+Math.round(s[0]*100)+"%";}).join(",")+")";}
   var pal='aurora'; try{var sp=localStorage.getItem('ragnar_rf_palette'); if(sp&&PALETTES[sp])pal=sp;}catch(e){}
+  // ---- shareable deep-link: parse ?name=…&t0=…&t1=…&f0=…&f1=…&mf=…&pal=… once on load
+  var DEEP=null;
+  (function(){ var q=new URLSearchParams(location.search); if(!q.get('name')) return;
+    function num(k){ var v=q.get(k); if(v==null||v==='')return null; var n=parseFloat(v); return isFinite(n)?n:null; }
+    DEEP={ name:q.get('name'), t0:num('t0'), t1:num('t1'), f0:num('f0'), f1:num('f1'), mf:num('mf') };
+    var p=q.get('pal'); if(p&&PALETTES[p]) pal=p;   // URL palette wins over localStorage
+  })();
   var LUT=buildLUT(PALETTES[pal].stops);
 
   var $=function(id){return document.getElementById(id);};
@@ -316,7 +331,7 @@
       pal=b.getAttribute('data-p'); LUT=buildLUT(PALETTES[pal].stops);
       try{localStorage.setItem('ragnar_rf_palette',pal);}catch(x){}
       Array.prototype.forEach.call(seg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-p')===pal?'true':'false');});
-      $('grad').style.background=gradCss(PALETTES[pal].stops); if(S.spec)drawSpec(S.spec);});
+      $('grad').style.background=gradCss(PALETTES[pal].stops); if(S.spec)drawSpec(S.spec); updateURL();});
     $('grad').style.background=gradCss(PALETTES[pal].stops);
   })();
 
@@ -346,8 +361,25 @@
         ['Bursts',s.bursts,'']
       ].map(function(x){return '<div class="stat"><span class="k">'+x[0]+'</span><span class="v '+x[2]+'">'+x[1]+'</span></div>';}).join('');
       S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2};
-      refreshWindow(); loadBursts(); loadAnnotations();
+      // restore a shared deep-link view/marker (once, for this capture)
+      if(DEEP && DEEP.name===name){
+        if(DEEP.t0!=null&&DEEP.t1!=null&&DEEP.f0!=null&&DEEP.f1!=null)
+          S.view={t0:Math.max(0,DEEP.t0),t1:Math.min(S.dur,DEEP.t1),f0:DEEP.f0*1e6,f1:DEEP.f1*1e6};
+        if(DEEP.mf!=null) S.marker={t:(S.view.t0+S.view.t1)/2, f:DEEP.mf*1e6};
+        DEEP=null;
+      }
+      refreshWindow(); loadBursts(); loadAnnotations(); updateURL();
     });
+  }
+  // ---- shareable deep-link: encode capture · zoom · marker · palette in the URL
+  function updateURL(){
+    if(!S.name) return;
+    var v=S.view||{}, q=['name='+encodeURIComponent(S.name)];
+    if(v.t0!=null){ q.push('t0='+v.t0.toFixed(5),'t1='+v.t1.toFixed(5),
+      'f0='+(v.f0/1e6).toFixed(5),'f1='+(v.f1/1e6).toFixed(5)); }
+    if(S.marker) q.push('mf='+(S.marker.f/1e6).toFixed(5));
+    q.push('pal='+pal);
+    try{ history.replaceState(null,'','?'+q.join('&')); }catch(e){}
   }
 
   // ---- spectrogram ----
@@ -363,6 +395,7 @@
     }).catch(function(){ if(req===_specReq && sp) sp.classList.remove('show'); });
     api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode||'avg'}).then(drawPsd);
     api('/api/net/rtl/analyze/envelope',{name:S.name,t0:v.t0,t1:v.t1}).then(drawEnv);
+    updateURL();
   }
   var PAD={l:52,r:10,t:8,b:20};
   function drawSpec(d){
@@ -455,7 +488,7 @@
         else { var da=Math.hypot((S.marker.t-b.t)/(sp.t1-sp.t0),(S.marker.f-b.f)/(sp.f1-sp.f0));
                var dbb=Math.hypot((S.markerB.t-b.t)/(sp.t1-sp.t0),(S.markerB.f-b.f)/(sp.f1-sp.f0));
                if(da<=dbb) S.marker=p; else S.markerB=p; }
-        drawSpec(sp); setAx(); drag=null; return; }
+        drawSpec(sp); setAx(); updateURL(); drag=null; return; }
       var t0=Math.min(drag.a.t,b.t),t1=Math.max(drag.a.t,b.t),f0=Math.min(drag.a.f,b.f),f1=Math.max(drag.a.f,b.f);
       if(S.dragMode==='measure'){   // measure the boxed time×freq region, don't zoom
         if(t1-t0>1e-5 && f1-f0>10){ $('axinfo').innerHTML='measuring…';
@@ -474,7 +507,7 @@
   })();
   $('reset').addEventListener('click',function(){ if(!S.name)return; S.hist=[]; S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2}; S.marker=null; S.markerB=null; refreshWindow(); });
   $('back').addEventListener('click',function(){ if(S.hist.length){ S.view=S.hist.pop(); refreshWindow(); } });
-  $('clrcur').addEventListener('click',function(){ S.marker=null; S.markerB=null; if(S.spec){drawSpec(S.spec);} setAx(); });
+  $('clrcur').addEventListener('click',function(){ S.marker=null; S.markerB=null; if(S.spec){drawSpec(S.spec);} setAx(); updateURL(); });
   $('dragmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.dragMode=b.getAttribute('data-dm');
     Array.prototype.forEach.call($('dragmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-dm')===S.dragMode?'true':'false');});
     if(S.dragMode==='annotate'){ $('axinfo').innerHTML='<span style="color:var(--live)">Annotate mode: drag a box around a signal to label + save it into the SigMF file.</span>'; }});
@@ -903,9 +936,40 @@
     if(st && st.enabled){ $('aicard').hidden=false; }
   }).catch(function(){});
 
-  // preselect a capture from ?name=
-  var want=new URLSearchParams(location.search).get('name');
-  loadList(want);
+  // ---- copy shareable link + keyboard-shortcut help ----
+  $('copylink').addEventListener('click',function(){
+    updateURL(); var url=location.href, b=$('copylink'), old=b.textContent;
+    function done(ok){ b.textContent=ok?'✓ Copied':'⚠ Copy failed'; setTimeout(function(){b.textContent=old;},1400); }
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(url).then(function(){done(true);},function(){done(false);}); }
+    else { try{ var ta=document.createElement('textarea'); ta.value=url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); done(true); }catch(e){ done(false); } }
+  });
+  $('kbdhelp').addEventListener('click',function(){ $('kbdpop').hidden=!$('kbdpop').hidden; });
+
+  // ---- keyboard shortcuts (ignored while typing in a field) ----
+  function palStep(dir){ var i=ORDER.indexOf(pal); if(i<0)i=0; var next=ORDER[(i+dir+ORDER.length)%ORDER.length];
+    var b=$('palette').querySelector('button[data-p="'+next+'"]'); if(b)b.click(); }
+  function setMode(m){ var b=$('dragmode').querySelector('button[data-dm="'+m+'"]'); if(b)b.click(); }
+  document.addEventListener('keydown',function(e){
+    var t=e.target, tag=t&&t.tagName; if(e.ctrlKey||e.metaKey||e.altKey) return;
+    if(tag==='INPUT'||tag==='SELECT'||tag==='TEXTAREA'||(t&&t.isContentEditable)) return;
+    switch(e.key){
+      case 'r': case 'R': $('reset').click(); break;
+      case 'b': case 'B': $('back').click(); break;
+      case '[': palStep(-1); break;
+      case ']': palStep(1); break;
+      case 'z': case 'Z': setMode('zoom'); break;
+      case 'x': case 'X': setMode('measure'); break;
+      case 'c': case 'C': setMode('annotate'); break;
+      case 'd': case 'D': if(S.name) $('run').click(); break;
+      case 'l': case 'L': $('copylink').click(); break;
+      case '?': $('kbdpop').hidden=!$('kbdpop').hidden; break;
+      default: return;
+    }
+    e.preventDefault();
+  });
+
+  // preselect a capture from a shared deep-link (?name=…); loadCapture applies the rest
+  loadList(DEEP?DEEP.name:null);
 })();
 </script>
 </body>
