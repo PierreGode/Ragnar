@@ -22206,6 +22206,13 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_analyze_instantaneous():
         return _analyze(sigmf_analyzer.instantaneous, **_sel(request.args))
 
+    @app.route('/api/net/rtl/analyze/filter', methods=['GET'])
+    def net_rtl_analyze_filter():
+        a = request.args
+        return _analyze(sigmf_analyzer.filter_preview, name=a.get('name', ''),
+                        kind=a.get('kind', 'bandpass'), f0_hz=_fl(a.get('f0')),
+                        f1_hz=_fl(a.get('f1')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args

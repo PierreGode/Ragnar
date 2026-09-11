@@ -703,6 +703,58 @@ def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
 
 
 # --------------------------------------------------------------------------
+# Segment 7 — advanced DSP: apply a band-pass / notch filter to a selection and
+# show the spectrum before vs after (isolate one signal, or reject an
+# interferer). An FFT-domain band mask over absolute frequency — simple, exact
+# and pure, so the selftest can prove a tone survives a band-pass and vanishes
+# under a notch.
+# --------------------------------------------------------------------------
+
+def _fft_bandmask(x, fs, fc, f0_hz, f1_hz, kind):
+    """Zero the FFT bins outside (band-pass) or inside (notch) [f0,f1] Hz (pure)."""
+    import numpy as np
+    n = len(x)
+    X = np.fft.fftshift(np.fft.fft(x))
+    freqs = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / fs)) + fc
+    lo, hi = (f0_hz, f1_hz) if f0_hz <= f1_hz else (f1_hz, f0_hz)
+    inband = (freqs >= lo) & (freqs <= hi)
+    mask = inband if str(kind).lower().startswith("band") else ~inband
+    xf = np.fft.ifft(np.fft.ifftshift(X * mask))
+    return xf.astype(np.complex64)
+
+
+def filter_preview(name, kind="bandpass", f0_hz=None, f1_hz=None, t0=None, t1=None, n=900):
+    """Band-pass/notch the [t0,t1] selection over [f0,f1] Hz; return the spectrum
+    before and after plus the fraction of power kept.  Absolute-frequency
+    filtering (bins mapped through the capture centre), not the mixed-to-DC path."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 32:
+        return {"ok": False, "error": "selection too short to filter"}
+    if f0_hz is None or f1_hz is None:
+        return {"ok": False, "error": "give a frequency band (f0_hz, f1_hz)"}
+    f0_hz, f1_hz = float(f0_hz), float(f1_hz)
+    xf = _fft_bandmask(x, fs, fc, f0_hz, f1_hz, kind)
+    fb, db_b = welch_psd(x, fs)
+    fa, db_a = welch_psd(xf, fs)
+    p_in = float(np.mean(np.abs(x) ** 2)); p_out = float(np.mean(np.abs(xf) ** 2))
+    n = int(max(64, min(1600, n)))
+    fr = (fb + fc) / 1e6
+    if len(db_b) > n:
+        idx = np.linspace(0, len(db_b) - 1, n).astype(int)
+        db_b = _pool_max(db_b, n); db_a = _pool_max(db_a, n); fr = fr[idx]
+    return {"ok": True, "kind": ("bandpass" if str(kind).lower().startswith("band") else "notch"),
+            "f0_mhz": round(min(f0_hz, f1_hz) / 1e6, 4), "f1_mhz": round(max(f0_hz, f1_hz) / 1e6, 4),
+            "freqs_mhz": [round(v, 4) for v in fr.tolist()],
+            "db_before": [round(v, 1) for v in db_b.tolist()],
+            "db_after": [round(v, 1) for v in db_a.tolist()],
+            "power_kept_pct": round(100.0 * p_out / (p_in + 1e-12), 1)}
+
+
+# --------------------------------------------------------------------------
 # Segment 4 — protocol framework: line coding, preamble/sync detection,
 # repeated-frame alignment (fixed code vs rolling bits) and a CRC/checksum
 # scanner. All pure string/int math — the demodulator recovers the bits, this
@@ -1401,6 +1453,21 @@ def selftest():
               and mb["channel_power_db"] > mb["mean_db"], str(mb.get("peak_hz")))
         check("list: the synth capture is listed",
               any(c["name"] == "synth" for c in list_captures()["captures"]))
+        # --- Segment 7: band-pass / notch filter before-vs-after ---
+        _pk = 433_900_000 + 150_000                      # the synth CW tone
+        bp = filter_preview("synth", "bandpass", _pk - 40_000, _pk + 40_000, 0, 0.2)
+        bpk = bp["freqs_mhz"].index(min(bp["freqs_mhz"], key=lambda f: abs(f - _pk / 1e6)))
+        check("filter: band-pass keeps the in-band tone",
+              bp["ok"] and bp["db_after"][bpk] > bp["db_before"][bpk] - 3
+              and bp["power_kept_pct"] > 5, str(bp.get("power_kept_pct")))
+        nt = filter_preview("synth", "notch", _pk - 40_000, _pk + 40_000, 0, 0.2)
+        ntk = nt["freqs_mhz"].index(min(nt["freqs_mhz"], key=lambda f: abs(f - _pk / 1e6)))
+        check("filter: notch removes the in-band tone (>=20 dB drop)",
+              nt["db_before"][ntk] - nt["db_after"][ntk] >= 20, str(nt["db_before"][ntk] - nt["db_after"][ntk]))
+        check("filter: complementary masks' kept power sums to ~100%",
+              abs(bp["power_kept_pct"] + nt["power_kept_pct"] - 100.0) < 5.0,
+              str(bp["power_kept_pct"]) + "+" + str(nt["power_kept_pct"]))
+        check("filter: needs a band", filter_preview("synth", "bandpass").get("ok") is False)
         # --- SigMF annotations round-trip ---
         _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
         check("annot: box -> SigMF annotation (samples + freq edges + label)",
