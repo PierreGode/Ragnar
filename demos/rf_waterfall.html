@@ -146,6 +146,13 @@
   .recbar .recdot{color:#fb7185}
   .recbar select{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
   .recbar input[type="range"]{flex:1 1 120px;min-width:100px;accent-color:var(--cyan)}
+  .infowrap{position:relative;display:inline-flex}
+  .infowrap .infobtn{padding:4px 9px;font-size:12px;line-height:1;color:var(--cyan);border-color:rgba(56,189,201,.4)}
+  .infopop{position:absolute;bottom:calc(100% + 8px);left:0;width:min(280px,80vw);z-index:40;display:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px;box-shadow:0 14px 34px -14px #000;
+    font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-dim);white-space:normal;text-align:left}
+  .infopop.show{display:block}
+  .infopop b{color:var(--ink)} .infopop .warn{color:var(--accent)} .infopop .k{color:var(--cyan)}
   .recbar .rsp{color:var(--muted)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
@@ -605,6 +612,16 @@
       +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
       +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
       +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
+      +'<span class="infowrap"><button class="infobtn" title="Capture size &amp; memory">&#9432;</button>'
+        +'<div class="infopop">'
+          +'<b>IQ capture &amp; memory</b><br>'
+          +'A SigMF capture is raw IQ &mdash; about <span class="k">4 MB per second</span> at 2 MS/s. '
+          +'The Analyzer loads the <b>whole file into RAM</b> as complex samples (&asymp;<b>4&times; the file size</b>).<br><br>'
+          +'On a low-memory board like a <b>Pi Zero (512 MB)</b>, keep captures small: '
+          +'<span class="warn">&le; ~50 MB (~12 s)</span> &rarr; ~200 MB RAM. '
+          +'Pi 4/5 handle hundreds of MB fine.<br><br>'
+          +'For long captures, <b>download the .sigmf-data</b> and analyse it on a desktop (GNU Radio / inspectrum / URH).'
+        +'</div></span>'
       +'<span class="rsp">·</span>'
       +'<button class="basebtn" aria-pressed="false" title="Learn a baseline spectrum, then alert on new / vanished carriers + broadband jamming (into the Watchtower feed)">&#9737;&nbsp;Baseline</button>'
       +'<span class="basestat rsp"></span>';
@@ -613,6 +630,9 @@
     this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
     this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
     g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
+    var ib=g.querySelector('.infobtn'), ip=g.querySelector('.infopop');
+    if(ib&&ip){ ib.addEventListener('click',function(e){ e.stopPropagation(); ip.classList.toggle('show'); });
+      document.addEventListener('click',function(e){ if(!ip.contains(e.target)&&e.target!==ib) ip.classList.remove('show'); }); }
     this.iqList.addEventListener('dblclick',function(){ self.openInAnalyzer(); });
     this.refreshSessions();
     this.baseBtn=g.querySelector('.basebtn'); this.baseStat=g.querySelector('.basestat');
