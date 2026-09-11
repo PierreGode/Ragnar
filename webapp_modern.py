@@ -25207,14 +25207,22 @@ def post_ai_signal():
         # not dependent on the page assembling a perfect context.
         facts = {}
         name = data.get('name')
-        if name:
+        try:
+            import sigmf_analyzer
+        except Exception:
+            sigmf_analyzer = None
+        if name and sigmf_analyzer:
             try:
-                import sigmf_analyzer
                 facts = sigmf_analyzer.summary(name)
             except Exception as exc:
                 logger.debug(f"ai/signal: summary({name!r}) failed: {exc}")
         answer = ai_service.analyze_signal(question, context, facts)
-        return jsonify({'enabled': True, 'answer': answer})
+        # Split any proposed analyzer actions out of the reply (allowlisted).
+        actions = []
+        if answer and sigmf_analyzer:
+            parsed = sigmf_analyzer.parse_ai_actions(answer)
+            answer, actions = parsed['text'], parsed['actions']
+        return jsonify({'enabled': True, 'answer': answer, 'actions': actions})
     except Exception as e:
         logger.error(f"Error getting AI signal analysis: {e}")
         return jsonify({'error': str(e)}), 500

@@ -73,6 +73,11 @@
   .airow button{flex:0 0 auto;align-self:stretch;padding:0 18px}
   .aiout{white-space:pre-wrap;line-height:1.65;color:var(--ink);max-height:520px;overflow:auto;border-top:1px solid var(--line-soft)}
   .aiout h4{color:var(--cyan);font-family:var(--head);font-size:13px;margin:12px 0 4px} .aiout code{color:var(--accent)} .aiout b{color:#fff}
+  .aiacts{display:flex;flex-wrap:wrap;gap:8px;padding:4px 14px 12px;align-items:center}
+  .aiacts .albl{font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .aiacts button{font-family:var(--mono);font-size:12px;color:var(--ground);background:var(--accent);border:1px solid var(--accent);border-radius:7px;padding:6px 12px;cursor:pointer;font-weight:600}
+  .aiacts button.runall{background:var(--cyan);border-color:var(--cyan)}
+  .aiacts button.done{opacity:.5}
   .axinfo{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);padding:6px 14px;border-top:1px solid var(--line-soft)}
   .axinfo b{color:var(--accent)}
   footer{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
@@ -199,7 +204,8 @@
       <textarea id="aiq" rows="2" placeholder="Ask anything about this capture — decoding, modulation, what to try next…"></textarea>
       <button class="go" id="aiask">Ask</button>
     </div>
-    <div id="aiout" class="aiout msg">The assistant sees this capture's measured summary plus whatever you've run (classification, bursts, demod bits, frame analysis). Run those first for a sharper answer.</div>
+    <div id="aiout" class="aiout msg">The assistant sees this capture's measured summary plus whatever you've run (classification, bursts, demod bits, frame analysis). Run those first for a sharper answer. It can also propose actions it'll drive for you.</div>
+    <div id="aiacts" class="aiacts" hidden></div>
   </div>
 
   <footer>
@@ -545,7 +551,52 @@
         if(res && res.enabled===false){ $('aiout').innerHTML='<span style="color:var(--accent)">'+esc(res.message||'AI is not enabled — add an API token in Settings › AI.')+'</span>'; return; }
         if(!res || res.error || !res.answer){ $('aiout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((res&&res.error)||'no answer')+'</span>'; return; }
         $('aiout').innerHTML=mdLite(res.answer);
+        renderAiActions(res.actions||[]);
       }).catch(function(){ $('aiout').textContent='request failed'; });
+  }
+  // ---- AI-proposed actions -> one-click drivers of the real analyzer ----
+  function setDemodMode(m){ var b=$('mode').querySelector('[data-m="'+m+'"]'); if(b) b.click(); }
+  function aiActionLabel(a){
+    if(a.action==='tune') return 'Tune '+(a.f_mhz!=null?a.f_mhz.toFixed(4)+' MHz':'')+(a.bw_khz!=null?' · BW '+a.bw_khz+' kHz':'')+(a.mode?' · '+a.mode.toUpperCase():'');
+    if(a.action==='demod') return 'Demod '+(a.mode?a.mode.toUpperCase():'')+(a.bw_khz!=null?' @ '+a.bw_khz+' kHz':'');
+    if(a.action==='classify') return 'Classify';
+    if(a.action==='frames') return 'Frames'+(a.line&&a.line!=='raw'?' ('+a.line+')':'');
+    if(a.action==='decode433') return 'Decode (rtl_433)';
+    if(a.action==='zoom') return 'Zoom';
+    if(a.action==='reset') return 'Reset zoom';
+    return a.action;
+  }
+  function runAiAction(a){
+    if(a.action==='reset'){ $('reset').click(); return; }
+    if(a.action==='tune'){
+      if(a.f_mhz!=null){ var f=a.f_mhz*1e6, span=(a.bw_khz?a.bw_khz*1e3*4:Math.max(60e3,(S.view.f1-S.view.f0)));
+        S.marker={f:f,t:(S.view.t0+S.view.t1)/2}; S.hist.push(S.view);
+        S.view={t0:S.view.t0,t1:S.view.t1,f0:f-span/2,f1:f+span/2}; }
+      if(a.bw_khz!=null) $('bw').value=a.bw_khz;
+      if(a.mode) setDemodMode(a.mode);
+      refreshWindow(); setAx(); return;
+    }
+    if(a.action==='zoom'){ S.hist.push(S.view);
+      S.view={t0:(a.t0!=null?a.t0:S.view.t0),t1:(a.t1!=null?a.t1:S.view.t1),
+              f0:(a.f0_mhz!=null?a.f0_mhz*1e6:S.view.f0),f1:(a.f1_mhz!=null?a.f1_mhz*1e6:S.view.f1)};
+      refreshWindow(); return; }
+    if(a.action==='demod'){ if(a.mode) setDemodMode(a.mode); if(a.bw_khz!=null)$('bw').value=a.bw_khz; $('run').click(); return; }
+    if(a.action==='classify'){ $('runmod').click(); return; }
+    if(a.action==='frames'){ if(a.line==='manchester'&&!manch) $('manch').click();
+      else if((!a.line||a.line==='raw')&&manch) $('manch').click(); $('frames').click(); return; }
+    if(a.action==='decode433'){ $('rundec').click(); return; }
+  }
+  function renderAiActions(actions){
+    var el=$('aiacts'); if(!actions.length){ el.hidden=true; el.innerHTML=''; return; }
+    el.hidden=false;
+    var html='<span class="albl">AI actions:</span>';
+    actions.forEach(function(a,i){ html+='<button data-i="'+i+'">▶ '+esc(aiActionLabel(a))+'</button>'; });
+    if(actions.length>1) html+='<button class="runall">▶▶ Run all</button>';
+    el.innerHTML=html;
+    el.querySelectorAll('button[data-i]').forEach(function(b){ b.addEventListener('click',function(){ runAiAction(actions[+b.getAttribute('data-i')]); b.classList.add('done'); }); });
+    var ra=el.querySelector('.runall');
+    if(ra) ra.addEventListener('click',function(){ actions.forEach(function(a,i){ setTimeout(function(){ runAiAction(a); },i*1100); });
+      el.querySelectorAll('button[data-i]').forEach(function(b){b.classList.add('done');}); });
   }
   $('aiask').addEventListener('click',function(){ aiAsk(($('aiq').value||'').trim()); });
   $('aiq').addEventListener('keydown',function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); aiAsk(($('aiq').value||'').trim()); } });

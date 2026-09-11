@@ -918,6 +918,96 @@ def frames(name=None, bits=None, line=None):
 
 
 # --------------------------------------------------------------------------
+# AI agent actions — the assistant may propose analyzer actions (tune, demod,
+# classify, …) as a JSON block; this parses/validates them into a safe,
+# allowlisted list the page executes against its existing controls. All actions
+# are read-only DSP on the local capture (no transmit, nothing destructive).
+# Pure; selftested.
+# --------------------------------------------------------------------------
+
+# name -> {param: (caster, allowed-set-or-None)} ; params absent are dropped.
+_AI_ACTION_SCHEMA = {
+    "tune":      {"f_mhz": (float, None), "bw_khz": (float, None),
+                  "mode": (str, {"ook", "fsk"})},
+    "zoom":      {"t0": (float, None), "t1": (float, None),
+                  "f0_mhz": (float, None), "f1_mhz": (float, None)},
+    "demod":     {"mode": (str, {"ook", "fsk"}), "bw_khz": (float, None)},
+    "classify":  {},
+    "frames":    {"line": (str, {"raw", "manchester", "nrzi"})},
+    "decode433": {},
+    "reset":     {},
+}
+_AI_ACTION_MAX = 8
+
+
+def _coerce_action(a):
+    """Validate one action dict against the schema; return a clean dict or None."""
+    if not isinstance(a, dict):
+        return None
+    name = str(a.get("action") or a.get("type") or "").strip().lower()
+    schema = _AI_ACTION_SCHEMA.get(name)
+    if schema is None:
+        return None
+    out = {"action": name}
+    for key, (caster, allowed) in schema.items():
+        if key not in a or a[key] is None:
+            continue
+        try:
+            v = caster(a[key])
+        except (TypeError, ValueError):
+            continue
+        if caster is str:
+            v = v.strip().lower()
+            if allowed and v not in allowed:
+                continue
+        out[key] = v
+    return out
+
+
+def parse_ai_actions(text):
+    """Split an AI reply into (clean_text, actions[]) (pure).
+
+    The assistant may append a fenced ```json {"actions":[…]} ``` block (or a bare
+    trailing object containing "actions"). We extract + validate it against
+    :data:`_AI_ACTION_SCHEMA`, strip it from the visible text, and return the
+    allowlisted actions. Malformed / unknown actions are dropped, not executed.
+    """
+    import re
+    if not text:
+        return {"text": "", "actions": []}
+    raw = None
+    m = None
+    for mm in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S):
+        m = mm                                          # keep the last fenced block
+    if m:
+        raw = m.group(1)
+        clean = (text[:m.start()] + text[m.end():]).strip()
+    else:
+        # bare trailing object that mentions "actions"
+        m2 = re.search(r"(\{[^{}]*\"actions\"[^{}]*\[.*?\][^{}]*\})\s*$", text, re.S)
+        if m2:
+            raw = m2.group(1)
+            clean = text[:m2.start()].strip()
+        else:
+            return {"text": text.strip(), "actions": []}
+    try:
+        obj = json.loads(raw)
+        items = obj.get("actions") if isinstance(obj, dict) else None
+    except (ValueError, TypeError):
+        return {"text": text.strip(), "actions": []}
+    if not isinstance(items, list):
+        return {"text": clean, "actions": []}
+    actions = []
+    for a in items:
+        c = _coerce_action(a)
+        if c:
+            actions.append(c)
+        if len(actions) >= _AI_ACTION_MAX:
+            break
+    return {"text": clean, "actions": actions}
+
+
+# --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
 
@@ -1044,6 +1134,24 @@ def selftest():
               any("sum" in m["algo"] for m in crc_scan(cbits)["matches"]))
         check("frames: web wrapper line-decodes + analyses",
               frames(bits="0110" * 8, line="manchester").get("ok") is True)
+        # --- AI agent action parsing (allowlist + coerce + strip) ---
+        pa = parse_ai_actions('Set it to OOK.\n```json\n{"actions":[{"action":"tune","f_mhz":"433.92","bw_khz":60},'
+                              '{"action":"demod","mode":"OOK"},{"action":"nuke","f_mhz":1}]}\n```')
+        acts = pa["actions"]
+        check("ai-act: fenced block stripped from visible text",
+              "```" not in pa["text"] and pa["text"].startswith("Set it to OOK"))
+        check("ai-act: tune coerced (f_mhz float, bw kept)",
+              acts and acts[0]["action"] == "tune" and abs(acts[0]["f_mhz"] - 433.92) < 1e-6
+              and acts[0]["bw_khz"] == 60.0, str(acts))
+        check("ai-act: demod mode lowercased + validated",
+              any(a["action"] == "demod" and a.get("mode") == "ook" for a in acts))
+        check("ai-act: unknown action dropped",
+              not any(a["action"] == "nuke" for a in acts))
+        check("ai-act: no block -> empty actions, text intact",
+              parse_ai_actions("just prose")["actions"] == []
+              and parse_ai_actions("just prose")["text"] == "just prose")
+        check("ai-act: bad mode value rejected",
+              "mode" not in (parse_ai_actions('```json\n{"actions":[{"action":"demod","mode":"psk"}]}\n```')["actions"][0]))
         p = psd("synth", n=256)
         check("psd: freqs+db aligned, noise below peak",
               len(p["freqs_mhz"]) == len(p["db"]) and max(p["db"]) - p["noise_db"] > 15)
