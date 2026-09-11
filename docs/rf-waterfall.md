@@ -186,9 +186,12 @@ turning Ragnar into a real capture instrument rather than a closed viewer.
 
 ## Signal Analyzer (on-box SigMF analysis)
 
-A finished SigMF capture shows an **📈 Open in Analyzer** link that opens
-**`/rf-analyzer`** (`demos/rf_analyzer.html`) — a dedicated page that analyses the
-recording *on the device* so it works from a phone, no desktop DSP tools needed.
+Two ways in: a finished SigMF capture shows an **📈 Open in Analyzer** link, and
+the **Signal Intelligence** page has a **Signal Analyzer** button (always shown —
+analysis is offline, so no SDR need be connected) alongside RF Waterfall / ADS-B /
+etc. Both open **`/rf-analyzer`** (`demos/rf_analyzer.html`) — a dedicated page
+that analyses the recording *on the device* so it works from a phone, no desktop
+DSP tools needed.
 All the maths runs in numpy/scipy in `sigmf_analyzer.py`; the page is a viewer
 that requests windows:
 

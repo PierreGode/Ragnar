@@ -151,9 +151,22 @@ Turn "here are bits" into "here is what it says."
 - *Done when:* the analyzer handles chirp-spread and cyclostationary signals a
   plain spectrogram can't characterise.
 
-## Segment 8 — UX & sharing
-- Keyboard shortcuts, per-signal notes, saved analysis presets, shareable
-  deep-links (`/rf-analyzer?name=…&t0=…&f0=…`).
+## Segment 8 — UX & sharing  (in progress)
+- **Shareable deep-links** ✅ — the URL always mirrors the current view:
+  `/rf-analyzer?name=…&t0=…&t1=…&f0=…&f1=…&mf=…&pal=…` (times in s, freqs in MHz,
+  `mf` = marker frequency, `pal` = palette). `updateURL()` (a `history.replaceState`)
+  fires on every zoom/pan (`refreshWindow`), marker set/clear and palette change;
+  opening such a link restores the capture, zoom window, marker and palette
+  (parsed into a one-shot `DEEP` object applied in `loadCapture`; the URL palette
+  wins over the saved localStorage one). A **🔗 Copy link** button copies the exact
+  view (clipboard API with an execCommand fallback).
+- **Keyboard shortcuts** ✅ — <kbd>R</kbd> reset zoom · <kbd>B</kbd> back ·
+  <kbd>[</kbd>/<kbd>]</kbd> cycle palette · <kbd>Z</kbd>/<kbd>X</kbd>/<kbd>C</kbd>
+  zoom/measure/annotate mode · <kbd>D</kbd> demodulate · <kbd>L</kbd> copy link ·
+  <kbd>?</kbd> toggle the shortcut help. Ignored while typing in an input/select/
+  textarea; a ⌨ button opens the same legend. Each shortcut drives the existing
+  buttons, so behaviour stays in one place.
+- *Left for later:* per-signal notes, saved analysis presets.
 
 ---
 
