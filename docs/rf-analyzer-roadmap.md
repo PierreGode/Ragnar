@@ -94,11 +94,25 @@ Turn "here are bits" into "here is what it says."
 - **Decimate-on-load** option for very wide/long files.
 - *Done when:* a 30 s / 120 MB capture is analysable on a 512 MB board.
 
-## Segment 6 — SigMF annotations & interop
-- **Annotate on the spectrogram** — draw/label a signal box and **save it back to
-  the `.sigmf-meta` as SigMF annotations** (the IQEngine model); reload shows them.
-- **Export a selection** as a new SigMF sub-capture; export decoded bits / CSV.
-- *Done when:* annotations round-trip through the SigMF file and open elsewhere.
+## Segment 6 — SigMF annotations & interop ✅ shipped
+- **Annotate on the spectrogram** — an **Annotate** drag mode: drag a box around a
+  signal, label it, and it's **saved into the `.sigmf-meta` as a standard SigMF
+  annotation** (`core:sample_start`/`core:sample_count` + `core:freq_lower_edge`/
+  `core:freq_upper_edge` + `core:label`). Saved annotations draw as dashed
+  green boxes with labels and list as chips with ✕-delete under the spectrogram;
+  they load automatically when a capture opens (so a capture's band-label
+  annotation from capture time shows too).
+- **Round-trips / interop:** annotations persist in the SigMF file, so a capture
+  labelled here opens with its labels in IQEngine / inspectrum / any SigMF tool,
+  and vice-versa. Backend `add_annotation` / `list_annotations` /
+  `delete_annotation` (+ pure `_box_to_annotation`/`_annotation_to_box`); routes
+  `/analyze/{annotations,annotate,annotation/delete}`. Writes are user-only (not
+  in the AI action allowlist — those stay read-only).
+- *Validated:* 6 new selftests (46/46) — box↔annotation round-trip, add persists
+  in the file (interop-visible), delete, zero-span rejected; plus a real-capture
+  add→verify-in-file→delete.
+- *Left for later:* export a selection as a new SigMF sub-capture; export decoded
+  bits / CSV.
 
 ## Segment 7 — Advanced DSP
 - **Filter design + apply** (band-pass/notch) with before/after; export/listen.

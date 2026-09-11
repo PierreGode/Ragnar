@@ -1018,6 +1018,119 @@ def frames(name=None, bits=None, line=None, period=None):
 
 
 # --------------------------------------------------------------------------
+# SigMF annotations — draw/label a signal box on the spectrogram and save it
+# into the capture's .sigmf-meta as standard SigMF annotations (sample range +
+# freq edges + label). They round-trip through the file, so a capture annotated
+# here opens with its labels in IQEngine / inspectrum / any SigMF-aware tool,
+# and vice-versa. Pure box<->annotation helpers are selftested; add/list/delete
+# do the file read-modify-write.
+# --------------------------------------------------------------------------
+
+def _box_to_annotation(t0, t1, f0_hz, f1_hz, label, fs, fc=None):
+    """(time,freq) box -> a SigMF v1.0.0 annotation dict (pure)."""
+    a, b = sorted((float(t0), float(t1)))
+    s0 = max(0, int(round(a * fs)))
+    cnt = max(1, int(round((b - a) * fs)))
+    ann = {"core:sample_start": s0, "core:sample_count": cnt}
+    if f0_hz is not None and f1_hz is not None:
+        lo, hi = sorted((float(f0_hz), float(f1_hz)))
+        ann["core:freq_lower_edge"] = lo
+        ann["core:freq_upper_edge"] = hi
+    if label:
+        ann["core:label"] = str(label)[:200]
+    ann["core:generator"] = "Ragnar Signal Analyzer"
+    return ann
+
+
+def _annotation_to_box(ann, fs, fc=None):
+    """A SigMF annotation dict -> a UI-friendly box (pure)."""
+    s0 = int(ann.get("core:sample_start", 0) or 0)
+    cnt = int(ann.get("core:sample_count", 0) or 0)
+    t0 = s0 / fs if fs else 0.0
+    t1 = (s0 + cnt) / fs if (fs and cnt) else t0
+    fl = ann.get("core:freq_lower_edge")
+    fu = ann.get("core:freq_upper_edge")
+    return {"t0": round(t0, 6), "t1": round(t1, 6),
+            "f0_mhz": (round(float(fl) / 1e6, 6) if fl is not None else None),
+            "f1_mhz": (round(float(fu) / 1e6, 6) if fu is not None else None),
+            "label": ann.get("core:label") or ann.get("core:description") or "",
+            "sample_start": s0, "sample_count": cnt}
+
+
+def _read_meta(name):
+    _, meta_p = _paths(name)
+    if not os.path.exists(meta_p):
+        raise ValueError("capture not found")
+    with open(meta_p) as fh:
+        return json.load(fh), meta_p
+
+
+def _capture_fs_fc(meta):
+    g = meta.get("global", {}); c = (meta.get("captures") or [{}])[0]
+    return float(g.get("core:sample_rate") or 0) or 1.0, float(c.get("core:frequency") or 0)
+
+
+def list_annotations(name):
+    """Annotations stored in the capture's .sigmf-meta, as UI boxes."""
+    meta, _ = _read_meta(name)
+    fs, fc = _capture_fs_fc(meta)
+    anns = meta.get("annotations") or []
+    return {"ok": True, "annotations": [dict(_annotation_to_box(a, fs, fc), index=i)
+                                        for i, a in enumerate(anns)]}
+
+
+def add_annotation(name, t0, t1, f0_hz=None, f1_hz=None, label=None):
+    """Append a SigMF annotation to the capture's .sigmf-meta (read-modify-write).
+
+    Clamps the box to the capture's extent; keeps annotations sorted by
+    sample_start (the SigMF convention)."""
+    meta, meta_p = _read_meta(name)
+    fs, fc = _capture_fs_fc(meta)
+    _, meta_p2 = _paths(name)
+    data_p = meta_p[:-len(".sigmf-meta")] + ".sigmf-data"
+    nsamp = (os.path.getsize(data_p) // 2) if os.path.exists(data_p) else None
+    try:
+        t0 = float(t0); t1 = float(t1)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "t0/t1 must be numeric"}
+    dur = (nsamp / fs) if nsamp else max(t0, t1)
+    t0 = max(0.0, min(dur, t0)); t1 = max(0.0, min(dur, t1))
+    if abs(t1 - t0) < 1e-9:
+        return {"ok": False, "error": "annotation has zero time span"}
+    ann = _box_to_annotation(t0, t1, f0_hz, f1_hz, label, fs, fc)
+    anns = meta.get("annotations") or []
+    anns.append(ann)
+    anns.sort(key=lambda a: a.get("core:sample_start", 0))
+    meta["annotations"] = anns
+    try:
+        with open(meta_p, "w") as fh:
+            json.dump(meta, fh, indent=2)
+    except OSError as exc:
+        return {"ok": False, "error": "cannot write meta: %s" % exc}
+    return dict(list_annotations(name), added=_annotation_to_box(ann, fs, fc))
+
+
+def delete_annotation(name, index):
+    """Remove the annotation at ``index`` from the .sigmf-meta."""
+    meta, meta_p = _read_meta(name)
+    anns = meta.get("annotations") or []
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "index must be an integer"}
+    if not (0 <= index < len(anns)):
+        return {"ok": False, "error": "annotation index out of range"}
+    anns.pop(index)
+    meta["annotations"] = anns
+    try:
+        with open(meta_p, "w") as fh:
+            json.dump(meta, fh, indent=2)
+    except OSError as exc:
+        return {"ok": False, "error": "cannot write meta: %s" % exc}
+    return list_annotations(name)
+
+
+# --------------------------------------------------------------------------
 # AI agent actions — the assistant may propose analyzer actions (tune, demod,
 # classify, …) as a JSON block; this parses/validates them into a safe,
 # allowlisted list the page executes against its existing controls. All actions
@@ -1281,6 +1394,29 @@ def selftest():
               and mb["channel_power_db"] > mb["mean_db"], str(mb.get("peak_hz")))
         check("list: the synth capture is listed",
               any(c["name"] == "synth" for c in list_captures()["captures"]))
+        # --- SigMF annotations round-trip ---
+        _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
+        check("annot: box -> SigMF annotation (samples + freq edges + label)",
+              _b["core:sample_start"] == 80000 and _b["core:sample_count"] == 40000
+              and _b["core:freq_lower_edge"] == 434_040_000.0
+              and _b["core:label"] == "OOK burst", str(_b))
+        _rb = _annotation_to_box(_b, 1_000_000.0)
+        check("annot: annotation -> box round-trips t/f/label",
+              abs(_rb["t0"] - 0.08) < 1e-6 and abs(_rb["t1"] - 0.12) < 1e-6
+              and abs(_rb["f0_mhz"] - 434.04) < 1e-6 and _rb["label"] == "OOK burst")
+        r1 = add_annotation("synth", 0.08, 0.12, 434_040_000, 434_060_000, "burst A")
+        check("annot: add writes it to the .sigmf-meta + lists back",
+              r1["ok"] and any(a["label"] == "burst A" for a in r1["annotations"]))
+        # persisted on disk (reload the meta fresh)?
+        _m2, _ = _read_meta("synth")
+        check("annot: persisted in the SigMF file (interop-visible)",
+              any(a.get("core:label") == "burst A" for a in _m2.get("annotations", [])))
+        _idx = next(a["index"] for a in list_annotations("synth")["annotations"] if a["label"] == "burst A")
+        r2 = delete_annotation("synth", _idx)
+        check("annot: delete removes it",
+              r2["ok"] and not any(a["label"] == "burst A" for a in r2["annotations"]))
+        check("annot: clamped + zero-span rejected",
+              add_annotation("synth", 0.1, 0.1).get("ok") is False)
         # pure bit slicer on a clean square wave
         import numpy as np
         sq = (np.arange(1000) // 10) % 2
