@@ -117,11 +117,16 @@ Turn "here are bits" into "here is what it says."
 - *Left for later:* export a selection as a new SigMF sub-capture; export decoded
   bits / CSV.
 
-## Segment 7 — Advanced DSP
-- **Filter design + apply** (band-pass/notch) with before/after; export/listen.
-- **LoRa / chirp** analysis (de-chirp view); **spectral correlation** (cyclo)
-  display; **multi-signal tracking** across time.
-- Long-capture **tiled waterfall** overview.
+## Segment 7 — Advanced DSP  (in progress)
+- **Filter design + apply** ✅ — band-pass (isolate a signal) / notch (reject an
+  interferer) over the A/B-cursor or marker±BW band, with a **spectrum
+  before-vs-after** plot and a power-kept %. FFT-domain band mask
+  (`_fft_bandmask` / `filter_preview`), route `/analyze/filter`, Filter card on
+  the page. 4 selftests (50/50); on the real garage capture band-pass/notch keep
+  37.5%/62.5% (sum 100%, complementary).
+- *Left for later:* **LoRa / chirp** de-chirp view; **spectral correlation**
+  (cyclostationary) display; **multi-signal tracking**; long-capture **tiled
+  waterfall** overview; filtered-audio export.
 - *Done when:* the analyzer handles chirp-spread and cyclostationary signals a
   plain spectrogram can't characterise.
 
