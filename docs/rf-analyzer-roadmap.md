@@ -1,7 +1,7 @@
 # Signal Analyzer — roadmap
 
-The on-box [Signal Analyzer](rf-waterfall.md#signal-analyzer-on-box-sigmf-analysis)
-(`sigmf_analyzer.py` + `/rf-analyzer`) is built in shippable **segments**. The
+The on-box [Signal Analyzer](signalanalyzer.md) (`sigmf_analyzer.py` +
+`/rf-analyzer`) is built in shippable **segments**. The
 honest north star is the capability set of GNU Radio + inspectrum + URH + IQEngine
 + rtl_433 — years of work — so each segment is a self-contained, on-device,
 phone-usable increment that stands on its own and is validated (pure-DSP

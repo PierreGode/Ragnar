@@ -201,6 +201,9 @@ turning Ragnar into a real capture instrument rather than a closed viewer.
 
 ## Signal Analyzer (on-box SigMF analysis)
 
+> Full reference: **[docs/signalanalyzer.md](signalanalyzer.md)**. This section is
+> the summary in the context of the waterfall page.
+
 Two ways in: a finished SigMF capture shows an **📈 Open in Analyzer** link, and
 the **Signal Intelligence** page has a **Signal Analyzer** button (always shown —
 analysis is offline, so no SDR need be connected) alongside RF Waterfall / ADS-B /
