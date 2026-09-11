@@ -109,8 +109,19 @@
       <h1>Signal Analyzer</h1>
     </div>
     <div class="spacer"></div>
-    <a class="back" href="/rf-waterfall">&#8592;&nbsp;RF Waterfall</a>
+    <a class="back" id="backlink" href="/#network/wifi">&#8592;&nbsp;Signal Intelligence</a>
   </header>
+  <script>
+    // Back-link returns to wherever you came from: the RF Waterfall page
+    // (a capture's "Open in Analyzer") or Signal Intelligence (the RF-tools
+    // hub). document.referrer drops the #hash, so SI arrives as the site root.
+    (function(){ try{
+      var b=document.getElementById('backlink'); if(!b) return;
+      var p=''; try{ p=new URL(document.referrer||'').pathname; }catch(e){}
+      if(p==='/rf-waterfall'){ b.href='/rf-waterfall'; b.innerHTML='← RF Waterfall'; }
+      else { b.href='/#network/wifi'; b.innerHTML='← Signal Intelligence'; }
+    }catch(e){} })();
+  </script>
 
   <div class="bar">
     <span class="lbl">Capture</span>

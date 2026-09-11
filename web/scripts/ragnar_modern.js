@@ -3152,7 +3152,7 @@ function _wifiFsAps() {
 }
 
 function _wifiSetStatus(text) {
-    const st = document.getElementById('wifi-status');
+    const st = document.getElementById('wifi-scan-status');
     if (st) st.textContent = text;
     const fs = document.getElementById('wifi-fs-status');
     if (fs) fs.textContent = text;
@@ -3182,7 +3182,7 @@ function _wifiFsRender() {
     const d = _wifiState.data;
     const iface = document.getElementById('wifi-fs-iface');
     if (iface) iface.textContent = _wifiState.iface ? `· ${_wifiState.iface}` : '';
-    const st = document.getElementById('wifi-fs-status'), main = document.getElementById('wifi-status');
+    const st = document.getElementById('wifi-fs-status'), main = document.getElementById('wifi-scan-status');
     if (st && main) st.textContent = main.textContent;
     _wifiFsSyncGates();
     // Band chips — clicking one filters the spectrum to that band.
