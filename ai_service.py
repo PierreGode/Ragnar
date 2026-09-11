@@ -653,6 +653,55 @@ one capture/filter that would confirm it."""
             self._cache_set(key, resp)
         return resp
 
+    def analyze_signal(self, question: str, context: Dict, facts: Dict = None):
+        """RF-analyst assistant for the Signal Analyzer (SigMF IQ captures).
+
+        Acts as an expert RF / SIGINT / signal-reverse-engineering analyst: helps
+        the user interpret the analyzer's measurements, choose demod parameters,
+        read a recovered bitstream / frame structure / CRC, guess the likely
+        device or protocol, and decide the next step. ``context`` is what the page
+        currently shows (summary, classification, bursts, demod bits, frame
+        analysis, decoded devices, marker); ``facts`` are freshly-measured values
+        the server re-derived from the capture so the AI is grounded in real
+        numbers. Chat-style, so this is NOT cached. Returns text, or None."""
+        if not self.is_enabled():
+            return None
+        merged = dict(context or {})
+        if facts:
+            merged["measured"] = facts
+        ctx_json = json.dumps(merged, indent=2, default=str)[:7000]
+        q = (question or "").strip() or "What is this signal, and how would I decode it?"
+        system = (
+            "You are a senior RF / SIGINT and signal-reverse-engineering analyst helping a user "
+            "at a software-defined-radio workbench. They have captured raw IQ (a SigMF recording "
+            "from an RTL-SDR, ~24 MHz-1.7 GHz, receive-only) and are looking at an on-device "
+            "analyzer: spectrogram, PSD, envelope, automatic burst detection, an OOK/AM & FSK/FM "
+            "demodulator that recovers a bitstream, a modulation classifier, and a protocol tool "
+            "(preamble / repeated-frame alignment / CRC scan). "
+            "Your job: interpret the measurements and TEACH the user how a professional would "
+            "proceed - what the signal likely is, which band/service it belongs to, what "
+            "modulation and symbol rate the numbers imply, how to set the demod (centre offset, "
+            "bandwidth, OOK vs FSK), how to read the recovered bits / frame structure / CRC, and "
+            "the single best NEXT step. "
+            "IMPORTANT HONESTY RULES: the analyzer's dB values are RELATIVE (uncalibrated), not "
+            "absolute dBm - never present them as calibrated power. LoRa / chirp-spread and most "
+            "digital mesh (Meshtastic) CANNOT be demodulated here - it is energy/occupancy only; "
+            "say so. Rolling-code remotes and unlisted protocols won't be 'named' by rtl_433 - "
+            "explain what the bits still tell you (fixed vs rolling fields). Do NOT invent values "
+            "that aren't in the provided context; if something needed isn't there, tell the user "
+            "which analyzer control to use to get it. Reference the analyzer's own controls by "
+            "name (Zoom/Measure, Demodulate, BW, Frames, Decode, Bin/Hex/Manchester). Be concise "
+            "and practical; use short markdown sections/bullets. This is receive-only analysis."
+        )
+        user = (
+            "Here is the current analyzer state for the selected capture (JSON):\n\n"
+            + ctx_json
+            + "\n\nUser question:\n" + q[:2000]
+            + "\n\nAnswer as their RF analyst: interpret what's measured, be specific about the "
+            "numbers present, and end with a concrete next step using the analyzer's controls."
+        )
+        return self._ask(system, user)
+
     # ===================================================================
     #   ATTACK VECTOR IDENTIFICATION
     # ===================================================================

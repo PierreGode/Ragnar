@@ -208,6 +208,16 @@ that requests windows:
   known ISM devices (TPMS / weather / remotes / doorbells…) straight from the
   recording, with their decoded fields.
 
+- **Ask the RF analyst (AI)** — when Ragnar's AI service is enabled (Settings ›
+  AI), the analyzer shows an assistant card that reuses that service
+  (`/api/ai/signal` → `AIService.analyze_signal`). It's **grounded**: the server
+  re-derives the capture's measured summary and the page sends what you've run
+  (classification, bursts, demod bits, frame analysis, marker), so the AI reasons
+  about *your* signal — explaining measurements, suggesting demod settings,
+  reading the bits/frame/CRC, guessing the likely device/protocol and the next
+  step. It's told the honest caveats (relative dB, LoRa is energy-only,
+  rolling-code remotes aren't "named"). The card is hidden when AI is disabled.
+
 Roadmap for where this is going (built in segments): see
 [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md).
 
