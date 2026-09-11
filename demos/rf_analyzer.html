@@ -65,6 +65,12 @@
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  #stackplots{display:flex;flex-direction:column;gap:6px}
+  .dplot{position:relative}
+  .dplot .dpl{position:absolute;top:3px;left:6px;z-index:2;font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);pointer-events:none}
+  .symbar{display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center;margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .symbar input{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+  .symbar .symout{color:var(--cyan)}
   .annbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 14px;border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;color:var(--muted)}
   .annbar .ann{display:inline-flex;align-items:center;gap:6px;background:rgba(63,181,107,.12);border:1px solid rgba(63,181,107,.4);border-radius:14px;padding:3px 6px 3px 10px;color:var(--live)}
   .annbar .ann b{color:var(--ink);font-weight:600}
@@ -194,9 +200,21 @@
             <div class="lbl" style="padding:4px 4px">IQ constellation</div>
             <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
           </div>
-          <div style="flex:1 1 220px;min-width:180px">
-            <div class="seg" id="instview" style="margin:2px 0 6px"><button data-iv="iq">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
-            <canvas class="rowcanvas" id="inst" style="height:150px"></canvas>
+          <div style="flex:2 1 320px;min-width:220px">
+            <div class="seg" id="instview" style="margin:2px 0 6px" title="Show/hide derived plots (stacked)">
+              <button data-iv="iq" aria-pressed="true">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
+            <div id="stackplots">
+              <div class="dplot" data-p="iq"><span class="dpl">I/Q sample</span><canvas class="rowcanvas dpc" id="p-iq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="freq"><span class="dpl">Frequency</span><canvas class="rowcanvas dpc" id="p-freq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="amp" hidden><span class="dpl">Amplitude</span><canvas class="rowcanvas dpc" id="p-amp" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="phase" hidden><span class="dpl">Phase</span><canvas class="rowcanvas dpc" id="p-phase" style="height:120px;cursor:col-resize"></canvas></div>
+            </div>
+            <div class="symbar">
+              <button id="symtog" aria-pressed="false" title="Overlay symbol-period boundaries on every plot — drag across one symbol to set the rate">⌗ Symbols</button>
+              <span class="lbl">baud</span><input id="symbaud" type="number" step="any" style="width:74px" title="Symbol rate (Hz). Drag one symbol width on a plot, or pull from the demod.">
+              <button id="symfrom" title="Use the demodulator's estimated symbol rate">⟳ demod</button>
+              <span id="symout" class="symout"></span>
+            </div>
           </div>
         </div>
       </div>
@@ -538,7 +556,8 @@
   });
 
   // ---- modulation analysis: classify + constellation + instantaneous ----
-  var instView='freq';
+  var PLOT_ORDER=['iq','freq','amp','phase'];
+  var plotsOn={iq:true, freq:true, amp:false, phase:false};   // stacked, multi-select
   function drawScatter(id,ix,qx){
     var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(120,c.clientWidth||190),H=c.clientHeight||190;
     c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
@@ -548,13 +567,60 @@
     g.fillStyle='rgba(56,189,201,0.5)';
     for(var i=0;i<ix.length;i++){var x=W/2+ix[i]*sx, y=H/2-qx[i]*sy; g.fillRect(x-0.6,y-0.6,1.4,1.4);}
   }
-  function drawInst(d){
-    if(!d||!d.ok){ plot('inst',[],[],'rgb(148,163,184)',false); return; }
-    if(instView==='amp') plot('inst',d.t,d.amp_db,'rgb(63,181,107)',true);
-    else if(instView==='phase') plot('inst',d.t,d.phase_deg,'rgb(129,140,248)',false);
-    else if(instView==='iq') plot2('inst',d.i,d.q,'rgb(245,185,66)','rgb(56,189,201)');  // sample plot: I & Q
-    else plot('inst',d.t,d.freq_hz,'rgb(245,185,66)',false);
+  function drawOne(key,d){
+    var id='p-'+key;
+    if(key==='iq') plot2(id,d.i,d.q,'rgb(245,185,66)','rgb(56,189,201)');       // sample plot
+    else if(key==='amp') plot(id,d.t,d.amp_db,'rgb(63,181,107)',true);
+    else if(key==='phase') plot(id,d.t,d.phase_deg,'rgb(129,140,248)',false);
+    else plot(id,d.t,d.freq_hz,'rgb(245,185,66)',false);
+    drawSymbolsOn(id,d);
   }
+  function drawInst(d){
+    S._inst=d;
+    PLOT_ORDER.forEach(function(key){
+      var blk=document.querySelector('.dplot[data-p="'+key+'"]');
+      if(blk) blk.hidden=!plotsOn[key];
+      if(plotsOn[key] && d && d.ok) drawOne(key,d);
+    });
+  }
+  // ---- symbol-period cursor (inspectrum-style): overlay symbol boundaries on
+  // EVERY visible stacked plot; set the rate by dragging one symbol width, typing
+  // baud, or pulling the demod estimate. A click shifts the grid phase.
+  var symState={on:false, baud:0, off:0};
+  function drawSymbolsOn(id,d){
+    if(!symState.on || !(symState.baud>0) || !d||!d.t||!d.t.length) return;
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    var g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    var tL=d.t[d.t.length-1]||0; if(tL<=0) return;
+    var per=1/symState.baud; if(per>=tL) return;         // <2 symbols: nothing useful
+    var off=symState.off-Math.floor(symState.off/per)*per;
+    g.strokeStyle='rgba(245,185,66,0.55)'; g.lineWidth=1; g.setLineDash([2,3]);
+    var cnt=0; for(var t=off;t<=tL+1e-12 && cnt<500;t+=per,cnt++){var x=6+(t/tL)*(W-12);g.beginPath();g.moveTo(x,0);g.lineTo(x,H);g.stroke();}
+    g.setLineDash([]);
+  }
+  function redrawSym(){ if(S._inst) drawInst(S._inst); }
+  function updateSymOut(){ var o=$('symout'),d=S._inst; if(!o)return;
+    if(!symState.on||!(symState.baud>0)){ o.textContent=''; return; }
+    var tL=(d&&d.t&&d.t.length)?d.t[d.t.length-1]:0, nsym=tL>0?Math.floor(tL*symState.baud):0;
+    o.textContent='period '+(1e3/symState.baud).toFixed(3)+' ms · '+nsym+' symbols'; }
+  function setBaud(b){ symState.baud=(b>0?b:0); if($('symbaud')) $('symbaud').value=(b>0?Math.round(b):''); updateSymOut(); redrawSym(); }
+  $('symtog').addEventListener('click',function(){ symState.on=!symState.on; $('symtog').setAttribute('aria-pressed',symState.on?'true':'false'); updateSymOut(); redrawSym(); });
+  $('symbaud').addEventListener('change',function(){ if(!symState.on){symState.on=true;$('symtog').setAttribute('aria-pressed','true');} setBaud(parseFloat($('symbaud').value)||0); });
+  $('symfrom').addEventListener('click',function(){ var b=(S.demod&&S.demod.baud)||(S.classifyData&&S.classifyData.symbol_rate_hz)||0;
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); } });
+  // drag/click to set the symbol rate on any stacked derived-plot canvas
+  (function(){var down=null;
+    function tAt(ev){var t=ev.target; if(!t||!t.classList||!t.classList.contains('dpc'))return null;
+      var r=t.getBoundingClientRect(),W=r.width,d=S._inst; if(!d||!d.t||!d.t.length)return null;
+      var tL=d.t[d.t.length-1]||0, x=(ev.clientX-r.left-6)/(W-12); x=Math.max(0,Math.min(1,x)); return x*tL;}
+    $('stackplots').addEventListener('mousedown',function(e){ var t=tAt(e); if(t!=null) down={t:t}; });
+    window.addEventListener('mouseup',function(e){ if(!down)return; var d0=down; down=null; var t=tAt(e); if(t==null||!S._inst)return;
+      var tL=S._inst.t[S._inst.t.length-1]||1, dt=Math.abs(t-d0.t);
+      symState.on=true; $('symtog').setAttribute('aria-pressed','true');
+      if(dt>tL/500){ symState.off=Math.min(t,d0.t); setBaud(1/dt); }   // drag = one symbol width -> baud
+      else { symState.off=d0.t; updateSymOut(); redrawSym(); }         // click = shift the grid
+    });
+  })();
   // two overlaid traces (raw I and Q), symmetric about 0 — the "sample plot".
   function plot2(id,a,b,ca,cb){
     var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
@@ -567,9 +633,11 @@
     g.fillStyle=ca;g.font='9px monospace';g.textAlign='left';g.fillText('I',6,11);
     g.fillStyle=cb;g.fillText('Q',16,11);
   }
-  $('instview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; instView=b.getAttribute('data-iv');
-    Array.prototype.forEach.call($('instview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-iv')===instView?'true':'false');});
-    drawInst(S._inst);});
+  $('instview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+    var k=b.getAttribute('data-iv'), on=(b.getAttribute('aria-pressed')==='true');
+    if(on && PLOT_ORDER.filter(function(x){return plotsOn[x];}).length<=1) return;  // keep >=1 visible
+    plotsOn[k]=!on; b.setAttribute('aria-pressed',plotsOn[k]?'true':'false');
+    if(S._inst) drawInst(S._inst);});
   $('runmod').addEventListener('click',function(){
     if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
     var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};

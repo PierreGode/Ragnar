@@ -48,6 +48,8 @@ Turn "here are bits" into "here is what it says."
 
 ## Segment 3 — Modulation analysis ✅ shipped
 - **Derived plots** (added 2026-09-11): the instantaneous toggle now includes an **I/Q sample plot** alongside Freq/Amp/Phase — inspectrum's full derived-plot set.
+- **Stacked derived plots** (added 2026-09-11): the derived plots (I/Q, Freq, Amp, Phase) now render **stacked simultaneously** (multi-select show/hide) instead of one-at-a-time — inspectrum's multi-plot model; the symbol grid overlays every visible plot.
+- **Symbol-period cursor** (added 2026-09-11): overlay symbol boundaries on the derived plots — drag one symbol width on the plot to set the baud (or type it / pull from the demod), readout shows period + symbol count. inspectrum's symbol-cursor parity.
 - **IQ constellation** for a selection (scatter) + **instantaneous** amplitude /
   frequency / phase (toggle) — a Modulation card driven by the marker + BW.
 - **Automatic modulation classification** — a feature decision tree (envelope
