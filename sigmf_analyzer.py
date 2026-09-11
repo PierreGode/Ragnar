@@ -1318,6 +1318,18 @@ def frame_analysis(bits, period=None):
 
 # --- CRC / checksum library (common ISM/embedded polynomials) ---
 
+# Shared algorithm tables (used by both crc_scan and crc_brute).
+_CRC8_ALGOS = [("CRC-8", 0x07, 0x00, 0x00),
+               ("CRC-8/MAXIM-DOW", 0x31, 0x00, 0x00),
+               ("CRC-8/SAE-J1850", 0x1D, 0xFF, 0xFF),
+               ("CRC-8/ROHC", 0x07, 0xFF, 0x00)]
+_CRC16_ALGOS = [("CRC-16/CCITT-FALSE", 0x1021, 0xFFFF, 0x0000, False, False),
+                ("CRC-16/XMODEM", 0x1021, 0x0000, 0x0000, False, False),
+                ("CRC-16/ARC (IBM)", 0x8005, 0x0000, 0x0000, True, True),
+                ("CRC-16/MODBUS", 0x8005, 0xFFFF, 0x0000, True, True),
+                ("CRC-16/KERMIT", 0x1021, 0x0000, 0x0000, True, True)]
+
+
 def _crc8(data, poly, init=0, xorout=0):
     c = init
     for b in data:
@@ -1359,12 +1371,9 @@ def crc_scan(bits):
         return {"checked": True, "matches": []}
     data = [int(bits[i * 8:i * 8 + 8], 2) for i in range(nbytes)]
     matches = []
-    algos8 = [("CRC-8", 0x07, 0x00, 0x00),
-              ("CRC-8/MAXIM-DOW", 0x31, 0x00, 0x00),
-              ("CRC-8/CCITT", 0x07, 0x00, 0x00)]
     # 8-bit check over all preceding bytes
     payload8, chk8 = data[:-1], data[-1]
-    for name, poly, init, xor in algos8:
+    for name, poly, init, xor in _CRC8_ALGOS:
         if _crc8(payload8, poly, init, xor) == chk8:
             matches.append({"algo": name, "width": 8, "over_bytes": len(payload8)})
     if _sum8(payload8) == chk8:
@@ -1375,11 +1384,7 @@ def crc_scan(bits):
     if nbytes >= 3:
         payload16 = data[:-2]
         chk16 = (data[-2] << 8) | data[-1]
-        algos16 = [("CRC-16/CCITT-FALSE", 0x1021, 0xFFFF, 0x0000, False, False),
-                   ("CRC-16/XMODEM", 0x1021, 0x0000, 0x0000, False, False),
-                   ("CRC-16/ARC (IBM)", 0x8005, 0x0000, 0x0000, True, True),
-                   ("CRC-16/MODBUS", 0x8005, 0xFFFF, 0x0000, True, True)]
-        for name, poly, init, xor, ri, ro in algos16:
+        for name, poly, init, xor, ri, ro in _CRC16_ALGOS:
             if _crc16(payload16, poly, init, xor, ri, ro) == chk16:
                 matches.append({"algo": name, "width": 16, "over_bytes": len(payload16)})
     return {"checked": True, "matches": matches}
@@ -1396,23 +1401,348 @@ def _xor8(data):
     return x
 
 
-def frames(name=None, bits=None, line=None, period=None):
+def crc_brute(bits, max_skip=3):
+    """Search for a CRC/checksum trailer that validates, allowing leading bytes
+    to be skipped and 0–1 trailing bytes after the check (pure).
+
+    A generalisation of :func:`crc_scan`: a real frame often carries a length or
+    type byte the CRC does *not* cover, or a trailing status byte after it, so
+    this tries payloads that skip up to ``max_skip`` leading bytes and end 0 or 1
+    bytes before the tail, in both 16-bit byte orders. Matches are ranked by
+    coverage (widest payload first) and capped so a chance hit on a tiny payload
+    doesn't bury a real one. Payloads shorter than 2 bytes aren't reported.
+    """
+    bits = "".join(c for c in (bits or "") if c in "01")
+    nbytes = len(bits) // 8
+    if nbytes < 3:
+        return {"checked": True, "matches": []}
+    data = [int(bits[i * 8:i * 8 + 8], 2) for i in range(nbytes)]
+    hits, seen = [], set()
+    for skip in range(0, min(max_skip, nbytes - 3) + 1):
+        for tail in (0, 1):
+            ci = nbytes - 1 - tail                     # 8-bit check position
+            payload = data[skip:ci]
+            if len(payload) >= 2:
+                chk = data[ci]
+                for name, poly, init, xor in _CRC8_ALGOS:
+                    if _crc8(payload, poly, init, xor) == chk:
+                        hits.append((len(payload), {"algo": name, "width": 8,
+                            "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+                if _sum8(payload) == chk:
+                    hits.append((len(payload), {"algo": "checksum-8 (sum)", "width": 8,
+                        "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+                if _xor8(payload) == chk:
+                    hits.append((len(payload), {"algo": "XOR-8", "width": 8,
+                        "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+            ci = nbytes - 2 - tail                     # 16-bit check position
+            payload = data[skip:ci]
+            if len(payload) >= 2:
+                be = (data[ci] << 8) | data[ci + 1]
+                le = (data[ci + 1] << 8) | data[ci]
+                for name, poly, init, xor, ri, ro in _CRC16_ALGOS:
+                    v = _crc16(payload, poly, init, xor, ri, ro)
+                    endian = "big" if v == be else ("little" if v == le else None)
+                    if endian:
+                        hits.append((len(payload), {"algo": name, "width": 16, "endian": endian,
+                            "skip_bytes": skip, "over_bytes": len(payload), "check_byte": ci}))
+    out = []
+    for _, m in sorted(hits, key=lambda x: x[0], reverse=True):
+        key = (m["algo"], m["width"], m["skip_bytes"], m["over_bytes"])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
+    return {"checked": True, "matches": out[:12]}
+
+
+def bit_transform(bits, invert=False, reflect=False, offset=0, take=0):
+    """Reshape a raw bitstream before framing (pure).
+
+    ``offset`` drops that many leading bits (slide the byte grid / skip a
+    preamble); ``take`` keeps only that many bits after the offset (0 = all);
+    ``invert`` complements every bit; ``reflect`` reverses bit order within each
+    whole byte (MSB-first ↔ LSB-first — the usual UART/SPI ambiguity). Applied in
+    that order. Non-01 characters are dropped.
+    """
+    b = "".join(c for c in (bits or "") if c in "01")
+    try:
+        offset = max(0, int(offset or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if offset:
+        b = b[offset:]
+    try:
+        take = int(take or 0)
+    except (TypeError, ValueError):
+        take = 0
+    if take > 0:
+        b = b[:take]
+    if invert:
+        b = b.translate({48: 49, 49: 48})              # '0'<->'1'
+    if reflect:
+        out = [b[i:i + 8][::-1] for i in range(0, len(b) - 7, 8)]
+        rem = len(b) % 8
+        if rem:
+            out.append(b[len(b) - rem:])               # trailing partial byte as-is
+        b = "".join(out)
+    return b
+
+
+def _to_hex_mask(bits):
+    """Hex of a mask string of '0'/'1'/'x'; any byte containing 'x' -> '··'."""
+    out = []
+    for i in range(0, len(bits) - 7, 8):
+        chunk = bits[i:i + 8]
+        out.append("··" if "x" in chunk else "%02x" % int(chunk, 2))
+    rem = len(bits) % 8
+    s = " ".join(out)
+    if rem:
+        s += (" " if s else "") + "+" + bits[len(bits) - rem:]
+    return s
+
+
+def _consensus_frame(bits):
+    """Reduce one recovered bitstream to a single best frame (pure).
+
+    Uses the confident repeated-frame period if there is one (aligned from 0 or
+    after a preamble), else returns the whole stream. Returns (frame, period,
+    repeats)."""
+    bits = "".join(c for c in (bits or "") if c in "01")
+    if len(bits) < 8:
+        return bits, len(bits), 1
+    p = _repeat_period(bits)
+    if p >= 8:
+        e = _eval_period(bits, p, 0)
+        if e:
+            return e["consensus_bits"], p, e["repeats"]
+    pre = _preamble(bits)
+    if pre >= 4:
+        p2 = _repeat_period(bits[pre:])
+        if p2 >= 8:
+            e = _eval_period(bits, p2, pre)
+            if e:
+                return e["consensus_bits"], p2, e["repeats"]
+    return bits, len(bits), 1
+
+
+def _classify_field(vals, width):
+    """Heuristic class for a varying field's values across ordered captures."""
+    if len(set(vals)) == 1:
+        return "fixed"
+    inc = all(vals[i + 1] > vals[i] for i in range(len(vals) - 1))
+    dec = all(vals[i + 1] < vals[i] for i in range(len(vals) - 1))
+    if (inc or dec) and len(vals) >= 2:
+        steps = {abs(vals[i + 1] - vals[i]) for i in range(len(vals) - 1)}
+        if len(steps) == 1 or max(steps) <= 4:
+            return "counter"
+    if len(set(vals)) == len(vals) and width >= 8 and (max(vals) - min(vals)) > (1 << (width - 2)):
+        return "rolling"
+    return "varying"
+
+
+def field_diff(streams, labels=None):
+    """Diff repeated captures of the *same* emitter: separate FIXED bits (device
+    ID / type) from VARYING bits (rolling code / counter / payload) — pure.
+
+    Each entry in ``streams`` is a recovered bitstream from one capture. Each is
+    reduced to its consensus frame, frames are aligned to the most common length
+    (odd ones out are dropped and reported), and every bit position is classed
+    fixed/varying across the set. Contiguous varying runs are grouped into fields
+    and classed as a monotonic *counter*, a high-entropy *rolling* code, or plain
+    *varying*. This is the "press the button twice, see what changes" move that
+    cracks a remote whose protocol no library knows.
+    """
+    import numpy as np
+    from collections import Counter
+    labels = labels or []
+    frs, lbls = [], []
+    for i, s in enumerate(streams or []):
+        fbits, _per, _rep = _consensus_frame(s)
+        fbits = "".join(c for c in (fbits or "") if c in "01")
+        if len(fbits) >= 8:
+            frs.append(fbits)
+            lbls.append(str(labels[i]) if i < len(labels) else ("cap %d" % (i + 1)))
+    if len(frs) < 2:
+        return {"ok": False, "error": "need at least 2 captures with a recoverable frame"}
+    lens = Counter(len(f) for f in frs)
+    L = lens.most_common(1)[0][0]
+    keep = [(lbls[j], frs[j]) for j in range(len(frs)) if len(frs[j]) == L]
+    dropped = [lbls[j] for j in range(len(frs)) if len(frs[j]) != L]
+    if len(keep) < 2:
+        return {"ok": False, "error": "frames differ in length (%s bits) — align a common frame length first"
+                % ", ".join(str(k) for k in sorted(lens))}
+    names = [k[0] for k in keep]
+    arr = np.array([[1 if c == "1" else 0 for c in k[1]] for k in keep])
+    n = arr.shape[0]
+    ones = arr.sum(axis=0)
+    cls = ["fixed1" if c == n else ("fixed0" if c == 0 else "vary") for c in ones]
+    consensus = "".join("1" if c == n else ("0" if c == 0 else "x") for c in ones)
+    fields, i = [], 0
+    while i < L:
+        if cls[i] == "vary":
+            j = i
+            while j < L and cls[j] == "vary":
+                j += 1
+            width = j - i
+            vals = [int("".join(str(x) for x in row), 2) for row in arr[:, i:j]]
+            fields.append({"start": i, "len": width, "kind": _classify_field(vals, width),
+                           "values": ["{:0{}b}".format(v, width) for v in vals],
+                           "values_hex": ["%x" % v for v in vals]})
+            i = j
+        else:
+            i += 1
+    return {"ok": True, "n_captures": n, "frame_bits": L, "labels": names, "dropped": dropped,
+            "consensus": consensus, "consensus_hex": _to_hex_mask(consensus),
+            "bit_class": cls, "fields": fields,
+            "n_fixed": int(((ones == 0) | (ones == n)).sum()),
+            "n_varying": int(((ones > 0) & (ones < n)).sum()),
+            "frames": [{"label": names[k], "bits": keep[k][1], "hex": _to_hex(keep[k][1])}
+                       for k in range(n)]}
+
+
+# --------------------------------------------------------------------------
+# Device fingerprinting — match measured signal features (modulation, frame
+# length, CRC, centre frequency) to known ISM device *families*. Heuristic and
+# honestly scored: it returns ranked candidate families with a per-feature
+# rationale, never a single certainty. rtl_433 remains the heavyweight decoder
+# for supported devices; this classifies the ones it can't, and the unknowns.
+# --------------------------------------------------------------------------
+
+_DEVICE_SIGNATURES = [
+    {"name": "EV1527 / PT2262 fixed-code remote", "mod": ["ook", "ask"],
+     "bands": [315, 433, 868], "frame": (20, 28), "crc": "none",
+     "klass": "OOK PWM remote — gate/garage/doorbell, fixed address",
+     "confirm": "~24-bit frame (≈20-bit address + 4-bit data), no CRC; decode PWM symbols."},
+    {"name": "KeeLoq rolling-code remote", "mod": ["ook", "ask", "fsk"],
+     "bands": [315, 433, 868], "frame": (64, 68), "crc": "none",
+     "klass": "rolling-code remote — car/gate (32-bit hopping + 28-bit serial)",
+     "confirm": "~66-bit frame, half a fixed serial + half changing every press (use Field diff)."},
+    {"name": "TPMS tyre-pressure sensor", "mod": ["fsk"],
+     "bands": [315, 433], "frame": (64, 96), "crc": "any",
+     "klass": "vehicle TPMS sensor — FSK, Manchester, CRC-checked",
+     "confirm": "FSK + Manchester line-coding, 8–12-byte frame with a CRC; rtl_433 has decoders."},
+    {"name": "Weather / environmental sensor", "mod": ["ook", "ask", "fsk"],
+     "bands": [433, 868, 915], "frame": (36, 96), "crc": "any",
+     "klass": "weather / temp-humidity sensor — Acurite / LaCrosse / Oregon class",
+     "confirm": "repeated 5–12-byte frame with a checksum or CRC-8; try the rtl_433 decoder."},
+    {"name": "Security sensor (door / window / PIR)", "mod": ["ook", "ask", "fsk"],
+     "bands": [315, 345, 433, 868], "frame": (40, 80), "crc": "any",
+     "klass": "alarm / security sensor — Honeywell 345 / DSC / 2GIG class",
+     "confirm": "framed serial + status bits; Honeywell is 345 MHz FSK, DSC 433/868."},
+    {"name": "LoRa (CSS chirp)", "mod": ["chirp", "lora", "spread"],
+     "bands": [433, 868, 915], "frame": None, "crc": "any",
+     "klass": "LoRa / chirp-spread-spectrum node",
+     "confirm": "wideband up/down chirps — use the LoRa de-chirp tool, not OOK/FSK demod."},
+]
+
+
+def _freq_band_mhz(freq_hz):
+    """Nearest common ISM band tag (MHz) for a centre frequency, or a rounded MHz."""
+    try:
+        f = float(freq_hz) / 1e6
+    except (TypeError, ValueError):
+        return None
+    for lo, hi, tag in [(300, 322, 315), (335, 355, 345), (386, 470, 433),
+                        (860, 872, 868), (900, 930, 915), (2400, 2500, 2450)]:
+        if lo <= f <= hi:
+            return tag
+    return round(f) if f > 0 else None
+
+
+def fingerprint(mod=None, baud=None, frame_bits=None, preamble_bits=None,
+                crc=None, freq_hz=None, bw_hz=None):
+    """Score measured signal features against known ISM device families.
+
+    Heuristic family identification: returns ranked *candidates* each with a
+    confidence (0–100) and a per-feature rationale — never a single certainty.
+    Feed it the modulation (from classify/demod), the frame length and whether a
+    CRC matched (from Frames), and the centre frequency.
+    """
+    mod = (mod or "").lower()
+    band = _freq_band_mhz(freq_hz)
+    has_crc = bool(crc)
+    try:
+        fb = int(frame_bits) if frame_bits else 0
+    except (TypeError, ValueError):
+        fb = 0
+    cands = []
+    for sig in _DEVICE_SIGNATURES:
+        score = total = 0.0
+        why = []
+        modmatch = False
+        total += 3
+        if mod and any(m in mod or mod in m for m in sig["mod"]):
+            score += 3
+            modmatch = True
+            why.append("%s ✓" % mod.upper())
+        elif mod:
+            why.append("%s ✗ (want %s)" % (mod.upper(), "/".join(sig["mod"])))
+        if band and sig["bands"]:
+            total += 2
+            if band in sig["bands"]:
+                score += 2
+                why.append("%s MHz ✓" % band)
+            else:
+                why.append("%s MHz ✗ (want %s)" % (band, "/".join(str(b) for b in sig["bands"])))
+        if sig["frame"] and fb:
+            total += 2
+            lo, hi = sig["frame"]
+            if lo <= fb <= hi:
+                score += 2
+                why.append("%d-bit frame ✓" % fb)
+            else:
+                why.append("%d-bit frame ✗ (want %d–%d)" % (fb, lo, hi))
+        if sig["crc"] == "none":
+            total += 1
+            if not has_crc:
+                score += 1
+                why.append("no CRC ✓")
+            else:
+                why.append("CRC present ✗ (family is un-CRC'd)")
+        elif sig["crc"] == "any" and has_crc:
+            total += 1
+            score += 1
+            why.append("CRC present ✓")
+        conf = int(round(100 * score / total)) if total else 0
+        if (conf > 0 and modmatch) or conf >= 55:
+            cands.append({"name": sig["name"], "class": sig["klass"], "confidence": conf,
+                          "why": why, "confirm": sig["confirm"]})
+    cands.sort(key=lambda c: c["confidence"], reverse=True)
+    generic = None
+    if not cands or cands[0]["confidence"] < 45:
+        generic = "%s%s%s%s — no strong family match; reverse it with Field diff + CRC brute." % (
+            (mod.upper() if mod else "unknown modulation"),
+            (" @ %s MHz" % band if band else ""),
+            (", %d-bit frame" % fb if fb else ""),
+            (", CRC-checked" if has_crc else ""))
+    return {"ok": True, "candidates": cands[:5], "band_mhz": band, "generic": generic}
+
+
+def frames(name=None, bits=None, line=None, period=None,
+           invert=False, reflect=False, offset=0, take=0):
     """Web entry: analyse a bitstream (raw or line-decoded) into frame structure.
 
-    Pass ``bits`` directly (the demod output the page holds); ``line`` optionally
-    line-decodes first (manchester / nrzi / diff_manchester); ``period`` forces a
-    specific frame length (from clicking a candidate).
+    Pass ``bits`` directly (the demod output the page holds); ``invert`` /
+    ``reflect`` / ``offset`` / ``take`` reshape the raw bits first (bit workbench);
+    ``line`` optionally line-decodes (manchester / nrzi / diff_manchester);
+    ``period`` forces a specific frame length (from clicking a candidate). Adds a
+    ``crc_brute`` search that tolerates leading header bytes and either endianness.
     """
     if not bits:
         return {"ok": False, "error": "no bits — demodulate a signal first"}
-    b = line_decode(bits, line) if line and line != "raw" else bits
+    raw = bit_transform(bits, invert=invert, reflect=reflect, offset=offset, take=take)
+    b = line_decode(raw, line) if line and line != "raw" else raw
     try:
         period = int(period) if period else None
     except (TypeError, ValueError):
         period = None
     r = frame_analysis(b, period=period)
     r["line"] = (line or "raw")
+    r["transform"] = {"invert": bool(invert), "reflect": bool(reflect),
+                      "offset": int(offset or 0), "take": int(take or 0)}
     r["decoded_bits"] = b
+    if r.get("ok"):
+        r["crc_brute"] = crc_brute(r.get("consensus_bits") or b)
     return r
 
 
@@ -2175,6 +2505,56 @@ def selftest():
               _si["ok"] and any(c["name"] == _si["name"] for c in list_captures()["captures"]), str(_si)[:80])
         check("import: SigMF meta without datatype rejected",
               import_sigmf('{"global":{}}', b"\x00", "x").get("ok") is False)
+        # --- Bit workbench: transforms, CRC brute-force, cross-capture diff ---
+        check("bitxf: invert flips every bit", bit_transform("0011", invert=True) == "1100")
+        check("bitxf: reflect reverses bits within each byte",
+              bit_transform("00000001", reflect=True) == "10000000")
+        check("bitxf: offset drops leading bits, take truncates",
+              bit_transform("1111000011", offset=4, take=4) == "0000")
+        _ft = frames(bits="11110000", invert=True)
+        check("frames: bit transform (invert) applied + reported",
+              _ft.get("ok") and _ft["transform"]["invert"] is True
+              and _ft["decoded_bits"] == "00001111", str(_ft.get("decoded_bits")))
+        # a CRC-8 after a length byte the CRC doesn't cover -> found by skipping it
+        _pl = [0xA1, 0xB2, 0xC3]
+        _fr8 = [0x03] + _pl + [_crc8(_pl, 0x07)]
+        cb = crc_brute("".join(format(x, "08b") for x in _fr8))
+        check("crc-brute: CRC-8 after a skipped length byte is found",
+              any(m["algo"] == "CRC-8" and m["skip_bytes"] == 1 and m["over_bytes"] == 3
+                  for m in cb["matches"]), str(cb["matches"])[:120])
+        # field diff: 4 captures of one emitter — fixed ID, a counter, a rolling byte
+        _id = format(0xABCD, "016b")
+        _ctr, _rolls = [0x10, 0x11, 0x12, 0x13], [0x5A, 0xC1, 0x37, 0x9E]
+        _caps = [(_id + format(_ctr[k], "08b") + "00000000" + format(_rolls[k], "08b")) * 3
+                 for k in range(4)]
+        fd = field_diff(_caps, labels=["A", "B", "C", "D"])
+        check("diff: repeated captures align to one 40-bit frame",
+              fd["ok"] and fd["frame_bits"] == 40 and fd["n_captures"] == 4, str(fd.get("frame_bits")))
+        check("diff: fixed 16-bit ID preserved at the front, varying bits marked",
+              fd["consensus"].startswith(_id) and "x" in fd["consensus"], str(fd.get("consensus")))
+        # 0x10..0x13 only change their low 2 bits, so the counter field is those 2
+        # bits; the high-entropy trailing byte is classed rolling.
+        check("diff: incrementing bits -> counter, high-entropy byte -> rolling (@32)",
+              any(f["kind"] == "counter" for f in fd["fields"])
+              and any(f["kind"] == "rolling" and f["start"] == 32 for f in fd["fields"]),
+              str([(f["start"], f["len"], f["kind"]) for f in fd["fields"]]))
+        check("diff: needs >=2 recoverable captures",
+              field_diff(["010101"]).get("ok") is False)
+        # --- Device fingerprinting: feature -> ISM device family (heuristic) ---
+        fp1 = fingerprint(mod="ook", baud=2500, frame_bits=24, crc=[], freq_hz=433_920_000)
+        check("fp: OOK 24-bit no-CRC @433 -> EV1527/PT2262 family on top",
+              fp1["candidates"] and "EV1527" in fp1["candidates"][0]["name"],
+              str(fp1["candidates"][0]["name"] if fp1["candidates"] else None))
+        fp2 = fingerprint(mod="fsk", frame_bits=72, crc=["CRC-8"], freq_hz=433_920_000)
+        check("fp: FSK CRC'd 72-bit @433 lists TPMS as a candidate",
+              any("TPMS" in c["name"] for c in fp2["candidates"]),
+              str([c["name"] for c in fp2["candidates"]]))
+        fp3 = fingerprint(mod="chirp", freq_hz=868_000_000, bw_hz=125000)
+        check("fp: chirp @868 -> LoRa family",
+              any("LoRa" in c["name"] for c in fp3["candidates"]),
+              str([c["name"] for c in fp3["candidates"]]))
+        check("fp: nothing measured -> generic fallback, no false certainty",
+              fingerprint().get("generic") is not None)
     finally:
         globals()["_cap_dir"] = saved
         import shutil
