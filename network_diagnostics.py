@@ -22190,6 +22190,22 @@ def register_network_diagnostics(app, logger=None):
     def net_rtl_analyze_decode433():
         return _analyze(sigmf_analyzer.decode433, name=request.args.get('name', ''))
 
+    def _sel(a):     # common signal-selection args for the modulation endpoints
+        return dict(name=a.get('name', ''), f_offset_hz=_fl(a.get('f_offset')) or 0.0,
+                    bw_hz=_fl(a.get('bw')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+
+    @app.route('/api/net/rtl/analyze/classify', methods=['GET'])
+    def net_rtl_analyze_classify():
+        return _analyze(sigmf_analyzer.classify, **_sel(request.args))
+
+    @app.route('/api/net/rtl/analyze/constellation', methods=['GET'])
+    def net_rtl_analyze_constellation():
+        return _analyze(sigmf_analyzer.constellation, **_sel(request.args))
+
+    @app.route('/api/net/rtl/analyze/instantaneous', methods=['GET'])
+    def net_rtl_analyze_instantaneous():
+        return _analyze(sigmf_analyzer.instantaneous, **_sel(request.args))
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.
