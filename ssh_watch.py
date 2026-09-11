@@ -46,6 +46,7 @@ THE HONEST POSITION ON CVE-2024-6387
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -65,6 +66,22 @@ SEVERITY_ORDER = {"info": 0, "notice": 1, "warn": 2, "high": 3}
 # statement of what a passive tap can actually establish, not what we wish it could.
 # ---------------------------------------------------------------------------
 CVE_CATALOG = {
+    "CVE-2025-38741": {
+        "title": "Dell Enterprise SONiC: hard-coded SSH host key",
+        "cvss": 7.5,
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        "cvss_source": "Dell (CNA), advisory DSA-2025-275 revision 2.0",
+        "severity_word": "HIGH",
+        "score_confidence": "agreed",
+        "score_note": "Dell is the CNA and scores confidentiality-only (C:H/I:N/A:N).",
+        "affected": "Dell Enterprise SONiC OS 4.5.0 (hard-coded key); the same "
+                    "observation covers Ruckus SmartZone (CVE-2025-44954), cloned VM "
+                    "images, and any vendor shipping a fixed host key.",
+        "platform": "any SSH server shipping or sharing a fixed host key",
+        "detect": "observed-duplicate-key-across-addresses",
+        "cwe": "CWE-321",
+        "refs": ("https://nvd.nist.gov/vuln/detail/CVE-2025-38741",),
+    },
     "CVE-2024-6387": {
         "title": "regreSSHion: signal-handler race in OpenSSH sshd leading to "
                  "unauthenticated RCE as root",
@@ -375,6 +392,71 @@ MAX_SSH_PACKET = 35000  # RFC 4253 s6.1 requires support for at least 32768 payl
 
 SSH_MSG_NEWKEYS = 21
 
+# The server's host key travels in CLEARTEXT in the key-exchange reply, before NEWKEYS —
+# the same window sshwatch already reads. Message 31 is KEXDH_REPLY (classic DH) and
+# KEX_ECDH_REPLY (curve methods); in both, the first string after the message byte is the
+# host key blob K_S. GROUP EXCHANGE is the trap: under diffie-hellman-group-exchange-*,
+# message 31 is KEX_DH_GEX_GROUP carrying (p, g) — no host key — and the real reply with
+# K_S is message 33. Reading 31 as a host key there would fingerprint a DH modulus, which
+# is shared by every host using that group — a false duplicate-key finding across the
+# whole estate. So the parse is disambiguated by the negotiated KEX, and when that is not
+# yet known the blob is accepted only if it structurally opens with a plausible key type.
+SSH_MSG_KEXDH_REPLY = 31          # also KEX_ECDH_REPLY
+SSH_MSG_KEX_DH_GEX_REPLY = 33
+GEX_KEX_PREFIX = "diffie-hellman-group-exchange-"
+_HOSTKEY_TYPE_PREFIXES = ("ssh-", "ecdsa-sha2-", "sk-ssh-", "sk-ecdsa-", "rsa-sha2-",
+                          "x509v3-", "null")
+
+
+def host_key_fingerprint(blob):
+    """OpenSSH's SHA256 fingerprint of a host key blob — base64 of the SHA-256 digest with
+    padding stripped, byte-for-byte what `ssh-keygen -lf` prints."""
+    return "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
+
+
+def plausible_host_key(blob):
+    """Return the key-type string if `blob` opens like an SSH host key, else None."""
+    try:
+        r = Reader(blob)
+        n = r.u32()
+        if not (3 <= n <= 64):
+            return None
+        ktype = r.take(n).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not all(33 <= ord(c) <= 126 for c in ktype):
+        return None
+    if not any(ktype.startswith(p) for p in _HOSTKEY_TYPE_PREFIXES):
+        return None
+    return ktype
+
+
+def parse_kex_reply(payload, negotiated_kex=None):
+    """Extract (key_type, K_S) from a key-exchange reply, or None. `negotiated_kex`
+    disambiguates message 31 vs 33 when known; otherwise a plausible-key-type structural
+    check rejects a (p, g) group message that shares message number 31 under GEX."""
+    if not payload:
+        return None
+    mtype = payload[0]
+    if negotiated_kex:
+        want = (SSH_MSG_KEX_DH_GEX_REPLY
+                if negotiated_kex.startswith(GEX_KEX_PREFIX)
+                else SSH_MSG_KEXDH_REPLY)
+        if mtype != want:
+            return None
+    elif mtype not in (SSH_MSG_KEXDH_REPLY, SSH_MSG_KEX_DH_GEX_REPLY):
+        return None
+    try:
+        r = Reader(payload, 1)
+        blob = r.take(r.u32())
+    except ValueError:
+        return None
+    ktype = plausible_host_key(blob)
+    if ktype is None:
+        return None
+    return ktype, blob
+
 
 def parse_packets(buf, strict=True):
     """Frame as many complete cleartext binary packets as `buf` holds.
@@ -572,6 +654,34 @@ def evaluate_findings(sess, cfg=None):
                     confidence_reason="the negotiated algorithm follows deterministically "
                                       "from both cleartext KEXINIT messages"))
 
+    # ---- duplicate host key across addresses (CVE-2025-38741 family) ----
+    dup = sess.get("duplicate_host_key")
+    if dup:
+        meta = CVE_CATALOG["CVE-2025-38741"]
+        addrs = dup["addresses"]
+        softs = dup["software"]
+        # Differing software strings across the same key argue against a deliberate
+        # cluster (which normally runs one image); same strings argue for one.
+        hint = ("the hosts report DIFFERENT software versions (%s), which argues against "
+                "a deliberately shared cluster key" % ", ".join(softs[:3])
+                if len(softs) > 1 else
+                "the hosts report the same software string, consistent with either a "
+                "shipped key or a deliberately shared cluster key")
+        findings.append(_finding(
+            "warn", "ssh_duplicate_host_key",
+            "%s host key %s is presented by %d addresses (%s) — %s. A shipped or "
+            "hard-coded key lets anyone holding it impersonate every affected host; a "
+            "high-availability pair or load-balanced front-end shares one deliberately, "
+            "so confirm which this is before acting"
+            % (dup["key_type"], dup["fingerprint"], len(addrs),
+               ", ".join(addrs[:6]), hint),
+            cve="CVE-2025-38741", cvss=meta["cvss"], cvss_source=meta["cvss_source"],
+            detect_class="exposure", confidence="observed",
+            confidence_reason="the key bytes are identical across the listed addresses, "
+                              "read from the cleartext key-exchange reply",
+            fingerprint=dup["fingerprint"], key_type=dup["key_type"],
+            addresses=addrs))
+
     # ---- CVE-2024-6387 behavioural signal ----
     burst = sess.get("grace_burst")
     if burst:
@@ -744,7 +854,7 @@ class SSHFlow:
     __slots__ = ("client_ep", "server_ep", "reasm", "stream", "client_ident",
                  "server_ident", "client_kexinit", "server_kexinit", "first_ts",
                  "last_ts", "emitted_ident", "emitted_session", "closed", "counted",
-                 "total_bytes")
+                 "total_bytes", "host_key_fp", "host_key_type")
 
     def __init__(self):
         self.client_ep = None
@@ -762,6 +872,8 @@ class SSHFlow:
         self.closed = False
         self.counted = False
         self.total_bytes = 0
+        self.host_key_fp = None
+        self.host_key_type = None
 
     def duration(self):
         return self.last_ts - self.first_ts
@@ -829,11 +941,22 @@ class Watcher:
     def __init__(self, emitter, flow_idle=300, max_flows=4096,
                  grace_seconds=120, grace_tolerance=0.30, grace_window=900,
                  grace_min=20, grace_high=100, max_session_bytes=16384,
-                 track_grace=True):
+                 track_grace=True, server_ports=None, track_host_keys=True,
+                 shared_key_allow=None):
         self.em = emitter
         self.flows = {}
         self.flow_idle = flow_idle
         self.max_flows = max_flows
+        # Host-key duplicate correlation (CVE-2025-38741 family). Knowing the server side
+        # by port lets the reply be attributed even before both idents are in.
+        self.server_ports = set(server_ports or ())
+        self.track_host_keys = track_host_keys
+        # fingerprint -> {"type": str, "addrs": set(server ip), "software": set()}
+        self.host_keys = {}
+        # Fingerprints an operator has declared legitimately shared (an HA pair / a VIP
+        # front-end SHOULD present one key), silenced rather than flagged.
+        self.shared_key_allow = set(shared_key_allow or ())
+        self.host_key_alerted = set()
         # regreSSHion behavioural parameters. LoginGraceTime is a server-side setting a
         # passive observer cannot read, so the expected hold time is configurable and the
         # band around it is generous.
@@ -867,6 +990,13 @@ class Watcher:
             self.flows[key] = fl
         fl.last_ts = now
         fl.total_bytes += len(payload)
+        # Pin the server side by known port when we can, so a host-key reply is attributed
+        # correctly even before both identification strings have been seen.
+        if fl.server_ep is None:
+            if dport in self.server_ports and sport not in self.server_ports:
+                fl.server_ep, fl.client_ep = dst, src
+            elif sport in self.server_ports and dport not in self.server_ports:
+                fl.server_ep, fl.client_ep = src, dst
 
         if payload:
             if src not in fl.reasm:
@@ -913,7 +1043,23 @@ class Watcher:
         return already
 
     def _on_packet(self, fl, src, dst, payload):
-        if not payload or payload[0] != SSH_MSG_KEXINIT:
+        if not payload:
+            return
+        if payload[0] != SSH_MSG_KEXINIT:
+            # The key-exchange reply carries the server's host key in cleartext. Only the
+            # SERVER sends it, so a reply from the client side is malformed/mis-attributed
+            # and is ignored rather than trusted.
+            if self.track_host_keys and src == fl.server_ep and fl.host_key_fp is None:
+                neg = None
+                if fl.client_kexinit and fl.server_kexinit:
+                    neg = negotiate(fl.client_kexinit["kex_algorithms"],
+                                    fl.server_kexinit["kex_algorithms"])
+                got = parse_kex_reply(payload, neg)
+                if got:
+                    fl.host_key_type, blob = got
+                    fl.host_key_fp = host_key_fingerprint(blob)
+                    self._emit_host_key(fl)
+                    self._record_host_key(fl)
             return
         try:
             kx = parse_kexinit(payload)
@@ -1000,6 +1146,55 @@ class Watcher:
         if f:
             ev["findings"] = f
         self.em.emit(ev)
+
+    # ---- host key correlation (CVE-2025-38741 family) ----
+    def _emit_host_key(self, fl):
+        """Report each host key as observed — a separate event, not a session field: the
+        session is emitted once both KEXINITs are seen, and the reply carrying the key
+        arrives strictly afterwards, so a session-level field would read None nearly
+        always."""
+        ts, iso = _now()
+        self.em.emit({
+            "schema": SCHEMA_VERSION, "module": MODULE, "event": "host_key",
+            "ts": ts, "time": iso,
+            "server": "%s:%d" % fl.server_ep if fl.server_ep else None,
+            "key_type": fl.host_key_type, "fingerprint": fl.host_key_fp,
+            "server_ident": self._ident_view(fl.server_ident)})
+
+    def _record_host_key(self, fl):
+        """Register a host key against the address that presented it, and flag when one key
+        turns up on two or more addresses — the exact observation of identical key bytes,
+        which generalises to any vendor shipping a fixed key. Not proof of a defect on its
+        own (an HA pair / VIP front-end shares a key deliberately), so it reports what was
+        seen and what to check; known-shared keys are silenced via shared_key_allow."""
+        fp = fl.host_key_fp
+        if not fp or fp in self.shared_key_allow:
+            return
+        ip = (fl.server_ep or ("?", 0))[0]
+        rec = self.host_keys.setdefault(
+            fp, {"type": fl.host_key_type, "addrs": set(), "software": set()})
+        rec["addrs"].add(ip)
+        if fl.server_ident and fl.server_ident.get("raw"):
+            rec["software"].add(fl.server_ident["raw"])
+        if len(rec["addrs"]) < 2:
+            return
+        # Alert once per fingerprint per newly-observed address count, so a fleet of
+        # identical switches reports growth rather than N identical events.
+        akey = (fp, len(rec["addrs"]))
+        if akey in self.host_key_alerted:
+            return
+        self.host_key_alerted.add(akey)
+        ts, iso = _now()
+        sess = self._sess(fl)
+        sess["duplicate_host_key"] = {
+            "fingerprint": fp, "key_type": rec["type"],
+            "addresses": sorted(rec["addrs"]), "software": sorted(rec["software"])}
+        self.em.emit({
+            "schema": SCHEMA_VERSION, "module": MODULE, "event": "duplicate_host_key",
+            "ts": ts, "time": iso, "fingerprint": fp,
+            "addresses": sorted(rec["addrs"]),
+            "findings": [f for f in evaluate_findings(sess)
+                         if f["code"] == "ssh_duplicate_host_key"]})
 
     # ---- regreSSHion behavioural tracking ----
     def _close(self, fl, key, now):
@@ -1257,23 +1452,39 @@ def _ssh_summarize(events, interface, seconds):
     flow's session event supersedes its earlier ident. SSH findings are posture /
     exposure / heuristic — never a confirmed live compromise — so the verdict scale
     tops out at 'suspicious'."""
-    index, order, bursts = {}, [], []
+    index, order, bursts, extra = {}, [], [], []
     for ev in events:
-        if ev.get("event") == "grace_burst":
+        etype = ev.get("event")
+        if etype == "grace_burst":
             bursts.append(_ssh_row(ev))
             continue
-        key = (ev.get("server"), ev.get("client"))
+        if etype == "duplicate_host_key":
+            # Carries the actionable ssh_duplicate_host_key finding; keep it out of the
+            # (server, client) index so it always surfaces and never collides.
+            row = _ssh_row(ev)
+            row["fingerprint"] = ev.get("fingerprint")
+            row["addresses"] = ev.get("addresses")
+            extra.append(row)
+            continue
+        if etype == "host_key":
+            # Per-observation info (no findings); key by server so distinct servers don't
+            # collide and it never supersedes a session row.
+            key = (ev.get("server"), "host_key")
+        else:
+            key = (ev.get("server"), ev.get("client"))
         if key not in index:
             order.append(key)
             index[key] = _ssh_row(ev)
-        elif ev.get("event") == "session":
+        elif etype == "session":
             index[key] = _ssh_row(ev)          # session supersedes the ident row
-    rows = [index[k] for k in order] + bursts
+    rows = [index[k] for k in order] + bursts + extra
     all_findings = [f for r in rows for f in r.get("findings", [])]
     verdict = "suspicious" if any(
         f.get("severity") in ("high", "warn") for f in all_findings) else "clean"
     return {"success": True, "verdict": verdict, "sessions": rows,
-            "count": len(order), "grace_bursts": len(bursts),
+            "count": sum(1 for k in order if k[1] != "host_key"),
+            "grace_bursts": len(bursts),
+            "duplicate_host_keys": len(extra),
             "findings_total": len(all_findings),
             "interface": interface, "seconds": seconds}
 
@@ -1359,7 +1570,8 @@ def do_ssh_watch(interface=None, seconds=12, grace_seconds=120, grace_min=20,
                 "error": "tcpdump is required for capture"}
     em = _CollectEmitter()
     watcher = Watcher(em, grace_seconds=grace_seconds, grace_min=grace_min,
-                      track_grace=not no_grace_track)
+                      track_grace=not no_grace_track,
+                      server_ports=set(SSH_TCP_PORTS))
     try:
         _replay_pcap(pcap, watcher, set(SSH_TCP_PORTS))
     except Exception as e:
@@ -1950,6 +2162,103 @@ def _run_selftest_checks(t):
     # Disabling the tracker silences it without affecting anything else.
     t.eq([e for e in grace_run(10, 120.0, track_grace=False)
           if e["event"] == "grace_burst"], [], "grace_track_disable")
+
+    # ---- host key fingerprinting + duplicate-key correlation (CVE-2025-38741) ----
+    def _kex_reply_payload(ktype=b"ssh-ed25519", keybody=b"\x11" * 32, mtype=31):
+        blob = (len(ktype).to_bytes(4, "big") + ktype
+                + len(keybody).to_bytes(4, "big") + keybody)
+        return bytes([mtype]) + len(blob).to_bytes(4, "big") + blob
+
+    def _frame(payload):
+        pad = 8 - ((len(payload) + 5) % 8)
+        if pad < 4:
+            pad += 8
+        return ((len(payload) + 1 + pad).to_bytes(4, "big") + bytes([pad])
+                + payload + b"\x00" * pad)
+
+    got = parse_kex_reply(_kex_reply_payload())
+    t.ok(got is not None, "kex_reply_parsed")
+    if got:
+        t.eq(got[0], "ssh-ed25519", "kex_reply_key_type")
+        fp = host_key_fingerprint(got[1])
+        t.ok(fp.startswith("SHA256:") and "=" not in fp and len(fp) == 7 + 43,
+             "fingerprint_openssh_format")
+    ka = parse_kex_reply(_kex_reply_payload(keybody=b"\xaa" * 32))[1]
+    kb = parse_kex_reply(_kex_reply_payload(keybody=b"\xbb" * 32))[1]
+    t.ok(host_key_fingerprint(ka) != host_key_fingerprint(kb), "distinct_keys_differ")
+    # Group-exchange trap: message 31 is (p, g) under GEX, not a host key. Reading it as
+    # one would fingerprint a shared DH modulus -> a false duplicate on every host.
+    gex_group = (bytes([31]) + (3).to_bytes(4, "big") + b"\x00\xff\x01"
+                 + (1).to_bytes(4, "big") + b"\x02")
+    t.ok(parse_kex_reply(gex_group, "diffie-hellman-group-exchange-sha256") is None,
+         "gex_group_not_read_as_host_key")
+    t.ok(parse_kex_reply(gex_group, None) is None, "gex_group_rejected_structurally")
+    t.ok(parse_kex_reply(_kex_reply_payload(mtype=33),
+                         "diffie-hellman-group-exchange-sha256") is not None,
+         "gex_reply_33_accepted")
+    t.ok(parse_kex_reply(_kex_reply_payload(mtype=31), "curve25519-sha256") is not None,
+         "msg31_accepted_under_non_gex_kex")
+    for bad_pl in (b"", b"\x1f", bytes([31]) + b"\xff\xff\xff\xff"):
+        t.ok(parse_kex_reply(bad_pl) is None, "kex_reply_rejects_garbage")
+
+    _hk_srv = build_kexinit(kex=("curve25519-sha256", STRICT_KEX_SERVER),
+                            hostkey=("ssh-ed25519",), enc=("aes128-ctr",),
+                            mac=("hmac-sha2-256",))
+    _hk_cli = build_kexinit(kex=("curve25519-sha256", STRICT_KEX_CLIENT),
+                            hostkey=("ssh-ed25519",), enc=("aes128-ctr",),
+                            mac=("hmac-sha2-256",))
+
+    def _hk_run(pairs, **wkw):
+        evs = []
+
+        class _C(Emitter):
+            def __init__(self):
+                pass
+
+            def emit(self, ev):
+                evs.append(ev)
+
+        wkw.setdefault("server_ports", {22})
+        w = Watcher(_C(), **wkw)
+        for i, (ip, body) in enumerate(pairs):
+            cp = 50000 + i
+            w.on_tcp(ip, 22, "10.0.0.5", cp, 1000, REAL_SERVER_BANNER)
+            w.on_tcp("10.0.0.5", cp, ip, 22, 2000, b"SSH-2.0-OpenSSH_9.6p1\r\n")
+            w.on_tcp(ip, 22, "10.0.0.5", cp, 1000 + len(REAL_SERVER_BANNER), _hk_srv)
+            w.on_tcp("10.0.0.5", cp, ip, 22, 2023, _hk_cli)
+            w.on_tcp(ip, 22, "10.0.0.5", cp,
+                     1000 + len(REAL_SERVER_BANNER) + len(_hk_srv),
+                     _frame(_kex_reply_payload(keybody=body)))
+        return evs, w
+
+    SAME = b"\xcc" * 32
+    evs, w = _hk_run([("10.0.0.9", SAME)])
+    t.eq([e for e in evs if e["event"] == "duplicate_host_key"], [],
+         "single_address_no_finding")
+    hks = [e for e in evs if e["event"] == "host_key"]
+    t.ok(len(hks) == 1 and hks[0]["key_type"] == "ssh-ed25519"
+         and hks[0]["server"] == "10.0.0.9:22", "host_key_event_emitted")
+    t.ok(all("host_key" not in e for e in evs if e["event"] == "session"),
+         "session_does_not_claim_a_host_key_it_cannot_have")
+    evs, _ = _hk_run([("10.0.0.9", b"\x01" * 32), ("10.0.0.10", b"\x02" * 32)])
+    t.eq([e for e in evs if e["event"] == "duplicate_host_key"], [],
+         "distinct_keys_no_finding")
+    evs, _ = _hk_run([("10.0.0.9", SAME), ("10.0.0.10", SAME)])
+    dups = [e for e in evs if e["event"] == "duplicate_host_key"]
+    t.ok(len(dups) == 1, "duplicate_key_across_addresses_fires")
+    if dups:
+        codes = [f["code"] for f in dups[0].get("findings", [])]
+        t.ok("ssh_duplicate_host_key" in codes, "duplicate_finding_code")
+        t.eq(sorted(dups[0]["addresses"]), sorted(["10.0.0.9", "10.0.0.10"]),
+             "duplicate_lists_both_addresses")
+    # An operator-declared shared key (HA pair / VIP) is silenced.
+    same_fp = host_key_fingerprint(
+        (len(b"ssh-ed25519")).to_bytes(4, "big") + b"ssh-ed25519"
+        + (32).to_bytes(4, "big") + SAME)
+    evs, _ = _hk_run([("10.0.0.9", SAME), ("10.0.0.10", SAME)],
+                     shared_key_allow={same_fp})
+    t.eq([e for e in evs if e["event"] == "duplicate_host_key"], [],
+         "shared_key_allow_silences_finding")
 
     # ---- robustness: truncation sweep and fuzz ----
     bad = 0

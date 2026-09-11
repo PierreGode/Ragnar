@@ -1753,12 +1753,23 @@ What it flags:
   algorithm so a feed doesn't warn on OpenSSH's default `umac-64-etm` first preference.
   *(notice → suspicious by severity)* · **ssh_strict_kex_absent** — strict KEX not offered by
   both sides, but the negotiated mode isn't vulnerable. *(info)*
+- **ssh_duplicate_host_key** — one host key presented by **two or more addresses**. The
+  server's host key travels in cleartext in the key-exchange reply (before NEWKEYS, the same
+  window this reads); its OpenSSH SHA-256 fingerprint is compared across addresses. Identical
+  key bytes on two hosts is a shipped / hard-coded key (**CVE-2025-38741** Dell Enterprise
+  SONiC, and the same observation covers Ruckus SmartZone CVE-2025-44954, cloned VM images,
+  and any vendor shipping a fixed key) — whoever holds it can impersonate every affected host.
+  It is *not* proof of a defect on its own: an HA pair or a load-balanced VIP front-end shares
+  one key deliberately, so the finding names both addresses and what to confirm, and a known
+  shared key is silenced via `shared_key_allow`. The group-exchange trap (message 31 is
+  `(p, g)`, not a host key, under `diffie-hellman-group-exchange-*`; the real reply is message
+  33) is handled so a shared DH modulus never reads as a duplicate key. *(suspicious)*
 
 Verdict is **clean → suspicious**: every SSH finding is posture, exposure or heuristic —
 none is a confirmed live compromise (regreSSHion can't be confirmed passively), so the scale
 does not reach "compromised". Capture is a short passive tcpdump snapshot dissected with
 Scapy. The parse+detect path is pure Python and self-tests without root (`ssh_watch.py
---selftest`, 182 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
+--selftest`, 201 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
 it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / ChaCha where
 Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. **API:**
 `GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.
