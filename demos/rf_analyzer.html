@@ -46,6 +46,12 @@
   .specwrap{position:relative;background:#05080d}
   canvas.spec{display:block;width:100%;height:auto;cursor:crosshair}
   .selbox{position:absolute;border:1px solid var(--accent);background:rgba(245,185,66,.12);pointer-events:none;display:none}
+  .specspin{position:absolute;inset:0;display:none;align-items:center;justify-content:center;gap:10px;flex-direction:column;
+    background:rgba(5,8,13,.45);pointer-events:none;font-family:var(--mono);font-size:11px;color:var(--ink-dim);z-index:5}
+  .specspin.show{display:flex}
+  .specspin .ring{width:34px;height:34px;border-radius:50%;border:3px solid rgba(56,189,201,.25);border-top-color:var(--cyan);animation:spin .8s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.specspin .ring{animation:none}}
   .rowcanvas{display:block;width:100%;height:120px;background:var(--panel-2)}
   .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:auto}
   .legend .grad{width:110px;height:9px;border-radius:3px}
@@ -100,6 +106,7 @@
         <div class="specwrap">
           <canvas class="spec" id="spec"></canvas>
           <div class="selbox" id="selbox"></div>
+          <div class="specspin" id="specspin"><div class="ring"></div><span>computing spectrogram…</span></div>
         </div>
         <div class="axinfo" id="axinfo">—</div>
       </div>
@@ -251,10 +258,16 @@
   }
 
   // ---- spectrogram ----
+  var _specReq=0;
   function refreshWindow(){
     var v=S.view, c=$('spec'), W=Math.max(320,Math.round(c.clientWidth||900));
+    var sp=$('specspin'); if(sp) sp.classList.add('show');
+    var req=++_specReq;                       // guard against out-of-order responses
     api('/api/net/rtl/analyze/spectrogram',{name:S.name,t0:v.t0,t1:v.t1,f0:v.f0,f1:v.f1,w:W,h:360}).then(function(d){
-      if(!d||!d.ok)return; S.spec=d; drawSpec(d); });
+      if(req!==_specReq) return;              // a newer window was requested; ignore
+      if(sp) sp.classList.remove('show');
+      if(!d||!d.ok)return; S.spec=d; drawSpec(d);
+    }).catch(function(){ if(req===_specReq && sp) sp.classList.remove('show'); });
     api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode||'avg'}).then(drawPsd);
     api('/api/net/rtl/analyze/envelope',{name:S.name,t0:v.t0,t1:v.t1}).then(drawEnv);
   }
