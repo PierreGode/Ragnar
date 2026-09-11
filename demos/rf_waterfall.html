@@ -611,6 +611,8 @@
       +'<span class="iqstat rsp"></span>'
       +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
       +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
+      +'<button class="iqrename" title="Rename the selected session">&#9998;&nbsp;Rename</button>'
+      +'<button class="iqdel" title="Delete the selected session">&#128465;&nbsp;Delete</button>'
       +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
       +'<span class="infowrap"><button class="infobtn" title="Capture size &amp; memory">&#9432;</button>'
         +'<div class="infopop">'
@@ -629,6 +631,8 @@
     this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
     this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
     this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
+    g.querySelector('.iqrename').addEventListener('click',function(){ self.renameSession(); });
+    g.querySelector('.iqdel').addEventListener('click',function(){ self.deleteSession(); });
     g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
     var ib=g.querySelector('.infobtn'), ip=g.querySelector('.infopop');
     if(ib&&ip){ ib.addEventListener('click',function(e){ e.stopPropagation(); ip.classList.toggle('show'); });
@@ -666,6 +670,22 @@
   Scope.prototype.openInAnalyzer=function(){ var n=this.iqList&&this.iqList.value;
     if(!n){ if(this.iqStat) this.iqStat.textContent='pick a session first'; return; }
     window.open('/rf-analyzer?name='+encodeURIComponent(n),'_blank'); };
+  Scope.prototype.renameSession=function(){ var self=this, n=this.iqList&&this.iqList.value;
+    if(!n){ this.iqStat.textContent='pick a session first'; return; }
+    var nn=(window.prompt('Rename session:', n)||'').trim(); if(!nn||nn===n) return;
+    fetch('/api/net/rtl/iq/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,new:nn})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc((res&&res.error)||'rename failed')+'</span>'; return; }
+        self.iqStat.innerHTML='<span style="color:var(--live)">renamed &rarr; '+esc(res.name)+'</span>'; self.refreshSessions(res.name);
+      }).catch(function(){ self.iqStat.textContent='rename failed'; }); };
+  Scope.prototype.deleteSession=function(){ var self=this, n=this.iqList&&this.iqList.value;
+    if(!n){ this.iqStat.textContent='pick a session first'; return; }
+    if(!window.confirm('Delete SigMF session "'+n+'"? This removes the .sigmf-data + .sigmf-meta files.')) return;
+    fetch('/api/net/rtl/iq/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ self.iqStat.innerHTML='<span style="color:#fb7185">delete failed</span>'; return; }
+        self.iqStat.innerHTML='<span style="color:var(--ink-dim)">deleted '+esc(n)+'</span>'; self.refreshSessions();
+      }).catch(function(){ self.iqStat.textContent='delete failed'; }); };
   // Raw-IQ capture to a SigMF recording. Centres on the marker (else the span
   // centre) at a single-tune sample rate; steals the dongle, so the live sweep
   // pauses and resumes when the capture finishes.

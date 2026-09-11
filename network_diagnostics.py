@@ -22077,6 +22077,12 @@ def register_network_diagnostics(app, logger=None):
         _log("net/rtl/iq/delete")
         return jsonify(rtl_sdr.iq_capture_delete(data.get('name', '')))
 
+    @app.route('/api/net/rtl/iq/rename', methods=['POST'])
+    def net_rtl_iq_rename():
+        data = request.get_json(silent=True) or {}
+        _log("net/rtl/iq/rename")
+        return jsonify(rtl_sdr.iq_capture_rename(data.get('name', ''), data.get('new', '')))
+
     @app.route('/api/net/rtl/iq/file', methods=['GET'])
     def net_rtl_iq_file():
         from flask import send_file
