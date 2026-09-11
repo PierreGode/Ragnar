@@ -152,6 +152,21 @@
         <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
         <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
       </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Modulation <span class="hint">classify + constellation + instantaneous — uses the marker &amp; BW</span>
+          <button class="go" id="runmod" style="margin-left:auto">Analyze</button></h3>
+        <div id="modout" class="msg">Mark a signal (or click a burst), set the demod BW, then Analyze.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 10px 10px">
+          <div style="flex:1 1 190px;min-width:160px">
+            <div class="lbl" style="padding:4px 4px">IQ constellation</div>
+            <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
+          </div>
+          <div style="flex:1 1 220px;min-width:180px">
+            <div class="seg" id="instview" style="margin:2px 0 6px"><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
+            <canvas class="rowcanvas" id="inst" style="height:150px"></canvas>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -398,6 +413,41 @@
       if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
       S.demod=d; plot('wave',d.wave,d.wave,'rgb(245,185,66)',false); renderBits();
     }).catch(function(){ $('bits').textContent='demod request failed'; });
+  });
+
+  // ---- modulation analysis: classify + constellation + instantaneous ----
+  var instView='freq';
+  function drawScatter(id,ix,qx){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(120,c.clientWidth||190),H=c.clientHeight||190;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    // axes
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(W/2,0);g.lineTo(W/2,H);g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    if(!ix||!ix.length)return; var m=1.6, sx=W/2/m, sy=H/2/m;
+    g.fillStyle='rgba(56,189,201,0.5)';
+    for(var i=0;i<ix.length;i++){var x=W/2+ix[i]*sx, y=H/2-qx[i]*sy; g.fillRect(x-0.6,y-0.6,1.4,1.4);}
+  }
+  function drawInst(d){
+    if(!d||!d.ok){ plot('inst',[],[],'rgb(148,163,184)',false); return; }
+    if(instView==='amp') plot('inst',d.t,d.amp_db,'rgb(63,181,107)',true);
+    else if(instView==='phase') plot('inst',d.t,d.phase_deg,'rgb(129,140,248)',false);
+    else plot('inst',d.t,d.freq_hz,'rgb(245,185,66)',false);
+  }
+  $('instview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; instView=b.getAttribute('data-iv');
+    Array.prototype.forEach.call($('instview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-iv')===instView?'true':'false');});
+    drawInst(S._inst);});
+  $('runmod').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    $('modout').textContent='analyzing…';
+    api('/api/net/rtl/analyze/classify',q).then(function(c){
+      if(!c||!c.ok){ $('modout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((c&&c.error)||'failed')+'</span>'; return; }
+      var f=c.features||{};
+      $('modout').innerHTML='<b style="color:var(--cyan);font-size:14px">'+esc(c.label)+'</b>  ·  confidence '+Math.round(c.confidence*100)+'%'
+        +(c.symbol_rate_hz?'  ·  symbol rate ≈ <b>'+(c.symbol_rate_hz>=1000?(c.symbol_rate_hz/1000).toFixed(2)+' kBd':c.symbol_rate_hz+' Bd')+'</b>':'')
+        +'<br><span style="color:var(--muted);font-size:11px">env-var '+f.env_var+' · freq-spread '+f.ifr_std+' · occupancy '+Math.round((f.occupancy||0)*100)+'% · bimodality '+f.bimodality+'</span>';
+    }).catch(function(){ $('modout').textContent='classify request failed'; });
+    api('/api/net/rtl/analyze/constellation',q).then(function(cn){ if(cn&&cn.ok) drawScatter('constell',cn.i,cn.q); });
+    api('/api/net/rtl/analyze/instantaneous',q).then(function(ins){ S._inst=ins; drawInst(ins); });
   });
 
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });

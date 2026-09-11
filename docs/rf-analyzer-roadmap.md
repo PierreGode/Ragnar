@@ -46,15 +46,18 @@ Turn "here are bits" into "here is what it says."
   frames vs one transmission) and **newest-first** capture ordering.
 - *Left for later:* on-spectrogram persistence, prettier ruler tick steps.
 
-## Segment 3 — Modulation analysis
-- **IQ constellation** for a selection (PSK/QAM); **instantaneous** amplitude /
-  frequency / phase plots.
-- Robust **symbol-rate estimation** via autocorrelation / cyclostationarity (not
-  just run-length).
-- **Automatic modulation classification** (AM/FM/ASK/FSK/PSK/OFDM/chirp) with a
-  confidence, from spectral + envelope features.
-- *Done when:* the analyzer guesses the modulation of a signal it's never seen and
-  is usually right.
+## Segment 3 — Modulation analysis ✅ shipped
+- **IQ constellation** for a selection (scatter) + **instantaneous** amplitude /
+  frequency / phase (toggle) — a Modulation card driven by the marker + BW.
+- **Automatic modulation classification** — a feature decision tree (envelope
+  variance, inst-freq spread & bimodality, spectral occupancy, phase jumps) that
+  labels CW / OOK-ASK / FSK / FM / PSK / chirp-spread with a confidence, plus a
+  run-length **symbol-rate** estimate.
+- *Validated:* 4/4 synthetic classes + the real garage remote (OOK @ 2552 baud).
+  Classification is **per-selection** — point it at one clean burst, not a whole
+  recording with silence gaps.
+- *Left for later:* robust cyclostationary symbol-rate; PSK order (BPSK/QPSK)
+  from constellation clustering; OFDM detection.
 
 ## Segment 4 — Protocol framework
 - A pluggable **frame decoder** stage over recovered bits (preamble/sync search,

@@ -558,6 +558,144 @@ def decode433(name):
 
 
 # --------------------------------------------------------------------------
+# Segment 3 — modulation analysis: IQ constellation, instantaneous
+# amplitude/frequency/phase, and automatic modulation classification.
+# --------------------------------------------------------------------------
+
+def _prep_selection(name, f_offset_hz, bw_hz, t0, t1):
+    """Load, mix the chosen signal to DC and decimate to ~2*bw. Returns (x, nfs)."""
+    import numpy as np
+    from scipy import signal as sig
+    iq, fs, fc, _ = load(name)
+    dur = len(iq) / fs
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 16:
+        return np.zeros(0, dtype=np.complex64), fs
+    foff = float(f_offset_hz or 0.0)
+    bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
+    bw = max(1e3, min(bw, fs / 2))
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    dec = int(max(1, fs // (bw * 2)))
+    if dec > 1:
+        x = sig.decimate(x, dec, ftype="fir")
+    return x.astype(np.complex64), fs / dec
+
+
+def _classify_signal(x, nfs):
+    """Heuristic automatic modulation classification from DSP features (pure).
+
+    Returns {label, confidence, symbol_rate_hz, features}. Not ML — a feature
+    decision tree over envelope variance, instantaneous-frequency spread &
+    bimodality, spectral occupancy and phase jumps. Honest, explainable, good
+    enough to guess the common ISM cases (CW / OOK-ASK / FSK / FM / chirp-spread).
+    """
+    import numpy as np
+    out = {"label": "unknown", "confidence": 0.0, "symbol_rate_hz": 0.0, "features": {}}
+    if x is None or len(x) < 64:
+        out["label"] = "too short"; return out
+    a = np.abs(x)
+    amean = float(a.mean())
+    if amean < 1e-4:
+        out["label"] = "no signal / noise"; return out
+    an = a / amean
+    env_var = float(np.var(an))                                   # amplitude modulation
+    ifr = np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)    # inst freq (Hz)
+    ifr_n = ifr / (nfs / 2.0)
+    ifr_std = float(np.std(ifr_n))
+    # spectral occupancy: fraction of bins within 10 dB of the peak (wideband-ness).
+    # Max-hold over the whole selection so a swept chirp shows its full band.
+    _fr, ps = welch_psd(x, nfs, nfft=min(2048, 1 << int(np.log2(max(2, len(x))))), reduce="max")
+    occ = float((ps > ps.max() - 10).mean())
+    # FSK bimodality: split inst-freq at its median, compare inter-cluster gap to spread
+    med = np.median(ifr)
+    lo, hi = ifr[ifr <= med], ifr[ifr > med]
+    bimod = 0.0
+    if len(lo) > 8 and len(hi) > 8:
+        sep = abs(float(hi.mean()) - float(lo.mean()))
+        spread = float(lo.std() + hi.std()) + 1e-9
+        bimod = sep / spread
+    # phase jumps (PSK tell): count large sample-to-sample phase steps
+    dphi = np.abs(np.angle(x[1:] * np.conj(x[:-1])))
+    phase_jumps = float((dphi > 1.2).mean())
+    f = {"env_var": round(env_var, 4), "ifr_std": round(ifr_std, 4),
+         "occupancy": round(occ, 3), "bimodality": round(bimod, 2),
+         "phase_jumps": round(phase_jumps, 4)}
+    out["features"] = f
+    # symbol rate via run-length of the thresholded feature (robust for random
+    # data, where autocorrelation has no clear peak) — reuse the demod's slicer.
+    if env_var > 0.05:
+        lvl = an > 0.5 * (float(np.percentile(an, 90)) + float(np.percentile(an, 10)))
+    else:
+        lvl = ifr_n > float(np.median(ifr_n))
+    _baud, _ = _slice_bits(lvl, nfs)
+    out["symbol_rate_hz"] = round(_baud, 1)
+    # --- decision tree ---
+    if occ > 0.55 and ifr_std > 0.15 and env_var < 0.25:
+        out["label"] = "chirp / spread (LoRa-like or wideband)"; out["confidence"] = round(min(1.0, occ), 2)
+    elif env_var > 0.3 and bimod < 2.0:
+        out["label"] = "OOK / ASK (on-off / amplitude)"; out["confidence"] = round(min(1.0, env_var), 2)
+    elif bimod > 3.0 and ifr_std > 0.02:
+        out["label"] = "FSK (frequency-shift keying)"; out["confidence"] = round(min(1.0, bimod / 6.0), 2)
+    elif ifr_std > 0.08:
+        out["label"] = "FM (frequency modulation)"; out["confidence"] = round(min(1.0, ifr_std * 3), 2)
+    elif phase_jumps > 0.02 and env_var < 0.2:
+        out["label"] = "PSK (phase-shift keying)"; out["confidence"] = round(min(1.0, phase_jumps * 8), 2)
+    else:
+        out["label"] = "CW carrier (unmodulated)"; out["confidence"] = round(max(0.4, 1.0 - ifr_std * 5 - env_var), 2)
+    return out
+
+
+def constellation(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=2000):
+    """IQ scatter (normalised) for the selected signal — PSK/QAM structure."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 16:
+        return {"ok": False, "error": "selection too short"}
+    rms = float(np.sqrt(np.mean(np.abs(x) ** 2))) or 1.0
+    x = x / rms
+    n = int(max(200, min(4000, n)))
+    if len(x) > n:
+        x = x[np.linspace(0, len(x) - 1, n).astype(int)]
+    return {"ok": True, "sample_rate_hz": round(nfs, 1),
+            "i": [round(float(v), 3) for v in x.real.tolist()],
+            "q": [round(float(v), 3) for v in x.imag.tolist()]}
+
+
+def instantaneous(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=1500):
+    """Instantaneous amplitude (dB), frequency (Hz) and phase (deg) over time."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 16:
+        return {"ok": False, "error": "selection too short"}
+    amp = np.abs(x); amp = amp / (amp.max() + 1e-9)
+    ampdb = 20 * np.log10(amp + 1e-4)
+    freq = np.concatenate([[0.0], np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)])
+    phase = np.degrees(np.unwrap(np.angle(x)))
+    n = int(max(200, min(4000, n)))
+    def ds(v):
+        return v[np.linspace(0, len(v) - 1, n).astype(int)] if len(v) > n else v
+    ampdb, freq, phase = ds(ampdb), ds(freq), ds(phase)
+    t = np.linspace(0, len(x) / nfs, len(ampdb))
+    return {"ok": True, "sample_rate_hz": round(nfs, 1),
+            "t": [round(float(v), 6) for v in t.tolist()],
+            "amp_db": [round(float(v), 2) for v in ampdb.tolist()],
+            "freq_hz": [round(float(v), 1) for v in freq.tolist()],
+            "phase_deg": [round(float(v), 1) for v in phase.tolist()]}
+
+
+def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
+    """Automatic modulation classification for the selected signal."""
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    r = _classify_signal(x, nfs)
+    r["ok"] = True
+    r["sample_rate_hz"] = round(nfs, 1)
+    return r
+
+
+# --------------------------------------------------------------------------
 # Self-test — synthesise a cu8 capture (tone + OOK burst) and check the DSP
 # --------------------------------------------------------------------------
 
@@ -634,6 +772,27 @@ def selftest():
               str(d.get("n_bits")))
         e = envelope("synth", n=300)
         check("envelope: returns matched t/db arrays", len(e["t"]) == len(e["db"]) > 0)
+        # --- modulation classification on synthetic baseband signals ---
+        import numpy as np
+        _nfs = 100000.0; _N = 40000; _t = np.arange(_N) / _nfs
+        noise = lambda: (np.random.randn(_N) + 1j * np.random.randn(_N)) * 0.01
+        cw = np.exp(2j * np.pi * 2000 * _t) + noise()
+        _sym = (np.random.rand((_t * 1000).astype(int).max() + 1) > 0.5).astype(float)
+        keyc = _sym[(_t * 1000).astype(int)]           # random 0/1 symbols @ 1000 baud
+        ook = keyc * np.exp(2j * np.pi * 2000 * _t) + noise()
+        ftone = np.where((_t * 1000).astype(int) % 2 == 0, 4000.0, -4000.0)
+        fsk = np.exp(2j * np.pi * np.cumsum(ftone) / _nfs) + noise()
+        sweep = np.linspace(-45000, 45000, _N)
+        chirp = np.exp(2j * np.pi * np.cumsum(sweep) / _nfs) + noise()
+        cl = lambda x: _classify_signal(x.astype(np.complex64), _nfs)["label"]
+        rcw, rook, rfsk, rch = cl(cw), cl(ook), cl(fsk), cl(chirp)
+        check("classify: CW carrier", "CW" in rcw, rcw)
+        check("classify: OOK/ASK", "OOK" in rook or "ASK" in rook, rook)
+        check("classify: FSK", "FSK" in rfsk, rfsk)
+        check("classify: chirp/spread", "chirp" in rch or "spread" in rch, rch)
+        check("classify: OOK symbol rate ~1000 baud",
+              abs(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"] - 1000) < 200,
+              str(_classify_signal(ook.astype(np.complex64), _nfs)["symbol_rate_hz"]))
         p = psd("synth", n=256)
         check("psd: freqs+db aligned, noise below peak",
               len(p["freqs_mhz"]) == len(p["db"]) and max(p["db"]) - p["noise_db"] > 15)
