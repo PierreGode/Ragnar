@@ -665,25 +665,32 @@ def constellation(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=2000):
 
 
 def instantaneous(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, n=1500):
-    """Instantaneous amplitude (dB), frequency (Hz) and phase (deg) over time."""
+    """Derived-plot data for a selection: the raw I/Q samples plus instantaneous
+    amplitude (dB), frequency (Hz) and phase (deg) over time — inspectrum's
+    sample / amplitude / frequency / phase plots."""
     import numpy as np
     x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
     if len(x) < 16:
         return {"ok": False, "error": "selection too short"}
-    amp = np.abs(x); amp = amp / (amp.max() + 1e-9)
+    peak = float(np.max(np.abs(x))) + 1e-9
+    amp = np.abs(x) / peak
     ampdb = 20 * np.log10(amp + 1e-4)
     freq = np.concatenate([[0.0], np.angle(x[1:] * np.conj(x[:-1])) * nfs / (2 * np.pi)])
     phase = np.degrees(np.unwrap(np.angle(x)))
+    inphase = x.real / peak                       # normalised I and Q (the "sample plot")
+    quad = x.imag / peak
     n = int(max(200, min(4000, n)))
     def ds(v):
         return v[np.linspace(0, len(v) - 1, n).astype(int)] if len(v) > n else v
-    ampdb, freq, phase = ds(ampdb), ds(freq), ds(phase)
+    ampdb, freq, phase, inphase, quad = ds(ampdb), ds(freq), ds(phase), ds(inphase), ds(quad)
     t = np.linspace(0, len(x) / nfs, len(ampdb))
     return {"ok": True, "sample_rate_hz": round(nfs, 1),
             "t": [round(float(v), 6) for v in t.tolist()],
             "amp_db": [round(float(v), 2) for v in ampdb.tolist()],
             "freq_hz": [round(float(v), 1) for v in freq.tolist()],
-            "phase_deg": [round(float(v), 1) for v in phase.tolist()]}
+            "phase_deg": [round(float(v), 1) for v in phase.tolist()],
+            "i": [round(float(v), 3) for v in inphase.tolist()],
+            "q": [round(float(v), 3) for v in quad.tolist()]}
 
 
 def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):

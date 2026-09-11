@@ -195,7 +195,7 @@
             <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
           </div>
           <div style="flex:1 1 220px;min-width:180px">
-            <div class="seg" id="instview" style="margin:2px 0 6px"><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
+            <div class="seg" id="instview" style="margin:2px 0 6px"><button data-iv="iq">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
             <canvas class="rowcanvas" id="inst" style="height:150px"></canvas>
           </div>
         </div>
@@ -552,7 +552,20 @@
     if(!d||!d.ok){ plot('inst',[],[],'rgb(148,163,184)',false); return; }
     if(instView==='amp') plot('inst',d.t,d.amp_db,'rgb(63,181,107)',true);
     else if(instView==='phase') plot('inst',d.t,d.phase_deg,'rgb(129,140,248)',false);
+    else if(instView==='iq') plot2('inst',d.i,d.q,'rgb(245,185,66)','rgb(56,189,201)');  // sample plot: I & Q
     else plot('inst',d.t,d.freq_hz,'rgb(245,185,66)',false);
+  }
+  // two overlaid traces (raw I and Q), symmetric about 0 — the "sample plot".
+  function plot2(id,a,b,ca,cb){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!a||!a.length)return;
+    var m=1.05, py=function(v){return H/2-(v/m)*(H/2-3);}, px=function(i,n){return 6+i/(n-1)*(W-12);};
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    [[a,ca],[b,cb]].forEach(function(pair){var ys=pair[0];g.strokeStyle=pair[1];g.lineWidth=1;g.beginPath();
+      for(var i=0;i<ys.length;i++){var x=px(i,ys.length),y=py(ys[i]);i?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();});
+    g.fillStyle=ca;g.font='9px monospace';g.textAlign='left';g.fillText('I',6,11);
+    g.fillStyle=cb;g.fillText('Q',16,11);
   }
   $('instview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; instView=b.getAttribute('data-iv');
     Array.prototype.forEach.call($('instview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-iv')===instView?'true':'false');});
