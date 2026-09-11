@@ -65,6 +65,11 @@
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .annbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:6px 14px;border-top:1px solid var(--line-soft);font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .annbar .ann{display:inline-flex;align-items:center;gap:6px;background:rgba(63,181,107,.12);border:1px solid rgba(63,181,107,.4);border-radius:14px;padding:3px 6px 3px 10px;color:var(--live)}
+  .annbar .ann b{color:var(--ink);font-weight:600}
+  .annbar .ann button{background:none;border:0;color:var(--muted);cursor:pointer;font-size:13px;padding:0 2px}
+  .annbar .ann button:hover{color:var(--rose)}
   .fcands{display:inline-flex;flex-wrap:wrap;gap:6px;margin-top:4px}
   .fcand{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel-2);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
   .fcand:hover{border-color:var(--cyan);color:var(--cyan)}
@@ -115,7 +120,7 @@
     <div>
       <div class="card">
         <h3>Spectrogram
-          <div class="seg" id="dragmode"><button data-dm="zoom" aria-pressed="true">Zoom</button><button data-dm="measure">Measure</button></div>
+          <div class="seg" id="dragmode"><button data-dm="zoom" aria-pressed="true">Zoom</button><button data-dm="measure">Measure</button><button data-dm="annotate">Annotate</button></div>
           <button id="back" title="Back to the previous zoom">&#8592;&nbsp;Back</button>
           <button id="clrcur" title="Clear the A/B cursors">Clear cursors</button>
           <span class="hint">drag = zoom/measure · click = cursor A, then B (Δ)</span>
@@ -127,6 +132,7 @@
           <div class="specspin" id="specspin"><div class="ring"></div><span>computing spectrogram…</span></div>
         </div>
         <div class="axinfo" id="axinfo">—</div>
+        <div id="annbar" class="annbar" hidden></div>
       </div>
       <div class="card" style="margin-top:16px">
         <h3>Time envelope <span class="hint">amplitude over the shown window (AM/OOK view)</span></h3>
@@ -249,6 +255,8 @@
   function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
       .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
     return fetch(path+(q?'?'+q:'')).then(function(r){return r.json();});}
+  function api2(path,body){return fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body||{})}).then(function(r){return r.json();});}
   function fmtHz(hz){var a=Math.abs(hz); if(a>=1e6)return (hz/1e6).toFixed(3)+' MHz'; if(a>=1e3)return (hz/1e3).toFixed(1)+' kHz'; return Math.round(hz)+' Hz';}
 
   // ---- palette selector ----
@@ -273,7 +281,7 @@
 
   function loadCapture(name){
     S.name=name; S.view=null; S.marker=null; S.markerB=null; S.hist=[];
-    S.summaryData=null; S.classifyData=null; S.framesData=null; S.demod=null; S.bursts=null;
+    S.summaryData=null; S.classifyData=null; S.framesData=null; S.demod=null; S.bursts=null; S.annotations=[];
     api('/api/net/rtl/analyze/summary',{name:name}).then(function(s){
       if(!s||!s.ok){ $('stats').innerHTML='<span class="msg">⚠ '+((s&&s.error)||'load failed')+'</span>'; return; }
       S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz; S.summaryData=s;
@@ -288,7 +296,7 @@
         ['Bursts',s.bursts,'']
       ].map(function(x){return '<div class="stat"><span class="k">'+x[0]+'</span><span class="v '+x[2]+'">'+x[1]+'</span></div>';}).join('');
       S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2};
-      refreshWindow(); loadBursts();
+      refreshWindow(); loadBursts(); loadAnnotations();
     });
   }
 
@@ -339,6 +347,17 @@
       g.fillStyle=color;g.font='bold 10px monospace';g.textAlign='left';g.textBaseline='top';g.fillText(label,mx+3,PAD.t+2);}
     cross(S.marker,getComputedStyle(document.documentElement).getPropertyValue('--accent')||'#f5b942','A');
     cross(S.markerB,getComputedStyle(document.documentElement).getPropertyValue('--cyan')||'#38bdc9','B');
+    // saved SigMF annotations: boxes + labels (freq-less ones span the band)
+    (S.annotations||[]).forEach(function(an){
+      var t0=Math.max(d.t0,an.t0), t1=Math.min(d.t1,an.t1); if(t1<=t0) return;
+      var f0=an.f0_mhz!=null?an.f0_mhz*1e6:d.f0, f1=an.f1_mhz!=null?an.f1_mhz*1e6:d.f1;
+      var x0=PAD.l+(t0-d.t0)/(d.t1-d.t0)*plotW, x1=PAD.l+(t1-d.t0)/(d.t1-d.t0)*plotW;
+      var ya=PAD.t+(d.f1-Math.min(f1,d.f1))/(d.f1-d.f0)*plotH, yb=PAD.t+(d.f1-Math.max(f0,d.f0))/(d.f1-d.f0)*plotH;
+      g.strokeStyle='rgba(63,181,107,0.9)';g.lineWidth=1;g.setLineDash([4,3]);
+      g.strokeRect(x0,Math.min(ya,yb),Math.max(2,x1-x0),Math.max(2,Math.abs(yb-ya)));g.setLineDash([]);
+      if(an.label){ g.fillStyle='rgba(63,181,107,0.95)';g.font='bold 10px monospace';g.textAlign='left';g.textBaseline='bottom';
+        g.fillText(an.label, x0+2, Math.min(ya,yb)-1); }
+    });
     $('grad').style.background=gradCss(PALETTES[pal].stops);
     $('lfloor').textContent=Math.round(d.floor_db)+' dB'; $('lceil').textContent=Math.round(d.ceil_db)+' dB';
     setAx();
@@ -395,6 +414,11 @@
             $('axinfo').innerHTML='Box '+(m.f0/1e6).toFixed(4)+'–'+(m.f1/1e6).toFixed(4)+' MHz · '+m.dt_ms+' ms  →  '
               +'ch.power <b>'+m.channel_power_db+' dB</b> · peak <b>'+m.peak_db+' dB</b> @ '+(m.peak_hz/1e6).toFixed(4)+' MHz · mean '+m.mean_db+' dB'; }); }
         drag=null; return; }
+      if(S.dragMode==='annotate'){   // draw a labelled box + save it into the .sigmf-meta
+        if(t1-t0>1e-5 && f1-f0>10){ var lab=(window.prompt('Label this signal (saved into the SigMF file):','')||'').trim();
+          if(lab!==null){ api2('/api/net/rtl/analyze/annotate',{name:S.name,t0:t0,t1:t1,f0:f0,f1:f1,label:lab}).then(function(r){
+            if(r&&r.ok){ S.annotations=r.annotations; renderAnnBar(); if(S.spec)drawSpec(S.spec); } }); } }
+        drag=null; return; }
       if(t1-t0>1e-4 && f1-f0>100){ S.hist.push(S.view); S.view={t0:t0,t1:t1,f0:f0,f1:f1}; refreshWindow(); }
       drag=null;});
   })();
@@ -402,7 +426,21 @@
   $('back').addEventListener('click',function(){ if(S.hist.length){ S.view=S.hist.pop(); refreshWindow(); } });
   $('clrcur').addEventListener('click',function(){ S.marker=null; S.markerB=null; if(S.spec){drawSpec(S.spec);} setAx(); });
   $('dragmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.dragMode=b.getAttribute('data-dm');
-    Array.prototype.forEach.call($('dragmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-dm')===S.dragMode?'true':'false');});});
+    Array.prototype.forEach.call($('dragmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-dm')===S.dragMode?'true':'false');});
+    if(S.dragMode==='annotate'){ $('axinfo').innerHTML='<span style="color:var(--live)">Annotate mode: drag a box around a signal to label + save it into the SigMF file.</span>'; }});
+  function loadAnnotations(){ if(!S.name){return;} api('/api/net/rtl/analyze/annotations',{name:S.name}).then(function(r){
+    S.annotations=(r&&r.annotations)||[]; renderAnnBar(); if(S.spec)drawSpec(S.spec); }).catch(function(){}); }
+  function renderAnnBar(){ var el=$('annbar'), a=S.annotations||[];
+    if(!a.length){ el.hidden=true; el.innerHTML=''; return; }
+    el.hidden=false;
+    el.innerHTML='<span>annotations:</span>'+a.map(function(x){
+      var fr=(x.f0_mhz!=null?x.f0_mhz.toFixed(3)+'–'+x.f1_mhz.toFixed(3)+' MHz':'full band');
+      return '<span class="ann"><b>'+esc(x.label||'(unlabelled)')+'</b> '+x.t0.toFixed(3)+'–'+x.t1.toFixed(3)+'s · '+fr
+        +' <button data-i="'+x.index+'" title="Delete">✕</button></span>';}).join('');
+    el.querySelectorAll('button[data-i]').forEach(function(b){ b.addEventListener('click',function(){
+      api2('/api/net/rtl/analyze/annotation/delete',{name:S.name,index:+b.getAttribute('data-i')}).then(function(r){
+        if(r&&r.ok){ S.annotations=r.annotations; renderAnnBar(); if(S.spec)drawSpec(S.spec); } }); }); });
+  }
   $('psdmode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; S.psdMode=b.getAttribute('data-pm');
     Array.prototype.forEach.call($('psdmode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-pm')===S.psdMode?'true':'false');});
     if(S.name){var v=S.view; api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1,mode:S.psdMode}).then(drawPsd);}});

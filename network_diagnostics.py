@@ -22213,6 +22213,25 @@ def register_network_diagnostics(app, logger=None):
         return _analyze(sigmf_analyzer.frames, bits=bits, line=a.get('line', 'raw'),
                         period=_fl(a.get('period')))
 
+    # SigMF annotations (save/label a signal box into the .sigmf-meta; interop).
+    @app.route('/api/net/rtl/analyze/annotations', methods=['GET'])
+    def net_rtl_analyze_annotations():
+        return _analyze(sigmf_analyzer.list_annotations, name=request.args.get('name', ''))
+
+    @app.route('/api/net/rtl/analyze/annotate', methods=['POST'])
+    def net_rtl_analyze_annotate():
+        d = request.get_json(silent=True) or {}
+        return _analyze(sigmf_analyzer.add_annotation, name=d.get('name', ''),
+                        t0=_fl(d.get('t0')), t1=_fl(d.get('t1')),
+                        f0_hz=_fl(d.get('f0')), f1_hz=_fl(d.get('f1')),
+                        label=(d.get('label') or ''))
+
+    @app.route('/api/net/rtl/analyze/annotation/delete', methods=['POST'])
+    def net_rtl_analyze_annotation_delete():
+        d = request.get_json(silent=True) or {}
+        return _analyze(sigmf_analyzer.delete_annotation, name=d.get('name', ''),
+                        index=d.get('index'))
+
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice
     # versa (the rtl power/ism starts above stop ADS-B first). Receive-only.
