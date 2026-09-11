@@ -168,6 +168,38 @@ Turn "here are bits" into "here is what it says."
   buttons, so behaviour stays in one place.
 - *Left for later:* per-signal notes, saved analysis presets.
 
+## Segment 9 — Constellation demod (PSK) ✅ shipped
+- **PSK symbol/bit recovery** — point it at one clean burst (marker + BW) and it
+  recovers **symbol timing** (grid-search over the sample phase), the **carrier**
+  (residual CFO + constant phase via the **M-power method**), the **constellation
+  order** M ∈ {2,4,8} = **BPSK/QPSK/8PSK** (the *smallest* order whose M-power tone
+  locks, so QPSK is never mislabelled 8PSK — a BPSK/QPSK signal also locks at higher
+  multiples), slices symbols to **bits** (Gray, plus a **rotation-invariant
+  differential** decode) and reports **EVM %** + an EVM-derived **SNR**. A
+  constellation scatter with the ideal cluster centres, and a single-tone/CW guard.
+- Symbol rate comes from the field or is **auto-estimated** with the
+  cyclostationary detector; the Cyclostationary card's candidate chips fill the
+  baud field. `_psk_symbol_demod` / `constellation_demod` (+ `_gray_bits`); route
+  `/analyze/constellation_demod`; a **Constellation demod** card.
+- *Validated:* 7 new selftests (66/66, stable over repeated random runs) — BPSK/
+  QPSK/8PSK order detection (QPSK not mislabelled 8PSK), low EVM, QPSK differential
+  symbols recovered rotation-invariantly, Gray mapping, CW flagged as a single
+  cluster, baud auto-estimate near truth. Proven **on-box** on a synthetic QPSK
+  capture (`psk-demo-qpsk-50k`, gitignored fixture): QPSK, EVM 6.9 %, lock-by-order
+  {2:0.03, 4:0.98, 8:0.93}.
+- *HONEST:* **PSK only** (no QAM), **rectangular** symbol sampling (no matched
+  filter), absolute-phase ambiguity resolved only by the differential decode; it's
+  a constellation demod, not a full frame decoder — pair it with Frames / CRC.
+
+## Segment 10 — Multi-signal & long captures  (next)
+- **Tiled / decimated spectrogram overview** for long or large captures — pan/zoom
+  without loading the whole file (Pi-Zero-safe; overlaps the skipped Segment 5).
+- **Memory-budgeted loading** derived from `/proc/meminfo`.
+- **Multi-signal detection & tracking** — find several carriers and follow each over
+  time; click a track to jump / zoom / measure.
+- *Done when:* a 30 s / 120 MB capture is analysable on a 512 MB board and several
+  simultaneous carriers are individually selectable.
+
 ---
 
 *Scope honesty:* this will be a genuinely strong, on-device analyzer — not a

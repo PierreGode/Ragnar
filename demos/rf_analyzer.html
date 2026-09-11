@@ -269,6 +269,20 @@
         <div style="padding:0 14px 12px"><canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas></div>
         <div id="lorasyms" class="msg" style="font-size:11px"></div>
       </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
+          <button class="go" id="runpsk" style="margin-left:auto">Demod</button></h3>
+        <div class="symbar" style="padding:6px 14px 8px">
+          <span class="lbl">Order</span>
+          <select id="pskorder"><option value="">Auto</option><option value="2">BPSK</option><option value="4">QPSK</option><option value="8">8PSK</option></select>
+          <span class="lbl">Baud</span>
+          <input id="pskbaud" size="8" placeholder="auto" title="Symbol rate in Bd — leave blank to auto-estimate (or click a Cyclostationary candidate to fill it)">
+          <span id="pskout" class="symout"></span>
+        </div>
+        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="pskcanvas" style="height:190px"></canvas></div>
+        <div id="pskbits" class="bits" hidden></div>
+        <div class="msg" style="font-size:11px;padding:2px 14px 12px">PSK only (BPSK / QPSK / 8PSK). Bits are shown <b>differentially</b> (rotation-invariant): PSK has an absolute-phase ambiguity, so the absolute bits may be rotated by a constant. Not a full frame decoder — pair with the Frames / CRC tools.</div>
+      </div>
     </div>
   </div>
 
@@ -854,8 +868,41 @@
       $('cycpeaks').innerHTML=(d.peaks||[]).length?'<span class="lbl">candidates:</span>'+d.peaks.map(function(p){
         return '<button class="fcand" data-b="'+p.symbol_rate_hz+'">'+fmt(p.symbol_rate_hz)+' ('+p.strength+')</button>';}).join(''):'';
       $('cycpeaks').querySelectorAll('button[data-b]').forEach(function(b){ b.addEventListener('click',function(){
-        var bd=parseFloat(b.getAttribute('data-b'))||0; if(bd>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(bd); } }); });
+        var bd=parseFloat(b.getAttribute('data-b'))||0; if(bd>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(bd);
+          $('pskbaud').value=Math.round(bd); } }); });   // also feed the constellation-demod baud field
     }).catch(function(){ $('cycout').textContent='cyclic request failed'; });
+  });
+
+  // ---- Constellation demod (PSK): scatter with cluster centres + recovered bits ----
+  function drawConstDemod(pi,pq,ci,cq){
+    var c=$('pskcanvas'),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(120,c.clientWidth||190),H=c.clientHeight||190;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    g.strokeStyle='rgba(255,255,255,0.08)';g.beginPath();g.moveTo(W/2,0);g.lineTo(W/2,H);g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+    var m=1.6, sx=W/2/m, sy=H/2/m, px=function(v){return W/2+v*sx;}, py=function(v){return H/2-v*sy;};
+    if(pi&&pi.length){ g.fillStyle='rgba(56,189,201,0.5)';
+      for(var i=0;i<pi.length;i++){ g.fillRect(px(pi[i])-0.6,py(pq[i])-0.6,1.4,1.4); } }
+    if(ci&&ci.length){ g.strokeStyle='rgb(245,185,66)';g.lineWidth=1.5;
+      for(var j=0;j<ci.length;j++){ g.beginPath();g.arc(px(ci[j]),py(cq[j]),4,0,2*Math.PI);g.stroke(); } }
+  }
+  function groupBits(s){ return (s||'').replace(/(.{8})/g,'$1 ').trim(); }
+  $('runpsk').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    var bd=parseFloat($('pskbaud').value); if(bd>0)q.baud=bd;
+    var ord=$('pskorder').value; if(ord)q.order=ord;
+    $('pskout').textContent='demodulating…'; $('pskbits').hidden=true;
+    api('/api/net/rtl/analyze/constellation_demod',q).then(function(d){
+      if(!d||!d.ok){ $('pskout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawConstDemod([],[],[],[]); return; }
+      var fmt=function(hz){return hz>=1000?(hz/1000).toFixed(2)+' kBd':Math.round(hz)+' Bd';};
+      $('pskout').innerHTML='<b style="color:var(--cyan)">'+esc(d.mod)+'</b>'
+        +(d.single_cluster?' <span style="color:var(--accent)">· single tone — not a real PSK constellation</span>':'')
+        +' · EVM <b>'+d.evm_pct+'%</b> · SNR '+d.snr_db+' dB · '+d.n_symbols+' sym @ '+fmt(d.baud_hz)
+        +(d.baud_estimated?' <span style="color:var(--muted)">(baud auto)</span>':'');
+      drawConstDemod(d.points_i,d.points_q,d.centers_i,d.centers_q);
+      $('pskbits').hidden=false;
+      $('pskbits').innerHTML='<b>differential bits</b> ('+(d.bits_diff||'').length+')  ·  '
+        +Math.log2(d.order)+' bit/sym\n'+groupBits(d.bits_diff);
+    }).catch(function(){ $('pskout').textContent='constellation-demod request failed'; });
   });
 
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });

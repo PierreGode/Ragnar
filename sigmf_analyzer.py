@@ -703,6 +703,127 @@ def classify(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
 
 
 # --------------------------------------------------------------------------
+# Segment 9 — deeper demod: PSK constellation recovery. Take one clean burst,
+# recover symbol timing (grid-search over the sample phase), the carrier
+# (residual CFO + constant phase via the M-power method), classify the
+# constellation order M ∈ {2,4,8} = BPSK/QPSK/8PSK (the SMALLEST order whose
+# M-power tone locks, so QPSK is never mislabelled 8PSK), slice symbols to bits
+# (Gray, plus a rotation-invariant differential decode) and report EVM + an
+# EVM-derived SNR. Pure core, selftested on synthetic PSK (no hardware).
+# HONEST: PSK only (no QAM), rectangular symbol sampling (no matched filter),
+# absolute-phase ambiguity resolved only by the differential decode.
+# --------------------------------------------------------------------------
+_PSK_NAME = {2: "BPSK", 4: "QPSK", 8: "8PSK"}
+
+
+def _gray_bits(k, nbits):
+    """MSB-first Gray-coded bit string for symbol index k over nbits bits (pure)."""
+    g = int(k) ^ (int(k) >> 1)
+    return format(g & ((1 << nbits) - 1), "0{}b".format(nbits))
+
+
+def _psk_symbol_demod(x, nfs, baud, order=None):
+    """Recover PSK symbols + bits from a baseband selection (pure).
+
+    Returns {ok, order, mod, sps, n_symbols, symbols, bits_gray, bits_diff,
+    evm_pct, snr_db, points_i/points_q, centers_i/centers_q, lock}. ``order``
+    forces M; otherwise M is the smallest of {2,4,8} whose M-power tone locks.
+    """
+    import numpy as np
+    out = {"ok": False}
+    if x is None or len(x) < 64 or not baud or baud <= 0:
+        out["error"] = "selection too short or symbol rate unknown"; return out
+    sps = nfs / float(baud)
+    if sps < 2.0:
+        out["error"] = "sample rate too low for this symbol rate"; return out
+    nsym = int((len(x) - 1) / sps)
+    if nsym < 16:
+        out["error"] = "too few symbols in the selection"; return out
+    x = np.asarray(x, dtype=np.complex128)
+    phases = np.linspace(0, sps, 12, endpoint=False)
+
+    def sample_at(phase):
+        idx = np.round(np.arange(nsym) * sps + phase).astype(int)
+        idx = idx[(idx >= 0) & (idx < len(x))]
+        s = x[idx]
+        rms = float(np.sqrt(np.mean(np.abs(s) ** 2))) + 1e-12
+        return s / rms
+
+    def eval_M(M):
+        # best sampling phase = the one whose M-power tone locks hardest, after
+        # removing a linear phase ramp (residual carrier offset) in s**M.
+        best = None
+        for p in phases:
+            s = sample_at(p)
+            sm = s ** M
+            ph = np.unwrap(np.angle(sm + 1e-12))
+            slope = float(np.polyfit(np.arange(len(sm)), ph, 1)[0])
+            s2 = s * np.exp(-1j * (slope / M) * np.arange(len(s)))
+            lock = float(np.abs(np.mean(np.exp(1j * M * np.angle(s2)))))
+            if best is None or lock > best[0]:
+                best = (lock, p, s2)
+        lock, p, s2 = best
+        phi0 = float(np.angle(np.mean(s2 ** M) + 1e-12)) / M   # constant-phase de-rotation
+        s2 = s2 * np.exp(-1j * phi0)
+        k = np.mod(np.round(np.angle(s2) / (2 * np.pi / M)), M).astype(int)
+        ideal = np.exp(1j * (2 * np.pi / M) * k)
+        s2n = s2 / (float(np.mean(np.abs(s2))) + 1e-12)
+        evm = float(np.sqrt(np.mean(np.abs(s2n - ideal) ** 2)))
+        return {"M": M, "lock": lock, "evm": evm, "phase": float(p), "s": s2n, "k": k}
+
+    cand = {M: eval_M(M) for M in (2, 4, 8)}
+    if order in (2, 4, 8):
+        chosen = int(order)
+    else:
+        LOCK = 0.55
+        locked = [M for M in (2, 4, 8) if cand[M]["lock"] >= LOCK]
+        chosen = min(locked) if locked else min((2, 4, 8), key=lambda M: cand[M]["evm"])
+    r = cand[chosen]
+    M, k, s2n = r["M"], r["k"], r["s"]
+    # guard: a single tone / CW locks trivially at every M — one cluster is not PSK
+    counts = np.bincount(k, minlength=M)
+    top_frac = float(counts.max()) / max(1, int(counts.sum()))
+    nbits = int(np.log2(M))
+    bits_gray = "".join(_gray_bits(int(v), nbits) for v in k)
+    dk = np.mod(np.diff(np.concatenate([[0], k])), M)         # differential symbols
+    bits_diff = "".join(_gray_bits(int(v), nbits) for v in dk)
+    centers = np.exp(1j * (2 * np.pi / M) * np.arange(M))
+    snr = round(-20.0 * np.log10(r["evm"] + 1e-6), 1)
+    NP = min(2000, len(s2n))
+    sub = s2n[np.linspace(0, len(s2n) - 1, NP).astype(int)] if len(s2n) > NP else s2n
+    return {"ok": True, "order": M, "mod": _PSK_NAME[M],
+            "sps": round(sps, 3), "n_symbols": int(len(k)),
+            "lock": round(r["lock"], 3), "evm_pct": round(r["evm"] * 100.0, 2),
+            "snr_db": snr, "single_cluster": bool(top_frac > 0.85),
+            "symbols": [int(v) for v in k.tolist()],
+            "bits_gray": bits_gray, "bits_diff": bits_diff,
+            "points_i": [round(float(v), 3) for v in sub.real.tolist()],
+            "points_q": [round(float(v), 3) for v in sub.imag.tolist()],
+            "centers_i": [round(float(v), 3) for v in centers.real.tolist()],
+            "centers_q": [round(float(v), 3) for v in centers.imag.tolist()],
+            "lock_by_order": {str(m): round(cand[m]["lock"], 3) for m in (2, 4, 8)}}
+
+
+def constellation_demod(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None,
+                        baud_hz=None, order=None):
+    """PSK symbol/bit recovery for a selection. Estimates the symbol rate with
+    the cyclostationary detector when ``baud_hz`` isn't given."""
+    import numpy as np
+    x, nfs = _prep_selection(name, f_offset_hz, bw_hz, t0, t1)
+    if len(x) < 64:
+        return {"ok": False, "error": "selection too short"}
+    baud = float(baud_hz) if baud_hz else 0.0
+    if baud <= 0:                       # estimate via the cyclic transition-energy profile
+        f, prof = _cyclic_profile(x, nfs, min(nfs / 4.0, 100000.0))
+        baud = _fundamental_rate(_cyclic_peaks(f, prof)) or 0.0
+    r = _psk_symbol_demod(x, nfs, baud, order=order)
+    r["sample_rate_hz"] = round(nfs, 1)
+    r["baud_hz"] = round(float(baud), 1)
+    r["baud_estimated"] = not bool(baud_hz)
+    return r
+
+
+# --------------------------------------------------------------------------
 # Segment 7 — advanced DSP: apply a band-pass / notch filter to a selection and
 # show the spectrum before vs after (isolate one signal, or reject an
 # interferer). An FFT-domain band mask over absolute frequency — simple, exact
@@ -1715,6 +1836,45 @@ def selftest():
             + (np.random.randn(80000) + 1j * np.random.randn(80000)) * 0.03
         _f, _p = _cyclic_profile(_xc, _fs, 20000)
         check("cyclo: CW shows no confident symbol rate", not _cyclic_peaks(_f, _p, kmin=8.0), str(_p.max()))
+        # --- Segment 9: PSK constellation demod (synthetic BPSK/QPSK/8PSK) ---
+        check("psk: Gray mapping (0->00, 2->11, 3->10)",
+              _gray_bits(0, 2) == "00" and _gray_bits(2, 2) == "11" and _gray_bits(3, 2) == "10")
+        _pfs = 1_000_000.0
+
+        def _mkpsk(M, baud, nsym=500, amp=0.05, cfo=0.0):
+            sps = int(_pfs / baud)
+            syms = np.random.randint(0, M, nsym)
+            x = np.repeat(np.exp(1j * (2 * np.pi / M) * syms), sps)
+            x = x * np.exp(2j * np.pi * cfo * np.arange(len(x)) / _pfs)
+            x = x + (np.random.randn(len(x)) + 1j * np.random.randn(len(x))) * amp
+            return x.astype(np.complex64), syms
+
+        _pbaud = 25000.0
+        _xb, _sb = _mkpsk(2, _pbaud, cfo=500.0)
+        _rb = _psk_symbol_demod(_xb, _pfs, _pbaud)
+        check("psk: BPSK order detected + low EVM",
+              _rb["ok"] and _rb["order"] == 2 and _rb["evm_pct"] < 25,
+              str(_rb.get("order")) + " evm=" + str(_rb.get("evm_pct")))
+        _xq, _sq = _mkpsk(4, _pbaud, cfo=-800.0)
+        _rq = _psk_symbol_demod(_xq, _pfs, _pbaud)
+        check("psk: QPSK order detected (not mislabelled 8PSK)",
+              _rq["order"] == 4, str(_rq.get("order")) + " locks=" + str(_rq.get("lock_by_order")))
+        _kq = np.array(_rq["symbols"]); _m = min(len(_kq), len(_sq))
+        _match = float(np.mean(np.mod(np.diff(_sq[:_m]), 4) == np.mod(np.diff(_kq[:_m]), 4)))
+        check("psk: QPSK differential symbols recovered (rotation-invariant)",
+              _match > 0.95, str(round(_match, 3)))
+        _xe, _se = _mkpsk(8, _pbaud, amp=0.03)
+        _re = _psk_symbol_demod(_xe, _pfs, _pbaud)
+        check("psk: 8PSK order detected", _re["order"] == 8, str(_re.get("order")))
+        _fq, _pq = _cyclic_profile(_xq, _pfs, 100000.0)
+        _bq = _fundamental_rate(_cyclic_peaks(_fq, _pq))
+        check("psk: symbol-rate auto-estimate near truth (feeds constellation_demod)",
+              _bq is not None and abs(_bq - _pbaud) < 2500, str(_bq))
+        _cwx = (np.exp(2j * np.pi * 1000 * np.arange(60000) / _pfs)
+                + (np.random.randn(60000) + 1j * np.random.randn(60000)) * 0.02).astype(np.complex64)
+        _rcw = _psk_symbol_demod(_cwx, _pfs, _pbaud)
+        check("psk: single tone / CW flagged (single cluster, not real PSK)",
+              _rcw["ok"] and _rcw["single_cluster"], str(_rcw.get("single_cluster")))
         # --- SigMF annotations round-trip ---
         _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
         check("annot: box -> SigMF annotation (samples + freq edges + label)",
