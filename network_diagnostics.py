@@ -54,6 +54,7 @@ import report_common
 import bt_scanner
 import sdr_spectrum
 import rtl_sdr
+import sigmf_analyzer
 import adsb
 import meshtastic_node
 import pagerdecode as pager   # decoder module (the `pager/` package is a separate device UI)
@@ -22111,6 +22112,60 @@ def register_network_diagnostics(app, logger=None):
         _log("net/rtl/calibrate true=%s near=%s" % (data.get('true_mhz'), data.get('near_mhz')))
         return jsonify(rtl_sdr.calibrate_from_reference(
             data.get('true_mhz'), near_mhz=data.get('near_mhz')))
+
+    # On-box SigMF IQ analyzer (powers the /rf-analyzer page). Read-only over the
+    # capture files, so it never touches the dongle and runs anytime.
+    def _fl(v):
+        try: return float(v)
+        except (TypeError, ValueError): return None
+
+    def _analyze(fn, **kw):
+        try:
+            return jsonify(fn(**kw))
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except Exception as exc:   # pragma: no cover - defensive
+            return jsonify({"ok": False, "error": str(exc)}), 500
+
+    @app.route('/api/net/rtl/analyze/list', methods=['GET'])
+    def net_rtl_analyze_list():
+        return jsonify(sigmf_analyzer.list_captures())
+
+    @app.route('/api/net/rtl/analyze/summary', methods=['GET'])
+    def net_rtl_analyze_summary():
+        return _analyze(sigmf_analyzer.summary, name=request.args.get('name', ''))
+
+    @app.route('/api/net/rtl/analyze/spectrogram', methods=['GET'])
+    def net_rtl_analyze_spectrogram():
+        a = request.args
+        return _analyze(sigmf_analyzer.spectrogram, name=a.get('name', ''),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')),
+                        f0=_fl(a.get('f0')), f1=_fl(a.get('f1')),
+                        w=int(_fl(a.get('w')) or 900), h=int(_fl(a.get('h')) or 360),
+                        nfft=int(_fl(a.get('nfft')) or 1024))
+
+    @app.route('/api/net/rtl/analyze/psd', methods=['GET'])
+    def net_rtl_analyze_psd():
+        a = request.args
+        return _analyze(sigmf_analyzer.psd, name=a.get('name', ''),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+
+    @app.route('/api/net/rtl/analyze/envelope', methods=['GET'])
+    def net_rtl_analyze_envelope():
+        a = request.args
+        return _analyze(sigmf_analyzer.envelope, name=a.get('name', ''),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+
+    @app.route('/api/net/rtl/analyze/bursts', methods=['GET'])
+    def net_rtl_analyze_bursts():
+        return _analyze(sigmf_analyzer.bursts, name=request.args.get('name', ''))
+
+    @app.route('/api/net/rtl/analyze/demod', methods=['GET'])
+    def net_rtl_analyze_demod():
+        a = request.args
+        return _analyze(sigmf_analyzer.demod, name=a.get('name', ''),
+                        mode=a.get('mode', 'ook'), f_offset_hz=_fl(a.get('f_offset')) or 0.0,
+                        bw_hz=_fl(a.get('bw')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
 
     # ADS-B (1090 MHz aircraft) via dump1090 — powers the radar screen. Uses the
     # whole RTL-SDR, so starting it stops the sub-GHz sweep/decoder, and vice

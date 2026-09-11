@@ -649,7 +649,8 @@
       else if(st.done && st.name){ var n=encodeURIComponent(st.name), mb=(st.bytes/1e6).toFixed(1);
         self.iqStat.innerHTML='<span style="color:var(--live)">&#10003; '+mb+' MB</span> '
           +'<a href="/api/net/rtl/iq/file?name='+n+'" download style="color:var(--cyan);margin:0 6px">.sigmf-data</a>'
-          +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'; }
+          +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'
+          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>'; }
       // resume the sweep the capture interrupted
       if(self._iqWasLive && self.available){ self._iqWasLive=false; self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
     }).catch(function(){ if(self._iqPoll){clearInterval(self._iqPoll);self._iqPoll=null;} });

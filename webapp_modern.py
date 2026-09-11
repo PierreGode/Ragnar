@@ -8735,6 +8735,17 @@ def rf_waterfall_page():
     return _no_store(make_response(send_from_directory('demos', 'rf_waterfall.html')))
 
 
+@app.route('/rf-analyzer')
+def rf_analyzer_page():
+    """Serve the on-box SigMF IQ Analyzer page.
+
+    Read-only over the RF Waterfall's SigMF captures (data/iq_captures/*), so it
+    needs no radio and is always served (it shows a "no captures yet" state when
+    empty). Login is required (not in the auth whitelist).
+    """
+    return _no_store(make_response(send_from_directory('demos', 'rf_analyzer.html')))
+
+
 @app.route('/adsb-radar')
 def adsb_radar_page():
     """Serve the ADS-B radar screen (live aircraft at 1090 MHz via dump1090).
