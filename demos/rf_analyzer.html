@@ -225,6 +225,19 @@
         <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
         <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
       </div>
+      <div class="card" style="margin-top:16px">
+        <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
+          <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
+        <div class="symbar" style="padding:0 0 6px">
+          <span class="lbl">BW</span>
+          <select id="lorabw"><option value="125000">125k</option><option value="250000" selected>250k</option><option value="500000">500k</option><option value="62500">62.5k</option></select>
+          <span class="lbl">SF</span>
+          <select id="lorasf"><option>7</option><option>8</option><option>9</option><option>10</option><option selected>11</option><option>12</option></select>
+          <span id="loraout" class="symout"></span>
+        </div>
+        <canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas>
+        <div id="lorasyms" class="msg" style="font-size:11px"></div>
+      </div>
     </div>
   </div>
 
@@ -693,6 +706,31 @@
         +'<b>'+d.power_kept_pct+'%</b> of power kept';
       drawFilt(d);
     }).catch(function(){ $('filtout').textContent='filter request failed'; });
+  });
+
+  // ---- LoRa de-chirp: draw the de-chirped symbol-tone map (reuses palette LUT) ----
+  function drawGrid(id,d){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||170;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!d||!d.ok||!d.data){ return; }
+    var bin=atob(d.data),n=bin.length,buf=new Uint8Array(n);for(var i=0;i<n;i++)buf[i]=bin.charCodeAt(i);
+    var off=document.createElement('canvas');off.width=d.w;off.height=d.h;
+    var oc=off.getContext('2d'),img=oc.createImageData(d.w,d.h),px=img.data;
+    for(var k=0;k<d.w*d.h;k++){var v=buf[k];px[k*4]=LUT[v*3];px[k*4+1]=LUT[v*3+1];px[k*4+2]=LUT[v*3+2];px[k*4+3]=255;}
+    oc.putImageData(img,0,0); g.imageSmoothingEnabled=false; g.drawImage(off,0,0,d.w,d.h,0,0,W,H);
+    g.fillStyle='rgba(205,214,228,.6)';g.font='9px monospace';g.textAlign='left';g.fillText('symbol value ↑ · time →',6,12);
+  }
+  $('rundechirp').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc;
+    var bw=parseFloat($('lorabw').value)||250000, sf=parseInt($('lorasf').value,10)||11;
+    $('loraout').textContent='de-chirping…'; $('lorasyms').textContent='';
+    api('/api/net/rtl/analyze/dechirp',{name:S.name,bw:bw,sf:sf,f_offset:foff,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('loraout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawGrid('loracanvas',null); return; }
+      $('loraout').innerHTML='SF'+d.sf+' BW'+(d.bw_hz/1e3)+'k · '+d.n_symbols+' symbols · lock '
+        +'<b style="color:'+(d.locked?'var(--live)':'var(--muted)')+'">'+d.quality+(d.locked?' ✓':' (weak — sweep SF/BW/marker)')+'</b>';
+      drawGrid('loracanvas',d);
+      $('lorasyms').textContent=d.locked?('symbols: '+d.symbols.slice(0,64).join(' ')):'';
+    }).catch(function(){ $('loraout').textContent='de-chirp request failed'; });
   });
 
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });
