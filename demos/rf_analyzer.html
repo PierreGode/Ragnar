@@ -233,14 +233,14 @@
       <div class="card" style="margin-top:16px">
         <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
           <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
-        <div class="symbar" style="padding:0 0 6px">
+        <div class="symbar" style="padding:6px 14px 8px">
           <span class="lbl">BW</span>
           <select id="lorabw"><option value="125000">125k</option><option value="250000" selected>250k</option><option value="500000">500k</option><option value="62500">62.5k</option></select>
           <span class="lbl">SF</span>
           <select id="lorasf"><option>7</option><option>8</option><option>9</option><option>10</option><option selected>11</option><option>12</option></select>
           <span id="loraout" class="symout"></span>
         </div>
-        <canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas>
+        <div style="padding:0 14px 12px"><canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas></div>
         <div id="lorasyms" class="msg" style="font-size:11px"></div>
       </div>
     </div>
