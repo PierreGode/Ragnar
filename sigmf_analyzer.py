@@ -773,6 +773,65 @@ def _repeat_period(bits, min_p=8):
     return 0
 
 
+def _period_candidates(bits, min_p=8, topk=6, floor=0.2):
+    """Ranked candidate frame periods from autocorrelation (pure, numpy).
+
+    Unlike :func:`_repeat_period` (which gates hard and returns one fundamental),
+    this returns *several* plausible periods even when the top peak is weak — so
+    a jittery real bitstream still offers frame lengths to try. Harmonics of an
+    already-listed candidate are collapsed to the fundamental.
+    """
+    import numpy as np
+    n = len(bits)
+    if n < min_p * 2:
+        return []
+    s = np.frombuffer(bits.encode(), dtype=np.uint8).astype(np.float32)
+    s = np.where(s == ord("1"), 1.0, -1.0)
+    s -= s.mean()
+    if s.std() < 1e-6:
+        return []
+    energy = float(np.dot(s, s)) / n + 1e-9
+    hi = n // 2
+    scored = []
+    for lag in range(min_p, hi + 1):
+        a, b = s[:-lag], s[lag:]
+        scored.append((float(np.dot(a, b) / len(a)) / energy, lag))
+    scored = [x for x in scored if x[0] >= floor]
+    scored.sort(reverse=True)                       # strongest correlation first
+    out = []
+    for c, lag in scored:
+        # collapse harmonics: skip a lag that's ~an integer multiple of one kept
+        if any(abs(lag - k * p) <= 1 for p in out for k in range(1, lag // p + 1)):
+            continue
+        out.append(lag)
+        if len(out) >= topk:
+            break
+    return out
+
+
+def _eval_period(bits, period, skip=0):
+    """Align a bitstream into frames of ``period`` (optionally after a ``skip``
+    preamble), build a consensus + stability map, and CRC-scan it (pure)."""
+    import numpy as np
+    body = bits[skip:]
+    nrep = len(body) // period
+    if period < 8 or nrep < 2:
+        return None
+    frames = [body[i * period:(i + 1) * period] for i in range(nrep)]
+    arr = np.array([[1 if ch == "1" else 0 for ch in f] for f in frames])
+    agree = arr.mean(axis=0)
+    consensus = "".join("1" if a >= 0.5 else "0" for a in agree)
+    stable = np.array([1.0 - 2 * min(a, 1 - a) for a in agree])
+    varying = [i for i, st in enumerate(stable) if st < 0.85]
+    crc = crc_scan(consensus)
+    return {"period_bits": period, "skip_bits": skip, "repeats": nrep,
+            "consensus_bits": consensus, "consensus_hex": _to_hex(consensus),
+            "varying_positions": varying[:200],
+            "stable_fraction": round(float((stable >= 0.85).mean()), 3),
+            "identical": len(varying) == 0,
+            "crc_matches": crc["matches"]}
+
+
 def _to_hex(bits):
     """Group a bit string into hex bytes (MSB first); trailing <8 bits appended."""
     out = []
@@ -785,40 +844,76 @@ def _to_hex(bits):
     return s
 
 
-def frame_analysis(bits):
-    """Structure a recovered bitstream: preamble, repeated-frame period, and a
-    per-bit stability map across repeats (constant code vs rolling bits) (pure).
+def frame_analysis(bits, period=None):
+    """Structure a recovered bitstream: preamble, repeated-frame period(s), a
+    per-bit stability map (fixed code vs rolling bits), and CRC per candidate.
 
     Aligning the repeated frames a remote transmits is *the* reverse-engineering
-    move: bits that never change across repeats are the fixed code / address;
-    bits that flip are a rolling code, counter or checksum.
+    move. Beyond the single best autocorrelation period, this returns a ranked
+    list of **candidate frame lengths** — each aligned (optionally after the
+    preamble), consensus-built and **CRC-scanned** — so a jittery real bitstream
+    still offers frame boundaries to try, and a length whose trailer validates a
+    CRC rises to the top. Pass ``period`` to force a specific frame length.
     """
-    import numpy as np
     bits = "".join(c for c in (bits or "") if c in "01")
     if len(bits) < 8:
         return {"ok": False, "error": "need at least 8 bits"}
     pre = _preamble(bits)
-    period = _repeat_period(bits)
+
+    # Build ranked candidate periods: the explicit one, the autocorr peaks, and
+    # a few common byte-aligned lengths — each evaluated aligned from 0 AND after
+    # the preamble, keeping whichever alignment reads better.
+    cand_periods = []
+    if period:
+        try:
+            cand_periods.append(int(period))
+        except (TypeError, ValueError):
+            pass
+    cand_periods += _period_candidates(bits)
+    for p in (24, 32, 40, 48, 64):                     # common ISM frame lengths
+        if 8 <= p <= len(bits) // 2:
+            cand_periods.append(p)
+    seen, evals = set(), []
+    for p in cand_periods:
+        if p in seen or p < 8:
+            continue
+        seen.add(p)
+        best_e = None
+        for skip in (0, pre if pre >= 4 else 0):
+            e = _eval_period(bits, p, skip)
+            if e and (best_e is None
+                      or (len(e["crc_matches"]), e["stable_fraction"])
+                      > (len(best_e["crc_matches"]), best_e["stable_fraction"])):
+                best_e = e
+        if best_e:
+            evals.append(best_e)
+    # rank: CRC match first, then most-stable, then most repeats
+    evals.sort(key=lambda e: (len(e["crc_matches"]) > 0, e["stable_fraction"], e["repeats"]),
+               reverse=True)
+    candidates = evals[:6]
+
     result = {"ok": True, "n_bits": len(bits), "preamble_bits": pre,
-              "period_bits": period}
-    if period >= 8:
-        nrep = len(bits) // period
-        frames = [bits[i * period:(i + 1) * period] for i in range(nrep)]
-        arr = np.array([[1 if ch == "1" else 0 for ch in f] for f in frames])
-        agree = arr.mean(axis=0)                       # fraction that are '1'
-        consensus = "".join("1" if a >= 0.5 else "0" for a in agree)
-        stable = np.array([1.0 - 2 * min(a, 1 - a) for a in agree])  # 1=constant,0=50/50
-        varying = [i for i, s in enumerate(stable) if s < 0.85]
-        result.update({"repeats": nrep, "consensus_bits": consensus,
-                       "consensus_hex": _to_hex(consensus),
-                       "varying_positions": varying[:200],
-                       "stable_fraction": round(float((stable >= 0.85).mean()), 3),
-                       "identical": len(varying) == 0})
+              "candidates": candidates}
+    # Headline pick: an explicit period, else a CRC-validated candidate, else the
+    # gated autocorr fundamental, else the whole blob (unchanged default).
+    forced = _eval_period(bits, int(period), 0) if period else None
+    crc_winner = next((e for e in candidates if e["crc_matches"]), None)
+    auto = _repeat_period(bits)
+    head = forced or crc_winner
+    if head is None and auto >= 8:
+        head = _eval_period(bits, auto, 0)
+    if head:
+        result["period_bits"] = head["period_bits"]
+        for k in ("repeats", "consensus_bits", "consensus_hex",
+                  "varying_positions", "stable_fraction", "identical"):
+            result[k] = head[k]
+        result["crc"] = {"checked": True, "matches": head["crc_matches"]}
     else:
+        result["period_bits"] = 0
         result.update({"repeats": 1, "consensus_bits": bits,
                        "consensus_hex": _to_hex(bits), "varying_positions": [],
                        "stable_fraction": 1.0, "identical": True})
-    result["crc"] = crc_scan(result["consensus_bits"])
+        result["crc"] = crc_scan(bits)
     return result
 
 
@@ -902,16 +997,21 @@ def _xor8(data):
     return x
 
 
-def frames(name=None, bits=None, line=None):
+def frames(name=None, bits=None, line=None, period=None):
     """Web entry: analyse a bitstream (raw or line-decoded) into frame structure.
 
     Pass ``bits`` directly (the demod output the page holds); ``line`` optionally
-    line-decodes first (manchester / nrzi / diff_manchester).
+    line-decodes first (manchester / nrzi / diff_manchester); ``period`` forces a
+    specific frame length (from clicking a candidate).
     """
     if not bits:
         return {"ok": False, "error": "no bits — demodulate a signal first"}
     b = line_decode(bits, line) if line and line != "raw" else bits
-    r = frame_analysis(b)
+    try:
+        period = int(period) if period else None
+    except (TypeError, ValueError):
+        period = None
+    r = frame_analysis(b, period=period)
     r["line"] = (line or "raw")
     r["decoded_bits"] = b
     return r
@@ -933,7 +1033,7 @@ _AI_ACTION_SCHEMA = {
                   "f0_mhz": (float, None), "f1_mhz": (float, None)},
     "demod":     {"mode": (str, {"ook", "fsk"}), "bw_khz": (float, None)},
     "classify":  {},
-    "frames":    {"line": (str, {"raw", "manchester", "nrzi"})},
+    "frames":    {"line": (str, {"raw", "manchester", "nrzi"}), "period_bits": (int, None)},
     "decode433": {},
     "reset":     {},
 }
@@ -1120,6 +1220,22 @@ def selftest():
         check("frame: fixed bits stable, rolling byte flagged varying",
               fa["repeats"] == 5 and any(p >= len(fixed) for p in fa["varying_positions"])
               and fa["stable_fraction"] < 1.0, str(fa.get("varying_positions"))[:60])
+        # candidate periods offered (incl. the true 32) + explicit period forcing
+        check("frame: candidate list offered incl. the true period",
+              any(c["period_bits"] == len(fixed) + 8 for c in fa["candidates"]),
+              str([c["period_bits"] for c in fa["candidates"]]))
+        check("frame: explicit period is honoured",
+              frame_analysis(fr_frames, period=len(fixed) + 8)["period_bits"] == len(fixed) + 8)
+        # a repeated 4-byte frame with a per-frame CRC-8 -> that length ranks first
+        # (its trailer validates a CRC) and is CRC-flagged in the candidate list.
+        one = [0x12, 0x34, 0x56]
+        one = one + [_crc8(one, 0x07)]
+        fbits = "".join(format(b, "08b") for b in one) * 6      # 32-bit frame ×6
+        fc2 = frame_analysis(fbits)
+        check("frame: CRC-validated frame length wins the headline",
+              fc2["period_bits"] == 32 and fc2["crc"]["matches"], str(fc2.get("period_bits")))
+        check("frame: a candidate carries its own CRC match",
+              any(c["period_bits"] == 32 and c["crc_matches"] for c in fc2["candidates"]))
         # CRC-8 appended over a known payload is recovered
         payload = [0xDE, 0xAD, 0xBE, 0xEF]
         crcv = _crc8(payload, 0x07)

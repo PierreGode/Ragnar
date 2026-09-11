@@ -69,12 +69,21 @@ Turn "here are bits" into "here is what it says."
 - **CRC/checksum scanner** (`crc_scan`): tries CRC-8 (× variants), CRC-16
   (CCITT/XMODEM/ARC/MODBUS), sum-8 and XOR-8 over the trailing byte(s) and reports
   matches — a ⌗ Frames button on the demod card.
-- *Validated:* 8 new selftests (30/30) — line decode, period=fundamental, fixed-
-  vs-rolling map, and an appended CRC-8 / sum-8 recovered. **Honest limit:** on
-  real run-length-recovered bits, timing jitter can defeat autocorrelation period
-  detection (real garage capture peaked at 0.43, below the 0.5 confidence gate) —
-  it then degrades to one frame + hex + CRC scan. Clean/clock-recovered bitstreams
-  align well. (Clock recovery is a later-segment improvement.)
+- **Candidate frame lengths + per-candidate CRC** (`_period_candidates` /
+  `_eval_period`): beyond the single autocorr fundamental, the tool ranks several
+  plausible frame lengths (autocorr peaks above a low floor + common byte-aligned
+  lengths), aligns each (from 0 AND after the preamble), and **CRC-scans each
+  independently**; a length whose trailer validates a CRC wins the headline.
+  Clickable candidate chips (force a length); the AI `frames` action can pass
+  `period_bits`. This directly fixes the jitter limitation below — on the real
+  garage bits (which the single-period pass returned "no period" for) it now
+  surfaces candidates incl. a **24-bit frame with a CRC match** (a lead to verify;
+  a short-frame CRC hit can be coincidental).
+- *Validated:* 40/40 selftests — line decode, period=fundamental, fixed-vs-rolling
+  map, appended CRC-8 / sum-8, candidate list incl. the true period, explicit
+  period honoured, CRC-validated length wins the headline. **Note:** run-length
+  demod jitter still weakens the *single* autocorr pick; candidates + CRC are the
+  mitigation. Clock recovery remains a later improvement.
 - *Left for later:* deeper rtl_433 hooks (per-protocol enable, raw pulse view),
   user-defined field layouts.
 
