@@ -297,38 +297,69 @@ def envelope(name, t0=None, t1=None, n=1200):
             "db": [round(x, 1) for x in db.tolist()]}
 
 
-def bursts(name, thresh_db=8.0, min_ms=0.2):
-    """Detect on/off bursts from the amplitude envelope (energy above noise)."""
+def _merge_runs(on, gap, min_len):
+    """Boolean 'on' -> list of (start,end) sample runs, bridging gaps < ``gap``
+    samples and dropping runs shorter than ``min_len``. Pure (numpy).
+
+    Gap-bridging is what turns a *pulse train* (an OOK/FSK packet is many short
+    pulses) into one burst per transmission, and a held/continuous carrier into a
+    single long burst — instead of hundreds of per-pulse fragments or nothing.
+    """
+    import numpy as np
+    if not on.any():
+        return []
+    d = np.diff(on.astype(np.int8))
+    starts = list(np.where(d == 1)[0] + 1)
+    ends = list(np.where(d == -1)[0] + 1)
+    if on[0]:
+        starts = [0] + starts
+    if on[-1]:
+        ends = ends + [len(on)]
+    runs = list(zip(starts, ends))
+    merged = []
+    for s, e in runs:
+        if merged and s - merged[-1][1] < gap:
+            merged[-1] = (merged[-1][0], e)
+        else:
+            merged.append((s, e))
+    return [(s, e) for s, e in merged if e - s >= min_len]
+
+
+def bursts(name, thresh_db=8.0, min_ms=1.0, gap_ms=25.0):
+    """Detect transmissions (bursts/packets) from the amplitude envelope.
+
+    A press of an OOK/FSK remote is a *train* of short pulses; ``gap_ms`` bridges
+    the inter-pulse gaps so each transmission is one burst (not one per pulse),
+    while ``min_ms`` rejects lone noise spikes. A near-100%-duty carrier collapses
+    to a single long burst. The noise floor is a low percentile so a busy band
+    still yields a sane threshold.
+    """
     import numpy as np
     iq, fs, fc, _ = load(name)
     mag = np.abs(iq)
-    # coarse envelope to keep it cheap on long captures
-    step = max(1, len(mag) // 200000)
+    step = max(1, len(mag) // 200000)          # coarse envelope; cheap on long files
     env = mag[::step]
     env_fs = fs / step
     edb = 20.0 * np.log10(env + 1e-6)
-    nf = float(np.percentile(edb, 30))
+    nf = float(np.percentile(edb, 20))
     on = edb > (nf + thresh_db)
+    gap = int(gap_ms / 1000.0 * env_fs)
+    min_len = max(1, int(min_ms / 1000.0 * env_fs))
     out = []
-    i, N = 0, len(on)
-    min_samp = int(min_ms / 1000.0 * env_fs)
-    while i < N:
-        if on[i]:
-            j = i
-            while j < N and on[j]:
-                j += 1
-            if j - i >= max(1, min_samp):
-                seg = iq[i * step: j * step]
-                fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
-                pk = int(np.argmax(db))
-                out.append({"t0": round(i / env_fs, 5), "t1": round(j / env_fs, 5),
-                            "dur_ms": round((j - i) / env_fs * 1000, 3),
-                            "f_mhz": round((fc + float(fr[pk])) / 1e6, 4),
-                            "bw_khz": round(occupied_bw(fr, db) / 1e3, 1),
-                            "peak_db": round(float(db[pk]), 1)})
-            i = j
-        else:
-            i += 1
+    for s, e in _merge_runs(on, gap, min_len):
+        seg = iq[s * step: e * step]
+        if len(seg) < 8:
+            continue
+        fr, db = welch_psd(seg, fs, nfft=min(2048, 1 << int(np.log2(max(2, len(seg))))))
+        pk = int(np.argmax(db))
+        # duty: fraction of the merged span actually above threshold (packet vs CW)
+        duty = float(on[s:e].mean()) if e > s else 1.0
+        out.append({"t0": round(s / env_fs, 5), "t1": round(e / env_fs, 5),
+                    "dur_ms": round((e - s) / env_fs * 1000, 2),
+                    "f_mhz": round((fc + float(fr[pk])) / 1e6, 4),
+                    "bw_khz": round(occupied_bw(fr, db) / 1e3, 1),
+                    "duty": round(duty, 2),
+                    "peak_db": round(float(db[pk]), 1)})
     return {"ok": True, "bursts": out[:200], "count": len(out)}
 
 
@@ -543,8 +574,15 @@ def selftest():
               len(raw) == sp["w"] * sp["h"] and sp["w"] == 200 and sp["h"] == 120, str((sp["w"], sp["h"], len(raw))))
         check("spectrogram: dynamic range present (floor<ceil)", sp["ceil_db"] > sp["floor_db"])
         b = bursts("synth")
-        check("bursts: the mid-record OOK burst is detected",
-              b["count"] >= 1 and any(0.07 < x["t0"] < 0.12 for x in b["bursts"]), str(b["count"]))
+        check("bursts: the OOK train merges into one burst (not per-pulse)",
+              1 <= b["count"] <= 3 and any(0.07 < x["t0"] < 0.12 for x in b["bursts"]), str(b["count"]))
+        check("bursts: burst carries a duty-cycle", b["bursts"] and "duty" in b["bursts"][0])
+        # _merge_runs: bridge small gaps into one run, drop short spikes
+        import numpy as np
+        onarr = np.array([1,1,0,1,1,0,0,0,0,0,0,0,0,0,0,1] + [0]*20, dtype=bool)
+        mr = _merge_runs(onarr, gap=3, min_len=2)     # first two runs merge (gap 1), lone tail spike dropped
+        check("merge: bridges small gaps, drops short spikes",
+              len(mr) == 1 and mr[0][0] == 0 and mr[0][1] == 5, str(mr))
         d = demod("synth", mode="ook", f_offset_hz=150_000, bw_hz=60_000, t0=0.08, t1=0.12)
         check("demod: OOK recovers ~2000 baud",
               d["ok"] and abs(d["baud"] - 2000) < 400, str(d.get("baud")))

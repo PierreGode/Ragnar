@@ -118,8 +118,8 @@
       <div class="card" style="margin-top:16px">
         <h3>Bursts / packets <span class="hint" id="bcount"></span></h3>
         <div style="max-height:220px;overflow:auto">
-          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>dB</th></tr></thead>
-            <tbody id="btbody"><tr><td class="empty" colspan="5">—</td></tr></tbody></table>
+          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>duty</th><th>dB</th></tr></thead>
+            <tbody id="btbody"><tr><td class="empty" colspan="6">—</td></tr></tbody></table>
         </div>
       </div>
       <div class="card" style="margin-top:16px">
@@ -307,7 +307,7 @@
   function loadBursts(){ api('/api/net/rtl/analyze/bursts',{name:S.name}).then(function(d){
     var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
     if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="5">No bursts above the noise floor.</td></tr>'; return; }
-    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
+    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+(x.duty!=null?Math.round(x.duty*100)+'%':'—')+'</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
     tb.querySelectorAll('tr').forEach(function(tr){tr.addEventListener('click',function(){var x=b[+tr.getAttribute('data-i')];
       var pad=(x.t1-x.t0)*0.5+0.002; S.view={t0:Math.max(0,x.t0-pad),t1:Math.min(S.dur,x.t1+pad),
         f0:x.f_mhz*1e6-Math.max(x.bw_khz*1e3*3,30e3), f1:x.f_mhz*1e6+Math.max(x.bw_khz*1e3*3,30e3)};
