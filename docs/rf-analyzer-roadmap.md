@@ -205,12 +205,24 @@ a Flipper .sub → loadable OOK capture → bursts); route `POST /analyze/upload
 (size-capped, names sanitised, bytes read as data only). *Left for later:*
 WAV-IQ, decoded (protocol) `.sub` re-synthesis, `.sigmf` tar archives.
 
-## Segment 10 — Multi-signal & long captures  (next)
-- **Tiled / decimated spectrogram overview** for long or large captures — pan/zoom
-  without loading the whole file (Pi-Zero-safe; overlaps the skipped Segment 5).
-- **Memory-budgeted loading** derived from `/proc/meminfo`.
-- **Multi-signal detection & tracking** — find several carriers and follow each over
-  time; click a track to jump / zoom / measure.
+## Segment 10 — Multi-signal & long captures  (in progress)
+- **Multi-signal detection & tracking** ✅ — a **Signals survey** finds *every*
+  simultaneous carrier in a window and tracks each over time: an STFT →
+  per-frame peak detection above the (per-frame) noise floor → detections linked
+  across frames into tracks (a carrier persists while its frequency stays within
+  a tolerance, bridging short gaps). Each track reports its frequency edges,
+  bandwidth, time extent, peak power and SNR; the page lists them and a click
+  zooms + marks that carrier, so a busy band's signals are individually
+  selectable. `_detect_signals` / `signals()`; route `/analyze/signals`; a
+  Signals-survey card with a min-SNR control (default **12 dB** — cleanly
+  separates carriers from noise; lower it for weak signals). 3 selftests (80/80)
+  — a synthetic 3-carrier scene (two continuous + one mid-capture burst) is found
+  with correct freqs and the burst correctly time-bounded; also proven on-box.
+  *HONEST:* a peak-tracking survey (amplitude carriers), not a full detector —
+  very weak or overlapping signals and the exact band edges are approximate.
+- **Tiled / decimated spectrogram overview** *(next)* for long or large captures
+  — pan/zoom without loading the whole file (Pi-Zero-safe; overlaps skipped Seg 5).
+- **Memory-budgeted loading** *(next)* derived from `/proc/meminfo`.
 - *Done when:* a 30 s / 120 MB capture is analysable on a 512 MB board and several
   simultaneous carriers are individually selectable.
 

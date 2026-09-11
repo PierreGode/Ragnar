@@ -837,6 +837,136 @@ def constellation_demod(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None,
 
 
 # --------------------------------------------------------------------------
+# Segment 10 — multi-signal survey: find EVERY simultaneous carrier in a window
+# and track each over time, so a busy band's signals are individually
+# selectable. An STFT → per-frame peak detection above a per-frame noise floor
+# → link detections across frames into tracks (a carrier persists while its
+# frequency stays within a tolerance, bridging short gaps). Returns each track's
+# frequency extent, time extent, peak power and occupancy. Pure core, selftested
+# on a synthetic multi-carrier scene (no hardware).
+# --------------------------------------------------------------------------
+
+def _detect_signals(iq, fs, fc, nfft=512, snr_db=12.0, min_frames=3, max_signals=40):
+    """Find + track carriers in an IQ block (pure). Returns a list of tracks with
+    absolute-Hz frequency edges and times in seconds from the block start."""
+    import numpy as np
+    n = len(iq)
+    if n < nfft * 2:
+        return [], 0.0
+    win = np.hanning(nfft).astype(np.float32)
+    ncol = max(2, min(1500, (n - nfft) // nfft + 1))          # non-overlapping frames, bounded
+    starts = np.linspace(0, max(0, n - nfft), ncol).astype(int)
+    frames = np.stack([iq[s:s + nfft] for s in starts]) * win
+    S = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
+    P = (S.real ** 2 + S.imag ** 2) / (nfft * float(np.sum(win ** 2)))
+    db = 10.0 * np.log10(P + 1e-12)                            # (frames, bins)
+    fbins = np.fft.fftshift(np.fft.fftfreq(nfft, 1.0 / fs)) + fc
+    bin_hz = fs / nfft
+    frame_dt = (starts[-1] - starts[0]) / max(1, ncol - 1) / fs if ncol > 1 else nfft / fs
+    active, closed = [], []                                   # tracks: dict(fc,flo,fhi,pk,t0i,t1i,frames,miss)
+    ftol = max(2.5 * bin_hz, 4000.0)                          # freq tolerance to continue a track
+    gap = 3                                                   # frames a track may miss before it closes
+    for ti in range(ncol):
+        row = db[ti]
+        floor = float(np.percentile(row, 40.0))
+        thr = floor + snr_db
+        hot = row > thr
+        # group consecutive hot bins into per-frame detections
+        dets = []
+        b = 0
+        while b < nfft:
+            if hot[b]:
+                e = b
+                while e + 1 < nfft and hot[e + 1]:
+                    e += 1
+                seg = row[b:e + 1]
+                pk = int(b + np.argmax(seg))
+                dets.append((float(fbins[pk]), float(fbins[b]), float(fbins[e]), float(row[pk])))
+                b = e + 1
+            else:
+                b += 1
+        prev = active                                          # tracks entering this frame
+        used = [False] * len(prev)
+        fresh = []
+        for (fcn, flo, fhi, pk) in dets:
+            best, bd = -1, ftol
+            for j, tr in enumerate(prev):
+                if used[j]:
+                    continue
+                d = abs(tr["fc"] - fcn)
+                if d < bd:
+                    bd, best = d, j
+            if best >= 0:
+                tr = prev[best]; used[best] = True
+                tr["fc"] = 0.7 * tr["fc"] + 0.3 * fcn          # track the drift
+                tr["flo"] = min(tr["flo"], flo); tr["fhi"] = max(tr["fhi"], fhi)
+                tr["pk"] = max(tr["pk"], pk); tr["t1i"] = ti
+                tr["frames"] += 1; tr["miss"] = 0
+            else:
+                fresh.append({"fc": fcn, "flo": flo, "fhi": fhi, "pk": pk,
+                              "t0i": ti, "t1i": ti, "frames": 1, "miss": 0})
+        # age unmatched tracks; close ones that have missed too long
+        still = []
+        for j, tr in enumerate(prev):
+            if not used[j]:
+                tr["miss"] += 1
+            if tr["miss"] > gap:
+                closed.append(tr)
+            else:
+                still.append(tr)
+        active = still + fresh
+    closed.extend(active)
+    out = []
+    for tr in closed:
+        if tr["frames"] < min_frames:
+            continue
+        span = tr["t1i"] - tr["t0i"] + 1
+        out.append({
+            "f_center_hz": round((tr["flo"] + tr["fhi"]) / 2.0, 1),
+            "f_lo_hz": round(tr["flo"] - bin_hz / 2, 1), "f_hi_hz": round(tr["fhi"] + bin_hz / 2, 1),
+            "bw_hz": round((tr["fhi"] - tr["flo"]) + bin_hz, 1),
+            "t0_s": round(tr["t0i"] * frame_dt, 4), "t1_s": round((tr["t1i"] + 1) * frame_dt, 4),
+            "peak_db": round(tr["pk"], 1), "frames": tr["frames"],
+            "occupancy": round(tr["frames"] / span, 2) if span else 1.0})
+    # merge tracks that overlap heavily in both freq and time (one carrier split)
+    out.sort(key=lambda s: s["peak_db"], reverse=True)
+    merged = []
+    for s in out:
+        hit = None
+        for m in merged:
+            if not (s["f_hi_hz"] < m["f_lo_hz"] or s["f_lo_hz"] > m["f_hi_hz"]) \
+               and not (s["t1_s"] < m["t0_s"] or s["t0_s"] > m["t1_s"]):
+                hit = m; break
+        if hit:
+            hit["f_lo_hz"] = min(hit["f_lo_hz"], s["f_lo_hz"]); hit["f_hi_hz"] = max(hit["f_hi_hz"], s["f_hi_hz"])
+            hit["f_center_hz"] = round((hit["f_lo_hz"] + hit["f_hi_hz"]) / 2.0, 1)
+            hit["bw_hz"] = round(hit["f_hi_hz"] - hit["f_lo_hz"], 1)
+            hit["t0_s"] = min(hit["t0_s"], s["t0_s"]); hit["t1_s"] = max(hit["t1_s"], s["t1_s"])
+            hit["frames"] += s["frames"]
+        else:
+            merged.append(dict(s))
+    merged.sort(key=lambda s: (s["t1_s"] - s["t0_s"]) * (s["peak_db"] + 140), reverse=True)
+    return merged[:max_signals], float(np.percentile(db, 40.0))
+
+
+def signals(name, t0=None, t1=None, snr_db=12.0, nfft=512, max_signals=40):
+    """Survey a window and return every detected carrier as a selectable track."""
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    base_t = i0 / fs
+    tracks, floor = _detect_signals(x, fs, fc, nfft=int(nfft), snr_db=float(snr_db),
+                                    max_signals=int(max_signals))
+    for s in tracks:                                          # times are absolute in the capture
+        s["t0_s"] = round(s["t0_s"] + base_t, 4); s["t1_s"] = round(s["t1_s"] + base_t, 4)
+        s["snr_db"] = round(s["peak_db"] - floor, 1)
+    return {"ok": True, "sample_rate_hz": round(fs, 1), "center_hz": fc,
+            "nfft": int(nfft), "noise_db": round(floor, 1),
+            "n_signals": len(tracks), "signals": tracks}
+
+
+# --------------------------------------------------------------------------
 # Segment 7 — advanced DSP: apply a band-pass / notch filter to a selection and
 # show the spectrum before vs after (isolate one signal, or reject an
 # interferer). An FFT-domain band mask over absolute frequency — simple, exact
@@ -2175,6 +2305,31 @@ def selftest():
               _si["ok"] and any(c["name"] == _si["name"] for c in list_captures()["captures"]), str(_si)[:80])
         check("import: SigMF meta without datatype rejected",
               import_sigmf('{"global":{}}', b"\x00", "x").get("ok") is False)
+        # --- Segment 10: multi-signal detection & tracking ---
+        import numpy as np
+        _sfs = 1_000_000.0; _sfc = 433_900_000.0; _sn = 100000; _st = np.arange(_sn) / _sfs
+        _scene = 0.25 * np.exp(2j * np.pi * 100000 * _st)          # continuous +100 kHz
+        _scene = _scene + 0.25 * np.exp(2j * np.pi * 250000 * _st)  # continuous +250 kHz
+        _bmask = ((_st > 0.033) & (_st < 0.066)).astype(np.float32)
+        _scene = _scene + 0.25 * _bmask * np.exp(2j * np.pi * -150000 * _st)  # -150 kHz burst, middle third
+        # amplitudes kept low so the summed scene doesn't clip in cu8 (clipping = spurs)
+        _scene = _scene + (np.random.randn(_sn) + 1j * np.random.randn(_sn)) * 0.02
+        _I = np.clip(np.round(_scene.real * 127.5 + 127.5), 0, 255).astype(np.uint8)
+        _Q = np.clip(np.round(_scene.imag * 127.5 + 127.5), 0, 255).astype(np.uint8)
+        _iv = np.empty(2 * _sn, dtype=np.uint8); _iv[0::2] = _I; _iv[1::2] = _Q
+        _write_capture("scene", _iv.tobytes(), _sfs, _sfc, "cu8")
+        _sg = signals("scene")
+        _fk = sorted(round((s["f_center_hz"] - _sfc) / 1000) for s in _sg["signals"])
+        check("signals: finds the 3 simultaneous carriers (+100 / +250 / -150 kHz)",
+              _sg["ok"] and _sg["n_signals"] >= 3
+              and any(abs(f - 100) < 20 for f in _fk) and any(abs(f - 250) < 20 for f in _fk)
+              and any(abs(f + 150) < 20 for f in _fk), str(_fk))
+        _burst = [s for s in _sg["signals"] if abs((s["f_center_hz"] - _sfc) / 1000 + 150) < 20]
+        check("signals: the -150 kHz carrier is time-bounded (a mid-capture burst)",
+              bool(_burst) and _burst[0]["t0_s"] > 0.02 and _burst[0]["t1_s"] < 0.08, str(_burst[:1]))
+        check("signals: each track carries freq extent + power + time",
+              all(all(k in s for k in ("f_lo_hz", "f_hi_hz", "bw_hz", "t0_s", "t1_s", "peak_db", "snr_db"))
+                  for s in _sg["signals"]) and _sg["n_signals"] <= 15, str(_sg["n_signals"]))
     finally:
         globals()["_cap_dir"] = saved
         import shutil
