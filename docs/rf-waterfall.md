@@ -163,6 +163,21 @@ teams do it. Backend: `rtl_sdr.SpectrumBaseline` + pure
   band, and the pager / ACARS / VOR classes link to their decode pages. LoRa is
   labelled energy-only (chirp spread-spectrum can't be demodulated here).
 
+## 2D / 3D waterfall view
+
+Each panel has a **View: 2D | 3D** toggle in the toolbar (default **2D**, the
+classic flat scrolling waterfall). **3D** renders the same sweeps as a receding
+**terrain surface** — signal power becomes height, older sweeps shrink and set
+back toward the horizon, so a steady carrier stands up as a ridge running back
+through time and bursts appear as hills. It uses the active colour palette
+(power → colour and height), with far rows dimmed for depth.
+
+It's drawn with the **plain 2D canvas** (a small ring buffer of recent rows,
+projected back-to-front with the painter's algorithm) — **no WebGL/GPU**, so it
+works offline on the Pi's own browser and on phones, and falls back to nothing
+worse than the 2D view. Per panel, redraw is throttled (~16 fps); the PNG export
+captures whichever view is showing.
+
 ## Raw-IQ capture (SigMF)
 
 The RTL panel's record bar has an **⤓ SigMF** button that captures raw baseband

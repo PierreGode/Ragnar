@@ -107,7 +107,7 @@
   button.mini:disabled{opacity:.35;cursor:not-allowed}
   button.mini:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
   button.mini[aria-pressed="true"]{border-color:var(--cyan);color:var(--cyan);background:rgba(56,189,201,.12)}
-  .toolbar .holdgrp{display:inline-flex;align-items:center;gap:5px}
+  .toolbar .holdgrp,.toolbar .d3grp{display:inline-flex;align-items:center;gap:5px}
   .toolbar .hlbl{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
   .toolbar .markmeas{color:var(--ink-dim)} .toolbar .markmeas b{color:var(--ink);font-weight:600}
   .stat .v.nf{color:var(--ink-dim)}
@@ -276,11 +276,22 @@
   };
   var PALETTE_ORDER=['aurora','inferno','viridis','classic','mono'];
   var CEIL=-20;
+  // 3D terrain-waterfall geometry: the recent dB rows are kept in a small ring
+  // buffer and projected as a receding surface (power = height). Pure 2D-canvas
+  // so it needs no WebGL/GPU and works offline on the Pi's own browser.
+  var COLS3D=120, ROWS3D=84;
   function buildLUT(stops){var lut=new Array(256);
     for(var i=0;i<256;i++){var t=i/255,a=stops[0],b=stops[stops.length-1];
       for(var s=0;s<stops.length-1;s++){if(t>=stops[s][0]&&t<=stops[s+1][0]){a=stops[s];b=stops[s+1];break;}}
       var f=(t-a[0])/((b[0]-a[0])||1);
       lut[i]="rgb("+Math.round(a[1][0]+(b[1][0]-a[1][0])*f)+","+Math.round(a[1][1]+(b[1][1]-a[1][1])*f)+","+Math.round(a[1][2]+(b[1][2]-a[1][2])*f)+")";}
+    return lut;}
+  // Same LUT but as numeric [r,g,b] triples — the 3D surface needs to dim colours by depth.
+  function buildLUTrgb(stops){var lut=new Array(256);
+    for(var i=0;i<256;i++){var t=i/255,a=stops[0],b=stops[stops.length-1];
+      for(var s=0;s<stops.length-1;s++){if(t>=stops[s][0]&&t<=stops[s+1][0]){a=stops[s];b=stops[s+1];break;}}
+      var f=(t-a[0])/((b[0]-a[0])||1);
+      lut[i]=[Math.round(a[1][0]+(b[1][0]-a[1][0])*f),Math.round(a[1][1]+(b[1][1]-a[1][1])*f),Math.round(a[1][2]+(b[1][2]-a[1][2])*f)];}
     return lut;}
   function gradCss(stops){return "linear-gradient(90deg,"+stops.map(function(s){
     return "rgb("+s[1][0]+","+s[1][1]+","+s[1][2]+") "+Math.round(s[0]*100)+"%";}).join(",")+")";}
@@ -288,10 +299,13 @@
   var activePalette='aurora';
   try{var _sp=localStorage.getItem('ragnar_rf_palette'); if(_sp&&PALETTES[_sp]) activePalette=_sp;}catch(e){}
   var LUT=buildLUT(PALETTES[activePalette].stops);
+  var LUTrgb=buildLUTrgb(PALETTES[activePalette].stops);
   function color(db,floor){var t=(db-floor)/(CEIL-floor);if(t<0)t=0;if(t>1)t=1;return LUT[(t*255)|0];}
+  function colorRGB(db,floor){var t=(db-floor)/(CEIL-floor);if(t<0)t=0;if(t>1)t=1;return LUTrgb[(t*255)|0];}
   function setPalette(id){
     if(!PALETTES[id]) return;
-    activePalette=id; LUT=buildLUT(PALETTES[id].stops);
+    activePalette=id; LUT=buildLUT(PALETTES[id].stops); LUTrgb=buildLUTrgb(PALETTES[id].stops);
+    try{ if(typeof scopes!=='undefined'&&scopes) scopes.forEach(function(s){ if(s.threeD) s.draw3D(); }); }catch(e){}
     var g=document.querySelector('.legend .grad'); if(g) g.style.background=gradCss(PALETTES[id].stops);
     var seg=document.getElementById('palette');
     if(seg) Array.prototype.forEach.call(seg.querySelectorAll('button'),function(x){
@@ -357,6 +371,7 @@
     this.zoom=null; this.marker=null; this.decoding=false; this.zwave=null; this.zwaveRegion=null;
     this.replaying=false; this.replay=null; this._recPoll=null;
     this.busy=0; this.log=[]; this._lastLog=0; this._ismPoll=null;
+    this.hist=[]; this.threeD=false; this._last3D=0;   // 3D terrain waterfall state
     this.model=cfg.synth(cfg.synthDefault);
     this.lo=this.model.lo; this.hi=this.model.hi; this.floor=this.model.floor;
     this.homeLo=this.lo; this.homeHi=this.hi;
@@ -400,6 +415,10 @@
             +'<button class="mini hbtn" data-h="min" aria-pressed="false" title="Min-hold trace — reveals the true noise floor">Min</button>'
           +'</span>'
           +'<button class="mini persistbtn" aria-pressed="false" title="Persistence (digital-phosphor) trace — accumulates a fading density cloud so rare bursts and modulation shape show up">Persist</button>'
+          +'<span class="d3grp"><span class="hlbl">View</span>'
+            +'<button class="mini d3btn" data-3d="0" aria-pressed="true" title="Flat 2D waterfall">2D</button>'
+            +'<button class="mini d3btn" data-3d="1" aria-pressed="false" title="3D terrain waterfall — signal power as height, older sweeps recede into the distance">3D</button>'
+          +'</span>'
           +'<button class="mini snapbtn" title="Save the waterfall as a PNG">⇩ PNG</button>'
           +'<button class="mini zoombtn" disabled>Zoom here</button>'
           +'<button class="mini resetbtn" disabled>Reset zoom</button>'
@@ -455,6 +474,9 @@
       document.addEventListener(ev,function(){ self.onFsChange(); });
     });
     this.snapBtn.addEventListener('click',function(){ self.snapshot(); });
+    this.d3Sel=el.querySelector('.d3grp');
+    if(this.d3Sel) this.d3Sel.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+      self.setThreeD(b.getAttribute('data-3d')==='1'); });
     if(this.holdGrp) this.holdGrp.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
       var h=b.getAttribute('data-h'); self.holds[h]=!self.holds[h]; b.setAttribute('aria-pressed', self.holds[h]?'true':'false');
       if(self.row) self.drawTrace(self.row); });
@@ -1124,18 +1146,74 @@
     this.lo=lo;this.hi=hi;this.floor=(typeof floor==='number')?floor:-110;
     if(!this.zoom){ this.homeLo=lo; this.homeHi=hi; }
     var N=power.length,f=this.fctx;
-    f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
     // measured noise floor (robust low-percentile) drives SNR + signal detection
     var nf=this._noiseFloor(power); this.noiseDb=nf;
     var peakDb=-999,peakIdx=0,busyC=0,thr=nf+10;
-    for(var c=0;c<N;c++){var x0=(c*this.W/N)|0,x1=((c+1)*this.W/N)|0;
-      f.fillStyle=color(power[c],this.floor); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
-      if(power[c]>peakDb){peakDb=power[c];peakIdx=c;} if(power[c]>thr)busyC++;}
+    this._pushHist(power);                    // keep recent rows for the 3D surface
+    if(this.threeD){                          // 3D terrain view: measure, then redraw the surface (throttled)
+      for(var cm=0;cm<N;cm++){ if(power[cm]>peakDb){peakDb=power[cm];peakIdx=cm;} if(power[cm]>thr)busyC++; }
+      var _t3=performance.now(); if(_t3-this._last3D>=60){ this._last3D=_t3; this.draw3D(); }
+    } else {                                  // classic 2D waterfall: scroll the canvas + paint the new row
+      f.drawImage(this.fall,0,0,this.W,this.H-this.STEP,0,this.STEP,this.W,this.H-this.STEP);
+      for(var c=0;c<N;c++){var x0=(c*this.W/N)|0,x1=((c+1)*this.W/N)|0;
+        f.fillStyle=color(power[c],this.floor); f.fillRect(x0,0,(x1-x0)||1,this.STEP);
+        if(power[c]>peakDb){peakDb=power[c];peakIdx=c;} if(power[c]>thr)busyC++;}
+    }
     this.row=power; this.peak={db:peakDb,idx:peakIdx}; this.snr=peakDb-nf;
     this.busy=this.busy*0.8 + (busyC/N*100)*0.2;
     this._updateTraces(power);
     this.updateSignals(power,nf);        // track emitters (CFAR) + throttled render
     this.drawTrace(power); this.updateReadout();
+  };
+
+  // ---- 3D terrain waterfall ----------------------------------------------
+  // Keep the recent rows (max-hold downsampled to COLS3D) in a ring buffer, then
+  // project them as a receding surface: power -> height, older sweeps smaller and
+  // set back. Pure 2D canvas (painter's algorithm, front rows overpaint) so it
+  // needs no WebGL and runs offline on the Pi's own browser.
+  Scope.prototype._pushHist=function(power){
+    var N=power.length, C=COLS3D, row=new Array(C);
+    for(var c=0;c<C;c++){ var a=(c*N/C)|0, b=((c+1)*N/C)|0; if(b<=a)b=a+1;
+      var m=-999; for(var i=a;i<b&&i<N;i++){ if(power[i]>m)m=power[i]; } row[c]=m; }
+    this.hist.push(row); if(this.hist.length>ROWS3D) this.hist.shift();
+  };
+  Scope.prototype.draw3D=function(){
+    var f=this.fctx, W=this.W, H=this.H, d=this.d||1;
+    f.fillStyle='#05080d'; f.fillRect(0,0,W,H);
+    var hist=this.hist, R=hist.length; if(!R) return;
+    var floor=this.floor, span=(CEIL-floor)||1, cx=W/2;
+    var yTop=Math.round(16*d), yBot=H-Math.round(8*d), depthSpan=yBot-yTop;
+    var back=0.46, MAXH=depthSpan*0.62, topClip=Math.round(4*d);   // shrink + ridge height + top clamp
+    var yAt=function(dep){ return yTop+dep*depthSpan; };
+    for(var r=0;r<R;r++){                              // r=0 oldest (back) .. R-1 newest (front)
+      var dep=R>1?r/(R-1):1, persp=back+(1-back)*dep, dim=0.5+0.5*dep;
+      var yRow=yAt(dep), yFill=(r<R-1)?yAt((r+1)/(R-1)):yBot;   // fill down to the next row (no gaps)
+      var row=hist[r], C=row.length, yy=new Array(C), xx=new Array(C);
+      // clamped + lightly smoothed (3-tap) heights, so crests read rounded not stepped
+      for(var c=0;c<C;c++){
+        var a=(c>0?row[c-1]:row[c]), b=row[c], e=(c<C-1?row[c+1]:row[c]);
+        var t=((a+2*b+e)/4-floor)/span; if(t<0)t=0; if(t>1)t=1;
+        var y=yRow-t*MAXH*persp; yy[c]=y<topClip?topClip:y;      // clamp tall far-row ridges to the top
+        xx[c]=cx+((c/(C-1))-0.5)*W*persp;
+      }
+      // sloped-top quads between adjacent columns — anti-aliased, so the ridgeline
+      // is a smooth surface instead of a row of flat-topped bars.
+      for(var c=0;c<C-1;c++){
+        var col=colorRGB(row[c],floor);
+        f.fillStyle='rgb('+((col[0]*dim)|0)+','+((col[1]*dim)|0)+','+((col[2]*dim)|0)+')';
+        f.beginPath(); f.moveTo(xx[c],yy[c]); f.lineTo(xx[c+1],yy[c+1]);
+        f.lineTo(xx[c+1],yFill); f.lineTo(xx[c],yFill); f.closePath(); f.fill();
+      }
+      // faint lit crest highlights the ridge (brighter on nearer rows)
+      f.strokeStyle='rgba(255,255,255,'+(0.04+0.10*dep).toFixed(3)+')'; f.lineWidth=1;
+      f.beginPath(); for(var c=0;c<C;c++){ c?f.lineTo(xx[c],yy[c]):f.moveTo(xx[c],yy[c]); } f.stroke();
+    }
+  };
+  Scope.prototype.setThreeD=function(on){
+    on=!!on; this.threeD=on;
+    if(this.d3Sel) Array.prototype.forEach.call(this.d3Sel.querySelectorAll('button'),function(b){
+      b.setAttribute('aria-pressed', (b.getAttribute('data-3d')==='1')===on?'true':'false'); });
+    if(on){ this.draw3D(); } else { this.resetCanvas(); }   // resume the flat 2D waterfall
   };
   // Robust noise-floor estimate: the ~30th-percentile of the row (ignores the
   // handful of bins that carry real signals). Feeds SNR + the detection threshold.
