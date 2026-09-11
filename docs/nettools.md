@@ -2589,7 +2589,7 @@ end-to-end leg) aggregated into the Detector Self-Test panel.
 Cisco IOS / IOS-XE / NX-OS routers, switches and edge/core devices. Firewalls
 (ASA/Firepower/FTD/FMC) are **screened out of scope** (`CG-009`), not misclassified.
 Capture surface: SNMP (161/162), Telnet (23), HTTP UIs (80/8080/8443), IKEv2
-(500/4500), DHCPv6 (546/547). The port clauses match **both IPv4 and IPv6** (libpcap's
+(500/4500), DHCPv6 (546/547), CAPWAP (5246/5247). The port clauses match **both IPv4 and IPv6** (libpcap's
 `port` primitive is family-agnostic, so plain v6 was never blind); the only real v6
 gap is a packet **behind an extension header**, where the next-header byte is no
 longer the transport — admitted by a narrow **`ip6[6]` next-header clause** (hop-by-hop
@@ -2617,7 +2617,15 @@ CFM header. The capture admits a `:4789` datagram **only when its inner ethertyp
 stream never lands on a Pi — the same resource-aware discipline as the `ip6[6]` clause.
 The **native** (non-IP) `0x8902` EtherType is L2-only and not reconstructable from
 tcpdump's IP-onward hex, so only the VXLAN-encapsulated path (which is the CVE path) is
-detected in-app. Plus IOS-XE / NX-OS version-in-range postures.
+detected in-app. **CAPWAP / NBAR (CVE-2025-20315):** **`CG-112`** CAPWAP on the segment
+(WLC control/data UDP 5246/5247 — the precondition, since NBAR/AVC inspecting it is the
+path) and **`CG-292`** a **structurally malformed CAPWAP header** (RFC 5415: non-zero
+version, an undefined header type, an HLEN below the 2-word minimum or overrunning the
+datagram, or reserved bits set — including a datagram too short to hold a header), the
+unauthenticated remote-reload shape on IOS XE. The related **`CG-222`**
+(`ETHERNET_LENGTH_FIELD_LIE`, CVE-2025-20311) is **not** ported in-app: it reads the
+802.3 frame length field, an L2 datum tcpdump's IP-onward hex does not carry. Plus
+IOS-XE / NX-OS version-in-range postures.
 - Endpoint: `GET /api/net/cisco-guard` `{interface, seconds}` · binary: `tcpdump`
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 

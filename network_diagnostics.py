@@ -17340,7 +17340,8 @@ _CISCO_VXLAN_TRILL_BPF = ('(udp port 4789 and '
                           '(ether[62:2] = 0x8902 or ether[82:2] = 0x8902))')
 _CISCO_GUARD_BPF = (
     'udp port 161 or udp port 162 or udp port 546 or udp port 547 or '
-    'udp port 500 or udp port 4500 or tcp port 23 or tcp port 80 or '
+    'udp port 500 or udp port 4500 or udp port 5246 or udp port 5247 or '
+    'tcp port 23 or tcp port 80 or '
     'tcp port 8080 or tcp port 8443 or ' + _CISCO_VXLAN_TRILL_BPF + ' or '
     + _GUARD_IP6_EXTHDR_BPF)
 # `udp port 4789` admits VXLAN (v4 and v6 underlay) so JNPR-061 can inspect the
@@ -17972,6 +17973,43 @@ def _vxlan_structural_anomalies(payload):
     return out
 
 
+# --- CAPWAP (Cisco IOS XE NBAR malformed-CAPWAP DoS, CVE-2025-20315) ---
+# RFC 5415 header: byte0 = version(4)|type(4); bytes1-3 = HLEN(5) RID(5) WBID(5)
+# flags(9); bytes6-7 = frag-offset(13)|reserved(3). HLEN counts 4-byte words and
+# must be >= 2; a value overrunning the datagram, a non-zero version, an undefined
+# header type, or set reserved bits are the malformed-input shape Cisco names.
+_CAPWAP_PORTS = (5246, 5247)               # WLC control / data
+_CAPWAP_HLEN_MIN = 2
+
+
+def _capwap_anomalies(payload):
+    """Return (ok, anomalies): ok=False means the datagram is too short to hold a
+    CAPWAP header at all (itself the malformed shape); `anomalies` lists structural
+    violations (non-zero version, undefined header type, HLEN below min or
+    overrunning the datagram, reserved bits set)."""
+    if len(payload) < 8:
+        return (False, ['CAPWAP datagram too short to hold a header'])
+    ver = (payload[0] >> 4) & 0x0F
+    htype = payload[0] & 0x0F
+    word = int.from_bytes(payload[1:4], 'big')     # 24 bits: HLEN|RID|WBID|flags
+    hlen = (word >> 19) & 0x1F
+    resv = int.from_bytes(payload[6:8], 'big') & 0x07
+    anom = []
+    if ver != 0:
+        anom.append('CAPWAP version %d is not 0 (RFC 5415 defines only 0)' % ver)
+    if htype not in (0, 1):
+        anom.append('CAPWAP header type %d is undefined' % htype)
+    if hlen < _CAPWAP_HLEN_MIN:
+        anom.append('CAPWAP HLEN %d words is below the minimum %d'
+                    % (hlen, _CAPWAP_HLEN_MIN))
+    elif hlen * 4 > len(payload):
+        anom.append('CAPWAP HLEN %d words (%d bytes) overruns the %d-byte datagram'
+                    % (hlen, hlen * 4, len(payload)))
+    if resv:
+        anom.append('CAPWAP reserved bits set (%#x)' % resv)
+    return (True, anom)
+
+
 def _cisco_analyze(records):
     """Pure classifier over parsed guard packets → Cisco findings + verdict.
     Separated from capture so the self-test can drive it with synthetic packets."""
@@ -18100,6 +18138,25 @@ def _cisco_analyze(records):
                             src or dst, ['CVE-2021-1587'],
                             {'vni': vni, 'reason': '; '.join(anom),
                              'confidence': 'experimental'})
+
+        # --- CAPWAP on segment + malformed header (CVE-2025-20315 NBAR DoS) ---
+        # CAPWAP (WLC control/data, UDP 5246/5247); NBAR inspecting a malformed
+        # CAPWAP datagram is the unauthenticated remote-reload path on IOS XE.
+        if r['proto'] == 'UDP' and (r['dport'] in _CAPWAP_PORTS
+                                    or r['sport'] in _CAPWAP_PORTS):
+            ok, capwap_anom = _capwap_anomalies(r['payload'])
+            if not ok:
+                add('CG-292', 'CAPWAP_MALFORMED_HEADER', 'HIGH', 'ATTACK', src or dst,
+                    ['CVE-2025-20315'], {'dst': dst, 'reason': capwap_anom[0]})
+            else:
+                add('CG-112', 'CAPWAP_ON_SEGMENT', 'LOW', 'EXPOSURE', src or dst,
+                    ['CVE-2025-20315'],
+                    {'dst': dst, 'note': 'CAPWAP here; NBAR/AVC inspecting it on an '
+                                         'IOS XE device is the CVE-2025-20315 path'})
+                if capwap_anom:
+                    add('CG-292', 'CAPWAP_MALFORMED_HEADER', 'HIGH', 'ATTACK',
+                        src or dst, ['CVE-2025-20315'],
+                        {'dst': dst, 'reason': '; '.join(capwap_anom)})
 
         # --- IPv6 Routing Header type 0 — deprecated source-routing (RFC 5095) ---
         if r.get('ipver') == 6 and r.get('ip_raw') and _ipv6_rh0(r['ip_raw']):
@@ -19116,6 +19173,34 @@ def _cisco_selftest():
                       'got': _CISCO_VXLAN_TRILL_BPF,
                       'pass': ('udp port 4789 and' in _CISCO_VXLAN_TRILL_BPF
                                and '0x8902' in _CISCO_VXLAN_TRILL_BPF)})
+
+    # CAPWAP (CVE-2025-20315). A well-formed header (version 0, type 0, HLEN 2
+    # words = 8 bytes) is only the on-segment exposure CG-112, no CG-292.
+    _capwap_ok = b'\x00\x10\x00\x00\x00\x00\x00\x00'   # ver0 type0, HLEN=2
+    check('cisco-capwap-clean',
+          [_guard_rec(proto='UDP', dport=5246, payload=_capwap_ok)],
+          'exposure', ['CG-112'])
+    r_cw = _cisco_analyze([_guard_rec(proto='UDP', dport=5246, payload=_capwap_ok)])
+    scenarios.append({'name': 'cisco-capwap-clean-no-292', 'expect': 'no CG-292',
+                      'got': str(sorted({f['code'] for f in r_cw['findings']})),
+                      'pass': 'CG-292' not in {f['code'] for f in r_cw['findings']}})
+    # Malformed CAPWAP: non-zero version -> CG-112 + CG-292.
+    _capwap_badver = b'\x10\x10\x00\x00\x00\x00\x00\x00'  # ver1 (illegal)
+    check('cisco-capwap-badversion',
+          [_guard_rec(proto='UDP', dport=5246, payload=_capwap_badver)],
+          'attack', ['CG-112', 'CG-292'])
+    # Malformed CAPWAP: HLEN (10 words = 40B) overruns an 8-byte datagram.
+    _capwap_hlen = b'\x00\x50\x00\x00\x00\x00\x00\x00'    # HLEN=10
+    check('cisco-capwap-hlen-overrun',
+          [_guard_rec(proto='UDP', dport=5247, payload=_capwap_hlen)],
+          'attack', ['CG-292'])
+    # A CAPWAP datagram too short to hold a header is itself the malformed shape
+    # (CG-292 only — no CG-112, mirroring the standalone's parse-error path).
+    r_cwr = _cisco_analyze([_guard_rec(proto='UDP', dport=5246, payload=b'\x00\x10\x00')])
+    _cwr = {f['code'] for f in r_cwr['findings']}
+    scenarios.append({'name': 'cisco-capwap-runt', 'expect': 'CG-292, no CG-112',
+                      'got': str(sorted(_cwr)),
+                      'pass': 'CG-292' in _cwr and 'CG-112' not in _cwr})
 
     # --- Scapy end-to-end: craft SNMP default-community -> pcap -> tcpdump -X. ---
     scapy_result = {'ran': False, 'reason': 'scapy or tcpdump unavailable'}
