@@ -602,11 +602,19 @@
       +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
       +'<button class="iqbtn" title="Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH">&#8681;&nbsp;SigMF</button>'
       +'<span class="iqstat rsp"></span>'
+      +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
+      +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
+      +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
       +'<span class="rsp">·</span>'
       +'<button class="basebtn" aria-pressed="false" title="Learn a baseline spectrum, then alert on new / vanished carriers + broadband jamming (into the Watchtower feed)">&#9737;&nbsp;Baseline</button>'
       +'<span class="basestat rsp"></span>';
     this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
     this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
+    this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
+    this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
+    g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
+    this.iqList.addEventListener('dblclick',function(){ self.openInAnalyzer(); });
+    this.refreshSessions();
     this.baseBtn=g.querySelector('.basebtn'); this.baseStat=g.querySelector('.basestat');
     this.baseBtn.addEventListener('click',function(){ self.baselineToggle(); });
     this.baselinePoll();   // reflect any baseline already running server-side
@@ -623,6 +631,21 @@
     g.querySelector('.rexit').addEventListener('click',function(){ self.exitReplay(); });
     this.refreshRecordings();
   };
+  // All recorded SigMF sessions (data/iq_captures) -> the Sessions dropdown, so
+  // any past capture can be opened in the Analyzer, not just the latest one.
+  Scope.prototype.refreshSessions=function(sel){ var self=this;
+    if(!this.iqList) return;
+    fetch('/api/net/rtl/analyze/list').then(function(r){return r.json();}).then(function(d){
+      var caps=(d&&d.captures)||[], cur=sel||self.iqList.value;
+      if(!caps.length){ self.iqList.innerHTML='<option value="">— no sessions yet —</option>'; return; }
+      self.iqList.innerHTML=caps.map(function(c){var mb=(c.bytes/1e6).toFixed(1),du=c.duration_s?(' '+c.duration_s+'s'):'';
+        return '<option value="'+esc(c.name)+'">'+esc(c.name)+' ('+mb+'MB'+du+')</option>';}).join('');
+      if(cur) self.iqList.value=cur;
+    }).catch(function(){});
+  };
+  Scope.prototype.openInAnalyzer=function(){ var n=this.iqList&&this.iqList.value;
+    if(!n){ if(this.iqStat) this.iqStat.textContent='pick a session first'; return; }
+    window.open('/rf-analyzer?name='+encodeURIComponent(n),'_blank'); };
   // Raw-IQ capture to a SigMF recording. Centres on the marker (else the span
   // centre) at a single-tune sample rate; steals the dongle, so the live sweep
   // pauses and resumes when the capture finishes.
@@ -650,7 +673,8 @@
         self.iqStat.innerHTML='<span style="color:var(--live)">&#10003; '+mb+' MB</span> '
           +'<a href="/api/net/rtl/iq/file?name='+n+'" download style="color:var(--cyan);margin:0 6px">.sigmf-data</a>'
           +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'
-          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>'; }
+          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>';
+        self.refreshSessions(st.name); }   // add the fresh capture to the Sessions dropdown
       // resume the sweep the capture interrupted
       if(self._iqWasLive && self.available){ self._iqWasLive=false; self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
     }).catch(function(){ if(self._iqPoll){clearInterval(self._iqPoll);self._iqPoll=null;} });
