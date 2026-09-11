@@ -146,6 +146,13 @@
   .recbar .recdot{color:#fb7185}
   .recbar select{font-family:var(--mono);font-size:11px;color:var(--ink-dim);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
   .recbar input[type="range"]{flex:1 1 120px;min-width:100px;accent-color:var(--cyan)}
+  .infowrap{position:relative;display:inline-flex}
+  .infowrap .infobtn{padding:4px 9px;font-size:12px;line-height:1;color:var(--cyan);border-color:rgba(56,189,201,.4)}
+  .infopop{position:absolute;bottom:calc(100% + 8px);left:0;width:min(280px,80vw);z-index:40;display:none;
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:11px 13px;box-shadow:0 14px 34px -14px #000;
+    font-family:var(--mono);font-size:11px;line-height:1.6;color:var(--ink-dim);white-space:normal;text-align:left}
+  .infopop.show{display:block}
+  .infopop b{color:var(--ink)} .infopop .warn{color:var(--accent)} .infopop .k{color:var(--cyan)}
   .recbar .rsp{color:var(--muted)}
   .scope-head .fsbtn{font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);padding:5px 11px;border-radius:6px;cursor:pointer;transition:border-color .15s,background .15s,color .15s;white-space:nowrap}
   .scope-head .fsbtn:hover{border-color:rgba(56,189,201,.5);color:var(--cyan);background:rgba(56,189,201,.08)}
@@ -602,11 +609,36 @@
       +'<input type="number" class="iqsec" value="2" min="0.1" max="30" step="0.5" title="Capture length (seconds)" style="width:46px;font-family:var(--mono);font-size:11px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:5px;padding:3px 5px">'
       +'<button class="iqbtn" title="Capture raw IQ to a SigMF recording — opens in GNU Radio / inspectrum / URH">&#8681;&nbsp;SigMF</button>'
       +'<span class="iqstat rsp"></span>'
+      +'<span class="rsp">Sessions</span><select class="iqlist" title="All recorded SigMF sessions"><option value="">—</option></select>'
+      +'<button class="iqopen" title="Open the selected SigMF session in the Signal Analyzer">&#128200;&nbsp;Analyzer</button>'
+      +'<button class="iqrename" title="Rename the selected session">&#9998;&nbsp;Rename</button>'
+      +'<button class="iqdel" title="Delete the selected session">&#128465;&nbsp;Delete</button>'
+      +'<button class="iqreload" title="Refresh the session list">&#8635;</button>'
+      +'<span class="infowrap"><button class="infobtn" title="Capture size &amp; memory">&#9432;</button>'
+        +'<div class="infopop">'
+          +'<b>IQ capture &amp; memory</b><br>'
+          +'A SigMF capture is raw IQ &mdash; about <span class="k">4 MB per second</span> at 2 MS/s. '
+          +'The Analyzer loads the <b>whole file into RAM</b> as complex samples (&asymp;<b>4&times; the file size</b>).<br><br>'
+          +'On a low-memory board like a <b>Pi Zero (512 MB)</b>, keep captures small: '
+          +'<span class="warn">&le; ~50 MB (~12 s)</span> &rarr; ~200 MB RAM. '
+          +'Pi 4/5 handle hundreds of MB fine.<br><br>'
+          +'For long captures, <b>download the .sigmf-data</b> and analyse it on a desktop (GNU Radio / inspectrum / URH).'
+        +'</div></span>'
       +'<span class="rsp">·</span>'
       +'<button class="basebtn" aria-pressed="false" title="Learn a baseline spectrum, then alert on new / vanished carriers + broadband jamming (into the Watchtower feed)">&#9737;&nbsp;Baseline</button>'
       +'<span class="basestat rsp"></span>';
     this.iqBtn=g.querySelector('.iqbtn'); this.iqSec=g.querySelector('.iqsec'); this.iqStat=g.querySelector('.iqstat');
     this.iqBtn.addEventListener('click',function(){ self.iqCapture(); });
+    this.iqList=g.querySelector('.iqlist'); this.iqOpen=g.querySelector('.iqopen');
+    this.iqOpen.addEventListener('click',function(){ self.openInAnalyzer(); });
+    g.querySelector('.iqrename').addEventListener('click',function(){ self.renameSession(); });
+    g.querySelector('.iqdel').addEventListener('click',function(){ self.deleteSession(); });
+    g.querySelector('.iqreload').addEventListener('click',function(){ self.refreshSessions(); });
+    var ib=g.querySelector('.infobtn'), ip=g.querySelector('.infopop');
+    if(ib&&ip){ ib.addEventListener('click',function(e){ e.stopPropagation(); ip.classList.toggle('show'); });
+      document.addEventListener('click',function(e){ if(!ip.contains(e.target)&&e.target!==ib) ip.classList.remove('show'); }); }
+    this.iqList.addEventListener('dblclick',function(){ self.openInAnalyzer(); });
+    this.refreshSessions();
     this.baseBtn=g.querySelector('.basebtn'); this.baseStat=g.querySelector('.basestat');
     this.baseBtn.addEventListener('click',function(){ self.baselineToggle(); });
     this.baselinePoll();   // reflect any baseline already running server-side
@@ -623,6 +655,37 @@
     g.querySelector('.rexit').addEventListener('click',function(){ self.exitReplay(); });
     this.refreshRecordings();
   };
+  // All recorded SigMF sessions (data/iq_captures) -> the Sessions dropdown, so
+  // any past capture can be opened in the Analyzer, not just the latest one.
+  Scope.prototype.refreshSessions=function(sel){ var self=this;
+    if(!this.iqList) return;
+    fetch('/api/net/rtl/analyze/list').then(function(r){return r.json();}).then(function(d){
+      var caps=(d&&d.captures)||[], cur=sel||self.iqList.value;
+      if(!caps.length){ self.iqList.innerHTML='<option value="">— no sessions yet —</option>'; return; }
+      self.iqList.innerHTML=caps.map(function(c){var mb=(c.bytes/1e6).toFixed(1),du=c.duration_s?(' '+c.duration_s+'s'):'';
+        return '<option value="'+esc(c.name)+'">'+esc(c.name)+' ('+mb+'MB'+du+')</option>';}).join('');
+      if(cur) self.iqList.value=cur;
+    }).catch(function(){});
+  };
+  Scope.prototype.openInAnalyzer=function(){ var n=this.iqList&&this.iqList.value;
+    if(!n){ if(this.iqStat) this.iqStat.textContent='pick a session first'; return; }
+    window.open('/rf-analyzer?name='+encodeURIComponent(n),'_blank'); };
+  Scope.prototype.renameSession=function(){ var self=this, n=this.iqList&&this.iqList.value;
+    if(!n){ this.iqStat.textContent='pick a session first'; return; }
+    var nn=(window.prompt('Rename session:', n)||'').trim(); if(!nn||nn===n) return;
+    fetch('/api/net/rtl/iq/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,new:nn})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ self.iqStat.innerHTML='<span style="color:#fb7185">'+esc((res&&res.error)||'rename failed')+'</span>'; return; }
+        self.iqStat.innerHTML='<span style="color:var(--live)">renamed &rarr; '+esc(res.name)+'</span>'; self.refreshSessions(res.name);
+      }).catch(function(){ self.iqStat.textContent='rename failed'; }); };
+  Scope.prototype.deleteSession=function(){ var self=this, n=this.iqList&&this.iqList.value;
+    if(!n){ this.iqStat.textContent='pick a session first'; return; }
+    if(!window.confirm('Delete SigMF session "'+n+'"? This removes the .sigmf-data + .sigmf-meta files.')) return;
+    fetch('/api/net/rtl/iq/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(!res||!res.ok){ self.iqStat.innerHTML='<span style="color:#fb7185">delete failed</span>'; return; }
+        self.iqStat.innerHTML='<span style="color:var(--ink-dim)">deleted '+esc(n)+'</span>'; self.refreshSessions();
+      }).catch(function(){ self.iqStat.textContent='delete failed'; }); };
   // Raw-IQ capture to a SigMF recording. Centres on the marker (else the span
   // centre) at a single-tune sample rate; steals the dongle, so the live sweep
   // pauses and resumes when the capture finishes.
@@ -649,7 +712,9 @@
       else if(st.done && st.name){ var n=encodeURIComponent(st.name), mb=(st.bytes/1e6).toFixed(1);
         self.iqStat.innerHTML='<span style="color:var(--live)">&#10003; '+mb+' MB</span> '
           +'<a href="/api/net/rtl/iq/file?name='+n+'" download style="color:var(--cyan);margin:0 6px">.sigmf-data</a>'
-          +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'; }
+          +'<a href="/api/net/rtl/iq/file?name='+n+'&kind=meta" download style="color:var(--cyan)">.sigmf-meta</a>'
+          +'<a href="/rf-analyzer?name='+n+'" target="_blank" style="color:var(--accent);margin-left:10px;font-weight:600">&#128200; Open in Analyzer</a>';
+        self.refreshSessions(st.name); }   // add the fresh capture to the Sessions dropdown
       // resume the sweep the capture interrupted
       if(self._iqWasLive && self.available){ self._iqWasLive=false; self._rangeKnown=false; self.resetCanvas(); self.startLive(); }
     }).catch(function(){ if(self._iqPoll){clearInterval(self._iqPoll);self._iqPoll=null;} });

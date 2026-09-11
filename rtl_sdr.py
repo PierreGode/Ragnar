@@ -1785,6 +1785,31 @@ def iq_capture_delete(name):
     return {"ok": ok}
 
 
+def iq_capture_rename(name, new):
+    """Rename a SigMF capture (both sidecars). Sanitises the new name; refuses to
+    clobber an existing capture."""
+    old = _rec_safe(name)
+    dst = _rec_safe(new)
+    if not dst:
+        return {"ok": False, "error": "invalid new name"}
+    if dst == old:
+        return {"ok": True, "name": dst}
+    d = _iq_cap_dir()
+    src_data = os.path.join(d, old + ".sigmf-data")
+    if not os.path.exists(src_data):
+        return {"ok": False, "error": "capture not found"}
+    if os.path.exists(os.path.join(d, dst + ".sigmf-data")):
+        return {"ok": False, "error": "a capture named '%s' already exists" % dst}
+    try:
+        for suffix in (".sigmf-data", ".sigmf-meta"):
+            s = os.path.join(d, old + suffix)
+            if os.path.exists(s):
+                os.rename(s, os.path.join(d, dst + suffix))
+    except OSError as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "name": dst}
+
+
 _iqcap = IqCapture()
 
 

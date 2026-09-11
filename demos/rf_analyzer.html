@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signal Analyzer — Ragnar</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root{--ground:#0a0e14;--panel:#111722;--panel-2:#0d1420;--ink:#cdd6e4;--ink-dim:#8b98ab;
+    --muted:#6b7a8f;--line:#1e2836;--line-soft:#161f2c;--accent:#f5b942;--cyan:#38bdc9;--live:#3fb56b;--rose:#fb7185;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;--disp:"IBM Plex Sans",system-ui,sans-serif;--head:"Chakra Petch",var(--disp);}
+  *{box-sizing:border-box}html,body{margin:0}
+  body{background:var(--ground);color:var(--ink);font-family:var(--disp);line-height:1.5;padding:clamp(12px,2.5vw,28px);
+    -webkit-font-smoothing:antialiased;min-height:100vh}
+  .wrap{max-width:1500px;margin:0 auto;overflow-x:hidden}
+  header{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px 20px;border-bottom:1px solid var(--line);padding-bottom:14px;margin-bottom:16px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.28em;text-transform:uppercase;color:var(--cyan);margin:0 0 6px}
+  h1{font-family:var(--head);font-weight:700;font-size:clamp(24px,4vw,36px);margin:0}
+  .spacer{flex:1 1 auto}
+  a.back{font-family:var(--head);font-weight:600;font-size:13px;color:var(--cyan);text-decoration:none;border:1px solid rgba(56,189,201,.4);
+    padding:8px 13px;border-radius:7px}
+  a.back:hover{background:rgba(56,189,201,.1);color:#fff}
+  .bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-bottom:16px;padding:10px 14px;background:var(--panel-2);border:1px solid var(--line);border-radius:10px}
+  .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+  select,button,input{font-family:var(--mono);font-size:12px;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:8px 11px}
+  button{cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+  button:hover{border-color:var(--cyan);color:#fff}
+  button[aria-pressed="true"]{border-color:var(--cyan);color:var(--cyan);background:rgba(56,189,201,.12)}
+  button.go{background:var(--cyan);color:var(--ground);border-color:var(--cyan);font-weight:600}
+  .seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{border:0;border-radius:0;background:transparent}
+  .seg button[aria-pressed="true"]{background:rgba(56,189,201,.14);color:var(--cyan)}
+  .stats{display:flex;flex-wrap:wrap;gap:14px 20px;margin-bottom:16px}
+  .stat{display:flex;flex-direction:column;gap:1px;min-width:70px}
+  .stat .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-family:var(--mono);font-size:15px;font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  .stat .v.cy{color:var(--cyan)} .stat .v.pk{color:var(--accent)}
+  .grid{display:grid;grid-template-columns:2fr 1fr;gap:16px;align-items:start}
+  @media (max-width:900px){.grid{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .card h3{font-family:var(--head);font-weight:600;font-size:13px;margin:0;padding:10px 14px;border-bottom:1px solid var(--line-soft);
+    background:var(--panel-2);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .card h3 .hint{font-family:var(--mono);font-size:10.5px;color:var(--muted);font-weight:400}
+  .specwrap{position:relative;background:#05080d}
+  canvas.spec{display:block;width:100%;height:auto;cursor:crosshair}
+  .selbox{position:absolute;border:1px solid var(--accent);background:rgba(245,185,66,.12);pointer-events:none;display:none}
+  .rowcanvas{display:block;width:100%;height:120px;background:var(--panel-2)}
+  .legend{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--muted);margin-left:auto}
+  .legend .grad{width:110px;height:9px;border-radius:3px}
+  .btable{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:12px}
+  .btable th{text-align:left;color:var(--muted);font-weight:500;font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;padding:8px 10px;border-bottom:1px solid var(--line-soft)}
+  .btable td{padding:7px 10px;border-bottom:1px solid var(--line-soft);color:var(--ink)}
+  .btable tr{cursor:pointer} .btable tr:hover td{background:rgba(56,189,201,.07)}
+  .btable .empty{color:var(--muted);padding:14px 10px}
+  .demodbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
+  .demodbar input{width:86px}
+  .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
+    border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
+  .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .axinfo{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);padding:6px 14px;border-top:1px solid var(--line-soft)}
+  .axinfo b{color:var(--accent)}
+  footer{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <p class="eyebrow">Ragnar · Signal Intelligence</p>
+      <h1>Signal Analyzer</h1>
+    </div>
+    <div class="spacer"></div>
+    <a class="back" href="/rf-waterfall">&#8592;&nbsp;RF Waterfall</a>
+  </header>
+
+  <div class="bar">
+    <span class="lbl">Capture</span>
+    <select id="cap"><option value="">— loading… —</option></select>
+    <button id="reload" title="Refresh the capture list">&#8635;</button>
+    <span class="lbl">Palette</span>
+    <div class="seg" id="palette"></div>
+    <span class="spacer"></span>
+    <button id="reset" title="Reset zoom to the whole capture">Reset zoom</button>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="grid">
+    <div>
+      <div class="card">
+        <h3>Spectrogram <span class="hint">drag a box to zoom · click to place a marker</span>
+          <span class="legend"><span id="lfloor">—</span><span class="grad" id="grad"></span><span id="lceil">—</span></span>
+        </h3>
+        <div class="specwrap">
+          <canvas class="spec" id="spec"></canvas>
+          <div class="selbox" id="selbox"></div>
+        </div>
+        <div class="axinfo" id="axinfo">—</div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Time envelope <span class="hint">amplitude over the shown window (AM/OOK view)</span></h3>
+        <canvas class="rowcanvas" id="env"></canvas>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h3>Spectrum <span class="hint">avg power over the window</span></h3>
+        <canvas class="rowcanvas" id="psd"></canvas>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Bursts / packets <span class="hint" id="bcount"></span></h3>
+        <div style="max-height:220px;overflow:auto">
+          <table class="btable"><thead><tr><th>t (s)</th><th>dur</th><th>freq</th><th>BW</th><th>dB</th></tr></thead>
+            <tbody id="btbody"><tr><td class="empty" colspan="5">—</td></tr></tbody></table>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Demodulate <span class="hint">recover bits from the marked signal</span></h3>
+        <div class="demodbar">
+          <div class="seg" id="mode">
+            <button data-m="ook" aria-pressed="true">OOK/AM</button>
+            <button data-m="fsk">FSK/FM</button>
+          </div>
+          <span class="lbl">BW kHz</span><input id="bw" type="number" value="60" step="any">
+          <button class="go" id="run">Demodulate</button>
+        </div>
+        <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
+        <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    On-box analysis of the RF Waterfall's SigMF captures (<code>data/iq_captures/</code>). DSP runs in numpy/scipy on the
+    device; this page is a viewer, so it works from a phone. For deep work, download the <code>.sigmf-data</code> and open it in
+    GNU Radio / inspectrum / URH.
+  </footer>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  // ---- palettes (shared look with the waterfall) ----
+  var PALETTES={
+    aurora:{name:'Aurora',stops:[[0,[7,26,44]],[.28,[22,90,130]],[.52,[46,160,150]],[.78,[123,140,210]],[1,[206,196,230]]]},
+    inferno:{name:'Inferno',stops:[[0,[4,3,18]],[.25,[87,16,110]],[.5,[188,55,84]],[.75,[249,142,9]],[1,[252,255,164]]]},
+    viridis:{name:'Viridis',stops:[[0,[68,1,84]],[.25,[59,82,139]],[.5,[33,145,140]],[.75,[94,201,98]],[1,[253,231,37]]]},
+    classic:{name:'Classic',stops:[[0,[0,0,12]],[.2,[0,40,150]],[.4,[0,180,200]],[.6,[40,200,70]],[.8,[240,220,40]],[1,[230,40,30]]]},
+    mono:{name:'Mono',stops:[[0,[6,8,12]],[.5,[120,124,132]],[1,[240,242,246]]]}
+  };
+  var ORDER=['aurora','inferno','viridis','classic','mono'];
+  function buildLUT(stops){var lut=new Uint8Array(256*3);
+    for(var i=0;i<256;i++){var t=i/255,a=stops[0],b=stops[stops.length-1];
+      for(var s=0;s<stops.length-1;s++){if(t>=stops[s][0]&&t<=stops[s+1][0]){a=stops[s];b=stops[s+1];break;}}
+      var f=(t-a[0])/((b[0]-a[0])||1);
+      lut[i*3]=a[1][0]+(b[1][0]-a[1][0])*f;lut[i*3+1]=a[1][1]+(b[1][1]-a[1][1])*f;lut[i*3+2]=a[1][2]+(b[1][2]-a[1][2])*f;}
+    return lut;}
+  function gradCss(stops){return "linear-gradient(90deg,"+stops.map(function(s){return "rgb("+s[1].join(",")+") "+Math.round(s[0]*100)+"%";}).join(",")+")";}
+  var pal='aurora'; try{var sp=localStorage.getItem('ragnar_rf_palette'); if(sp&&PALETTES[sp])pal=sp;}catch(e){}
+  var LUT=buildLUT(PALETTES[pal].stops);
+
+  var $=function(id){return document.getElementById(id);};
+  var S={name:null, view:null, spec:null, marker:null, dur:0, fs:0, fc:0};
+
+  function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
+      .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
+    return fetch(path+(q?'?'+q:'')).then(function(r){return r.json();});}
+  function fmtHz(hz){var a=Math.abs(hz); if(a>=1e6)return (hz/1e6).toFixed(3)+' MHz'; if(a>=1e3)return (hz/1e3).toFixed(1)+' kHz'; return Math.round(hz)+' Hz';}
+
+  // ---- palette selector ----
+  (function(){var seg=$('palette');
+    seg.innerHTML=ORDER.map(function(id){return '<button data-p="'+id+'" aria-pressed="'+(id===pal?'true':'false')+'">'+PALETTES[id].name+'</button>';}).join('');
+    seg.addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return;
+      pal=b.getAttribute('data-p'); LUT=buildLUT(PALETTES[pal].stops);
+      try{localStorage.setItem('ragnar_rf_palette',pal);}catch(x){}
+      Array.prototype.forEach.call(seg.querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-p')===pal?'true':'false');});
+      $('grad').style.background=gradCss(PALETTES[pal].stops); if(S.spec)drawSpec(S.spec);});
+    $('grad').style.background=gradCss(PALETTES[pal].stops);
+  })();
+
+  // ---- capture list ----
+  function loadList(sel){return api('/api/net/rtl/analyze/list',{}).then(function(d){
+    var caps=(d&&d.captures)||[], el=$('cap');
+    if(!caps.length){ el.innerHTML='<option value="">— no captures yet — grab one with ⤓ SigMF —</option>'; return; }
+    el.innerHTML=caps.map(function(c){var mb=(c.bytes/1e6).toFixed(1), du=c.duration_s?c.duration_s+'s':'';
+      return '<option value="'+encodeURIComponent(c.name)+'">'+c.name+'  ('+mb+' MB '+du+')</option>';}).join('');
+    var want=sel||caps[0].name; el.value=encodeURIComponent(want); loadCapture(want);
+  });}
+
+  function loadCapture(name){
+    S.name=name; S.view=null; S.marker=null;
+    api('/api/net/rtl/analyze/summary',{name:name}).then(function(s){
+      if(!s||!s.ok){ $('stats').innerHTML='<span class="msg">⚠ '+((s&&s.error)||'load failed')+'</span>'; return; }
+      S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz;
+      $('stats').innerHTML=[
+        ['Center',(s.center_hz/1e6).toFixed(3)+' MHz','cy'],
+        ['Sample rate',(s.sr_hz/1e6).toFixed(3)+' MS/s',''],
+        ['Duration',s.duration_s+' s',''],
+        ['Peak',(s.peak_hz/1e6).toFixed(4)+' MHz','pk'],
+        ['SNR',Math.round(s.snr_db)+' dB','cy'],
+        ['Noise',Math.round(s.noise_db)+' dB',''],
+        ['Occupied BW',fmtHz(s.occupied_bw_hz),''],
+        ['Bursts',s.bursts,'']
+      ].map(function(x){return '<div class="stat"><span class="k">'+x[0]+'</span><span class="v '+x[2]+'">'+x[1]+'</span></div>';}).join('');
+      S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2};
+      refreshWindow(); loadBursts();
+    });
+  }
+
+  // ---- spectrogram ----
+  function refreshWindow(){
+    var v=S.view, c=$('spec'), W=Math.max(320,Math.round(c.clientWidth||900));
+    api('/api/net/rtl/analyze/spectrogram',{name:S.name,t0:v.t0,t1:v.t1,f0:v.f0,f1:v.f1,w:W,h:360}).then(function(d){
+      if(!d||!d.ok)return; S.spec=d; drawSpec(d); });
+    api('/api/net/rtl/analyze/psd',{name:S.name,t0:v.t0,t1:v.t1}).then(drawPsd);
+    api('/api/net/rtl/analyze/envelope',{name:S.name,t0:v.t0,t1:v.t1}).then(drawEnv);
+  }
+  var PAD={l:52,r:10,t:8,b:20};
+  function drawSpec(d){
+    var c=$('spec'),dpr=Math.min(window.devicePixelRatio||1,2);
+    var Wc=Math.max(320,Math.round(c.clientWidth||900)), Hc=420;
+    c.width=Wc*dpr; c.height=Hc*dpr; c.style.height=Hc+'px';
+    var g=c.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0); g.clearRect(0,0,Wc,Hc);
+    var plotW=Wc-PAD.l-PAD.r, plotH=Hc-PAD.t-PAD.b;
+    // decode base64 grid -> offscreen image, then scale into the plot
+    var bin=atob(d.data), n=bin.length, buf=new Uint8Array(n); for(var i=0;i<n;i++)buf[i]=bin.charCodeAt(i);
+    var off=document.createElement('canvas'); off.width=d.w; off.height=d.h;
+    var octx=off.getContext('2d'), img=octx.createImageData(d.w,d.h), px=img.data;
+    for(var k=0;k<d.w*d.h;k++){var val=buf[k];px[k*4]=LUT[val*3];px[k*4+1]=LUT[val*3+1];px[k*4+2]=LUT[val*3+2];px[k*4+3]=255;}
+    octx.putImageData(img,0,0);
+    g.imageSmoothingEnabled=false;
+    g.drawImage(off,0,0,d.w,d.h,PAD.l,PAD.t,plotW,plotH);
+    // axes
+    g.fillStyle='#64748b';g.font='9px monospace';
+    g.textAlign='right';g.textBaseline='middle';
+    for(var yf=0;yf<=4;yf++){var fy=PAD.t+plotH*yf/4, fv=d.f1-(d.f1-d.f0)*yf/4;
+      g.fillText((fv/1e6).toFixed(3),PAD.l-4,fy);
+      g.strokeStyle='rgba(255,255,255,0.05)';g.beginPath();g.moveTo(PAD.l,fy);g.lineTo(PAD.l+plotW,fy);g.stroke();}
+    g.textAlign='center';g.textBaseline='top';
+    for(var xt=0;xt<=5;xt++){var tx=PAD.l+plotW*xt/5, tv=d.t0+(d.t1-d.t0)*xt/5;
+      g.fillText(tv.toFixed(3)+'s',tx,PAD.t+plotH+4);}
+    S._geom={plotW:plotW,plotH:plotH};
+    // marker
+    if(S.marker){var mx=PAD.l+(S.marker.t-d.t0)/(d.t1-d.t0)*plotW, my=PAD.t+(d.f1-S.marker.f)/(d.f1-d.f0)*plotH;
+      g.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--accent')||'#f5b942';g.lineWidth=1;
+      g.beginPath();g.moveTo(mx,PAD.t);g.lineTo(mx,PAD.t+plotH);g.moveTo(PAD.l,my);g.lineTo(PAD.l+plotW,my);g.stroke();}
+    $('grad').style.background=gradCss(PALETTES[pal].stops);
+    $('lfloor').textContent=Math.round(d.floor_db)+' dB'; $('lceil').textContent=Math.round(d.ceil_db)+' dB';
+    setAx();
+  }
+  function setAx(){var m=S.marker;
+    $('axinfo').innerHTML = m
+      ? 'Marker: <b>'+(m.f/1e6).toFixed(4)+' MHz</b> ('+fmtHz(m.f-S.fc)+' offset) · t=<b>'+m.t.toFixed(4)+' s</b>'
+      : 'Window: '+S.view.t0.toFixed(3)+'–'+S.view.t1.toFixed(3)+' s · '+(S.view.f0/1e6).toFixed(3)+'–'+(S.view.f1/1e6).toFixed(3)+' MHz';
+  }
+  // ---- line plots (psd + envelope + demod wave) ----
+  function plot(id,xs,ys,color,fill){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||120;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!ys||!ys.length)return; var lo=Math.min.apply(null,ys),hi=Math.max.apply(null,ys); if(hi-lo<1){hi+=1;lo-=1;}
+    var px=function(i){return 6+i/(ys.length-1)*(W-12);}, py=function(v){return H-4-(v-lo)/(hi-lo)*(H-10);};
+    g.strokeStyle=color;g.lineWidth=1.2;g.beginPath();
+    for(var i=0;i<ys.length;i++){var x=px(i),y=py(ys[i]);i?g.lineTo(x,y):g.moveTo(x,y);}
+    g.stroke();
+    if(fill){g.lineTo(px(ys.length-1),H);g.lineTo(px(0),H);g.closePath();g.fillStyle=color.replace('rgb','rgba').replace(')',',0.12)');g.fill();}
+  }
+  function drawPsd(d){ if(d&&d.ok) plot('psd',d.freqs_mhz,d.db,'rgb(56,189,201)',true); }
+  function drawEnv(d){ if(d&&d.ok) plot('env',d.t,d.db,'rgb(63,181,107)',true); }
+
+  // ---- drag-to-zoom + click marker ----
+  (function(){var c=$('spec'),box=$('selbox'),drag=null;
+    function toData(ev){var r=c.getBoundingClientRect(),gx=(S._geom||{}),
+        x=(ev.clientX-r.left-PAD.l)/(gx.plotW||1), y=(ev.clientY-r.top-PAD.t)/(gx.plotH||1);
+      x=Math.max(0,Math.min(1,x));y=Math.max(0,Math.min(1,y));
+      var d=S.spec; return {t:d.t0+(d.t1-d.t0)*x, f:d.f1-(d.f1-d.f0)*y, px:ev.clientX-r.left, py:ev.clientY-r.top};}
+    c.addEventListener('mousedown',function(e){ if(!S.spec)return; drag={a:toData(e),startX:e.clientX,startY:e.clientY}; });
+    window.addEventListener('mousemove',function(e){ if(!drag)return;
+      var r=c.getBoundingClientRect(); box.style.display='block';
+      var x0=Math.min(drag.startX,e.clientX)-r.left, y0=Math.min(drag.startY,e.clientY)-r.top;
+      box.style.left=x0+'px';box.style.top=y0+'px';box.style.width=Math.abs(e.clientX-drag.startX)+'px';box.style.height=Math.abs(e.clientY-drag.startY)+'px';});
+    window.addEventListener('mouseup',function(e){ if(!drag)return; box.style.display='none';
+      var moved=Math.abs(e.clientX-drag.startX)+Math.abs(e.clientY-drag.startY);
+      var b=toData(e);
+      if(moved<6){ S.marker={t:b.t,f:b.f}; $('bw').focus&&0; drawSpec(S.spec); setAx(); drag=null; return; }
+      var t0=Math.min(drag.a.t,b.t),t1=Math.max(drag.a.t,b.t),f0=Math.min(drag.a.f,b.f),f1=Math.max(drag.a.f,b.f);
+      if(t1-t0>1e-4 && f1-f0>100){ S.view={t0:t0,t1:t1,f0:f0,f1:f1}; refreshWindow(); }
+      drag=null;});
+  })();
+  $('reset').addEventListener('click',function(){ if(!S.name)return; S.view={t0:0,t1:S.dur,f0:S.fc-S.fs/2,f1:S.fc+S.fs/2}; S.marker=null; refreshWindow(); });
+
+  // ---- bursts ----
+  function loadBursts(){ api('/api/net/rtl/analyze/bursts',{name:S.name}).then(function(d){
+    var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
+    if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="5">No bursts above the noise floor.</td></tr>'; return; }
+    tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
+    tb.querySelectorAll('tr').forEach(function(tr){tr.addEventListener('click',function(){var x=b[+tr.getAttribute('data-i')];
+      var pad=(x.t1-x.t0)*0.5+0.002; S.view={t0:Math.max(0,x.t0-pad),t1:Math.min(S.dur,x.t1+pad),
+        f0:x.f_mhz*1e6-Math.max(x.bw_khz*1e3*3,30e3), f1:x.f_mhz*1e6+Math.max(x.bw_khz*1e3*3,30e3)};
+      S.marker={t:(x.t0+x.t1)/2, f:x.f_mhz*1e6}; if(x.bw_khz)$('bw').value=Math.max(10,Math.round(x.bw_khz*1.5)); refreshWindow(); setAx();});});
+  });}
+
+  // ---- demod ----
+  var mode='ook';
+  $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; mode=b.getAttribute('data-m');
+    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});});
+  $('run').addEventListener('click',function(){
+    if(!S.name){return;}
+    var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
+    $('bits').textContent='demodulating…';
+    api('/api/net/rtl/analyze/demod',{name:S.name,mode:mode,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
+      plot('wave',d.wave,d.wave,'rgb(245,185,66)',false);
+      $('bits').textContent='baud ≈ '+d.baud+'   ('+d.n_bits+' bits @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz offset, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz)\n'+(d.bits||'(no bits recovered)');
+    }).catch(function(){ $('bits').textContent='demod request failed'; });
+  });
+
+  $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });
+  $('reload').addEventListener('click',function(){ loadList(S.name); });
+  window.addEventListener('resize',function(){ if(S.spec)drawSpec(S.spec); });
+
+  // preselect a capture from ?name=
+  var want=new URLSearchParams(location.search).get('name');
+  loadList(want);
+})();
+</script>
+</body>
+</html>

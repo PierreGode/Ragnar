@@ -184,6 +184,32 @@ turning Ragnar into a real capture instrument rather than a closed viewer.
   `.sigmf-data` + `.sigmf-meta` download links. Backend: `rtl_sdr.iq_capture_*`
   + `sigmf_meta()`; routes `/api/net/rtl/iq/{start,status,stop,list,delete,file}`.
 
+## Signal Analyzer (on-box SigMF analysis)
+
+A finished SigMF capture shows an **📈 Open in Analyzer** link that opens
+**`/rf-analyzer`** (`demos/rf_analyzer.html`) — a dedicated page that analyses the
+recording *on the device* so it works from a phone, no desktop DSP tools needed.
+All the maths runs in numpy/scipy in `sigmf_analyzer.py`; the page is a viewer
+that requests windows:
+
+- **Summary** — center/rate/duration, measured noise floor, peak frequency, SNR,
+  occupied bandwidth, burst count.
+- **Zoomable spectrogram** — a time × frequency image for any window; drag a box
+  to zoom, click to drop a marker. Rendered client-side with the waterfall
+  palettes (the backend returns a compact base64 dB grid).
+- **Spectrum + time-envelope** panels for the shown window.
+- **Burst / packet list** — automatic on/off detection (start/end/BW/level);
+  click a row to zoom to it and pre-fill the demodulator.
+- **Demodulate** — shift to the marked signal, low-pass to a chosen bandwidth,
+  and demodulate **OOK/AM** (envelope) or **FSK/FM** (instantaneous frequency),
+  estimate the symbol rate and **recover a bitstream**.
+
+Routes (read-only over `data/iq_captures/`, so no dongle needed):
+`/api/net/rtl/analyze/{list,summary,spectrogram,psd,envelope,bursts,demod}` and
+the page at `/rf-analyzer` (optionally `?name=<capture>`). For heavier work the
+raw `.sigmf-data` still opens in GNU Radio / inspectrum / URH. `scipy` is used
+for decimation/filtering in the demodulator.
+
 ## Colour palettes
 
 The top toolbar has a **Palette** selector for the waterfall colour map. Five are

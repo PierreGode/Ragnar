@@ -84,6 +84,14 @@ capture opens directly in **GNU Radio, inspectrum or Universal Radio Hacker** �
 turning Ragnar into a real capture instrument you can hand to serious DSP tools,
 not a closed viewer. Files land under `data/iq_captures/` with download links.
 
+**📈 Open in Analyzer** — every finished capture also gets a button to the
+on-box **Signal Analyzer** (`/rf-analyzer`): a zoomable spectrogram of the
+recording, spectrum + time-envelope panels, automatic **burst/packet detection**,
+and a **demodulator** that recovers a **bitstream** (OOK/AM or FSK/FM) with an
+estimated symbol rate. It runs entirely on the device (numpy/scipy), so you can
+analyse a capture from your phone without a desktop — then drop to GNU Radio /
+URH when you want to go deeper.
+
 ## 7. Trustworthy frequencies (PPM calibration)
 
 A cheap RTL-SDR crystal is typically tens of ppm off — tens of kHz at 900 MHz,
