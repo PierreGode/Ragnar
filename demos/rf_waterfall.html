@@ -279,7 +279,7 @@
   // 3D terrain-waterfall geometry: the recent dB rows are kept in a small ring
   // buffer and projected as a receding surface (power = height). Pure 2D-canvas
   // so it needs no WebGL/GPU and works offline on the Pi's own browser.
-  var COLS3D=72, ROWS3D=84;
+  var COLS3D=120, ROWS3D=84;
   function buildLUT(stops){var lut=new Array(256);
     for(var i=0;i<256;i++){var t=i/255,a=stops[0],b=stops[stops.length-1];
       for(var s=0;s<stops.length-1;s++){if(t>=stops[s][0]&&t<=stops[s+1][0]){a=stops[s];b=stops[s+1];break;}}
@@ -1188,15 +1188,25 @@
     for(var r=0;r<R;r++){                              // r=0 oldest (back) .. R-1 newest (front)
       var dep=R>1?r/(R-1):1, persp=back+(1-back)*dep, dim=0.5+0.5*dep;
       var yRow=yAt(dep), yFill=(r<R-1)?yAt((r+1)/(R-1)):yBot;   // fill down to the next row (no gaps)
-      var row=hist[r], C=row.length;
+      var row=hist[r], C=row.length, yy=new Array(C), xx=new Array(C);
+      // clamped + lightly smoothed (3-tap) heights, so crests read rounded not stepped
       for(var c=0;c<C;c++){
-        var t=(row[c]-floor)/span; if(t<0)t=0; if(t>1)t=1;
-        var xL=cx+((c/C)-0.5)*W*persp, xR=cx+(((c+1)/C)-0.5)*W*persp;
-        var yT=yRow-t*MAXH*persp; if(yT<topClip)yT=topClip;      // clamp tall far-row ridges to the top
+        var a=(c>0?row[c-1]:row[c]), b=row[c], e=(c<C-1?row[c+1]:row[c]);
+        var t=((a+2*b+e)/4-floor)/span; if(t<0)t=0; if(t>1)t=1;
+        var y=yRow-t*MAXH*persp; yy[c]=y<topClip?topClip:y;      // clamp tall far-row ridges to the top
+        xx[c]=cx+((c/(C-1))-0.5)*W*persp;
+      }
+      // sloped-top quads between adjacent columns — anti-aliased, so the ridgeline
+      // is a smooth surface instead of a row of flat-topped bars.
+      for(var c=0;c<C-1;c++){
         var col=colorRGB(row[c],floor);
         f.fillStyle='rgb('+((col[0]*dim)|0)+','+((col[1]*dim)|0)+','+((col[2]*dim)|0)+')';
-        f.fillRect(xL, yT, (xR-xL)+1, (yFill-yT)+1);
+        f.beginPath(); f.moveTo(xx[c],yy[c]); f.lineTo(xx[c+1],yy[c+1]);
+        f.lineTo(xx[c+1],yFill); f.lineTo(xx[c],yFill); f.closePath(); f.fill();
       }
+      // faint lit crest highlights the ridge (brighter on nearer rows)
+      f.strokeStyle='rgba(255,255,255,'+(0.04+0.10*dep).toFixed(3)+')'; f.lineWidth=1;
+      f.beginPath(); for(var c=0;c<C;c++){ c?f.lineTo(xx[c],yy[c]):f.moveTo(xx[c],yy[c]); } f.stroke();
     }
   };
   Scope.prototype.setThreeD=function(on){
