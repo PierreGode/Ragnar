@@ -857,6 +857,110 @@ def dechirp(name, bw_hz=125000, sf=7, f_offset_hz=0.0, t0=None, t1=None, os=2, h
 
 
 # --------------------------------------------------------------------------
+# Segment 7 — cyclostationary symbol-rate detector. Digitally-modulated signals
+# are cyclostationary: their statistics repeat at the symbol rate even when the
+# *data* is random (so the symbol rate is NOT an ordinary spectral line). The
+# transition energy |x[n]-x[n-1]|^2 spikes at every symbol edge (amplitude or
+# phase change), so its spectrum shows a discrete line at the symbol rate and
+# its harmonics — a 2nd-order cyclic feature. This finds the baud when the
+# demodulator's run-length estimate is unsure. Targets amplitude/phase-transition
+# mods (OOK/ASK/PSK) well; FSK/very-weak signals may not show a clear line (the
+# strength readout says so). Pure core, selftested on synthetic signals.
+# --------------------------------------------------------------------------
+
+def _cyclic_profile(x, fs, amax_hz, n=700):
+    """Transition-energy spectrum over cycle frequency; returns (freqs_hz, prof)
+    normalised to its median. Pure numpy."""
+    import numpy as np
+    x = np.asarray(x)
+    if len(x) < 64:
+        return np.array([]), np.array([])
+    d = np.abs(np.diff(x)) ** 2
+    # high-pass: subtract a slow moving-average so the random-data low-frequency
+    # bulk doesn't swamp the (relatively sharp) symbol-rate transition line.
+    k = max(3, int(len(d) * 0.02))
+    d = d - np.convolve(d, np.ones(k) / k, mode="same")
+    w = np.hanning(len(d)).astype(np.float32)
+    F = np.abs(np.fft.rfft(d * w))
+    f = np.fft.rfftfreq(len(d), 1.0 / fs)
+    sel = (f > 0) & (f <= amax_hz)
+    F = F[sel]; f = f[sel]
+    if not len(F):
+        return np.array([]), np.array([])
+    prof = F / (np.median(F) + 1e-9)
+    if len(prof) > n:
+        idx = (np.arange(n + 1) * len(prof) / n).astype(int)
+        prof = np.array([prof[idx[i]:max(idx[i] + 1, idx[i + 1])].max() for i in range(n)])
+        f = f[np.linspace(0, len(f) - 1, n).astype(int)]
+    return f, prof
+
+
+def _cyclic_peaks(f, prof, kmin=6.0, top=6):
+    """Local maxima of the cyclic profile above ``kmin`` (candidate symbol rates)."""
+    out = []
+    for i in range(2, len(prof) - 1):
+        if prof[i] > prof[i - 1] and prof[i] >= prof[i + 1] and prof[i] > kmin:
+            out.append((float(prof[i]), float(f[i])))
+    out.sort(reverse=True)
+    return out[:top]
+
+
+def _fundamental_rate(peaks):
+    """Symbol rate = the fundamental of the cyclic peaks (their harmonics sit at
+    k·f0). Score each peak freq by how many strong peaks are ~integer multiples;
+    prefer more multiples, then the smaller frequency. Pure."""
+    if not peaks:
+        return None
+    top = peaks[0][0]
+    strong = [fr for st, fr in peaks if st >= 0.5 * top]
+    best = None
+    for _, f0 in peaks:
+        if f0 <= 0:
+            continue
+        score = sum(1 for fr in strong
+                    if round(fr / f0) >= 1 and abs(fr / f0 - round(fr / f0)) < 0.06)
+        key = (score, -f0)
+        if best is None or key > best[0]:
+            best = (key, f0)
+    return best[1] if best else peaks[0][1]
+
+
+def cyclic(name, f_offset_hz=0.0, t0=None, t1=None, amax_hz=None):
+    """Cyclostationary symbol-rate profile over a selection. Peaks at the symbol
+    rate (and harmonics). Returns the profile curve + candidate symbol rates with
+    a strength; ``locked`` when the top peak is confident."""
+    import numpy as np
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 256:
+        return {"ok": False, "error": "selection too short"}
+    foff = float(f_offset_hz or 0.0)
+    if foff:
+        x = x * np.exp(-2j * np.pi * (foff / fs) * np.arange(len(x)))
+    amax = float(amax_hz) if amax_hz else min(fs / 4.0, 100000.0)
+    amax = max(1000.0, min(amax, fs / 2.0))
+    f, prof = _cyclic_profile(x, fs, amax)
+    if not len(f):
+        return {"ok": False, "error": "could not compute cyclic profile"}
+    peaks = _cyclic_peaks(f, prof)
+    fund = _fundamental_rate(peaks)
+    # strength credited to the fundamental = the strongest peak near it or a harmonic
+    fstr = 0.0
+    for st, fr in peaks:
+        if fund and abs(fr / fund - round(fr / fund)) < 0.06:
+            fstr = max(fstr, st)
+    return {"ok": True, "amax_hz": round(amax, 1),
+            "freqs_hz": [round(v, 1) for v in f.tolist()],
+            "profile": [round(v, 2) for v in prof.tolist()],
+            "peaks": [{"symbol_rate_hz": round(fr, 1), "strength": round(st, 1)} for st, fr in peaks],
+            "top_symbol_rate_hz": round(fund, 1) if fund else None,
+            "top_strength": round(fstr, 1),
+            "locked": bool(fund and fstr >= 8.0)}
+
+
+# --------------------------------------------------------------------------
 # Segment 4 — protocol framework: line coding, preamble/sync detection,
 # repeated-frame alignment (fixed code vs rolling bits) and a CRC/checksum
 # scanner. All pure string/int math — the demodulator recovers the bits, this
@@ -1584,6 +1688,33 @@ def selftest():
         check("lora: wrong SF does not lock (quality drops)", _qw < _q / 3, str(round(_qw, 1)))
         check("lora: grid is chips×symbols", _grid is not None and _grid.shape == (_M, len(_true)))
         check("lora: bw/sf validation", dechirp("synth", bw_hz=125000, sf=99).get("ok") is False)
+        # --- Segment 7: cyclostationary symbol-rate detector (pure core) ---
+        from scipy import signal as _sg
+        _fs = 1_000_000.0
+        def _ook(baud):
+            sps = int(_fs / baud); nbb = 300; bits = np.random.randint(0, 2, nbb).astype(float)
+            k = max(2, sps // 8)
+            env = _sg.lfilter(np.ones(k) / k, 1, np.repeat(bits, sps))
+            return env + (np.random.randn(nbb * sps) + 1j * np.random.randn(nbb * sps)) * 0.03
+        # high baud: confident lock; mid baud: found (strength scales with baud/SNR)
+        _f, _p = _cyclic_profile(_ook(20000), _fs, 70000)
+        _pk = _cyclic_peaks(_f, _p)
+        check("cyclo: OOK 20000 baud found + confident",
+              bool(_pk) and abs(_pk[0][1] - 20000) < 1000 and _pk[0][0] >= 8, str(_pk[0] if _pk else None))
+        _f, _p = _cyclic_profile(_ook(5000), _fs, 17500)
+        _fund = _fundamental_rate(_cyclic_peaks(_f, _p, kmin=4.0))
+        check("cyclo: OOK 5000 baud found via fundamental (harmonics rejected)",
+              _fund is not None and abs(_fund - 5000) < 400, str(_fund))
+        _sps = 200; _nb = 300; _sy = (np.random.randint(0, 2, _nb) * 2 - 1).astype(float)
+        _xb = _sg.lfilter(np.ones(_sps // 8) / (_sps // 8), 1, np.repeat(_sy, _sps)) \
+            * np.exp(2j * np.pi * 1500 * np.arange(_nb * _sps) / _fs) \
+            + (np.random.randn(_nb * _sps) + 1j * np.random.randn(_nb * _sps)) * 0.03
+        _f, _p = _cyclic_profile(_xb, _fs, 20000); _fb = _fundamental_rate(_cyclic_peaks(_f, _p))
+        check("cyclo: BPSK 5000 baud found via fundamental", _fb is not None and abs(_fb - 5000) < 300, str(_fb))
+        _xc = np.exp(2j * np.pi * 1000 * np.arange(80000) / _fs) \
+            + (np.random.randn(80000) + 1j * np.random.randn(80000)) * 0.03
+        _f, _p = _cyclic_profile(_xc, _fs, 20000)
+        check("cyclo: CW shows no confident symbol rate", not _cyclic_peaks(_f, _p, kmin=8.0), str(_p.max()))
         # --- SigMF annotations round-trip ---
         _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
         check("annot: box -> SigMF annotation (samples + freq edges + label)",
