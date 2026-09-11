@@ -2054,6 +2054,13 @@ function _wifiRfwfShow() {
     btn.title = bits.length
         ? 'Open the RF Waterfall page — live: ' + bits.join(' + ')
         : 'Open the RF Waterfall page (synthetic demo — connect a HackRF or RTL-SDR for true RF)';
+    // Signal Analyzer works offline on recorded SigMF captures (no live SDR
+    // needed) — always offer it; the page itself guides you if no capture exists.
+    const analyzer = document.getElementById('wifi-analyzer-btn');
+    if (analyzer) {
+        analyzer.classList.remove('hidden');
+        analyzer.classList.add('inline-flex');
+    }
     // ADS-B radar needs an RTL-SDR (1090 MHz via dump1090); show alongside when
     // an RTL is present or the demo is on (synthetic sky).
     const adsb = document.getElementById('wifi-adsb-btn');
