@@ -217,6 +217,11 @@ that requests windows:
   reading the bits/frame/CRC, guessing the likely device/protocol and the next
   step. It's told the honest caveats (relative dB, LoRa is energy-only,
   rolling-code remotes aren't "named"). The card is hidden when AI is disabled.
+  **It can also take actions:** the assistant may propose analyzer actions
+  (tune/zoom/demod/classify/frames/decode433/reset), returned as an allowlisted,
+  validated list (`sigmf_analyzer.parse_ai_actions`) and rendered as one-click
+  buttons (plus "Run all") that drive the analyzer's real controls — nothing runs
+  without a click, and every action is read-only DSP on the local capture.
 
 Roadmap for where this is going (built in segments): see
 [rf-analyzer-roadmap.md](rf-analyzer-roadmap.md).
