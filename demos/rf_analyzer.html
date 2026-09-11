@@ -245,11 +245,18 @@
         <div id="framesout" class="msg" hidden></div>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3>Filter <span class="hint">band-pass isolates a signal · notch rejects an interferer — band from the A/B cursors or marker±BW</span>
-          <div class="seg" id="fkind" style="margin-left:auto"><button data-fk="bandpass" aria-pressed="true">Band-pass</button><button data-fk="notch">Notch</button></div>
-          <button class="go" id="runfilt">Apply</button></h3>
-        <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
-        <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
+        <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
+          <button class="go" id="runpsk" style="margin-left:auto">Demod</button></h3>
+        <div class="symbar" style="padding:6px 14px 8px">
+          <span class="lbl">Order</span>
+          <select id="pskorder"><option value="">Auto</option><option value="2">BPSK</option><option value="4">QPSK</option><option value="8">8PSK</option></select>
+          <span class="lbl">Baud</span>
+          <input id="pskbaud" size="8" placeholder="auto" title="Symbol rate in Bd — leave blank to auto-estimate (or click a Cyclostationary candidate to fill it)">
+          <span id="pskout" class="symout"></span>
+        </div>
+        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="pskcanvas" style="height:190px"></canvas></div>
+        <div id="pskbits" class="bits" hidden></div>
+        <div class="msg" style="font-size:11px;padding:2px 14px 12px">PSK only (BPSK / QPSK / 8PSK). Bits are shown <b>differentially</b> (rotation-invariant): PSK has an absolute-phase ambiguity, so the absolute bits may be rotated by a constant. Not a full frame decoder — pair with the Frames / CRC tools.</div>
       </div>
     </div>
   </div>
@@ -277,18 +284,11 @@
         <div id="lorasyms" class="msg" style="font-size:11px"></div>
       </div>
       <div class="card">
-        <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
-          <button class="go" id="runpsk" style="margin-left:auto">Demod</button></h3>
-        <div class="symbar" style="padding:6px 14px 8px">
-          <span class="lbl">Order</span>
-          <select id="pskorder"><option value="">Auto</option><option value="2">BPSK</option><option value="4">QPSK</option><option value="8">8PSK</option></select>
-          <span class="lbl">Baud</span>
-          <input id="pskbaud" size="8" placeholder="auto" title="Symbol rate in Bd — leave blank to auto-estimate (or click a Cyclostationary candidate to fill it)">
-          <span id="pskout" class="symout"></span>
-        </div>
-        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="pskcanvas" style="height:190px"></canvas></div>
-        <div id="pskbits" class="bits" hidden></div>
-        <div class="msg" style="font-size:11px;padding:2px 14px 12px">PSK only (BPSK / QPSK / 8PSK). Bits are shown <b>differentially</b> (rotation-invariant): PSK has an absolute-phase ambiguity, so the absolute bits may be rotated by a constant. Not a full frame decoder — pair with the Frames / CRC tools.</div>
+        <h3>Filter <span class="hint">band-pass isolates a signal · notch rejects an interferer — band from the A/B cursors or marker±BW</span>
+          <div class="seg" id="fkind" style="margin-left:auto"><button data-fk="bandpass" aria-pressed="true">Band-pass</button><button data-fk="notch">Notch</button></div>
+          <button class="go" id="runfilt">Apply</button></h3>
+        <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
+        <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
       </div>
   </div>
 
