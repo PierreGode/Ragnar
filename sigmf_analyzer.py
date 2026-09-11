@@ -755,6 +755,108 @@ def filter_preview(name, kind="bandpass", f0_hz=None, f1_hz=None, t0=None, t1=No
 
 
 # --------------------------------------------------------------------------
+# Segment 7 — LoRa de-chirp view. LoRa is chirp spread-spectrum: each symbol is
+# a base up-chirp cyclically shifted by the symbol value. Multiplying by a
+# reference DOWN-chirp collapses each chirp to a constant tone whose FFT-bin IS
+# the symbol — so diagonal sweeps become horizontal lines and the symbol
+# sequence falls out. This is a de-chirp VIEW + rough symbol readout, NOT a full
+# LoRa decoder (no sync-word/Gray/interleave/FEC/CRC/header — that needs
+# gr-lora_sdr); but it's how you confirm a signal is LoRa and read its SF/BW.
+# The core is pure (selftested on a synthesised LoRa signal, no hardware).
+# --------------------------------------------------------------------------
+
+_LORA_BW = {"7.8k": 7800, "10.4k": 10400, "15.6k": 15600, "20.8k": 20800,
+            "31.25k": 31250, "41.7k": 41700, "62.5k": 62500,
+            "125k": 125000, "250k": 250000, "500k": 500000}
+
+
+def _lora_base_upchirp(M, os):
+    """One LoRa base up-chirp: L=M*os samples sweeping -BW/2..+BW/2 (pure)."""
+    import numpy as np
+    L = M * os
+    k = np.arange(L)
+    f = -M / 2.0 + M * (k / float(L))
+    return np.exp(2j * np.pi * np.cumsum(f) / (os * M)).astype(np.complex64)
+
+
+def _lora_dechirp(iq, sf, os):
+    """De-chirp IQ already sampled at os*BW; return per-symbol values, a quality
+    (peak/mean lock metric) and an M×nsym magnitude grid (pure numpy)."""
+    import numpy as np
+    M = 1 << int(sf)
+    L = M * os
+    down = np.conj(_lora_base_upchirp(M, os))
+    nsym = len(iq) // L
+    if nsym < 1:
+        return [], 0.0, None
+    nsym = min(nsym, 500)
+    syms, quals = [], []
+    grid = np.zeros((M, nsym), dtype=np.float32)
+    binsym = np.arange(L)
+    binsym = np.where(binsym < L // 2, binsym, binsym - (L - M)) % M   # bin -> symbol
+    for i in range(nsym):
+        S = np.abs(np.fft.fft(iq[i * L:(i + 1) * L] * down, L))
+        pk = int(np.argmax(S))
+        syms.append(int(binsym[pk]))
+        quals.append(float(S.max() / (S.mean() + 1e-9)))
+        col = np.zeros(M, dtype=np.float32)          # fold L bins onto M symbol rows (max)
+        np.maximum.at(col, binsym, S.astype(np.float32))
+        grid[:, i] = col
+    return syms, float(np.mean(quals)), grid
+
+
+def dechirp(name, bw_hz=125000, sf=7, f_offset_hz=0.0, t0=None, t1=None, os=2, h=256):
+    """LoRa de-chirp a selection: resample the chosen channel to os*BW, de-chirp
+    at the given spreading factor, and return the symbol sequence, a lock quality,
+    and a de-chirped magnitude grid (symbol value × time) for display."""
+    import numpy as np
+    from scipy.signal import resample_poly
+    from fractions import Fraction
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    try:
+        bw = float(bw_hz); sf = int(sf); os = int(max(1, min(4, os)))
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "bad bw/sf"}
+    if not (6 <= sf <= 12):
+        return {"ok": False, "error": "spreading factor must be 7..12"}
+    if bw <= 0 or bw > fs:
+        return {"ok": False, "error": "bandwidth must be >0 and <= sample rate"}
+    if len(x) < 256:
+        return {"ok": False, "error": "selection too short"}
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (float(f_offset_hz) / fs) * n)      # channel -> DC
+    fs2 = os * bw
+    frac = Fraction(fs2 / fs).limit_denominator(2000)
+    up, down = frac.numerator, frac.denominator
+    if up < 1 or down < 1:
+        return {"ok": False, "error": "cannot resample to that bandwidth"}
+    xr = resample_poly(x, up, down).astype(np.complex64)
+    syms, quality, grid = _lora_dechirp(xr, sf, os)
+    if grid is None:
+        return {"ok": False, "error": "selection shorter than one LoRa symbol at SF%d/BW%g" % (sf, bw)}
+    # pack the grid (symbol-value rows × time cols) to a base64 uint8 image
+    M = grid.shape[0]
+    g = grid[::-1, :]                                # row 0 (top) = highest symbol value
+    if M > h:
+        g = np.stack([_pool_max(g[:, c], h) for c in range(g.shape[1])], axis=1)
+    db = 10.0 * np.log10(g ** 2 + 1e-9)
+    floor = float(np.percentile(db, 40)); ceil = float(np.percentile(db, 99.8))
+    if ceil - floor < 12:
+        ceil = floor + 12
+    u8 = np.clip((db - floor) / (ceil - floor), 0, 1)
+    u8 = (u8 * 255).astype(np.uint8)
+    return {"ok": True, "sf": sf, "bw_hz": bw, "os": os, "sym_rate_hz": round(bw / M, 2),
+            "n_symbols": len(syms), "symbols": syms[:256],
+            "quality": round(quality, 1), "locked": quality >= 12.0,
+            "w": u8.shape[1], "h": u8.shape[0], "chips": M,
+            "data": base64.b64encode(u8.tobytes()).decode("ascii"),
+            "bw_presets": {k: v for k, v in _LORA_BW.items()}}
+
+
+# --------------------------------------------------------------------------
 # Segment 4 — protocol framework: line coding, preamble/sync detection,
 # repeated-frame alignment (fixed code vs rolling bits) and a CRC/checksum
 # scanner. All pure string/int math — the demodulator recovers the bits, this
@@ -1468,6 +1570,20 @@ def selftest():
               abs(bp["power_kept_pct"] + nt["power_kept_pct"] - 100.0) < 5.0,
               str(bp["power_kept_pct"]) + "+" + str(nt["power_kept_pct"]))
         check("filter: needs a band", filter_preview("synth", "bandpass").get("ok") is False)
+        # --- Segment 7: LoRa de-chirp (synth signal, no hardware) ---
+        _sf, _os, _M = 7, 4, 128
+        _base = _lora_base_upchirp(_M, _os)
+        _true = [11, 60, 127, 3, 96, 40, 8, 75]
+        _lsig = np.concatenate([np.roll(_base, -int(round(s * _os))) for s in _true])
+        _lsig = _lsig + (np.random.randn(len(_lsig)) + 1j * np.random.randn(len(_lsig))).astype(np.complex64) * 0.08
+        _rs, _q, _grid = _lora_dechirp(_lsig, _sf, _os)
+        check("lora: de-chirp recovers the symbol sequence",
+              _rs == _true, str(_rs))
+        check("lora: lock quality high at the right SF", _q > 20, str(round(_q, 1)))
+        _rw, _qw, _ = _lora_dechirp(_lsig, _sf + 2, _os)      # wrong SF -> no lock
+        check("lora: wrong SF does not lock (quality drops)", _qw < _q / 3, str(round(_qw, 1)))
+        check("lora: grid is chips×symbols", _grid is not None and _grid.shape == (_M, len(_true)))
+        check("lora: bw/sf validation", dechirp("synth", bw_hz=125000, sf=99).get("ok") is False)
         # --- SigMF annotations round-trip ---
         _b = _box_to_annotation(0.08, 0.12, 434_040_000, 434_060_000, "OOK burst", 1_000_000.0)
         check("annot: box -> SigMF annotation (samples + freq edges + label)",

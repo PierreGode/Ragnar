@@ -124,9 +124,20 @@ Turn "here are bits" into "here is what it says."
   (`_fft_bandmask` / `filter_preview`), route `/analyze/filter`, Filter card on
   the page. 4 selftests (50/50); on the real garage capture band-pass/notch keep
   37.5%/62.5% (sum 100%, complementary).
-- *Left for later:* **LoRa / chirp** de-chirp view; **spectral correlation**
-  (cyclostationary) display; **multi-signal tracking**; long-capture **tiled
-  waterfall** overview; filtered-audio export.
+- **LoRa de-chirp view** ✅ — multiply by a reference down-chirp so LoRa's
+  diagonal chirps collapse to horizontal **symbol tones**; returns the symbol
+  sequence, a **lock quality** (peak/mean; wrong SF ≠ lock), and a symbol-value×
+  time grid drawn with the palette LUT. Pick BW + SF (7–12), centre on the marker.
+  `_lora_base_upchirp`/`_lora_dechirp` (pure) + `dechirp()` (resample to os·BW,
+  mix, de-chirp); route `/analyze/dechirp`; a LoRa de-chirp card. 5 selftests
+  (55/55) — **8/8 symbol recovery on synthetic LoRa under noise, wrong-SF doesn't
+  lock**. HONEST: it's a de-chirp *view* + rough symbol readout, **not** a full
+  LoRa decoder (no sync/Gray/interleave/FEC/CRC/header). On the real weak
+  Meshtastic RTL capture it did **not** lock across an SF/BW/offset sweep (faint
+  packet in a 1 MS/s recording) — the lock readout says so honestly.
+- *Left for later:* **spectral correlation** (cyclostationary) display;
+  **multi-signal tracking**; long-capture **tiled waterfall** overview;
+  filtered-audio export.
 - *Done when:* the analyzer handles chirp-spread and cyclostationary signals a
   plain spectrogram can't characterise.
 

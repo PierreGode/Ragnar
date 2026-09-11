@@ -22213,6 +22213,14 @@ def register_network_diagnostics(app, logger=None):
                         kind=a.get('kind', 'bandpass'), f0_hz=_fl(a.get('f0')),
                         f1_hz=_fl(a.get('f1')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
 
+    @app.route('/api/net/rtl/analyze/dechirp', methods=['GET'])
+    def net_rtl_analyze_dechirp():
+        a = request.args
+        return _analyze(sigmf_analyzer.dechirp, name=a.get('name', ''),
+                        bw_hz=_fl(a.get('bw')) or 125000, sf=int(_fl(a.get('sf')) or 7),
+                        f_offset_hz=_fl(a.get('f_offset')) or 0.0,
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args

@@ -144,6 +144,38 @@
         <h3>Time envelope <span class="hint">amplitude over the shown window (AM/OOK view)</span></h3>
         <canvas class="rowcanvas" id="env"></canvas>
       </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Modulation <span class="hint">classify + constellation + instantaneous — uses the marker &amp; BW</span>
+          <button class="go" id="runmod" style="margin-left:auto">Analyze</button></h3>
+        <div id="modout" class="msg">Mark a signal (or click a burst), set the demod BW, then Analyze.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 10px 10px">
+          <div style="flex:1 1 190px;min-width:160px">
+            <div class="lbl" style="padding:4px 4px">IQ constellation</div>
+            <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
+          </div>
+          <div style="flex:2 1 320px;min-width:220px">
+            <div class="seg" id="instview" style="margin:2px 0 6px" title="Show/hide derived plots (stacked)">
+              <button data-iv="iq" aria-pressed="true">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
+            <div id="stackplots">
+              <div class="dplot" data-p="iq"><span class="dpl">I/Q sample</span><canvas class="rowcanvas dpc" id="p-iq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="freq"><span class="dpl">Frequency</span><canvas class="rowcanvas dpc" id="p-freq" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="amp" hidden><span class="dpl">Amplitude</span><canvas class="rowcanvas dpc" id="p-amp" style="height:120px;cursor:col-resize"></canvas></div>
+              <div class="dplot" data-p="phase" hidden><span class="dpl">Phase</span><canvas class="rowcanvas dpc" id="p-phase" style="height:120px;cursor:col-resize"></canvas></div>
+            </div>
+            <div class="symbar">
+              <button id="symtog" aria-pressed="false" title="Overlay symbol-period boundaries on every plot; sample dots mark each symbol centre">⌗ Symbols</button>
+              <button id="symauto" title="Estimate the symbol rate from the signal in the shown window">Auto</button>
+              <button id="symfrom" title="Use the demodulator's estimated symbol rate">⟳ demod</button>
+              <span class="lbl">baud</span><input id="symbaud" type="number" step="any" style="width:74px" title="Symbol rate (Hz). Drag one symbol width on a plot, type it, Auto, or pull from the demod.">
+              <span class="lbl">bits/sym</span>
+              <select id="symbits" title="Bits per symbol for read-off"><option value="1" selected>1 (OOK/BPSK)</option><option value="2">2 (4-ary)</option></select>
+              <button id="symread" title="Read symbol values at the grid centres">Read</button>
+              <span id="symout" class="symout"></span>
+            </div>
+            <div id="symseq" class="msg" style="font-size:11px;padding:2px 0"></div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div>
@@ -192,38 +224,24 @@
         <div id="framesout" class="msg" hidden></div>
       </div>
       <div class="card" style="margin-top:16px">
-        <h3>Modulation <span class="hint">classify + constellation + instantaneous — uses the marker &amp; BW</span>
-          <button class="go" id="runmod" style="margin-left:auto">Analyze</button></h3>
-        <div id="modout" class="msg">Mark a signal (or click a burst), set the demod BW, then Analyze.</div>
-        <div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 10px 10px">
-          <div style="flex:1 1 190px;min-width:160px">
-            <div class="lbl" style="padding:4px 4px">IQ constellation</div>
-            <canvas class="rowcanvas" id="constell" style="height:190px"></canvas>
-          </div>
-          <div style="flex:2 1 320px;min-width:220px">
-            <div class="seg" id="instview" style="margin:2px 0 6px" title="Show/hide derived plots (stacked)">
-              <button data-iv="iq" aria-pressed="true">I/Q</button><button data-iv="freq" aria-pressed="true">Freq</button><button data-iv="amp">Amp</button><button data-iv="phase">Phase</button></div>
-            <div id="stackplots">
-              <div class="dplot" data-p="iq"><span class="dpl">I/Q sample</span><canvas class="rowcanvas dpc" id="p-iq" style="height:120px;cursor:col-resize"></canvas></div>
-              <div class="dplot" data-p="freq"><span class="dpl">Frequency</span><canvas class="rowcanvas dpc" id="p-freq" style="height:120px;cursor:col-resize"></canvas></div>
-              <div class="dplot" data-p="amp" hidden><span class="dpl">Amplitude</span><canvas class="rowcanvas dpc" id="p-amp" style="height:120px;cursor:col-resize"></canvas></div>
-              <div class="dplot" data-p="phase" hidden><span class="dpl">Phase</span><canvas class="rowcanvas dpc" id="p-phase" style="height:120px;cursor:col-resize"></canvas></div>
-            </div>
-            <div class="symbar">
-              <button id="symtog" aria-pressed="false" title="Overlay symbol-period boundaries on every plot — drag across one symbol to set the rate">⌗ Symbols</button>
-              <span class="lbl">baud</span><input id="symbaud" type="number" step="any" style="width:74px" title="Symbol rate (Hz). Drag one symbol width on a plot, or pull from the demod.">
-              <button id="symfrom" title="Use the demodulator's estimated symbol rate">⟳ demod</button>
-              <span id="symout" class="symout"></span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:16px">
         <h3>Filter <span class="hint">band-pass isolates a signal · notch rejects an interferer — band from the A/B cursors or marker±BW</span>
           <div class="seg" id="fkind" style="margin-left:auto"><button data-fk="bandpass" aria-pressed="true">Band-pass</button><button data-fk="notch">Notch</button></div>
           <button class="go" id="runfilt">Apply</button></h3>
         <div id="filtout" class="msg">Set a band (drop A &amp; B cursors, or a marker + BW), then Apply to see the spectrum before vs after.</div>
         <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
+          <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
+        <div class="symbar" style="padding:6px 14px 8px">
+          <span class="lbl">BW</span>
+          <select id="lorabw"><option value="125000">125k</option><option value="250000" selected>250k</option><option value="500000">500k</option><option value="62500">62.5k</option></select>
+          <span class="lbl">SF</span>
+          <select id="lorasf"><option>7</option><option>8</option><option>9</option><option>10</option><option selected>11</option><option>12</option></select>
+          <span id="loraout" class="symout"></span>
+        </div>
+        <div style="padding:0 14px 12px"><canvas class="rowcanvas" id="loracanvas" style="height:170px"></canvas></div>
+        <div id="lorasyms" class="msg" style="font-size:11px"></div>
       </div>
     </div>
   </div>
@@ -604,6 +622,9 @@
     g.strokeStyle='rgba(245,185,66,0.55)'; g.lineWidth=1; g.setLineDash([2,3]);
     var cnt=0; for(var t=off;t<=tL+1e-12 && cnt<500;t+=per,cnt++){var x=6+(t/tL)*(W-12);g.beginPath();g.moveTo(x,0);g.lineTo(x,H);g.stroke();}
     g.setLineDash([]);
+    // symbol-centre markers (where Read samples the value)
+    g.fillStyle='rgba(245,185,66,0.85)'; var c2=0;
+    for(var tc=off+per/2;tc<=tL+1e-12 && c2<500;tc+=per,c2++){var xc=6+(tc/tL)*(W-12);g.fillRect(xc-1,H-6,2,4);}
   }
   function redrawSym(){ if(S._inst) drawInst(S._inst); }
   function updateSymOut(){ var o=$('symout'),d=S._inst; if(!o)return;
@@ -614,7 +635,39 @@
   $('symtog').addEventListener('click',function(){ symState.on=!symState.on; $('symtog').setAttribute('aria-pressed',symState.on?'true':'false'); updateSymOut(); redrawSym(); });
   $('symbaud').addEventListener('change',function(){ if(!symState.on){symState.on=true;$('symtog').setAttribute('aria-pressed','true');} setBaud(parseFloat($('symbaud').value)||0); });
   $('symfrom').addEventListener('click',function(){ var b=(S.demod&&S.demod.baud)||(S.classifyData&&S.classifyData.symbol_rate_hz)||0;
-    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); } });
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); }
+    else { $('symout').textContent='run Demodulate first'; } });
+  // estimate baud from the shown signal (amplitude run-lengths, like the demod slicer)
+  function estimateBaud(d){
+    if(!d||!d.amp_db||!d.t||d.t.length<8) return 0;
+    var tL=d.t[d.t.length-1]||0; if(tL<=0) return 0;
+    var a=d.amp_db,lo=Math.min.apply(null,a),hi=Math.max.apply(null,a),mid=(lo+hi)/2;
+    var runs=[],cur=1,prev=a[0]>mid;
+    for(var i=1;i<a.length;i++){var b=a[i]>mid; if(b===prev)cur++; else{runs.push(cur);cur=1;prev=b;}} runs.push(cur);
+    runs=runs.filter(function(r){return r>=2;}); if(!runs.length) return 0;
+    runs.sort(function(x,y){return x-y;}); var ui=runs[Math.floor(runs.length*0.1)];
+    var fsp=(a.length-1)/tL; return ui>0?fsp/ui:0;
+  }
+  $('symauto').addEventListener('click',function(){ var b=estimateBaud(S._inst);
+    if(b>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(b); }
+    else { $('symout').textContent='could not estimate — set baud manually'; } });
+  // read symbol values at the grid centres (OOK 1/0, or 2-bit I/Q quadrant)
+  $('symread').addEventListener('click',function(){
+    var d=S._inst; if(!d||!(symState.baud>0)){ $('symseq').textContent='enable Symbols + set a baud first'; return; }
+    var tL=d.t[d.t.length-1]||0, per=1/symState.baud;
+    if(per>=tL){ $('symseq').textContent='window shorter than one symbol'; return; }
+    var off=symState.off-Math.floor(symState.off/per)*per, bits=parseInt($('symbits').value,10)||1;
+    var idxAt=function(t){ return Math.max(0,Math.min(d.t.length-1, Math.round(t/tL*(d.t.length-1)))); };
+    var a=d.amp_db,lo=Math.min.apply(null,a),hi=Math.max.apply(null,a),mid=(lo+hi)/2, seq=[],cnt=0;
+    for(var t=off+per/2;t<=tL && cnt<512;t+=per,cnt++){ var j=idxAt(t);
+      if(bits>=2) seq.push(((d.i[j]>=0)?0:1)*2 + ((d.q[j]>=0)?0:1));
+      else seq.push(a[j]>mid?1:0); }
+    var body;
+    if(bits>=2){ body=seq.join(' '); }
+    else { var s=seq.join(''),hex=''; for(var i=0;i+8<=s.length;i+=8)hex+=('0'+parseInt(s.substr(i,8),2).toString(16)).slice(-2)+' ';
+      body=s.replace(/(.{8})/g,'$1 ').trim()+(hex?('\nhex: '+hex.trim()):''); }
+    $('symseq').textContent=seq.length+' symbols @ '+Math.round(symState.baud)+' baud:\n'+body;
+  });
   // drag/click to set the symbol rate on any stacked derived-plot canvas
   (function(){var down=null;
     function tAt(ev){var t=ev.target; if(!t||!t.classList||!t.classList.contains('dpc'))return null;
@@ -693,6 +746,31 @@
         +'<b>'+d.power_kept_pct+'%</b> of power kept';
       drawFilt(d);
     }).catch(function(){ $('filtout').textContent='filter request failed'; });
+  });
+
+  // ---- LoRa de-chirp: draw the de-chirped symbol-tone map (reuses palette LUT) ----
+  function drawGrid(id,d){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||170;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!d||!d.ok||!d.data){ return; }
+    var bin=atob(d.data),n=bin.length,buf=new Uint8Array(n);for(var i=0;i<n;i++)buf[i]=bin.charCodeAt(i);
+    var off=document.createElement('canvas');off.width=d.w;off.height=d.h;
+    var oc=off.getContext('2d'),img=oc.createImageData(d.w,d.h),px=img.data;
+    for(var k=0;k<d.w*d.h;k++){var v=buf[k];px[k*4]=LUT[v*3];px[k*4+1]=LUT[v*3+1];px[k*4+2]=LUT[v*3+2];px[k*4+3]=255;}
+    oc.putImageData(img,0,0); g.imageSmoothingEnabled=false; g.drawImage(off,0,0,d.w,d.h,0,0,W,H);
+    g.fillStyle='rgba(205,214,228,.6)';g.font='9px monospace';g.textAlign='left';g.fillText('symbol value ↑ · time →',6,12);
+  }
+  $('rundechirp').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc;
+    var bw=parseFloat($('lorabw').value)||250000, sf=parseInt($('lorasf').value,10)||11;
+    $('loraout').textContent='de-chirping…'; $('lorasyms').textContent='';
+    api('/api/net/rtl/analyze/dechirp',{name:S.name,bw:bw,sf:sf,f_offset:foff,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('loraout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawGrid('loracanvas',null); return; }
+      $('loraout').innerHTML='SF'+d.sf+' BW'+(d.bw_hz/1e3)+'k · '+d.n_symbols+' symbols · lock '
+        +'<b style="color:'+(d.locked?'var(--live)':'var(--muted)')+'">'+d.quality+(d.locked?' ✓':' (weak — sweep SF/BW/marker)')+'</b>';
+      drawGrid('loracanvas',d);
+      $('lorasyms').textContent=d.locked?('symbols: '+d.symbols.slice(0,64).join(' ')):'';
+    }).catch(function(){ $('loraout').textContent='de-chirp request failed'; });
   });
 
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });
