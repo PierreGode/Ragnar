@@ -135,9 +135,19 @@ Turn "here are bits" into "here is what it says."
   LoRa decoder (no sync/Gray/interleave/FEC/CRC/header). On the real weak
   Meshtastic RTL capture it did **not** lock across an SF/BW/offset sweep (faint
   packet in a 1 MS/s recording) — the lock readout says so honestly.
-- *Left for later:* **spectral correlation** (cyclostationary) display;
-  **multi-signal tracking**; long-capture **tiled waterfall** overview;
-  filtered-audio export.
+- **Cyclostationary symbol-rate detector** ✅ — a cyclic-feature profile from the
+  transition energy |x[n]-x[n-1]|² (whose spectrum lines up at the symbol rate
+  even for *random* data — the point of cyclostationarity), with harmonic→
+  fundamental resolution, a strength/lock readout and clickable candidate rates
+  that feed the symbol tool. `_cyclic_profile`/`_fundamental_rate`/`cyclic()`;
+  route `/analyze/cyclic`; a Cyclostationary card. 4 selftests (59/59), stable
+  over repeated random runs — OOK 5k/20k + BPSK land on the true baud, CW shows
+  no confident feature. HONEST: targets amplitude/phase-transition mods
+  (OOK/ASK/PSK); FSK / very weak / very low baud read low-confidence (the
+  strength says so). It's a symbol-rate cyclic feature, not the full 2-D SCF
+  surface.
+- *Left for later:* full 2-D **spectral-correlation** surface; **multi-signal
+  tracking**; long-capture **tiled waterfall** overview; filtered-audio export.
 - *Done when:* the analyzer handles chirp-spread and cyclostationary signals a
   plain spectrogram can't characterise.
 

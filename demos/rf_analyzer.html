@@ -231,6 +231,13 @@
         <canvas class="rowcanvas" id="filtcanvas" style="height:150px"></canvas>
       </div>
       <div class="card" style="margin-top:16px">
+        <h3>Cyclostationary <span class="hint">finds the symbol rate even in random data — a cyclic feature the PSD can't show</span>
+          <button class="go" id="runcyc" style="margin-left:auto">Detect</button></h3>
+        <div id="cycout" class="msg">Centre on a signal (marker), then Detect — peaks mark candidate symbol rates.</div>
+        <div style="padding:0 14px 6px"><canvas class="rowcanvas" id="cyccanvas" style="height:140px"></canvas></div>
+        <div id="cycpeaks" class="symbar" style="padding:0 14px 10px"></div>
+      </div>
+      <div class="card" style="margin-top:16px">
         <h3>LoRa de-chirp <span class="hint">collapse chirps to symbol tones — centre on the signal (marker), pick BW+SF</span>
           <button class="go" id="rundechirp" style="margin-left:auto">De-chirp</button></h3>
         <div class="symbar" style="padding:6px 14px 8px">
@@ -771,6 +778,40 @@
       drawGrid('loracanvas',d);
       $('lorasyms').textContent=d.locked?('symbols: '+d.symbols.slice(0,64).join(' ')):'';
     }).catch(function(){ $('loraout').textContent='de-chirp request failed'; });
+  });
+
+  // ---- cyclostationary symbol-rate detector ----
+  function drawProfile(id,fx,py,peaks){
+    var c=$(id),dpr=Math.min(window.devicePixelRatio||1,2),W=Math.max(200,c.clientWidth||300),H=c.clientHeight||140;
+    c.width=W*dpr;c.height=H*dpr;var g=c.getContext('2d');g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);
+    if(!py||!py.length)return; var hi=Math.max.apply(null,py)||1, n=py.length;
+    var X=function(i){return 6+i/(n-1)*(W-12);}, Y=function(v){return H-16-v/hi*(H-24);};
+    g.strokeStyle='rgb(56,189,201)';g.lineWidth=1;g.beginPath();
+    for(var i=0;i<n;i++){var x=X(i),y=Y(py[i]);i?g.lineTo(x,y):g.moveTo(x,y);} g.stroke();
+    // mark peaks + freq labels
+    (peaks||[]).forEach(function(p){ var idx=Math.round((p.symbol_rate_hz-fx[0])/((fx[n-1]-fx[0])||1)*(n-1));
+      idx=Math.max(0,Math.min(n-1,idx)); var x=X(idx);
+      g.strokeStyle='rgba(245,185,66,0.7)';g.setLineDash([2,3]);g.beginPath();g.moveTo(x,0);g.lineTo(x,H-14);g.stroke();g.setLineDash([]);
+      g.fillStyle='var(--accent)';g.fillStyle='#f5b942';g.font='9px monospace';g.textAlign='center';
+      g.fillText((p.symbol_rate_hz>=1000?(p.symbol_rate_hz/1000).toFixed(1)+'k':Math.round(p.symbol_rate_hz)),x,H-3); });
+    g.fillStyle='rgba(205,214,228,.55)';g.font='9px monospace';g.textAlign='left';g.fillText('cycle freq (symbol rate) →',6,11);
+  }
+  $('runcyc').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc;
+    $('cycout').textContent='detecting…'; $('cycpeaks').innerHTML='';
+    api('/api/net/rtl/analyze/cyclic',{name:S.name,f_offset:foff,t0:v.t0,t1:v.t1}).then(function(d){
+      if(!d||!d.ok){ $('cycout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'failed')+'</span>'; drawProfile('cyccanvas',[],[],[]); return; }
+      var fmt=function(hz){return hz>=1000?(hz/1000).toFixed(2)+' kBd':Math.round(hz)+' Bd';};
+      $('cycout').innerHTML=d.top_symbol_rate_hz
+        ? 'symbol rate ≈ <b style="color:'+(d.locked?'var(--live)':'var(--accent)')+'">'+fmt(d.top_symbol_rate_hz)+'</b> · strength '+d.top_strength+(d.locked?' ✓':' (weak/uncertain)')
+        : '<span style="color:var(--muted)">no clear cyclostationary feature — try a cleaner burst / different marker</span>';
+      drawProfile('cyccanvas',d.freqs_hz,d.profile,d.peaks);
+      // clickable candidate rates -> feed the symbol tool + LoRa nothing
+      $('cycpeaks').innerHTML=(d.peaks||[]).length?'<span class="lbl">candidates:</span>'+d.peaks.map(function(p){
+        return '<button class="fcand" data-b="'+p.symbol_rate_hz+'">'+fmt(p.symbol_rate_hz)+' ('+p.strength+')</button>';}).join(''):'';
+      $('cycpeaks').querySelectorAll('button[data-b]').forEach(function(b){ b.addEventListener('click',function(){
+        var bd=parseFloat(b.getAttribute('data-b'))||0; if(bd>0){ symState.on=true; $('symtog').setAttribute('aria-pressed','true'); symState.off=0; setBaud(bd); } }); });
+    }).catch(function(){ $('cycout').textContent='cyclic request failed'; });
   });
 
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });

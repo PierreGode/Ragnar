@@ -22221,6 +22221,13 @@ def register_network_diagnostics(app, logger=None):
                         f_offset_hz=_fl(a.get('f_offset')) or 0.0,
                         t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
 
+    @app.route('/api/net/rtl/analyze/cyclic', methods=['GET'])
+    def net_rtl_analyze_cyclic():
+        a = request.args
+        return _analyze(sigmf_analyzer.cyclic, name=a.get('name', ''),
+                        f_offset_hz=_fl(a.get('f_offset')) or 0.0,
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), amax_hz=_fl(a.get('amax')))
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args
