@@ -65,6 +65,14 @@
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
+  .aichips{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px 4px}
+  .aichips button{font-family:var(--mono);font-size:11.5px;color:var(--ink-dim);background:var(--panel-2);border:1px solid var(--line);border-radius:16px;padding:6px 12px;cursor:pointer}
+  .aichips button:hover{border-color:var(--cyan);color:var(--cyan)}
+  .airow{display:flex;gap:8px;padding:6px 14px 10px;align-items:stretch}
+  .airow textarea{flex:1 1 auto;font-family:var(--mono);font-size:12.5px;color:var(--ink);background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;resize:vertical;min-height:40px}
+  .airow button{flex:0 0 auto;align-self:stretch;padding:0 18px}
+  .aiout{white-space:pre-wrap;line-height:1.65;color:var(--ink);max-height:520px;overflow:auto;border-top:1px solid var(--line-soft)}
+  .aiout h4{color:var(--cyan);font-family:var(--head);font-size:13px;margin:12px 0 4px} .aiout code{color:var(--accent)} .aiout b{color:#fff}
   .axinfo{font-family:var(--mono);font-size:10.5px;color:var(--ink-dim);padding:6px 14px;border-top:1px solid var(--line-soft)}
   .axinfo b{color:var(--accent)}
   footer{margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
@@ -179,6 +187,21 @@
     </div>
   </div>
 
+  <div class="card aicard" id="aicard" style="margin-top:16px" hidden>
+    <h3>🤖 Ask the RF analyst <span class="hint">grounded in this capture's measurements</span></h3>
+    <div class="aichips" id="aichips">
+      <button data-q="What is this signal, which band/service is it, and how would a professional decode it?">What is this signal?</button>
+      <button data-q="Based on the measurements shown, what demod settings (OOK vs FSK, centre offset, bandwidth) should I use, and why?">How do I demodulate it?</button>
+      <button data-q="Explain the recovered bits and frame structure — preamble, fixed vs rolling fields, and whether the CRC makes sense.">Explain the bits / frame</button>
+      <button data-q="What device or protocol is this most likely to be, and what's my single best next step in this analyzer?">What device is this?</button>
+    </div>
+    <div class="airow">
+      <textarea id="aiq" rows="2" placeholder="Ask anything about this capture — decoding, modulation, what to try next…"></textarea>
+      <button class="go" id="aiask">Ask</button>
+    </div>
+    <div id="aiout" class="aiout msg">The assistant sees this capture's measured summary plus whatever you've run (classification, bursts, demod bits, frame analysis). Run those first for a sharper answer.</div>
+  </div>
+
   <footer>
     On-box analysis of the RF Waterfall's SigMF captures (<code>data/iq_captures/</code>). DSP runs in numpy/scipy on the
     device; this page is a viewer, so it works from a phone. For deep work, download the <code>.sigmf-data</code> and open it in
@@ -239,9 +262,10 @@
 
   function loadCapture(name){
     S.name=name; S.view=null; S.marker=null; S.markerB=null; S.hist=[];
+    S.summaryData=null; S.classifyData=null; S.framesData=null; S.demod=null; S.bursts=null;
     api('/api/net/rtl/analyze/summary',{name:name}).then(function(s){
       if(!s||!s.ok){ $('stats').innerHTML='<span class="msg">⚠ '+((s&&s.error)||'load failed')+'</span>'; return; }
-      S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz;
+      S.dur=s.duration_s; S.fs=s.sr_hz; S.fc=s.center_hz; S.summaryData=s;
       $('stats').innerHTML=[
         ['Center',(s.center_hz/1e6).toFixed(3)+' MHz','cy'],
         ['Sample rate',(s.sr_hz/1e6).toFixed(3)+' MS/s',''],
@@ -376,6 +400,7 @@
   // ---- bursts ----
   function loadBursts(){ var gap=parseFloat($('gapms').value)||25;
     api('/api/net/rtl/analyze/bursts',{name:S.name,gap_ms:gap}).then(function(d){
+    S.bursts=d;
     var tb=$('btbody'), b=(d&&d.bursts)||[]; $('bcount').textContent=b.length?b.length+' detected':'';
     if(!b.length){ tb.innerHTML='<tr><td class="empty" colspan="6">No bursts above the noise floor.</td></tr>'; return; }
     tb.innerHTML=b.map(function(x,i){return '<tr data-i="'+i+'"><td>'+x.t0.toFixed(4)+'</td><td>'+x.dur_ms+' ms</td><td>'+x.f_mhz.toFixed(4)+'</td><td>'+x.bw_khz+' kHz</td><td>'+(x.duty!=null?Math.round(x.duty*100)+'%':'—')+'</td><td>'+Math.round(x.peak_db)+'</td></tr>';}).join('');
@@ -414,6 +439,7 @@
     var fo=$('framesout'); fo.hidden=false; fo.textContent='analysing frames…';
     api('/api/net/rtl/analyze/frames',{bits:d.bits, line:(manch?'manchester':'raw')}).then(function(r){
       if(!r||!r.ok){ fo.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'no structure')+'</span>'; return; }
+      S.framesData=r;
       var lines=[];
       lines.push('preamble '+r.preamble_bits+' bits · '
         +(r.period_bits?('frame period <b>'+r.period_bits+' bits</b> · '+r.repeats+' repeats · '
@@ -475,6 +501,7 @@
     $('modout').textContent='analyzing…';
     api('/api/net/rtl/analyze/classify',q).then(function(c){
       if(!c||!c.ok){ $('modout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((c&&c.error)||'failed')+'</span>'; return; }
+      S.classifyData=c;
       var f=c.features||{};
       $('modout').innerHTML='<b style="color:var(--cyan);font-size:14px">'+esc(c.label)+'</b>  ·  confidence '+Math.round(c.confidence*100)+'%'
         +(c.symbol_rate_hz?'  ·  symbol rate ≈ <b>'+(c.symbol_rate_hz>=1000?(c.symbol_rate_hz/1000).toFixed(2)+' kBd':c.symbol_rate_hz+' Bd')+'</b>':'')
@@ -487,6 +514,46 @@
   $('cap').addEventListener('change',function(){ var n=decodeURIComponent($('cap').value||''); if(n)loadCapture(n); });
   $('reload').addEventListener('click',function(){ loadList(S.name); });
   window.addEventListener('resize',function(){ if(S.spec)drawSpec(S.spec); });
+
+  // ---- AI assistant (reuses Ragnar's existing AI service via /api/ai/signal) ----
+  // very small markdown -> HTML (headings, bold, code, bullets) for the answer
+  function mdLite(t){
+    var h=esc(t||'');
+    h=h.replace(/^###?\s*(.+)$/gm,'<h4>$1</h4>');
+    h=h.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+    h=h.replace(/`([^`]+)`/g,'<code>$1</code>');
+    h=h.replace(/^\s*[-*]\s+(.+)$/gm,'• $1');
+    return h;
+  }
+  function aiContext(){
+    // Send only compact, relevant slices (the demod bitstream can be long).
+    var d=S.demod, c={capture:S.name, summary:S.summaryData||null,
+      marker:(S.marker?{freq_hz:S.marker.f, t_s:S.marker.t}:null),
+      view:S.view, classification:S.classifyData||null,
+      bursts:(S.bursts?{count:S.bursts.count, list:(S.bursts.bursts||[]).slice(0,12)}:null),
+      frame_analysis:S.framesData||null,
+      demod:(d?{mode:d.mode,baud:d.baud,n_bits:d.n_bits,bits:(d.bits||'').slice(0,256),
+                f_offset_hz:d.f_offset_hz,bw_hz:d.bw_hz}:null)};
+    return c;
+  }
+  function aiAsk(q){
+    if(!S.name){ $('aiout').textContent='Load a capture first.'; return; }
+    $('aiout').textContent='thinking…';
+    fetch('/api/ai/signal',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:S.name, question:q, context:aiContext()})})
+      .then(function(r){return r.json();}).then(function(res){
+        if(res && res.enabled===false){ $('aiout').innerHTML='<span style="color:var(--accent)">'+esc(res.message||'AI is not enabled — add an API token in Settings › AI.')+'</span>'; return; }
+        if(!res || res.error || !res.answer){ $('aiout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((res&&res.error)||'no answer')+'</span>'; return; }
+        $('aiout').innerHTML=mdLite(res.answer);
+      }).catch(function(){ $('aiout').textContent='request failed'; });
+  }
+  $('aiask').addEventListener('click',function(){ aiAsk(($('aiq').value||'').trim()); });
+  $('aiq').addEventListener('keydown',function(e){ if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){ e.preventDefault(); aiAsk(($('aiq').value||'').trim()); } });
+  $('aichips').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; var q=b.getAttribute('data-q'); $('aiq').value=q; aiAsk(q); });
+  // Only show the card when the AI service is actually enabled.
+  fetch('/api/ai/status').then(function(r){return r.json();}).then(function(st){
+    if(st && st.enabled){ $('aicard').hidden=false; }
+  }).catch(function(){});
 
   // preselect a capture from ?name=
   var want=new URLSearchParams(location.search).get('name');

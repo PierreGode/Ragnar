@@ -25190,6 +25190,36 @@ def post_ai_pcap_analysis():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/ai/signal', methods=['POST'])
+def post_ai_signal():
+    """AI RF-analyst assistant for the Signal Analyzer. The page posts its current
+    analysis context + a free-form question; we ground it with freshly measured
+    facts from the capture and hand it to the AI."""
+    try:
+        ai_service = getattr(shared_data, 'ai_service', None)
+        if not ai_service or not ai_service.is_enabled():
+            return jsonify({'enabled': False,
+                            'message': 'AI service is not enabled — add an OpenAI token in Settings.'})
+        data = request.get_json(silent=True) or {}
+        question = (data.get('question') or '')
+        context = data.get('context') or {}
+        # Re-derive real measured facts from the capture so the AI is grounded,
+        # not dependent on the page assembling a perfect context.
+        facts = {}
+        name = data.get('name')
+        if name:
+            try:
+                import sigmf_analyzer
+                facts = sigmf_analyzer.summary(name)
+            except Exception as exc:
+                logger.debug(f"ai/signal: summary({name!r}) failed: {exc}")
+        answer = ai_service.analyze_signal(question, context, facts)
+        return jsonify({'enabled': True, 'answer': answer})
+    except Exception as e:
+        logger.error(f"Error getting AI signal analysis: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/ai/weaknesses')
 def get_ai_weakness_analysis():
     """Get AI-identified network weaknesses"""
