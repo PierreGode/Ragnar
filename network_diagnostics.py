@@ -6638,6 +6638,10 @@ _NTP_DISP_ALARM = 4.0
 _NTP_EVENTS_CAP = 200
 # tcpdump mode labels for a *time source* (something a client would sync to).
 _NTP_SERVER_MODES = ('Server', 'Broadcast', 'Symmetric Active', 'Symmetric Passive')
+# Symmetric association modes (1/2) — the crypto-NAK auth-bypass path (CVE-2015-7871).
+_NTP_SYM_MODES = ('Symmetric Active', 'Symmetric Passive')
+# Modes where a crypto-NAK is meaningful at all (peer/client/server exchanges).
+_NTP_NAK_MODES = ('Symmetric Active', 'Symmetric Passive', 'Client', 'Server', 'Broadcast')
 # Non-standard modes on 123 = ntpq control (6) / private-monlist (7); some tcpdump
 # builds print both as 'Reserved'. Either way it's query/recon/amplification, never
 # normal client<->server time exchange.
@@ -6656,6 +6660,8 @@ _NTP_HEADER_LEN = 48
 _NTP_EF_MIN_LEN = 28              # RFC 7822 minimum extension-field length
 _NTP_EF_LEN_FLOOR = 8            # absolute floor: type(2)+len(2)+4 body
 _NTP_MAC_SIZES = frozenset((0, 4, 20, 24))   # none / crypto-NAK / MD5 / SHA-1
+_NTP_CRYPTO_NAK_LEN = 4         # a 4-octet MAC = key ID, empty digest (crypto-NAK)
+_NTP_OFF_ORIGIN = 24            # u64 origin timestamp offset within the NTP header
 _NTP_EF_OFF_LEN = 2              # u16 total EF length (incl. header + padding)
 _NTP_EF_OFF_VALLEN = 16         # u32 value length — the crypto_recv() copy length
 _NTP_EF_VALUE_START = 20        # first octet of the value payload
@@ -6799,7 +6805,8 @@ def _parse_ntp_capture(output):
                'ntp_len': int(sm.group(7)),
                'stratum': None, 'sdesc': '', 'refid': '', 'disp': 0.0,
                'leap': None, 'xmit_unix': None, 'offset': None, 'origin': None,
-               'autokey': False, 'autokey_info': None, 'autokey_reasons': []}
+               'autokey': False, 'autokey_info': None, 'autokey_reasons': [],
+               'mac_len': None, 'crypto_nak': False, 'origin_zero': False}
 
         # Autokey / extension-field inspection. Prefer the exact wire bytes from the
         # -x hex dump (lets us catch a malformed EF = the CVE-2014-9295 exploit
@@ -6818,6 +6825,19 @@ def _parse_ntp_capture(output):
                 if trailer < _NTP_EF_MIN_LEN:
                     rec['autokey_reasons'] = ['ef_region_undersized']
                     rec['autokey_info'] = {'ef_len': None, 'region': trailer}
+
+        # MAC trailer classification for the crypto-NAK check (RN16 / CVE-2015-7871).
+        # A 4-octet trailer is a key ID with NO digest — a crypto-NAK. Read from the
+        # wire bytes when present, else from tcpdump's reported NTP length; a trailer
+        # of 4 is unambiguous (a real extension field is >= 28 bytes).
+        mac_trailer = None
+        if payload is not None and len(payload) >= _NTP_HEADER_LEN:
+            mac_trailer = len(payload) - _NTP_HEADER_LEN
+        elif rec['ntp_len'] is not None:
+            mac_trailer = rec['ntp_len'] - _NTP_HEADER_LEN
+        if mac_trailer in _NTP_MAC_SIZES and mac_trailer > 0:
+            rec['mac_len'] = mac_trailer
+            rec['crypto_nak'] = (mac_trailer == _NTP_CRYPTO_NAK_LEN)
 
         st = re.search(r'Stratum\s+(\d+)\s*\(([^)]*)\)', text)
         if st:
@@ -6844,6 +6864,18 @@ def _parse_ntp_capture(output):
                 rec['origin'] = float(om.group(1))
             except ValueError:
                 pass
+        # Zero origin timestamp (RN17 / CVE-2016-7431, CVE-2015-8138): the server's
+        # echo of the client's transmit nonce is all-zero, so the "reply" binds to no
+        # request the client actually made. Read from the wire bytes when present,
+        # else from the parsed text field (an explicit 0.0, not a missing field).
+        if payload is not None and len(payload) >= _NTP_OFF_ORIGIN + 8:
+            try:
+                rec['origin_zero'] = (int.from_bytes(
+                    payload[_NTP_OFF_ORIGIN:_NTP_OFF_ORIGIN + 8], 'big') == 0)
+            except Exception:
+                pass
+        elif rec['origin'] == 0.0:
+            rec['origin_zero'] = True
         xm = re.search(r'(?<!- )Transmit Timestamp:\s*([\d.]+)', text)
         if xm:
             try:
@@ -6953,8 +6985,9 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
         known = dict(baseline['servers'])
         had_baseline = True
 
-    PRIORITY = ['autokey-exploit', 'time-injection', 'rogue-server', 'kod',
-                'stratum-spoof', 'broadcast', 'recon', 'autokey', 'anomaly', 'clean']
+    PRIORITY = ['auth-bypass', 'autokey-exploit', 'time-injection', 'rogue-server',
+                'kod', 'stratum-spoof', 'broadcast', 'recon', 'autokey', 'anomaly',
+                'clean']
     verdict = 'clean'
     reasons = []
 
@@ -7094,6 +7127,50 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
             f"surface for CVE-2014-9295 and its siblings; disable it and use NTS "
             f"or symmetric keys")
 
+    # --- auth-bypass: crypto-NAK (CVE-2015-7871, "NAK to the Future") ---
+    # A 4-octet MAC is a key ID with an empty digest — a crypto-NAK. ntpd < 4.2.8p4
+    # accepted it as satisfying authentication when mobilizing an ephemeral SYMMETRIC
+    # association, so an off-path attacker could peer with the victim and then steer
+    # its clock (marking the real sources falsetickers). A NAK is a legitimate element
+    # in general ("I cannot authenticate you"); the exploit is the symmetric modes
+    # (1/2), so severity splits — symmetric is the bypass, other modes are only noted.
+    sym_nak_srcs = sorted({r['src'] for r in records
+                           if r.get('crypto_nak') and r['mode'] in _NTP_SYM_MODES})
+    other_nak_srcs = sorted({r['src'] for r in records
+                             if r.get('crypto_nak') and r['mode'] in _NTP_NAK_MODES
+                             and r['mode'] not in _NTP_SYM_MODES
+                             and r['src'] not in sym_nak_srcs})
+    for src in sym_nak_srcs:
+        bump('auth-bypass')
+        reasons.append(
+            f"NTP crypto-NAK on a symmetric association from {src} (4-byte MAC, "
+            f"empty digest) — the authentication-bypass path of CVE-2015-7871 "
+            f"('NAK to the Future'): ntpd < 4.2.8p4 mobilizes an unauthenticated peer "
+            f"that can then steer the clock. Upgrade ntp >= 4.2.8p4 / use NTS")
+    for src in other_nak_srcs:
+        bump('anomaly')
+        reasons.append(
+            f"NTP crypto-NAK from {src} — a peer signalling it cannot authenticate; "
+            f"benign in isolation, but the CVE-2015-7871 bypass rides the symmetric "
+            f"(peer) modes, so an unexpected NAK is worth noting")
+
+    # --- time-injection: mode-4 reply with a zero origin timestamp ---
+    # CVE-2016-7431 / CVE-2015-8138: the origin timestamp binds a response to a query
+    # the client actually sent. A zero origin on a SERVER reply echoes no request — an
+    # off-path spoofed response or origin-check bypass, accepted without ever seeing
+    # the client's packet. Distinct from the transmit-offset check (a bad time VALUE)
+    # and the on-path nonce collision above (a non-zero nonce reused). Gated to mode
+    # Server: mode 3/5 and the first packet of a symmetric exchange legitimately carry
+    # a zero origin, so alerting on those would be a guaranteed false positive.
+    zero_origin_srcs = sorted({r['src'] for r in server_recs
+                               if r['mode'] == 'Server' and r.get('origin_zero')})
+    for src in zero_origin_srcs:
+        bump('time-injection')
+        reasons.append(
+            f"NTP server {src} sent a reply with a zero origin timestamp — it echoed "
+            f"no client request (CVE-2016-7431 / CVE-2015-8138): an off-path spoofed "
+            f"response or origin-check bypass, accepted without seeing the query")
+
     # --- anomaly: unusable / forged time source ---
     for src in sorted(servers):
         s = servers[src]
@@ -7175,6 +7252,8 @@ def _ntp_analyze(records, seconds, baseline, learn=True, threshold=None):
         'control_count': len(control_recs),
         'autokey_count': len(ak_seen),
         'autokey_malformed': len(ak_bad),
+        'crypto_nak_count': sum(1 for r in records if r.get('crypto_nak')),
+        'zero_origin_count': len(zero_origin_srcs),
         'rate': round(len(records) / seconds, 2),
         'servers': [_pub(servers[s]) for s in sorted(servers)],
         'advisories': advisories,
@@ -7245,12 +7324,13 @@ def _ntp_selftest():
 
     def block(src, mode='Server', stratum=2, refid='17.253.14.125', xmit_off=0.0,
               disp='0.020000', leap=0, ver=4, rx=BASE, dst='192.168.1.50',
-              origin=None):
+              origin=None, ntp_len=48, origin_zero=False):
         """Craft one tcpdump -tt -v NTP packet block. xmit_off is how far the
         server's transmit time is from the capture time (the injected skew).
         origin is the echoed client nonce — by default a per-source value (real
         servers each echo a different client query), overridable to force the
-        on-path-forgery collision."""
+        on-path-forgery collision. ntp_len sets the reported NTP message length
+        (52 = a 4-byte crypto-NAK MAC); origin_zero emits an all-zero origin echo."""
         ntp_secs = rx + xmit_off + _NTP_UNIX_DELTA
         if origin is None:
             try:
@@ -7259,18 +7339,20 @@ def _ntp_selftest():
                 origin_secs = ntp_secs - 1
         else:
             origin_secs = origin + _NTP_UNIX_DELTA
+        origin_line = ('0.000000000 (1900-01-01T00:00:00Z)' if origin_zero
+                       else f'{origin_secs:.9f} (2026-05-28T20:26:39Z)')
         sdesc = {0: 'unspecified', 1: 'primary reference'}.get(
             stratum, 'secondary reference')
         return "\n".join([
             f"{rx:.6f} IP (tos 0x0, ttl 64, id 1, offset 0, flags [none], "
-            f"proto UDP (17), length 76)",
-            f"    {src}.123 > {dst}.123: NTPv{ver}, {mode}, length 48",
+            f"proto UDP (17), length {ntp_len + 28})",
+            f"    {src}.123 > {dst}.123: NTPv{ver}, {mode}, length {ntp_len}",
             f"\tLeap indicator:  ({leap}), Stratum {stratum} ({sdesc}), "
             f"poll 10 (1024s), precision -23",
             f"\tRoot Delay: 0.000000, Root dispersion: {disp}, "
             f"Reference-ID: {refid}",
             f"\t  Reference Timestamp:  {ntp_secs - 60:.9f} (2026-05-28T20:00:00Z)",
-            f"\t  Originator Timestamp: {origin_secs:.9f} (2026-05-28T20:26:39Z)",
+            f"\t  Originator Timestamp: {origin_line}",
             f"\t  Receive Timestamp:    {ntp_secs:.9f} (2026-05-28T20:26:40Z)",
             f"\t  Transmit Timestamp:   {ntp_secs:.9f} (2026-05-28T20:26:40Z)",
             f"\t    Originator - Receive Timestamp:  +1.000000000",
@@ -7364,6 +7446,49 @@ def _ntp_selftest():
     scenarios.append({'name': 'ntp-origin-parse', 'expect': 'origin!=None',
                       'got': f"origin={op[0].get('origin') if op else None}",
                       'pass': origin_ok})
+
+    # 14. crypto-NAK on a symmetric association (CVE-2015-7871) → auth-bypass.
+    r_nak = run('crypto-nak-symmetric',
+                block('10.0.0.1', mode='Symmetric Active', ntp_len=52),
+                15, base, 'auth-bypass')
+    scenarios.append({'name': 'crypto-nak-reason', 'expect': 'CVE-2015-7871 flagged',
+                      'got': 'present' if any('CVE-2015-7871' in x for x in r_nak['reasons'])
+                      else 'absent',
+                      'pass': any('CVE-2015-7871' in x for x in r_nak['reasons'])})
+    # 15. crypto-NAK parse: a 52-byte NTP message (48 + 4-byte MAC) is a crypto-NAK.
+    pn = _parse_ntp_capture(block('10.0.0.1', ntp_len=52))
+    nak_parse_ok = bool(pn and pn[0].get('crypto_nak') and pn[0].get('mac_len') == 4)
+    scenarios.append({'name': 'crypto-nak-parse', 'expect': 'crypto_nak+mac_len=4',
+                      'got': f"nak={pn[0].get('crypto_nak') if pn else None}"
+                             f",mac={pn[0].get('mac_len') if pn else None}",
+                      'pass': nak_parse_ok})
+    # 16. crypto-NAK in server mode is benign-in-isolation → anomaly, NOT auth-bypass.
+    r_naks = run('crypto-nak-server-benign',
+                 block('10.0.0.1', mode='Server', ntp_len=52), 15, base, 'anomaly')
+    scenarios.append({'name': 'crypto-nak-server-not-bypass',
+                      'expect': 'not auth-bypass',
+                      'got': r_naks['verdict'],
+                      'pass': r_naks['verdict'] != 'auth-bypass'})
+    # 17. zero origin timestamp on a mode-4 reply (CVE-2016-7431) → time-injection.
+    r_zo = run('zero-origin',
+               block('10.0.0.1', origin_zero=True), 15, base, 'time-injection')
+    scenarios.append({'name': 'zero-origin-reason', 'expect': 'CVE-2016-7431 flagged',
+                      'got': 'present' if any('CVE-2016-7431' in x for x in r_zo['reasons'])
+                      else 'absent',
+                      'pass': any('CVE-2016-7431' in x for x in r_zo['reasons'])})
+    # 18. zero-origin parse: the byte/text origin echo is recognised as all-zero.
+    pz = _parse_ntp_capture(block('10.0.0.1', origin_zero=True))
+    scenarios.append({'name': 'zero-origin-parse', 'expect': 'origin_zero=True',
+                      'got': f"origin_zero={pz[0].get('origin_zero') if pz else None}",
+                      'pass': bool(pz and pz[0].get('origin_zero'))})
+    # 19. FP guard: a zero origin in CLIENT mode (mode 3) is legitimate — no RN17.
+    r_zc = run('zero-origin-client-nofp',
+               block('10.0.0.1', mode='Client', origin_zero=True), 15, base, 'clean')
+    scenarios.append({'name': 'zero-origin-client-no-fp',
+                      'expect': 'no zero-origin finding',
+                      'got': 'clean' if not any('zero origin' in x for x in r_zc['reasons'])
+                      else 'flagged',
+                      'pass': not any('zero origin' in x for x in r_zc['reasons'])})
 
     # --- Autokey extension-field detector (byte-level, deterministic, no deps) ---
     def _ak_ef(ef_len, vallen, total=28):
