@@ -764,6 +764,23 @@ per-packet Unix timestamp via `-tt`) is parsed and classified:
   is **misaligned**, or is structurally impossible. That value-length overflow is the
   specific signature of **CVE-2014-9295 / CVE-2014-9750** and escalates to a
   **critical** verdict (ranked as such by the Network Integrity Monitor).
+- **Auth bypass — crypto-NAK *(new in v4)*** — a **4-octet MAC** (a key ID with an
+  **empty digest**) is a *crypto-NAK*. On a **symmetric** association (modes 1/2) that
+  is the **CVE-2015-7871** (&ldquo;NAK to the Future&rdquo;) authentication-bypass path:
+  `ntpd` < 4.2.8p4 mobilizes an unauthenticated peer that can then steer the clock, so
+  it escalates to a **critical `auth-bypass`** verdict. A crypto-NAK is a legitimate
+  protocol element in general (&ldquo;I cannot authenticate you&rdquo;), so a NAK in
+  client/server mode is only **noted** (`anomaly`) — the exploit is the peer modes. The
+  4-octet trailer is read from the reconstructed `-x` bytes, with a fallback to the
+  reported NTP length; a real extension field is ≥ 28 bytes, so a 4-byte trailer is
+  unambiguous.
+- **Zero origin timestamp *(new in v4)*** — a **mode-4 server reply** whose **origin
+  timestamp is all-zero** echoes no request the client actually sent — an **off-path
+  spoofed response** or origin-check bypass (**CVE-2016-7431** / **CVE-2015-8138**),
+  surfaced as **`time-injection`**. It is distinct from the transmit-offset check (a bad
+  time *value*) and the on-path nonce collision (a *non-zero* nonce reused). Gated to
+  server replies: mode 3 (client), mode 5 (broadcast) and the first packet of a
+  symmetric exchange legitimately carry a zero origin, so those never false-positive.
 
 The **first scan learns** the trusted time source(s) + their stratum into
 `data/ntp_watch.json`; after a legitimate NTP change, click **Trust current** to
