@@ -12823,6 +12823,136 @@ def wardriving_export(session_id):
         logger.error(f"Wardriving export error: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+# ---------------------------------------------------------------------------
+# Wardrive session upload -> WiGLE / WDGWars
+#
+# Ragnar already *exports* and *imports* WiGLE CSV; this adds the missing
+# piece - pushing a finished session straight to WiGLE and/or WDGWars
+# (wdgwars.pl, "WiGLE 2.0") through their upload APIs. Reuses the exact CSV
+# the export route produces, so the on-the-wire format is identical.
+# ---------------------------------------------------------------------------
+WIGLE_UPLOAD_URL = 'https://api.wigle.net/api/v2/file/upload'
+WDGWARS_UPLOAD_URL = 'https://wdgwars.pl/api/upload-csv'
+
+
+def _wardrive_session_csv(session_id):
+    """Build the WiGLE CSV for a session id (same path as the export route)."""
+    engine = _get_wardriving_engine()
+    from wardriving import WardrivingSession
+    session = WardrivingSession(engine.data_dir, session_id=session_id)
+    device_name = engine.device_name or shared_data.config.get('wardriving_device_name', 'Ragnar')
+    include_zigbee = bool(shared_data.config.get('wardriving_wigle_include_zigbee', False))
+    return session.export_wigle_csv(device_name=device_name, include_zigbee=include_zigbee)
+
+
+def _wardrive_located_count(csv_text):
+    """Count rows that carry a GPS fix (WiGLE cols 7/8 = lat/lon)."""
+    n = 0
+    for line in csv_text.splitlines()[2:]:          # skip WigleWifi banner + header
+        parts = line.split(',')
+        if len(parts) > 8 and parts[6].strip() and parts[7].strip():
+            n += 1
+    return n
+
+
+def _upload_wigle(csv_text):
+    name = (shared_data.config.get('wigle_api_name') or '').strip()
+    token = (shared_data.config.get('wigle_api_token') or '').strip()
+    if not (name and token):
+        return {'ok': False, 'error': 'WiGLE API name/token not configured'}
+    try:
+        import requests
+        r = requests.post(WIGLE_UPLOAD_URL, auth=(name, token),
+                          files={'file': ('ragnar.csv', csv_text, 'text/csv')},
+                          data={'donate': 'off'}, timeout=180)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {'raw': r.text[:300]}
+        return {'ok': bool(r.ok and body.get('success', r.ok)),
+                'status': r.status_code, 'response': body}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+def _upload_wdgwars(csv_text):
+    key = (shared_data.config.get('wdg_key') or '').strip()
+    if not key:
+        return {'ok': False, 'error': 'WDGWars API key not configured'}
+    try:
+        import requests
+        r = requests.post(WDGWARS_UPLOAD_URL, headers={'X-API-Key': key},
+                          files={'file': ('ragnar.csv', csv_text, 'text/csv')}, timeout=180)
+        try:
+            body = r.json()
+        except ValueError:
+            body = {'raw': r.text[:300]}
+        # WDGWars replies {"ok": true, ...} on accept, {"ok": false, "error": ...} otherwise
+        return {'ok': bool(r.ok and body.get('ok', r.ok)),
+                'status': r.status_code, 'response': body}
+    except Exception as e:
+        return {'ok': False, 'error': str(e)}
+
+
+@app.route('/api/wardriving/upload-config', methods=['GET', 'POST'])
+def wardriving_upload_config():
+    """Report (never reveal) or set WiGLE / WDGWars upload credentials.
+
+    GET  -> {wigle_configured, wdgwars_configured} booleans only (no secrets).
+    POST -> saves any of wigle_api_name / wigle_api_token / wdg_key present.
+    """
+    try:
+        if request.method == 'POST':
+            data = request.get_json(silent=True) or {}
+            for k in ('wigle_api_name', 'wigle_api_token', 'wdg_key'):
+                if k in data:
+                    shared_data.config[k] = str(data[k]).strip()
+            shared_data.save_config()
+        return jsonify({
+            'wigle_configured': bool((shared_data.config.get('wigle_api_name') or '').strip()
+                                     and (shared_data.config.get('wigle_api_token') or '').strip()),
+            'wdgwars_configured': bool((shared_data.config.get('wdg_key') or '').strip()),
+        })
+    except Exception as e:
+        logger.error(f"Wardriving upload-config error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/wardriving/upload/<session_id>', methods=['POST'])
+def wardriving_upload(session_id):
+    """Upload a session's WiGLE CSV to WiGLE and/or WDGWars.
+
+    Body: {"target": "wigle"|"wdgwars"|"both", "force": false}
+    Refuses a session with no GPS-located rows unless force=true, so we never
+    push location-less junk to the public databases.
+    """
+    try:
+        if not re.match(r'^[A-Za-z0-9_-]+$', session_id):
+            return jsonify({'error': 'Invalid session ID'}), 400
+        data = request.get_json(silent=True) or {}
+        target = (data.get('target') or 'wdgwars').lower()
+        if target not in ('wigle', 'wdgwars', 'both'):
+            return jsonify({'error': "target must be 'wigle', 'wdgwars' or 'both'"}), 400
+
+        csv_text = _wardrive_session_csv(session_id)
+        located = _wardrive_located_count(csv_text)
+        if located == 0 and not data.get('force'):
+            return jsonify({'success': False, 'located': 0,
+                            'error': 'No GPS-located networks in this session yet - get a fix first'}), 422
+
+        results = {}
+        if target in ('wigle', 'both'):
+            results['wigle'] = _upload_wigle(csv_text)
+        if target in ('wdgwars', 'both'):
+            results['wdgwars'] = _upload_wdgwars(csv_text)
+        overall = all(v.get('ok') for v in results.values())
+        return jsonify({'success': overall, 'located': located, 'results': results}), (200 if overall else 502)
+    except Exception as e:
+        logger.error(f"Wardriving upload error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/wardriving/gps')
 def wardriving_gps():
     """Get current GPS status and position."""
