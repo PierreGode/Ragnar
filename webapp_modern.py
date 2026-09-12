@@ -54,6 +54,7 @@ except ImportError:
 from init_shared import shared_data
 import git_updater
 import cyd_node
+import cyd_serial_bridge
 from safe_vault import SafeVault, SafeError, SafeLockedError
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
@@ -2665,16 +2666,16 @@ def _cyd_network_band_counts():
     return nets_24, nets_5
 
 
-@app.route('/api/cyd/status', methods=['GET'])
-def cyd_status():
-    """Compact, flat status for a CYD node's touch display (the firmware parses
-    it with lightweight string matching, so keep the shape flat and stable)."""
+def _cyd_build_status_dict():
+    """The compact, flat status a CYD node displays — shared by the HTTP status
+    endpoint and the USB-serial bridge. Flat on purpose: the firmware parses it
+    with lightweight string matching (no JSON library)."""
     try:
         unit = _mesh_unit_name()
     except Exception:
         unit = socket.gethostname()
     nets_24, nets_5 = _cyd_network_band_counts()
-    return jsonify({
+    return {
         'unit': unit,
         'mesh_nodes': _cyd_mesh_node_count(),
         'nets_24': nets_24,
@@ -2683,7 +2684,13 @@ def cyd_status():
         'bluetooth': _cyd_bluetooth_state(),
         'uptime': _cyd_uptime_sec(),
         'ts': int(time.time()),
-    })
+    }
+
+
+@app.route('/api/cyd/status', methods=['GET'])
+def cyd_status():
+    """Compact status for a WiFi-transport CYD node's touch display."""
+    return jsonify(_cyd_build_status_dict())
 
 
 @app.route('/api/cyd/ingest', methods=['POST'])
@@ -2774,10 +2781,52 @@ def cyd_action():
     return jsonify({'success': ok, 'accepted': action, 'status': status}), code
 
 
+# ── USB-serial bridge: the Pi end of a cabled CYD (CYD_TRANSPORT_SERIAL) ──────
+# Self-managing daemon: only opens a port while `cyd_serial_enabled` is set AND a
+# device is present, so it is safe to leave running. Reuses the same registry,
+# status builder and action allowlist as the WiFi transport.
+def _cyd_serial_on_ingest(payload):
+    cyd_node.record_ingest(payload, 'usb-serial')
+
+
+def _cyd_serial_on_action(node, action):
+    if action not in cyd_node.ALLOWED_ACTIONS:
+        return
+    status, _code = _cyd_dispatch_action(action, node)
+    cyd_node.record_action(node, action, 'usb-serial', status=status)
+
+
+_cyd_bridge = cyd_serial_bridge.CydSerialBridge(
+    build_status=_cyd_build_status_dict,
+    on_ingest=_cyd_serial_on_ingest,
+    on_action=_cyd_serial_on_action,
+    enabled=lambda: bool(shared_data.config.get('cyd_serial_enabled', False)),
+    baud=115200,
+)
+try:
+    _cyd_bridge.start()
+except Exception as _cyd_exc:  # pragma: no cover - never block startup
+    logger.debug(f"[cyd] serial bridge failed to start: {_cyd_exc}")
+
+
 @app.route('/api/cyd/nodes', methods=['GET'])
 def cyd_nodes():
-    """Operator view of CYD nodes that have reported in (session-gated)."""
-    return jsonify({'success': True, 'nodes': cyd_node.list_nodes()})
+    """Operator view of CYD nodes that have reported in (session-gated), plus the
+    USB-serial bridge's state."""
+    return jsonify({'success': True, 'nodes': cyd_node.list_nodes(),
+                    'serial': _cyd_bridge.status()})
+
+
+@app.route('/api/cyd/serial/toggle', methods=['POST'])
+def cyd_serial_toggle():
+    """Enable/disable the USB-serial bridge (persisted in config)."""
+    data = request.get_json(silent=True) or {}
+    shared_data.config['cyd_serial_enabled'] = bool(data.get('enabled'))
+    try:
+        shared_data.save_config()
+    except Exception as exc:
+        logger.debug(f"[cyd] save_config after serial toggle failed: {exc}")
+    return jsonify({'success': True, 'serial': _cyd_bridge.status()})
 
 
 @app.route('/api/cyd/tokens', methods=['GET'])

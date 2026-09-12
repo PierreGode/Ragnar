@@ -26,6 +26,34 @@ chip; it sends it commands and receives its findings.
         authenticated by a Bearer device token (not a mesh peer)
 ```
 
+## Two transports: USB-serial (cabled) or WiFi
+
+The firmware picks its transport at compile time (`CYD_TRANSPORT_SERIAL` in
+`config.h`):
+
+- **USB-serial (default, `=1`) — "one connected unit".** The node is wired to
+  the Pi and exchanges newline-delimited JSON over USB; **no WiFi association, no
+  device token, no provisioning**, and the 2.4 GHz radio is free for sensing the
+  whole time. The Pi end is `cyd_serial_bridge.py`, a self-managing daemon
+  thread started by the webapp — it only opens a port while the **USB-serial
+  bridge** toggle (Mesh → CYD Nodes) is on *and* a device is present, and
+  reconnects on unplug. Line protocol:
+  ```
+  node → Pi : {"t":"in", <sensor counts>}          (sensor report)
+              {"t":"ac","node":..,"action":".."}     (operator tap)
+  Pi → node : {"t":"st", <the /api/cyd/status dict>} (dashboard, ~2 s)
+  ```
+  The bridge feeds reports into the same registry and dispatches actions through
+  the same allowlist as the HTTP path — the endpoints below are the WiFi path's
+  door to the very same machinery.
+
+- **WiFi (`=0`).** The node joins WiFi and calls the REST API below, authenticated
+  by a Bearer device token, provisioned via the on-device captive portal.
+
+Serial I/O in the bridge is **poll-based** (`in_waiting`+`read`, never
+`readline`/`select`) — Ragnar runs with 700+ FDs and pyserial's select() path
+breaks past FD 1024 (the landmine `roomscan_bridge.py` documents).
+
 ## The one hard constraint: a single 2.4 GHz radio
 
 The WROOM‑32 has one 2.4 GHz radio shared by WiFi and BT, and **cannot be
@@ -111,13 +139,16 @@ Extras: RGB LED 4/16/17 (active LOW), LDR 34. See `config.h`.
 
 ## Provisioning & flashing
 
-The firmware ships **no baked-in secrets** — one generic image works on every
-node. Flash it the easy way from `cyd_firmware/flasher/index.html` (ESP Web
-Tools, Chrome/Edge, committed bins under `flasher/firmware/`), or build and
-upload with `arduino-cli`.
+Flash it from `cyd_firmware/flasher/index.html` (ESP Web Tools, Chrome/Edge,
+committed bins under `flasher/firmware/` — the **USB-serial build**), or build
+and upload with `arduino-cli`.
 
-On first boot — or when it can't connect, or when **BOOT** (GPIO0) is held at
-power-on — the node raises a **setup portal**: a SoftAP `Ragnar-CYD-setup`
+- **USB-serial build (default):** no provisioning — cable it to the Pi and turn
+  on the **USB-serial bridge** toggle (Mesh → CYD Nodes).
+- **WiFi build (`CYD_TRANSPORT_SERIAL 0`):** the firmware ships **no baked-in
+  secrets**; on first boot — or when it can't connect, or when **BOOT** (GPIO0)
+  is held at power-on — the node raises a **setup portal**: a SoftAP
+  `Ragnar-CYD-setup`
 (password `ragnarcyd`) + a captive form for WiFi SSID/password, Ragnar URL,
 device token and node name. Values persist in NVS (`Preferences`), the node
 reboots, connects, and appears under `/api/cyd/nodes`. Hold **BOOT** at power-on
@@ -136,5 +167,6 @@ Tailscale mesh itself is running.
 - [x] Wire `/api/cyd/action` to the live WIDS / BLE / Watchtower subsystems.
 - [x] Operator UI (nodes list + token management).
 - [x] Fill `nets_24` / `nets_5` from the kernel's cached scan (`iw scan dump`).
-- [x] On-device captive-portal provisioning (no secrets in `config.h`).
+- [x] On-device captive-portal provisioning (WiFi build; no secrets in `config.h`).
+- [x] USB-serial transport (`cyd_serial_bridge.py` + UI toggle) — cabled node.
 - [x] ESP Web Tools flasher page + committed bins (`cyd_firmware/flasher`).

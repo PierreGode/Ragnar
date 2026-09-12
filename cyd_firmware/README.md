@@ -10,23 +10,36 @@ A **companion node** for a Ragnar Pi built on the cheap, ubiquitous
 > screen, lets you trigger a small allowlist of Ragnar actions, and scans
 > 2.4 GHz with its own radio and reports the counts back to Ragnar.
 
+## Two ways to connect it to the Pi
+
+Set `CYD_TRANSPORT_SERIAL` in `config.h`:
+
+- **USB-serial (default, `=1`) — one cabled unit.** Wire the CYD to the Pi over
+  USB; that cable is power **and** the data link. No WiFi, no token, no
+  provisioning. Turn on the **USB-serial bridge** toggle under *Ragnar Mesh →
+  CYD Nodes* and it works. This is the "sits-together" build.
+- **WiFi (`=0`).** The node joins your WiFi and talks to Ragnar's REST API,
+  provisioned by the on-device captive portal (below).
+
+The screen is a **native dashboard the ESP32 draws** — Ragnar can't render its
+actual web page on this panel (the ESP32 owns the display). For the real web UI
+on a touchscreen, use a Pi-native display + Ragnar's kiosk mode instead.
+
 ## What it does
 
-The single 2.4 GHz radio can't be joined to WiFi **and** sniff other channels at
-the same time, so the firmware **time‑shares** in a duty cycle:
+The 2.4 GHz radio time-shares between sensing and (WiFi build) talking to Ragnar:
 
 ```
- CONNECT + SYNC   GET /api/cyd/status   (pull status for the display)
-      │           POST /api/cyd/ingest  (push last window's sensor counts)
-      │           POST /api/cyd/action  (flush any queued operator taps)
+ SYNC   serial: push counts + flush taps + read status   (cable; radio stays free)
+        wifi:   GET /api/cyd/status · POST ingest · POST action
       ▼
- DISCONNECT ─ WiFi promiscuous sweep ch 1..13  (beacons/probes/deauths/BSSIDs)
+ SNIFF  WiFi promiscuous sweep ch 1..13  (beacons/probes/deauths/BSSIDs)
       ▼
- DISCONNECT ─ BLE advertisement scan           (advert count)   ── loops ──
+ BLE    advertisement scan               (advert count)   ── loops ──
 ```
 
-The screen always shows the **last‑synced** values, so status and findings are
-near‑real‑time, not continuous — the price of a WROOM‑32 vs an S3/C5.
+The screen shows the **last-synced** values — near-real-time, not continuous.
+(In the serial build there's no WiFi-connect phase, so the radio sniffs more.)
 
 Three touch tabs: **STATUS** (Ragnar's live state), **SCAN** (this node's own
 2.4 GHz counts), **ACT** (buttons that queue an allowlisted action).
@@ -71,11 +84,24 @@ arduino-cli upload -p /dev/ttyUSB0 \
 
 To drop BLE (saves flash/RAM), set `CYD_ENABLE_BLE 0` in `config.h`.
 
-## Provisioning (on-device setup portal)
+## Connecting it (USB-serial build — the default)
 
-The firmware carries **no baked-in secrets** — a single generic image works on
-any node. On first boot (or when it can't connect, or when **BOOT** is held at
-power-on) the node raises its own AP and serves a setup form:
+No provisioning at all. Flash it, keep it plugged into the Pi over USB, then in
+Ragnar open **Ragnar Mesh → CYD Nodes** and switch on the **USB-serial bridge**
+toggle. `cyd_serial_bridge.py` (a daemon thread in the webapp) auto-detects the
+port, feeds the node's reports into the same registry, dispatches its taps
+through the same allowlist, and pushes status back for the display. Toggle off
+to release the port.
+
+> If the port doesn't appear, the Pi user needs access to it (add to the
+> `dialout` group) — Ragnar runs as root here, so this is usually a non-issue.
+
+## Provisioning the WiFi build (on-device setup portal)
+
+The WiFi build (`CYD_TRANSPORT_SERIAL 0`) carries **no baked-in secrets** — a
+single generic image works on any node. On first boot (or when it can't connect,
+or when **BOOT** is held at power-on) the node raises its own AP and serves a
+setup form:
 
 1. In Ragnar, issue a device token under **Ragnar Mesh → CYD Nodes** (or
    `POST /api/cyd/token/generate` `{"name":"cyd-01"}`) — the raw token is shown
@@ -105,8 +131,10 @@ scoped and fail‑closed in `webapp_modern.py`'s `check_authentication()`.
   counts + token generate/list/revoke).
 - ✅ `/api/cyd/status` `nets_24`/`nets_5` come from the kernel's cached scan
   (`iw scan dump`, memoised 30 s — non‑disruptive).
-- ✅ On-device captive-portal provisioning (no secrets in `config.h`).
-- ✅ ESP Web Tools flasher page (`flasher/index.html`) + committed bins.
+- ✅ **USB-serial transport** (`cyd_serial_bridge.py` + a UI toggle) — a node
+  cabled to the Pi, no WiFi/token. PTY-loopback verified.
+- ✅ On-device captive-portal provisioning for the WiFi build (no secrets in `config.h`).
+- ✅ ESP Web Tools flasher page (`flasher/index.html`) + committed bins (serial build).
 
 See [docs/cyd-hybrid-node.md](../docs/cyd-hybrid-node.md) for the full design
 and API reference.

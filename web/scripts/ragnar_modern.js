@@ -24238,6 +24238,16 @@ function loadCydNodes() {
     const box = document.getElementById('cyd-nodes-list');
     if (!box) return;
     networkAwareFetch('/api/cyd/nodes').then(r => r.json()).then(d => {
+        // USB-serial bridge state (for a node cabled to this Pi)
+        const s = (d && d.serial) || {};
+        const cb = document.getElementById('cyd-serial-toggle');
+        if (cb) cb.checked = !!s.enabled;
+        const ss = document.getElementById('cyd-serial-status');
+        if (ss) {
+            ss.textContent = !s.enabled ? 'off'
+                : (s.connected ? ('linked · ' + (s.port || '')) : (s.error || 'waiting for device'));
+            ss.className = 'text-xs ' + (s.enabled && s.connected ? 'text-green-400' : 'text-gray-500');
+        }
         const nodes = (d && d.nodes) || [];
         if (!nodes.length) {
             box.innerHTML = '<p class="text-gray-500 text-sm p-4">No CYD nodes have reported in yet. Flash a node with a device token and point it at this unit.</p>';
@@ -24313,10 +24323,19 @@ function cydRevokeToken(id) {
       .catch(() => { showNotification('Revoke failed', 'error'); });
 }
 
+function cydToggleSerial(on) {
+    networkAwareFetch('/api/cyd/serial/toggle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !!on })
+    }).then(r => r.json()).then(() => loadCydNodes())
+      .catch(() => { showNotification('Serial bridge toggle failed', 'error'); });
+}
+
 window.loadCydNodes = loadCydNodes;
 window.loadCydTokens = loadCydTokens;
 window.cydGenerateToken = cydGenerateToken;
 window.cydRevokeToken = cydRevokeToken;
+window.cydToggleSerial = cydToggleSerial;
 function _xferStartPolling() { _xferStopPolling(); _xferPollTimer = setInterval(xferRefresh, 2000); }
 function _xferStopPolling() { if (_xferPollTimer) { clearInterval(_xferPollTimer); _xferPollTimer = null; } }
 function xferRefresh() { loadXferTransfers(); loadXferInbox(); }

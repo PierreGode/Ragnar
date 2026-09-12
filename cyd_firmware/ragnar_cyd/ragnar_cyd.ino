@@ -290,16 +290,8 @@ static String jsonStr(const String &body, const char *key) {
   return body.substring(q1 + 1, q2);
 }
 
-static bool httpGetStatus() {
-  HTTPClient http;
-  http.setConnectTimeout(2000);
-  http.setTimeout(2500);
-  http.begin(g_cfg.url + "/api/cyd/status");
-  http.addHeader("Authorization", String("Bearer ") + g_cfg.token);
-  int code = http.GET();
-  if (code != 200) { http.end(); return false; }
-  String body = http.getString();
-  http.end();
+// Apply a status JSON body (shared by the HTTP and serial transports).
+static void applyStatus(const String &body) {
   g_rs.meshNodes = jsonInt(body, "mesh_nodes");
   g_rs.nets24    = jsonInt(body, "nets_24");
   g_rs.nets5     = jsonInt(body, "nets_5");
@@ -311,6 +303,21 @@ static bool httpGetStatus() {
   if (un.length()) { strncpy(g_rs.unitName, un.c_str(), sizeof(g_rs.unitName) - 1); g_rs.unitName[sizeof(g_rs.unitName)-1]=0; }
   g_rs.ok = true;
   g_rs.lastSyncMs = millis();
+  g_needRedraw = true;
+}
+
+#if !CYD_TRANSPORT_SERIAL
+static bool httpGetStatus() {
+  HTTPClient http;
+  http.setConnectTimeout(2000);
+  http.setTimeout(2500);
+  http.begin(g_cfg.url + "/api/cyd/status");
+  http.addHeader("Authorization", String("Bearer ") + g_cfg.token);
+  int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  String body = http.getString();
+  http.end();
+  applyStatus(body);
   return true;
 }
 
@@ -358,6 +365,50 @@ static bool wifiConnect() {
   }
   return WiFi.status() == WL_CONNECTED;
 }
+#endif // !CYD_TRANSPORT_SERIAL
+
+// ════════════════════════════════════════════════════════════════════════════
+//  USB-serial transport — newline-delimited JSON to/from cyd_serial_bridge.py
+// ════════════════════════════════════════════════════════════════════════════
+#if CYD_TRANSPORT_SERIAL
+// Pi -> node: {"t":"st","unit":..,"mesh_nodes":..,"nets_24":..,"nets_5":..,
+//              "threat":..,"bluetooth":"idle","uptime":..}
+// node -> Pi: {"t":"in", <sensor counts>}   and   {"t":"ac","action":".."}
+static void handleSerialLine(const String &line) {
+  if (line.indexOf("\"st\"") < 0) return;   // only status frames are inbound
+  applyStatus(line);
+}
+
+// Drain any pending inbound bytes and apply complete lines (non-blocking).
+static void serialDrain() {
+  static String buf;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n') { if (buf.length()) handleSerialLine(buf); buf = ""; }
+    else if (c != '\r' && buf.length() < 512) buf += c;
+  }
+}
+
+static void serialSendIngest() {
+  Serial.print("{\"t\":\"in\",\"node\":\"");
+  Serial.print(g_cfg.name);
+  Serial.print("\",\"beacons\":");  Serial.print((uint32_t)g_sc.beacons);
+  Serial.print(",\"probes\":");     Serial.print((uint32_t)g_sc.probes);
+  Serial.print(",\"deauths\":");    Serial.print((uint32_t)g_sc.deauths);
+  Serial.print(",\"frames\":");     Serial.print((uint32_t)g_sc.frames);
+  Serial.print(",\"bssids\":");     Serial.print(g_sc.bssids);
+  Serial.print(",\"ble_adv\":");    Serial.print(g_sc.bleAdv);
+  Serial.println("}");
+}
+
+static void serialSendAction(const String &action) {
+  Serial.print("{\"t\":\"ac\",\"node\":\"");
+  Serial.print(g_cfg.name);
+  Serial.print("\",\"action\":\"");
+  Serial.print(action);
+  Serial.println("\"}");
+}
+#endif // CYD_TRANSPORT_SERIAL
 
 // ════════════════════════════════════════════════════════════════════════════
 //  UI
@@ -495,7 +546,9 @@ static void handleTouch(int16_t px, int16_t py) {
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Setup portal — SoftAP + captive form to provision WiFi / URL / token / name
+//  (WiFi transport only; the serial build is cabled and needs no provisioning)
 // ════════════════════════════════════════════════════════════════════════════
+#if !CYD_TRANSPORT_SERIAL
 static WebServer g_portalServer(80);
 static DNSServer g_portalDNS;
 
@@ -591,12 +644,13 @@ static void runConfigPortal() {
     delay(5);
   }
 }
+#endif // !CYD_TRANSPORT_SERIAL
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Lifecycle
 // ════════════════════════════════════════════════════════════════════════════
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(CYD_SERIAL_BAUD);
 
   pinMode(PIN_LED_R, OUTPUT); pinMode(PIN_LED_G, OUTPUT); pinMode(PIN_LED_B, OUTPUT);
   digitalWrite(PIN_LED_R, HIGH); digitalWrite(PIN_LED_G, HIGH); digitalWrite(PIN_LED_B, HIGH); // off (active LOW)
@@ -611,14 +665,17 @@ void setup() {
   pinMode(TOUCH_IRQ, INPUT);
   touchSPI.begin(TOUCH_SCLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
 
-  // Provisioning: load saved config; enter the setup portal if unconfigured or
-  // if BOOT is held at power-on (a deliberate "reconfigure me" gesture).
+  loadConfig();   // node name (+ optional WiFi seeds)
+#if CYD_TRANSPORT_SERIAL
+  Serial.setTimeout(20);   // cabled to the Pi; cyd_serial_bridge.py is the link
+#else
+  // WiFi transport: enter the setup portal if unconfigured or if BOOT is held.
   pinMode(PIN_BOOT_BUTTON, INPUT_PULLUP);
-  loadConfig();
   bool forcePortal = (digitalRead(PIN_BOOT_BUTTON) == LOW);
   if (forcePortal || !haveConfig()) {
     runConfigPortal();   // never returns — reboots on save
   }
+#endif
 
   setStatus("init BLE/WiFi", WHITE);
   render();
@@ -638,6 +695,9 @@ static void pollTouchFor(uint32_t ms) {
   uint32_t start = millis();
   static uint32_t lastTap = 0;
   while (millis() - start < ms) {
+#if CYD_TRANSPORT_SERIAL
+    serialDrain();   // keep the display current with the Pi's status pushes
+#endif
     int16_t px, py;
     if (touchRead(px, py) && millis() - lastTap > 250) {
       lastTap = millis();
@@ -649,7 +709,21 @@ static void pollTouchFor(uint32_t ms) {
 }
 
 void loop() {
-  // ── 1) CONNECT + SYNC ───────────────────────────────────────────────────────
+  // ── 1) SYNC WITH RAGNAR ─────────────────────────────────────────────────────
+#if CYD_TRANSPORT_SERIAL
+  // Cabled transport: push our counts, flush queued actions, and read whatever
+  // status the Pi has sent. serialDrain() also runs inside pollTouchFor so the
+  // display keeps up with the Pi's ~2 s status pushes.
+  digitalWrite(PIN_LED_B, LOW);          // blue = linked
+  serialSendIngest();
+  { String a; while (actionDequeue(a)) serialSendAction(a); }
+  serialDrain();
+  setStatus("usb-serial", gfx->color565(70,200,120));
+  digitalWrite(PIN_LED_B, HIGH);
+  g_needRedraw = true;
+  render();
+  pollTouchFor(CYD_SYNC_WINDOW_MS);
+#else
   setStatus("connecting wifi", gfx->color565(230,170,50));
   if (g_needRedraw) render();
   if (wifiConnect()) {
@@ -675,6 +749,7 @@ void loop() {
     render();
     pollTouchFor(CYD_SYNC_WINDOW_MS);
   }
+#endif
 
   // ── 2) WiFi promiscuous sweep (disconnected) ────────────────────────────────
   setStatus("sniffing 2.4G", gfx->color565(200,120,255));

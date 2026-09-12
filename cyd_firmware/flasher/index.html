@@ -51,8 +51,11 @@
       <h2>What you get</h2>
       <p class="sub">A companion node for a Ragnar Pi. It shows Ragnar's live status on the
       touch screen, lets you trigger a few allowlisted actions, and scans 2.4 GHz
-      (WiFi + BLE) with its own radio, reporting the counts home. First boot raises a
-      <strong>setup portal</strong> — no need to bake WiFi or tokens into the image.</p>
+      (WiFi + BLE) with its own radio, reporting the counts home. This is the
+      <strong>USB-cabled build</strong>: plug it into the Pi, flip on the
+      <em>USB-serial bridge</em> in Ragnar, and it works — no WiFi, no tokens, no
+      provisioning. (A WiFi build with a captive-portal setup exists too; set
+      <code>CYD_TRANSPORT_SERIAL 0</code> in <code>config.h</code> and rebuild.)</p>
       <div class="grid">
         <div><span>Chip:</span> ESP32-WROOM-32</div>
         <div><span>Display:</span> 2.8″ ILI9341 240×320</div>
@@ -77,16 +80,16 @@
           <span slot="not-allowed" class="unsupported">This page must be served over HTTPS (or localhost) to flash.</span>
         </esp-web-install-button>
       </div>
-      <div class="note">Flashing <strong>erases</strong> the board. After it reboots, join the
-        <code>Ragnar-CYD-setup</code> WiFi (password <code>ragnarcyd</code>) and open the
-        address shown on screen to enter your WiFi + Ragnar URL + device token.</div>
+      <div class="note">Flashing <strong>erases</strong> the board. Keep it plugged into the
+        Pi over USB afterwards — that cable is both power and the data link.</div>
     </div>
 
     <div class="card">
       <h2>Then, in Ragnar</h2>
-      <p class="sub">Generate a device token under <strong>Ragnar Mesh → CYD Nodes</strong>
-      (or <code>POST /api/cyd/token/generate</code>), paste it into the node's setup form,
-      and it appears in the node list once it reports in. Full guide:
+      <p class="sub">Open <strong>Ragnar Mesh → CYD Nodes</strong> and turn on the
+      <strong>USB-serial bridge</strong> toggle. The node connects over the cable, its
+      screen fills in, and it appears in the node list — no token needed for the cabled
+      build. Full guide:
       <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/cyd-hybrid-node.md" target="_blank" rel="noopener">docs/cyd-hybrid-node.md</a>.</p>
     </div>
   </div>

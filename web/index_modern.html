@@ -3838,6 +3838,13 @@
                         <button onclick="loadCydNodes()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
                     </div>
                     <p class="text-sm text-gray-400 mb-3">Cheap-Yellow-Display (ESP32-2432S028R) companions running the <code class="text-gray-500">cyd_firmware/ragnar_cyd</code> firmware. Each is a 2.4&nbsp;GHz sensor with a touch dashboard — not a mesh peer. It reports its own beacon/probe/deauth/BLE counts and may request an allowlisted action from its screen. See <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/cyd-hybrid-node.md" class="text-sky-400 hover:underline" target="_blank" rel="noopener">the guide</a>.</p>
+                    <div class="flex items-center justify-between gap-2 mb-3 flex-wrap">
+                        <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                            <input id="cyd-serial-toggle" type="checkbox" onchange="cydToggleSerial(this.checked)" class="rounded bg-slate-900 border-slate-700">
+                            USB-serial bridge <span class="text-xs text-gray-500">— for a node cabled to this Pi</span>
+                        </label>
+                        <span id="cyd-serial-status" class="text-xs text-gray-500">off</span>
+                    </div>
                     <div id="cyd-nodes-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
                 </div>
 

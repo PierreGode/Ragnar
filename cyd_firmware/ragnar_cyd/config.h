@@ -8,8 +8,9 @@
  *   - RGB LED (active LOW), LDR, speaker amp, microSD slot
  *   - 2.4 GHz only radio shared by WiFi + BT (no 5 GHz / no WiFi 6)
  *
- * Copy-and-edit file: put your WiFi creds, Ragnar URL and the device token
- * (generated in Ragnar: Config -> CYD nodes -> Generate token) below.
+ * Transport is chosen by CYD_TRANSPORT_SERIAL below: USB-serial (cabled to the
+ * Pi, default) or WiFi (provisioned on-device via the setup portal). Neither
+ * needs secrets baked in here.
  */
 #ifndef RAGNAR_CYD_CONFIG_H
 #define RAGNAR_CYD_CONFIG_H
@@ -43,6 +44,16 @@
 
 // Compile-time feature gates (BLE+WiFi+GFX is tight on a 4 MB / no-PSRAM WROOM-32)
 #define CYD_ENABLE_BLE       1       // set 0 to drop BLE (saves flash/RAM)
+
+// ── Transport to Ragnar ───────────────────────────────────────────────────────
+// 1 = USB SERIAL: the node is cabled to the Pi and exchanges newline-delimited
+//     JSON over USB (run cyd_serial_bridge.py on the Pi). No WiFi association,
+//     no provisioning portal, no baked-in URL/token — the cable IS the link, so
+//     the 2.4 GHz radio is free for sensing. This is the "one connected unit".
+// 0 = WIFI: the node joins WiFi and talks to Ragnar's REST API (needs the setup
+//     portal / a device token).
+#define CYD_TRANSPORT_SERIAL 1
+#define CYD_SERIAL_BAUD      115200
 
 // ── TFT (ILI9341) — hardware VSPI ─────────────────────────────────────────────
 #define TFT_SCLK   14
