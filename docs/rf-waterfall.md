@@ -218,6 +218,13 @@ that requests windows:
 - **Spectrum + time-envelope** panels for the shown window.
 - **Burst / packet list** — automatic on/off detection (start/end/BW/level);
   click a row to zoom to it and pre-fill the demodulator.
+- **Signals survey** — finds **every simultaneous carrier** in the window (an
+  STFT → per-frame peak detection above the noise floor → tracks linked across
+  time), listing each with its frequency, bandwidth, time span and SNR. Click a
+  row to zoom + mark that carrier. A min-SNR control (default 12 dB) trades
+  weak-signal reach for a cleaner list — so a busy band's signals become
+  individually selectable. Route `/analyze/signals`; see the
+  [roadmap](rf-analyzer-roadmap.md) (Segment 10).
 - **Demodulate** — shift to the marked signal, low-pass to a chosen bandwidth,
   and demodulate **OOK/AM** (envelope) or **FSK/FM** (instantaneous frequency),
   estimate the symbol rate and **recover a bitstream** (view as binary or **hex**,

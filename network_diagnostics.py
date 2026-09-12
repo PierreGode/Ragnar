@@ -22320,6 +22320,14 @@ def register_network_diagnostics(app, logger=None):
                         f_offset_hz=_fl(a.get('f_offset')) or 0.0,
                         t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), amax_hz=_fl(a.get('amax')))
 
+    @app.route('/api/net/rtl/analyze/signals', methods=['GET'])
+    def net_rtl_analyze_signals():
+        a = request.args
+        return _analyze(sigmf_analyzer.signals, name=a.get('name', ''),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')),
+                        snr_db=_fl(a.get('snr_db')) or 12.0,
+                        nfft=int(_fl(a.get('nfft')) or 512))
+
     @app.route('/api/net/rtl/analyze/constellation_demod', methods=['GET'])
     def net_rtl_analyze_constellation_demod():
         a = request.args
