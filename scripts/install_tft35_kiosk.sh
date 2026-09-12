@@ -2,6 +2,13 @@
 # Ragnar SPI TFT kiosk installer — MPI3501 / ILI9486 3.5" display with ADS7846 touch.
 # Idempotent: safe to re-run; only installs what's missing.
 #
+# MODE-AWARE: the on-screen kiosk follows the active mode. Ragnar and its built-in
+# Pwnagotchi mode never run together (switching to Pwnagotchi stops ragnar.service
+# and :8000, and serves the Pwnagotchi web UI on :8080). The kiosk therefore points
+# Chromium at whichever UI is live — Ragnar (:8000) or Pwnagotchi (:8080) — and
+# relaunches on a mode switch, via scripts/ragnar_tft_kiosk.sh. This makes an
+# all-in-one box (Ragnar + Pwnagotchi + SPI TFT) show the right screen at all times.
+#
 # Supported displays (ILI9486 + ADS7846, standard GPIO pinout):
 #   - MPI3501 Display-F 3.5" 480x320 (tested)
 #   - Waveshare 3.5" (A)
@@ -246,38 +253,33 @@ echo "[tft35-kiosk] ragnar service drop-in written -> $RAGNAR_DROPIN"
 # ---------------------------------------------------------------------------
 # kiosk-tft systemd service
 # ---------------------------------------------------------------------------
+# Install the mode-aware kiosk runner (picks :8000 vs :8080 live, relaunches on switch)
+install -m 0755 "$REPO_ROOT/scripts/ragnar_tft_kiosk.sh" /usr/local/bin/ragnar-tft-kiosk
+echo "[tft35-kiosk] mode-aware runner installed -> /usr/local/bin/ragnar-tft-kiosk"
+
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Ragnar TFT Kiosk — Chromium on 3.5" SPI display (MPI3501/ILI9486)
+Description=Ragnar TFT Kiosk — Chromium on 3.5" SPI display (MPI3501/ILI9486), mode-aware
+# Ordered after ragnar.service but NOT Requires= it: in Pwnagotchi mode ragnar.service
+# is stopped, and the kiosk must keep running to show the Pwnagotchi UI on :8080.
 After=ragnar.service network.target
-Requires=ragnar.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
 [Service]
 User=$KIOSK_USER
-# Wait for Ragnar web server to be ready (up to 60s)
-ExecStartPre=/bin/bash -c 'for i in \$(seq 1 30); do curl -s http://localhost:8000 >/dev/null 2>&1 && break; sleep 2; done'
+# Wait for EITHER Ragnar (:8000) or Pwnagotchi (:8080) to answer — the box may boot
+# straight into Pwnagotchi mode, where :8000 never comes up.
+ExecStartPre=/bin/bash -c 'for i in \$(seq 1 30); do curl -s http://localhost:8000 >/dev/null 2>&1 && break; curl -s http://localhost:8080 >/dev/null 2>&1 && break; sleep 2; done'
+# Start X + touch calibration + hide cursor, then hand off to the mode-aware runner,
+# which points Chromium at whichever UI is live and relaunches it on a mode switch.
 ExecStart=/bin/bash -c '\\
     sudo Xorg :1 -nolisten tcp vt7 & \\
-    sleep 4 && \\
-    DISPLAY=:1 xinput set-prop "ADS7846 Touchscreen" "Coordinate Transformation Matrix" 1 0 0.003 0 1 0.048 0 0 1 && \\
+    sleep 4 ; \\
+    DISPLAY=:1 xinput set-prop "ADS7846 Touchscreen" "Coordinate Transformation Matrix" 1 0 0.003 0 1 0.048 0 0 1 ; \\
     DISPLAY=:1 unclutter -idle 0 -root & \\
-    exec DISPLAY=:1 $BROWSER_BIN \\
-        --no-sandbox \\
-        --kiosk \\
-        --noerrdialogs \\
-        --disable-infobars \\
-        --disable-session-crashed-bubble \\
-        --disable-restore-session-state \\
-        --disable-features=TranslateUI \\
-        --disable-pinch \\
-        --overscroll-history-navigation=0 \\
-        --disable-gpu \\
-        --force-device-scale-factor=0.5 \\
-        --touch-events=enabled \\
-        http://localhost:8000'
-ExecStop=/bin/bash -c 'pkill -f "$BROWSER_BIN.*localhost:8000"; pkill -f "Xorg :1"'
+    exec env DISPLAY=:1 RAGNAR_BROWSER=$BROWSER_BIN /usr/local/bin/ragnar-tft-kiosk'
+ExecStop=/bin/bash -c 'pkill -f ragnar-tft-kiosk; pkill -f "$BROWSER_BIN.*user-data-dir"; pkill -f "Xorg :1"'
 Restart=on-failure
 RestartSec=10
 

@@ -274,6 +274,71 @@ The one-shot flags are what Pwnagotchi's own web UI MANU/AUTO buttons write, so 
 
 ---
 
+## 🖥️ All-in-one SPI TFT kiosk (both modes on one screen)
+
+If you run Ragnar + Pwnagotchi as an all-in-one box (e.g. a Pi 5 with a 3.5"
+MPI3501/ILI9486 SPI TFT and ADS7846 touch), you can have the little screen mirror
+the web UI of whichever mode is active:
+
+```bash
+sudo bash scripts/install_tft35_kiosk.sh
+sudo reboot
+```
+
+The kiosk is **mode-aware**. Because Ragnar and Pwnagotchi never run at the same
+time — switching to Pwnagotchi stops `ragnar.service` (and `:8000`) and serves the
+Pwnagotchi web UI on `:8080` — a fixed-URL kiosk would show a dead page for the
+whole time you were hunting. Instead the runner (`scripts/ragnar_tft_kiosk.sh`)
+points Chromium at whichever UI answers and relaunches it when you swap:
+
+| Active mode | On-screen |
+|-------------|-----------|
+| Ragnar      | `http://localhost:8000/?kiosk=1` |
+| Pwnagotchi  | `http://localhost:8080/` |
+
+Per-mode Chromium zoom is tunable via the service environment
+(`RAGNAR_TFT_RAGNAR_SCALE`, default `0.5` for the dense dashboard;
+`RAGNAR_TFT_PWN_SCALE`, default `1.0`).
+
+### Touch calibration
+
+The panel shows up as `ADS7846 Touchscreen`. The tap position depends on the
+display **rotation** you set on the overlay (`dtoverlay=tft35a:rotate=…`), so the
+touch axes have to be transformed to match. Test a matrix live (applies instantly,
+no restart) and, once taps land where you press, persist it:
+
+```bash
+# find the device + test live (drag a finger and watch the cursor track it)
+export DISPLAY=:1   # kiosk-tft runs X on :1
+xinput set-prop "ADS7846 Touchscreen" "Coordinate Transformation Matrix" <9 values>
+```
+
+Known-good transformation matrices by rotation (portrait 320×480 is `rotate=0`):
+
+| Overlay rotate | Orientation      | `Coordinate Transformation Matrix` |
+|----------------|------------------|------------------------------------|
+| `0`            | portrait         | `1 0 0 0 1 0 0 0 1` (identity; the installer adds a small `1 0 0.003 0 1 0.048 0 0 1` offset for the MPI3501) |
+| `90`           | landscape        | `0 -1 1 1 0 0 0 0 1` (verified on a Pi 5 + MPI3501) |
+| `180`          | portrait flipped | `-1 0 1 0 -1 1 0 0 1` |
+| `270`          | landscape flipped| `0 1 0 -1 0 1 0 0 1` |
+
+To make it permanent, drop it into an `xorg.conf.d` rule (matches by product name,
+so it's independent of the `/dev/input/eventN` number):
+
+```
+# /etc/X11/xorg.conf.d/98-touch-calibration.conf
+Section "InputClass"
+    Identifier "ADS7846 touch calibration"
+    MatchProduct "ADS7846 Touchscreen"
+    Option "TransformationMatrix" "0 -1 1 1 0 0 0 0 1"
+EndSection
+```
+
+Resistive panels tap most reliably with a stylus. If you only want a status
+display, disable touch entirely with `Option "Ignore" "on"` in the same block.
+
+---
+
 ## 🌐 API Endpoints
 
 | Method | Endpoint | Description |
