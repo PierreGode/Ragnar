@@ -2665,7 +2665,8 @@ IOS-XE / NX-OS version-in-range postures.
 - CLI: `python3 network_diagnostics.py cisco-guard [--iface I] [--seconds N] [--json]`
 
 #### Juniper Guard
-Juniper J-Web (SRX/EX), Session Smart Router, Junos Space and Junos-Evolved. Fully
+Juniper J-Web (SRX/EX), Session Smart Router (incl. **Conductor** / **WAN Assurance
+Router**), Junos Space and Junos-Evolved. Fully
 dissects cleartext HTTP to **J-Web** (80/8080) and the Junos-Evolved **On-Box Anomaly
 Detection API** (8160), and reads the TLS ClientHello **SNI** (443/8443). Detects the
 byte-exact **CVE-2023-36844..36847** J-Web attack shapes — **`JNPR-011` PHPRC** and
@@ -2685,7 +2686,10 @@ in-app: **`JNPR-060`** (version posture) has no Junos version banner on this cap
 passive version extraction is a known dead end for this vendor, so version postures are
 **not** claimed; **`JNPR-062`** (VSTP BPDU on an L2PT UNI) is a non-IP LLC/SNAP frame
 not reconstructable from IP-onward hex (and is lab-deferred even in the standalone); and
-**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for. **Dual-stack** — the same attacks are detected over **IPv4 and
+**`JNPR-063`** needs an operator-declared VTEP set the in-app guard has no config for.
+The **Session Smart Router** family — SSR, **Conductor** and **WAN Assurance Router** —
+is named as product scope but its CVEs (`CVE-2025-21589`, `CVE-2024-2973`) are
+**version-posture only**, so for the same reason they are not detected here. **Dual-stack** — the same attacks are detected over **IPv4 and
 IPv6** with the same codes (the logic keys on port + payload, which are identical
 over either family). libpcap's `port` primitive already matches plain v6, so the
 only real gap is a packet **behind an extension header**, where the next-header byte
