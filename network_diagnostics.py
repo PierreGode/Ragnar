@@ -22271,6 +22271,13 @@ def register_network_diagnostics(app, logger=None):
                         mode=a.get('mode', 'ook'), f_offset_hz=_fl(a.get('f_offset')) or 0.0,
                         bw_hz=_fl(a.get('bw')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
 
+    @app.route('/api/net/rtl/analyze/pulse', methods=['GET'])
+    def net_rtl_analyze_pulse():
+        a = request.args
+        return _analyze(sigmf_analyzer.pulse_decode, name=a.get('name', ''),
+                        f_offset_hz=_fl(a.get('f_offset')) or 0.0, bw_hz=_fl(a.get('bw')),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), coding=a.get('coding', 'auto'))
+
     @app.route('/api/net/rtl/analyze/decode433', methods=['GET'])
     def net_rtl_analyze_decode433():
         return _analyze(sigmf_analyzer.decode433, name=request.args.get('name', ''))

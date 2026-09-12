@@ -241,9 +241,28 @@ two moves that turn a mystery emitter into a cracked one.
   and `fingerprint` (EV1527 / TPMS / LoRa families). Routes: `GET
   /analyze/fingerprint`, `POST /analyze/diff`, and transform params on `GET
   /analyze/frames`.
-- *Next here:* a **PWM/PPM symbol decoder** (many OOK remotes are pulse-width
-  coded, not raw levels) so the fingerprint's frame-length claim lines up with a
-  clean symbol stream; a bigger signature catalog.
+## Segment 12 — Pulse (PWM / PPM) symbol decoder ✅ shipped
+Many sub-GHz OOK remotes (PT2262 / EV1527 / HT12E / Princeton, and Flipper `.sub`
+RAW captures) encode a bit as a *pulse width* (short/long high) or a *pulse
+position* (short/long gap after a fixed pulse), **not** as raw NRZ levels — so the
+level-sampling demod turned one symbol into several raw bits and the frame length
+came out wrong. A new **Pulse** demod mode decodes the true symbol stream:
+- `pulse_decode` shifts / decimates / envelopes an OOK selection, then the pure
+  `_decode_pulses` run-length-encodes the on/off stream, two-means-clusters the
+  high widths and gaps (`_two_class`), auto-detects **PWM vs PPM** from whichever
+  dimension is bimodal, splits frames at the long inter-frame gap, and decodes
+  each symbol (wide high = 1 for PWM; wide gap = 1 for PPM/PDM).
+- Returns a **demod-shaped** result (`bits` / `baud` / `wave`) so the recovered
+  symbols flow straight into **Frames → Fingerprint → Field diff**, plus the
+  coding, the base pulse width **Te**, and the per-frame symbol bits. The page's
+  fingerprint call maps `pulse → ook` (a decoded pulse train is still OOK), so an
+  EV1527's 24-bit frame now lines up with the family match.
+- 96/96 selftests (6 new: PWM + PPM auto-detect and bit recovery, forced coding,
+  run-length + two-class cores, and an **end-to-end** synthesised PWM cu8 capture
+  → symbols). Route `GET /analyze/pulse?name&f_offset&bw&t0&t1&coding`; UI adds a
+  Pulse mode toggle + a coding selector (auto / PWM / PPM).
+- *Next:* a bigger device signature catalog; decoded-`.sub` re-synthesis so
+  Flipper protocol files (not just RAW) round-trip.
 
 ---
 
