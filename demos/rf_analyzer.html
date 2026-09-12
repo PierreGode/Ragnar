@@ -267,8 +267,12 @@
           <div class="seg" id="mode">
             <button data-m="ook" aria-pressed="true">OOK/AM</button>
             <button data-m="fsk">FSK/FM</button>
+            <button data-m="pulse" title="Decode PWM / PPM pulse symbols (PT2262 / EV1527 / Princeton remotes, Flipper .sub)">Pulse</button>
           </div>
           <span class="lbl">BW kHz</span><input id="bw" type="number" value="60" step="any">
+          <select id="pcoding" title="Pulse coding: auto-detect, pulse-width (PWM) or pulse-distance/position (PPM)" hidden>
+            <option value="auto">auto</option><option value="pwm">PWM</option><option value="ppm">PPM</option>
+          </select>
           <button class="go" id="run">Demodulate</button>
           <span class="spacer"></span>
           <div class="seg" id="bitview">
@@ -642,7 +646,8 @@
   // ---- demod + bit views ----
   var mode='ook', bitview='bin', manch=false, binv=false, brefl=false;
   $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; mode=b.getAttribute('data-m');
-    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});});
+    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});
+    $('pcoding').hidden=(mode!=='pulse');});
   $('bitview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; bitview=b.getAttribute('data-v');
     Array.prototype.forEach.call($('bitview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-v')===bitview?'true':'false');}); renderBits();});
   $('manch').addEventListener('click',function(){ manch=!manch; $('manch').setAttribute('aria-pressed',manch?'true':'false'); renderBits();});
@@ -707,7 +712,8 @@
   function runFingerprint(fr){
     var d=S.demod, fo=$('fpout'); if(!d){ fo.hidden=true; return; }
     var crc=((fr&&fr.crc&&fr.crc.matches)||[]).map(function(m){return m.algo;});
-    api('/api/net/rtl/analyze/fingerprint',{mod:d.mode||'', baud:Math.round(d.baud||0),
+    var mod=(d.mode==='pulse')?'ook':(d.mode||'');   // a decoded pulse train is an OOK signal
+    api('/api/net/rtl/analyze/fingerprint',{mod:mod, baud:Math.round(d.baud||0),
         frame_bits:(fr&&fr.period_bits)||0, preamble:(fr&&fr.preamble_bits)||0, crc:crc.join(','),
         freq:(S.marker?S.marker.f:S.fc)||0, bw:d.bw_hz||0})
       .then(renderFingerprint).catch(function(){ fo.hidden=true; });
@@ -784,15 +790,20 @@
     var bits=curBits();
     var body=(bitview==='hex')?toHex(bits):(bits.replace(/(.{8})/g,'$1 ').trim());
     S._bitsShown=body;
-    $('bits').textContent='baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+xfLabel()
-      +'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
+    var head=(d.mode==='pulse')
+      ? (d.coding||'pulse').toUpperCase()+' · Te ≈ '+d.te_us+' µs · '+(d.n_frames||1)+' frames · '+bits.length+' symbols'+xfLabel()
+      : 'baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+xfLabel();
+    $('bits').textContent=head+'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
   }
   $('run').addEventListener('click',function(){
     if(!S.name){return;}
     var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
-    $('bits').textContent='demodulating…';
-    api('/api/net/rtl/analyze/demod',{name:S.name,mode:mode,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1}).then(function(d){
-      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
+    $('bits').textContent=(mode==='pulse'?'decoding pulses…':'demodulating…');
+    var path=(mode==='pulse')?'/api/net/rtl/analyze/pulse':'/api/net/rtl/analyze/demod';
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    if(mode==='pulse') q.coding=$('pcoding').value; else q.mode=mode;
+    api(path,q).then(function(d){
+      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); $('fpout').hidden=true; return; }
       S.demod=d; plot('wave',d.wave,d.wave,'rgb(245,185,66)',false); renderBits();
     }).catch(function(){ $('bits').textContent='demod request failed'; });
   });

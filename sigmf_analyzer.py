@@ -493,6 +493,156 @@ def demod(name, mode="ook", f_offset_hz=0.0, bw_hz=None, t0=None, t1=None):
             "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff}
 
 
+# --------------------------------------------------------------------------
+# Pulse (PWM / PPM) symbol decoder — many sub-GHz OOK remotes (PT2262 / EV1527
+# / HT12E / Princeton, and Flipper .sub RAW captures) encode a bit as a *pulse
+# width* (short/long high) or a *pulse position* (short/long gap after a fixed
+# pulse), not as raw NRZ levels. The demod() slicer samples the level on a fixed
+# grid, so one such symbol becomes several raw bits and the frame length is
+# wrong. This decodes the true symbol stream from the on/off run lengths, so the
+# recovered bits — and the device fingerprint's frame length — line up. Pure
+# core (_decode_pulses) selftested on synthetic PWM + PPM.
+# --------------------------------------------------------------------------
+
+def _two_class(vals):
+    """1-D two-means split of positive durations -> (lo_center, hi_center, threshold).
+
+    Equal centers are returned when the values aren't clearly bimodal (pure)."""
+    import numpy as np
+    v = np.sort(np.asarray(vals, dtype=float))
+    if v.size < 2 or v[-1] <= v[0] * 1.05:
+        m = float(v.mean()) if v.size else 0.0
+        return m, m, m
+    c0, c1 = float(v[0]), float(v[-1])
+    for _ in range(25):
+        thr = 0.5 * (c0 + c1)
+        lo, hi = v[v <= thr], v[v > thr]
+        if lo.size == 0 or hi.size == 0:
+            break
+        n0, n1 = float(lo.mean()), float(hi.mean())
+        if abs(n0 - c0) < 1e-9 and abs(n1 - c1) < 1e-9:
+            c0, c1 = n0, n1
+            break
+        c0, c1 = n0, n1
+    return c0, c1, 0.5 * (c0 + c1)
+
+
+def _runs_from_level(level):
+    """Run-length encode a boolean level stream -> [(state_bool, length_int), ...] (pure)."""
+    import numpy as np
+    lvl = np.asarray(level).astype(bool)
+    if lvl.size == 0:
+        return []
+    chg = np.where(np.diff(lvl.astype(np.int8)) != 0)[0] + 1
+    bounds = np.concatenate(([0], chg, [lvl.size]))
+    return [(bool(lvl[bounds[i]]), int(bounds[i + 1] - bounds[i])) for i in range(len(bounds) - 1)]
+
+
+def _decode_pulses(level, nfs, coding="auto"):
+    """Decode an OOK on/off level stream carrying PWM or PPM symbols into bits (pure).
+
+    ``pwm`` — the bit is set by the HIGH width (wide high = 1): PT2262 / EV1527 /
+    Princeton. ``ppm`` (pulse-position / pulse-distance) — a near-constant pulse,
+    the bit set by the GAP after it (wide gap = 1). A low far longer than the
+    symbol gaps is an inter-frame separator: frames split there. ``auto`` picks
+    whichever dimension (high width or gap) is the more clearly bimodal.
+    """
+    import numpy as np
+    runs = _runs_from_level(level)
+    if len(runs) < 4:
+        return {"ok": False, "error": "no pulse structure — not an on/off (OOK) signal?"}
+    highs = [d for s, d in runs if s]
+    lows = [d for s, d in runs if not s]
+    if len(highs) < 3 or len(lows) < 2:
+        return {"ok": False, "error": "too few pulses to decode"}
+    med_low = float(np.median(lows))
+    gap_thr = 4.0 * med_low if med_low > 0 else float(max(lows)) + 1
+    sym_lows = [d for d in lows if d <= gap_thr] or lows
+    hi_lo, hi_hi, hi_thr = _two_class(highs)
+    lo_lo, lo_hi, lo_thr = _two_class(sym_lows)
+    r_hi = (hi_hi / hi_lo) if hi_lo > 0 else 1.0
+    r_lo = (lo_hi / lo_lo) if lo_lo > 0 else 1.0
+    if coding == "auto":
+        coding = "pwm" if (r_hi >= 1.7 and r_hi >= r_lo) else ("ppm" if r_lo >= 1.7 else "pwm")
+    # ordered (high, following-low) pairs
+    hl, pending = [], None
+    for s, d in runs:
+        if s:
+            pending = d
+        elif pending is not None:
+            hl.append((pending, d)); pending = None
+    if pending is not None:
+        hl.append((pending, 0))                    # signal ended high
+    frames_bits, cur = [], []
+    for h, lo in hl:
+        sep = lo > gap_thr
+        if coding == "pwm":
+            cur.append("1" if h > hi_thr else "0")
+            if sep:
+                frames_bits.append("".join(cur)); cur = []
+        else:                                      # ppm / pdm
+            if sep:
+                if cur:
+                    frames_bits.append("".join(cur)); cur = []
+            else:
+                cur.append("1" if lo > lo_thr else "0")
+    if cur:
+        frames_bits.append("".join(cur))
+    frames_bits = [f for f in frames_bits if f]
+    if not frames_bits:
+        return {"ok": False, "error": "no symbols recovered"}
+    bits = "".join(frames_bits)
+    te = min(hi_lo, lo_lo) or max(hi_lo, lo_lo)
+    tot = float(sum(h + lo for h, lo in hl))
+    return {"ok": True, "coding": coding, "te_us": round(te / nfs * 1e6, 1) if nfs else 0.0,
+            "n_symbols": len(bits), "n_frames": len(frames_bits), "bits": bits,
+            "baud": round(len(bits) / (tot / nfs), 1) if (tot > 0 and nfs) else 0.0,
+            "frames": [{"bits": f, "hex": _to_hex(f), "n": len(f)} for f in frames_bits[:12]],
+            "ratio_high": round(r_hi, 2), "ratio_low": round(r_lo, 2)}
+
+
+def pulse_decode(name, f_offset_hz=0.0, bw_hz=None, t0=None, t1=None, coding="auto"):
+    """Shift/decimate/envelope an OOK selection, then decode PWM/PPM symbols.
+
+    Returns a demod-shaped result (``bits`` / ``baud`` / ``wave``) so the recovered
+    symbols flow straight into Frames / Fingerprint / Field-diff, plus the coding,
+    the estimated base pulse width Te, and the per-frame symbol bits.
+    """
+    import numpy as np
+    from scipy import signal as sig
+    iq, fs, fc, _ = load(name)
+    i0 = 0 if t0 is None else max(0, int(float(t0) * fs))
+    i1 = len(iq) if t1 is None else min(len(iq), int(float(t1) * fs))
+    x = iq[i0:i1] if i1 > i0 else iq
+    if len(x) < 32:
+        return {"ok": False, "error": "selection too short"}
+    foff = float(f_offset_hz or 0.0)
+    bw = float(bw_hz) if bw_hz else min(fs / 4, 200e3)
+    bw = max(1e3, min(bw, fs / 2))
+    n = np.arange(len(x))
+    x = x * np.exp(-2j * np.pi * (foff / fs) * n)
+    dec = int(max(1, fs // (bw * 2)))
+    if dec > 1:
+        x = sig.decimate(x, dec, ftype="fir")
+    nfs = fs / dec
+    env = np.abs(x)
+    env = env / (env.max() + 1e-9)
+    thr = 0.5 * (float(np.percentile(env, 90)) + float(np.percentile(env, 10)))
+    level = env > thr
+    r = _decode_pulses(level, nfs, coding=coding)
+    wave = 20.0 * np.log10(env + 1e-4)
+    m = 1600
+    if len(wave) > m:
+        edges = (np.arange(m + 1) * len(wave) / m).astype(int)
+        wave = np.array([wave[edges[i]:max(edges[i] + 1, edges[i + 1])].mean() for i in range(m)])
+    r.update({"mode": "pulse", "sample_rate_hz": round(nfs, 1), "ylabel": "envelope (dB)",
+              "wave": [round(float(v), 3) for v in wave.tolist()],
+              "t0": i0 / fs, "t1": i1 / fs, "bw_hz": bw, "f_offset_hz": foff})
+    if r.get("ok"):
+        r["n_bits"] = r["n_symbols"]
+    return r
+
+
 def _parse_rtl433_lines(text):
     """Parse rtl_433 -F json output into deduped device records (pure)."""
     _meta = ("time", "mod", "freq", "freq1", "freq2", "rssi", "snr", "noise",
@@ -2555,6 +2705,49 @@ def selftest():
               str([c["name"] for c in fp3["candidates"]]))
         check("fp: nothing measured -> generic fallback, no false certainty",
               fingerprint().get("generic") is not None)
+        # --- Pulse (PWM / PPM) symbol decoder ---
+        import numpy as np
+        _te = 12
+        _truth = "10110100"
+
+        def _pwm_level(bits):                # EV1527/PT2262 OOK: 1=wide high, 0=narrow high
+            seq = []
+            for c in bits:
+                seq += ([1] * (3 * _te) + [0] * _te) if c == "1" else ([1] * _te + [0] * (3 * _te))
+            return seq + [0] * (31 * _te)    # inter-frame gap
+
+        def _ppm_level(bits):                # pulse-distance: fixed pulse, gap sets the bit
+            seq = []
+            for c in bits:
+                seq += [1] * _te + [0] * (3 * _te if c == "1" else _te)
+            return seq + [1] * _te + [0] * (31 * _te)   # terminator pulse + frame gap
+        _lp = np.array(_pwm_level(_truth) * 3, dtype=bool)
+        _rp = _decode_pulses(_lp, 30000.0)
+        check("pulse: PWM auto-detected + high-width bits recovered",
+              _rp["ok"] and _rp["coding"] == "pwm" and _rp["frames"][0]["bits"] == _truth
+              and _rp["n_frames"] >= 2, str(_rp.get("coding")) + " " + str(_rp.get("frames", [{}])[0].get("bits")))
+        _lq = np.array(_ppm_level(_truth) * 3, dtype=bool)
+        _rq = _decode_pulses(_lq, 30000.0)
+        check("pulse: PPM auto-detected + gap bits recovered",
+              _rq["ok"] and _rq["coding"] == "ppm" and _rq["frames"][0]["bits"] == _truth,
+              str(_rq.get("coding")) + " " + str(_rq.get("frames", [{}])[0].get("bits")))
+        check("pulse: forcing the wrong coding is honoured (not auto)",
+              _decode_pulses(_lp, 30000.0, coding="ppm").get("coding") == "ppm")
+        check("pulse: run-length encode round-trips a level stream",
+              _runs_from_level(np.array([1, 1, 0, 1], dtype=bool)) == [(True, 2), (False, 1), (True, 1)])
+        check("pulse: two-class split separates short/long durations",
+              round(_two_class([10, 11, 9, 30, 31, 29])[2]) == 20)
+        # end-to-end: synthesise a PWM-OOK cu8 capture, decode it back to symbols
+        _fspd = 1_000_000.0
+        _lvl = np.array(_pwm_level(_truth) * 4, dtype=float)
+        _car = _lvl * np.exp(2j * np.pi * 100_000 * np.arange(len(_lvl)) / _fspd)
+        _car = _car + (np.random.randn(len(_lvl)) + 1j * np.random.randn(len(_lvl))) * 0.01
+        _cf = np.empty(len(_lvl) * 2, dtype=np.float32)
+        _cf[0::2], _cf[1::2] = _car.real.astype(np.float32), _car.imag.astype(np.float32)
+        _ip = import_raw_iq(_cf.tobytes(), "pwm.cf32", "cf32", int(_fspd), 433_920_000)
+        _pd = pulse_decode(_ip["name"], f_offset_hz=100_000, bw_hz=80_000)
+        check("pulse: end-to-end PWM capture -> symbols (fingerprint frame length lines up)",
+              _pd["ok"] and _pd["coding"] == "pwm" and _truth in _pd["bits"], str(_pd.get("bits"))[:60])
     finally:
         globals()["_cap_dir"] = saved
         import shutil
