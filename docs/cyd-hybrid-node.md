@@ -66,12 +66,15 @@ This mirrors the existing mesh *share‑token* role exactly.
 **`GET /api/cyd/status`** — compact, flat status for the touch display:
 
 ```json
-{ "unit": "Bjorn", "mesh_nodes": 3, "nets_24": 0, "nets_5": 0,
+{ "unit": "Bjorn", "mesh_nodes": 3, "nets_24": 11, "nets_5": 7,
   "threat": 15, "bluetooth": "idle", "uptime": 84213, "ts": 1789225000 }
 ```
 
 The shape is intentionally flat — the firmware parses it with lightweight string
-matching (no JSON library) to stay small.
+matching (no JSON library) to stay small. `nets_24`/`nets_5` are distinct BSSIDs
+per band from the kernel's **cached** scan (`iw scan dump`, memoised 30 s) — a
+non-disruptive read that never kicks off a new scan, so `0`/`0` just means the
+kernel has no recent scan cached.
 
 **`POST /api/cyd/ingest`** — a node's 2.4 GHz sensor report:
 
@@ -118,6 +121,6 @@ Tailscale mesh itself is running.
 
 - [x] Wire `/api/cyd/action` to the live WIDS / BLE / Watchtower subsystems.
 - [x] Operator UI (nodes list + token management).
-- [ ] Fill `nets_24` / `nets_5` from the WiFi‑analyzer cache.
+- [x] Fill `nets_24` / `nets_5` from the kernel's cached scan (`iw scan dump`).
 - [ ] ESP Web Tools flasher page (manifest stub in `cyd_firmware/flasher`).
 - [ ] WiFiManager captive‑portal provisioning (drop creds from `config.h`).

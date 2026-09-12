@@ -2633,6 +2633,38 @@ def _cyd_bluetooth_state():
     return 'idle'
 
 
+_cyd_netcount = {'t': 0.0, 'nets_24': 0, 'nets_5': 0}
+_cyd_netcount_lock = threading.Lock()
+
+
+def _cyd_network_band_counts():
+    """Distinct 2.4/5 GHz BSSIDs from the kernel's CACHED scan (`iw scan dump`),
+    memoised for 30 s. Non-disruptive — it never triggers a new scan, so it is
+    safe to call from the frequently-polled CYD status endpoint. Reuses
+    wifi_analyzer.parse_scan (dump output shares the `iw scan` format).
+    Best-effort: any failure (no iface, no cached scan, not root) yields 0/0."""
+    now = time.time()
+    with _cyd_netcount_lock:
+        if now - _cyd_netcount['t'] < 30:
+            return _cyd_netcount['nets_24'], _cyd_netcount['nets_5']
+    nets_24 = nets_5 = 0
+    try:
+        import wifi_analyzer
+        iface = _get_wifi_iface()
+        if iface:
+            iw = getattr(wifi_analyzer, '_IW', 'iw')
+            out = subprocess.run([iw, 'dev', iface, 'scan', 'dump', '-u'],
+                                 capture_output=True, text=True, timeout=5).stdout
+            bss = wifi_analyzer.parse_scan(out) or []
+            nets_24 = len({b['bssid'] for b in bss if b.get('band') == '2.4' and b.get('bssid')})
+            nets_5 = len({b['bssid'] for b in bss if b.get('band') == '5' and b.get('bssid')})
+    except Exception as exc:
+        logger.debug(f"[cyd] band counts failed: {exc}")
+    with _cyd_netcount_lock:
+        _cyd_netcount.update(t=now, nets_24=nets_24, nets_5=nets_5)
+    return nets_24, nets_5
+
+
 @app.route('/api/cyd/status', methods=['GET'])
 def cyd_status():
     """Compact, flat status for a CYD node's touch display (the firmware parses
@@ -2641,11 +2673,12 @@ def cyd_status():
         unit = _mesh_unit_name()
     except Exception:
         unit = socket.gethostname()
+    nets_24, nets_5 = _cyd_network_band_counts()
     return jsonify({
         'unit': unit,
         'mesh_nodes': _cyd_mesh_node_count(),
-        'nets_24': 0,      # TODO: wire to the live WiFi-analyzer cache
-        'nets_5': 0,       # TODO: 5 GHz network count (analyzer)
+        'nets_24': nets_24,
+        'nets_5': nets_5,
         'threat': _cyd_threat_score(),
         'bluetooth': _cyd_bluetooth_state(),
         'uptime': _cyd_uptime_sec(),

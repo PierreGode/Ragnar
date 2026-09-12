@@ -86,8 +86,8 @@ scoped and fail‑closed in `webapp_modern.py`'s `check_authentication()`.
   in a background thread) — and logs the outcome, visible in `/api/cyd/nodes`.
 - ✅ Operator UI: **Ragnar Mesh → CYD Nodes** sub‑tab (node list with live
   counts + token generate/list/revoke).
-- ⏳ `/api/cyd/status` `nets_24`/`nets_5` are placeholders pending a wire to the
-  WiFi‑analyzer cache.
+- ✅ `/api/cyd/status` `nets_24`/`nets_5` come from the kernel's cached scan
+  (`iw scan dump`, memoised 30 s — non‑disruptive).
 - ⏳ ESP Web Tools flasher page (manifest stub included; needs the built `.bin`).
 - ⏳ WiFiManager captive‑portal provisioning (drop creds from `config.h`).
 
