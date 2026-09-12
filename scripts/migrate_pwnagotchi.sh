@@ -135,6 +135,56 @@ except Exception as e:
 fi
 
 # -------------------------------------------------------------------
+# ENFORCE SAFE MESH / CHANNEL SETTINGS
+# -------------------------------------------------------------------
+# Two settings must be corrected on migrated configs or Pwnagotchi will not
+# work under Ragnar:
+#
+# 1. personality.advertise: agent.start_monitor_mode() calls start_advertising()
+#    unconditionally, and start_advertising() POSTs to the pwngrid peer API on
+#    127.0.0.1:8666 whenever advertise is true. Ragnar ships pwngrid only as a
+#    no-op shim (nothing listens on 8666), so "advertise = true" makes Pwnagotchi
+#    crash on start in a systemd restart loop. Force it false.
+#
+# 2. personality.channels: an empty list means "use every channel the card
+#    reports". Wi-Fi 6E adapters (e.g. the common MediaTek MT7921U) report 6 GHz
+#    channels (like 221) that bettercap rejects with "error 400: <n> is not a
+#    valid wifi channel", which breaks wifi.recon.channels and stops handshake
+#    capture. If channels is empty or contains an invalid (>165, i.e. 6 GHz)
+#    channel, replace it with a valid 2.4/5 GHz list. A user's already-valid
+#    custom list is left untouched.
+if [[ -f "$CONFIG_FILE" ]]; then
+    echo "[MIGRATE] Enforcing advertise=false / grid disabled / valid channels..."
+    python3 -c "
+import tomlkit
+f = '${CONFIG_FILE}'
+with open(f, 'r') as fh:
+    doc = tomlkit.parse(fh.read())
+
+def table(parent, key):
+    t = parent.get(key)
+    if t is None:
+        t = tomlkit.table()
+        parent[key] = t
+    return t
+
+personality = table(doc, 'personality')
+personality['advertise'] = False
+table(table(table(doc, 'main'), 'plugins'), 'grid')['enabled'] = False
+
+SAFE_CHANNELS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165]
+channels = personality.get('channels')
+if not channels or any(int(c) > 165 for c in channels):
+    personality['channels'] = SAFE_CHANNELS
+    print('[MIGRATE] Reset personality.channels to valid 2.4/5 GHz list')
+
+with open(f, 'w') as fh:
+    fh.write(tomlkit.dumps(doc))
+print('[MIGRATE] Set personality.advertise=false and main.plugins.grid.enabled=false')
+" 2>&1 || echo "[MIGRATE] WARNING: could not enforce safe settings (tomlkit missing?)"
+fi
+
+# -------------------------------------------------------------------
 # ENSURE DEFAULT CONFIG EXISTS
 # -------------------------------------------------------------------
 DEFAULT_TOML="$CONFIG_DIR/default.toml"
