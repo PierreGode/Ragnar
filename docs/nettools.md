@@ -1168,6 +1168,29 @@ wire. One short `tcpdump` window over the TLS ports (443/8443/993/995/465/990/
   RC2/IDEA 64-bit suites share the birthday-bound weakness but fall outside the CVE's
   named DES/3DES scope, so they get a distinct **`weak_block_cipher_64bit`** (warn)
   that keeps the CVE's coverage claim exact. NVD/CISA-ADP score the CVE 7.5 HIGH.
+- **RC4 / `CVE-2013-2566` + `CVE-2015-2808` *(new in v4)*** — when the server negotiates
+  an RC4 suite, both RC4 CVEs (keystream biases; the Invariance Weakness that Bar Mitzvah
+  exploits) are attached to the `weak_cipher` finding as *exposure*-class attribution — the
+  negotiated suite **is** the vulnerable condition, so nothing is inferred and no second
+  code is raised. RC4 lives in its own table, so even the KRB5/PSK RC4 suites the generic
+  legacy list misses are named.
+- **SSL Death Alert / `CVE-2016-8610` *(new in v4)*** — the record layer, not a handshake
+  field: **`cve_2016_8610_alert_flood`** counts *plaintext* warning-alert records during the
+  handshake (they precede any key, so their level and count are read directly), per
+  direction. A run of **≥ 6** consecutive warnings is *warn* — six exceeds the five OpenSSL's
+  own fix permits (`SSL_R_TOO_MANY_WARN_ALERTS`); **≥ 100** escalates to *high* as a
+  deliberate CPU-exhaustion flood. Alerts after ChangeCipherSpec are encrypted and not
+  counted. 7.5 HIGH (Red Hat / IBM agree).
+- **Truncated record / `CVE-2017-3731` *(new in v4)*** — **`cve_2017_3731_short_record`**
+  (warn, *attack-shape*): a complete protected `application_data` record whose declared
+  length is below the 16-byte authenticator both vulnerable ciphers append — impossible for
+  a well-formed record, exactly the underflow the fix guards — seen against a susceptible
+  cipher (RC4-MD5 or ChaCha20-Poly1305). It reports an attack **shape** against a
+  susceptible cipher, never a vulnerable host: whether the peer is 32-bit or which OpenSSL
+  it runs is not on the wire. **`CVE-2016-2108`** (OpenSSL ASN.1 negative-zero corruption)
+  is *deliberately not* detected — the crafted ASN.1 that triggers it reaches the decoder
+  in no field a passive tap can read; the decision is recorded in-code so the absence is
+  reviewable.
 - **Certificate posture (TLS 1.2 over TCP only)** — subject/issuer, SANs, validity
   window, self-issued flag, signature hash, and findings: `cert_expired`,
   `cert_not_yet_valid`, `cert_self_signed`, `cert_short_chain`, `cert_weak_sig`,
@@ -1188,9 +1211,10 @@ active operation. The client Initial's CRYPTO stream is reassembled into the
 ClientHello and fingerprinted with proto `q`.
 
 The verdict escalates to **compromised** on an `sni_cert_mismatch` or JA4 denylist
-hit, **suspicious** on any other high/warn finding (weak cipher, expired cert,
-legacy version), else **clean**. Needs a SPAN/mirror port to see other hosts on a
-switched segment.
+hit, **suspicious** on any other high/warn finding (weak/RC4 cipher, SWEET32, an
+alert flood or truncated record, expired cert, legacy version) — these are exposures
+and attack shapes, not a broken session — else **clean**. Needs a SPAN/mirror port to
+see other hosts on a switched segment.
 
 **Deduplicated results.** A browser routinely opens several parallel connections
 to the same host, and a QUIC client may retransmit its Initial — all with an
@@ -1753,12 +1777,23 @@ What it flags:
   algorithm so a feed doesn't warn on OpenSSH's default `umac-64-etm` first preference.
   *(notice → suspicious by severity)* · **ssh_strict_kex_absent** — strict KEX not offered by
   both sides, but the negotiated mode isn't vulnerable. *(info)*
+- **ssh_duplicate_host_key** — one host key presented by **two or more addresses**. The
+  server's host key travels in cleartext in the key-exchange reply (before NEWKEYS, the same
+  window this reads); its OpenSSH SHA-256 fingerprint is compared across addresses. Identical
+  key bytes on two hosts is a shipped / hard-coded key (**CVE-2025-38741** Dell Enterprise
+  SONiC, and the same observation covers Ruckus SmartZone CVE-2025-44954, cloned VM images,
+  and any vendor shipping a fixed key) — whoever holds it can impersonate every affected host.
+  It is *not* proof of a defect on its own: an HA pair or a load-balanced VIP front-end shares
+  one key deliberately, so the finding names both addresses and what to confirm, and a known
+  shared key is silenced via `shared_key_allow`. The group-exchange trap (message 31 is
+  `(p, g)`, not a host key, under `diffie-hellman-group-exchange-*`; the real reply is message
+  33) is handled so a shared DH modulus never reads as a duplicate key. *(suspicious)*
 
 Verdict is **clean → suspicious**: every SSH finding is posture, exposure or heuristic —
 none is a confirmed live compromise (regreSSHion can't be confirmed passively), so the scale
 does not reach "compromised". Capture is a short passive tcpdump snapshot dissected with
 Scapy. The parse+detect path is pure Python and self-tests without root (`ssh_watch.py
---selftest`, 182 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
+--selftest`, 201 checks; fixtures are bytes captured from a real OpenSSH server). Hardening
 it drives: upgrade sshd to **9.8p1+**, enable **strict KEX** and drop CBC-EtM / ChaCha where
 Terrapin matters, and remove SSH-1 / weak KEX / host-key / cipher / MAC offers. **API:**
 `GET /api/net/ssh-watch` (`seconds`, `grace_seconds`). **CLI:** `ssh-watch`, `ssh-selftest`.

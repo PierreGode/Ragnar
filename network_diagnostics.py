@@ -22271,6 +22271,13 @@ def register_network_diagnostics(app, logger=None):
                         mode=a.get('mode', 'ook'), f_offset_hz=_fl(a.get('f_offset')) or 0.0,
                         bw_hz=_fl(a.get('bw')), t0=_fl(a.get('t0')), t1=_fl(a.get('t1')))
 
+    @app.route('/api/net/rtl/analyze/pulse', methods=['GET'])
+    def net_rtl_analyze_pulse():
+        a = request.args
+        return _analyze(sigmf_analyzer.pulse_decode, name=a.get('name', ''),
+                        f_offset_hz=_fl(a.get('f_offset')) or 0.0, bw_hz=_fl(a.get('bw')),
+                        t0=_fl(a.get('t0')), t1=_fl(a.get('t1')), coding=a.get('coding', 'auto'))
+
     @app.route('/api/net/rtl/analyze/decode433', methods=['GET'])
     def net_rtl_analyze_decode433():
         return _analyze(sigmf_analyzer.decode433, name=request.args.get('name', ''))
@@ -22375,12 +22382,37 @@ def register_network_diagnostics(app, logger=None):
             return jsonify({"ok": False, "error": "import failed: " + str(exc)})
         return jsonify(r)
 
+    def _b(v):       # query-string boolean
+        return str(v).lower() in ('1', 'true', 'yes', 'on')
+
     @app.route('/api/net/rtl/analyze/frames', methods=['GET'])
     def net_rtl_analyze_frames():
         a = request.args
         bits = (a.get('bits', '') or '')[:8192]     # cap: a frame bitstream, not a file
         return _analyze(sigmf_analyzer.frames, bits=bits, line=a.get('line', 'raw'),
-                        period=_fl(a.get('period')))
+                        period=_fl(a.get('period')),
+                        invert=_b(a.get('invert')), reflect=_b(a.get('reflect')),
+                        offset=int(_fl(a.get('offset')) or 0), take=int(_fl(a.get('take')) or 0))
+
+    @app.route('/api/net/rtl/analyze/fingerprint', methods=['GET'])
+    def net_rtl_analyze_fingerprint():
+        # Match measured features (modulation / frame length / CRC / centre freq)
+        # to known ISM device families. Heuristic; returns ranked candidates.
+        a = request.args
+        crc = [c for c in (a.get('crc', '') or '').split(',') if c.strip()]
+        return _analyze(sigmf_analyzer.fingerprint, mod=a.get('mod'),
+                        baud=_fl(a.get('baud')), frame_bits=_fl(a.get('frame_bits')),
+                        preamble_bits=_fl(a.get('preamble')), crc=crc,
+                        freq_hz=_fl(a.get('freq')), bw_hz=_fl(a.get('bw')))
+
+    @app.route('/api/net/rtl/analyze/diff', methods=['POST'])
+    def net_rtl_analyze_diff():
+        # Cross-capture field diff: separate fixed (device ID) from varying
+        # (rolling/counter) bits across repeated captures of one emitter.
+        d = request.get_json(silent=True) or {}
+        streams = [str(s)[:8192] for s in (d.get('streams') or [])][:16]
+        labels = [str(x)[:60] for x in (d.get('labels') or [])][:16]
+        return _analyze(sigmf_analyzer.field_diff, streams=streams, labels=labels)
 
     # SigMF annotations (save/label a signal box into the .sigmf-meta; interop).
     @app.route('/api/net/rtl/analyze/annotations', methods=['GET'])

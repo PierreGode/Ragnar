@@ -64,6 +64,31 @@
   .btable .empty{color:var(--muted);padding:14px 10px}
   .demodbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
   .demodbar input{width:86px}
+  .demodbar input.mini{width:56px}
+  .cnt{background:rgba(56,189,201,.18);color:var(--cyan);border-radius:8px;padding:0 6px;margin-left:3px}
+  /* device fingerprint */
+  .fp{font-family:var(--mono);font-size:12px;padding:10px 14px;border-top:1px solid var(--line-soft);background:var(--panel-2)}
+  .fp .fh{color:var(--muted);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px}
+  .fp .cand{display:flex;flex-wrap:wrap;align-items:baseline;gap:5px 10px;margin:6px 0;padding-bottom:6px;border-bottom:1px dashed var(--line-soft)}
+  .fp .cand:last-child{border-bottom:0}
+  .fp .nm{color:var(--cyan);font-weight:600}
+  .fp .conf{color:var(--accent);font-variant-numeric:tabular-nums}
+  .fp .cls{color:var(--ink-dim);flex-basis:100%;font-size:11px}
+  .fp .why{color:var(--muted);font-size:11px;flex-basis:100%}
+  .fp .why b{color:var(--live);font-weight:500}
+  .fp .gen{color:var(--ink-dim)}
+  /* field diff compare-set + result */
+  .cmpset{display:flex;flex-wrap:wrap;gap:8px;padding:10px 14px;border-bottom:1px solid var(--line-soft)}
+  .chip{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:11px;color:var(--ink);
+    background:var(--panel-2);border:1px solid var(--line);border-radius:20px;padding:4px 6px 4px 11px}
+  .chip button{border:0;background:transparent;color:var(--muted);padding:0 3px;font-size:14px;line-height:1}
+  .chip button:hover{color:var(--rose);border-color:transparent}
+  .diffbits{font-family:var(--mono);font-size:13px;word-break:break-all;line-height:1.9;padding:6px 0}
+  .diffbits .fx{color:var(--muted)} .diffbits .vy{color:var(--accent);background:rgba(245,185,66,.14);border-radius:2px}
+  .tag{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;padding:1px 6px;border-radius:4px}
+  .tag.counter{color:var(--cyan);background:rgba(56,189,201,.16)}
+  .tag.rolling{color:var(--accent);background:rgba(245,185,66,.16)}
+  .tag.varying{color:var(--ink-dim);background:rgba(139,152,171,.16)}
   .bits{font-family:var(--mono);font-size:12px;color:var(--live);word-break:break-all;line-height:1.7;padding:10px 14px;background:var(--panel-2);
     border-top:1px solid var(--line-soft);max-height:150px;overflow:auto;white-space:pre-wrap}
   .msg{font-family:var(--mono);font-size:12px;color:var(--muted);padding:12px 14px}
@@ -254,8 +279,12 @@
           <div class="seg" id="mode">
             <button data-m="ook" aria-pressed="true">OOK/AM</button>
             <button data-m="fsk">FSK/FM</button>
+            <button data-m="pulse" title="Decode PWM / PPM pulse symbols (PT2262 / EV1527 / Princeton remotes, Flipper .sub)">Pulse</button>
           </div>
           <span class="lbl">BW kHz</span><input id="bw" type="number" value="60" step="any">
+          <select id="pcoding" title="Pulse coding: auto-detect, pulse-width (PWM) or pulse-distance/position (PPM)" hidden>
+            <option value="auto">auto</option><option value="pwm">PWM</option><option value="ppm">PPM</option>
+          </select>
           <button class="go" id="run">Demodulate</button>
           <span class="spacer"></span>
           <div class="seg" id="bitview">
@@ -263,12 +292,23 @@
             <button data-v="hex">Hex</button>
           </div>
           <button id="manch" aria-pressed="false" title="Manchester decode (01→1, 10→0)">Manchester</button>
+          <button id="binv" aria-pressed="false" title="Invert every bit (complement)">Invert</button>
+          <button id="brefl" aria-pressed="false" title="Reflect bits within each byte (MSB-first ↔ LSB-first)">Reflect</button>
+          <span class="lbl">offset</span><input id="boff" class="mini" type="number" value="0" min="0" step="1" title="Drop this many leading bits — slide the byte grid to align a frame">
           <button id="copybits" title="Copy the bits to the clipboard">Copy</button>
           <button id="frames" title="Find preamble, repeated frames (fixed vs rolling bits) and scan for a CRC/checksum">⌗ Frames</button>
+          <button id="addcmp" title="Add these bits to the Field-diff compare set — capture the same emitter again to see which bits change">＋ Compare <span id="cmpn" class="cnt">0</span></button>
         </div>
         <canvas class="rowcanvas" id="wave" style="height:90px"></canvas>
         <div class="bits" id="bits">Place a marker on a signal (or click a burst), then Demodulate.</div>
         <div id="framesout" class="msg" hidden></div>
+        <div id="fpout" class="fp" hidden></div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <h3>Field diff <span class="hint">separate the fixed device ID from rolling / counter bits — add ≥2 captures of the same emitter</span>
+          <button class="go" id="rundiff" style="margin-left:auto">Diff</button></h3>
+        <div class="cmpset" id="cmpset"><span class="msg" style="padding:0">No captures added. Demodulate a signal and press <b>＋ Compare</b>; do it again for the same remote (press its button again / re-capture) — then <b>Diff</b> shows which bits are the fixed ID and which are a rolling code or counter.</span></div>
+        <div id="diffout" class="msg" hidden></div>
       </div>
       <div class="card" style="margin-top:16px">
         <h3>Constellation demod <span class="hint">recover PSK symbols &amp; bits — centre on one clean burst (marker), set BW</span>
@@ -372,7 +412,7 @@
 
   var $=function(id){return document.getElementById(id);};
   var S={name:null, view:null, spec:null, marker:null, markerB:null, hist:[],
-         dragMode:'zoom', psdMode:'avg', dur:0, fs:0, fc:0};
+         dragMode:'zoom', psdMode:'avg', dur:0, fs:0, fc:0, cmp:[]};
 
   function api(path,params){var q=Object.keys(params||{}).filter(function(k){return params[k]!=null;})
       .map(function(k){return k+'='+encodeURIComponent(params[k]);}).join('&');
@@ -640,19 +680,36 @@
   });
 
   // ---- demod + bit views ----
-  var mode='ook', bitview='bin', manch=false;
+  var mode='ook', bitview='bin', manch=false, binv=false, brefl=false;
   $('mode').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; mode=b.getAttribute('data-m');
-    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});});
+    Array.prototype.forEach.call($('mode').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-m')===mode?'true':'false');});
+    $('pcoding').hidden=(mode!=='pulse');});
   $('bitview').addEventListener('click',function(e){var b=e.target.closest('button');if(!b)return; bitview=b.getAttribute('data-v');
     Array.prototype.forEach.call($('bitview').querySelectorAll('button'),function(x){x.setAttribute('aria-pressed',x.getAttribute('data-v')===bitview?'true':'false');}); renderBits();});
   $('manch').addEventListener('click',function(){ manch=!manch; $('manch').setAttribute('aria-pressed',manch?'true':'false'); renderBits();});
+  $('binv').addEventListener('click',function(){ binv=!binv; $('binv').setAttribute('aria-pressed',binv?'true':'false'); renderBits();});
+  $('brefl').addEventListener('click',function(){ brefl=!brefl; $('brefl').setAttribute('aria-pressed',brefl?'true':'false'); renderBits();});
+  $('boff').addEventListener('change',renderBits); $('boff').addEventListener('input',renderBits);
   $('copybits').addEventListener('click',function(){ var t=S._bitsShown||''; if(navigator.clipboard)navigator.clipboard.writeText(t).catch(function(){}); });
+  // bit-workbench transforms — mirror the server's bit_transform (offset→invert→reflect), then line-decode
+  function xfRaw(b){ b=(b||'').replace(/[^01]/g,'');
+    var off=parseInt($('boff').value,10)||0; if(off>0) b=b.slice(off);
+    if(binv) b=b.replace(/[01]/g,function(c){return c==='0'?'1':'0';});
+    if(brefl){ var o='',i; for(i=0;i+8<=b.length;i+=8) o+=b.substr(i,8).split('').reverse().join('');
+      o+=b.slice(Math.floor(b.length/8)*8); b=o; }
+    return b; }
+  function curBits(){ var d=S.demod; if(!d) return ''; var b=xfRaw(d.bits||''); return manch?manchester(b):b; }
+  function xfLabel(){ var p=[]; var off=parseInt($('boff').value,10)||0;
+    if(off>0)p.push('offset '+off); if(binv)p.push('inverted'); if(brefl)p.push('reflected'); if(manch)p.push('Manchester');
+    return p.length?' ('+p.join(', ')+')':''; }
   function runFrames(period){
     var d=S.demod; if(!d||!d.bits){ return; }
     var fo=$('framesout'); fo.hidden=false; fo.textContent='analysing frames…';
-    var q={bits:d.bits, line:(manch?'manchester':'raw')}; if(period) q.period=period;
+    var off=parseInt($('boff').value,10)||0;
+    var q={bits:d.bits, line:(manch?'manchester':'raw'), invert:(binv?1:0), reflect:(brefl?1:0), offset:off};
+    if(period) q.period=period;
     api('/api/net/rtl/analyze/frames',q).then(function(r){
-      if(!r||!r.ok){ fo.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'no structure')+'</span>'; return; }
+      if(!r||!r.ok){ fo.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'no structure')+'</span>'; $('fpout').hidden=true; return; }
       S.framesData=r;
       var crcHtml=function(cm){return (cm&&cm.length)
         ? '<span style="color:var(--live)">✓ CRC: '+cm.map(function(m){return esc(m.algo)+' ('+m.width+'b/'+m.over_bytes+'B)';}).join(', ')+'</span>'
@@ -675,28 +732,114 @@
             +c.period_bits+'b'+(hit?' ✓CRC':'')+'</button>';}).join('');
         lines.push('<span style="color:var(--muted)">candidate frame lengths (click to align):</span><div class="fcands">'+chips+'</div>');
       }
+      // CRC brute-force: matches that tolerate a leading header byte / either endianness
+      var cb=(r.crc_brute&&r.crc_brute.matches)||[];
+      var known=((r.crc&&r.crc.matches)||[]).map(function(m){return m.algo+'/'+m.over_bytes;});
+      var extra=cb.filter(function(m){return known.indexOf(m.algo+'/'+m.over_bytes)<0;});
+      if(extra.length)
+        lines.push('<span style="color:var(--live)">✓ CRC-brute:</span> '+extra.slice(0,4).map(function(m){
+          return esc(m.algo)+' ('+m.width+'b over '+m.over_bytes+'B'+(m.skip_bytes?', skip '+m.skip_bytes:'')+(m.endian?', '+m.endian:'')+')';}).join('; '));
       fo.innerHTML=lines.filter(Boolean).join('<br>');
       fo.querySelectorAll('.fcand').forEach(function(b){ b.addEventListener('click',function(){ runFrames(+b.getAttribute('data-p')); }); });
+      runFingerprint(r);
     }).catch(function(){ fo.textContent='frame request failed'; });
   }
+  // device fingerprint: match measured features to ISM device families
+  function runFingerprint(fr){
+    var d=S.demod, fo=$('fpout'); if(!d){ fo.hidden=true; return; }
+    var crc=((fr&&fr.crc&&fr.crc.matches)||[]).map(function(m){return m.algo;});
+    var mod=(d.mode==='pulse')?'ook':(d.mode||'');   // a decoded pulse train is an OOK signal
+    api('/api/net/rtl/analyze/fingerprint',{mod:mod, baud:Math.round(d.baud||0),
+        frame_bits:(fr&&fr.period_bits)||0, preamble:(fr&&fr.preamble_bits)||0, crc:crc.join(','),
+        freq:(S.marker?S.marker.f:S.fc)||0, bw:d.bw_hz||0})
+      .then(renderFingerprint).catch(function(){ fo.hidden=true; });
+  }
+  function renderFingerprint(r){
+    var fo=$('fpout'); if(!r||!r.ok){ fo.hidden=true; return; }
+    var cs=r.candidates||[]; if(!cs.length && !r.generic){ fo.hidden=true; return; }
+    fo.hidden=false;
+    var h=['<div class="fh">likely device family'+(r.band_mhz?' · '+r.band_mhz+' MHz band':'')+'</div>'];
+    cs.forEach(function(c){
+      h.push('<div class="cand"><span class="nm">'+esc(c.name)+'</span>'
+        +'<span class="conf">'+c.confidence+'%</span>'
+        +'<span class="cls">'+esc(c.class)+'</span>'
+        +'<span class="why">'+(c.why||[]).map(esc).join('  ·  ')+'</span></div>');
+    });
+    if(r.generic) h.push('<div class="gen">'+esc(r.generic)+'</div>');
+    else if(cs.length && cs[0].confirm) h.push('<div class="gen">to confirm: '+esc(cs[0].confirm)+'</div>');
+    fo.innerHTML=h.join('');
+  }
+  // field diff: compare set + cross-capture diff
+  function renderCmp(){
+    var cs=$('cmpset'); $('cmpn').textContent=S.cmp.length;
+    if(!S.cmp.length){ cs.innerHTML='<span class="msg" style="padding:0">No captures added. Demodulate a signal and press <b>＋ Compare</b>; do it again for the same remote (press its button again / re-capture) — then <b>Diff</b> shows which bits are the fixed ID and which are a rolling code or counter.</span>'; return; }
+    cs.innerHTML=S.cmp.map(function(c,i){return '<span class="chip">'+esc(c.label)+' <button data-i="'+i+'" title="remove">✕</button></span>';}).join('');
+    Array.prototype.forEach.call(cs.querySelectorAll('.chip button'),function(b){
+      b.addEventListener('click',function(){ S.cmp.splice(+b.getAttribute('data-i'),1); renderCmp(); }); });
+  }
+  $('addcmp').addEventListener('click',function(){
+    var d=S.demod; if(!d||!d.bits){ return; }
+    var b=curBits(); if(b.replace(/[^01]/g,'').length<8){ return; }
+    var mhz=(((S.marker?S.marker.f:S.fc)||0)/1e6).toFixed(3);
+    S.cmp.push({label:mhz+' MHz #'+(S.cmp.length+1), bits:b}); renderCmp();
+  });
+  $('rundiff').addEventListener('click',function(){
+    var out=$('diffout');
+    if(S.cmp.length<2){ out.hidden=false; out.innerHTML='<span style="color:var(--muted)">add at least 2 captures of the same emitter (＋ Compare) first</span>'; return; }
+    out.hidden=false; out.textContent='diffing '+S.cmp.length+' captures…';
+    api2('/api/net/rtl/analyze/diff',{streams:S.cmp.map(function(c){return c.bits;}), labels:S.cmp.map(function(c){return c.label;})})
+      .then(renderDiff).catch(function(){ out.textContent='diff request failed'; });
+  });
+  function renderDiff(r){
+    var out=$('diffout');
+    if(!r||!r.ok){ out.innerHTML='<span style="color:var(--rose)">⚠ '+esc((r&&r.error)||'diff failed')+'</span>'; return; }
+    var h=[];
+    h.push(r.n_captures+' captures aligned · frame <b>'+r.frame_bits+' bits</b> · '
+      +'<span style="color:var(--muted)">'+r.n_fixed+' fixed, </span><span style="color:var(--accent)">'+r.n_varying+' varying</span>'
+      +(r.dropped&&r.dropped.length?' <span style="color:var(--rose)">(dropped, different length: '+r.dropped.map(esc).join(', ')+')</span>':''));
+    // consensus with fixed dim / varying highlighted, grouped in bytes
+    var cons=r.consensus||'', vis='';
+    for(var i=0;i<cons.length;i++){ var ch=cons[i];
+      vis+=(ch==='x')?'<span class="vy">·</span>':'<span class="fx">'+ch+'</span>';
+      if((i+1)%8===0) vis+=' '; }
+    h.push('<div class="diffbits">'+vis+'</div>');
+    h.push('fixed skeleton (hex): <span style="color:var(--live)">'+esc(r.consensus_hex)+'</span>');
+    // per-field table
+    if(r.fields&&r.fields.length){
+      var rows=r.fields.map(function(f){
+        return '<tr><td>'+f.start+'–'+(f.start+f.len-1)+'</td><td>'+f.len+'</td>'
+          +'<td><span class="tag '+f.kind+'">'+f.kind+'</span></td>'
+          +'<td style="color:var(--ink-dim)">'+f.values_hex.map(esc).join(' → ')+'</td></tr>';}).join('');
+      h.push('<table class="btable" style="margin-top:8px"><thead><tr><th>bits</th><th>len</th><th>kind</th><th>values (per capture, hex)</th></tr></thead><tbody>'+rows+'</tbody></table>');
+    } else {
+      h.push('<span style="color:var(--muted)">no varying bits — every capture is identical (a fixed-code emitter, or the same frame twice)</span>');
+    }
+    out.innerHTML=h.join('<br>');
+  }
+  renderCmp();
   $('frames').addEventListener('click',function(){ runFrames(); });
   function toHex(b){var h=[];for(var i=0;i+8<=b.length;i+=8)h.push(('0'+parseInt(b.substr(i,8),2).toString(16)).slice(-2));
     var r=b.length%8; var s=h.join(' '); if(r)s+=' +'+b.substr(b.length-r); return s;}
   function manchester(b){var o='';for(var i=0;i+2<=b.length;i+=2){var p=b.substr(i,2);o+=(p==='01'?'1':(p==='10'?'0':'?'));}return o;}
   function renderBits(){
     var d=S.demod; if(!d){ return; }
-    var bits=manch?manchester(d.bits||''):(d.bits||'');
+    var bits=curBits();
     var body=(bitview==='hex')?toHex(bits):(bits.replace(/(.{8})/g,'$1 ').trim());
     S._bitsShown=body;
-    $('bits').textContent='baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+(manch?' (Manchester)':'')
-      +'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
+    var head=(d.mode==='pulse')
+      ? (d.coding||'pulse').toUpperCase()+' · Te ≈ '+d.te_us+' µs · '+(d.n_frames||1)+' frames · '+bits.length+' symbols'+xfLabel()
+      : 'baud ≈ '+d.baud+'  ·  '+bits.length+' bits'+xfLabel();
+    $('bits').textContent=head+'  @ '+(d.f_offset_hz/1e3).toFixed(1)+' kHz, BW '+(d.bw_hz/1e3).toFixed(0)+' kHz\n'+(body||'(no bits recovered)');
   }
   $('run').addEventListener('click',function(){
     if(!S.name){return;}
     var v=S.view, foff=(S.marker?S.marker.f:S.fc)-S.fc, bw=(parseFloat($('bw').value)||60)*1e3;
-    $('bits').textContent='demodulating…';
-    api('/api/net/rtl/analyze/demod',{name:S.name,mode:mode,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1}).then(function(d){
-      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); return; }
+    $('bits').textContent=(mode==='pulse'?'decoding pulses…':'demodulating…');
+    var path=(mode==='pulse')?'/api/net/rtl/analyze/pulse':'/api/net/rtl/analyze/demod';
+    var q={name:S.name,f_offset:foff,bw:bw,t0:v.t0,t1:v.t1};
+    if(mode==='pulse') q.coding=$('pcoding').value; else q.mode=mode;
+    api(path,q).then(function(d){
+      if(!d||!d.ok){ S.demod=null; $('bits').textContent='⚠ '+((d&&d.error)||'demod failed'); $('fpout').hidden=true; return; }
       S.demod=d; plot('wave',d.wave,d.wave,'rgb(245,185,66)',false); renderBits();
     }).catch(function(){ $('bits').textContent='demod request failed'; });
   });

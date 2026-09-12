@@ -468,6 +468,12 @@ enabled = false
 
 [personality]
 advertise = false
+# Pin recon to valid 2.4/5 GHz channels. Leaving this empty makes pwnagotchi
+# use every channel the card reports, and Wi-Fi 6E adapters (e.g. the common
+# MediaTek MT7921U) report 6 GHz channels (like 221) that bettercap rejects
+# with "error 400: <n> is not a valid wifi channel", which breaks recon and
+# stops handshake capture. This list covers 2.4 GHz + non-DFS 5 GHz.
+channels = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 36, 40, 44, 48, 149, 153, 157, 161, 165]
 EOF
     echo "[INFO] Created default config at ${CONFIG_FILE}"
 else
@@ -693,6 +699,70 @@ EOF
 else
     echo "[WARN] migrate_pwnagotchi.sh not found - skipping"
 fi
+
+# -------------------------------------------------------------------
+# PWNAGOTCHI / BETTERCAP EVENT-PIPELINE FIXES
+# -------------------------------------------------------------------
+# Without these, Pwnagotchi mode boots but is effectively useless: the PWND
+# counter stays 0, captures never reach the wpa-sec upload queue, and the live
+# UI never updates -- because pwnagotchi's bettercap event WebSocket never
+# connects. Root cause chain (all verified on hardware):
+echo "[INFO] Applying Pwnagotchi/bettercap event-pipeline fixes..."
+
+# 1. bettercap only upgrades GET /api/events to a WebSocket when
+#    api.rest.websocket is true; it DEFAULTS TO FALSE and otherwise returns
+#    plain JSON (HTTP 200), which pwnagotchi's client rejects with
+#    "server rejected WebSocket connection: HTTP 200". The stock Debian
+#    bettercap.service runs `api.rest on` without the flag. Add it via a
+#    systemd drop-in (survives apt upgrades; leaves the packaged unit intact).
+if systemctl list-unit-files bettercap.service >/dev/null 2>&1; then
+    mkdir -p /etc/systemd/system/bettercap.service.d
+    cat > /etc/systemd/system/bettercap.service.d/ragnar-websocket.conf <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/bettercap -no-colors -eval "set events.stream.output /var/log/bettercap.log; set api.rest.websocket true; api.rest on"
+EOF
+    timeout 10 systemctl daemon-reload >/dev/null 2>&1 || true
+    echo "[INFO] Enabled api.rest.websocket on bettercap.service"
+fi
+
+# 2. python3-websockets >= 14 no longer sends HTTP Basic Auth from the
+#    ws://user:pass@host URL userinfo, so bettercap sees an unauthenticated
+#    upgrade. Pin a compatible version for pwnagotchi's client code.
+PIP_CONFIG_FILE=/dev/null python3 -m pip install --break-system-packages \
+    --index-url https://pypi.org/simple "websockets<14" >/dev/null 2>&1 || \
+    echo "[WARN] could not pin websockets<14"
+
+# 3. Belt-and-suspenders: send the Authorization header explicitly so the event
+#    WebSocket authenticates regardless of the installed websockets version.
+BCAP_PY="${PWN_DIR}/pwnagotchi/bettercap.py"
+if [[ -f "$BCAP_PY" ]] && ! grep -q 'extra_headers' "$BCAP_PY"; then
+    if python3 - "$BCAP_PY" <<'PY' 2>/dev/null
+import sys
+p = sys.argv[1]; s = open(p).read()
+if 'import base64' not in s:
+    s = s.replace('import websockets', 'import websockets\nimport base64', 1)
+s = s.replace('max_queue=max_queue) as ws:',
+    "max_queue=max_queue, extra_headers={'Authorization': 'Basic ' + base64.b64encode((self.username + ':' + self.password).encode()).decode()}) as ws:", 1)
+open(p, 'w').write(s)
+PY
+    then
+        echo "[INFO] Patched bettercap.py to authenticate the event WebSocket"
+    else
+        echo "[WARN] bettercap.py auth patch skipped"
+    fi
+fi
+
+# 4. pwnagotchi tallies total handshakes by globbing *.pcapng, but bettercap
+#    writes *.pcap in this setup, so PWND (total) reads 0 despite real captures.
+#    Match both extensions.
+UTILS_PY="${PWN_DIR}/pwnagotchi/utils.py"
+if [[ -f "$UTILS_PY" ]]; then
+    sed -i 's/"\*\.pcapng"/"*.pcap*"/' "$UTILS_PY" || true
+fi
+
+# clear stale bytecode so a running service picks up the source patches
+find "$PWN_DIR" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
 # -------------------------------------------------------------------
 # BETTERCAP SERVICE SYNC
