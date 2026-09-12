@@ -39,6 +39,14 @@ Three touch tabs: **STATUS** (Ragnar's live state), **SCAN** (this node's own
 
 ## Build & flash
 
+### Easiest: the browser flasher
+
+Open **`cyd_firmware/flasher/index.html`** (served over HTTPS or `localhost`,
+in Chrome/Edge), plug the board in, and click **Flash**. It uses ESP Web Tools
+and the committed bins under `flasher/firmware/`. No toolchain needed.
+
+### Or build it yourself
+
 Requires `arduino-cli`, the `esp32` core, and the **GFX Library for Arduino**
 (moononournation) — the same library the other Ragnar ESP32 firmware uses.
 
@@ -47,7 +55,7 @@ Requires `arduino-cli`, the `esp32` core, and the **GFX Library for Arduino**
 arduino-cli core install esp32:esp32
 arduino-cli lib install "GFX Library for Arduino"
 
-# edit cyd_firmware/ragnar_cyd/config.h first (WiFi, Ragnar URL, device token)
+# config.h needs NO secrets — provisioning is done on-device (see below).
 
 arduino-cli compile \
   --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M" \
@@ -63,15 +71,24 @@ arduino-cli upload -p /dev/ttyUSB0 \
 
 To drop BLE (saves flash/RAM), set `CYD_ENABLE_BLE 0` in `config.h`.
 
-## Ragnar‑side setup
+## Provisioning (on-device setup portal)
 
-1. In Ragnar, issue a device token:
-   `POST /api/cyd/token/generate` with `{"name":"cyd-01"}` → returns the raw
-   token **once**. (List/revoke via `/api/cyd/tokens` and
-   `/api/cyd/token/revoke`.)
-2. Paste that token + your WiFi creds + Ragnar's LAN URL into `config.h`.
-3. Flash. The node connects, the STATUS tab fills in, and reports show up under
-   `GET /api/cyd/nodes`.
+The firmware carries **no baked-in secrets** — a single generic image works on
+any node. On first boot (or when it can't connect, or when **BOOT** is held at
+power-on) the node raises its own AP and serves a setup form:
+
+1. In Ragnar, issue a device token under **Ragnar Mesh → CYD Nodes** (or
+   `POST /api/cyd/token/generate` `{"name":"cyd-01"}`) — the raw token is shown
+   **once**.
+2. Join the node's WiFi **`Ragnar-CYD-setup`** (password `ragnarcyd`) and open
+   the `http://…` address shown on its screen.
+3. Enter WiFi SSID/password, the Ragnar URL, the device token and a node name →
+   **Save & reboot**. Values are stored in NVS; the node connects and appears
+   under `GET /api/cyd/nodes`.
+
+To re-provision later, hold **BOOT** while powering on to force the portal.
+(Developers can still pre-seed `config.h`'s optional `CYD_*` defaults instead of
+using the portal — leave them empty for the portal path.)
 
 The node authenticates purely by the Bearer token (it is **not** a mesh peer),
 and that token grants **only** the three `/api/cyd/*` device endpoints —
@@ -88,8 +105,8 @@ scoped and fail‑closed in `webapp_modern.py`'s `check_authentication()`.
   counts + token generate/list/revoke).
 - ✅ `/api/cyd/status` `nets_24`/`nets_5` come from the kernel's cached scan
   (`iw scan dump`, memoised 30 s — non‑disruptive).
-- ⏳ ESP Web Tools flasher page (manifest stub included; needs the built `.bin`).
-- ⏳ WiFiManager captive‑portal provisioning (drop creds from `config.h`).
+- ✅ On-device captive-portal provisioning (no secrets in `config.h`).
+- ✅ ESP Web Tools flasher page (`flasher/index.html`) + committed bins.
 
 See [docs/cyd-hybrid-node.md](../docs/cyd-hybrid-node.md) for the full design
 and API reference.

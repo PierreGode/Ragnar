@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ragnar — CYD Hybrid Node Flasher</title>
+  <meta name="description" content="Flash the Ragnar CYD hybrid-node firmware onto an ESP32-2432S028R 'Cheap Yellow Display' straight from your browser. A 2.4 GHz sensor + touch dashboard that reports to a Ragnar Pi." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg:#0b1220; --card:rgba(15,23,42,0.72); --line:rgba(255,255,255,0.1);
+            --fg:#e5e7eb; --muted:#94a3b8; --blue:#0284c7; --amber:#f59e0b; }
+    * { box-sizing: border-box; }
+    body { margin:0; background: linear-gradient(135deg,#0b1220,#0f172a 60%,#111827);
+           color:var(--fg); font-family:Inter,system-ui,sans-serif; padding:28px 16px; }
+    .page { max-width: 720px; margin: 0 auto; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+    .logo { font-size:30px; }
+    .brand { font-family:'Russo One',sans-serif; letter-spacing:.5px; font-size:20px; }
+    h1 { font-family:'Russo One',sans-serif; font-size:30px; margin:18px 0 4px; }
+    h1 span { color:var(--blue); }
+    .tagline { color:var(--muted); margin:0 0 22px; }
+    .card { background:var(--card); backdrop-filter:blur(10px); border:1px solid var(--line);
+            border-radius:16px; padding:22px; margin-bottom:18px; }
+    .card h2 { margin:0 0 6px; font-size:20px; }
+    .sub { color:var(--muted); font-size:14px; }
+    ol { color:var(--muted); font-size:14px; line-height:1.7; padding-left:20px; }
+    code { background:#1e293b; border-radius:6px; padding:1px 6px; font-size:13px; }
+    .flash { text-align:center; margin-top:18px; }
+    esp-web-install-button { --esp-tools-button-color:#fff; --esp-tools-button-background-color:var(--blue); }
+    .note { border-left:3px solid var(--amber); background:rgba(245,158,11,0.08);
+            padding:10px 14px; border-radius:8px; color:#fcd9a0; font-size:13px; margin-top:14px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; margin-top:12px; font-size:14px; }
+    .grid div span { color:var(--muted); }
+    a { color:#38bdf8; }
+    .unsupported { color:#fca5a5; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div class="logo">🐗</div>
+      <span class="brand">RAGNAR — CYD Hybrid Node</span>
+    </header>
+
+    <h1>Flash the <span>Cheap Yellow Display</span></h1>
+    <p class="tagline">ESP32-2432S028R · 2.8″ touch · a 2.4 GHz sensor + Ragnar dashboard in one</p>
+
+    <div class="card">
+      <h2>What you get</h2>
+      <p class="sub">A companion node for a Ragnar Pi. It shows Ragnar's live status on the
+      touch screen, lets you trigger a few allowlisted actions, and scans 2.4 GHz
+      (WiFi + BLE) with its own radio, reporting the counts home. First boot raises a
+      <strong>setup portal</strong> — no need to bake WiFi or tokens into the image.</p>
+      <div class="grid">
+        <div><span>Chip:</span> ESP32-WROOM-32</div>
+        <div><span>Display:</span> 2.8″ ILI9341 240×320</div>
+        <div><span>Touch:</span> XPT2046 (resistive)</div>
+        <div><span>Radio:</span> 2.4 GHz only (no 5 GHz)</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Before you flash</h2>
+      <ol>
+        <li>Use a <strong>data-capable</strong> USB cable (charge-only cables do nothing).</li>
+        <li>Close the Arduino IDE / Serial Monitor or anything else holding the port.</li>
+        <li>Use Chrome or Edge (Web Serial). Safari and Firefox can't flash.</li>
+        <li>If the board isn't detected, hold <strong>BOOT</strong> while tapping <strong>RST</strong>.</li>
+      </ol>
+
+      <div class="flash">
+        <esp-web-install-button manifest="manifest-cyd-hybrid.json">
+          <button slot="activate" style="background:var(--blue);color:#fff;border:0;border-radius:10px;padding:14px 26px;font-size:16px;cursor:pointer">⚡ Flash CYD firmware</button>
+          <span slot="unsupported" class="unsupported">Your browser can't flash — use desktop Chrome or Edge.</span>
+          <span slot="not-allowed" class="unsupported">This page must be served over HTTPS (or localhost) to flash.</span>
+        </esp-web-install-button>
+      </div>
+      <div class="note">Flashing <strong>erases</strong> the board. After it reboots, join the
+        <code>Ragnar-CYD-setup</code> WiFi (password <code>ragnarcyd</code>) and open the
+        address shown on screen to enter your WiFi + Ragnar URL + device token.</div>
+    </div>
+
+    <div class="card">
+      <h2>Then, in Ragnar</h2>
+      <p class="sub">Generate a device token under <strong>Ragnar Mesh → CYD Nodes</strong>
+      (or <code>POST /api/cyd/token/generate</code>), paste it into the node's setup form,
+      and it appears in the node list once it reports in. Full guide:
+      <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/cyd-hybrid-node.md" target="_blank" rel="noopener">docs/cyd-hybrid-node.md</a>.</p>
+    </div>
+  </div>
+
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</body>
+</html>

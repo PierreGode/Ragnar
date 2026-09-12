@@ -109,6 +109,20 @@ TFT (ILI9341, VSPI): SCLK 14 · MOSI 13 · MISO 12 · CS 15 · DC 2 · BL 21.
 Touch (XPT2046, separate bus): SCLK 25 · MOSI 32 · MISO 39 · CS 33 · IRQ 36.
 Extras: RGB LED 4/16/17 (active LOW), LDR 34. See `config.h`.
 
+## Provisioning & flashing
+
+The firmware ships **no baked-in secrets** — one generic image works on every
+node. Flash it the easy way from `cyd_firmware/flasher/index.html` (ESP Web
+Tools, Chrome/Edge, committed bins under `flasher/firmware/`), or build and
+upload with `arduino-cli`.
+
+On first boot — or when it can't connect, or when **BOOT** (GPIO0) is held at
+power-on — the node raises a **setup portal**: a SoftAP `Ragnar-CYD-setup`
+(password `ragnarcyd`) + a captive form for WiFi SSID/password, Ragnar URL,
+device token and node name. Values persist in NVS (`Preferences`), the node
+reboots, connects, and appears under `/api/cyd/nodes`. Hold **BOOT** at power-on
+to re-provision. See [`cyd_firmware/README.md`](../cyd_firmware/README.md).
+
 ## Operator UI
 
 **Ragnar Mesh → CYD Nodes** sub‑tab: a live list of reporting nodes (status dot,
@@ -122,5 +136,5 @@ Tailscale mesh itself is running.
 - [x] Wire `/api/cyd/action` to the live WIDS / BLE / Watchtower subsystems.
 - [x] Operator UI (nodes list + token management).
 - [x] Fill `nets_24` / `nets_5` from the kernel's cached scan (`iw scan dump`).
-- [ ] ESP Web Tools flasher page (manifest stub in `cyd_firmware/flasher`).
-- [ ] WiFiManager captive‑portal provisioning (drop creds from `config.h`).
+- [x] On-device captive-portal provisioning (no secrets in `config.h`).
+- [x] ESP Web Tools flasher page + committed bins (`cyd_firmware/flasher`).

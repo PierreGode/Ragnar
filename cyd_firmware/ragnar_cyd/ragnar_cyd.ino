@@ -34,6 +34,9 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <esp_wifi.h>
 #include <Arduino_GFX_Library.h>
@@ -44,6 +47,40 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #endif
+
+// ── Runtime configuration (NVS-backed; provisioned via the setup portal) ──────
+struct RuntimeConfig {
+  String ssid, pass, url, token, name;
+};
+static RuntimeConfig g_cfg;
+static Preferences g_prefs;
+
+// Load config from NVS, falling back to the (optional) compile-time seeds.
+static void loadConfig() {
+  g_prefs.begin("ragnarcyd", true);
+  g_cfg.ssid  = g_prefs.getString("ssid",  CYD_WIFI_SSID);
+  g_cfg.pass  = g_prefs.getString("pass",  CYD_WIFI_PASS);
+  g_cfg.url   = g_prefs.getString("url",   CYD_RAGNAR_URL);
+  g_cfg.token = g_prefs.getString("token", CYD_DEVICE_TOKEN);
+  g_cfg.name  = g_prefs.getString("name",  CYD_NODE_NAME);
+  g_prefs.end();
+  if (g_cfg.name.length() == 0) g_cfg.name = "cyd-node";
+}
+
+static void saveConfig(const RuntimeConfig &c) {
+  g_prefs.begin("ragnarcyd", false);
+  g_prefs.putString("ssid",  c.ssid);
+  g_prefs.putString("pass",  c.pass);
+  g_prefs.putString("url",   c.url);
+  g_prefs.putString("token", c.token);
+  g_prefs.putString("name",  c.name.length() ? c.name : String("cyd-node"));
+  g_prefs.end();
+}
+
+// Enough to attempt operation: a WiFi SSID, a Ragnar URL and a device token.
+static bool haveConfig() {
+  return g_cfg.ssid.length() && g_cfg.url.length() && g_cfg.token.length();
+}
 
 // Arduino_GFX 1.6.7 exposes colors as RGB565_*; alias the two bare names we use.
 #define WHITE RGB565_WHITE
@@ -257,8 +294,8 @@ static bool httpGetStatus() {
   HTTPClient http;
   http.setConnectTimeout(2000);
   http.setTimeout(2500);
-  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/status");
-  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  http.begin(g_cfg.url + "/api/cyd/status");
+  http.addHeader("Authorization", String("Bearer ") + g_cfg.token);
   int code = http.GET();
   if (code != 200) { http.end(); return false; }
   String body = http.getString();
@@ -281,11 +318,11 @@ static bool httpPostIngest() {
   HTTPClient http;
   http.setConnectTimeout(2000);
   http.setTimeout(2500);
-  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/ingest");
-  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  http.begin(g_cfg.url + "/api/cyd/ingest");
+  http.addHeader("Authorization", String("Bearer ") + g_cfg.token);
   http.addHeader("Content-Type", "application/json");
   String payload = String("{")
-    + "\"node\":\"" + CYD_NODE_NAME + "\","
+    + "\"node\":\"" + g_cfg.name + "\","
     + "\"beacons\":" + String((uint32_t)g_sc.beacons) + ","
     + "\"probes\":"  + String((uint32_t)g_sc.probes)  + ","
     + "\"deauths\":" + String((uint32_t)g_sc.deauths) + ","
@@ -302,10 +339,10 @@ static bool httpPostAction(const String &action) {
   HTTPClient http;
   http.setConnectTimeout(2000);
   http.setTimeout(3000);
-  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/action");
-  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  http.begin(g_cfg.url + "/api/cyd/action");
+  http.addHeader("Authorization", String("Bearer ") + g_cfg.token);
   http.addHeader("Content-Type", "application/json");
-  String payload = String("{\"node\":\"") + CYD_NODE_NAME + "\",\"action\":\"" + action + "\"}";
+  String payload = String("{\"node\":\"") + g_cfg.name + "\",\"action\":\"" + action + "\"}";
   int code = http.POST(payload);
   http.end();
   return code == 200 || code == 202;
@@ -314,7 +351,7 @@ static bool httpPostAction(const String &action) {
 // Connect to WiFi within the timeout. Returns true on success.
 static bool wifiConnect() {
   WiFi.mode(WIFI_STA);
-  WiFi.begin(CYD_WIFI_SSID, CYD_WIFI_PASS);
+  WiFi.begin(g_cfg.ssid.c_str(), g_cfg.pass.c_str());
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < CYD_WIFI_CONNECT_TO) {
     delay(150);
@@ -457,6 +494,105 @@ static void handleTouch(int16_t px, int16_t py) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+//  Setup portal — SoftAP + captive form to provision WiFi / URL / token / name
+// ════════════════════════════════════════════════════════════════════════════
+static WebServer g_portalServer(80);
+static DNSServer g_portalDNS;
+
+static String htmlAttr(const String &s) {
+  String o; o.reserve(s.length() + 8);
+  for (size_t i = 0; i < s.length(); i++) {
+    char c = s[i];
+    if (c == '&') o += "&amp;"; else if (c == '<') o += "&lt;";
+    else if (c == '>') o += "&gt;"; else if (c == '"') o += "&quot;";
+    else o += c;
+  }
+  return o;
+}
+
+static String portalPage() {
+  String p =
+    "<!doctype html><html><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>Ragnar CYD setup</title><style>"
+    "body{font-family:system-ui,sans-serif;background:#0f172a;color:#e5e7eb;margin:0;padding:20px}"
+    ".c{max-width:440px;margin:0 auto}h1{font-size:20px}label{display:block;margin:12px 0 4px;font-size:14px;color:#94a3b8}"
+    "input{width:100%;box-sizing:border-box;background:#1e293b;border:1px solid #334155;color:#e5e7eb;border-radius:8px;padding:10px;font-size:15px}"
+    "button{margin-top:18px;width:100%;background:#0284c7;color:#fff;border:0;border-radius:8px;padding:12px;font-size:16px}"
+    "p{color:#94a3b8;font-size:13px}</style></head><body><div class='c'>"
+    "<h1>Ragnar CYD node setup</h1>"
+    "<p>Join this node to your WiFi and point it at your Ragnar. The device token comes from Ragnar → Config → CYD Nodes.</p>"
+    "<form method='POST' action='/save'>"
+    "<label>WiFi SSID (2.4 GHz)</label><input name='ssid' value='" + htmlAttr(g_cfg.ssid) + "'>"
+    "<label>WiFi password</label><input name='pass' type='password' value='" + htmlAttr(g_cfg.pass) + "'>"
+    "<label>Ragnar URL</label><input name='url' placeholder='http://192.168.1.50:8080' value='" + htmlAttr(g_cfg.url) + "'>"
+    "<label>Device token</label><input name='token' value='" + htmlAttr(g_cfg.token) + "'>"
+    "<label>Node name</label><input name='name' value='" + htmlAttr(g_cfg.name) + "'>"
+    "<button type='submit'>Save &amp; reboot</button></form></div></body></html>";
+  return p;
+}
+
+static void handlePortalRoot() { g_portalServer.send(200, "text/html", portalPage()); }
+
+static void handlePortalSave() {
+  RuntimeConfig c;
+  c.ssid  = g_portalServer.arg("ssid");
+  c.pass  = g_portalServer.arg("pass");
+  c.url   = g_portalServer.arg("url");
+  c.token = g_portalServer.arg("token");
+  c.name  = g_portalServer.arg("name");
+  // Trim a trailing slash on the URL so our path concatenation stays correct.
+  while (c.url.endsWith("/")) c.url.remove(c.url.length() - 1);
+  saveConfig(c);
+  g_portalServer.send(200, "text/html",
+    "<html><body style='font-family:system-ui,sans-serif;background:#0f172a;color:#e5e7eb;padding:24px'>"
+    "<h2>Saved. Rebooting…</h2></body></html>");
+  delay(800);
+  ESP.restart();
+}
+
+static void drawPortalScreen(const String &ip) {
+  gfx->fillScreen(gfx->color565(10, 12, 16));
+  gfx->setTextColor(gfx->color565(90, 180, 255));
+  gfx->setTextSize(2);
+  gfx->setCursor(10, 16); gfx->print("SETUP MODE");
+  gfx->setTextSize(1);
+  gfx->setTextColor(gfx->color565(150, 160, 170));
+  int16_t y = 60;
+  gfx->setCursor(10, y); gfx->print("1) Join WiFi:"); y += 16;
+  gfx->setTextColor(WHITE); gfx->setTextSize(2);
+  gfx->setCursor(16, y); gfx->print(CYD_SETUP_AP_SSID); y += 26;
+  gfx->setTextSize(1); gfx->setTextColor(gfx->color565(150, 160, 170));
+  gfx->setCursor(16, y); gfx->print("pass: "); gfx->print(CYD_SETUP_AP_PASS); y += 26;
+  gfx->setCursor(10, y); gfx->print("2) Open in a browser:"); y += 16;
+  gfx->setTextColor(WHITE); gfx->setTextSize(2);
+  gfx->setCursor(16, y); gfx->print("http://"); gfx->print(ip); y += 30;
+  gfx->setTextSize(1); gfx->setTextColor(gfx->color565(120, 130, 140));
+  gfx->setCursor(10, y); gfx->print("Fill WiFi + Ragnar URL + token,");  y += 14;
+  gfx->setCursor(10, y); gfx->print("save, and the node reboots.");
+}
+
+// Raise the SoftAP + captive portal and serve requests until a save reboots us.
+static void runConfigPortal() {
+  WiFi.mode(WIFI_AP);
+  const char *pw = strlen(CYD_SETUP_AP_PASS) >= 8 ? CYD_SETUP_AP_PASS : nullptr;
+  WiFi.softAP(CYD_SETUP_AP_SSID, pw);
+  IPAddress ip = WiFi.softAPIP();
+  g_portalDNS.start(53, "*", ip);
+  g_portalServer.on("/", handlePortalRoot);
+  g_portalServer.on("/save", HTTP_POST, handlePortalSave);
+  g_portalServer.onNotFound(handlePortalRoot);   // captive: any URL -> the form
+  g_portalServer.begin();
+  setStatus("setup portal", gfx->color565(230, 170, 50));
+  drawPortalScreen(ip.toString());
+  for (;;) {
+    g_portalDNS.processNextRequest();
+    g_portalServer.handleClient();
+    delay(5);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 //  Lifecycle
 // ════════════════════════════════════════════════════════════════════════════
 void setup() {
@@ -474,6 +610,15 @@ void setup() {
   pinMode(TOUCH_CS, OUTPUT); digitalWrite(TOUCH_CS, HIGH);
   pinMode(TOUCH_IRQ, INPUT);
   touchSPI.begin(TOUCH_SCLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+
+  // Provisioning: load saved config; enter the setup portal if unconfigured or
+  // if BOOT is held at power-on (a deliberate "reconfigure me" gesture).
+  pinMode(PIN_BOOT_BUTTON, INPUT_PULLUP);
+  loadConfig();
+  bool forcePortal = (digitalRead(PIN_BOOT_BUTTON) == LOW);
+  if (forcePortal || !haveConfig()) {
+    runConfigPortal();   // never returns — reboots on save
+  }
 
   setStatus("init BLE/WiFi", WHITE);
   render();

@@ -15,18 +15,25 @@
 #define RAGNAR_CYD_CONFIG_H
 
 // ── Operator settings ─────────────────────────────────────────────────────────
-// WiFi the node joins to reach Ragnar's REST API (2.4 GHz SSID only).
-#define CYD_WIFI_SSID        "YOUR_WIFI_SSID"
-#define CYD_WIFI_PASS        "YOUR_WIFI_PASSWORD"
-
-// Ragnar base URL, reachable from the node (LAN IP of the Pi, no trailing slash).
-#define CYD_RAGNAR_URL       "http://192.168.1.50:8080"
-
-// Device token issued by Ragnar (Bearer). Scopes the node to the /api/cyd/* role.
-#define CYD_DEVICE_TOKEN     "PASTE_TOKEN_FROM_RAGNAR"
-
-// Human label shown on screen and reported to Ragnar.
+// PRIMARY provisioning is the on-device captive portal: an unconfigured node
+// (or one that fails to connect, or one booted with the BOOT button held) raises
+// its own "Ragnar-CYD-setup" AP and serves a form for WiFi + Ragnar URL + device
+// token + node name, saved to NVS. So a single generic firmware image works on
+// any node without baking in secrets.
+//
+// These compile-time values are OPTIONAL SEEDS: leave them empty ("") for the
+// portal path, or fill them to pre-seed NVS on first boot (developer convenience
+// — do NOT commit real secrets). NVS always wins once set in the portal.
+#define CYD_WIFI_SSID        ""    // 2.4 GHz SSID only
+#define CYD_WIFI_PASS        ""
+#define CYD_RAGNAR_URL       ""    // e.g. http://192.168.1.50:8080  (no trailing slash)
+#define CYD_DEVICE_TOKEN     ""    // Bearer token issued by Ragnar (Config → CYD Nodes)
 #define CYD_NODE_NAME        "cyd-01"
+
+// SoftAP name/password for the setup portal (password >= 8 chars, or "" for open).
+#define CYD_SETUP_AP_SSID    "Ragnar-CYD-setup"
+#define CYD_SETUP_AP_PASS    "ragnarcyd"
+#define PIN_BOOT_BUTTON      0     // hold at boot to force the setup portal (GPIO0)
 
 // ── Duty-cycle timing (ms) — the single 2.4 GHz radio is time-shared ──────────
 #define CYD_SYNC_WINDOW_MS   2500    // connected: pull status, push findings, send queued actions
