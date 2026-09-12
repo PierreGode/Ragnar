@@ -24,6 +24,9 @@
 #   RAGNAR_TFT_RAGNAR_SCALE   Chromium device scale for Ragnar (default 0.5 — dense dashboard)
 #   RAGNAR_TFT_PWN_SCALE      Chromium device scale for Pwnagotchi (default 1.0 — mostly the face)
 #   RAGNAR_TFT_POLL           seconds between mode checks (default 5)
+#   RAGNAR_TFT_STABLE         consecutive equal reads a mode must hold before we switch
+#                             to it (default 2 -> ~POLL*2s). Debounces boot-time flapping,
+#                             where both modes' ports come and go while the box settles.
 
 set -u
 
@@ -46,6 +49,7 @@ PWN_URL="${RAGNAR_TFT_PWN_URL:-http://localhost:8080}"
 RAGNAR_SCALE="${RAGNAR_TFT_RAGNAR_SCALE:-0.5}"
 PWN_SCALE="${RAGNAR_TFT_PWN_SCALE:-1.0}"
 POLL="${RAGNAR_TFT_POLL:-5}"
+STABLE="${RAGNAR_TFT_STABLE:-2}"
 
 PROFILE="${HOME:-/home/ragnar}/.config/ragnar-tft-chromium"
 mkdir -p "$PROFILE" 2>/dev/null || true
@@ -100,17 +104,25 @@ trap _term TERM INT
 
 echo "[tft-kiosk] mode-aware runner: DISPLAY=$DISPLAY browser=$BROWSER ragnar=$RAGNAR_URL pwn=$PWN_URL"
 
-CUR=""
+# CUR  = what Chromium is currently showing
+# CAND = the target seen on the last poll; CANDN = how many polls in a row
+# We only (re)launch once a target has held for STABLE consecutive polls, so the
+# port flapping while the box picks a mode at boot can't thrash Chromium (which
+# was hammering X into the service's restart limit).
+CUR=""; CAND=""; CANDN=0
 while true; do
     sel="$(pick_target)"
     url="${sel%|*}"
     scale="${sel#*|}"
-    if [ -n "$url" ] && [ "$sel" != "$CUR" ]; then
-        echo "[tft-kiosk] $(date -Iseconds) -> $url (scale $scale)"
-        pkill -f "user-data-dir=$PROFILE" 2>/dev/null || true
-        sleep 1
-        launch "$url" "$scale"
-        CUR="$sel"
+    if [ -n "$url" ]; then
+        if [ "$sel" = "$CAND" ]; then CANDN=$((CANDN + 1)); else CAND="$sel"; CANDN=1; fi
+        if [ "$sel" != "$CUR" ] && [ "$CANDN" -ge "$STABLE" ]; then
+            echo "[tft-kiosk] $(date -Iseconds) -> $url (scale $scale)"
+            pkill -f "user-data-dir=$PROFILE" 2>/dev/null || true
+            sleep 1
+            launch "$url" "$scale"
+            CUR="$sel"
+        fi
     fi
     sleep "$POLL"
 done
