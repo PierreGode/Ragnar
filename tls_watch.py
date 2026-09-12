@@ -416,6 +416,94 @@ BLOCK64_OTHER = {
     0x002a: ('TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5', 'RC2'),
 }
 
+# RC4 stream-cipher suites (new in v4). RC4 in TLS carries two named CVEs of its
+# own — CVE-2013-2566 (keystream biases) and CVE-2015-2808 (the Invariance
+# Weakness that Bar Mitzvah exploits) — and BOTH are EXPOSURES observed directly:
+# the negotiated suite IS the vulnerable condition, so nothing is inferred. Kept
+# as its own table (not folded into _WEAK_CIPHERS) so every RC4 code point is
+# named — including the KRB5/PSK RC4 suites the generic legacy list happens to
+# miss — and so the CVE attribution rides on exactly the RC4 suites and no others.
+RC4_CIPHERS = {
+    0x0003: 'TLS_RSA_EXPORT_WITH_RC4_40_MD5',
+    0x0004: 'TLS_RSA_WITH_RC4_128_MD5',
+    0x0005: 'TLS_RSA_WITH_RC4_128_SHA',
+    0x0017: 'TLS_DH_anon_EXPORT_WITH_RC4_40_MD5',
+    0x0018: 'TLS_DH_anon_WITH_RC4_128_MD5',
+    0x0020: 'TLS_KRB5_WITH_RC4_128_SHA',
+    0x0024: 'TLS_KRB5_WITH_RC4_128_MD5',
+    0x0028: 'TLS_KRB5_EXPORT_WITH_RC4_40_SHA',
+    0x002b: 'TLS_KRB5_EXPORT_WITH_RC4_40_MD5',
+    0x008a: 'TLS_PSK_WITH_RC4_128_SHA',
+    0x008e: 'TLS_DHE_PSK_WITH_RC4_128_SHA',
+    0x0092: 'TLS_RSA_PSK_WITH_RC4_128_SHA',
+    0xc002: 'TLS_ECDH_ECDSA_WITH_RC4_128_SHA',
+    0xc007: 'TLS_ECDHE_ECDSA_WITH_RC4_128_SHA',
+    0xc00c: 'TLS_ECDH_RSA_WITH_RC4_128_SHA',
+    0xc011: 'TLS_ECDHE_RSA_WITH_RC4_128_SHA',
+    0xc016: 'TLS_ECDH_anon_WITH_RC4_128_SHA',
+    0xc033: 'TLS_ECDHE_PSK_WITH_RC4_128_SHA',
+}
+_CVE_RC4 = {'cves': ['CVE-2013-2566', 'CVE-2015-2808'], 'cvss': 5.9,
+            'cvss_source': 'NVD, as republished by Tenable'}
+
+# ---- record-layer CVEs (new in v4) -----------------------------------------
+# Read from the plaintext TLS record framing, not from any handshake field. Both
+# are DoS-class OpenSSL bugs.
+#
+# CVE-2016-8610 "SSL Death Alert": unbounded plaintext ALERT processing during
+# the handshake. The alerts are plaintext by definition — the flood happens
+# before any key is in effect — so the record type, level and count are read
+# directly. The threshold is OpenSSL's own: its fix errors above FIVE consecutive
+# warning alerts (SSL_R_TOO_MANY_WARN_ALERTS), so six is the vendor's statement
+# of what is too many.
+_ALERT_LEVEL_WARNING = 1
+_ALERT_LEVEL_FATAL = 2
+_SSL_DEATH_ALERT_TIERS = (
+    (6, 'warn', "exceeds the five consecutive warning alerts OpenSSL's own fix permits"),
+    (100, 'high', 'sustained alert flood consistent with a deliberate CPU-exhaustion '
+                  'attempt rather than a misbehaving peer'),
+)
+_CVE_2016_8610 = {'cve': 'CVE-2016-8610', 'cvss': 7.5,
+                  'cvss_source': 'Red Hat and IBM agree on 7.5 / A:H'}
+
+# CVE-2017-3731 truncated-record out-of-bounds read: a PROTECTED (application_data)
+# record whose declared length is below the 16-byte authenticator both vulnerable
+# ciphers append cannot be well-formed — it is precisely the underflow OpenSSL's
+# fix guards. The RC4-MD5 half rides on RC4_CIPHERS, but the ChaCha20-Poly1305
+# half is a modern, correct cipher that no weak-cipher table should ever hold, so
+# the precondition needs its own table. What is NOT observable is whether the peer
+# is 32-bit or which OpenSSL it runs, so this reports an attack SHAPE against a
+# susceptible cipher, never a vulnerable host.
+_CVE_2017_3731_CIPHERS = {
+    0x0004: 'TLS_RSA_WITH_RC4_128_MD5',
+    0x0018: 'TLS_DH_anon_WITH_RC4_128_MD5',
+    0xcca8: 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xcca9: 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xccaa: 'TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256',
+    0xccab: 'TLS_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccac: 'TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccad: 'TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xccae: 'TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256',
+    0xcc13: 'TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+    0xcc14: 'TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+    0xcc15: 'TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256 (draft)',
+}
+_CVE_2017_3731_MIN_RECORD = 16
+_CVE_2017_3731 = {'cve': 'CVE-2017-3731', 'cvss': 7.5,
+                  'cvss_source': 'Red Hat (A:H); IBM X-Force scores 5.3 with A:L',
+                  'score_confidence': 'disputed'}
+
+# CVE-2016-2108 (OpenSSL ASN.1 negative-zero memory corruption) is DELIBERATELY
+# NOT detected. The attack needs a crafted ASN.1 structure fed to the victim's
+# decoder; the only ASN.1 a passive tap sees is the server certificate chain, and
+# that only on TLS 1.2 over TCP (1.3 encrypts the Certificate, QUIC is always 1.3).
+# A certificate on the wire says nothing about whether it triggers the decoder
+# bug — deciding that would mean reimplementing the vulnerable parser and hoping
+# ours is wrong the same way — and the attack path that matters (a client feeding
+# a crafted structure to a server) is carried in no field a passive observer can
+# read. The v4 standalone defers it for the same reason; recorded here so the
+# absence is a reviewable decision, not an oversight.
+
 
 def _leaf_findings(der, chain_len, sni, now):
     """Return (findings, info) for the leaf certificate. Requires cryptography;
@@ -470,9 +558,11 @@ def _leaf_findings(der, chain_len, sni, now):
     return out, info
 
 
-def analyze_session(client, server, cert_ders, now):
+def analyze_session(client, server, cert_ders, now, records=None):
     """Combine parsed client/server/cert state into a findings list (severity
-    descending) plus per-cert info. Any argument may be None."""
+    descending) plus per-cert info. Any argument may be None. `records` is the
+    optional list of per-direction record-layer stats from `_scan_tls_stream`,
+    used for the v4 record-layer findings (CVE-2016-8610 / CVE-2017-3731)."""
     findings = []
 
     def add(sev, code, msg):
@@ -511,6 +601,20 @@ def analyze_session(client, server, cert_ders, now):
                                          'as SWEET32, though CVE-2016-2183 names only DES/3DES'
                                          .format(name, ch, algo)),
                              'related_cve': 'CVE-2016-2183', 'cipher': '0x{:04x}'.format(ch)})
+        elif ch in RC4_CIPHERS:
+            # RC4 in TLS: two named CVEs, both EXPOSURES (the negotiated suite is
+            # itself the vulnerable condition, so nothing is inferred). Attached
+            # to the weak_cipher finding as attribution rather than a second code
+            # — that would be one observation reported twice.
+            findings.append({
+                'severity': 'high', 'code': 'weak_cipher',
+                'message': ('Server selected RC4 suite {} (0x{:04x}) - keystream biases '
+                            '(CVE-2013-2566) and the Invariance Weakness that Bar Mitzvah '
+                            'exploits (CVE-2015-2808) both enable plaintext recovery '
+                            'against RC4 in TLS'.format(RC4_CIPHERS[ch], ch)),
+                'cve': list(_CVE_RC4['cves']), 'cvss': _CVE_RC4['cvss'],
+                'cvss_source': _CVE_RC4['cvss_source'], 'detect_class': 'exposure',
+                'cipher': '0x{:04x}'.format(ch), 'cipher_name': RC4_CIPHERS[ch]})
         elif ch in _WEAK_CIPHERS:
             add('high', 'weak_cipher',
                 'Server selected weak/legacy cipher 0x{:04x}'.format(ch))
@@ -525,6 +629,55 @@ def analyze_session(client, server, cert_ders, now):
                                          'a SWEET32-exposed session (CVE-2016-2183) if a server '
                                          'selected one'.format(len(offered))),
                              'cve': 'CVE-2016-2183', 'detect_class': 'posture'})
+    # ---- record-layer attack shapes (v4): read from the plaintext record stream ----
+    neg_ch = server['cipher'] if server else None
+    for d in (records or []):
+        # CVE-2016-8610 (SSL Death Alert): consecutive plaintext warning alerts
+        # during the handshake. Latching tiers on the per-direction run — a fatal
+        # alert or any non-alert record already broke the run in the scanner.
+        run = d.get('max_consec_warn', 0)
+        tier = None
+        for limit, sev, why in _SSL_DEATH_ALERT_TIERS:
+            if run >= limit:
+                tier = (limit, sev, why)
+        if tier:
+            limit, sev, why = tier
+            findings.append({
+                'severity': sev, 'code': 'cve_2016_8610_alert_flood',
+                'message': ('{} consecutive plaintext warning alerts on {} ({} alert '
+                            'records total) - {}'.format(
+                                run, d.get('label', '?'),
+                                d.get('plaintext_alerts', run), why)),
+                'cve': _CVE_2016_8610['cve'], 'cvss': _CVE_2016_8610['cvss'],
+                'cvss_source': _CVE_2016_8610['cvss_source'], 'detect_class': 'attack',
+                'direction': d.get('label'), 'consecutive_warning_alerts': run,
+                'total_plaintext_alerts': d.get('plaintext_alerts', run),
+                'threshold': limit,
+                'note': ("OpenSSL's own fix errors above five consecutive warning "
+                         'alerts (SSL_R_TOO_MANY_WARN_ALERTS); a patched peer rejects '
+                         'this rather than burning CPU on it')})
+        # CVE-2017-3731 (truncated record): a complete protected record below the
+        # 16-byte authenticator, against a susceptible cipher. Attack SHAPE, never
+        # a vulnerable host — the 32-bit/OpenSSL-version preconditions are not on
+        # the wire. The cipher precondition is checked here because only the
+        # session knows what was negotiated.
+        short = d.get('short_records', 0)
+        if short and neg_ch in _CVE_2017_3731_CIPHERS:
+            findings.append({
+                'severity': 'warn', 'code': 'cve_2017_3731_short_record',
+                'message': ('{} protected record(s) on {} shorter than the 16-byte '
+                            'authenticator {} appends (smallest {} bytes) - the '
+                            'truncation shape that underflows OpenSSL length '
+                            'arithmetic'.format(short, d.get('label', '?'),
+                                                _CVE_2017_3731_CIPHERS[neg_ch],
+                                                d.get('shortest'))),
+                'cve': _CVE_2017_3731['cve'], 'cvss': _CVE_2017_3731['cvss'],
+                'cvss_source': _CVE_2017_3731['cvss_source'],
+                'score_confidence': _CVE_2017_3731['score_confidence'],
+                'detect_class': 'attack', 'confidence': 'shape',
+                'direction': d.get('label'), 'cipher': '0x{:04x}'.format(neg_ch),
+                'cipher_name': _CVE_2017_3731_CIPHERS[neg_ch], 'short_records': short})
+
     infos = []
     if cert_ders:
         try:
@@ -701,20 +854,77 @@ def handshake_messages(buf):
 
 
 # ======================= capture -> sessions -> verdict ======================
-def _handshake_from_tls_stream(stream):
-    """Extract handshake messages from a reassembled TLS-over-TCP byte stream,
-    walking record headers and concatenating handshake (type 22) record bodies."""
-    i, hs = 0, b''
-    while i + 5 <= len(stream):
+def _scan_tls_stream(stream):
+    """Walk record headers in a reassembled TLS-over-TCP byte stream once and
+    return (handshake_messages, record_stats).
+
+    Besides concatenating handshake (type 22) record bodies for the fingerprint
+    path, this counts the two record-layer attack shapes v4 names, both read
+    directly from the plaintext record framing:
+
+      * CVE-2016-8610 (SSL Death Alert) — PLAINTEXT alert records (type 21) seen
+        before the handshake turns encrypted, tracking the longest run of
+        consecutive *warning* alerts (a fatal alert, or any non-alert record,
+        ends a run). Only pre-CCS / pre-appdata alerts count: afterwards the two
+        body bytes are encrypted and unreadable, and the flood the CVE describes
+        happens during the handshake anyway.
+      * CVE-2017-3731 (truncated record) — COMPLETE application_data records
+        (type 23) whose declared length is below the 16-byte authenticator. Only
+        fully-present records are counted; a short *read* (a record's bytes still
+        arriving across TCP segments) is incomplete data, not an attack.
+    """
+    i, hs = 0, bytearray()
+    saw_ccs = saw_appdata = False
+    plaintext_alerts = 0
+    consec_warn = max_consec_warn = 0
+    alert_sample = []
+    short_records = 0
+    shortest = None
+    n = len(stream)
+    while i + 5 <= n:
         ctype = stream[i]
         rlen = (stream[i + 3] << 8) | stream[i + 4]
-        body = stream[i + 5:i + 5 + rlen]
-        if len(body) < rlen:
-            break
-        if ctype == 22:
-            hs += body
+        if i + 5 + rlen > n:
+            break                                 # record body not fully captured
+        frag = stream[i + 5:i + 5 + rlen]
+        if ctype == 22:                           # handshake
+            hs += frag
+            consec_warn = 0
+        elif ctype == 23:                         # application_data (protected)
+            saw_appdata = True
+            consec_warn = 0
+            if rlen < _CVE_2017_3731_MIN_RECORD:
+                short_records += 1
+                if shortest is None or rlen < shortest:
+                    shortest = rlen
+        elif ctype == 20:                         # ChangeCipherSpec
+            saw_ccs = True
+            consec_warn = 0
+        elif ctype == 21:                         # alert
+            if not (saw_ccs or saw_appdata):
+                plaintext_alerts += 1
+                level = frag[0] if len(frag) >= 1 else None
+                desc = frag[1] if len(frag) >= 2 else None
+                if len(alert_sample) < 8:
+                    alert_sample.append((level, desc))
+                if level == _ALERT_LEVEL_WARNING:
+                    consec_warn += 1
+                    if consec_warn > max_consec_warn:
+                        max_consec_warn = consec_warn
+                else:                             # fatal ends the connection/run
+                    consec_warn = 0
         i += 5 + rlen
-    return handshake_messages(hs)
+    stats = {'plaintext_alerts': plaintext_alerts,
+             'max_consec_warn': max_consec_warn, 'alert_sample': alert_sample,
+             'short_records': short_records, 'shortest': shortest}
+    return handshake_messages(bytes(hs)), stats
+
+
+def _handshake_from_tls_stream(stream):
+    """Handshake messages from a reassembled TLS-over-TCP byte stream (record
+    walk in `_scan_tls_stream`); thin wrapper for callers that only want the
+    messages."""
+    return _scan_tls_stream(stream)[0]
 
 
 def parse_pcap(path):
@@ -759,19 +969,27 @@ def parse_pcap(path):
             continue
         src, sport, dst, dport = key
         rev = (dst, dport, src, sport)
-        cmsgs = _handshake_from_tls_stream(stream)
+        cmsgs, cstats = _scan_tls_stream(stream)
         if any(m[0] == 0x01 for m in cmsgs):
             client = parse_client_hello(next(b for t, b in cmsgs if t == 0x01))
             server, certs = None, []
-            for t, b in _handshake_from_tls_stream(streams.get(rev, b'')):
+            smsgs, sstats = _scan_tls_stream(streams.get(rev, b''))
+            for t, b in smsgs:
                 if t == 0x02 and server is None:
                     server = parse_server_hello(b)
                 elif t == 0x0b:
                     certs = parse_certificates(b)
             seen.add(rev)
+            # Per-direction record-layer stats, labelled by who is talking, so a
+            # death-alert flood or a truncated record is attributed to the side
+            # that sent it — CVE-2016-8610 and CVE-2017-3731 are both asymmetric.
+            records = [
+                dict(cstats, label='{}:{} -> {}:{}'.format(src, sport, dst, dport)),
+                dict(sstats, label='{}:{} -> {}:{}'.format(dst, dport, src, sport)),
+            ]
             sessions.append({'proto': 'tls', 'src': src, 'sport': sport,
                              'dst': dst, 'dport': dport, 'client': client,
-                             'server': server, 'certs': certs})
+                             'server': server, 'certs': certs, 'records': records})
         seen.add(key)
 
     quic_seen = set()
@@ -832,7 +1050,8 @@ def _tls_analyze(sessions, now=None, denylist=None):
             j4s = _maybe_ja4s(server, pchar)
             if j4s:
                 rec['ja4s'] = j4s
-        findings, infos = analyze_session(client, server, s.get('certs'), now)
+        findings, infos = analyze_session(client, server, s.get('certs'), now,
+                                          records=s.get('records'))
         if client and rec.get('ja4') in denylist:
             findings.insert(0, {'severity': 'high', 'code': 'ja4_denylist',
                                 'message': 'Client JA4 on denylist: {}'.format(
@@ -1158,6 +1377,17 @@ def selftest():
     fw, _ = analyze_session(None, shw, [], now)
     ck('weak_cipher', any(x['code'] == 'weak_cipher' for x in fw))
 
+    # ---- RC4 (CVE-2013-2566 / CVE-2015-2808): weak_cipher carries both CVEs ----
+    frc4 = next((x for x in fw if x['code'] == 'weak_cipher'), None)
+    ck('rc4_cve_list', (frc4 or {}).get('cve'), ['CVE-2013-2566', 'CVE-2015-2808'])
+    ck('rc4_exposure_class', (frc4 or {}).get('detect_class'), 'exposure')
+    ck('rc4_cipher_name', (frc4 or {}).get('cipher_name'), 'TLS_RSA_WITH_RC4_128_SHA')
+    # A KRB5 RC4 suite the generic legacy list misses is still named as RC4.
+    shk = parse_server_hello(_mk_server_hello(0x0303, 0x0020)[4:])   # KRB5_WITH_RC4_128_SHA
+    fk = next((x for x in analyze_session(None, shk, [], now)[0]
+               if x['code'] == 'weak_cipher'), None)
+    ck('rc4_krb5_named', (fk or {}).get('cve'), ['CVE-2013-2566', 'CVE-2015-2808'])
+
     # ---- CVE-2016-2183 (SWEET32): negotiated 64-bit block cipher ----
     sh3des = parse_server_hello(_mk_server_hello(0x0303, 0x000a)[4:])   # 3DES_EDE_CBC
     f3, _ = analyze_session(None, sh3des, [], now)
@@ -1188,6 +1418,60 @@ def selftest():
         _KAT_CIPHERS, _KAT_EXTS, _KAT_SIGALGS, [0x0304], alpn=['h2'], sni='x.test')[4:])
     ck('no_sweet32_false_positive', 'cve_2016_2183_client_offer'
        not in {x['code'] for x in analyze_session(cclean, None, [], now)[0]})
+
+    # ---- record-layer CVEs (v4): CVE-2016-8610 death alert, CVE-2017-3731 short record ----
+    def _rec_bytes(ct, body):
+        return bytes([ct]) + struct.pack('!HH', 0x0303, len(body)) + body
+
+    def _alert(level, desc=0):
+        return _rec_bytes(21, bytes([level, desc]))
+    # The scanner counts a run of consecutive plaintext warning alerts.
+    _m, st7 = _scan_tls_stream(_alert(1) * 7)
+    ck('death_alert_run', st7['max_consec_warn'], 7)
+    da = analyze_session(None, None, [], now, records=[dict(st7, label='c -> s')])[0]
+    fda = next((x for x in da if x['code'] == 'cve_2016_8610_alert_flood'), None)
+    ck('death_alert_finding', fda is not None)
+    ck('death_alert_warn', (fda or {}).get('severity'), 'warn')
+    ck('death_alert_cve', (fda or {}).get('cve'), 'CVE-2016-8610')
+    ck('death_alert_attack_class', (fda or {}).get('detect_class'), 'attack')
+    # >= 100 consecutive warning alerts escalates to the high tier.
+    _m, st100 = _scan_tls_stream(_alert(1) * 100)
+    dh = analyze_session(None, None, [], now, records=[dict(st100, label='c -> s')])[0]
+    ck('death_alert_high', next((x for x in dh
+        if x['code'] == 'cve_2016_8610_alert_flood'), {}).get('severity'), 'high')
+    # Five warnings alone stay under the six-alert bound OpenSSL's fix permits.
+    _m, st5 = _scan_tls_stream(_alert(1) * 5)
+    ck('death_alert_under_threshold', st5['max_consec_warn'], 5)
+    d5 = analyze_session(None, None, [], now, records=[dict(st5, label='c -> s')])[0]
+    ck('death_alert_no_fp',
+       not any(x['code'] == 'cve_2016_8610_alert_flood' for x in d5))
+    # A fatal alert breaks the run of warnings.
+    _m, stf = _scan_tls_stream(_alert(1) * 4 + _alert(2) + _alert(1) * 3)
+    ck('death_alert_fatal_breaks_run', stf['max_consec_warn'], 4)
+    # Alerts AFTER ChangeCipherSpec are encrypted, so they are not counted.
+    _m, stpost = _scan_tls_stream(_rec_bytes(20, b'\x01') + _alert(1) * 8)
+    ck('death_alert_post_ccs_ignored', stpost['max_consec_warn'], 0)
+
+    # CVE-2017-3731: a complete protected (appdata, type 23) record below 16 bytes,
+    # against a susceptible cipher (ChaCha20-Poly1305), is the truncation shape.
+    _m, stsr = _scan_tls_stream(_rec_bytes(23, b'\x00' * 4))
+    ck('short_record_count', stsr['short_records'], 1)
+    ck('short_record_shortest', stsr['shortest'], 4)
+    shcc = parse_server_hello(_mk_server_hello(0x0303, 0xcca8)[4:])   # ChaCha20-Poly1305
+    sr = analyze_session(None, shcc, [], now, records=[dict(stsr, label='s -> c')])[0]
+    fsr = next((x for x in sr if x['code'] == 'cve_2017_3731_short_record'), None)
+    ck('short_record_finding', fsr is not None)
+    ck('short_record_warn', (fsr or {}).get('severity'), 'warn')
+    ck('short_record_shape', (fsr or {}).get('confidence'), 'shape')
+    # The same short record against a modern AEAD cipher is NOT the shape (no
+    # susceptible precondition) — no finding.
+    shaes = parse_server_hello(_mk_server_hello(0x0303, 0xc030)[4:])   # AES-GCM
+    sr2 = analyze_session(None, shaes, [], now, records=[dict(stsr, label='s -> c')])[0]
+    ck('short_record_needs_precondition',
+       not any(x['code'] == 'cve_2017_3731_short_record' for x in sr2))
+    # A full-length protected record is not short.
+    _m, stok = _scan_tls_stream(_rec_bytes(23, b'\x00' * 40))
+    ck('short_record_no_fp', stok['short_records'], 0)
 
     try:
         # self-signed leaf + SNI mismatch (the interception signal)
