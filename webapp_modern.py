@@ -53,6 +53,7 @@ except ImportError:
     pandas_available = False
 from init_shared import shared_data
 import git_updater
+import cyd_node
 from safe_vault import SafeVault, SafeError, SafeLockedError
 from wifi_interfaces import gather_wifi_interfaces, gather_ethernet_interfaces, is_ethernet_available, get_active_ethernet_interface
 from utils import WebUtils
@@ -549,6 +550,20 @@ def _valid_share_token():
     return False
 
 
+def _valid_cyd_token():
+    """Node name bound to the CYD device token on this request, or None.
+
+    A CYD hybrid node (cyd_firmware/ragnar_cyd) reaches us over plain WiFi, not
+    the tailnet, so it authenticates purely by an operator-issued Bearer token
+    (shared_data.config['cyd_device_tokens']). Constant-time compared in
+    cyd_node.valid_token. The token grants only the three /api/cyd/* device
+    endpoints (gated in check_authentication)."""
+    auth = request.headers.get('Authorization', '')
+    if not auth.startswith('Bearer '):
+        return None
+    return cyd_node.valid_token(shared_data.config, auth[7:].strip())
+
+
 def _remote_shares():
     """Outbound remote-share targets (address + token) this unit can send to."""
     v = shared_data.config.get('mesh_remote_shares')
@@ -694,6 +709,25 @@ def check_authentication():
         token_push = request.method == 'POST' and path == '/api/mesh/files/push'
         if token_push and _valid_share_token():
             return
+
+    # CYD hybrid-node role. A device carrying a valid CYD device token (one this
+    # unit's operator generated and pasted into the firmware) may reach ONLY the
+    # three device-facing endpoints: pull its status display, push sensor counts,
+    # and request an allowlisted action. Authenticated purely by the bearer token
+    # — no tailnet identity needed — so a plain-WiFi CYD that is not a mesh peer
+    # still works. Scoped hard by exact path + method, fail-closed.
+    cyd_name = _valid_cyd_token()
+    if cyd_name:
+        cyd_ok = (
+            (request.method == 'GET'  and path == '/api/cyd/status') or
+            (request.method == 'POST' and path == '/api/cyd/ingest') or
+            (request.method == 'POST' and path == '/api/cyd/action')
+        )
+        if cyd_ok:
+            g.cyd_node = cyd_name
+            return
+        return jsonify({'error': 'Forbidden',
+                        'detail': 'cyd device token: status/ingest/action only'}), 403
 
     # Check if user is authenticated via Flask session
     if not session.get('authenticated'):
@@ -2545,6 +2579,134 @@ def watchtower_clear():
         logger.debug(f"[watchtower] clear failed: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
     return jsonify({'success': True, 'summary': _wt_summary})
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CYD HYBRID NODE  (ESP32-2432S028R "Cheap Yellow Display")
+#  Device-facing endpoints, reached over plain WiFi and gated by the CYD device
+#  token role in check_authentication(). A node pulls a compact status for its
+#  touch display, pushes its own 2.4 GHz sensor counts, and may request an
+#  allowlisted operator action. Registry + tokens live in cyd_node.py.
+#  Operator-only management endpoints (session-gated) generate/list/revoke the
+#  device tokens and view reporting nodes.
+# ════════════════════════════════════════════════════════════════════════════
+def _cyd_threat_score():
+    """Best-effort 0..100 indicator from the Watchtower alert volume."""
+    try:
+        total = int((_wt_summary or {}).get('total', 0))
+    except (TypeError, ValueError):
+        total = 0
+    return max(0, min(100, total * 5))
+
+
+def _cyd_mesh_node_count():
+    try:
+        if not mesh_available or not _mesh_enabled():
+            return 0
+        return len(mesh_manager.status().get('peers', []) or [])
+    except Exception:
+        return 0
+
+
+def _cyd_uptime_sec():
+    try:
+        with open('/proc/uptime', 'r') as fh:
+            return int(float(fh.read().split()[0]))
+    except Exception:
+        return 0
+
+
+def _cyd_bluetooth_state():
+    try:
+        if getattr(shared_data, 'bluetooth_scan_active', False):
+            return 'scanning'
+    except Exception:
+        pass
+    return 'idle'
+
+
+@app.route('/api/cyd/status', methods=['GET'])
+def cyd_status():
+    """Compact, flat status for a CYD node's touch display (the firmware parses
+    it with lightweight string matching, so keep the shape flat and stable)."""
+    try:
+        unit = _mesh_unit_name()
+    except Exception:
+        unit = socket.gethostname()
+    return jsonify({
+        'unit': unit,
+        'mesh_nodes': _cyd_mesh_node_count(),
+        'nets_24': 0,      # TODO: wire to the live WiFi-analyzer cache
+        'nets_5': 0,       # TODO: 5 GHz network count (analyzer)
+        'threat': _cyd_threat_score(),
+        'bluetooth': _cyd_bluetooth_state(),
+        'uptime': _cyd_uptime_sec(),
+        'ts': int(time.time()),
+    })
+
+
+@app.route('/api/cyd/ingest', methods=['POST'])
+def cyd_ingest():
+    """Accept a node's 2.4 GHz sensor report (beacon/probe/deauth/BSSID/BLE
+    counts) and store it in the registry. Returns the node's stored summary."""
+    data = request.get_json(silent=True) or {}
+    summary = cyd_node.record_ingest(data, request.remote_addr)
+    return jsonify({'success': True, 'node': summary})
+
+
+@app.route('/api/cyd/action', methods=['POST'])
+def cyd_action():
+    """Record an operator action requested from a node's touch screen. The
+    action is validated against cyd_node.ALLOWED_ACTIONS and LOGGED; wiring the
+    request to the live subsystems (WIDS / BLE scan / Watchtower clear) is a
+    tracked follow-up, so nothing is executed here yet."""
+    data = request.get_json(silent=True) or {}
+    action = str(data.get('action') or '').strip()
+    node_name = data.get('node') or getattr(g, 'cyd_node', None) or 'cyd-node'
+    if action not in cyd_node.ALLOWED_ACTIONS:
+        return jsonify({'success': False, 'error': 'unknown action'}), 400
+    cyd_node.record_action(node_name, action, request.remote_addr)
+    logger.info(f"[cyd] node {node_name} requested action '{action}' (recorded; dispatch TODO)")
+    return jsonify({'success': True, 'accepted': action,
+                    'note': 'recorded; live dispatch not yet wired'}), 202
+
+
+@app.route('/api/cyd/nodes', methods=['GET'])
+def cyd_nodes():
+    """Operator view of CYD nodes that have reported in (session-gated)."""
+    return jsonify({'success': True, 'nodes': cyd_node.list_nodes()})
+
+
+@app.route('/api/cyd/tokens', methods=['GET'])
+def cyd_tokens():
+    """List issued CYD device tokens (previews only, never the raw secret)."""
+    return jsonify({'success': True, 'tokens': cyd_node.list_tokens(shared_data.config)})
+
+
+@app.route('/api/cyd/token/generate', methods=['POST'])
+def cyd_token_generate():
+    """Issue a new CYD device token. The raw token is returned ONCE for pasting
+    into the firmware's config.h; only a copy is persisted."""
+    data = request.get_json(silent=True) or {}
+    entry, raw = cyd_node.generate_token(shared_data.config, data.get('name'))
+    try:
+        shared_data.save_config()
+    except Exception as exc:
+        logger.debug(f"[cyd] save_config after token generate failed: {exc}")
+    return jsonify({'success': True, 'token': raw, 'entry': entry})
+
+
+@app.route('/api/cyd/token/revoke', methods=['POST'])
+def cyd_token_revoke():
+    """Revoke a CYD device token by id."""
+    data = request.get_json(silent=True) or {}
+    changed = cyd_node.revoke_token(shared_data.config, data.get('id'))
+    if changed:
+        try:
+            shared_data.save_config()
+        except Exception as exc:
+            logger.debug(f"[cyd] save_config after token revoke failed: {exc}")
+    return jsonify({'success': changed})
 
 
 @app.route('/api/net/incidents', methods=['GET'])

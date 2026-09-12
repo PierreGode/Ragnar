@@ -27,6 +27,7 @@ browse than search.
 ## Wireless & RF
 - [WiFi Analyzer](wifi-analyzer.md) — passive tri-band spectrum analyzer + coverage heatmap
 - [RoomScan](roomscan.md) — touchscreen floor-plan tracer for the coverage heatmap
+- [CYD hybrid node](cyd-hybrid-node.md) — ESP32 "Cheap Yellow Display" companion: touch dashboard + 2.4 GHz sniff/BLE sensor
 - [WiFi Defense (WIDS)](wifi-defense.md) — passive 802.11 intrusion detection
 - [Wardriving](wardriving.md) — WiFi/BLE/cell logging with GPS recovery
 - [Diagnostics panel](diagnostics.md) — radios / power / GPS sky view + Starview observatory

@@ -1,0 +1,13 @@
+{
+  "name": "Ragnar CYD Hybrid Node (ESP32-2432S028R, 2.8\" touch)",
+  "version": "0.1",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32",
+      "parts": [
+        { "path": "firmware/cyd-hybrid.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

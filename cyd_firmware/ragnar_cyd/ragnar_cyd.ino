@@ -1,0 +1,557 @@
+/*
+ * ragnar_cyd.ino — Ragnar CYD hybrid node (Piglet Core, 2.4 GHz)
+ *
+ * Target: ESP32-2432S028R "Cheap Yellow Display" (CYD)
+ *   ESP32-WROOM-32 • 2.8" ILI9341 240x320 • XPT2046 resistive touch
+ *
+ * ROLE — a hybrid companion to a Ragnar Pi. It is NOT Ragnar: Ragnar (Flask on
+ * Linux) cannot run on a WROOM-32. The node instead
+ *   (1) shows a native touch dashboard of Ragnar's live status, and
+ *   (2) lets the operator trigger a small allowlist of Ragnar actions, and
+ *   (3) scans 2.4 GHz (WiFi promiscuous + BLE adverts) with its OWN radio and
+ *       reports the counts back to Ragnar.
+ *
+ * The single 2.4 GHz radio cannot be joined to WiFi AND sniff other channels at
+ * the same time, so the node TIME-SHARES in a duty cycle:
+ *
+ *   CONNECT+SYNC  -> (GET /api/cyd/status, POST /api/cyd/ingest, flush actions)
+ *        |
+ *   DISCONNECT -> WiFi promiscuous sweep ch 1..13
+ *        |
+ *   DISCONNECT -> BLE advertisement scan        (loops)
+ *
+ * The screen always renders the last-synced values, so status/findings are
+ * near-real-time, not continuous. This is the price of a WROOM-32 vs an S3/C5.
+ *
+ * Build (arduino-cli):
+ *   --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M"
+ * Required library (already used elsewhere in Ragnar):
+ *   "GFX Library for Arduino" by moononournation
+ *
+ * See cyd_firmware/README.md for flashing and Ragnar-side setup.
+ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <SPI.h>
+#include <esp_wifi.h>
+#include <Arduino_GFX_Library.h>
+
+#include "config.h"
+
+#if CYD_ENABLE_BLE
+#include <BLEDevice.h>
+#include <BLEScan.h>
+#endif
+
+// Arduino_GFX 1.6.7 exposes colors as RGB565_*; alias the two bare names we use.
+#define WHITE RGB565_WHITE
+#define BLACK RGB565_BLACK
+
+// ── Display ───────────────────────────────────────────────────────────────────
+static Arduino_DataBus *bus = new Arduino_ESP32SPI(
+    TFT_DC, TFT_CS, TFT_SCLK, TFT_MOSI, TFT_MISO, VSPI);
+static Arduino_GFX *gfx = new Arduino_ILI9341(bus, TFT_RST, 0 /*rotation*/, false /*IPS*/);
+
+static const int16_t SCR_W = 240;
+static const int16_t SCR_H = 320;
+
+// ── Touch (XPT2046 on its own SPI bus) ────────────────────────────────────────
+static SPIClass touchSPI(HSPI);
+
+// ── UI state ──────────────────────────────────────────────────────────────────
+enum Page { PAGE_STATUS = 0, PAGE_SCAN = 1, PAGE_ACTIONS = 2 };
+static Page   g_page       = PAGE_STATUS;
+static bool   g_needRedraw = true;
+
+// ── Live model: last status synced from Ragnar ────────────────────────────────
+struct RagnarStatus {
+  bool     ok        = false;
+  int      meshNodes = 0;
+  int      nets24    = 0;
+  int      nets5     = 0;
+  int      threat    = 0;      // 0..100 threat score
+  char     btState[16]      = "?";
+  char     unitName[24]     = "ragnar";
+  uint32_t uptimeSec        = 0;
+  uint32_t lastSyncMs       = 0;
+};
+static RagnarStatus g_rs;
+
+// ── Local sensor counters (this node's own radio) ─────────────────────────────
+struct SensorCounts {
+  volatile uint32_t beacons  = 0;
+  volatile uint32_t probes   = 0;
+  volatile uint32_t deauths  = 0;
+  volatile uint32_t frames   = 0;
+  uint32_t          bssids   = 0;   // unique BSSIDs this window
+  uint32_t          bleAdv   = 0;   // BLE advertisements this window
+};
+static SensorCounts g_sc;
+
+// Small unique-BSSID set (RAM-bounded).
+#define MAX_BSSID 96
+static uint8_t  g_bssidSet[MAX_BSSID][6];
+static uint32_t g_bssidCount = 0;
+
+// ── Pending action queue (taps flushed on next sync window) ───────────────────
+#define MAX_ACTIONS 6
+static String g_actionQ[MAX_ACTIONS];
+static uint8_t g_actionHead = 0, g_actionTail = 0;
+
+static bool actionEnqueue(const String &a) {
+  uint8_t next = (uint8_t)((g_actionTail + 1) % MAX_ACTIONS);
+  if (next == g_actionHead) return false;   // full
+  g_actionQ[g_actionTail] = a;
+  g_actionTail = next;
+  return true;
+}
+static bool actionDequeue(String &out) {
+  if (g_actionHead == g_actionTail) return false;
+  out = g_actionQ[g_actionHead];
+  g_actionHead = (uint8_t)((g_actionHead + 1) % MAX_ACTIONS);
+  return true;
+}
+
+// ── Status line shown at the bottom of every page ─────────────────────────────
+static char g_statusLine[40] = "booting";
+static uint16_t g_statusColor = WHITE;
+static void setStatus(const char *s, uint16_t c) {
+  strncpy(g_statusLine, s, sizeof(g_statusLine) - 1);
+  g_statusLine[sizeof(g_statusLine) - 1] = 0;
+  g_statusColor = c;
+  g_needRedraw = true;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  XPT2046 touch — minimal SPI reader (no external lib)
+// ════════════════════════════════════════════════════════════════════════════
+static uint16_t xptRead(uint8_t cmd) {
+  touchSPI.beginTransaction(SPISettings(2000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(TOUCH_CS, LOW);
+  touchSPI.transfer(cmd);
+  uint16_t hi = touchSPI.transfer(0x00);
+  uint16_t lo = touchSPI.transfer(0x00);
+  digitalWrite(TOUCH_CS, HIGH);
+  touchSPI.endTransaction();
+  return ((hi << 8) | lo) >> 3;   // 12-bit result
+}
+
+// Returns true and fills px/py (screen coords) when the panel is pressed.
+static bool touchRead(int16_t &px, int16_t &py) {
+  if (digitalRead(TOUCH_IRQ) == HIGH) return false;   // IRQ idles HIGH
+  // Average a few samples to debounce the resistive panel.
+  uint32_t sx = 0, sy = 0; int n = 0;
+  for (int i = 0; i < 4; i++) {
+    uint16_t rx = xptRead(0xD0);   // X
+    uint16_t ry = xptRead(0x90);   // Y
+    if (rx < 100 || ry < 100) continue;
+    sx += rx; sy += ry; n++;
+  }
+  if (n == 0) return false;
+  uint16_t rawx = sx / n, rawy = sy / n;
+  // Map raw ADC -> pixels (rotation 0, portrait). Clamp to screen.
+  long mx = map(rawx, TOUCH_RAW_MINX, TOUCH_RAW_MAXX, 0, SCR_W - 1);
+  long my = map(rawy, TOUCH_RAW_MINY, TOUCH_RAW_MAXY, 0, SCR_H - 1);
+  px = (int16_t)constrain(mx, 0, SCR_W - 1);
+  py = (int16_t)constrain(my, 0, SCR_H - 1);
+  return true;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  WiFi promiscuous sniffer
+// ════════════════════════════════════════════════════════════════════════════
+static void bssidSeen(const uint8_t *mac) {
+  for (uint32_t i = 0; i < g_bssidCount; i++)
+    if (memcmp(g_bssidSet[i], mac, 6) == 0) return;
+  if (g_bssidCount < MAX_BSSID) {
+    memcpy(g_bssidSet[g_bssidCount], mac, 6);
+    g_bssidCount++;
+  }
+}
+
+static void IRAM_ATTR snifferCb(void *buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_MGMT) return;
+  const wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+  const uint8_t *p = pkt->payload;
+  g_sc.frames++;
+  uint8_t subtype = (p[0] & 0xF0) >> 4;   // frame-control subtype
+  switch (subtype) {
+    case 0x08: g_sc.beacons++; bssidSeen(&p[16]); break;  // beacon (BSSID @ addr3)
+    case 0x04: g_sc.probes++;  break;                     // probe request
+    case 0x0C: g_sc.deauths++; break;                     // deauth
+    case 0x0A: g_sc.deauths++; break;                     // disassoc (count as deauth)
+    default: break;
+  }
+}
+
+static void sniffReset() {
+  g_sc.beacons = g_sc.probes = g_sc.deauths = g_sc.frames = 0;
+  g_bssidCount = 0;
+}
+
+static void sniffWindow(uint32_t durationMs) {
+  sniffReset();
+  WiFi.disconnect(true, false);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_rx_cb(&snifferCb);
+  const uint8_t channels[] = {1, 6, 11, 2, 7, 12, 3, 8, 13, 4, 9, 5, 10};
+  const int nch = sizeof(channels);
+  uint32_t start = millis();
+  int idx = 0;
+  while (millis() - start < durationMs) {
+    esp_wifi_set_channel(channels[idx % nch], WIFI_SECOND_CHAN_NONE);
+    idx++;
+    delay(durationMs / (nch + 1) > 60 ? 60 : durationMs / (nch + 1));
+  }
+  esp_wifi_set_promiscuous(false);
+  g_sc.bssids = g_bssidCount;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  BLE advertisement scan
+// ════════════════════════════════════════════════════════════════════════════
+#if CYD_ENABLE_BLE
+static bool g_bleReady = false;
+static void bleWindow(uint32_t durationMs) {
+  if (!g_bleReady) return;
+  BLEScan *scan = BLEDevice::getScan();
+  scan->setActiveScan(false);       // passive: just count adverts
+  scan->setInterval(100);
+  scan->setWindow(99);
+  BLEScanResults *res = scan->start((int)(durationMs / 1000), false);
+  g_sc.bleAdv = res ? res->getCount() : 0;
+  scan->clearResults();
+}
+#else
+static void bleWindow(uint32_t) { g_sc.bleAdv = 0; }
+#endif
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Ragnar REST client
+// ════════════════════════════════════════════════════════════════════════════
+// Flat-JSON helpers (we control the /api/cyd/status shape, so keep it simple).
+static long jsonInt(const String &body, const char *key) {
+  String k = String("\"") + key + "\"";
+  int i = body.indexOf(k);
+  if (i < 0) return 0;
+  i = body.indexOf(':', i);
+  if (i < 0) return 0;
+  return body.substring(i + 1).toInt();
+}
+static String jsonStr(const String &body, const char *key) {
+  String k = String("\"") + key + "\"";
+  int i = body.indexOf(k);
+  if (i < 0) return "";
+  i = body.indexOf(':', i);
+  if (i < 0) return "";
+  int q1 = body.indexOf('"', i);
+  if (q1 < 0) return "";
+  int q2 = body.indexOf('"', q1 + 1);
+  if (q2 < 0) return "";
+  return body.substring(q1 + 1, q2);
+}
+
+static bool httpGetStatus() {
+  HTTPClient http;
+  http.setConnectTimeout(2000);
+  http.setTimeout(2500);
+  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/status");
+  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+  String body = http.getString();
+  http.end();
+  g_rs.meshNodes = jsonInt(body, "mesh_nodes");
+  g_rs.nets24    = jsonInt(body, "nets_24");
+  g_rs.nets5     = jsonInt(body, "nets_5");
+  g_rs.threat    = jsonInt(body, "threat");
+  g_rs.uptimeSec = jsonInt(body, "uptime");
+  String bt = jsonStr(body, "bluetooth");
+  String un = jsonStr(body, "unit");
+  if (bt.length()) { strncpy(g_rs.btState, bt.c_str(), sizeof(g_rs.btState) - 1); g_rs.btState[sizeof(g_rs.btState)-1]=0; }
+  if (un.length()) { strncpy(g_rs.unitName, un.c_str(), sizeof(g_rs.unitName) - 1); g_rs.unitName[sizeof(g_rs.unitName)-1]=0; }
+  g_rs.ok = true;
+  g_rs.lastSyncMs = millis();
+  return true;
+}
+
+static bool httpPostIngest() {
+  HTTPClient http;
+  http.setConnectTimeout(2000);
+  http.setTimeout(2500);
+  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/ingest");
+  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  http.addHeader("Content-Type", "application/json");
+  String payload = String("{")
+    + "\"node\":\"" + CYD_NODE_NAME + "\","
+    + "\"beacons\":" + String((uint32_t)g_sc.beacons) + ","
+    + "\"probes\":"  + String((uint32_t)g_sc.probes)  + ","
+    + "\"deauths\":" + String((uint32_t)g_sc.deauths) + ","
+    + "\"frames\":"  + String((uint32_t)g_sc.frames)  + ","
+    + "\"bssids\":"  + String(g_sc.bssids) + ","
+    + "\"ble_adv\":" + String(g_sc.bleAdv) + ","
+    + "\"rssi\":"    + String(WiFi.RSSI()) + "}";
+  int code = http.POST(payload);
+  http.end();
+  return code == 200 || code == 204;
+}
+
+static bool httpPostAction(const String &action) {
+  HTTPClient http;
+  http.setConnectTimeout(2000);
+  http.setTimeout(3000);
+  http.begin(String(CYD_RAGNAR_URL) + "/api/cyd/action");
+  http.addHeader("Authorization", String("Bearer ") + CYD_DEVICE_TOKEN);
+  http.addHeader("Content-Type", "application/json");
+  String payload = String("{\"node\":\"") + CYD_NODE_NAME + "\",\"action\":\"" + action + "\"}";
+  int code = http.POST(payload);
+  http.end();
+  return code == 200 || code == 202;
+}
+
+// Connect to WiFi within the timeout. Returns true on success.
+static bool wifiConnect() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(CYD_WIFI_SSID, CYD_WIFI_PASS);
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < CYD_WIFI_CONNECT_TO) {
+    delay(150);
+  }
+  return WiFi.status() == WL_CONNECTED;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  UI
+// ════════════════════════════════════════════════════════════════════════════
+static const int16_t TAB_H = 34;
+
+static void drawTabs() {
+  const char *labels[3] = {"STATUS", "SCAN", "ACT"};
+  int16_t w = SCR_W / 3;
+  for (int i = 0; i < 3; i++) {
+    uint16_t bg = (i == (int)g_page) ? gfx->color565(30, 90, 160) : gfx->color565(20, 24, 30);
+    gfx->fillRect(i * w, 0, w, TAB_H, bg);
+    gfx->drawRect(i * w, 0, w, TAB_H, gfx->color565(60, 70, 80));
+    gfx->setTextColor(WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(i * w + 8, 9);
+    gfx->print(labels[i]);
+  }
+}
+
+static void drawStatusBar() {
+  gfx->fillRect(0, SCR_H - 22, SCR_W, 22, gfx->color565(16, 18, 22));
+  gfx->setTextSize(1);
+  gfx->setTextColor(g_statusColor);
+  gfx->setCursor(6, SCR_H - 15);
+  gfx->print(g_statusLine);
+}
+
+static void kv(int16_t y, const char *k, const String &v, uint16_t vc) {
+  gfx->setTextSize(1);
+  gfx->setTextColor(gfx->color565(150, 160, 170));
+  gfx->setCursor(10, y);
+  gfx->print(k);
+  gfx->setTextColor(vc);
+  gfx->setTextSize(2);
+  gfx->setCursor(10, y + 10);
+  gfx->print(v);
+}
+
+static uint16_t threatColor(int t) {
+  if (t >= 66) return gfx->color565(220, 60, 60);
+  if (t >= 33) return gfx->color565(230, 170, 50);
+  return gfx->color565(70, 200, 120);
+}
+
+static void drawStatusPage() {
+  int16_t y = TAB_H + 10;
+  gfx->setTextColor(gfx->color565(90, 180, 255));
+  gfx->setTextSize(2);
+  gfx->setCursor(10, y); gfx->print(g_rs.unitName);
+  y += 30;
+  kv(y, "MESH NODES", String(g_rs.meshNodes), WHITE); y += 40;
+  kv(y, "NETWORKS 2.4G", String(g_rs.nets24), WHITE); y += 40;
+  kv(y, "NETWORKS 5G", String(g_rs.nets5), gfx->color565(120,130,140)); y += 40;
+  kv(y, "BLUETOOTH", String(g_rs.btState), WHITE); y += 40;
+  kv(y, "THREAT", String(g_rs.threat) + " / 100", threatColor(g_rs.threat)); y += 40;
+  uint32_t since = g_rs.lastSyncMs ? (millis() - g_rs.lastSyncMs) / 1000 : 0;
+  kv(y, "LAST SYNC", String(since) + "s ago", g_rs.ok ? gfx->color565(70,200,120) : gfx->color565(220,60,60));
+}
+
+static void drawScanPage() {
+  int16_t y = TAB_H + 10;
+  gfx->setTextColor(gfx->color565(90, 180, 255));
+  gfx->setTextSize(2);
+  gfx->setCursor(10, y); gfx->print("LOCAL 2.4 GHz");
+  y += 30;
+  kv(y, "BEACONS", String((uint32_t)g_sc.beacons), WHITE); y += 40;
+  kv(y, "UNIQUE APs", String(g_sc.bssids), WHITE); y += 40;
+  kv(y, "PROBE REQ", String((uint32_t)g_sc.probes), WHITE); y += 40;
+  kv(y, "DEAUTH/DISASSOC", String((uint32_t)g_sc.deauths),
+     g_sc.deauths > 0 ? gfx->color565(220,60,60) : WHITE); y += 40;
+  kv(y, "BLE ADVERTS", String(g_sc.bleAdv), WHITE); y += 40;
+  kv(y, "FRAMES SEEN", String((uint32_t)g_sc.frames), gfx->color565(120,130,140));
+}
+
+struct ActionBtn { const char *label; const char *action; };
+static const ActionBtn g_actions[] = {
+  {"WiFi Defense scan", "wifi_defense_scan"},
+  {"BLE scan",          "ble_scan"},
+  {"Watchtower clear",  "watchtower_clear"},
+};
+static const int N_ACTIONS = sizeof(g_actions) / sizeof(g_actions[0]);
+
+static void drawActionsPage() {
+  int16_t y = TAB_H + 14;
+  gfx->setTextColor(gfx->color565(90, 180, 255));
+  gfx->setTextSize(2);
+  gfx->setCursor(10, y); gfx->print("TRIGGER");
+  y += 30;
+  for (int i = 0; i < N_ACTIONS; i++) {
+    gfx->fillRoundRect(10, y, SCR_W - 20, 44, 6, gfx->color565(30, 90, 160));
+    gfx->drawRoundRect(10, y, SCR_W - 20, 44, 6, gfx->color565(70, 130, 200));
+    gfx->setTextColor(WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(22, y + 14);
+    gfx->print(g_actions[i].label);
+    y += 54;
+  }
+}
+
+static void render() {
+  gfx->fillScreen(gfx->color565(10, 12, 16));
+  drawTabs();
+  switch (g_page) {
+    case PAGE_STATUS:  drawStatusPage();  break;
+    case PAGE_SCAN:    drawScanPage();    break;
+    case PAGE_ACTIONS: drawActionsPage(); break;
+  }
+  drawStatusBar();
+  g_needRedraw = false;
+}
+
+// Handle a touch at (px,py): tab switching + action buttons.
+static void handleTouch(int16_t px, int16_t py) {
+  if (py < TAB_H) {
+    Page np = (Page)(px / (SCR_W / 3));
+    if (np != g_page) { g_page = np; g_needRedraw = true; }
+    return;
+  }
+  if (g_page == PAGE_ACTIONS) {
+    int16_t y = TAB_H + 14 + 30;
+    for (int i = 0; i < N_ACTIONS; i++) {
+      if (py >= y && py < y + 44 && px >= 10 && px <= SCR_W - 10) {
+        if (actionEnqueue(g_actions[i].action)) {
+          setStatus((String("queued: ") + g_actions[i].label).c_str(), gfx->color565(230,170,50));
+        } else {
+          setStatus("action queue full", gfx->color565(220,60,60));
+        }
+        return;
+      }
+      y += 54;
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  Lifecycle
+// ════════════════════════════════════════════════════════════════════════════
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_LED_R, OUTPUT); pinMode(PIN_LED_G, OUTPUT); pinMode(PIN_LED_B, OUTPUT);
+  digitalWrite(PIN_LED_R, HIGH); digitalWrite(PIN_LED_G, HIGH); digitalWrite(PIN_LED_B, HIGH); // off (active LOW)
+
+  pinMode(TFT_BL, OUTPUT); digitalWrite(TFT_BL, HIGH);
+
+  gfx->begin();
+  gfx->fillScreen(BLACK);
+
+  // Touch bus + CS/IRQ
+  pinMode(TOUCH_CS, OUTPUT); digitalWrite(TOUCH_CS, HIGH);
+  pinMode(TOUCH_IRQ, INPUT);
+  touchSPI.begin(TOUCH_SCLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
+
+  setStatus("init BLE/WiFi", WHITE);
+  render();
+
+#if CYD_ENABLE_BLE
+  BLEDevice::init("");
+  g_bleReady = true;
+#endif
+
+  WiFi.mode(WIFI_STA);   // start the radio so promiscuous works later
+  setStatus("ready", gfx->color565(70,200,120));
+  g_needRedraw = true;
+}
+
+// Poll touch between long radio phases so the UI stays responsive.
+static void pollTouchFor(uint32_t ms) {
+  uint32_t start = millis();
+  static uint32_t lastTap = 0;
+  while (millis() - start < ms) {
+    int16_t px, py;
+    if (touchRead(px, py) && millis() - lastTap > 250) {
+      lastTap = millis();
+      handleTouch(px, py);
+    }
+    if (g_needRedraw) render();
+    delay(20);
+  }
+}
+
+void loop() {
+  // ── 1) CONNECT + SYNC ───────────────────────────────────────────────────────
+  setStatus("connecting wifi", gfx->color565(230,170,50));
+  if (g_needRedraw) render();
+  if (wifiConnect()) {
+    digitalWrite(PIN_LED_B, LOW);   // blue = online
+    setStatus("syncing", gfx->color565(90,180,255));
+    if (g_needRedraw) render();
+
+    httpPostIngest();               // push last window's counts
+    httpGetStatus();                // pull fresh status
+
+    String a;                       // flush any queued operator actions
+    while (actionDequeue(a)) httpPostAction(a);
+
+    setStatus(g_rs.ok ? "online" : "sync failed",
+              g_rs.ok ? gfx->color565(70,200,120) : gfx->color565(220,60,60));
+    digitalWrite(PIN_LED_B, HIGH);
+    g_needRedraw = true;
+    render();
+    pollTouchFor(CYD_SYNC_WINDOW_MS);
+  } else {
+    setStatus("wifi unavailable", gfx->color565(220,60,60));
+    g_rs.ok = false;
+    render();
+    pollTouchFor(CYD_SYNC_WINDOW_MS);
+  }
+
+  // ── 2) WiFi promiscuous sweep (disconnected) ────────────────────────────────
+  setStatus("sniffing 2.4G", gfx->color565(200,120,255));
+  render();
+  digitalWrite(PIN_LED_G, LOW);     // green = sensing
+  sniffWindow(CYD_SNIFF_WINDOW_MS);
+  digitalWrite(PIN_LED_G, HIGH);
+  g_needRedraw = true;
+  render();
+  pollTouchFor(400);
+
+  // ── 3) BLE advert scan (disconnected) ───────────────────────────────────────
+#if CYD_ENABLE_BLE
+  if (CYD_BLE_WINDOW_MS > 0) {
+    setStatus("scanning BLE", gfx->color565(200,120,255));
+    render();
+    digitalWrite(PIN_LED_G, LOW);
+    bleWindow(CYD_BLE_WINDOW_MS);
+    digitalWrite(PIN_LED_G, HIGH);
+    g_needRedraw = true;
+    render();
+    pollTouchFor(400);
+  }
+#endif
+}
