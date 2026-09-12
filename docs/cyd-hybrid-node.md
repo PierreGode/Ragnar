@@ -84,9 +84,12 @@ Unknown fields are dropped; counts are coerced to non‑negative ints. Returns t
 node's stored summary.
 
 **`POST /api/cyd/action`** — request an allowlisted operator action
-(`wifi_defense_scan`, `ble_scan`, `watchtower_clear`). Currently **recorded**
-(visible in `/api/cyd/nodes`) and returns `202`; live dispatch to the
-subsystems is a tracked follow‑up.
+(`wifi_defense_scan`, `ble_scan`, `watchtower_clear`). Validated against the
+allowlist, then **dispatched to the live subsystem**: `watchtower_clear` runs
+synchronously (`done`), `ble_scan` starts via the Bluetooth manager (`started`),
+`wifi_defense_scan` runs a WIDS scan in a background thread (`started`, then the
+thread records `completed` / `no-monitor-iface` / `error`). The outcome status
+is logged against the node and visible in `/api/cyd/nodes`.
 
 ### Operator‑facing (session‑gated)
 
@@ -103,10 +106,18 @@ TFT (ILI9341, VSPI): SCLK 14 · MOSI 13 · MISO 12 · CS 15 · DC 2 · BL 21.
 Touch (XPT2046, separate bus): SCLK 25 · MOSI 32 · MISO 39 · CS 33 · IRQ 36.
 Extras: RGB LED 4/16/17 (active LOW), LDR 34. See `config.h`.
 
+## Operator UI
+
+**Ragnar Mesh → CYD Nodes** sub‑tab: a live list of reporting nodes (status dot,
+last‑seen, per‑node beacon/AP/probe/deauth/BLE/frame tiles, recent action
+outcomes) and device‑token management (generate — shown once — list, revoke).
+Reachable whenever the Mesh tab is enabled (its default), independent of whether
+Tailscale mesh itself is running.
+
 ## Roadmap
 
-- [ ] Wire `/api/cyd/action` to the live WIDS / BLE / Watchtower subsystems.
+- [x] Wire `/api/cyd/action` to the live WIDS / BLE / Watchtower subsystems.
+- [x] Operator UI (nodes list + token management).
 - [ ] Fill `nets_24` / `nets_5` from the WiFi‑analyzer cache.
-- [ ] Operator UI tab (nodes list + token management + map).
 - [ ] ESP Web Tools flasher page (manifest stub in `cyd_firmware/flasher`).
 - [ ] WiFiManager captive‑portal provisioning (drop creds from `config.h`).

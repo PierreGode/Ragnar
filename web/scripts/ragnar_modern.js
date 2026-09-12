@@ -24208,8 +24208,8 @@ let _xferPollTimer = null;
 
 // Toggle the Ragnar Mesh sub-views (Overview / File Transfer / Mesh Share).
 function showMeshView(view) {
-    const views = { overview: 'mesh-view-overview', transfer: 'mesh-view-transfer', share: 'mesh-view-share' };
-    const navs = { overview: 'mesh-nav-overview', transfer: 'mesh-nav-transfer', share: 'mesh-nav-share' };
+    const views = { overview: 'mesh-view-overview', transfer: 'mesh-view-transfer', share: 'mesh-view-share', cyd: 'mesh-view-cyd' };
+    const navs = { overview: 'mesh-nav-overview', transfer: 'mesh-nav-transfer', share: 'mesh-nav-share', cyd: 'mesh-nav-cyd' };
     Object.entries(views).forEach(([k, id]) => document.getElementById(id)?.classList.toggle('hidden', k !== view));
     Object.entries(navs).forEach(([k, id]) => {
         const el = document.getElementById(id);
@@ -24223,7 +24223,100 @@ function showMeshView(view) {
     if (view === 'transfer') { xferLoadUnits(); xferRefresh(); _xferStartPolling(); }
     else _xferStopPolling();
     if (view === 'share') loadMeshShare();
+    if (view === 'cyd') { loadCydNodes(); loadCydTokens(); }
 }
+
+// ── CYD hybrid nodes ─────────────────────────────────────────────────────────
+function _cydAgo(sec) {
+    if (sec === null || sec === undefined) return 'never';
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    return Math.floor(sec / 3600) + 'h ago';
+}
+
+function loadCydNodes() {
+    const box = document.getElementById('cyd-nodes-list');
+    if (!box) return;
+    networkAwareFetch('/api/cyd/nodes').then(r => r.json()).then(d => {
+        const nodes = (d && d.nodes) || [];
+        if (!nodes.length) {
+            box.innerHTML = '<p class="text-gray-500 text-sm p-4">No CYD nodes have reported in yet. Flash a node with a device token and point it at this unit.</p>';
+            return;
+        }
+        box.innerHTML = nodes.map(n => {
+            const c = n.counts || {};
+            const stale = n.stale;
+            const dot = stale ? 'bg-gray-500' : 'bg-green-500';
+            const acts = (n.recent_actions || []).slice(-3).map(a =>
+                `<span class="text-xs px-1.5 py-0.5 rounded bg-slate-700 text-gray-300">${escapeHtml(a.action)}${a.status ? ' · ' + escapeHtml(a.status) : ''}</span>`).join(' ');
+            return `<div class="p-4">
+                <div class="flex items-center justify-between gap-2 flex-wrap mb-2">
+                    <div class="flex items-center gap-2 min-w-0">
+                        <span class="w-2 h-2 rounded-full ${dot} flex-shrink-0"></span>
+                        <span class="font-semibold truncate">${escapeHtml(n.name || 'cyd-node')}</span>
+                        <span class="text-xs text-gray-500">${escapeHtml(n.ip || '')}</span>
+                    </div>
+                    <span class="text-xs ${stale ? 'text-gray-500' : 'text-green-400'}">${_cydAgo(n.age_sec)}</span>
+                </div>
+                <div class="grid grid-cols-3 gap-2 text-center">
+                    ${[['beacons','Beacons'],['bssids','APs'],['probes','Probes'],['deauths','Deauth'],['ble_adv','BLE'],['frames','Frames']].map(([k,lbl]) =>
+                        `<div class="bg-slate-900/40 rounded-lg py-1.5"><div class="text-base font-bold ${k==='deauths'&&(c[k]||0)>0?'text-red-400':''}">${c[k]||0}</div><div class="text-xs text-gray-500 uppercase">${lbl}</div></div>`).join('')}
+                </div>
+                ${acts ? `<div class="flex flex-wrap gap-1 mt-2">${acts}</div>` : ''}
+            </div>`;
+        }).join('');
+    }).catch(() => { box.innerHTML = '<p class="text-red-400 text-sm p-4">Failed to load CYD nodes.</p>'; });
+}
+
+function loadCydTokens() {
+    const box = document.getElementById('cyd-tokens-list');
+    if (!box) return;
+    networkAwareFetch('/api/cyd/tokens').then(r => r.json()).then(d => {
+        const toks = (d && d.tokens) || [];
+        if (!toks.length) { box.innerHTML = '<p class="text-gray-500 text-sm p-4">No tokens issued.</p>'; return; }
+        box.innerHTML = toks.map(t => `<div class="flex items-center justify-between gap-2 p-3">
+            <div class="min-w-0">
+                <div class="font-semibold truncate">${escapeHtml(t.name || 'cyd-node')}</div>
+                <code class="text-xs text-gray-500 font-mono">${escapeHtml(t.preview || '')}</code>
+            </div>
+            <button onclick="cydRevokeToken('${escapeAttr(t.id)}')" class="bg-slate-700 hover:bg-red-700 text-white px-3 py-1.5 rounded-lg text-sm transition-colors flex-shrink-0">Revoke</button>
+        </div>`).join('');
+    }).catch(() => { box.innerHTML = '<p class="text-red-400 text-sm p-4">Failed to load tokens.</p>'; });
+}
+
+function cydGenerateToken() {
+    const nameEl = document.getElementById('cyd-token-name');
+    const name = (nameEl && nameEl.value || '').trim() || 'cyd-node';
+    networkAwareFetch('/api/cyd/token/generate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+    }).then(r => r.json()).then(d => {
+        if (d && d.success && d.token) {
+            const wrap = document.getElementById('cyd-new-token');
+            const val = document.getElementById('cyd-new-token-value');
+            if (val) val.textContent = d.token;
+            if (wrap) wrap.classList.remove('hidden');
+            if (nameEl) nameEl.value = '';
+            loadCydTokens();
+        } else {
+            showNotification('Token generation failed', 'error');
+        }
+    }).catch(() => { showNotification('Token generation failed', 'error'); });
+}
+
+function cydRevokeToken(id) {
+    if (!confirm('Revoke this CYD device token? The node using it will stop being accepted.')) return;
+    networkAwareFetch('/api/cyd/token/revoke', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id })
+    }).then(r => r.json()).then(() => loadCydTokens())
+      .catch(() => { showNotification('Revoke failed', 'error'); });
+}
+
+window.loadCydNodes = loadCydNodes;
+window.loadCydTokens = loadCydTokens;
+window.cydGenerateToken = cydGenerateToken;
+window.cydRevokeToken = cydRevokeToken;
 function _xferStartPolling() { _xferStopPolling(); _xferPollTimer = setInterval(xferRefresh, 2000); }
 function _xferStopPolling() { if (_xferPollTimer) { clearInterval(_xferPollTimer); _xferPollTimer = null; } }
 function xferRefresh() { loadXferTransfers(); loadXferInbox(); }

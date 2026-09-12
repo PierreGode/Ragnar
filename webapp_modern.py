@@ -2562,23 +2562,31 @@ def watchtower_clear():
     tailer keeps its file offsets, so cleared alerts don't re-appear; only
     genuinely new watcher lines show up afterwards. The Pushover dedup memory
     is left intact so clearing the pane never re-pages old findings."""
-    global _wt_summary
     try:
-        with _watchtower_lock:
-            wt = _wt_get()
-            wt.clear()
-            _wt_summary = wt.summary()
-            _wt_save(wt)
-            # Also empty the correlated-incident view — it's fused from the same
-            # alert stream, so a Clear that left incidents behind would look broken.
-            try:
-                _inc_get().clear()
-            except Exception as exc:
-                logger.debug(f"[watchtower] incident clear failed: {exc}")
+        summary = _watchtower_clear_core()
     except Exception as exc:
         logger.debug(f"[watchtower] clear failed: {exc}")
         return jsonify({'success': False, 'error': str(exc)}), 500
-    return jsonify({'success': True, 'summary': _wt_summary})
+    return jsonify({'success': True, 'summary': summary})
+
+
+def _watchtower_clear_core():
+    """Empty the Watchtower display ring and the correlated-incident view, and
+    persist the cleared state. Shared by the HTTP route and the CYD action
+    dispatcher. Raises on failure; returns the fresh summary on success."""
+    global _wt_summary
+    with _watchtower_lock:
+        wt = _wt_get()
+        wt.clear()
+        _wt_summary = wt.summary()
+        _wt_save(wt)
+        # Also empty the correlated-incident view — it's fused from the same
+        # alert stream, so a Clear that left incidents behind would look broken.
+        try:
+            _inc_get().clear()
+        except Exception as exc:
+            logger.debug(f"[watchtower] incident clear failed: {exc}")
+    return _wt_summary
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -2654,21 +2662,83 @@ def cyd_ingest():
     return jsonify({'success': True, 'node': summary})
 
 
+def _cyd_pick_monitor_iface():
+    """Choose a monitor-capable WiFi interface for a WIDS scan: the active
+    monitor vif if one is up, else the first monitor-capable base adapter."""
+    import wifi_defense
+    caps = wifi_defense.list_monitor_capable() or {}
+    active = caps.get('active_monitor')
+    if active:
+        return active
+    for dev in caps.get('interfaces', []):
+        if dev.get('monitor_capable') and not dev.get('is_monitor'):
+            return dev.get('iface')
+    return None
+
+
+def _cyd_dispatch_action(action, node_name):
+    """Execute an allowlisted CYD action against the live subsystems. Long or
+    blocking work (the WIDS scan) runs in a background thread and reports its
+    final status back into the node's action log. Returns (status, http_code)."""
+    if action == 'watchtower_clear':
+        try:
+            _watchtower_clear_core()
+            return 'done', 200
+        except Exception as exc:
+            logger.warning(f"[cyd] watchtower_clear failed: {exc}")
+            return 'error', 500
+
+    if action == 'ble_scan':
+        if not BLUETOOTH_AVAILABLE or bluetooth_manager is None:
+            return 'unavailable', 503
+        try:
+            ok, _msg = bluetooth_manager.start_scan(None)
+            if ok:
+                shared_data.bluetooth_scan_active = True
+                shared_data.bluetooth_scan_start_time = time.time()
+                return 'started', 202
+            return 'error', 500
+        except Exception as exc:
+            logger.warning(f"[cyd] ble_scan failed: {exc}")
+            return 'error', 500
+
+    if action == 'wifi_defense_scan':
+        def _run():
+            try:
+                iface = _cyd_pick_monitor_iface()
+                if not iface:
+                    cyd_node.record_action(node_name, action, None, status='no-monitor-iface')
+                    logger.info("[cyd] wifi_defense_scan: no monitor-capable interface")
+                    return
+                import wifi_defense
+                wifi_defense.do_scan(iface, seconds=15, auto_enable=True)
+                cyd_node.record_action(node_name, action, None, status='completed')
+                logger.info(f"[cyd] wifi_defense_scan completed on {iface}")
+            except Exception as exc:
+                cyd_node.record_action(node_name, action, None, status='error')
+                logger.warning(f"[cyd] wifi_defense_scan failed: {exc}")
+        threading.Thread(target=_run, name='cyd-wids-scan', daemon=True).start()
+        return 'started', 202
+
+    return 'unknown', 400
+
+
 @app.route('/api/cyd/action', methods=['POST'])
 def cyd_action():
-    """Record an operator action requested from a node's touch screen. The
-    action is validated against cyd_node.ALLOWED_ACTIONS and LOGGED; wiring the
-    request to the live subsystems (WIDS / BLE scan / Watchtower clear) is a
-    tracked follow-up, so nothing is executed here yet."""
+    """Dispatch an operator action requested from a node's touch screen. The
+    action is validated against cyd_node.ALLOWED_ACTIONS, executed against the
+    live subsystem (_cyd_dispatch_action), and logged with its outcome so the
+    operator can see what a tap did via /api/cyd/nodes."""
     data = request.get_json(silent=True) or {}
     action = str(data.get('action') or '').strip()
     node_name = data.get('node') or getattr(g, 'cyd_node', None) or 'cyd-node'
     if action not in cyd_node.ALLOWED_ACTIONS:
         return jsonify({'success': False, 'error': 'unknown action'}), 400
-    cyd_node.record_action(node_name, action, request.remote_addr)
-    logger.info(f"[cyd] node {node_name} requested action '{action}' (recorded; dispatch TODO)")
-    return jsonify({'success': True, 'accepted': action,
-                    'note': 'recorded; live dispatch not yet wired'}), 202
+    status, code = _cyd_dispatch_action(action, node_name)
+    cyd_node.record_action(node_name, action, request.remote_addr, status=status)
+    logger.info(f"[cyd] node {node_name} action '{action}' -> {status}")
+    ok = status in ('done', 'started')
+    return jsonify({'success': ok, 'accepted': action, 'status': status}), code
 
 
 @app.route('/api/cyd/nodes', methods=['GET'])

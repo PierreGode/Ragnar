@@ -3521,6 +3521,7 @@
                     <button id="mesh-nav-overview" onclick="showMeshView('overview')" class="px-3 py-1.5 rounded-lg text-sm bg-Ragnar-600 text-white transition-colors">Overview</button>
                     <button id="mesh-nav-transfer" onclick="showMeshView('transfer')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">File Transfer<span id="mesh-inbox-badge" class="hidden ml-1.5 text-xs bg-amber-500 text-slate-900 font-bold px-1.5 rounded-full">0</span></button>
                     <button id="mesh-nav-share" onclick="showMeshView('share')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">Mesh Share</button>
+                    <button id="mesh-nav-cyd" onclick="showMeshView('cyd')" class="px-3 py-1.5 rounded-lg text-sm bg-slate-700 text-gray-300 hover:text-white transition-colors">CYD Nodes</button>
                 </div>
             </div>
 
@@ -3825,6 +3826,40 @@
                 <div id="mesh-update-results" class="space-y-1"></div>
             </div>
             </div><!-- /mesh-view-overview -->
+
+            <!-- CYD Hybrid Nodes view -->
+            <div id="mesh-view-cyd" class="hidden">
+                <div class="glass rounded-xl p-6 mb-4">
+                    <div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
+                        <div class="flex items-center gap-2">
+                            <svg class="w-5 h-5 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                            <h3 class="text-xl font-bold">CYD Hybrid Nodes</h3>
+                        </div>
+                        <button onclick="loadCydNodes()" class="bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-lg text-sm transition-colors">Refresh</button>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-3">Cheap-Yellow-Display (ESP32-2432S028R) companions running the <code class="text-gray-500">cyd_firmware/ragnar_cyd</code> firmware. Each is a 2.4&nbsp;GHz sensor with a touch dashboard — not a mesh peer. It reports its own beacon/probe/deauth/BLE counts and may request an allowlisted action from its screen. See <a href="https://github.com/PierreGode/Ragnar/blob/main/docs/cyd-hybrid-node.md" class="text-sky-400 hover:underline" target="_blank" rel="noopener">the guide</a>.</p>
+                    <div id="cyd-nodes-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">Loading…</p></div>
+                </div>
+
+                <div class="glass rounded-xl p-6">
+                    <div class="flex items-center justify-between gap-2 mb-2 flex-wrap">
+                        <h4 class="font-semibold">Device tokens <span class="text-xs text-gray-500 font-normal">— paste into the firmware's config.h</span></h4>
+                    </div>
+                    <div class="flex flex-wrap items-end gap-2 mb-3">
+                        <div class="flex-1">
+                            <label class="block text-sm text-gray-400 mb-1">Node name</label>
+                            <input id="cyd-token-name" type="text" placeholder="cyd-01" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+                        </div>
+                        <button onclick="cydGenerateToken()" class="bg-Ragnar-600 hover:bg-Ragnar-700 text-white px-4 py-2 rounded-lg text-sm transition-colors">+ Generate token</button>
+                    </div>
+                    <div id="cyd-new-token" class="hidden bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 mb-3 text-sm">
+                        <div class="text-amber-300 font-semibold mb-1">Copy this token now — it is shown only once.</div>
+                        <code id="cyd-new-token-value" class="block break-all font-mono text-amber-200 bg-slate-900/60 rounded px-2 py-1.5"></code>
+                    </div>
+                    <div id="cyd-tokens-list" class="bg-slate-800/40 border border-slate-700 rounded-lg divide-y divide-slate-700/50"><p class="text-gray-500 text-sm p-4">No tokens issued.</p></div>
+                    <p class="text-xs text-gray-500 mt-2">A token authenticates one CYD node purely by a bearer secret (it is not a tailnet peer) and grants only the three <code class="text-gray-500">/api/cyd/*</code> device endpoints. Revoke any time.</p>
+                </div>
+            </div><!-- /mesh-view-cyd -->
 
             <!-- File Transfer view -->
             <div id="mesh-view-transfer" class="hidden">

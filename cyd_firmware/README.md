@@ -80,13 +80,16 @@ scoped and fail‑closed in `webapp_modern.py`'s `check_authentication()`.
 ## Status
 
 - ✅ Firmware: boots, touch UI, duty‑cycle WiFi‑sniff + BLE scan, REST client.
-- ✅ Ragnar: `/api/cyd/status` + `/api/cyd/ingest` are live; token role wired.
-- ⏳ `POST /api/cyd/action` currently **records** the requested action (visible
-  in `/api/cyd/nodes`); wiring it to the live subsystems (WIDS scan / BLE scan /
-  Watchtower clear) is a tracked follow‑up.
+- ✅ Ragnar: `/api/cyd/status` + `/api/cyd/ingest` live; token role wired.
+- ✅ `POST /api/cyd/action` **dispatches** to the live subsystems — `watchtower_clear`
+  (sync), `ble_scan` (via the Bluetooth manager), `wifi_defense_scan` (WIDS scan
+  in a background thread) — and logs the outcome, visible in `/api/cyd/nodes`.
+- ✅ Operator UI: **Ragnar Mesh → CYD Nodes** sub‑tab (node list with live
+  counts + token generate/list/revoke).
 - ⏳ `/api/cyd/status` `nets_24`/`nets_5` are placeholders pending a wire to the
   WiFi‑analyzer cache.
-- ⏳ Operator UI tab + ESP Web Tools flasher page (manifest stub included).
+- ⏳ ESP Web Tools flasher page (manifest stub included; needs the built `.bin`).
+- ⏳ WiFiManager captive‑portal provisioning (drop creds from `config.h`).
 
 See [docs/cyd-hybrid-node.md](../docs/cyd-hybrid-node.md) for the full design
 and API reference.

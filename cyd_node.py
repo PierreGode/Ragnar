@@ -35,8 +35,8 @@ _STALE_AFTER = 90       # seconds without a report -> node shown "stale"
 
 # Actions a node's touch screen may request. Kept as an allowlist so a
 # compromised or spoofed node can only ever ask for these, never arbitrary ops.
-# NOTE: the webapp currently RECORDS these requests; wiring them to the live
-# subsystems (WIDS scan / BLE scan / Watchtower clear) is a tracked follow-up.
+# The webapp dispatches these to the live subsystems (_cyd_dispatch_action) and
+# records the outcome via record_action(status=...).
 ALLOWED_ACTIONS = {
     'wifi_defense_scan': 'Run a WiFi Defense (WIDS) scan',
     'ble_scan':          'Start a Bluetooth scan',
@@ -158,13 +158,18 @@ def record_ingest(payload, remote_ip):
     return summarize_node(name)
 
 
-def record_action(node_name, action, remote_ip):
-    """Log an operator action requested from a node's touch screen."""
+def record_action(node_name, action, remote_ip, status='requested'):
+    """Log an operator action requested from a node's touch screen.
+
+    `status` tracks the dispatch outcome ('requested', 'started', 'done',
+    'error', 'no-monitor-iface', ...) so the operator can see what happened to a
+    tap. A background job updates the same node's log with its final status."""
     name = str(node_name or 'cyd-node')[:32]
     with _LOCK:
         n = _node(name)
-        n['ip'] = remote_ip
-        n['actions'].append({'t': int(time.time()), 'action': action})
+        if remote_ip:
+            n['ip'] = remote_ip
+        n['actions'].append({'t': int(time.time()), 'action': action, 'status': status})
 
 
 def summarize_node(name):
