@@ -262,6 +262,18 @@
         </div>
       </div>
       <div class="card" style="margin-top:16px">
+        <h3>Signals survey <span class="hint">every simultaneous carrier in the window — click one to jump to it</span>
+          <span class="lbl" style="margin-left:auto">min SNR</span>
+          <input id="sigsnr" type="number" value="12" min="3" step="1" style="width:52px" title="Detection threshold over the noise floor (dB) — lower it to catch weaker carriers">
+          <span class="lbl">dB</span>
+          <button class="go" id="runsig">Survey</button></h3>
+        <div id="sigout" class="msg">Survey finds and lists every carrier in the current view — click a row to zoom + mark it.</div>
+        <div style="max-height:220px;overflow:auto">
+          <table class="btable"><thead><tr><th>freq</th><th>BW</th><th>t start</th><th>span</th><th>SNR</th></tr></thead>
+            <tbody id="sigtbody"></tbody></table>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
         <h3>Demodulate <span class="hint">recover bits from the marked signal</span></h3>
         <div class="demodbar">
           <div class="seg" id="mode">
@@ -626,6 +638,30 @@
         f0:x.f_mhz*1e6-Math.max(x.bw_khz*1e3*3,30e3), f1:x.f_mhz*1e6+Math.max(x.bw_khz*1e3*3,30e3)};
       S.marker={t:(x.t0+x.t1)/2, f:x.f_mhz*1e6}; if(x.bw_khz)$('bw').value=Math.max(10,Math.round(x.bw_khz*1.5)); refreshWindow(); setAx();});});
   });}
+
+  // ---- Signals survey: every carrier in the window, click a row to jump to it ----
+  $('runsig').addEventListener('click',function(){
+    if(!S.name)return; var v=S.view||{}, snr=parseFloat($('sigsnr').value)||12;
+    $('sigout').textContent='surveying…'; $('sigtbody').innerHTML='';
+    api('/api/net/rtl/analyze/signals',{name:S.name,t0:v.t0,t1:v.t1,snr_db:snr}).then(function(d){
+      if(!d||!d.ok){ $('sigout').innerHTML='<span style="color:var(--rose)">⚠ '+esc((d&&d.error)||'survey failed')+'</span>'; return; }
+      var sg=d.signals||[]; S.signals=sg;
+      $('sigout').innerHTML=sg.length? '<b>'+sg.length+'</b> carrier'+(sg.length>1?'s':'')+' found · noise floor '+d.noise_db+' dB'
+        : '<span style="color:var(--muted)">no carriers above +'+snr+' dB — lower the threshold for weaker signals</span>';
+      var fc=S.fc||d.center_hz;
+      $('sigtbody').innerHTML=sg.map(function(s,i){
+        var off=(s.f_center_hz-fc)/1e6, span=(s.t1_s-s.t0_s);
+        return '<tr data-i="'+i+'"><td>'+(s.f_center_hz/1e6).toFixed(4)+'<span style="color:var(--muted)"> ('+(off>=0?'+':'')+off.toFixed(3)+')</span></td><td>'+
+          (s.bw_hz>=1e3?(s.bw_hz/1e3).toFixed(1)+' kHz':Math.round(s.bw_hz)+' Hz')+'</td><td>'+s.t0_s.toFixed(3)+'</td><td>'+
+          (span>=1?span.toFixed(2)+' s':Math.round(span*1e3)+' ms')+'</td><td>'+Math.round(s.snr_db)+' dB</td></tr>';}).join('');
+      $('sigtbody').querySelectorAll('tr').forEach(function(tr){ tr.addEventListener('click',function(){
+        var s=sg[+tr.getAttribute('data-i')], padf=Math.max((s.f_hi_hz-s.f_lo_hz)*1.5,30e3), padt=(s.t1_s-s.t0_s)*0.4+0.002;
+        S.hist.push(S.view); S.view={t0:Math.max(0,s.t0_s-padt),t1:Math.min(S.dur,s.t1_s+padt),
+          f0:s.f_lo_hz-padf, f1:s.f_hi_hz+padf};
+        S.marker={t:(s.t0_s+s.t1_s)/2, f:s.f_center_hz}; $('bw').value=Math.max(10,Math.round(s.bw_hz/1e3*1.5)||30);
+        refreshWindow(); setAx(); }); });
+    }).catch(function(){ $('sigout').textContent='survey request failed'; });
+  });
 
   // ---- decode (rtl_433 over the whole capture) ----
   function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
