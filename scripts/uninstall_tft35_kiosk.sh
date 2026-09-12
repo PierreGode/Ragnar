@@ -20,6 +20,10 @@ fi
 rm -f /etc/systemd/system/kiosk-tft.service
 systemctl daemon-reload
 
+# Remove the mode-aware kiosk runner
+rm -f /usr/local/bin/ragnar-tft-kiosk
+echo "[tft35-kiosk-uninstall] removed /usr/local/bin/ragnar-tft-kiosk"
+
 # Remove ragnar service drop-in (restore wipe_epd pre-start)
 rm -f /etc/systemd/system/ragnar.service.d/tft.conf
 rmdir --ignore-fail-on-non-empty /etc/systemd/system/ragnar.service.d 2>/dev/null || true
