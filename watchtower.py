@@ -97,6 +97,10 @@ DEFAULT_SOURCES = {
     # new/vanished carriers + broadband jamming vs a learned baseline.
     'rfwatch':   {'label': 'RF Spectrum Watch (sub-GHz)',
                   'paths': ['/var/log/ragnar/rfwatch.jsonl']},
+    # Standalone passive Dell SmartFabric OS10 SSRF-egress sensor (python/dellguard.py,
+    # its own systemd unit). LLDP-attributed egress vs a learned baseline — CVE-2025-22474.
+    'dellguard': {'label': 'Dell Guard (OS10 SSRF egress)',
+                  'paths': ['/var/log/ragnar/dellguard.jsonl']},
     # In-app vendor CVE guards (network_diagnostics do_*_guard) emit JSON-lines
     # findings here so Watchtower folds them into the one pane and Pushover path.
     'cisco_guard':   {'label': 'Cisco Guard (IOS/IOS-XE/NX-OS)',

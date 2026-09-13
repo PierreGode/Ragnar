@@ -2779,6 +2779,47 @@ validated against the published PoC pcap (506 frames → `VRF-001/002/003/014/01
 > tails them into the unified alert pane and single Pushover path alongside the standalone
 > watcher daemons — automatically whenever Extended Monitoring is on.
 
+#### Dell Guard (standalone daemon)
+Dell **SmartFabric OS10** SSRF-egress sensor for **CVE-2025-22474** (CWE-918, CVSS 6.8,
+`C:H/I:N/A:N`). Unlike the four guards above, Dell Guard is **not** an on-demand in-app
+scan — it is an **opt-in standalone daemon** (`python/dellguard.py`, units
+`scripts/dellguard@.service` + `scripts/dellguard-learn@.service`) that feeds
+[Watchtower](#watchtower) via `/var/log/ragnar/dellguard.jsonl`. It lives outside the
+in-app guard model for two structural reasons the bounded `tcpdump` scan cannot meet:
+**(1) attribution is native-L2 LLDP** — it reads the OS10 identity from LLDP (chassis-ID /
+system-description / Management-Address TLV) to prove *this Dell device* originated a
+request; **(2) detection is a *learned baseline*** — a `--learn` run (24 h by default)
+records each device's normal egress, and enforcement flags departures from it. A stateless
+per-capture classifier can hold neither.
+
+CVE-2025-22474 is **PR:H**, so this is a **post-exploitation egress** detector, not a
+vulnerability scanner: a true positive means an already-admin attacker is using the switch
+as an SSRF proxy. The SSRF trigger (HTTPS REST / SSH CLI on the management plane) is
+invisible to a passive tap; the *resulting egress* is not, so detection is **by effect** —
+an outbound request from an attributed OS10 device to a destination absent from its
+baseline. Finding classes: **DG-0xx** posture (OS10 version vs the affected trains
+10.5.4/5/6, 10.6.0), **DG-1xx** exposure (mgmt plane on the segment / cleartext mgmt /
+no Management-Address TLV), **DG-2xx** attack (`DG-201` egress to a cloud
+instance-metadata endpoint — critical, needs no baseline; `DG-202..206` baseline-gated new
+endpoint / protocol / DNS name / fan-out / scope-crossing; `DG-207` egress that could not be
+attributed), and **DG-3xx** operational sensor-state (baseline absent/thin/mismatch). The
+baseline is **never auto-learned** (an auto-updating baseline is attacker-poisonable) and is
+fingerprinted against the attribution config so a baseline built under different attribution
+is refused (`DG-303`) rather than silently applied.
+
+Version **0.1.0-dev**: several thresholds (the sufficiency gate, the 10.5.6 boundary) are
+documented as *starting points, not measured values* — re-derive them against a real
+segment before they drive a patch SLA. Passive/RX-only, kernel-enforced (no `AF_INET`, so
+it can never transmit or open an IP socket). Take a baseline first, then enable the sensor:
+
+```
+sudo cp scripts/dellguard@.service scripts/dellguard-learn@.service /etc/systemd/system/
+sudo install -Dm640 -o ragnar -g ragnar python/dellguard.example.json /etc/ragnar/dellguard.conf
+sudo systemctl start dellguard-learn@eth1.service      # emits nothing; writes the baseline
+sudo systemctl enable --now dellguard@eth1.service     # then enforce
+python3 python/dellguard.py --selftest                 # 256 KAT checks, no root
+```
+
 ### Locate Port
 Physically find **which switch port** the device is plugged into — the software
 equivalent of a cable tester / toner probe. It blinks a **per-port LED** on the
