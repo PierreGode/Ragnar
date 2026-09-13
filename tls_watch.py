@@ -1093,6 +1093,28 @@ def _tls_analyze(sessions, now=None, denylist=None):
     return {'success': True, 'verdict': verdict, 'sessions': out, 'count': len(out)}
 
 
+# Admit IPv6 packets that sit behind an extension header (Hop-by-Hop 0, Routing 43,
+# Fragment 44, AH 51, Destination Options 60). libpcap's `tcp/udp port` primitive
+# matches plain IPv4 AND plain IPv6, but reads the transport port at a fixed offset
+# that an extension-header chain shifts — the next-header byte at ip6[6] is then the
+# EH, not the transport — so an EH-bearing TLS/QUIC flow is dropped by the kernel
+# filter before parse_pcap (which walks the chain via scapy) ever sees it. This narrow
+# next-header clause admits ONLY EH-bearing v6 — NOT a blanket `or ip6`, which would
+# copy the whole v6 stream to userspace to drop it in Python (needless load on a Pi
+# Zero 2W). Same shape the in-app vendor guards already use.
+_IPV6_EXTHDR_BPF = ('(ip6 and (ip6[6] = 0 or ip6[6] = 43 or ip6[6] = 44 '
+                    'or ip6[6] = 51 or ip6[6] = 60))')
+
+
+def _build_capture_bpf(tcp_ports, udp_ports):
+    """Capture filter: precise port scoping for IPv4 + plain IPv6, plus a narrow
+    clause admitting EH-bearing IPv6 (see _IPV6_EXTHDR_BPF). Pure/testable."""
+    parts = ['tcp port {}'.format(p) for p in tcp_ports] \
+        + ['udp port {}'.format(p) for p in udp_ports]
+    parts.append(_IPV6_EXTHDR_BPF)
+    return ' or '.join(parts)
+
+
 def _capture_pcap(interface, seconds, tcp_ports, udp_ports):
     """Run tcpdump for `seconds` into a temp pcap and return its path. Passive:
     -w only, no probes. Returns None if tcpdump is unavailable."""
@@ -1101,9 +1123,7 @@ def _capture_pcap(interface, seconds, tcp_ports, udp_ports):
     import tempfile
     if not shutil.which('tcpdump'):
         return None
-    parts = ['tcp port {}'.format(p) for p in tcp_ports] \
-        + ['udp port {}'.format(p) for p in udp_ports]
-    bpf = ' or '.join(parts)
+    bpf = _build_capture_bpf(tcp_ports, udp_ports)
     fd, path = tempfile.mkstemp(suffix='.pcap', prefix='tlswatch_')
     import os
     os.close(fd)
@@ -1620,6 +1640,16 @@ def selftest():
         ck('pcap_quic_retransmit_deduped', quicrec['count'], 1)
     except Exception as e:
         checks.append({'name': 'pcap_e2e', 'pass': True, 'skipped': str(e)})
+
+    # ---- capture BPF: IPv6 extension-header admission (new in v5) ----
+    _bpf = _build_capture_bpf((443, 8443), (443,))
+    ck('bpf_tcp_port_scoped', 'tcp port 443' in _bpf and 'tcp port 8443' in _bpf)
+    ck('bpf_udp_port_scoped', 'udp port 443' in _bpf)
+    ck('bpf_ext_v6_admitted', 'ip6[6] = 0' in _bpf and 'ip6[6] = 44' in _bpf
+       and 'ip6[6] = 60' in _bpf)
+    # NOT a blanket `or ip6` (which would flood a Pi Zero 2W); v6 is gated on a
+    # next-header extension-header clause.
+    ck('bpf_not_blanket_ip6', '(ip6 and (ip6[6]' in _bpf)
 
     failed = sum(1 for c in checks if not c['pass'])
     return {'success': failed == 0, 'checks': checks, 'failed': failed}
